@@ -362,6 +362,14 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(setDoc(doc(alice, momentPath(id)), moment(ALICE, { kind: 'bingo', dayIndex: 3 })));
     // A SIBLING Day is untouched: the denial is keyed on the exact Moment id.
     await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d7`)), moment(ALICE, { kind: 'bingo', dayIndex: 7 })));
+    // The spent win cannot dodge its tombstone by choosing a NON-CANONICAL doc id
+    // either (Phase 4b round 2 on PR #467 raised this as a hole; it is not one):
+    // the create rule binds every Moment id to `first_bingo`, `${uid}-${kind}`, or
+    // `${uid}-${kind}-d${dayIndex}` BEFORE the tombstone clause is consulted, so a
+    // free-form id carrying the same payload never reaches the exists() check at
+    // all. Pinned here so the id binding and the tombstone denial stay one system.
+    await assertFails(setDoc(doc(alice, momentPath('some-fresh-id')), moment(ALICE, { kind: 'bingo', dayIndex: 3 })));
+    await assertFails(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d3-retry`)), moment(ALICE, { kind: 'bingo', dayIndex: 3 })));
   });
 
   it('spends the LEGACY day-less forms too — the retract-once bound is not per-card-only', async () => {
