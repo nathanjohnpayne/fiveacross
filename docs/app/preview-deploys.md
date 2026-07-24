@@ -48,6 +48,8 @@ Save. Google's own note applies: a change here can take five minutes to a few ho
 
 A preview build uses the Vercel **Preview** environment's `VITE_FIREBASE_*`, which point at the production Firebase project, so anything you mark while testing lands in the real `med-2026` event. If that becomes a nuisance, set `VITE_EVENT_ID` on the Preview environment (Vercel → Settings → Environment Variables → Preview) to a throwaway event id. The schema is event-scoped, so this isolates cleanly, but the throwaway event needs seeding before a preview can deal a card.
 
+`VITE_EVENT_ID` is **baked into the bundle at build time** (`src/firebase.ts` reads it into `EVENT_ID`), so changing it in the dashboard does nothing to a deployment that already exists — including the one step 1 just created. Push to `preview` again to force a rebuild, and confirm the new deployment finished before you test, or you will still be writing to the live event while believing you are isolated.
+
 ---
 
 ## Part 2 — previewing a branch
@@ -58,9 +60,11 @@ From the branch you want to look at:
 git push --force origin HEAD:preview
 ```
 
-Then open the preview alias on the device. Vercel takes roughly a minute to build; the URL serves the previous deployment until the new one is ready, so a page that looks stale usually just needs a reload.
+Then open the preview alias on the device. Vercel takes roughly a minute to build, and the URL serves the previous deployment until the new one is ready.
 
-The alias holds **one** branch at a time. If two people (or two agent lanes) want a device check at once, take turns — or add a second slot by repeating Part 1 for a `preview2` branch. Branch names are capped at 18 characters inside this URL shape before Vercel truncates the host, so keep any additional slot names short.
+**A plain reload is not enough to pick up the new build.** The app runs `vite-plugin-pwa` with `registerType: 'prompt'`, so a fresh deployment's service worker installs and *waits* while the old precache keeps serving — reloading a page you have already visited on this alias can render the previous branch, which is the worst possible failure here because it looks like your change simply did not work. Use the in-app **Reload** banner when it appears, or pull down to refresh (both activate the waiting worker before reloading — see [`specs/app-update-reload-prompt.md`](../../specs/app-update-reload-prompt.md) and [`specs/pull-to-refresh.md`](../../specs/pull-to-refresh.md)). On a device you have not visited the alias from before, there is no cached worker and an ordinary load is fine.
+
+The alias holds **one** branch at a time. If two people (or two agent lanes) want a device check at once, take turns. A second slot is possible but is **not** console-only: a `preview2` branch would need Part 1's two registrations *and* its hostname added to `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` (with its test and spec updates, merged and deployed), because that list is an exact match by design and every other branch URL deliberately falls back to the configured domain. Branch names are also capped at 18 characters inside this URL shape before Vercel truncates the host, so keep any additional slot names short.
 
 ## Part 3 — the Vercel login wall
 
@@ -86,7 +90,8 @@ If a sign-in attempt fails oddly after a long idle, reload the preview URL to re
 | `auth/unauthorized-domain` | Part 1 step 2 not done, or the host was typed differently. |
 | `redirect_uri_mismatch` | Part 1 step 3 not done, still propagating, or added to the wrong OAuth client. |
 | "Unable to process request due to missing initial state" | The auth handler resolved cross-origin. The host is missing from `FIRST_PARTY_AUTH_HOSTS`, or `vercel.json`'s `/__/auth/:path*` rewrite lost its priority over the SPA catch-all. |
-| Sign-in works but the board is someone else's | You are on the live event. Part 1 step 4. |
+| Sign-in works but the board is someone else's | You are on the live event. Part 1 step 4 — and it needs a rebuild, not just an env-var edit. |
+| Your change is missing but the build succeeded | A waiting service worker; the old precache is still serving. Use the Reload banner or pull-to-refresh, not a plain reload. |
 
 ## Not doing this at all
 
