@@ -360,9 +360,10 @@ describe('reshuffleSeed', () => {
 describe('joinAndDeal — seeding the allowance', () => {
   const user = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null } as never;
 
-  /** The player-row payload joinAndDeal merged. */
+  /** The player-row payload joinAndDeal merged — a tx.set since #409 made the
+   *  daily identity seed transactional (read-and-write of the row it guards). */
   const joinedPlayerWrite = () => {
-    const call = H.setDoc.mock.calls.find((c) => {
+    const call = H.txSet.mock.calls.find((c) => {
       const a = ((c[0] as { args?: unknown[] }).args ?? []).filter((x) => typeof x === 'string');
       return a[2] === 'players';
     });

@@ -329,6 +329,22 @@ export async function hasCachedCard(uid: string): Promise<boolean> {
  * already-boarded Player records nothing (Codex #117 round 8, finding B) —
  * `runDeal` re-fires on every online/authority flip, and an existing-board no-op
  * is not a join.
+ *
+ * IDEMPOTENT under overlap (#409, the Codex finding on #408): `withTimeout`
+ * rejects runDeal's race but cannot cancel the underlying joinAndDeal, so a
+ * timed-out deal keeps running while a Retry starts a second one. Both the
+ * daily identity seed and the legacy board create therefore run inside a
+ * `runTransaction` that re-reads the row/board it is about to write — the same
+ * pattern `dealDayCard` and `reshuffleBoard` already use. Two overlapping
+ * joins serialize server-side: the loser's transaction retries against the
+ * committed state, sees the join already happened, and degrades to an
+ * identity-only merge (daily) or a no-op (legacy) — it can no longer re-stamp
+ * `joinedAt`, re-zero aggregates off a stale read (a stale `reshufflesUsed: 0`
+ * over a real spend is a write firestore.rules DENIES outright — the monotonic
+ * counter — which failed the whole join), or double-report an actual join.
+ * The deal path is online-gated in AuthContext, so the transaction's
+ * online-only nature changes nothing for the offline story (it rejects fast
+ * where the old plain write would hang until the #403 timeout).
  */
 export async function joinAndDeal(u: User): Promise<boolean> {
   // Decide the MODE from the Event before touching any board (#246): the Phase 1.5
@@ -367,31 +383,46 @@ export async function joinAndDeal(u: User): Promise<boolean> {
     // `dayStats` write (or real earlier progress) is never reset to 0. The return
     // value reports whether this was a genuine first join (no identity yet), so the
     // `join_event` analytic still fires exactly once.
-    const existingPlayer = await getDoc(rawPlayer(u.uid));
-    const existing = existingPlayer.exists() ? (existingPlayer.data() as Partial<UserDoc & { joinedAt: number; bingoCount: number; squaresMarked: number; firstBingoAt: number | null; blackout: boolean; reshufflesUsed: number }>) : null;
-    const alreadyJoined = existing != null && typeof existing.joinedAt === 'number';
+    // The saved profile read stays OUTSIDE the transaction: it is advisory
+    // identity input (validated + fallback-guarded either way), lives on a doc
+    // this write never touches, and re-reading it on a contention retry would
+    // add a round trip for no correctness gain.
     const profileSnap = await getDoc(rawUser(u.uid)).catch(() => null);
     const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
     const savedPhoto = profile && isHttpsUrl(profile.photoURL) ? profile.photoURL : null;
     const displayName = resolveDisplayName(profile, u.displayName);
     const photoURL =
       profile?.customPhoto === true ? (savedPhoto ?? u.photoURL ?? null) : (u.photoURL ?? null);
-    // Identity always merged; aggregates only for fields not already present, so a
-    // racing `dealDayCard` dayStats write is never clobbered back to zero.
-    const seed: Record<string, unknown> = { uid: u.uid, displayName, photoURL };
-    if (existing?.joinedAt == null) seed.joinedAt = Date.now();
-    if (typeof existing?.bingoCount !== 'number') seed.bingoCount = 0;
-    if (typeof existing?.squaresMarked !== 'number') seed.squaresMarked = 0;
-    if (existing?.firstBingoAt === undefined) seed.firstBingoAt = null;
-    if (typeof existing?.blackout !== 'boolean') seed.blackout = false;
-    // The cruise-wide Reshuffle allowance (#378), seeded like the aggregates
-    // above and guarded the same way: written ONLY when the row does not already
-    // carry a number, so a returning Player's real spend is never reset to 0 —
-    // which firestore.rules would deny outright (the counter is monotonic), and
-    // which would fail the whole join write, not just this field.
-    if (typeof existing?.reshufflesUsed !== 'number') seed.reshufflesUsed = 0;
-    await setDoc(rawPlayer(u.uid), seed, { merge: true });
-    return !alreadyJoined; // a genuine first join (no prior identity) is the analytic-worthy event
+    // The row read + conditional seed run as ONE transaction (#409): the
+    // per-field guards below are only sound against the row state the write
+    // actually lands on. Two overlapping joins (a timed-out deal still in
+    // flight + its Retry) previously both read "no row" and both wrote —
+    // re-stamping `joinedAt` and, worse, racing a guard computed from a stale
+    // read (e.g. `reshufflesUsed: 0` over a spend committed in between, which
+    // the monotonic rule denies and which then failed the WHOLE join). Under
+    // the transaction the loser retries, re-reads the committed row, and its
+    // guards degrade it to an identity-only merge with `alreadyJoined` true.
+    return await runTransaction(db, async (tx) => {
+      const existingPlayer = await tx.get(rawPlayer(u.uid));
+      const existing = existingPlayer.exists() ? (existingPlayer.data() as Partial<UserDoc & { joinedAt: number; bingoCount: number; squaresMarked: number; firstBingoAt: number | null; blackout: boolean; reshufflesUsed: number }>) : null;
+      const alreadyJoined = existing != null && typeof existing.joinedAt === 'number';
+      // Identity always merged; aggregates only for fields not already present, so a
+      // racing `dealDayCard` dayStats write is never clobbered back to zero.
+      const seed: Record<string, unknown> = { uid: u.uid, displayName, photoURL };
+      if (existing?.joinedAt == null) seed.joinedAt = Date.now();
+      if (typeof existing?.bingoCount !== 'number') seed.bingoCount = 0;
+      if (typeof existing?.squaresMarked !== 'number') seed.squaresMarked = 0;
+      if (existing?.firstBingoAt === undefined) seed.firstBingoAt = null;
+      if (typeof existing?.blackout !== 'boolean') seed.blackout = false;
+      // The cruise-wide Reshuffle allowance (#378), seeded like the aggregates
+      // above and guarded the same way: written ONLY when the row does not already
+      // carry a number, so a returning Player's real spend is never reset to 0 —
+      // which firestore.rules would deny outright (the counter is monotonic), and
+      // which would fail the whole join write, not just this field.
+      if (typeof existing?.reshufflesUsed !== 'number') seed.reshufflesUsed = 0;
+      tx.set(rawPlayer(u.uid), seed, { merge: true });
+      return !alreadyJoined; // a genuine first join (no prior identity) is the analytic-worthy event
+    });
   }
 
   const existing = await getDoc(rawBoard(u.uid));
@@ -481,28 +512,39 @@ export async function joinAndDeal(u: User): Promise<boolean> {
 
   const seed = seedFromUid(u.uid);
   const cells = dealBoard(pool, FREE_TEXT, seed, spicyRatio ?? 0.4);
-  const now = Date.now();
 
-  const batch = writeBatch(db);
-  // dayIndex: 0 honors the now-required BoardDoc.dayIndex — today there is one
-  // Board per Player per Event, read as Day 0; the day-scoped board path is #204.
-  batch.set(rawBoard(u.uid), { uid: u.uid, dayIndex: 0, seed, createdAt: now, cells });
-  batch.set(
-    rawPlayer(u.uid),
-    {
-      uid: u.uid,
-      displayName,
-      photoURL,
-      joinedAt: now,
-      bingoCount: 0,
-      squaresMarked: 0,
-      firstBingoAt: null,
-      blackout: false,
-    },
-    { merge: true },
-  );
-  await batch.commit();
-  return true; // dealt a NEW board — an actual join
+  // The create runs as a transaction that RE-CHECKS board existence (#409),
+  // mirroring `dealDayCard`: the plain existence probe above is only a fast
+  // path (it spares returning Players the pool fetch), so a second joinAndDeal
+  // overlapping this one — the timed-out-deal + Retry window — must not also
+  // pass it and double-commit. The loser's transaction retries against the
+  // winner's committed board, sees it exists, and returns `false` (no re-deal,
+  // no `joinedAt` re-stamp, no duplicate `join_event`). The pool/profile reads
+  // stay outside: a query cannot run in a transaction, and the deal is
+  // deterministic from the uid, so a retry recomputes identical cells.
+  return await runTransaction(db, async (tx) => {
+    const latestBoard = await tx.get(rawBoard(u.uid));
+    if (latestBoard.exists()) return false;
+    const now = Date.now();
+    // dayIndex: 0 honors the now-required BoardDoc.dayIndex — today there is one
+    // Board per Player per Event, read as Day 0; the day-scoped board path is #204.
+    tx.set(rawBoard(u.uid), { uid: u.uid, dayIndex: 0, seed, createdAt: now, cells });
+    tx.set(
+      rawPlayer(u.uid),
+      {
+        uid: u.uid,
+        displayName,
+        photoURL,
+        joinedAt: now,
+        bingoCount: 0,
+        squaresMarked: 0,
+        firstBingoAt: null,
+        blackout: false,
+      },
+      { merge: true },
+    );
+    return true; // dealt a NEW board — an actual join
+  });
 }
 
 /**

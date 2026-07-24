@@ -198,6 +198,10 @@ beforeEach(() => {
   H.runTransaction.mockReset();
   H.runTransaction.mockImplementation(async (_db, fn) => fn({ get: H.txGet, set: H.txSet }));
   H.txGet.mockReset();
+  // Default transactional read: nothing exists yet. joinAndDeal (#409) re-reads
+  // the board (legacy) / player row (daily) INSIDE its transaction; tests that
+  // need an existing doc override with mockResolvedValueOnce.
+  H.txGet.mockResolvedValue({ exists: () => false });
   H.txSet.mockReset();
   H.batchSet.mockReset();
   H.batchCommit.mockReset();
@@ -426,8 +430,52 @@ describe('joinAndDeal freeze-at-join', () => {
 
     expect(H.getDoc).toHaveBeenCalledTimes(2); // event (mode) + board check — no profile read for returning Players
     expect(H.getDocs).not.toHaveBeenCalled(); // never reads the pool
-    expect(H.batchSet).not.toHaveBeenCalled(); // never re-writes the Board
-    expect(H.batchCommit).not.toHaveBeenCalled();
+    expect(H.txSet).not.toHaveBeenCalled(); // never re-writes the Board
+    expect(H.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it('legacy: the transaction RE-CHECKS board existence — a board that appears after the fast-path probe is not re-dealt (#409)', async () => {
+    // The timed-out-deal + Retry window: attempt A commits its board AFTER
+    // attempt B's plain fast-path probe read "no board". B's transaction must
+    // re-read and no-op instead of double-committing (re-stamping joinedAt).
+    H.getDocs.mockResolvedValueOnce({
+      docs: [...activeItems(30), mkItem('free', true)].map((it) => ({ data: () => it })),
+    });
+    H.txGet.mockResolvedValueOnce({ exists: () => true }); // the txn's authoritative read: A's board landed
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false); // not an actual join — no duplicate join_event
+
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    expect(H.txSet).not.toHaveBeenCalled(); // neither board nor player re-written
+  });
+
+  it('daily: alreadyJoined derives from the row read INSIDE the transaction, and the guards degrade to an identity-only merge (#409)', async () => {
+    H.getDoc.mockReset();
+    H.getDoc.mockResolvedValue({ exists: () => false }); // saved profile: none
+    H.getDoc.mockResolvedValueOnce({ exists: () => true, data: () => ({ days: [{ index: 0 }] }) }); // mode: daily
+    // The transactional row read sees a join committed by the overlapping
+    // attempt — including a spent reshuffle the stale-read code would have
+    // rewound to 0 (a write firestore.rules' monotonic counter DENIES).
+    H.txGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        uid: 'sailor-1',
+        joinedAt: 111,
+        bingoCount: 3,
+        squaresMarked: 9,
+        firstBingoAt: 222,
+        blackout: false,
+        reshufflesUsed: 2,
+      }),
+    });
+
+    await expect(joinAndDeal(SIGNED_IN)).resolves.toBe(false); // the join already happened
+
+    const seed = H.txSet.mock.calls[0][1] as Record<string, unknown>;
+    expect(seed).toMatchObject({ uid: 'sailor-1', displayName: 'Sailor' }); // identity still merged
+    expect(seed).not.toHaveProperty('joinedAt'); // no re-stamp
+    expect(seed).not.toHaveProperty('reshufflesUsed'); // no rules-denied rewind
+    expect(seed).not.toHaveProperty('bingoCount'); // aggregates untouched
   });
 
   it('deals once from the active non-free pool (24 Prompts + marked Free Space)', async () => {
@@ -437,8 +485,8 @@ describe('joinAndDeal freeze-at-join', () => {
     await joinAndDeal(SIGNED_IN);
 
     expect(H.getDocs).toHaveBeenCalledTimes(1);
-    expect(H.batchCommit).toHaveBeenCalledTimes(1);
-    const boardWrite = H.batchSet.mock.calls[0][1] as BoardDoc;
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
+    const boardWrite = H.txSet.mock.calls[0][1] as BoardDoc;
     expect(boardWrite.cells).toHaveLength(25);
     expect(boardWrite.cells[CENTER]).toMatchObject({ free: true, marked: true, text: FREE_TEXT });
     const dealtIds = boardWrite.cells.filter((c) => !c.free).map((c) => c.itemId);
@@ -456,7 +504,7 @@ describe('joinAndDeal freeze-at-join', () => {
 
     await joinAndDeal(SIGNED_IN);
 
-    const boardWrite = H.batchSet.mock.calls[0][1] as BoardDoc;
+    const boardWrite = H.txSet.mock.calls[0][1] as BoardDoc;
     const dealtIds = boardWrite.cells.filter((c) => !c.free).map((c) => c.itemId);
     expect(dealtIds).toHaveLength(24);
     expect(dealtIds).not.toContain('embark-1');
@@ -468,7 +516,7 @@ describe('joinAndDeal freeze-at-join', () => {
     H.getDocs.mockResolvedValueOnce({ docs });
 
     await expect(joinAndDeal(SIGNED_IN)).rejects.toThrow(/at least 24 prompts/);
-    expect(H.batchCommit).not.toHaveBeenCalled(); // no broken Board written
+    expect(H.runTransaction).not.toHaveBeenCalled(); // no broken Board written
   });
 });
 
@@ -499,7 +547,7 @@ describe('joinAndDeal community auto-hide at the deal path (specs/w2-admin-conso
 
     await joinAndDeal(SIGNED_IN);
 
-    const boardWrite = H.batchSet.mock.calls[0][1] as BoardDoc;
+    const boardWrite = H.txSet.mock.calls[0][1] as BoardDoc;
     const dealtIds = boardWrite.cells.filter((c) => !c.free).map((c) => c.itemId);
     expect(dealtIds).toHaveLength(24);
     expect(dealtIds).not.toContain('hot-1');
@@ -520,7 +568,7 @@ describe('joinAndDeal community auto-hide at the deal path (specs/w2-admin-conso
     H.getDocs.mockResolvedValueOnce({ docs });
 
     await expect(joinAndDeal(SIGNED_IN)).rejects.toThrow(/at least 24 prompts/);
-    expect(H.batchCommit).not.toHaveBeenCalled(); // no card dealt from a thin visible pool
+    expect(H.runTransaction).not.toHaveBeenCalled(); // no card dealt from a thin visible pool
   });
 
   it('with a NON-POSITIVE threshold, deals the full pool — a 0 typo does not empty the board (finding 2)', async () => {
@@ -535,9 +583,9 @@ describe('joinAndDeal community auto-hide at the deal path (specs/w2-admin-conso
 
     await joinAndDeal(SIGNED_IN);
 
-    const boardWrite = H.batchSet.mock.calls[0][1] as BoardDoc;
+    const boardWrite = H.txSet.mock.calls[0][1] as BoardDoc;
     expect(boardWrite.cells.filter((c) => !c.free)).toHaveLength(24); // full deal
-    expect(H.batchCommit).toHaveBeenCalledTimes(1);
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('falls open on a MISSING threshold — a readable event with no settings deals unfiltered', async () => {
@@ -553,9 +601,9 @@ describe('joinAndDeal community auto-hide at the deal path (specs/w2-admin-conso
 
     await joinAndDeal(SIGNED_IN);
 
-    const boardWrite = H.batchSet.mock.calls[0][1] as BoardDoc;
+    const boardWrite = H.txSet.mock.calls[0][1] as BoardDoc;
     expect(boardWrite.cells.filter((c) => !c.free)).toHaveLength(24); // still deals
-    expect(H.batchCommit).toHaveBeenCalledTimes(1);
+    expect(H.runTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('FAILS CLOSED when the event-mode read errors — never guesses legacy (CodeRabbit #247)', async () => {
@@ -565,7 +613,7 @@ describe('joinAndDeal community auto-hide at the deal path (specs/w2-admin-conso
     H.getDoc.mockRejectedValueOnce(new Error('offline'));
 
     await expect(joinAndDeal(SIGNED_IN)).rejects.toThrow(/offline/);
-    expect(H.batchCommit).not.toHaveBeenCalled(); // no board/player written on a mode-read failure
+    expect(H.runTransaction).not.toHaveBeenCalled(); // no board/player written on a mode-read failure
   });
 });
 
@@ -577,7 +625,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
   const healthyPoolDocs = () => ({
     docs: activeItems(30).map((it) => ({ data: () => it })),
   });
-  const playerWrite = () => H.batchSet.mock.calls[1][1] as PlayerDoc;
+  const playerWrite = () => H.txSet.mock.calls[1][1] as PlayerDoc;
 
   it('prefers the saved profile name and custom avatar over the Google identity', async () => {
     H.getDoc
@@ -774,7 +822,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     await joinAndDeal(SIGNED_IN_WITH_PHOTO);
 
-    expect(H.batchCommit).toHaveBeenCalledTimes(1); // the deal still lands
+    expect(H.runTransaction).toHaveBeenCalledTimes(1); // the deal still lands
     expect(playerWrite()).toMatchObject({
       displayName: 'Sailor',
       photoURL: 'https://lh3.example/google.jpg',

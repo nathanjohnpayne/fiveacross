@@ -707,6 +707,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // attempt is still current, clear the error so the card shows without a manual
     // retry. Guarded by the attempt so a superseded deal never clobbers; the
     // rejection arm is a no-op (the catch below already owns a real failure).
+    //
+    // The uncancelled deal is also WRITE-safe to overlap with a Retry (#409):
+    // joinAndDeal runs its row/board read-and-write inside a runTransaction, so
+    // the timed-out attempt still in flight and the Retry's fresh attempt
+    // serialize server-side — the loser re-reads the committed join and
+    // degrades to a no-op instead of double-writing. This ref-based supersede
+    // guard stays load-bearing for CLIENT state (join_event, dealing/dealError)
+    // — the transaction bounds the writes, not which attempt reports them.
     const dealPromise = joinAndDeal(u);
     void dealPromise.then(
       () => {
