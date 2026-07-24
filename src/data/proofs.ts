@@ -2,6 +2,7 @@ import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/
 import { db, EVENT_ID } from '../firebase';
 import { uploadProofMedia, deleteStoragePath } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
+import { resolveProofMediaUrl } from './proofMediaUrl';
 import { markerDisplayName } from './attribution';
 import { completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
@@ -512,5 +513,8 @@ export async function deleteProof(
   // that could let a purge rejection propagate to deleteProof's caller — the
   // Storage delete above is the authoritative revocation regardless of
   // whether this device's own cache purge succeeds (#373).
-  void purgeProofMediaFromCaches(mediaURL);
+  // `resolveProofMediaUrl` keeps the purge key equal to the URL the browser
+  // actually fetched (#335): identity in every real build, and under the e2e
+  // emulator build the emulator-origin twin of the canonicalized stored value.
+  void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
 }

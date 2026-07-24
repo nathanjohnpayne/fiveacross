@@ -6,20 +6,21 @@
 // event-level `camera_only` override hides Library, leaving only Take photo,
 // in EVERY Claim Mode (never gated on claimMode itself).
 //
-// The Library pick's FULL round trip — submit → Storage upload →
-// `mediaURL`-badged Feed Proof — is exercised too, and it is EXPECTED to fail
-// in this local stack, not flakily but 100% deterministically: Storage's
-// EMULATOR `getDownloadURL()` returns a `http://127.0.0.1:9199/...` URL, but
-// firestore.rules' proof-create rule regex-pins `mediaURL` to the PRODUCTION
-// `https://firebasestorage.googleapis.com/...` host (by design — a forged
-// non-Storage URL must never pass as proof media). That host never matches
-// against the local Storage emulator, so `attachProof` 403s here on every
-// real photo/audio submission — in PRODUCTION, against real Storage, the host
-// matches and this path works. This is a genuine e2e-TESTABILITY gap (no spec
-// in this repo has ever driven a real photo/audio Proof through the browser
-// before — every existing spec uses the honor pledge specifically to avoid
-// it), not a product bug; this spec drives the real submit and RECORDS the
-// exact, deterministic outcome rather than asserting around it.
+// The Library pick's FULL round trip — submit → Storage upload → committed
+// Proof doc — is exercised too. It used to 403 here 100% deterministically:
+// Storage's EMULATOR `getDownloadURL()` returns a `http://127.0.0.1:9199/...`
+// URL, while firestore.rules' proof-create rule regex-pins `mediaURL` to the
+// PRODUCTION `https://firebasestorage.googleapis.com/...` host (by design — a
+// forged non-Storage URL must never pass as proof media), so the rule the
+// coverage exists to protect was the one thing e2e could not exercise. #335
+// closed that with the flag-gated canonicalize/resolve pair in
+// `src/data/proofMediaUrl.ts` — the emulator download URL is rewritten to its
+// production-shaped twin at proof-write (so the regex is exercised FOR REAL,
+// not relaxed) and inverted at render. The deeper media assertions — the
+// stored URL against the literal rules regex, the rendered <img>/<audio> src
+// against the emulator origin, decoded pixels, and the audio half via the fake
+// mic — live in `tests/e2e/d15-proof-media.spec.ts`; this case just proves the
+// affordance it is about actually completes a claim.
 import { test, expect, type Page } from '@playwright/test';
 import { seedDailyEvent, dismissCoach, readDealtDayGrid } from './support/daily';
 import { joinViaSharedLink, signedInUid } from './support/join';
@@ -116,30 +117,37 @@ test.describe('claim sheet photo affordances', () => {
       await expect(pageB.locator('.preview')).toBeVisible();
       await pageB.screenshot({ path: `${SHOTS}/claim-sheet-library-preview.png`, fullPage: true });
 
-      // The submit: expected (see file header) to fail against THIS stack's
-      // Storage-emulator/firestore.rules host mismatch — captured precisely,
-      // not silently swallowed. `alert()` blocks the page's JS, so the dialog
-      // handler must be armed BEFORE the click that triggers it.
+      // The submit now COMPLETES against this stack (#335). `alert()` blocks the
+      // page's JS, so the dialog handler is still armed BEFORE the click — an
+      // alert here would mean the host mismatch is back, and it must be captured
+      // rather than deadlock the run.
       let alertText: string | null = null;
       pageB.once('dialog', (d) => {
         alertText = d.message();
         void d.dismiss();
       });
       await pageB.getByRole('button', { name: 'Mark it' }).click();
-      await expect
-        .poll(() => alertText, { timeout: 15_000, message: 'waiting for the submit to settle (success close or failure alert)' })
-        .not.toBeNull();
-      console.log(`[claim-sheet-library-submit] alert="${alertText}"`);
-      expect(alertText).toBe('Upload failed—try again.');
+      // ProofSheet closes only after attachProof's transaction commits, so the
+      // sheet going away IS the success signal.
+      await expect(pageB.locator('.sheet-backdrop')).toHaveCount(0, { timeout: 20_000 });
+      expect(alertText).toBeNull();
 
-      // Ground truth: the 403 means NO Proof doc was written — the failure is
-      // real, not a UI-only glitch masking a silent success.
+      // Ground truth: the Proof doc landed, with the media pinned to the exact
+      // object this Proof owns — which is only possible because the committed
+      // `mediaURL` satisfied the proof-create rule's production-host regex.
       await testEnv.withSecurityRulesDisabled(async (ctx) => {
         const { collection, getDocs, query, where } = await import('firebase/firestore');
         const snap = await getDocs(
           query(collection(ctx.firestore(), 'events', EVENT_ID, 'proofs'), where('uid', '==', uidB)),
         );
-        expect(snap.docs).toHaveLength(0);
+        expect(snap.docs).toHaveLength(1);
+        const proof = snap.docs[0];
+        expect(proof.data().type).toBe('photo');
+        expect(proof.data().source).toBe('library');
+        expect(proof.data().storagePath).toBe(`proofs/${EVENT_ID}/${uidB}/${proof.id}.jpg`);
+        expect(proof.data().mediaURL).toMatch(
+          /^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/[^/]+\/o\/proofs%2F/,
+        );
       });
     } finally {
       await pageA?.context().close();

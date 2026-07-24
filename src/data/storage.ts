@@ -1,6 +1,7 @@
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { storage, EVENT_ID } from '../firebase';
 import { PROOF_MEDIA_CACHE_CONTROL } from './proofMediaCache';
+import { canonicalizeProofMediaUrl } from './proofMediaUrl';
 
 /** Downscale + re-encode an image in the browser so we upload ~100–300 KB, not 12 MP. */
 export async function downscaleImage(file: Blob, max = 1280, quality = 0.82): Promise<Blob> {
@@ -71,7 +72,15 @@ export async function uploadProofMedia(
   // so the long-lived immutable policy is safe. Avatars below deliberately do
   // NOT get this: avatars/{uid}.jpg is overwritten in place on profile edits.
   await uploadBytes(r, payload, { contentType, cacheControl: PROOF_MEDIA_CACHE_CONTROL });
-  const url = await getDownloadURL(r);
+  // #335: identity in every real build. Under the Playwright e2e build ONLY, the
+  // Storage emulator hands back its own origin (`http://127.0.0.1:9199/v0/b/…`),
+  // which firestore.rules' proof-create `mediaURL` regex — which pins the
+  // production `firebasestorage.googleapis.com` host on purpose — can never
+  // match, so a real photo/audio Proof used to 403 in the emulator stack. The
+  // canonicalization writes the production-shaped URL the rule actually expects,
+  // so e2e exercises that regex for real; ProofFeed inverts it at render
+  // (resolveProofMediaUrl) to load the bytes back from the emulator.
+  const url = canonicalizeProofMediaUrl(await getDownloadURL(r));
   return { path, url };
 }
 
