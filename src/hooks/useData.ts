@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { collectionGroup, onSnapshot, query, where, type DocumentReference, type Query } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
@@ -431,13 +431,23 @@ export function useProofFeed(max = 60) {
     query(proofsCol(), where('status', '==', 'active')),
     'proofs',
   );
+  // `bannedUids` is a fresh array every render (`useEventModeration` returns
+  // `event?.bannedUids ?? []`), so a plain array dep would defeat this memo on
+  // every render regardless of whether the ban roster actually changed. Join it
+  // into a stable string key — mirrors `useTallyCards`'s `bannedKey`.
+  const bannedKey = bannedUids.join(',');
   // Plus the Admin ban (#108): a Proof authored by a banned uid drops from the
   // public Feed (and, through `useFeed`, the merged stream) by its OWNER — the same
   // presentational hide `useReportedProofs` (Admin) deliberately does NOT apply.
-  const proofs = data
-    .filter((p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids))
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, max);
+  const proofs = useMemo(
+    () =>
+      data
+        .filter((p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids))
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, max),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, threshold, bannedKey, max],
+  );
   return { proofs, loading };
 }
 
@@ -452,14 +462,21 @@ export function useProofFeed(max = 60) {
 export function useMoments(max = 60) {
   const { bannedUids } = useEventModeration();
   const { data, loading } = useColSub<MomentDoc>(momentsCol(), 'moments');
+  // Same fresh-array problem as `useProofFeed` — join to a stable dep key.
+  const bannedKey = bannedUids.join(',');
   // The Admin ban (#108): a banned Player's broadcast beats drop from the public
   // Feed by their `uid`, mirroring the proof side above so the whole merged Feed
   // (`useFeed`) is consistent. Presentational only; admin surfaces do not read this.
-  const moments = data
-    .filter(hasCanonicalMomentId)
-    .filter((m) => !isBanned(m.uid, bannedUids))
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, max);
+  const moments = useMemo(
+    () =>
+      data
+        .filter(hasCanonicalMomentId)
+        .filter((m) => !isBanned(m.uid, bannedUids))
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, max),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, bannedKey, max],
+  );
   return { moments, loading };
 }
 
@@ -473,7 +490,7 @@ export function useMoments(max = 60) {
  */
 export function useNotices() {
   const { data, loading } = useColSub<NoticeDoc>(noticesCol(), 'notices');
-  const notices = [...data].sort((a, b) => b.createdAt - a.createdAt);
+  const notices = useMemo(() => [...data].sort((a, b) => b.createdAt - a.createdAt), [data]);
   return { notices, loading };
 }
 
@@ -723,10 +740,17 @@ export function useFeed(max = 60) {
   const { moments, loading: momentsLoading } = useMoments(max + 1);
   const { cards, loading: tallyLoading } = useTallyCards();
   const { notices, loading: noticesLoading } = useNotices();
-  const entries = mergeFeed(proofs, moments, cards, notices, max);
+  const entries = useMemo(
+    () => mergeFeed(proofs, moments, cards, notices, max),
+    [proofs, moments, cards, notices, max],
+  );
+  const widerEntries = useMemo(
+    () => mergeFeed(proofs, moments, cards, notices, max + 1),
+    [proofs, moments, cards, notices, max],
+  );
   return {
     entries,
-    hasMore: mergeFeed(proofs, moments, cards, notices, max + 1).length > entries.length,
+    hasMore: widerEntries.length > entries.length,
     // The UNCAPPED tally stream (Codex P2 on #286): the proof-card pills
     // (itemId → text for the doubts derivation, itemText → live count) must be
     // derived from EVERY Tally Card, not just the ones that survived the
