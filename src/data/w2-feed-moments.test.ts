@@ -319,28 +319,43 @@ const fellThenServerSays = (
   });
 };
 
+// The pre-set tombstone probe (sibling-form spend, Codex round 2 on PR #467):
+// `commitRetraction` reads each tombstone id through the normal `getDoc` path and
+// skips the set when one already exists — tombstones have NO update path, so a
+// blind re-set would be a doc-exists update and deny the whole batch. The
+// beforeEach default resolves exists=true (it serves the write-once confirmation
+// read), so retraction cases opt into the fresh-state norm: nothing minted yet.
+const noTombstonesYet = () => getDocSpy.mockResolvedValue({ exists: () => false });
+
 describe('retract-once for a PUBLISHED win (#377)', () => {
-  it('retracts the per-card BINGO Moment: delete + tombstone at the SAME id, in ONE batch', async () => {
+  it('retracts the per-card BINGO Moment: delete + BOTH tombstone forms, in ONE batch', async () => {
+    noTombstonesYet();
     cacheHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
     fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
     await settle();
 
-    // ONE batch — atomicity is the point (a crash between the two writes would
+    // ONE batch — atomicity is the point (a crash between the writes would
     // leave the win deleted-but-not-spent, i.e. freely repostable).
     expect(writeBatchSpy).toHaveBeenCalledTimes(1);
     expect(batchDeleteSpy).toHaveBeenCalledTimes(1);
-    expect(batchSetSpy).toHaveBeenCalledTimes(1);
     expect(batchCommitSpy).toHaveBeenCalledTimes(1);
     expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo-d3'));
-    // The tombstone mirrors the Moment id it retracts — that id-mirroring is what
-    // lets the rules answer "is this win spent?" with one exists() lookup.
-    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo-d3'));
-    expect(batchSetSpy.mock.calls[0][1]).toEqual({
-      uid: 'u1',
-      kind: 'bingo',
-      dayIndex: 3,
-      createdAt: expect.any(Number),
-    });
+    // The win is spent under BOTH ids that can address it (Codex round 2 on PR
+    // #467): the day-scoped id this bundle writes AND the legacy day-less id a
+    // stale pre-#372 bundle would repost the SAME win under. The owner-delete
+    // rule enforces the pairing (getAfter on the sibling form), so this is the
+    // only batch shape the rules accept.
+    expect(batchSetSpy).toHaveBeenCalledTimes(2);
+    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo'));
+    expect(batchSetSpy.mock.calls[1][0].path).toBe(tombstoneAt('u1-bingo-d3'));
+    for (const call of batchSetSpy.mock.calls) {
+      expect(call[1]).toEqual({
+        uid: 'u1',
+        kind: 'bingo',
+        dayIndex: 3,
+        createdAt: expect.any(Number),
+      });
+    }
   });
 
   it('retracts NOTHING when the win never published — a tombstone would spend the slot for free', async () => {
@@ -356,6 +371,7 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
     // `setMark` is fire-and-forget: its verdict is a LOCAL fold while its batch is
     // still pending. Spending the win here would irreversibly silence a STANDING
     // win whenever the unmark is later rejected and rolled back.
+    noTombstonesYet();
     cacheHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
     enqueueRetraction('u1', { bingo: true, bingoDayIndex: 3 });
     await settle();
@@ -383,6 +399,7 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
   it('holds an intent whose own Day is not the board being adjudicated', async () => {
     // A Day-3 fall while Day 7 renders: this board is not evidence about that
     // card, so the intent survives until its own board arrives server-committed.
+    noTombstonesYet();
     cacheHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
     enqueueRetraction('u1', { bingo: true, bingoDayIndex: 3 });
     drainRetractions('u1', { dayIndex: 7, bingoStands: false, blackoutStands: false });
@@ -406,6 +423,7 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
   });
 
   it('retracts only the kind that FELL — a blackout fall leaves a still-standing bingo alone', async () => {
+    noTombstonesYet();
     cacheHolding({
       [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
       [momentAt('u1-blackout-d3')]: { kind: 'blackout', uid: 'u1', dayIndex: 3 },
@@ -420,24 +438,75 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
     expect(batchSetSpy.mock.calls[0][1]).toMatchObject({ kind: 'blackout', dayIndex: 3 });
   });
 
-  it('retracts a LEGACY day-less Moment that covers the fallen Day — with a day-LESS tombstone', async () => {
+  it('retracts a LEGACY day-less Moment that covers the fallen Day — spending BOTH id forms', async () => {
     // Not hypothetical: the writers' legacy same-day dedupe (#267/#372) means a
     // Day's live Moment can genuinely sit at the pre-per-card `${uid}-bingo` id
-    // with a day-stamped payload. Retraction has to reach it, and its tombstone
-    // must mirror THAT id form (day-less), not the per-card one.
+    // with a day-stamped payload. Retraction has to reach it — and it must spend
+    // the DAY-SCOPED sibling too (Codex round 2 on PR #467): a tombstone at only
+    // the legacy id left `${uid}-bingo-d3` freely creatable, so a re-mark on the
+    // CURRENT bundle reposted the exact win just retracted. Both tombstones carry
+    // the Day: on the legacy form it is provenance for WHICH Day spent the slot.
+    noTombstonesYet();
     cacheHolding({ [momentAt('u1-bingo')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
     fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
     await settle();
 
     expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy).toHaveBeenCalledTimes(1);
     expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo'));
+    expect(batchSetSpy).toHaveBeenCalledTimes(2);
     expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo'));
-    expect(batchSetSpy.mock.calls[0][1]).toEqual({
-      uid: 'u1',
-      kind: 'bingo',
-      createdAt: expect.any(Number),
+    expect(batchSetSpy.mock.calls[1][0].path).toBe(tombstoneAt('u1-bingo-d3'));
+    for (const call of batchSetSpy.mock.calls) {
+      expect(call[1]).toEqual({
+        uid: 'u1',
+        kind: 'bingo',
+        dayIndex: 3,
+        createdAt: expect.any(Number),
+      });
+    }
+  });
+
+  it('retracts a win living at BOTH id forms in ONE batch — two deletes, two tombstones', async () => {
+    // Possible when a stale bundle posted the legacy id and a current one the
+    // per-card id for the same (Player, Day). Two separate batches would race
+    // each other's tombstones (no update path), so both docs ride one commit.
+    noTombstonesYet();
+    cacheHolding({
+      [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+      [momentAt('u1-bingo')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
     });
-    expect('dayIndex' in (batchSetSpy.mock.calls[0][1] as object)).toBe(false);
+    fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+    await settle();
+
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy).toHaveBeenCalledTimes(2);
+    const deleted = batchDeleteSpy.mock.calls.map((c) => (c[0] as { path: string }).path);
+    expect(deleted).toEqual([momentAt('u1-bingo-d3'), momentAt('u1-bingo')]);
+    expect(batchSetSpy).toHaveBeenCalledTimes(2);
+    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo'));
+    expect(batchSetSpy.mock.calls[1][0].path).toBe(tombstoneAt('u1-bingo-d3'));
+  });
+
+  it('skips a tombstone an EARLIER retraction already minted — no doc-exists update in the batch', async () => {
+    // A second retraction of the same kind on ANOTHER Day: the legacy form was
+    // already spent (tombstones are permanent, no update path), so re-setting it
+    // would deny the whole batch. The probe reads through the normal getDoc path
+    // — drain fires only after a server-committed snapshot, so the device is
+    // online and the answer is authoritative.
+    getDocSpy.mockImplementation((ref: { path: string }) =>
+      Promise.resolve({ exists: () => ref.path === tombstoneAt('u1-bingo') }),
+    );
+    cacheHolding({ [momentAt('u1-bingo-d5')]: { kind: 'bingo', uid: 'u1', dayIndex: 5 } });
+    fellThenServerSays('u1', { bingo: true, bingoDayIndex: 5 }, { dayIndex: 5 });
+    await settle();
+
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo-d5'));
+    // Only the not-yet-spent day-scoped form is written; the delete rule's
+    // getAfter accepts the PRE-EXISTING legacy tombstone.
+    expect(batchSetSpy).toHaveBeenCalledTimes(1);
+    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo-d5'));
   });
 
   it('leaves a LEGACY Moment stamped for a DIFFERENT Day standing — it describes another card', async () => {
@@ -449,14 +518,18 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
 
   it('a LEGACY (day-less) Event retracts its one card’s Moment unconditionally', async () => {
     // One card for the whole Event, so per-Player IS per-card there: there is no
-    // Day to scope to and no day-suffixed id to probe.
+    // Day to scope to, no day-suffixed id to probe — and no sibling form to
+    // spend, so exactly ONE day-less tombstone is written.
+    noTombstonesYet();
     cacheHolding({ [momentAt('u1-blackout')]: { kind: 'blackout', uid: 'u1' } });
     fellThenServerSays('u1', { blackout: true });
     await settle();
 
     expect(writeBatchSpy).toHaveBeenCalledTimes(1);
     expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-blackout'));
+    expect(batchSetSpy).toHaveBeenCalledTimes(1);
     expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-blackout'));
+    expect('dayIndex' in (batchSetSpy.mock.calls[0][1] as object)).toBe(false);
     // No day-scoped probe happened at all — there is no Day.
     const probed = getDocFromCacheSpy.mock.calls.map((c) => (c[0] as { path: string }).path);
     expect(probed.some((p) => p.includes('u1-blackout-d'))).toBe(false);

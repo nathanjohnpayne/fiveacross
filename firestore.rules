@@ -939,7 +939,11 @@ service cloud.firestore {
           // the same-id repost a re-mark would otherwise produce. Keyed on the
           // MOMENT ID itself, so one clause covers all four canonical forms
           // (`${uid}-bingo` / `${uid}-blackout` and their `-d${dayIndex}` per-card
-          // twins) without re-deriving kind or Day here. `first_bingo` can never
+          // twins) without re-deriving kind or Day here. One exists() SUFFICES
+          // even though the same win is addressable under two id forms, because
+          // the owner-delete arm below makes every retraction spend BOTH forms
+          // (Codex round 2 on PR #467) — whichever id a later bundle posts under,
+          // its own tombstone is there. `first_bingo` can never
           // carry a tombstone (the block below restricts `kind` to the two
           // per-card kinds, and the singleton id matches no `${uid}-${kind}`
           // form), so the ceremonial create path is untouched.
@@ -979,9 +983,48 @@ service cloud.firestore {
         // ADMINS stay exempt: moderation must be able to remove a Moment WITHOUT
         // spending its (Player, Day) slot, and an admin deleting a Moment is not a
         // player retracting a win.
+        //
+        // SIBLING-FORM SPEND (Codex round 2 on PR #467). The same (Player, Day)
+        // win is addressable under TWO id forms: the day-scoped
+        // `${uid}-${kind}-d${dayIndex}` a current bundle writes, and the legacy
+        // day-less `${uid}-${kind}` a pre-#267/#372 bundle (or the writers'
+        // legacy same-day dedupe) writes. A tombstone at only the retracted id
+        // left the OTHER form creatable: retract the legacy Moment, re-mark, and
+        // the current bundle reposts the SAME win at the day-scoped id whose
+        // tombstone does not exist (a stale bundle can run the mirror image). So
+        // the owner arm requires the retraction to spend BOTH forms:
+        //
+        //   - deleting a DAY-SCOPED Moment also requires the legacy tombstone.
+        //     Its id is constructible here (`uid + '-' + kind`) because the
+        //     create rule bound id ↔ uid ↔ kind.
+        //   - deleting a LEGACY Moment whose payload names its Day (the
+        //     same-day-dedupe stamp) also requires the day-scoped tombstone for
+        //     THAT Day. A legacy Moment with no integer `dayIndex` names no Day
+        //     — rules cannot conjure one from a day-less id — so only its own
+        //     tombstone is required: on a single-board Event no day-scoped form
+        //     exists at all, and on a daily Event the client never retracts a
+        //     day-less-payload doc anyway (deliberately conservative; see
+        //     src/data/moments.ts). A junk non-int/out-of-schedule `dayIndex`
+        //     (only the owner could have minted it — the create rule's legacy
+        //     arm validates nothing beyond kind) at worst makes that owner's own
+        //     doc owner-unretractable, since its sibling tombstone id is
+        //     un-creatable; admin delete stays the escape hatch.
+        //
+        // `getAfter` accepts a sibling tombstone that ALREADY exists (an earlier
+        // retraction of the same kind on another Day minted it — tombstones are
+        // permanent and have no update path, so the client probes before
+        // re-setting). Spending the legacy form for one Day's retraction
+        // over-blocks a STALE bundle's later legacy-id post for a DIFFERENT Day —
+        // accepted residual in the silence direction (the current bundle's
+        // day-scoped post for that other Day is untouched); see the spec.
         allow delete: if isAdmin(eventId)
           || (isOwner(resource.data.uid)
-              && getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId)).data.uid == resource.data.uid);
+              && getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId)).data.uid == resource.data.uid
+              && (momentId == resource.data.uid + '-' + resource.data.kind
+                    ? (!resource.data.keys().hasAny(['dayIndex'])
+                        || !(resource.data.dayIndex is int)
+                        || getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(resource.data.uid + '-' + resource.data.kind + '-d' + string(resource.data.dayIndex))).data.uid == resource.data.uid)
+                    : getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(resource.data.uid + '-' + resource.data.kind)).data.uid == resource.data.uid));
       }
 
       // Retraction tombstones (#377, specs/w2-feed-moments.md § Retracting a
@@ -989,9 +1032,11 @@ service cloud.firestore {
       //
       // Unmarking the square that completed a PUBLISHED BINGO/Blackout deletes the
       // Moment (the owner-delete path above) and, in the SAME batch, creates a
-      // tombstone at the SAME id. The moments create rule then denies any create
-      // whose tombstone exists, so that (Player, Day) win is spent — retracted
-      // once, never repostable.
+      // tombstone at the SAME id — plus, on a daily Event, at the SIBLING id form
+      // for the same (Player, Day) win (Codex round 2 on PR #467; the owner-delete
+      // arm above enforces the pairing). The moments create rule then denies any
+      // create whose tombstone exists, so that win is spent under BOTH the ids
+      // that can address it — retracted once, never repostable.
       //
       // WHY a tombstone and not a bare delete. The deterministic per-card Moment
       // id is the strongest anti-gaming primitive in the system (§ Once-only
@@ -1034,11 +1079,20 @@ service cloud.firestore {
           // grow into and no reason to accept publicly-readable junk.
           && request.resource.data.keys().hasOnly(['uid', 'kind', 'dayIndex', 'createdAt'])
           && request.resource.data.kind in ['bingo', 'blackout']
+          // A day-less id may carry a `dayIndex` stamp — since round 2 the writer
+          // DOES mint this (the legacy tombstone of a daily-Event retraction
+          // records WHICH Day spent the legacy slot; pure provenance, nothing
+          // reads it back). When present it must still be a real scheduled Day —
+          // hasOnly alone would otherwise admit junk into a publicly-readable doc.
           && (momentId == request.resource.data.uid + '-' + request.resource.data.kind
-              || (request.resource.data.dayIndex is int
-                  && request.resource.data.dayIndex >= 0
-                  && request.resource.data.dayIndex < get(/databases/$(database)/documents/events/$(eventId)).data.days.size()
-                  && momentId == request.resource.data.uid + '-' + request.resource.data.kind + '-d' + string(request.resource.data.dayIndex)))
+                ? (!request.resource.data.keys().hasAny(['dayIndex'])
+                    || (request.resource.data.dayIndex is int
+                        && request.resource.data.dayIndex >= 0
+                        && request.resource.data.dayIndex < get(/databases/$(database)/documents/events/$(eventId)).data.days.size()))
+                : (request.resource.data.dayIndex is int
+                    && request.resource.data.dayIndex >= 0
+                    && request.resource.data.dayIndex < get(/databases/$(database)/documents/events/$(eventId)).data.days.size()
+                    && momentId == request.resource.data.uid + '-' + request.resource.data.kind + '-d' + string(request.resource.data.dayIndex)))
           // Same near-now window as moments/proofs/hearts. The stamp is provenance
           // only (nothing sorts by it), but an unbounded client-set number in a
           // publicly-readable doc buys nothing, so it carries the house bound.

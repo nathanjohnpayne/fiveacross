@@ -41,9 +41,11 @@ type RetractableKind = 'bingo' | 'blackout';
 
 /**
  * The tombstone payload — exactly the keys the rules' `hasOnly` allows. `dayIndex`
- * is present iff the id it marks is the day-suffixed per-card form, mirroring the
- * Moment payload/id discipline (the rules accept a day-stamped payload on a
- * day-LESS id too, matching the moments block; the writer just never mints one).
+ * is present iff the retraction knows its Day (a daily Event), and then rides on
+ * BOTH tombstone forms — the day-suffixed per-card id where the rules bind it to
+ * the id, and the day-LESS legacy id where it is pure provenance recording WHICH
+ * Day spent the legacy slot (the rules validate it against the schedule either
+ * way). A legacy single-board Event's tombstone carries no `dayIndex` at all.
  */
 interface RetractionTombstone {
   uid: string;
@@ -705,10 +707,42 @@ async function cachedMomentData(id: string): Promise<Record<string, unknown> | u
 }
 
 /**
- * Delete the Moment and mint its tombstone ATOMICALLY. A batch, not two writes:
- * a crash (or a rules denial) between them would otherwise leave the win
- * deleted-but-not-spent — i.e. freely repostable, the exact loop this closes — or
- * spent-but-still-displayed. `writeBatch` commits all-or-nothing.
+ * Does a tombstone already exist at `id`? Server-first through the normal
+ * `getDoc` path — retraction only ever commits right after a server-committed
+ * board snapshot (`drainRetractions`), so the device is online and the answer is
+ * authoritative; offline `getDoc` falls back to the cache. Needed since the
+ * sibling-form spend (Codex round 2 on PR #467): a retraction writes BOTH
+ * tombstone forms, tombstones are permanent with NO update path, so blindly
+ * re-setting one minted by an EARLIER retraction (same kind, another Day) would
+ * be a doc-exists update and deny the whole batch. An unreadable doc reads as
+ * missing and the set is included best-effort — at worst the batch is denied and
+ * logged, never a silent half-retraction (the batch is all-or-nothing).
+ */
+async function tombstoneExists(id: string): Promise<boolean> {
+  try {
+    return (await getDoc(rawMomentRetraction(id))).exists();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete the fallen win's Moment doc(s) and mint its tombstones ATOMICALLY. A
+ * batch, not separate writes: a crash (or a rules denial) between them would
+ * otherwise leave the win deleted-but-not-spent — i.e. freely repostable, the
+ * exact loop this closes — or spent-but-still-displayed. `writeBatch` commits
+ * all-or-nothing.
+ *
+ * The batch spends BOTH id forms of the win (Codex round 2 on PR #467): the same
+ * (Player, Day) win is addressable as `${uid}-${kind}-d${dayIndex}` by a current
+ * bundle AND as legacy `${uid}-${kind}` by a stale (or same-day-deduping) one, so
+ * a tombstone at only the form that happened to hold the Moment left the other
+ * freely creatable — retract the legacy Moment, re-mark, and the current bundle
+ * reposts the SAME win under the day-scoped id. The owner-delete rule enforces
+ * the pairing server-side (getAfter on the sibling form), so this is the only
+ * shape the rules accept; a form's set is skipped when its tombstone already
+ * exists (getAfter accepts a pre-existing sibling). A day-less caller (legacy
+ * single-board Event) has no sibling form — one tombstone, no `dayIndex`.
  *
  * Fire-and-forget and offline-queueable like every other write in this module
  * (ADR 0006): the batch pends durably in the persistent cache when offline and
@@ -717,22 +751,26 @@ async function cachedMomentData(id: string): Promise<Record<string, unknown> | u
 async function commitRetraction(
   uid: string,
   kind: RetractableKind,
-  momentId: string,
+  momentIds: string[],
   dayIndex?: number,
 ): Promise<void> {
   const tombstone: RetractionTombstone = {
     uid,
     kind,
     createdAt: Date.now(),
-    // Only when the id is the day-suffixed form — never an explicit `undefined`,
-    // which Firestore rejects outright.
+    // Only when the Day is known — never an explicit `undefined`, which
+    // Firestore rejects outright.
     ...(dayIndex !== undefined ? { dayIndex } : {}),
   };
+  const tombstoneIds = [winMomentId(uid, kind)];
+  if (dayIndex !== undefined) tombstoneIds.push(winMomentId(uid, kind, dayIndex));
   const batch = writeBatch(db);
-  batch.delete(rawMoment(momentId));
-  batch.set(rawMomentRetraction(momentId), tombstone);
+  for (const momentId of momentIds) batch.delete(rawMoment(momentId));
+  for (const id of tombstoneIds) {
+    if (!(await tombstoneExists(id))) batch.set(rawMomentRetraction(id), tombstone);
+  }
   await batch.commit().catch((err: unknown) => {
-    console.error('[moments] retraction rejected', { momentId, kind, uid }, err);
+    console.error('[moments] retraction rejected', { momentIds, kind, uid }, err);
   });
 }
 
@@ -765,23 +803,30 @@ async function commitRetraction(
  * A day-less caller (a legacy Event has one card for the whole Event, so per-Player
  * IS per-card there) retracts the day-less id unconditionally and probes no
  * day-scoped form — there is no Day to scope to.
+ *
+ * The cache probes decide only which Moment DOCS the batch deletes. The
+ * tombstones are NOT conditioned on which form held the Moment: whenever the Day
+ * is known the batch spends BOTH forms (Codex round 2 on PR #467; enforced by the
+ * owner-delete rule) — see commitRetraction.
  */
 async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number): Promise<void> {
+  const momentIds: string[] = [];
   if (dayIndex !== undefined) {
     const perCardId = winMomentId(uid, kind, dayIndex);
-    if (await cachedMomentData(perCardId)) await commitRetraction(uid, kind, perCardId, dayIndex);
+    if (await cachedMomentData(perCardId)) momentIds.push(perCardId);
   }
   const legacyId = winMomentId(uid, kind);
   const legacy = await cachedMomentData(legacyId);
-  if (!legacy) return;
   // On a daily Event the legacy doc must NAME this Day to be the one that fell.
   // A doc with NO `dayIndex` at all (a true pre-#262 Moment) therefore never
   // matches and always survives — deliberately conservative: nothing on the doc
   // says which card it describes, and a wrong retraction is permanent.
-  if (dayIndex !== undefined && legacy.dayIndex !== dayIndex) return;
-  // The tombstone mirrors the ID form it marks: a day-LESS id gets a day-less
-  // tombstone (the rules' legacy arm), never a day-stamped one.
-  await commitRetraction(uid, kind, legacyId);
+  if (legacy && (dayIndex === undefined || legacy.dayIndex === dayIndex)) momentIds.push(legacyId);
+  if (momentIds.length === 0) return;
+  // ONE batch for however many docs hold this win, spending BOTH id forms when
+  // the Day is known — see commitRetraction for why the sibling form must be
+  // spent even when no Moment sits at it.
+  await commitRetraction(uid, kind, momentIds, dayIndex);
 }
 
 /**

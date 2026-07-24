@@ -312,14 +312,24 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
   });
   const tombstonePath = (id: string) => at(`momentRetractions/${id}`);
   // The retraction as the client actually issues it (src/data/moments.ts): the
-  // Moment delete and its tombstone in ONE atomic batch. Since #377 that is the
-  // ONLY shape an owner delete can take — the delete rule's `getAfter` requires
-  // the tombstone to exist once the request completes, so a lone delete denies.
+  // Moment delete and its tombstone(s) in ONE atomic batch. Since #377 that is
+  // the ONLY shape an owner delete can take — the delete rule's `getAfter`
+  // requires the tombstone to exist once the request completes, so a lone delete
+  // denies. Since the round-2 sibling-form spend, a Day-scoped retraction (a
+  // `dayIndex` in `over`) tombstones BOTH id forms of the win — the legacy
+  // day-less `${uid}-${kind}` and the day-scoped `${uid}-${kind}-d${dayIndex}` —
+  // exactly as the client's commitRetraction does; a day-less retraction has no
+  // sibling form and writes one tombstone.
   const retract = (uid: string, id: string, over: Record<string, unknown> = {}) => {
     const s = db(uid) as Firestore;
     const batch = writeBatch(s);
     batch.delete(doc(s, momentPath(id)));
-    batch.set(doc(s, tombstonePath(id)), tombstone(uid, over));
+    const kind = (over.kind as string) ?? 'bingo';
+    const dayIndex = over.dayIndex as number | undefined;
+    batch.set(doc(s, tombstonePath(`${uid}-${kind}`)), tombstone(uid, over));
+    if (dayIndex !== undefined) {
+      batch.set(doc(s, tombstonePath(`${uid}-${kind}-d${dayIndex}`)), tombstone(uid, over));
+    }
     return batch.commit();
   };
 
@@ -366,6 +376,107 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(
       setDoc(doc(alice, momentPath(`${ALICE}-blackout`)), moment(ALICE, { kind: 'blackout' })),
     );
+  });
+
+  it('retracting a LEGACY Moment spends the DAY-SCOPED twin too — the current bundle cannot repost the same win (Codex round 2)', async () => {
+    // The bypass this closes: the legacy same-day dedupe means a Day-3 win can
+    // live at `${uid}-bingo` with a day-stamped payload. A tombstone at only that
+    // id left `${uid}-bingo-d3` freely creatable — retract, re-mark, and the
+    // CURRENT bundle reposts the exact win just spent, at the top of the Feed.
+    const alice = db(ALICE);
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE, { dayIndex: 3 })));
+    await assertSucceeds(retract(ALICE, `${ALICE}-bingo`, { dayIndex: 3 }));
+    // The same (Player, Day) win under the day-scoped id: DENIED.
+    await assertFails(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d3`)), moment(ALICE, { dayIndex: 3 })));
+    // ANOTHER Day's day-scoped win is untouched — the sibling spend names Day 3.
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`)), moment(ALICE, { dayIndex: 5 })));
+    // The OTHER kind is untouched entirely.
+    await assertSucceeds(
+      setDoc(doc(alice, momentPath(`${ALICE}-blackout-d3`)), moment(ALICE, { kind: 'blackout', dayIndex: 3 })),
+    );
+  });
+
+  it('retracting a LEGACY blackout spends its day-scoped twin too — both kinds carry the bound', async () => {
+    const alice = db(ALICE);
+    await assertSucceeds(
+      setDoc(doc(alice, momentPath(`${ALICE}-blackout`)), moment(ALICE, { kind: 'blackout', dayIndex: 4 })),
+    );
+    await assertSucceeds(retract(ALICE, `${ALICE}-blackout`, { kind: 'blackout', dayIndex: 4 }));
+    await assertFails(
+      setDoc(doc(alice, momentPath(`${ALICE}-blackout-d4`)), moment(ALICE, { kind: 'blackout', dayIndex: 4 })),
+    );
+    await assertSucceeds(
+      setDoc(doc(alice, momentPath(`${ALICE}-blackout-d6`)), moment(ALICE, { kind: 'blackout', dayIndex: 6 })),
+    );
+  });
+
+  it('retracting a DAY-SCOPED Moment spends the LEGACY twin too — a stale bundle cannot repost the same win (Codex round 2)', async () => {
+    // The mirror image: a pre-#372 bundle writes the day-less `${uid}-bingo` id,
+    // so a tombstone at only `${uid}-bingo-d3` left that form freely creatable.
+    const alice = db(ALICE);
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d3`)), moment(ALICE, { dayIndex: 3 })));
+    await assertSucceeds(retract(ALICE, `${ALICE}-bingo-d3`, { dayIndex: 3 }));
+    // The legacy repost a stale bundle would issue (day-less payload): DENIED.
+    await assertFails(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE)));
+    // A day-stamped payload at the legacy id changes nothing — the check is id-keyed.
+    await assertFails(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE, { dayIndex: 3 })));
+    // ANOTHER Day's day-scoped win is untouched. (A stale bundle's OTHER-Day win
+    // at the now-spent legacy id IS over-blocked — the accepted, silence-direction
+    // residual documented in the spec.)
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d7`)), moment(ALICE, { dayIndex: 7 })));
+    // The other kind is untouched.
+    await assertSucceeds(
+      setDoc(doc(alice, momentPath(`${ALICE}-blackout-d3`)), moment(ALICE, { kind: 'blackout', dayIndex: 3 })),
+    );
+  });
+
+  it('the delete rule ENFORCES the sibling spend — a half-retraction cannot smuggle the bypass back (Codex round 2)', async () => {
+    // Server-enforced, not client-voluntary: a hand-built client issuing the old
+    // one-tombstone batch must be denied, or the cross-form bypass survives for
+    // anyone willing to skip the app.
+    const alice = db(ALICE);
+    // Day-scoped Moment + only its own tombstone (no legacy twin): DENIED.
+    const id = `${ALICE}-bingo-d3`;
+    await assertSucceeds(setDoc(doc(alice, momentPath(id)), moment(ALICE, { dayIndex: 3 })));
+    const dayOnly = writeBatch(alice as Firestore);
+    dayOnly.delete(doc(alice, momentPath(id)));
+    dayOnly.set(doc(alice, tombstonePath(id)), tombstone(ALICE, { dayIndex: 3 }));
+    await assertFails(dayOnly.commit());
+    // Legacy Moment whose payload NAMES its Day + only the legacy tombstone: DENIED.
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-blackout`)), moment(ALICE, { kind: 'blackout', dayIndex: 2 })));
+    const legacyOnly = writeBatch(alice as Firestore);
+    legacyOnly.delete(doc(alice, momentPath(`${ALICE}-blackout`)));
+    legacyOnly.set(doc(alice, tombstonePath(`${ALICE}-blackout`)), tombstone(ALICE, { kind: 'blackout', dayIndex: 2 }));
+    await assertFails(legacyOnly.commit());
+    // Both Moments survived the denied half-retractions; the full spends land.
+    await assertSucceeds(retract(ALICE, id, { dayIndex: 3 }));
+    await assertSucceeds(retract(ALICE, `${ALICE}-blackout`, { kind: 'blackout', dayIndex: 2 }));
+  });
+
+  it('a LEGACY Moment naming NO Day needs only its own tombstone — there is no sibling id to derive', async () => {
+    // A true pre-#262 doc (or a single-board Event's) carries no dayIndex: the
+    // rules cannot conjure a Day from a day-less id, so the one-tombstone
+    // retraction stays valid. (The client never retracts a day-less-payload doc
+    // on a daily Event at all — deliberately conservative.)
+    const alice = db(ALICE);
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE)));
+    await assertSucceeds(retract(ALICE, `${ALICE}-bingo`));
+  });
+
+  it('accepts a PRE-EXISTING sibling tombstone — a second retraction of the same kind on another Day still lands', async () => {
+    // Tombstones are permanent with no update path, so the client SKIPS re-setting
+    // one an earlier retraction minted; the delete rule's getAfter must accept the
+    // already-standing legacy tombstone or same-kind wins become one-retraction-ever.
+    const alice = db(ALICE);
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d3`)), moment(ALICE, { dayIndex: 3 })));
+    await assertSucceeds(retract(ALICE, `${ALICE}-bingo-d3`, { dayIndex: 3 })); // spends d3 + legacy
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`)), moment(ALICE, { dayIndex: 5 })));
+    // The client's second batch: delete d5, set ONLY the d5 tombstone (the legacy
+    // one already exists — getAfter reads it as post-request state regardless).
+    const second = writeBatch(alice as Firestore);
+    second.delete(doc(alice, momentPath(`${ALICE}-bingo-d5`)));
+    second.set(doc(alice, tombstonePath(`${ALICE}-bingo-d5`)), tombstone(ALICE, { dayIndex: 5 }));
+    await assertSucceeds(second.commit());
   });
 
   it('an owner Moment delete must CARRY its tombstone — a bare delete cannot bypass retract-once (Codex P1)', async () => {
@@ -437,10 +548,15 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4, createdAt: 'now' })));
     // The canonical create still lands after all of the above.
     await assertSucceeds(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4 })));
-    // A day-LESS id with a day-stamped payload stays valid — the binding
-    // constrains the day-SUFFIXED id form, not the field's presence, exactly like
-    // the moments rule (the writer never mints this, but the rules mirror).
+    // A day-LESS id with a day-stamped payload is valid — since the round-2
+    // sibling-form spend the writer DOES mint this: the legacy tombstone of a
+    // daily-Event retraction records WHICH Day spent the legacy slot.
     await assertSucceeds(setDoc(t(`${ALICE}-bingo`), tombstone(ALICE, { dayIndex: 2 })));
+    // ... but when present it must still be a real scheduled Day — hasOnly alone
+    // would otherwise admit junk into a publicly-readable doc.
+    await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: '2' })));
+    await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: 99 })));
+    await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: -1 })));
   });
 
   it('cannot tombstone the ceremonial First-to-BINGO — the event singleton has no retraction path', async () => {
