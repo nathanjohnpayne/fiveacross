@@ -94,19 +94,12 @@ test('Doubt raised on another Player\'s Mark → badge appears; a Proof satisfie
 
     // A attaches a Proof to the SAME Square (the "＋ Proof" affordance on an
     // already-marked, non-free cell). A TEXT proof (a Callout), not a photo:
-    // the photo/audio path uploads to Storage and stamps `mediaURL` from the
-    // Storage EMULATOR's `getDownloadURL()`, which returns a
-    // `http://127.0.0.1:9199/...` URL — but firestore.rules' proof-create rule
-    // regex-pins `mediaURL` to the PRODUCTION `https://firebasestorage
-    // .googleapis.com/...` host (by design, so a forged non-Storage URL can't
-    // be claimed as proof media). That host never matches in this local
-    // emulator stack, so a real photo/audio attach 403s here even though it
-    // works in production against real Storage — a genuine e2e-testability
-    // gap (see tests/e2e/d15-claim-sheet-photo.spec.ts, which hits it directly
-    // and records it). A text Proof carries no `mediaURL` at all, so it proves
-    // the SAME satisfaction derivation (`isDoubtSatisfied` keys on
-    // `(uid, itemText, createdAt)`, never on proof `type`) without tripping
-    // that unrelated infra limitation.
+    // `isDoubtSatisfied` keys on `(uid, itemText, createdAt)` and never on proof
+    // `type`, so a Callout proves the same derivation with no Storage upload in
+    // the way. (The media path IS drivable here now — #335's canonicalize/resolve
+    // pair fixed the Storage-emulator host mismatch that used to 403 it — and is
+    // covered end to end by tests/e2e/d15-proof-media.spec.ts; keeping this case
+    // on text just holds it to the one behavior it is about.)
     await cellA.locator('.proofbtn').click();
     await pageA.getByRole('button', { name: 'Callout' }).click();
     await pageA.getByPlaceholder('Name names. Who, what, how bad?').fill('Proof: it happened.');

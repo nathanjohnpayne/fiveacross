@@ -9,6 +9,7 @@ import { resolveDisplayName } from '../data/api';
 import { track } from '../analytics';
 import Avatar from './Avatar';
 import { safeMediaUrl } from './safeMediaUrl';
+import { resolveProofMediaUrl } from '../data/proofMediaUrl';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
 import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../data/doubts';
 import { heartState, setHeart } from '../data/hearts';
@@ -269,7 +270,14 @@ function ProofCard({
   // its one flat hearts stream.
   heart: HeartControl;
 }) {
-  const media = safeMediaUrl(proof.mediaURL);
+  // #335: `resolveProofMediaUrl` is composed INSIDE `safeMediaUrl`, never around
+  // it. It is identity in every real build (and a no-op on any value that is not
+  // a production Storage download URL); under the e2e emulator build ONLY it
+  // points a canonicalized `mediaURL` back at the Storage emulator holding the
+  // bytes. Sanitizing LAST keeps `safeMediaUrl` the final barrier on every flow
+  // into the `src` attribute below — the CodeQL js/xss-through-dom guard from
+  // PR #95 — which a rewrite applied AFTER the guard would have re-opened.
+  const media = safeMediaUrl(resolveProofMediaUrl(proof.mediaURL));
   return (
     <div className="proof">
       <div className="row" style={{ border: 'none', background: 'none', padding: 0 }}>
