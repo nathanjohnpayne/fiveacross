@@ -35,7 +35,7 @@ vi.mock('firebase/firestore', () => {
   };
 });
 
-import { useFeed } from './useData';
+import { useFeed, useProofFeed, useMoments, useNotices } from './useData';
 import type { MomentDoc, NoticeDoc, ProofDoc, TallyCard } from '../types';
 
 beforeEach(() => {
@@ -257,5 +257,60 @@ describe('useFeed — the render window and hasMore (#441)', () => {
     const cards: TallyCard[] = view.result.current.tallyCards;
     expect(cards.map((c) => c.itemId).sort()).toEqual(['i1', 'i2', 'i3']);
     expect(cards.every((c) => c.count === 1)).toBe(true);
+  });
+});
+
+// #443: useProofFeed / useMoments / useNotices each rebuilt their derived array
+// on EVERY render, even when neither the snapshot nor the scalar inputs
+// changed — the fresh identity silently defeated any useMemo one level up
+// (useFeed's mergeFeed calls). Proof of the fix: force a render with no new
+// data (a bare `rerender()`, same props) and assert the returned array is the
+// SAME object (`Object.is`), not merely deep-equal — `mergeFeed` and friends
+// always build a fresh array via `.filter`/`.sort`/`.slice`, so this only
+// passes once the derivation is actually memoized.
+describe('referentially-stable derived arrays (#443)', () => {
+  it('useProofFeed returns the same array across an unrelated re-render', () => {
+    const fire = capture();
+    const view = renderHook(() => useProofFeed(10));
+    fire.fireEvent(eventSnap);
+    fire.fireProofs(colSnap([proof(1), proof(2)]));
+    const first = view.result.current.proofs;
+    expect(first.map((p) => p.id)).toEqual(['p2', 'p1']);
+    act(() => view.rerender());
+    expect(view.result.current.proofs).toBe(first);
+  });
+
+  it('useMoments returns the same array across an unrelated re-render', () => {
+    const fire = capture();
+    const view = renderHook(() => useMoments(10));
+    fire.fireEvent(eventSnap);
+    fire.fireMoments(colSnap([moment(1), moment(2)]));
+    const first = view.result.current.moments;
+    expect(first.map((m) => m.id)).toEqual(['u2-bingo', 'u1-bingo']);
+    act(() => view.rerender());
+    expect(view.result.current.moments).toBe(first);
+  });
+
+  it('useNotices returns the same array across an unrelated re-render', () => {
+    const fire = capture();
+    const view = renderHook(() => useNotices());
+    fire.fireNotices(colSnap([notice(1), notice(2)]));
+    const first = view.result.current.notices;
+    expect(first.map((n) => n.id)).toEqual(['n2', 'n1']);
+    act(() => view.rerender());
+    expect(view.result.current.notices).toBe(first);
+  });
+
+  it('useFeed memoizes both mergeFeed calls — entries stay referentially stable across an unrelated re-render', () => {
+    const { view } = feedOf(5, 3);
+    const firstEntries = view.result.current.entries;
+    expect(view.result.current.hasMore).toBe(true);
+    // Re-render with the SAME `max` — no snapshot changed, no scalar input
+    // changed. Before the fix this still produced two fresh `mergeFeed` calls
+    // (and therefore a fresh `entries` array) because `proofs`/`moments`/
+    // `notices` were themselves rebuilt every render one level down.
+    view.rerender({ m: 3 });
+    expect(view.result.current.entries).toBe(firstEntries);
+    expect(view.result.current.hasMore).toBe(true);
   });
 });
