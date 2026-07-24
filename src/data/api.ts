@@ -1785,6 +1785,27 @@ async function runSetMark(
       { uid, index: params.index, nextMarked: params.nextMarked },
       err,
     );
+    // #387: a rejected Mark batch means the player WATCHED their square revert
+    // — the exact symptom of the 2026-07-17 rules/stale-bundle skew, which was
+    // invisible outside sampled replay console logs. Surface it as a
+    // first-class analytics event so the next skew (any rules deploy that
+    // tightens the mark-write contract while stale PWA shells linger) shows up
+    // in PostHog immediately, queryable and alertable. Dynamic import keeps
+    // this Firestore-only module free of an eager analytics/firebase-singleton
+    // dependency (test doubles mock ../firebase with only { db, EVENT_ID });
+    // both the import and the call are guarded — observability must never
+    // throw out of a fire-and-forget commit handler.
+    void import('../analytics')
+      .then(({ track }) =>
+        track('mark_rejected', {
+          code: (err as { code?: string } | null)?.code ?? 'unknown',
+          index: params.index,
+          marked: params.nextMarked,
+          dayIndex,
+          daily: params.daily === true,
+        }),
+      )
+      .catch(() => {});
   });
 
   // Echo-caused wins route through the EXISTING pending-Moment queue, keyed to

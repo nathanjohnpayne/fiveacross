@@ -43,6 +43,16 @@ export const GA4_EVENTS = [
   // unhearted). Fired only once the write persists (the demand_proof posture).
   // Call site: src/data/hearts.ts.
   'heart_post',
+  // A Mark's atomic batch was REJECTED online (#387) — a rules denial rolled
+  // back the optimistic write and the square visibly reverted. Params: `code`
+  // (the FirebaseError code, e.g. 'permission-denied'), `index`, `marked`,
+  // `dayIndex`, `daily`. The 2026-07-17 rules/stale-bundle skew produced
+  // exactly this failure, but it was only visible in the console logs of the
+  // subset of sessions replay happened to capture; as a first-class event it
+  // is queryable, alertable, and countable the moment a deploy starts
+  // reverting players' marks.
+  // Call site: src/data/api.ts (setMark's commit-rejection handler).
+  'mark_rejected',
 ] as const;
 
 export type GA4EventName = (typeof GA4_EVENTS)[number];

@@ -7,11 +7,18 @@ status: accepted
 
 `src/analytics.ts` owns the GA4 event catalog and the single `track(name, params?)` entry point every call site uses instead of importing `firebase/analytics` directly. This spec pins the completed 12-event PRD set (10 events already fired at their call sites pre-ticket; this ticket adds `demand_proof` and `install_pwa` to the catalog and type) and the lightweight 18+ analytics disclosure that ships alongside it. It is exercised by `src/w2-ga4-events.test.tsx` (unit + RTL-jsdom, covering both `src/analytics.ts` and `src/components/ConsentNotice.tsx`).
 
-## The catalog is the complete, de-duplicated 12-event PRD set (plus one later operational event)
+## The catalog is the complete, de-duplicated 12-event PRD set (plus later operational events)
 
 `GA4_EVENTS` enumerates every catalogued event name in one place, and `track()`'s `name` parameter is typed to that union so a call site can only pass a catalogued name.
 
 - **Given** the exported `GA4_EVENTS` catalog **when** read **then** it contains the 12 PRD events plus the operational `login_failed` (added later by #163, defined below), in order — `login`, `login_failed`, `join_event`, `add_item`, `report_item`, `mark_square`, `attach_proof`, `demand_proof`, `bingo`, `blackout`, `theme_change`, `share_click`, `install_pwa` — with no duplicate names. (Test: "enumerates the 12 PRD events plus the operational login_failed (#163)".)
+- Later tickets added further catalogued events, each documented at its own call site and in the catalog test's enumeration: `text_size_change` (#215, inserted after `theme_change` — so the bullet above is the original 12+1 SET, not a positional prefix of today's array), then `reshuffle_card` (#378, `specs/reshuffle.md`), `heart_post` (`specs/feed-hearts.md`), and the operational `mark_rejected` (#387, below) appended at the end. The catalog test in `src/w2-ga4-events.test.tsx` remains the canonical in-order enumeration.
+
+## `mark_rejected` — operational mark-batch-rejection event (#387, post-w2)
+
+`mark_rejected` is an operational observability event in the `login_failed` family, not a PRD event. `setMark`'s atomic mark batch is fire-and-forget; an ONLINE rejection (rules denial) rolls back the optimistic write and the player watches their square revert — the 2026-07-17 incident (#387), where a rules-deploy/stale-bundle skew rejected every mark from stale PWA shells and the failure was visible only in sampled session-replay console logs. The rejection handler in `src/data/api.ts` now fires `track('mark_rejected', { code, index, marked, dayIndex, daily })` alongside its `console.error`, so the next skew is queryable and alertable in PostHog. Params are PII-free (the Firebase error `code`, the cell index, the toggle direction, the Day, and the daily-mode flag); the emit is guarded and observability-only — no retry surface, no toast, and the optimistic return contract of `setMark` is unchanged (`specs/w1-board-mark-win.md` § Write-failure semantics, as amended by #387).
+
+- **Given** a mark batch **when** its online `commit()` rejects **then** `track('mark_rejected', …)` fires with the error code and Mark context. (Test: "fires the mark_rejected observability event with the error code + Mark context (#387)", in `src/data/w1-board-mark-win.test.ts`.)
 
 ## `login_failed` — operational sign-in-failure event (#163, post-w2)
 

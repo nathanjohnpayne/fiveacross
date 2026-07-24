@@ -26,13 +26,16 @@ const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is un
 // default rejection below.
 type FakeSnap = { exists: () => boolean; data: () => unknown };
 
-const { setSpy, commitSpy, getDocFromCacheSpy } = vi.hoisted(() => ({
+const { setSpy, commitSpy, getDocFromCacheSpy, trackSpy } = vi.hoisted(() => ({
   setSpy: vi.fn(),
   commitSpy: vi.fn(() => Promise.resolve()),
   // Rejects by default (nothing cached), matching a fresh test double with no
   // real persistent cache; individual tests override with mockResolvedValueOnce
   // to prove the write folds onto a cached Board instead of a stale `cells` arg.
   getDocFromCacheSpy: vi.fn((): Promise<FakeSnap> => Promise.reject(new Error('no cache in this test double'))),
+  // Captures the #387 mark_rejected observability event setMark fires (via a
+  // dynamic import of ../analytics) when a commit is rejected online.
+  trackSpy: vi.fn(),
 }));
 
 // Keep the module graph loadable but the write path inspectable: real
@@ -40,6 +43,9 @@ const { setSpy, commitSpy, getDocFromCacheSpy } = vi.hoisted(() => ({
 // spies), `getDocFromCache` (→ our spy), and the write fns we assert are NEVER
 // called.
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+// The #387 rejection handler dynamically imports ../analytics (whose real
+// module drags in the firebase singleton + PostHog); stub it to the spy.
+vi.mock('../analytics', () => ({ track: trackSpy }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -669,6 +675,40 @@ describe('setMark (surfaces a genuine commit failure instead of swallowing it)',
     expect(call[0]).toEqual(expect.stringContaining('setMark'));
     expect(call).toContain(failure); // the actual error is logged, not swallowed
 
+    errorSpy.mockRestore();
+  });
+
+  it('fires the mark_rejected observability event with the error code + Mark context (#387)', async () => {
+    // The 2026-07-17 production incident: a rules/stale-bundle skew rejected
+    // every mark batch from stale clients with permission-denied, visible only
+    // in sampled replay console logs. The rejection handler now also emits a
+    // first-class analytics event so the next skew is queryable in PostHog.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = Object.assign(new Error('Missing or insufficient permissions.'), {
+      code: 'permission-denied',
+    });
+    commitSpy.mockImplementationOnce(() => Promise.reject(failure));
+
+    await setMark({
+      uid: 'u1',
+      cells: dealt(),
+      index: 3,
+      nextMarked: true,
+      claimMode: 'honor',
+      currentFirstBingoAt: null,
+      dayIndex: 2,
+      daily: true,
+    });
+
+    await vi.waitFor(() =>
+      expect(trackSpy).toHaveBeenCalledWith('mark_rejected', {
+        code: 'permission-denied',
+        index: 3,
+        marked: true,
+        dayIndex: 2,
+        daily: true,
+      }),
+    );
     errorSpy.mockRestore();
   });
 });
