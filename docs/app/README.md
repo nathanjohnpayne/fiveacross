@@ -137,6 +137,8 @@ The Vercel project serves the same Vite build at `gaycruisebingo.vercel.app`. Se
 
 This configuration is Vercel-only. Firebase Hosting builds continue to use `VITE_FIREBASE_AUTH_DOMAIN=gaycruisebingo.com`; direct `.firebaseapp.com` visits pin auth to that same origin, and signed-out `.web.app` visits hand off there before SignIn renders. Both hosting providers remain independently usable.
 
+Vercel **preview** deploys get the same rewrites, but sign-in additionally needs the preview host in the two allowlists above — which only works if the host is stable. See [`preview-deploys.md`](preview-deploys.md) for the fixed preview alias, its one-time console setup, and how to push a branch onto it.
+
 ## 8. Configuration knobs
 
 - **Claim mode** (`events/med-2026.claimMode`): `honor` (default) · `proof_required` · `verified`. The card UI adapts; `verified` marks are `pending` until confirmed (confirmation UI is Phase 1).

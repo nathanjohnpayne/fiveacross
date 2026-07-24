@@ -35,6 +35,7 @@ Deploys go through `op-firebase-deploy` (1Password-backed service-account impers
 |---|---|
 | [`docs/app/README.md`](docs/app/README.md) | App guide + deploy / seed / custom-domain runbook |
 | [`docs/app/phase-1-deploy.md`](docs/app/phase-1-deploy.md) | Phase-1 backend deploy (Functions, App Check) |
+| [`docs/app/preview-deploys.md`](docs/app/preview-deploys.md) | Previewing a branch on a real device, with working Google sign-in |
 | [`docs/projects/gaycruisebingo/prds/gaycruisebingo.md`](docs/projects/gaycruisebingo/prds/gaycruisebingo.md) | Product requirements (PRD) |
 | [`docs/adr/`](docs/adr/) · [`docs/architecture/`](docs/architecture/) | Architecture decision records |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Deploy tooling + 1Password credential model |
