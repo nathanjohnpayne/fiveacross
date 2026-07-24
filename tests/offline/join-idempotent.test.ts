@@ -12,6 +12,48 @@ vi.mock('../../src/firebase', () => ({
   },
   EVENT_ID: 'med-2026',
 }));
+// DETERMINISTIC overlap barrier (Codex P2 on #472): `Promise.all` alone does
+// not guarantee the two joins overlap at the conflicting player-row read — the
+// emulator may let the first call read AND commit before the second reaches
+// the row, a schedule in which even the old non-transactional code returns one
+// true/one false. While armed, both transactions are held at the TOP of their
+// callback (before any tx read) until BOTH have arrived, so both perform the
+// row read before either can commit — a guaranteed read-write conflict the
+// loser must resolve by retrying against the winner's committed row. Retries
+// re-enter the callback and pass straight through (the gate is already open).
+const txGate = vi.hoisted(() => {
+  let release: (() => void) | undefined;
+  let open: Promise<void> = Promise.resolve();
+  let remaining = 0;
+  return {
+    /** Hold the next `n` transaction callbacks until all `n` have arrived. */
+    arm(n: number) {
+      remaining = n;
+      open = new Promise<void>((r) => {
+        release = r;
+      });
+    },
+    async arrive(): Promise<void> {
+      if (remaining <= 0) return;
+      remaining -= 1;
+      if (remaining === 0) release?.();
+      await open;
+    },
+  };
+});
+vi.mock('firebase/firestore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('firebase/firestore')>();
+  const gatedRunTransaction: typeof actual.runTransaction = (db, fn, options?) =>
+    actual.runTransaction(
+      db,
+      async (tx) => {
+        await txGate.arrive();
+        return fn(tx);
+      },
+      options,
+    );
+  return { ...actual, runTransaction: gatedRunTransaction };
+});
 import {
   getAuth,
   connectAuthEmulator,
@@ -91,7 +133,10 @@ describe('#409 — joinAndDeal is idempotent under overlapping calls', () => {
     const user = { uid: tab.uid, displayName: 'Idem Tester', photoURL: null } as unknown as User;
 
     // The timed-out-deal + Retry window, compressed: both calls in flight at
-    // once, neither awaited before the other starts.
+    // once, neither awaited before the other starts — and the barrier holds
+    // BOTH transactions before their row read until both have arrived, so the
+    // conflicting overlap is guaranteed, not schedule-dependent.
+    txGate.arm(2);
     const [first, second] = await Promise.all([joinAndDeal(user), joinAndDeal(user)]);
 
     // Exactly one actual join — runDeal fires join_event off this verdict, so
