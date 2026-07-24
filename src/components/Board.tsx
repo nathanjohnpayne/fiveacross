@@ -22,7 +22,8 @@ import {
   pendingFirstBingoDayIndex,
   clearPendingMoment,
   dropPendingWins,
-  retractPublishedWins,
+  enqueueRetraction,
+  drainRetractions,
   pendingActionGeneration,
   firstBingoCandidateCurrent,
 } from '../data/moments';
@@ -649,7 +650,13 @@ export default function Board() {
   // The single legacy Board (pre-1.5 events with no `days[]` schedule). In daily-
   // cards mode the rendered Board is the DAY-SCOPED one below; this stays the
   // source only for legacy events (#246).
-  const { data: legacyBoard, loading: legacyBoardLoading, hasServerData: legacyBoardConfirmed } = useBoard(uid);
+  const {
+    data: legacyBoard,
+    loading: legacyBoardLoading,
+    hasServerData: legacyBoardConfirmed,
+    fromCache: legacyBoardFromCache,
+    hasPendingWrites: legacyBoardPending,
+  } = useBoard(uid);
   const { data: player, loading: playerLoading, hasServerData: playerConfirmed } = useMyPlayer(uid);
   // ONE resolution of the caller's public display name, fed to BOTH the per-Prompt
   // Tally marker (setMark, below) AND the new-Proof attribution (ProofSheet), so a
@@ -695,6 +702,8 @@ export default function Board() {
     data: dayBoard,
     loading: dayBoardLoading,
     hasServerData: dayBoardConfirmed,
+    fromCache: dayBoardFromCache,
+    hasPendingWrites: dayBoardPending,
   } = useDayBoard(uid, hasDays ? viewedIndex : undefined);
   // The VIEWED Day's pinned First to BINGO honor (#264) — one doc sub, keyed on
   // the viewed index; legacy events (no schedule) open no subscription.
@@ -711,6 +720,16 @@ export default function Board() {
   const board = hasDays ? dayBoardForView : legacyBoard;
   const boardLoading = hasDays ? dayBoardLoading : legacyBoardLoading;
   const boardConfirmed = hasDays ? dayBoardConfirmed : legacyBoardConfirmed;
+  // Is THIS snapshot the server's own view of the card — acked, not merely
+  // optimistic? `boardConfirmed` is a LATCH ("the server has spoken at least once")
+  // and cannot answer that. The #377 retraction drain is the one consumer, because
+  // it is the one IRREVERSIBLE thing this component does: see the drain in the
+  // cells effect. In daily mode the stale-Day guard above can null `board` while
+  // `dayBoard` still holds the prior Day's doc, so the flags are read from the
+  // subscription that actually feeds the rendered board.
+  const boardServerCommitted = hasDays
+    ? !dayBoardFromCache && !dayBoardPending
+    : !legacyBoardFromCache && !legacyBoardPending;
   // The known-players roster — the SAME data the Leaderboard's First-to-BINGO pin
   // reads (useLeaderboard) — used to derive whether THIS Player is first to BINGO
   // when broadcasting the ceremonial Moment (ADR 0001). Read into a ref below so
@@ -1273,28 +1292,17 @@ export default function Board() {
     // state before the refs re-seed below. On a mount's first snapshot the refs
     // are 0/false, so nothing can spuriously read as a fall.
     if (uid) {
-      // A retraction is PERMANENT (retract-once, #377), so — unlike the queue
-      // drop beside it — it is taken only off a SERVER-CONFIRMED board. A
-      // cache-only snapshot is not proof a published win fell: under the ADR 0006
-      // persistent cache a stale local copy can briefly show a win gone that the
-      // server still holds, and spending the (Player, Day) slot on that would
-      // silence a standing win forever. Dropping a QUEUED flag off the same
-      // snapshot stays safe (the drain re-validates and the flag re-enqueues on a
-      // fresh rising verdict), so the existing behaviour there is unchanged.
-      // The player's own unmark (doMark) needs no such gate — it is their
-      // deliberate action, and its verdict is the authority on what fell.
-      const retractable = boardConfirmed && initialized.current;
       if (wasBingoLines.current > 0 && bingoLines === 0) {
         // The fall is witnessed by THIS board — drop only its Day's queued
         // bingo (#372, the twin of the blackout day-scoping below); legacy
         // (no schedule) keeps the full clear.
         const fell = { bingo: true, bingoDayIndex: hasDays ? board?.dayIndex : undefined };
         dropPendingWins(uid, fell);
-        // Cross-source fall (another tab/device unmarked, or a rules rollback
-        // landed): retract the published Moment too, so Feed truth does not
-        // depend on which tab observed the fall. Idempotent — a Moment the
-        // acting tab already retracted is no longer cached here either.
-        if (retractable) retractPublishedWins(uid, fell);
+        // Cross-source fall (another tab/device unmarked, a rules rollback
+        // landed): record the published-side intent too, so Feed truth does not
+        // depend on which tab observed the fall. Writes nothing — the drain
+        // below adjudicates it against the server.
+        enqueueRetraction(uid, fell);
         if (hasDays && board?.dayIndex !== undefined) dropHeldHonorPins(uid, board.dayIndex);
       }
       if (wasBlackout.current && !black) {
@@ -1302,7 +1310,24 @@ export default function Board() {
         // blackout (#267); legacy (no schedule) keeps the full clear.
         const fell = { blackout: true, blackoutDayIndex: hasDays ? board?.dayIndex : undefined };
         dropPendingWins(uid, fell);
-        if (retractable) retractPublishedWins(uid, fell);
+        enqueueRetraction(uid, fell);
+      }
+      // Retraction drain (#377, Codex P1 round 1 on #467): the IRREVERSIBLE half,
+      // and the only place it happens. A retraction spends the (Player, Day) win
+      // forever, so it may act only on the server's OWN view of this card —
+      // `boardServerCommitted` is this snapshot being neither `fromCache` nor
+      // `hasPendingWrites`, i.e. the write is acked, not merely optimistic. If
+      // the win no longer stands there, the server agrees the fall is real and the
+      // Moment is deleted + tombstoned; if it DOES stand — a rejected unmark
+      // rolled back (a pre-#458 cells-array straggler, a seed/unlock guard), or
+      // the Player re-marked — the intent is dropped and nothing is spent.
+      // Offline no such snapshot arrives, so intents simply wait for reconnect.
+      if (boardServerCommitted) {
+        drainRetractions(uid, {
+          dayIndex: hasDays ? board?.dayIndex : undefined,
+          bingoStands: bingoLines > 0,
+          blackoutStands: black,
+        });
       }
     }
     // Baseline vs detection (round 2 finding C, kept for the animation): under the
@@ -1336,7 +1361,11 @@ export default function Board() {
     wasBingoLines.current = bingoLines;
     wasBlackout.current = black;
     drainMoments(); // duty 2
-  }, [cells, cellsAttributable, boardConfirmed, uid, drainMoments]);
+    // `boardServerCommitted` is a dependency because the server ack for an unmark
+    // usually delivers IDENTICAL cells (the optimistic snapshot already had them),
+    // so a `[cells]`-only effect would never re-run to drain the retraction intent
+    // that unmark queued — the write would hang until some later cells change.
+  }, [cells, cellsAttributable, boardConfirmed, boardServerCommitted, uid, drainMoments]);
 
   // The mark-stamp animation's edge detector (specs/motion-polish.md): a
   // Square whose marked flag RISES between attributable snapshots wears
@@ -1764,13 +1793,14 @@ export default function Board() {
           blackoutDayIndex: hasDays ? viewedIndex : board?.dayIndex,
         };
         dropPendingWins(uid, fell);
-        // The same fall on the PUBLISHED side (#377): a Moment already standing
-        // in the Feed for this (Player, Day) is retracted — deleted and
-        // tombstoned in one batch — so the Feed stops claiming a win the card no
-        // longer supports. The SAME `fell` verdict drives both halves, so the
-        // pre- and post-publish paths can never disagree about what fell. A win
-        // that never published is a no-op (nothing cached to retract).
-        retractPublishedWins(uid, fell);
+        // The same fall on the PUBLISHED side (#377) — but only as an INTENT.
+        // The SAME `fell` verdict drives both halves, so the pre- and
+        // post-publish paths can never disagree about what fell. The irreversible
+        // write waits for a SERVER-COMMITTED board to confirm the fall (see the
+        // drain in the cells effect): this verdict is a LOCAL fold and setMark's
+        // batch is still pending, so a rejected unmark would otherwise spend a
+        // win the server rolls back to standing (Codex P1, round 1 on #467).
+        enqueueRetraction(uid, fell);
         if (hasDays && !res.bingo) dropHeldHonorPins(uid, viewedIndex);
         // Drain with the action's own folded cells AND its own Day (see
         // broadcastWinVerdict) — skipped if the account switched while the

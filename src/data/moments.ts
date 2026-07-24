@@ -1,4 +1,4 @@
-import { doc, getDocFromCache, setDoc, writeBatch } from 'firebase/firestore';
+import { doc, getDoc, getDocFromCache, setDoc, writeBatch } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
 import { hasBingo, isBlackout } from '../game/logic';
@@ -584,6 +584,108 @@ export function dropPendingWins(
 // player claiming squares they did not earn simply does not unclick. Its value is
 // Feed TRUTH for honest self-correction, and it must not cost the once-per-card
 // bound to get it.
+//
+// **Why it is a two-step INTENT → DRAIN, not a write at the fall (Codex P1, round 1
+// on PR #467).** A retraction is IRREVERSIBLE, and the fall observers only ever see
+// LOCAL evidence: `setMark` is fire-and-forget (ADR 0006), returning a locally
+// folded verdict while its batch is still pending, and the passive falling edge can
+// arrive as a latency-compensated cache snapshot. If that unmark is then REJECTED —
+// a pre-#458 cells-array straggler whose per-cell patch the canonical-map gate
+// denies, a Day-unlock or seed guard — Firestore rolls the board back to its
+// still-winning state, but a retraction batch fired at fall time is already
+// authorized and would irreversibly silence a STANDING win.
+//
+// So an observed fall only records an INTENT (`enqueueRetraction`). The write
+// happens in `drainRetractions`, which Board calls ONLY from a fully
+// SERVER-COMMITTED board snapshot (`!fromCache && !hasPendingWrites`): if the win
+// no longer stands there, the server agrees it fell and the retraction commits; if
+// it DOES stand (the rollback, or a regain), the intent is dropped and nothing is
+// spent. Offline there is no server-committed snapshot, so the intent simply waits
+// — the correct posture for a permanent action taken on unverified state.
+//
+// The intent map is MODULE scope, uid-keyed like the pending-Moment queue above, so
+// it survives Board unmounts and route changes. Deliberately memory-only (no
+// localStorage, unlike the pending queue): an intent lost to a full page reload
+// leaves the Moment standing until the next observed fall — the same bounded,
+// silence-not-falsehood residual the pending queue already documents, and the safe
+// direction for an irreversible write.
+
+// Queued retraction intents, keyed by uid → a set of `${kind}:${day}` tokens
+// (`legacy` for the day-less form). A Set because a Player can hold intents for
+// several Days and both kinds at once, exactly like the per-Day pending queues.
+const pendingRetractions = new Map<string, Set<string>>();
+
+const DAY_LESS = 'legacy';
+const retractionToken = (kind: RetractableKind, dayIndex?: number): string =>
+  `${kind}:${dayIndex ?? DAY_LESS}`;
+
+/**
+ * Record that an observed fall INVALIDATED a (possibly published) win — the
+ * published-side twin of `dropPendingWins`, called with the SAME `fell` verdict at
+ * the SAME two fall-observer sites (Board's unmark verdict and its passive falling
+ * edge), so the pre- and post-publish halves of one fall can never drift apart.
+ *
+ * Enqueuing writes NOTHING and is freely reversible — that is the point. The
+ * irreversible half waits for `drainRetractions` and server-committed evidence.
+ */
+export function enqueueRetraction(
+  uid: string,
+  fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
+): void {
+  if (!fell.bingo && !fell.blackout) return;
+  const key = pendingKey(uid);
+  let intents = pendingRetractions.get(key);
+  if (!intents) {
+    intents = new Set();
+    pendingRetractions.set(key, intents);
+  }
+  if (fell.bingo) intents.add(retractionToken('bingo', fell.bingoDayIndex));
+  if (fell.blackout) intents.add(retractionToken('blackout', fell.blackoutDayIndex));
+}
+
+/** The queued retraction intents for `uid`, as raw `${kind}:${day}` tokens.
+ *  Exported for tests and for Board's own assertions; app code drains. */
+export function peekRetractions(uid: string): string[] {
+  return [...(pendingRetractions.get(pendingKey(uid)) ?? [])];
+}
+
+/**
+ * Adjudicate the queued intents for ONE board against SERVER-COMMITTED truth.
+ * Board calls this only from a snapshot that is neither `fromCache` nor
+ * `hasPendingWrites` — i.e. the server's own view of the card.
+ *
+ * Per kind, for the intent whose Day IS this board's:
+ *   - the win still STANDS → the fall did not survive the server (a rejected
+ *     unmark rolled back, or the Player re-marked). Drop the intent; write nothing.
+ *   - the win does NOT stand → the server agrees. Commit the retraction.
+ *
+ * An intent for ANOTHER Day is untouched: this board is not evidence about that
+ * card, and it drains when its own board next arrives server-committed.
+ */
+export function drainRetractions(
+  uid: string,
+  board: { dayIndex?: number; bingoStands: boolean; blackoutStands: boolean },
+): void {
+  const key = pendingKey(uid);
+  const intents = pendingRetractions.get(key);
+  if (!intents) return;
+  const consider = (kind: RetractableKind, stands: boolean) => {
+    const token = retractionToken(kind, board.dayIndex);
+    if (!intents.has(token)) return;
+    intents.delete(token);
+    if (stands) return; // the server says the win is fine — spend nothing
+    void retractWin(uid, kind, board.dayIndex);
+  };
+  consider('bingo', board.bingoStands);
+  consider('blackout', board.blackoutStands);
+  if (intents.size === 0) pendingRetractions.delete(key);
+}
+
+/** Drop every queued retraction intent. Exported for test isolation only (module
+ *  state persists across unmounts by design); not used by app code. */
+export function resetRetractions(): void {
+  pendingRetractions.clear();
+}
 
 /** The tombstone/Moment id for a (Player, kind, Day) win — the writer's own
  *  deterministic scheme (`broadcastBingo` / `broadcastBlackout`). */
@@ -635,13 +737,9 @@ async function commitRetraction(
 }
 
 /**
- * Retract the PUBLISHED Moment(s) an observed fall just invalidated — the
- * published-side twin of `dropPendingWins`, called with the SAME `fell` shape at
- * the SAME two fall-observer sites (Board's unmark verdict and its passive
- * falling-edge snapshot), so the pre- and post-publish halves of one fall can
- * never drift apart.
- *
- * Fire-and-forget: a retraction must never block the unmark it follows.
+ * Retract one kind's published Moment for one board — the irreversible half, only
+ * ever reached from `drainRetractions` (i.e. with the server's own confirmation
+ * that the win fell). Fire-and-forget: it must never block the UI.
  *
  * Nothing is retracted unless a Moment for that (Player, Day) is ACTUALLY in the
  * local cache. That check is load-bearing, not an optimization: minting a
@@ -651,18 +749,9 @@ async function commitRetraction(
  * whole moments collection (`useMoments`), so a published Moment is cached on any
  * running client. A cold-cache device simply does not retract (the fall's own
  * device does); that residual is silence, never a false tombstone.
- */
-export function retractPublishedWins(
-  uid: string,
-  fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
-): void {
-  if (fell.bingo) void retractWin(uid, 'bingo', fell.bingoDayIndex);
-  if (fell.blackout) void retractWin(uid, 'blackout', fell.blackoutDayIndex);
-}
-
-/**
- * Retract one kind's published Moment for one board. BOTH id forms are probed,
- * because both can legitimately hold the live Moment for a given (Player, Day):
+ *
+ * BOTH id forms are probed, because both can legitimately hold the live Moment for
+ * a given (Player, Day):
  *
  *   - the PER-CARD id (`${uid}-${kind}-d${dayIndex}`) — what a current client
  *     writes on a daily Event (bingo since #372, blackout since #267);
@@ -835,18 +924,31 @@ async function writeMomentOnce(
   // which is the device a re-mark realistically comes from — and a cache miss just
   // falls through to the server, which denies. Never a gate on correctness, only
   // on the visible flash.
+  //
+  // A cached HIT is then RE-READ through the normal `getDoc` path before it may
+  // suppress anything (Codex P2, round 1 on PR #467). Nothing subscribes to
+  // `momentRetractions`, so a cache hit is never invalidated on its own: when an
+  // ADMIN deletes a tombstone to correct an accidental retraction, the device that
+  // wrote it would otherwise keep suppressing that win forever — across reloads
+  // too, since the cache is persistent — silently contradicting the documented
+  // admin escape hatch. The extra read is on the RARE path only (a re-mark of a
+  // win this device retracted), and `getDoc` falls back to the cache offline, so
+  // the offline flash suppression this pre-check exists for is untouched.
   try {
-    const retraction = await getDocFromCache(rawMomentRetraction(id));
-    if (retraction.exists()) {
-      console.debug('[moments] broadcast skipped — this win was retracted (#377)', {
-        id,
-        kind,
-        uid: who.uid,
-      });
-      return;
+    if ((await getDocFromCache(rawMomentRetraction(id))).exists()) {
+      const live = await getDoc(rawMomentRetraction(id));
+      if (live.exists()) {
+        console.debug('[moments] broadcast skipped — this win was retracted (#377)', {
+          id,
+          kind,
+          uid: who.uid,
+        });
+        return;
+      }
     }
   } catch {
-    // No cached tombstone — nothing known to be spent; the server is the decider.
+    // No cached tombstone, or the confirmation read failed — nothing this device
+    // knows to be spent; the server's create rule is the decider either way.
   }
   // #332: about to genuinely write this bingo doc (the pre-check above found no
   // cached doc, so this is NOT a regain re-broadcast). Stamp the current action

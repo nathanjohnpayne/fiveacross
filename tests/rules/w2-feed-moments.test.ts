@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, setDoc, writeBatch, type Firestore } from 'firebase/firestore';
 
 // specs/w2-feed-moments.md — the Moments rules contract (ADR 0002). Pinned against
 // the block that shipped from #16/#18, was TIGHTENED in PR #99 (Codex P2) — the
@@ -263,10 +263,22 @@ describe('firestore.rules — Feed Moments (specs/w2-feed-moments.md)', () => {
     await assertSucceeds(getDoc(doc(db(BOB), momentPath(`${CAROL}-bingo`)))); // Bob reads Carol's beat
   });
 
-  it('an owner deletes their own Moment; a peer cannot delete another’s', async () => {
-    const mine = doc(db(ALICE), momentPath(`${ALICE}-bingo`));
+  it('an owner deletes their own Moment ONLY as a retraction (#377); a peer cannot delete another’s', async () => {
+    const alice = db(ALICE);
+    const mine = doc(alice, momentPath(`${ALICE}-bingo`));
     await assertSucceeds(setDoc(mine, moment(ALICE)));
-    await assertSucceeds(deleteDoc(mine)); // owner may retract their own
+    // A BARE owner delete is denied since #377: it would leave the win unspent and
+    // freely repostable at the same deterministic id with a fresh createdAt — the
+    // top-of-Feed flapping loop the tombstone exists to close. The owner-delete arm
+    // now requires the matching tombstone in the SAME atomic write (getAfter).
+    await assertFails(deleteDoc(mine));
+    // The retraction itself — delete + tombstone in one batch — is allowed.
+    const batch = writeBatch(alice as Firestore);
+    batch.delete(doc(alice, momentPath(`${ALICE}-bingo`)));
+    batch.set(doc(alice, at(`momentRetractions/${ALICE}-bingo`)), {
+      uid: ALICE, kind: 'bingo', createdAt: NOW(),
+    });
+    await assertSucceeds(batch.commit());
     await assertFails(deleteDoc(doc(db(BOB), momentPath(`${CAROL}-bingo`)))); // a peer may not moderate
   });
 
@@ -299,6 +311,17 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     ...over,
   });
   const tombstonePath = (id: string) => at(`momentRetractions/${id}`);
+  // The retraction as the client actually issues it (src/data/moments.ts): the
+  // Moment delete and its tombstone in ONE atomic batch. Since #377 that is the
+  // ONLY shape an owner delete can take — the delete rule's `getAfter` requires
+  // the tombstone to exist once the request completes, so a lone delete denies.
+  const retract = (uid: string, id: string, over: Record<string, unknown> = {}) => {
+    const s = db(uid) as Firestore;
+    const batch = writeBatch(s);
+    batch.delete(doc(s, momentPath(id)));
+    batch.set(doc(s, tombstonePath(id)), tombstone(uid, over));
+    return batch.commit();
+  };
 
   it('a Player tombstones their OWN win — all four canonical retractable id forms', async () => {
     const t = (id: string) => doc(db(ALICE), tombstonePath(id));
@@ -320,10 +343,9 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     // 1. The win posts.
     await assertSucceeds(setDoc(doc(alice, momentPath(id)), moment(ALICE, { kind: 'bingo', dayIndex: 3 })));
     // 2. The completing square is unmarked → the client deletes the Moment and
-    //    tombstones it (one batch in the app; sequential here — the rules see the
-    //    same two writes either way).
-    await assertSucceeds(deleteDoc(doc(alice, momentPath(id))));
-    await assertSucceeds(setDoc(doc(alice, tombstonePath(id)), tombstone(ALICE, { dayIndex: 3 })));
+    //    tombstones it in ONE atomic batch. Since #377 that is the only shape the
+    //    owner delete permits: a bare delete is denied (see the immutability case).
+    await assertSucceeds(retract(ALICE, id, { dayIndex: 3 }));
     // 3. Re-marking the same square CANNOT re-post it. Without the tombstone this
     //    create would SUCCEED (the doc is gone, so it is a create, not an update)
     //    with a fresh createdAt — straight back to the top of the Feed.
@@ -335,8 +357,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
   it('spends the LEGACY day-less forms too — the retract-once bound is not per-card-only', async () => {
     const alice = db(ALICE);
     await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE)));
-    await assertSucceeds(deleteDoc(doc(alice, momentPath(`${ALICE}-bingo`))));
-    await assertSucceeds(setDoc(doc(alice, tombstonePath(`${ALICE}-bingo`)), tombstone(ALICE)));
+    await assertSucceeds(retract(ALICE, `${ALICE}-bingo`));
     await assertFails(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE)));
     // The blackout twin, same shape.
     await assertSucceeds(
@@ -345,6 +366,36 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(
       setDoc(doc(alice, momentPath(`${ALICE}-blackout`)), moment(ALICE, { kind: 'blackout' })),
     );
+  });
+
+  it('an owner Moment delete must CARRY its tombstone — a bare delete cannot bypass retract-once (Codex P1)', async () => {
+    // The create-side exists() check alone made retract-once VOLUNTARY: a player
+    // could delete their Moment straight through the SDK, skip the tombstone, and
+    // recreate the same deterministic id with a fresh createdAt — the flapping loop,
+    // bypassed. `getAfter` on the delete rule closes it: the tombstone must exist
+    // once the request completes, which only an atomic batch can satisfy.
+    const alice = db(ALICE);
+    const id = `${ALICE}-bingo-d3`;
+    await assertSucceeds(setDoc(doc(alice, momentPath(id)), moment(ALICE, { dayIndex: 3 })));
+    // Bare delete: DENIED.
+    await assertFails(deleteDoc(doc(alice, momentPath(id))));
+    // Delete batched with a tombstone for SOMEONE ELSE's win does not satisfy it
+    // either — the tombstone must be at this Moment's own id.
+    const wrongId = writeBatch(alice as Firestore);
+    wrongId.delete(doc(alice, momentPath(id)));
+    wrongId.set(doc(alice, tombstonePath(`${ALICE}-bingo-d7`)), tombstone(ALICE, { dayIndex: 7 }));
+    await assertFails(wrongId.commit());
+    // The Moment is still there — nothing above removed it.
+    await assertSucceeds(getDoc(doc(alice, momentPath(id))));
+    // The real retraction lands.
+    await assertSucceeds(retract(ALICE, id, { dayIndex: 3 }));
+  });
+
+  it('an ADMIN may still delete a Moment WITHOUT spending its win — moderation is not retraction', async () => {
+    // An admin removing a Moment is moderation, not a player retracting a win, so
+    // the (Player, Day) slot must stay unspent: the player can post it again.
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), momentPath(`${CAROL}-bingo`))));
+    await assertSucceeds(setDoc(doc(db(CAROL), momentPath(`${CAROL}-bingo`)), moment(CAROL)));
   });
 
   it('denies a forged tombstone — a Player cannot spend another Player’s win', async () => {

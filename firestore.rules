@@ -958,7 +958,30 @@ service cloud.firestore {
         // rewriting content; moderation here is delete-only. A moderation-only update
         // (a status field + a hasOnly() diff) is deferred to #37/#41, which own that
         // schema evolution.
-        allow delete: if isAdmin(eventId) || isOwner(resource.data.uid);
+        // Delete: admin moderation, OR an owner RETRACTION — and since #377 the
+        // owner arm requires the retraction to be COMPLETE, not merely intended.
+        //
+        // The bare owner delete this used to be made retract-once VOLUNTARY (Codex
+        // P1, round 1 on PR #467): a player could delete their own Moment straight
+        // through the SDK, skip the tombstone, and immediately recreate the same
+        // deterministic id with a fresh createdAt — the exact top-of-Feed flapping
+        // loop the tombstone exists to close, bypassed entirely. The create-side
+        // exists() check alone only binds clients that opt in.
+        //
+        // `getAfter` is what closes it: it reads the doc as it WILL be once this
+        // request completes, so the delete is authorized only when the SAME atomic
+        // batch also writes the matching tombstone (src/data/moments.ts commits
+        // exactly that pair). A lone delete makes the lookup miss and the field
+        // access error, which denies — the safe default. The uid comparison also
+        // pins the tombstone to the Moment's own owner, so one cannot be satisfied
+        // by a tombstone minted for somebody else's win.
+        //
+        // ADMINS stay exempt: moderation must be able to remove a Moment WITHOUT
+        // spending its (Player, Day) slot, and an admin deleting a Moment is not a
+        // player retracting a win.
+        allow delete: if isAdmin(eventId)
+          || (isOwner(resource.data.uid)
+              && getAfter(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId)).data.uid == resource.data.uid);
       }
 
       // Retraction tombstones (#377, specs/w2-feed-moments.md § Retracting a

@@ -69,7 +69,8 @@ vi.mock('../data/moments', () => ({
   peekPendingMoments: vi.fn(() => ({ bingo: false, blackout: false, firstBingo: false })),
   clearPendingMoment: vi.fn(),
   dropPendingWins: vi.fn(),
-  retractPublishedWins: vi.fn(),
+  enqueueRetraction: vi.fn(),
+  drainRetractions: vi.fn(),
   pendingActionGeneration: vi.fn(() => 0),
   firstBingoCandidateCurrent: vi.fn(() => false),
 }));
