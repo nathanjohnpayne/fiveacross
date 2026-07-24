@@ -46,8 +46,12 @@ import { cellsToMap, cellsFromData } from '../../src/game/cells';
 // emulator loads: the CURRENT client write shape, marking a past Day with the
 // full batch (tally marker + stats fold + echo to the current Day's card),
 // is accepted end-to-end and lands server-side. If a future rules tightening
-// (or client write-shape change) breaks any write in the batch, this fails —
-// the skew class is caught in CI instead of live on the ship.
+// (or client write-shape change) breaks any write in the batch, this fails.
+// NOTE (Codex P1/P2 on PR #470): the tests/offline layer is NOT yet collected
+// by app-ci — wiring it in is #471 — so the CI-GATED pin for the deployment-
+// skew class is tests/rules/mark-wire-compat.test.ts (the frozen deployed
+// wire shape, run by `npm run test:rules`). This file is the deeper local
+// proof through the real setMark writer.
 
 const EVENT_ID = 'med-2026'; // must match the mocked src/firebase EVENT_ID
 const PROJECT_ID = 'demo-past-day-mark'; // distinct project → isolated data
