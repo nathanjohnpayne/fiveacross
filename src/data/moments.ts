@@ -1,4 +1,4 @@
-import { doc, getDocFromCache, setDoc } from 'firebase/firestore';
+import { doc, getDocFromCache, setDoc, writeBatch } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
 import { hasBingo, isBlackout } from '../game/logic';
@@ -20,6 +20,37 @@ import type { Cell, MomentDoc, MomentKind } from '../types';
 // and proofs.ts's rawProof — the read side attaches `momentConverter` via
 // `momentsCol`/`momentRef` (src/data/paths.ts).
 const rawMoment = (id: string) => doc(db, 'events', EVENT_ID, 'moments', id);
+
+/**
+ * The RETRACTION TOMBSTONE ref for a Moment id (#377). Same id as the Moment it
+ * retracts, in a sibling collection — so "is this win spent?" is one lookup at a
+ * known path on both the client (cache-only, below) and the rules (`exists()` in
+ * the moments create rule).
+ *
+ * Not to be confused with Firestore's own cached-deletion tombstone (a
+ * `getDocFromCache` snapshot with `exists() === false`), which is a local SDK
+ * artifact; this is a real, server-side, publicly readable doc.
+ */
+const rawMomentRetraction = (id: string) => doc(db, 'events', EVENT_ID, 'momentRetractions', id);
+
+/** The two Moment kinds a Player can retract (#377) — the PER-CARD wins. The
+ *  ceremonial `first_bingo` singleton is deliberately not retractable: it is the
+ *  event-wide honor, admin-delete-only, and a per-Player retraction path would
+ *  hand one Player a lever on an Event-level record. */
+type RetractableKind = 'bingo' | 'blackout';
+
+/**
+ * The tombstone payload — exactly the keys the rules' `hasOnly` allows. `dayIndex`
+ * is present iff the id it marks is the day-suffixed per-card form, mirroring the
+ * Moment payload/id discipline (the rules accept a day-stamped payload on a
+ * day-LESS id too, matching the moments block; the writer just never mints one).
+ */
+interface RetractionTombstone {
+  uid: string;
+  kind: RetractableKind;
+  dayIndex?: number;
+  createdAt: number;
+}
 
 /**
  * The event-singleton doc id for the ceremonial "First to BINGO" Moment. Because
@@ -526,6 +557,144 @@ export function dropPendingWins(
   persistPending(uid);
 }
 
+// --- Retraction of a PUBLISHED win (#377) ------------------------------------
+//
+// `dropPendingWins` above covers only the PRE-publish case: a win completed then
+// unmarked before its gate opens never posts. After publish there was no path at
+// all — the Feed went on claiming a bingo the card no longer supported, forever.
+// (`moments/{momentId}` has no update path, and although the rules already let an
+// owner delete their own Moment, nothing in the client ever called it.)
+//
+// Retraction is DELETE + TOMBSTONE, in one atomic batch, never a bare delete. The
+// deterministic per-card id is the strongest anti-gaming primitive in the system:
+// `${uid}-bingo-d${dayIndex}` posts exactly once per (Player, Day), create-only
+// and immutable. A bare delete breaks that bound — retract-then-re-mark recreates
+// the same id with a fresh `createdAt`, and the Feed sorts by `createdAt` desc, so
+// mark/unmark/re-mark would bounce one win back to the TOP of the Feed
+// repeatedly: an engagement-farming loop introduced by the very feature meant to
+// keep the Feed honest. The tombstone spends the (Player, Day) win instead —
+// retracted once, never repostable (firestore.rules § momentRetractions).
+//
+// **Accepted cost, decided in #377:** a genuine mis-unclick (unmark by accident,
+// then re-mark) loses that Day's Moment permanently. It fails in the safe
+// direction — silence, never a false claim — and an admin can delete the tombstone
+// for a real correction.
+//
+// **Scope, stated plainly:** retraction does nothing against deliberate gaming — a
+// player claiming squares they did not earn simply does not unclick. Its value is
+// Feed TRUTH for honest self-correction, and it must not cost the once-per-card
+// bound to get it.
+
+/** The tombstone/Moment id for a (Player, kind, Day) win — the writer's own
+ *  deterministic scheme (`broadcastBingo` / `broadcastBlackout`). */
+const winMomentId = (uid: string, kind: RetractableKind, dayIndex?: number): string =>
+  dayIndex === undefined ? `${uid}-${kind}` : `${uid}-${kind}-d${dayIndex}`;
+
+/** Read a Moment from the LOCAL cache only, resolving `undefined` on a miss —
+ *  `getDocFromCache` REJECTS when the doc is not cached, and a retraction must
+ *  never throw into a fall observer. */
+async function cachedMomentData(id: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const snap = await getDocFromCache(rawMoment(id));
+    return snap.exists() ? ((snap.data() as Record<string, unknown>) ?? {}) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Delete the Moment and mint its tombstone ATOMICALLY. A batch, not two writes:
+ * a crash (or a rules denial) between them would otherwise leave the win
+ * deleted-but-not-spent — i.e. freely repostable, the exact loop this closes — or
+ * spent-but-still-displayed. `writeBatch` commits all-or-nothing.
+ *
+ * Fire-and-forget and offline-queueable like every other write in this module
+ * (ADR 0006): the batch pends durably in the persistent cache when offline and
+ * drains on reconnect, and an ONLINE rejection is logged rather than surfaced.
+ */
+async function commitRetraction(
+  uid: string,
+  kind: RetractableKind,
+  momentId: string,
+  dayIndex?: number,
+): Promise<void> {
+  const tombstone: RetractionTombstone = {
+    uid,
+    kind,
+    createdAt: Date.now(),
+    // Only when the id is the day-suffixed form — never an explicit `undefined`,
+    // which Firestore rejects outright.
+    ...(dayIndex !== undefined ? { dayIndex } : {}),
+  };
+  const batch = writeBatch(db);
+  batch.delete(rawMoment(momentId));
+  batch.set(rawMomentRetraction(momentId), tombstone);
+  await batch.commit().catch((err: unknown) => {
+    console.error('[moments] retraction rejected', { momentId, kind, uid }, err);
+  });
+}
+
+/**
+ * Retract the PUBLISHED Moment(s) an observed fall just invalidated — the
+ * published-side twin of `dropPendingWins`, called with the SAME `fell` shape at
+ * the SAME two fall-observer sites (Board's unmark verdict and its passive
+ * falling-edge snapshot), so the pre- and post-publish halves of one fall can
+ * never drift apart.
+ *
+ * Fire-and-forget: a retraction must never block the unmark it follows.
+ *
+ * Nothing is retracted unless a Moment for that (Player, Day) is ACTUALLY in the
+ * local cache. That check is load-bearing, not an optimization: minting a
+ * tombstone for a win that never published would SPEND the (Player, Day) slot
+ * without a Moment ever having existed — permanently silencing a legitimate future
+ * win. The cache is a trustworthy witness here because the Feed subscribes to the
+ * whole moments collection (`useMoments`), so a published Moment is cached on any
+ * running client. A cold-cache device simply does not retract (the fall's own
+ * device does); that residual is silence, never a false tombstone.
+ */
+export function retractPublishedWins(
+  uid: string,
+  fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
+): void {
+  if (fell.bingo) void retractWin(uid, 'bingo', fell.bingoDayIndex);
+  if (fell.blackout) void retractWin(uid, 'blackout', fell.blackoutDayIndex);
+}
+
+/**
+ * Retract one kind's published Moment for one board. BOTH id forms are probed,
+ * because both can legitimately hold the live Moment for a given (Player, Day):
+ *
+ *   - the PER-CARD id (`${uid}-${kind}-d${dayIndex}`) — what a current client
+ *     writes on a daily Event (bingo since #372, blackout since #267);
+ *   - the LEGACY day-less id (`${uid}-${kind}`) — what pre-#267/#372 clients
+ *     wrote, and what a current client still writes on a legacy single-board
+ *     Event. On a DAILY Event it is retracted only when its payload's `dayIndex`
+ *     names the fallen Day: the writers' legacy same-day dedupe means a Day's live
+ *     Moment can genuinely live at that day-less id, but a legacy doc stamped for
+ *     a DIFFERENT Day describes a different card and must survive this fall.
+ *
+ * A day-less caller (a legacy Event has one card for the whole Event, so per-Player
+ * IS per-card there) retracts the day-less id unconditionally and probes no
+ * day-scoped form — there is no Day to scope to.
+ */
+async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number): Promise<void> {
+  if (dayIndex !== undefined) {
+    const perCardId = winMomentId(uid, kind, dayIndex);
+    if (await cachedMomentData(perCardId)) await commitRetraction(uid, kind, perCardId, dayIndex);
+  }
+  const legacyId = winMomentId(uid, kind);
+  const legacy = await cachedMomentData(legacyId);
+  if (!legacy) return;
+  // On a daily Event the legacy doc must NAME this Day to be the one that fell.
+  // A doc with NO `dayIndex` at all (a true pre-#262 Moment) therefore never
+  // matches and always survives — deliberately conservative: nothing on the doc
+  // says which card it describes, and a wrong retraction is permanent.
+  if (dayIndex !== undefined && legacy.dayIndex !== dayIndex) return;
+  // The tombstone mirrors the ID form it marks: a day-LESS id gets a day-less
+  // tombstone (the rules' legacy arm), never a day-stamped one.
+  await commitRetraction(uid, kind, legacyId);
+}
+
 /**
  * Clear one DRAINED kind so a later drain cannot re-fire it: the drain either
  * published the Moment (the win stood at fire time) or decided-and-lost the
@@ -652,6 +821,32 @@ async function writeMomentOnce(
     }
   } catch {
     // Not in the local cache — no duplicate to protect; proceed with the write.
+  }
+  // RETRACT-ONCE pre-check (#377), the exact twin of the write-once one above and
+  // for the same latency-compensation reason. The rules DENY a create whose
+  // tombstone exists, but Firestore applies the optimistic write LOCALLY first: a
+  // re-marked, already-retracted win would flash back to the TOP of the Feed until
+  // the server's denial rolled it back — and indefinitely while OFFLINE, where no
+  // denial ever arrives. That flash is precisely the engagement-farming loop the
+  // tombstone exists to close, so the retraction must be honored client-side too.
+  //
+  // Cache-only and best-effort, matching every other pre-check here: the tombstone
+  // is in the local cache on the device that WROTE it (latency compensation) —
+  // which is the device a re-mark realistically comes from — and a cache miss just
+  // falls through to the server, which denies. Never a gate on correctness, only
+  // on the visible flash.
+  try {
+    const retraction = await getDocFromCache(rawMomentRetraction(id));
+    if (retraction.exists()) {
+      console.debug('[moments] broadcast skipped — this win was retracted (#377)', {
+        id,
+        kind,
+        uid: who.uid,
+      });
+      return;
+    }
+  } catch {
+    // No cached tombstone — nothing known to be spent; the server is the decider.
   }
   // #332: about to genuinely write this bingo doc (the pre-check above found no
   // cached doc, so this is NOT a regain re-broadcast). Stamp the current action

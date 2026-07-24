@@ -23,10 +23,33 @@ const EVENT_ID = 'med-2026'; // src/firebase.ts default when VITE_EVENT_ID is un
 // Plain vi.fn() so `.mock.calls` stays loosely typed (indexable) like the sibling
 // tally suite; the resolved Promise (moments.ts does `setDoc(...).catch(...)`) is
 // set in beforeEach so a re-broadcast's .catch has something to attach to.
-const { setDocSpy, getDocFromCacheSpy } = vi.hoisted(() => ({
-  setDocSpy: vi.fn(),
-  getDocFromCacheSpy: vi.fn(),
-}));
+const {
+  setDocSpy,
+  getDocFromCacheSpy,
+  writeBatchSpy,
+  batchDeleteSpy,
+  batchSetSpy,
+  batchCommitSpy,
+} = vi.hoisted(() => {
+  // ONE shared batch handle across calls: the retraction asserts BOTH writes ride
+  // the SAME batch (atomic delete + tombstone — #377), so the spies are shared and
+  // the call counts on `writeBatchSpy` say how many batches were opened.
+  const batchDeleteSpy = vi.fn();
+  const batchSetSpy = vi.fn();
+  const batchCommitSpy = vi.fn();
+  return {
+    setDocSpy: vi.fn(),
+    getDocFromCacheSpy: vi.fn(),
+    batchDeleteSpy,
+    batchSetSpy,
+    batchCommitSpy,
+    writeBatchSpy: vi.fn(() => ({
+      delete: batchDeleteSpy,
+      set: batchSetSpy,
+      commit: batchCommitSpy,
+    })),
+  };
+});
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
 vi.mock('firebase/firestore', async (importOriginal) => {
@@ -36,6 +59,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     doc: (_db: unknown, ...segments: string[]) => ({ path: segments.join('/') }),
     setDoc: setDocSpy,
     getDocFromCache: getDocFromCacheSpy,
+    writeBatch: writeBatchSpy,
     addDoc: vi.fn(),
     runTransaction: vi.fn(),
   };
@@ -57,6 +81,7 @@ import {
   removePendingBingoDay,
   clearPendingMoment,
   dropPendingWins,
+  retractPublishedWins,
   pendingActionGeneration,
   firstBingoCandidateCurrent,
   resetPendingMoments,
@@ -72,6 +97,7 @@ const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 beforeEach(() => {
   vi.clearAllMocks();
   setDocSpy.mockResolvedValue(undefined);
+  batchCommitSpy.mockResolvedValue(undefined);
   // Cache-miss default: getDocFromCache REJECTS when the doc is not cached, which
   // is the fresh-state norm — the write-once pre-check then lets the write proceed.
   getDocFromCacheSpy.mockRejectedValue(new Error('unavailable'));
@@ -242,6 +268,144 @@ describe('moments broadcasts — the Feed beat writer (specs/w2-feed-moments.md)
     broadcastBlackout({ uid: 'u1', displayName: 'Alice', photoURL: null });
     await settle();
     expect(setDocSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// --- Retract-once (#377) -----------------------------------------------------
+//
+// The Feed must not keep claiming a win the card no longer supports. Unmarking
+// the square that completed a PUBLISHED BINGO/Blackout retracts its Moment —
+// DELETE + TOMBSTONE in one atomic batch — and the tombstone SPENDS that
+// (Player, Day) win: the rules deny every later create at the same id, so
+// mark/unmark/re-mark can never bounce one win back to the top of the Feed. The
+// rules half is tests/rules/w2-feed-moments.test.ts.
+
+// The local-cache oracle these cases drive: `byPath` maps a full doc path to its
+// payload; everything else REJECTS, which is what `getDocFromCache` really does
+// for an uncached doc.
+const cacheHolding = (byPath: Record<string, Record<string, unknown>>) =>
+  getDocFromCacheSpy.mockImplementation((ref: { path: string }) =>
+    byPath[ref.path]
+      ? Promise.resolve({ exists: () => true, data: () => byPath[ref.path] })
+      : Promise.reject(new Error('unavailable')),
+  );
+const momentAt = (id: string) => `events/${EVENT_ID}/moments/${id}`;
+const tombstoneAt = (id: string) => `events/${EVENT_ID}/momentRetractions/${id}`;
+
+describe('retractPublishedWins — retract-once for a PUBLISHED win (#377)', () => {
+  it('retracts the per-card BINGO Moment: delete + tombstone at the SAME id, in ONE batch', async () => {
+    cacheHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    retractPublishedWins('u1', { bingo: true, bingoDayIndex: 3 });
+    await settle();
+
+    // ONE batch — atomicity is the point (a crash between the two writes would
+    // leave the win deleted-but-not-spent, i.e. freely repostable).
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy).toHaveBeenCalledTimes(1);
+    expect(batchSetSpy).toHaveBeenCalledTimes(1);
+    expect(batchCommitSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo-d3'));
+    // The tombstone mirrors the Moment id it retracts — that id-mirroring is what
+    // lets the rules answer "is this win spent?" with one exists() lookup.
+    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo-d3'));
+    expect(batchSetSpy.mock.calls[0][1]).toEqual({
+      uid: 'u1',
+      kind: 'bingo',
+      dayIndex: 3,
+      createdAt: expect.any(Number),
+    });
+  });
+
+  it('retracts NOTHING when the win never published — a tombstone would spend the slot for free', async () => {
+    // The load-bearing guard: minting a tombstone for a Moment that never existed
+    // would permanently silence a legitimate FUTURE win for that (Player, Day).
+    getDocFromCacheSpy.mockRejectedValue(new Error('unavailable')); // cold cache
+    retractPublishedWins('u1', { bingo: true, bingoDayIndex: 3 });
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('retracts only the kind that FELL — a blackout fall leaves a still-standing bingo alone', async () => {
+    cacheHolding({
+      [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+      [momentAt('u1-blackout-d3')]: { kind: 'blackout', uid: 'u1', dayIndex: 3 },
+    });
+    // Unmarking one square of a blacked-out card drops the blackout while the
+    // lines (and so the bingo) still stand — the common real sequence.
+    retractPublishedWins('u1', { blackout: true, blackoutDayIndex: 3 });
+    await settle();
+
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-blackout-d3'));
+    expect(batchSetSpy.mock.calls[0][1]).toMatchObject({ kind: 'blackout', dayIndex: 3 });
+  });
+
+  it('retracts a LEGACY day-less Moment that covers the fallen Day — with a day-LESS tombstone', async () => {
+    // Not hypothetical: the writers' legacy same-day dedupe (#267/#372) means a
+    // Day's live Moment can genuinely sit at the pre-per-card `${uid}-bingo` id
+    // with a day-stamped payload. Retraction has to reach it, and its tombstone
+    // must mirror THAT id form (day-less), not the per-card one.
+    cacheHolding({ [momentAt('u1-bingo')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    retractPublishedWins('u1', { bingo: true, bingoDayIndex: 3 });
+    await settle();
+
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo'));
+    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-bingo'));
+    expect(batchSetSpy.mock.calls[0][1]).toEqual({
+      uid: 'u1',
+      kind: 'bingo',
+      createdAt: expect.any(Number),
+    });
+    expect('dayIndex' in (batchSetSpy.mock.calls[0][1] as object)).toBe(false);
+  });
+
+  it('leaves a LEGACY Moment stamped for a DIFFERENT Day standing — it describes another card', async () => {
+    cacheHolding({ [momentAt('u1-bingo')]: { kind: 'bingo', uid: 'u1', dayIndex: 6 } });
+    retractPublishedWins('u1', { bingo: true, bingoDayIndex: 3 });
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('a LEGACY (day-less) Event retracts its one card’s Moment unconditionally', async () => {
+    // One card for the whole Event, so per-Player IS per-card there: there is no
+    // Day to scope to and no day-suffixed id to probe.
+    cacheHolding({ [momentAt('u1-blackout')]: { kind: 'blackout', uid: 'u1' } });
+    retractPublishedWins('u1', { blackout: true });
+    await settle();
+
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-blackout'));
+    expect(batchSetSpy.mock.calls[0][0].path).toBe(tombstoneAt('u1-blackout'));
+    // No day-scoped probe happened at all — there is no Day.
+    const probed = getDocFromCacheSpy.mock.calls.map((c) => (c[0] as { path: string }).path);
+    expect(probed.some((p) => p.includes('u1-blackout-d'))).toBe(false);
+  });
+
+  it('is a no-op when nothing fell', async () => {
+    cacheHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    retractPublishedWins('u1', {});
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+    expect(getDocFromCacheSpy).not.toHaveBeenCalled();
+  });
+
+  it('a re-mark after a retraction posts NOTHING locally — the cached tombstone blocks the optimistic write', async () => {
+    // The retract-once twin of the write-once pre-check. The rules deny the create
+    // server-side, but latency compensation applies it LOCALLY first, so without
+    // this the re-marked win would flash back to the TOP of the Feed until the
+    // denial — indefinitely while offline, which IS the farming loop the tombstone
+    // exists to close.
+    cacheHolding({ [tombstoneAt('u1-bingo-d3')]: { uid: 'u1', kind: 'bingo', dayIndex: 3 } });
+    broadcastBingo({ uid: 'u1', displayName: 'Alice', photoURL: null }, 3);
+    await settle();
+    expect(setDocSpy).not.toHaveBeenCalled();
+
+    // A DIFFERENT Day is a different card and is untouched by that tombstone.
+    broadcastBingo({ uid: 'u1', displayName: 'Alice', photoURL: null }, 6);
+    await settle();
+    expect(setDocSpy).toHaveBeenCalledTimes(1);
+    expect(setDocSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo-d6'));
   });
 });
 

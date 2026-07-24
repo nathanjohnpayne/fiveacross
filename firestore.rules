@@ -932,7 +932,21 @@ service cloud.firestore {
           // the lower bound (accepted residual — see specs/w2-feed-moments.md).
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
-          && request.resource.data.createdAt >= request.time.toMillis() - 86400000;
+          && request.resource.data.createdAt >= request.time.toMillis() - 86400000
+          // RETRACT-ONCE (#377). A retracted (Player, Day) win is SPENT: the
+          // retraction wrote a tombstone at THIS id (see the momentRetractions
+          // block below), and its existence denies every later create — including
+          // the same-id repost a re-mark would otherwise produce. Keyed on the
+          // MOMENT ID itself, so one clause covers all four canonical forms
+          // (`${uid}-bingo` / `${uid}-blackout` and their `-d${dayIndex}` per-card
+          // twins) without re-deriving kind or Day here. `first_bingo` can never
+          // carry a tombstone (the block below restricts `kind` to the two
+          // per-card kinds, and the singleton id matches no `${uid}-${kind}`
+          // form), so the ceremonial create path is untouched.
+          //
+          // LAST in the conjunction on purpose: `&&` short-circuits, so a create
+          // that fails any cheaper clause never spends this document read.
+          && !exists(/databases/$(database)/documents/events/$(eventId)/momentRetractions/$(momentId));
         // No update path — a Moment is fully immutable (Codex P2, PR #99 finding 4).
         // The deterministic-id, create-only dedup the writer relies on (moments.ts:
         // `${uid}-bingo`, the `first_bingo` singleton) is only sound if a re-broadcast
@@ -945,6 +959,70 @@ service cloud.firestore {
         // (a status field + a hasOnly() diff) is deferred to #37/#41, which own that
         // schema evolution.
         allow delete: if isAdmin(eventId) || isOwner(resource.data.uid);
+      }
+
+      // Retraction tombstones (#377, specs/w2-feed-moments.md § Retracting a
+      // published win). The spent-marker that makes retraction RETRACT-ONCE.
+      //
+      // Unmarking the square that completed a PUBLISHED BINGO/Blackout deletes the
+      // Moment (the owner-delete path above) and, in the SAME batch, creates a
+      // tombstone at the SAME id. The moments create rule then denies any create
+      // whose tombstone exists, so that (Player, Day) win is spent — retracted
+      // once, never repostable.
+      //
+      // WHY a tombstone and not a bare delete. The deterministic per-card Moment
+      // id is the strongest anti-gaming primitive in the system (§ Once-only
+      // semantics): `${uid}-bingo-d${dayIndex}` posts exactly ONCE per (Player,
+      // Day), create-only and immutable. A bare delete path breaks that bound —
+      // retract-then-re-mark recreates the SAME id with a FRESH createdAt, and the
+      // Feed sorts by createdAt desc, so mark/unmark/re-mark would bounce one win
+      // back to the TOP of the Feed repeatedly: an engagement-farming loop
+      // introduced by the very feature meant to keep the Feed honest.
+      //
+      // Create-only, owner-attributed, and id-bound to the Moment it retracts —
+      // the SAME id discipline the moments create rule enforces, so a tombstone
+      // can only ever be minted for one of the four canonical retractable ids of
+      // the CALLER'S OWN uid: `${uid}-bingo` / `${uid}-blackout` (legacy day-less)
+      // and `${uid}-bingo-d${dayIndex}` / `${uid}-blackout-d${dayIndex}`
+      // (per-card, Day bounded to the Event's real schedule exactly as the moments
+      // block bounds it). `first_bingo` is deliberately NOT tombstoneable: `kind`
+      // is restricted to the two per-card kinds and the singleton id matches no
+      // `${uid}-${kind}` form, so the ceremonial event-wide honor keeps its
+      // existing admin-delete-only moderation and no player-facing retraction.
+      //
+      // NO update path (a tombstone is a permanent fact, like the Moment it
+      // replaces) and NO owner delete: an owner-deletable tombstone would restore
+      // the delete-then-repost loop this doc exists to close. Delete is
+      // admin-only — the moderation escape hatch for a genuine mis-retraction,
+      // mirroring the write-once honor doc at days/{dayIndex}/meta/{dayIndex}.
+      //
+      // Read is public like the Feed it describes: nothing renders it today, but a
+      // signed-in client may want to know a win is spent before optimistically
+      // re-posting it (src/data/moments.ts consults its LOCAL cache copy for
+      // exactly that), and it carries no information a Moment did not already
+      // publish.
+      match /momentRetractions/{momentId} {
+        allow read: if signedIn();
+        allow create: if isOwner(request.resource.data.uid)
+          // Exactly the contract's fields, no extras riding along. Deliberately
+          // STRICTER than the moments create rule (which has no hasOnly and so
+          // accepts stray fields — the honesty pin in the spec): a tombstone is
+          // pure bookkeeping nothing renders, so there is no legitimate payload to
+          // grow into and no reason to accept publicly-readable junk.
+          && request.resource.data.keys().hasOnly(['uid', 'kind', 'dayIndex', 'createdAt'])
+          && request.resource.data.kind in ['bingo', 'blackout']
+          && (momentId == request.resource.data.uid + '-' + request.resource.data.kind
+              || (request.resource.data.dayIndex is int
+                  && request.resource.data.dayIndex >= 0
+                  && request.resource.data.dayIndex < get(/databases/$(database)/documents/events/$(eventId)).data.days.size()
+                  && momentId == request.resource.data.uid + '-' + request.resource.data.kind + '-d' + string(request.resource.data.dayIndex)))
+          // Same near-now window as moments/proofs/hearts. The stamp is provenance
+          // only (nothing sorts by it), but an unbounded client-set number in a
+          // publicly-readable doc buys nothing, so it carries the house bound.
+          && request.resource.data.createdAt is number
+          && request.resource.data.createdAt <= request.time.toMillis() + 60000
+          && request.resource.data.createdAt >= request.time.toMillis() - 86400000;
+        allow delete: if isAdmin(eventId);
       }
 
       // Notices (specs/admin-messages.md): admin-authored broadcasts — title +

@@ -274,3 +274,153 @@ describe('firestore.rules — Feed Moments (specs/w2-feed-moments.md)', () => {
     await assertSucceeds(deleteDoc(doc(db(ADMIN), momentPath(`${CAROL}-bingo`))));
   });
 });
+
+// --- Retract-once: the tombstone (#377) --------------------------------------
+//
+// The Feed must not keep claiming a win the card no longer supports. Retraction
+// is DELETE + TOMBSTONE, never a bare delete: the deterministic per-card id is the
+// strongest anti-gaming primitive here (one Moment per (Player, Day), create-only,
+// immutable), and a bare delete would break it — retract-then-re-mark recreates
+// the SAME id with a fresh `createdAt`, and the Feed sorts by `createdAt` desc, so
+// mark/unmark/re-mark would bounce one win back to the TOP of the Feed repeatedly.
+// The tombstone SPENDS that (Player, Day) win instead: the moments create rule
+// denies any create whose tombstone exists.
+//
+// Stated plainly, because the scope must stay honest: retraction does nothing
+// against deliberate gaming — a player claiming squares they did not earn simply
+// does not unclick. Its value is Feed TRUTH for honest self-correction, and it
+// must not cost the once-per-card bound to get it.
+describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments.md)', () => {
+  // Exactly the tombstone contract the writer emits (src/data/moments.ts).
+  const tombstone = (uid: string, over: Record<string, unknown> = {}) => ({
+    uid,
+    kind: 'bingo',
+    createdAt: NOW(),
+    ...over,
+  });
+  const tombstonePath = (id: string) => at(`momentRetractions/${id}`);
+
+  it('a Player tombstones their OWN win — all four canonical retractable id forms', async () => {
+    const t = (id: string) => doc(db(ALICE), tombstonePath(id));
+    // The two per-card forms (blackout since #267, bingo since #372).
+    await assertSucceeds(setDoc(t(`${ALICE}-bingo-d3`), tombstone(ALICE, { dayIndex: 3 })));
+    await assertSucceeds(
+      setDoc(t(`${ALICE}-blackout-d3`), tombstone(ALICE, { kind: 'blackout', dayIndex: 3 })),
+    );
+    // The two LEGACY day-less forms — a pre-#267/#372 Moment (or a legacy
+    // single-board Event's) is just as retractable, and its tombstone mirrors that
+    // day-less id.
+    await assertSucceeds(setDoc(t(`${ALICE}-bingo`), tombstone(ALICE)));
+    await assertSucceeds(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout' })));
+  });
+
+  it('SPENDS the win — the retracted (Player, Day) Moment can never be re-posted (the headline AC)', async () => {
+    const alice = db(ALICE);
+    const id = `${ALICE}-bingo-d3`;
+    // 1. The win posts.
+    await assertSucceeds(setDoc(doc(alice, momentPath(id)), moment(ALICE, { kind: 'bingo', dayIndex: 3 })));
+    // 2. The completing square is unmarked → the client deletes the Moment and
+    //    tombstones it (one batch in the app; sequential here — the rules see the
+    //    same two writes either way).
+    await assertSucceeds(deleteDoc(doc(alice, momentPath(id))));
+    await assertSucceeds(setDoc(doc(alice, tombstonePath(id)), tombstone(ALICE, { dayIndex: 3 })));
+    // 3. Re-marking the same square CANNOT re-post it. Without the tombstone this
+    //    create would SUCCEED (the doc is gone, so it is a create, not an update)
+    //    with a fresh createdAt — straight back to the top of the Feed.
+    await assertFails(setDoc(doc(alice, momentPath(id)), moment(ALICE, { kind: 'bingo', dayIndex: 3 })));
+    // A SIBLING Day is untouched: the denial is keyed on the exact Moment id.
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d7`)), moment(ALICE, { kind: 'bingo', dayIndex: 7 })));
+  });
+
+  it('spends the LEGACY day-less forms too — the retract-once bound is not per-card-only', async () => {
+    const alice = db(ALICE);
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE)));
+    await assertSucceeds(deleteDoc(doc(alice, momentPath(`${ALICE}-bingo`))));
+    await assertSucceeds(setDoc(doc(alice, tombstonePath(`${ALICE}-bingo`)), tombstone(ALICE)));
+    await assertFails(setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE)));
+    // The blackout twin, same shape.
+    await assertSucceeds(
+      setDoc(doc(alice, tombstonePath(`${ALICE}-blackout`)), tombstone(ALICE, { kind: 'blackout' })),
+    );
+    await assertFails(
+      setDoc(doc(alice, momentPath(`${ALICE}-blackout`)), moment(ALICE, { kind: 'blackout' })),
+    );
+  });
+
+  it('denies a forged tombstone — a Player cannot spend another Player’s win', async () => {
+    // The denial-of-win shape the id binding closes: without it, any signed-in
+    // Player could pre-tombstone `${BOB}-bingo-d3` and permanently deny Bob that
+    // Day's Moment. Both halves are checked — the payload uid (isOwner) and the id
+    // binding (which embeds the payload uid).
+    await assertFails(setDoc(doc(db(ALICE), tombstonePath(`${BOB}-bingo-d3`)), tombstone(BOB, { dayIndex: 3 })));
+    await assertFails(setDoc(doc(db(ALICE), tombstonePath(`${BOB}-bingo-d3`)), tombstone(ALICE, { dayIndex: 3 })));
+    // And Bob's own Moment still posts, proving the denials above left no mark.
+    await assertSucceeds(setDoc(doc(db(BOB), momentPath(`${BOB}-bingo-d3`)), moment(BOB, { dayIndex: 3 })));
+  });
+
+  it('binds the tombstone id to its payload exactly as the moments create rule does', async () => {
+    const t = (id: string) => doc(db(ALICE), tombstonePath(id));
+    // The id's Day must equal the payload's dayIndex. A FRESH id each time: a
+    // reused id would be denied as a doc-exists update regardless, masking the
+    // create-rule condition under test (Codex P3 on #277).
+    await assertFails(setDoc(t(`${ALICE}-bingo-d8`), tombstone(ALICE, { dayIndex: 5 })));
+    // A day-suffixed id with NO dayIndex has nothing to bind to.
+    await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE)));
+    // A non-integer dayIndex is denied.
+    await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: '4' })));
+    // Out-of-schedule Days are denied — no unbounded junk-doc minting, the same
+    // bound the moments block carries (Codex P2 on #277).
+    await assertFails(setDoc(t(`${ALICE}-bingo-d10`), tombstone(ALICE, { dayIndex: 10 })));
+    await assertFails(setDoc(t(`${ALICE}-bingo-d999999`), tombstone(ALICE, { dayIndex: 999999 })));
+    await assertFails(setDoc(t(`${ALICE}-bingo-d-1`), tombstone(ALICE, { dayIndex: -1 })));
+    // An id whose kind does not match its payload kind is denied.
+    await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { kind: 'blackout', dayIndex: 4 })));
+    // An arbitrary id is denied — the tombstone is not a free-form doc.
+    await assertFails(setDoc(t('spoof'), tombstone(ALICE)));
+    // Extra fields are denied (hasOnly) — DELIBERATELY stricter than the moments
+    // create rule, which accepts them (the honesty pin above). A tombstone is pure
+    // bookkeeping nothing renders, so there is no payload to grow into.
+    await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4, note: 'oops' })));
+    // createdAt carries the house near-now bound.
+    await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4, createdAt: NOW() + 3600000 })));
+    await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4, createdAt: 'now' })));
+    // The canonical create still lands after all of the above.
+    await assertSucceeds(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4 })));
+    // A day-LESS id with a day-stamped payload stays valid — the binding
+    // constrains the day-SUFFIXED id form, not the field's presence, exactly like
+    // the moments rule (the writer never mints this, but the rules mirror).
+    await assertSucceeds(setDoc(t(`${ALICE}-bingo`), tombstone(ALICE, { dayIndex: 2 })));
+  });
+
+  it('cannot tombstone the ceremonial First-to-BINGO — the event singleton has no retraction path', async () => {
+    // `kind` is restricted to the two PER-CARD kinds and the singleton id matches
+    // no `${uid}-${kind}` form, so the event-wide honor keeps its existing
+    // admin-delete-only moderation. A per-Player retraction lever on an
+    // Event-level record is not something one Player gets.
+    await assertFails(setDoc(doc(db(ALICE), tombstonePath('first_bingo')), tombstone(ALICE, { kind: 'first_bingo' })));
+    await assertFails(setDoc(doc(db(ALICE), tombstonePath(`${ALICE}-first_bingo`)), tombstone(ALICE, { kind: 'first_bingo' })));
+    // And the singleton itself still posts — nothing above spent it.
+    await assertSucceeds(setDoc(doc(db(ALICE), momentPath('first_bingo')), moment(ALICE, { kind: 'first_bingo' })));
+  });
+
+  it('is IMMUTABLE and NOT owner-deletable — an undoable tombstone would restore the repost loop', async () => {
+    const id = `${ALICE}-bingo-d3`;
+    await assertSucceeds(setDoc(doc(db(ALICE), tombstonePath(id)), tombstone(ALICE, { dayIndex: 3 })));
+    // No update path — for the owner OR an admin, exactly like a Moment.
+    await assertFails(setDoc(doc(db(ALICE), tombstonePath(id)), tombstone(ALICE, { dayIndex: 3 })));
+    await assertFails(setDoc(doc(db(ADMIN), tombstonePath(id)), tombstone(ALICE, { dayIndex: 3 })));
+    // The owner may NOT delete it: an owner-deletable tombstone is just the
+    // delete-then-repost loop with an extra step.
+    await assertFails(deleteDoc(doc(db(ALICE), tombstonePath(id))));
+    await assertFails(deleteDoc(doc(db(BOB), tombstonePath(id))));
+    // An ADMIN may — the moderation escape hatch for a genuine mis-retraction,
+    // mirroring the write-once per-day honor doc. Afterwards the win posts again.
+    await assertSucceeds(deleteDoc(doc(db(ADMIN), tombstonePath(id))));
+    await assertSucceeds(setDoc(doc(db(ALICE), momentPath(id)), moment(ALICE, { dayIndex: 3 })));
+  });
+
+  it('tombstone reads are public, like the Feed they describe', async () => {
+    await assertSucceeds(setDoc(doc(db(ALICE), tombstonePath(`${ALICE}-bingo-d3`)), tombstone(ALICE, { dayIndex: 3 })));
+    await assertSucceeds(getDoc(doc(db(BOB), tombstonePath(`${ALICE}-bingo-d3`))));
+  });
+});

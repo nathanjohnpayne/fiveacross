@@ -22,6 +22,7 @@ import {
   pendingFirstBingoDayIndex,
   clearPendingMoment,
   dropPendingWins,
+  retractPublishedWins,
   pendingActionGeneration,
   firstBingoCandidateCurrent,
 } from '../data/moments';
@@ -1272,17 +1273,37 @@ export default function Board() {
     // state before the refs re-seed below. On a mount's first snapshot the refs
     // are 0/false, so nothing can spuriously read as a fall.
     if (uid) {
+      // A retraction is PERMANENT (retract-once, #377), so — unlike the queue
+      // drop beside it — it is taken only off a SERVER-CONFIRMED board. A
+      // cache-only snapshot is not proof a published win fell: under the ADR 0006
+      // persistent cache a stale local copy can briefly show a win gone that the
+      // server still holds, and spending the (Player, Day) slot on that would
+      // silence a standing win forever. Dropping a QUEUED flag off the same
+      // snapshot stays safe (the drain re-validates and the flag re-enqueues on a
+      // fresh rising verdict), so the existing behaviour there is unchanged.
+      // The player's own unmark (doMark) needs no such gate — it is their
+      // deliberate action, and its verdict is the authority on what fell.
+      const retractable = boardConfirmed && initialized.current;
       if (wasBingoLines.current > 0 && bingoLines === 0) {
         // The fall is witnessed by THIS board — drop only its Day's queued
         // bingo (#372, the twin of the blackout day-scoping below); legacy
         // (no schedule) keeps the full clear.
-        dropPendingWins(uid, { bingo: true, bingoDayIndex: hasDays ? board?.dayIndex : undefined });
+        const fell = { bingo: true, bingoDayIndex: hasDays ? board?.dayIndex : undefined };
+        dropPendingWins(uid, fell);
+        // Cross-source fall (another tab/device unmarked, or a rules rollback
+        // landed): retract the published Moment too, so Feed truth does not
+        // depend on which tab observed the fall. Idempotent — a Moment the
+        // acting tab already retracted is no longer cached here either.
+        if (retractable) retractPublishedWins(uid, fell);
         if (hasDays && board?.dayIndex !== undefined) dropHeldHonorPins(uid, board.dayIndex);
       }
-      if (wasBlackout.current && !black)
+      if (wasBlackout.current && !black) {
         // The fall is witnessed by THIS board — drop only its Day's queued
         // blackout (#267); legacy (no schedule) keeps the full clear.
-        dropPendingWins(uid, { blackout: true, blackoutDayIndex: hasDays ? board?.dayIndex : undefined });
+        const fell = { blackout: true, blackoutDayIndex: hasDays ? board?.dayIndex : undefined };
+        dropPendingWins(uid, fell);
+        if (retractable) retractPublishedWins(uid, fell);
+      }
     }
     // Baseline vs detection (round 2 finding C, kept for the animation): under the
     // ADR 0006 persistent cache the first snapshot(s) can be cache-only, and a
@@ -1733,7 +1754,7 @@ export default function Board() {
         // (round 4: a NON-falling unmark — another line still standing — bumps
         // nothing, so a legitimate ceremony mid-witness-read survives it). An already-drained
         // flag is a harmless no-op (the Moment is immutable + once-only besides).
-        dropPendingWins(uid, {
+        const fell = {
           bingo: !res.bingo,
           blackout: !res.blackout,
           // The unmark verdict witnesses the ACTED board only (#267 for
@@ -1741,7 +1762,15 @@ export default function Board() {
           // on one Day cannot drop another Day's still-standing queued bingo).
           bingoDayIndex: hasDays ? viewedIndex : board?.dayIndex,
           blackoutDayIndex: hasDays ? viewedIndex : board?.dayIndex,
-        });
+        };
+        dropPendingWins(uid, fell);
+        // The same fall on the PUBLISHED side (#377): a Moment already standing
+        // in the Feed for this (Player, Day) is retracted — deleted and
+        // tombstoned in one batch — so the Feed stops claiming a win the card no
+        // longer supports. The SAME `fell` verdict drives both halves, so the
+        // pre- and post-publish paths can never disagree about what fell. A win
+        // that never published is a no-op (nothing cached to retract).
+        retractPublishedWins(uid, fell);
         if (hasDays && !res.bingo) dropHeldHonorPins(uid, viewedIndex);
         // Drain with the action's own folded cells AND its own Day (see
         // broadcastWinVerdict) — skipped if the account switched while the
