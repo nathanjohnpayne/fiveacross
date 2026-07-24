@@ -128,6 +128,26 @@ describe('proofMediaUrl — outside the e2e emulator build', () => {
 });
 
 describe('proofMediaUrl — source guards', () => {
+  it('the literal match patterns still cover the exported origin constants', async () => {
+    // The two rewrites match on LITERAL regexes rather than patterns assembled
+    // from the constants (a dynamically-built hostname pattern is the shape
+    // CodeQL's js/incomplete-hostname-regexp and js/incomplete-sanitization
+    // rules flag, and it flagged this module before that change). This closes
+    // the drift that literal-vs-constant split opens: the fixtures are DERIVED
+    // from the constants, so changing a constant without the pattern fails here.
+    const {
+      STORAGE_EMULATOR_HOST,
+      STORAGE_EMULATOR_PORT,
+      PRODUCTION_DOWNLOAD_ORIGIN,
+      canonicalizeProofMediaUrl,
+      resolveProofMediaUrl,
+    } = await loadUnderEmulator();
+    const tail = 'v0/b/bucket/o/proofs%2Fe%2Fu%2Fp.jpg?alt=media&token=t';
+    const fromConstants = `http://${STORAGE_EMULATOR_HOST}:${STORAGE_EMULATOR_PORT}/${tail}`;
+    expect(canonicalizeProofMediaUrl(fromConstants)).toBe(`${PRODUCTION_DOWNLOAD_ORIGIN}/${tail}`);
+    expect(resolveProofMediaUrl(`${PRODUCTION_DOWNLOAD_ORIGIN}/${tail}`)).toBe(fromConstants);
+  });
+
   it('pins the emulator host/port to the connectStorageEmulator call in src/firebase.ts', async () => {
     // The two literals are duplicated ON PURPOSE (each module's gate must fold
     // locally at build time — see the module header), so pin them against

@@ -67,7 +67,18 @@ export const STORAGE_EMULATOR_HOST = '127.0.0.1';
 export const STORAGE_EMULATOR_PORT = 9199;
 
 /** The single origin every real `getDownloadURL()` resolves against. */
-const PRODUCTION_DOWNLOAD_ORIGIN = 'https://firebasestorage.googleapis.com';
+export const PRODUCTION_DOWNLOAD_ORIGIN = 'https://firebasestorage.googleapis.com';
+
+// The two match patterns are LITERAL regexes rather than `new RegExp` built from
+// the constants above. Assembling a hostname pattern by interpolation is exactly
+// the shape CodeQL's `js/incomplete-hostname-regexp` and `js/incomplete-
+// sanitization` rules flag (correctly: an escaping helper that handles `.` but
+// not `\` is a real hazard in general, and a dynamically-built host pattern is
+// hard to audit by eye) — and it flagged this module on PR #468 before this
+// change. A literal is also simply easier to read as a security boundary. The
+// cost is that the pattern and the constants could drift, so
+// `proofMediaUrl.test.ts` derives its fixtures FROM the constants and asserts
+// the literals still rewrite them.
 
 /**
  * True only in the Playwright e2e build, which is the only build that talks to
@@ -87,15 +98,12 @@ const EMULATOR_STORAGE_WIRED =
  */
 export function canonicalizeProofMediaUrl(url: string): string {
   if (!EMULATOR_STORAGE_WIRED) return url;
-  // Built here rather than hoisted to module scope ON PURPOSE: keeping every
-  // emulator literal inside the guarded branch is what lets the production build
-  // drop them with the dead code. The cost is one regex compile per call, on a
-  // path that only ever runs in the e2e build (once per proof upload).
+  // Anchored on the whole emulator origin plus its trailing `/`, so nothing
+  // else — another loopback port, a host that merely starts the same way — is
+  // ever rewritten. Kept inside the guarded branch (rather than hoisted to
+  // module scope) so the production build drops the literals with the dead code.
   return url.replace(
-    new RegExp(
-      `^https?://(?:${STORAGE_EMULATOR_HOST.replace(/\./g, '\\.')}|localhost):${STORAGE_EMULATOR_PORT}/`,
-      'i',
-    ),
+    /^https?:\/\/(?:127\.0\.0\.1|localhost):9199\//i,
     `${PRODUCTION_DOWNLOAD_ORIGIN}/`,
   );
 }
@@ -112,12 +120,11 @@ export function canonicalizeProofMediaUrl(url: string): string {
  */
 export function resolveProofMediaUrl(url: string | null | undefined): string | null | undefined {
   if (!EMULATOR_STORAGE_WIRED || !url) return url;
-  // Same reasoning as above: the literals live inside the guarded branch so the
-  // production build can drop them. One compile per Feed media card, e2e only.
+  // Every `.` escaped and the trailing `/` required, so a look-alike host
+  // (`https://firebasestorage.googleapis.com.example.test/…`) never matches;
+  // `^` keeps a mid-string occurrence out too. Same in-branch placement as above.
   return url.replace(
-    // Anchored on the full origin plus its trailing `/`, so a look-alike host
-    // (`https://firebasestorage.googleapis.com.example/…`) never matches.
-    new RegExp(`^${PRODUCTION_DOWNLOAD_ORIGIN.replace(/[.]/g, '\\.')}/`, 'i'),
+    /^https:\/\/firebasestorage\.googleapis\.com\//i,
     `http://${STORAGE_EMULATOR_HOST}:${STORAGE_EMULATOR_PORT}/`,
   );
 }
