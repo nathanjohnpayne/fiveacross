@@ -338,6 +338,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Monotonic id of the latest deal attempt; runDeal captures it and re-checks
   // before each setState so a superseded attempt's late result is dropped (P2).
   const dealAttemptRef = useRef(0);
+  // The CURRENT signed-in uid, mirrored from the auth listener for non-render
+  // closures (#409): runDeal's join_event net must attribute a late-winning
+  // join to the session that actually performed it — never to whoever happens
+  // to be signed in when a superseded attempt finally resolves.
+  const authUidRef = useRef<string | null>(null);
   // Monotonic id of the latest auth change, captured before the awaited
   // ensureUserProfile so a retired account's slower bootstrap can't flip
   // profileReady true for the account that already replaced it. A SEPARATE ref
@@ -578,6 +583,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return onAuthStateChanged(auth, (u) => {
       // Auth changed: retire the previous account's in-flight deal/bootstrap and
       // clear its stale state so a late result can't clobber the incoming User (P2).
+      authUidRef.current = u?.uid ?? null;
       const profileAttempt = (profileAttemptRef.current += 1);
       dealAttemptRef.current += 1;
       clearDealError();
@@ -707,22 +713,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // attempt is still current, clear the error so the card shows without a manual
     // retry. Guarded by the attempt so a superseded deal never clobbers; the
     // rejection arm is a no-op (the catch below already owns a real failure).
+    //
+    // The uncancelled deal is also WRITE-safe to overlap with a Retry (#409):
+    // joinAndDeal runs its row/board read-and-write inside a runTransaction, so
+    // the timed-out attempt still in flight and the Retry's fresh attempt
+    // serialize server-side — the loser re-reads the committed join and
+    // degrades to a no-op instead of double-writing. This ref-based supersede
+    // guard stays load-bearing for CLIENT state (join_event, dealing/dealError)
+    // — the transaction bounds the writes, not which attempt reports them.
     const dealPromise = joinAndDeal(u);
     void dealPromise.then(
-      () => {
+      (dealt) => {
         if (dealAttemptRef.current === attempt) clearDealError();
+        // Record `join_event` ONLY on an actual join — a NEW board/row (Codex
+        // #117 round 8, finding B): joinAndDeal no-ops (returns false) for an
+        // already-boarded Player, so a ship-wifi reconnect records nothing.
+        // Tracked HERE, on the ORIGINAL promise, not on the awaited race below
+        // (#409, Codex P2 on #472): the transactional join resolves `true` from
+        // EXACTLY ONE call per actual join, and that call is not necessarily
+        // the current attempt — a timed-out (superseded) attempt's transaction
+        // can win while the Retry re-reads the committed row and resolves
+        // false. Attributing off the original promise records that ordering's
+        // join exactly once; the uid guard keeps a join that lands after a
+        // sign-out/account switch from attributing to the wrong session (the
+        // rare silent drop is the conservative direction).
+        if (dealt === true && authUidRef.current === u.uid) track('join_event');
       },
       () => {},
     );
     try {
-      const dealt = await withTimeout(dealPromise, DEAL_TIMEOUT_MS, 'Deal timed out');
+      // join_event tracking lives on the dealPromise net above — the awaited
+      // race resolves the SAME promise, so the net covers this branch too
+      // without double-firing.
+      await withTimeout(dealPromise, DEAL_TIMEOUT_MS, 'Deal timed out');
       if (dealAttemptRef.current !== attempt) return;
       clearDealError();
-      // Record `join_event` ONLY on an actual join — a NEW board (Codex #117 round
-      // 8, finding B). runDeal re-fires on every online/authority flip, and
-      // joinAndDeal no-ops (returns false) for an already-boarded Player, so a
-      // ship-wifi reconnect must record nothing rather than inflate join analytics.
-      if (dealt) track('join_event');
     } catch (err) {
       if (dealAttemptRef.current !== attempt) return;
       // A TRANSIENT connection failure must not tear down a card the Player already
