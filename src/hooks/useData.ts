@@ -3,6 +3,7 @@ import { collectionGroup, onSnapshot, query, where, type DocumentReference, type
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
 import { isReportHidden, isBanned, isSystemAuthor } from '../data/moderation';
+import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -305,16 +306,29 @@ export function useDayMetasStatus(dayCount: number): {
  * this sailing), so the fan is fixed-size per Event and re-keys only when the
  * schedule length or the viewer changes. Days without a Board simply never
  * enter the map.
+ *
+ * This fan is also the feeder for the Echo seed-freshness registry (#474,
+ * src/data/board-freshness.ts): each per-day subscription registers a watch
+ * and reports every snapshot, so the mark-time Echo pass only stamps a
+ * sibling's cached `seed` as `markSeed` once a live, fully server-committed
+ * snapshot has confirmed it. `includeMetadataChanges: true` is load-bearing
+ * for that (same rationale as useDocSub above): without metadata events,
+ * Firestore never re-notifies when the server confirms byte-identical cached
+ * data, and the registry would stay untrusted — silently skipping every echo
+ * — despite a healthy listener.
  */
 export function useMyDayBoards(uid: string | undefined, dayCount: number): ReadonlyMap<number, BoardDoc> {
   const [boards, setBoards] = useState<ReadonlyMap<number, BoardDoc>>(new Map());
   useEffect(() => {
     setBoards(new Map());
     if (!uid || dayCount <= 0) return;
-    const unsubs = Array.from({ length: dayCount }, (_, dayIndex) =>
-      onSnapshot(
+    const unsubs = Array.from({ length: dayCount }, (_, dayIndex) => {
+      const releaseWatch = beginDayBoardSeedWatch(dayIndex, uid);
+      const unsub = onSnapshot(
         dayBoardRef(dayIndex, uid),
+        { includeMetadataChanges: true },
         (snap) => {
+          recordDayBoardSeedSnapshot(dayIndex, uid, snap);
           setBoards((prev) => {
             const next = new Map(prev);
             if (snap.exists()) next.set(dayIndex, snap.data() as BoardDoc);
@@ -325,8 +339,12 @@ export function useMyDayBoards(uid: string | undefined, dayCount: number): Reado
         () => {
           /* permission-denied (signed out mid-flight) — leave the day absent */
         },
-      ),
-    );
+      );
+      return () => {
+        releaseWatch();
+        unsub();
+      };
+    });
     return () => unsubs.forEach((u) => u());
   }, [uid, dayCount]);
   return boards;
