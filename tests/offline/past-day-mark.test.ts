@@ -24,6 +24,7 @@ import {
 import { setMark } from '../../src/data/api';
 import type { Cell, PlayerDoc } from '../../src/types';
 import { seedEventDoc } from './seedEvent';
+import { runScopedEmail, runScopedProject } from './runScope';
 import { cellsToMap, cellsFromData } from '../../src/game/cells';
 
 // ---------------------------------------------------------------------- #387 ---
@@ -54,8 +55,8 @@ import { cellsToMap, cellsFromData } from '../../src/game/cells';
 // proof through the real setMark writer.
 
 const EVENT_ID = 'med-2026'; // must match the mocked src/firebase EVENT_ID
-const PROJECT_ID = 'demo-past-day-mark'; // distinct project → isolated data
-const EMAIL = 'pastday@offline.test';
+const PROJECT_ID = runScopedProject('demo-past-day-mark'); // distinct project → isolated data
+const EMAIL = runScopedEmail('pastday');
 const PASSWORD = 'passw0rd!';
 // The shared Prompt sits on BOTH Day Cards, so the past-Day Mark also
 // exercises the Echo write to the current Day's board in the same batch.

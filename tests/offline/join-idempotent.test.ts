@@ -70,6 +70,7 @@ import {
 } from 'firebase/firestore';
 import { joinAndDeal } from '../../src/data/api';
 import { seedEventDoc } from './seedEvent';
+import { runScopedEmail, runScopedProject } from './runScope';
 
 // ---------------------------------------------------------------------- #409 ---
 // The join must be IDEMPOTENT under overlap. `withTimeout` in runDeal rejects
@@ -83,8 +84,11 @@ import { seedEventDoc } from './seedEvent';
 // overlapping calls read "no row" and both committed a full seed.
 
 const EVENT_ID = 'med-2026'; // must match the mocked src/firebase EVENT_ID
-const PROJECT_ID = 'demo-join-idempotent'; // distinct project → isolated data
-const EMAIL = 'idem@offline.test';
+// Per-run scoped (#473): a fixed project id + email left the player row and
+// its auth user behind in a long-lived local emulator, so a SECOND `vitest
+// run` saw the row already present and both overlapping joins resolved false.
+const PROJECT_ID = runScopedProject('demo-join-idempotent'); // distinct project → isolated data
+const EMAIL = runScopedEmail('idem');
 const PASSWORD = 'passw0rd!';
 
 function firestoreEmulator(): [string, number] {

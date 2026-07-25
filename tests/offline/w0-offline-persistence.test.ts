@@ -24,6 +24,7 @@ import {
 } from 'firebase/firestore';
 import type { BoardDoc, Cell } from '../../src/types';
 import { seedEventDoc } from './seedEvent';
+import { runScopedEmail, runScopedProject } from './runScope';
 import { cellsToMap, cellsFromData, type CellsMap } from '../../src/game/cells';
 
 // ---------------------------------------------------------------- ADR 0006 ---
@@ -57,8 +58,8 @@ import { cellsToMap, cellsFromData, type CellsMap } from '../../src/game/cells';
 //     "vitest run --config vitest.offline.config.ts"
 
 const EVENT_ID = 'med-2026';
-const PROJECT_ID = 'demo-offline-persistence';
-const EMAIL = 'player@offline.test';
+const PROJECT_ID = runScopedProject('demo-offline-persistence');
+const EMAIL = runScopedEmail('player');
 const PASSWORD = 'passw0rd!';
 // A normal (non-free) Square: index 12 is the Free Space center, which the
 // real Board UI refuses to toggle, so marking it would be an unreachable
