@@ -2,8 +2,9 @@ name: app-ci
 
 # Runs the app test harness on every PR and on pushes to main: typecheck, the
 # jsdom unit/component suite, the production build, the Cloud Functions notifier
-# suite (tests/functions/), and the Firestore/Storage security-rules suite
-# against the emulators. The Playwright e2e layer is a local smoke runner
+# suite (tests/functions/), the Firestore/Storage security-rules suite against
+# the emulators, and the offline-durability suite (tests/offline/) against the
+# auth + firestore emulators. The Playwright e2e layer is a local smoke runner
 # (`npm run test:e2e`) and is intentionally not run here.
 
 on:
@@ -60,3 +61,18 @@ jobs:
 
       - name: Firestore rules tests (emulator)
         run: npm run test:rules
+
+      # The offline-durability layer (ADR 0006): tests/offline/** drives a real
+      # Firestore client under jsdom + fake-indexeddb against the auth +
+      # firestore emulators — the ADR 0006 persistence proofs, Echo Marks
+      # offline, the #457 cells-map merge, and the #387 / #409 regressions.
+      # Until now nothing in CI ever executed it, so a regression against any of
+      # those pins could merge green (#471).
+      #
+      # This step is deliberately SEPARATE from and AFTER the rules step, not
+      # merged into it: each script owns its own `firebase emulators:exec`
+      # invocation, and two emulator instances must never be live at once in one
+      # job (they would contend for the same ports). Steps run sequentially, so
+      # the rules emulator is fully torn down before this one boots.
+      - name: Offline durability tests (emulator)
+        run: npm run test:offline
