@@ -4,10 +4,10 @@ import type { Cell, DayDef, EventDoc, ItemDoc } from '../types';
 // Covers specs/reshuffle.md — the `reshuffleBoard` write path (#378). Proves the
 // deal SOURCE (the same frozen Day Snapshot, never a live query), the exclusion
 // posture (kept cards only — the discarded card's Prompts return to the pool),
-// the write SHAPE (exactly two docs, board + counter, in ONE transaction), the
-// eligibility refusals, that it FAILS rather than queues offline, and that no
-// other Player's card is touched. The sampling/stratification math itself is
-// proven in src/game/logic.test.ts.
+// the write SHAPE (exactly three docs — board + counter + per-spend marker
+// (#463) — in ONE transaction), the eligibility refusals, that it FAILS rather
+// than queues offline, and that no other Player's card is touched. The
+// sampling/stratification math itself is proven in src/game/logic.test.ts.
 
 const EVENT_ID = 'test-event';
 
@@ -170,6 +170,17 @@ const writtenPlayer = () => {
   return call?.[1] as { reshufflesUsed: number } | undefined;
 };
 
+/** The per-spend marker the transaction minted (#463) — path segments + payload. */
+const writtenMarker = () => {
+  const call = H.txSet.mock.calls.find((c) => {
+    const a = ((c[0] as { args?: unknown[] }).args ?? []).filter((x) => typeof x === 'string');
+    return a[2] === 'reshuffles';
+  });
+  if (!call) return undefined;
+  const a = ((call[0] as { args?: unknown[] }).args ?? []).filter((x): x is string => typeof x === 'string');
+  return { id: a[3], payload: call[1] as { uid: string; n: number; dayIndex: number } };
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   seedItems();
@@ -183,9 +194,17 @@ beforeEach(() => {
 });
 
 describe('reshuffleBoard — the happy path', () => {
-  it('writes exactly TWO docs: the day board and the counter — nothing else', async () => {
+  it('writes exactly THREE docs: the day board, the counter, and the spend marker — nothing else', async () => {
     await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
-    expect(H.txSet).toHaveBeenCalledTimes(2);
+    expect(H.txSet).toHaveBeenCalledTimes(3);
+  });
+
+  it('mints the per-spend marker the rules demand: id {uid}-{n}, naming this Day (#463)', async () => {
+    H.player = { uid: 'u1', reshufflesUsed: 1 };
+    await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
+    const marker = writtenMarker()!;
+    expect(marker.id).toBe('u1-2');
+    expect(marker.payload).toMatchObject({ uid: 'u1', n: 2, dayIndex: 1 });
   });
 
   it('returns the resulting spend and bumps the counter by exactly 1', async () => {

@@ -617,10 +617,10 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
   });
 
-  it('REGRESSION: a no-echo reshuffle keeps the exact two-write shape — the counter write is bare', async () => {
+  it('REGRESSION: a no-echo reshuffle keeps the exact three-write shape (board + counter + spend marker, #463) — the counter write is bare', async () => {
     seedShuffle({ playerExtra: { dayStats: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } } } });
     await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).resolves.toBe(1);
-    expect(H.txSet).toHaveBeenCalledTimes(2);
+    expect(H.txSet).toHaveBeenCalledTimes(3);
     expect(H.txSet.mock.calls.find(isPlayerWrite)![1]).toEqual({ reshufflesUsed: 1 });
     expect(H.txDelete).not.toHaveBeenCalled();
   });

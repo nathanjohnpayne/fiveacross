@@ -32,6 +32,7 @@ const FUTURE = () => NOW() + 3_600_000;
 
 const UNLOCKED_DAY = 0;
 const LOCKED_DAY = 1;
+const SECOND_UNLOCKED_DAY = 2;
 
 let testEnv: RulesTestEnvironment;
 const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
@@ -62,6 +63,25 @@ const board = (uid: string, dayIndex: number, seed: number, markedIndex?: number
   createdAt: NOW(),
   cells: cells(markedIndex),
 });
+
+/** A full 25-cell map whose 24 PROMPTS differ from `cells()` — the payload of
+ *  the same-seed re-deal attack (#463 finding 2): every itemId/text replaced,
+ *  nothing marked, the free centre intact. */
+function otherPromptCells() {
+  return Object.fromEntries(
+    Array.from({ length: 25 }, (_, index) => [
+      String(index),
+      {
+        index,
+        itemId: index === 12 ? null : `swapped${index}`,
+        text: index === 12 ? 'FREE' : `Swapped ${index}`,
+        free: index === 12,
+        marked: index === 12,
+        markedAt: null,
+      },
+    ]),
+  );
+}
 
 beforeAll(async () => {
   const host = process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080';
@@ -95,6 +115,7 @@ beforeEach(async () => {
       days: [
         { index: 0, unlockAt: PAST(), pool: 'main', tutorial: false },
         { index: 1, unlockAt: FUTURE(), pool: 'main', tutorial: false },
+        { index: 2, unlockAt: PAST(), pool: 'main', tutorial: false },
       ],
     });
     await setDoc(doc(d, `events/${EVENT}/players/${ALICE}`), {
@@ -107,20 +128,46 @@ beforeEach(async () => {
     });
     await setDoc(doc(d, `events/${EVENT}/days/${UNLOCKED_DAY}/boards/${ALICE}`), board(ALICE, UNLOCKED_DAY, 111));
     await setDoc(doc(d, `events/${EVENT}/days/${LOCKED_DAY}/boards/${ALICE}`), board(ALICE, LOCKED_DAY, 222));
+    await setDoc(doc(d, `events/${EVENT}/days/${SECOND_UNLOCKED_DAY}/boards/${ALICE}`), board(ALICE, SECOND_UNLOCKED_DAY, 333));
   });
 });
 
-/** The legitimate shape: replace the board with a new seed AND bump the counter,
- *  in ONE batch — exactly what `reshuffleBoard` commits. */
+/** The legitimate shape: replace the board with a new seed, bump the counter,
+ *  AND mint the per-spend marker (#463), in ONE batch — exactly what
+ *  `reshuffleBoard` commits. `marker: false` omits the marker write; a string
+ *  overrides the marker doc id. */
 function reshuffle(
   uid: string,
-  opts: { dayIndex?: number; seed?: number; nextUsed?: number; asUid?: string } = {},
+  opts: {
+    dayIndex?: number;
+    seed?: number;
+    nextUsed?: number;
+    asUid?: string;
+    marker?: boolean | string;
+    markerDayIndex?: number;
+  } = {},
 ) {
-  const { dayIndex = UNLOCKED_DAY, seed = 999, nextUsed = 1, asUid = uid } = opts;
+  const {
+    dayIndex = UNLOCKED_DAY,
+    seed = 999,
+    nextUsed = 1,
+    asUid = uid,
+    marker = true,
+    markerDayIndex = dayIndex,
+  } = opts;
   const d = db(asUid);
   const b = writeBatch(d);
   b.set(doc(d, `events/${EVENT}/days/${dayIndex}/boards/${uid}`), board(uid, dayIndex, seed));
   b.set(doc(d, `events/${EVENT}/players/${uid}`), { reshufflesUsed: nextUsed }, { merge: true });
+  if (marker !== false) {
+    const markerId = typeof marker === 'string' ? marker : `${uid}-${nextUsed}`;
+    b.set(doc(d, `events/${EVENT}/reshuffles/${markerId}`), {
+      uid,
+      n: nextUsed,
+      dayIndex: markerDayIndex,
+      createdAt: NOW(),
+    });
+  }
   return b.commit();
 }
 
@@ -201,7 +248,7 @@ describe('reshuffle — the board-side pairing gate', () => {
 // this exercises the ACTUAL production shape against the emulator so the rule is
 // proven on the path the app really takes, not merely on a cousin of it.
 describe('reshuffle — the pairing holds through a TRANSACTION (the production path)', () => {
-  it('ALLOWS a pristine reshuffle + paired +1 committed in one transaction', async () => {
+  it('ALLOWS a pristine reshuffle + paired +1 + spend marker committed in one transaction', async () => {
     const d = db(ALICE);
     await assertSucceeds(
       runTransaction(d, async (tx) => {
@@ -211,6 +258,12 @@ describe('reshuffle — the pairing holds through a TRANSACTION (the production 
         await tx.get(playerRef);
         tx.set(boardRef, board(ALICE, UNLOCKED_DAY, 4242));
         tx.set(playerRef, { reshufflesUsed: 1 }, { merge: true });
+        tx.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+          uid: ALICE,
+          n: 1,
+          dayIndex: UNLOCKED_DAY,
+          createdAt: NOW(),
+        });
       }),
     );
   });
@@ -237,6 +290,12 @@ describe('reshuffle — the pairing holds through a TRANSACTION (the production 
         await tx.get(playerRef);
         tx.set(boardRef, board(ALICE, UNLOCKED_DAY, 4242));
         tx.set(playerRef, { reshufflesUsed: 4 }, { merge: true });
+        tx.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-4`), {
+          uid: ALICE,
+          n: 4,
+          dayIndex: UNLOCKED_DAY,
+          createdAt: NOW(),
+        });
       }),
     );
   });
@@ -286,6 +345,125 @@ describe('reshuffle — the cap cannot be laundered around', () => {
     );
   });
 
+  // #463 finding 1: rules evaluate each batched document independently, and
+  // every Board write reads the SAME player doc — so ONE +1 satisfied the
+  // counter pairing for EVERY board in the batch (confirmed on the emulator:
+  // three boards + one 0→1 was ALLOWED, turning the cruise budget of 3 into up
+  // to 30). The per-spend marker is the batch-wide token that closes it: its
+  // path is pinned by the post-batch counter (one per batch) and its payload
+  // names exactly ONE Day.
+  it('DENIES a batched TWO-board reshuffle riding a single +1 (the N-for-1 laundering)', async () => {
+    const d = db(ALICE);
+    const b = writeBatch(d);
+    b.set(doc(d, `events/${EVENT}/days/${UNLOCKED_DAY}/boards/${ALICE}`), board(ALICE, UNLOCKED_DAY, 999));
+    b.set(
+      doc(d, `events/${EVENT}/days/${SECOND_UNLOCKED_DAY}/boards/${ALICE}`),
+      board(ALICE, SECOND_UNLOCKED_DAY, 888),
+    );
+    b.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
+    b.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+      uid: ALICE,
+      n: 1,
+      dayIndex: UNLOCKED_DAY,
+      createdAt: NOW(),
+    });
+    await assertFails(b.commit());
+  });
+
+  it('DENIES the two-board batch even when it mints a SECOND marker for the unpaid spend', async () => {
+    // The second marker's n=2 is denied by the marker rule (the counter only
+    // reaches 1), and board 2's own marker lookup resolves the n=1 path whose
+    // dayIndex names board 1 — either way the batch dies.
+    const d = db(ALICE);
+    const b = writeBatch(d);
+    b.set(doc(d, `events/${EVENT}/days/${UNLOCKED_DAY}/boards/${ALICE}`), board(ALICE, UNLOCKED_DAY, 999));
+    b.set(
+      doc(d, `events/${EVENT}/days/${SECOND_UNLOCKED_DAY}/boards/${ALICE}`),
+      board(ALICE, SECOND_UNLOCKED_DAY, 888),
+    );
+    b.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
+    b.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+      uid: ALICE,
+      n: 1,
+      dayIndex: UNLOCKED_DAY,
+      createdAt: NOW(),
+    });
+    b.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-2`), {
+      uid: ALICE,
+      n: 2,
+      dayIndex: SECOND_UNLOCKED_DAY,
+      createdAt: NOW(),
+    });
+    await assertFails(b.commit());
+  });
+
+  it('DENIES a reshuffle whose batch omits the spend marker', async () => {
+    await assertFails(reshuffle(ALICE, { marker: false }));
+  });
+
+  it('DENIES a reshuffle whose marker names a DIFFERENT Day', async () => {
+    await assertFails(reshuffle(ALICE, { markerDayIndex: SECOND_UNLOCKED_DAY }));
+  });
+
+  it('DENIES a reshuffle vouched by a marker PRE-CREATED in an earlier request', async () => {
+    // A marker that already exists is not a spend this batch is paying — the
+    // board side requires the marker to be NEW in the batch (!exists).
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/reshuffles/${ALICE}-1`), {
+        uid: ALICE,
+        n: 1,
+        dayIndex: UNLOCKED_DAY,
+        createdAt: NOW(),
+      });
+    });
+    await assertFails(reshuffle(ALICE, { marker: false }));
+  });
+
+  // #463 finding 2: `isReshuffleWrite()` discriminates on `seed` alone, so a
+  // full cells replacement that KEEPS the stored seed — 24 new prompts,
+  // `markSeed` echoed — was never classified as a reshuffle and passed the Mark
+  // arm: a free, unlimited re-deal (confirmed on the emulator at
+  // reshufflesUsed: 3). Prompt content is now bound on every non-reshuffle
+  // cells write.
+  it('DENIES a same-seed full cells rewrite — the free re-deal (finding 2)', async () => {
+    await seedCounter(3); // spent out — and it still would have been ALLOWED before
+    const d = db(ALICE);
+    await assertFails(
+      setDoc(doc(d, `events/${EVENT}/days/${UNLOCKED_DAY}/boards/${ALICE}`), {
+        uid: ALICE,
+        dayIndex: UNLOCKED_DAY,
+        seed: 111,
+        createdAt: NOW(),
+        cells: otherPromptCells(),
+        markSeed: 111,
+      }),
+    );
+  });
+
+  it('DENIES the same-seed rewrite even when fully PAID (counter +1 and marker)', async () => {
+    // Flat-denied, not reclassified: a real reshuffle always changes seed
+    // (reshuffleSeed() nudges past collisions), so no legitimate caller keeps
+    // it — and denying outright leaves no same-seed shape to launder through.
+    const d = db(ALICE);
+    const b = writeBatch(d);
+    b.set(doc(d, `events/${EVENT}/days/${UNLOCKED_DAY}/boards/${ALICE}`), {
+      uid: ALICE,
+      dayIndex: UNLOCKED_DAY,
+      seed: 111,
+      createdAt: NOW(),
+      cells: otherPromptCells(),
+      markSeed: 111,
+    });
+    b.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
+    b.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+      uid: ALICE,
+      n: 1,
+      dayIndex: UNLOCKED_DAY,
+      createdAt: NOW(),
+    });
+    await assertFails(b.commit());
+  });
+
   it('still ALLOWS a seedless legacy board to be MARKED (no seed on either side)', async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), `events/${EVENT}/days/${UNLOCKED_DAY}/boards/${ALICE}`), {
@@ -303,6 +481,91 @@ describe('reshuffle — the cap cannot be laundered around', () => {
         { merge: true },
       ),
     );
+  });
+});
+
+// The marker collection's own rules (#463): create-only, id bound to
+// {uid}-{n}, n bound to the POST-batch counter — so a marker can only ever be
+// minted for the spend its batch is actually paying.
+describe('reshuffle — the spend-marker collection', () => {
+  it('DENIES pre-minting a FUTURE spend marker (the self-brick / stockpile shape)', async () => {
+    // Counter is 0; a lone marker for n=1 claims a spend no batch is paying.
+    const d = db(ALICE);
+    await assertFails(
+      setDoc(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+        uid: ALICE,
+        n: 1,
+        dayIndex: UNLOCKED_DAY,
+        createdAt: NOW(),
+      }),
+    );
+  });
+
+  it('DENIES minting a marker under a MISMATCHED id', async () => {
+    await assertFails(reshuffle(ALICE, { marker: `${ALICE}-2` }));
+  });
+
+  it('DENIES minting a marker for ANOTHER player', async () => {
+    const d = db(BOB);
+    const b = writeBatch(d);
+    b.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
+    b.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+      uid: ALICE,
+      n: 1,
+      dayIndex: UNLOCKED_DAY,
+      createdAt: NOW(),
+    });
+    await assertFails(b.commit());
+  });
+
+  it('DENIES rewriting an existing marker — markers are immutable', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/reshuffles/${ALICE}-1`), {
+        uid: ALICE,
+        n: 1,
+        dayIndex: UNLOCKED_DAY,
+        createdAt: NOW(),
+      });
+    });
+    await seedCounter(1);
+    const d = db(ALICE);
+    await assertFails(
+      setDoc(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+        uid: ALICE,
+        n: 1,
+        dayIndex: SECOND_UNLOCKED_DAY,
+        createdAt: NOW(),
+      }),
+    );
+  });
+
+  it('DENIES an owner DELETING a marker — a spent marker cannot be re-minted', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/reshuffles/${ALICE}-1`), {
+        uid: ALICE,
+        n: 1,
+        dayIndex: UNLOCKED_DAY,
+        createdAt: NOW(),
+      });
+    });
+    await assertFails(deleteDoc(doc(db(ALICE), `events/${EVENT}/reshuffles/${ALICE}-1`)));
+  });
+
+  // The marker-side twin of the unpaired-+1 residual (specs/reshuffle.md §
+  // Residuals): a counter bump + marker with NO board write burns the Player's
+  // own allowance and replaces no card — self-harm, not an exploit. Pinned so
+  // it is a decision on the record rather than a gap someone later "discovers".
+  it('PERMITS a paired counter+marker with no board write — the documented self-burn residual', async () => {
+    const d = db(ALICE);
+    const b = writeBatch(d);
+    b.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
+    b.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+      uid: ALICE,
+      n: 1,
+      dayIndex: UNLOCKED_DAY,
+      createdAt: NOW(),
+    });
+    await assertSucceeds(b.commit());
   });
 });
 
