@@ -110,7 +110,9 @@ export default function ConfirmWinMoments() {
   // `useBoard` above; the two paths never mix (a Claim either carries a
   // dayIndex or it does not).
   const { data: event } = useEventDoc(!!uid);
-  const dayBoards = useMyDayBoards(uid, event?.days?.length ?? 0);
+  // Canonical DayDef.index values, not array positions (#447 precedent, #474):
+  // the fan keys board paths AND the echo seed-trust registry on d.index.
+  const dayBoards = useMyDayBoards(uid, event?.days?.map((d) => d.index) ?? []);
   const { data: player, loading: playerLoading, hasServerData: playerConfirmed } = useMyPlayer(uid);
   const { players, hasServerData: rosterConfirmed } = useLeaderboard();
   const { claims, fromCache: claimsFromCache } = useMyClaims(uid);

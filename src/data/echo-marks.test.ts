@@ -154,6 +154,26 @@ import {
 import { confirmClaim, rejectClaim } from './admin';
 import { resetPendingMoments, peekPendingMoments, pendingBingoDayIndexes } from './moments';
 import { cellsFromData } from '../game/cells';
+import {
+  __resetBoardFreshnessForTests,
+  beginDayBoardSeedWatch,
+  recordDayBoardSeedSnapshot,
+} from './board-freshness';
+
+/**
+ * #474: latch mark-time echo trust for a Day board the way the production
+ * `useMyDayBoards` fan does — a live watch plus one fully server-committed
+ * snapshot confirming the seed. Returns the watch's release fn.
+ */
+function trustDayBoard(dayIndex: number, uid: string, seed: number | undefined): () => void {
+  const release = beginDayBoardSeedWatch(dayIndex, uid);
+  recordDayBoardSeedSnapshot(dayIndex, uid, {
+    metadata: { fromCache: false, hasPendingWrites: false },
+    exists: () => true,
+    data: () => (typeof seed === 'number' ? { seed } : {}),
+  });
+  return release;
+}
 
 const PAST = Date.now() - 3_600_000;
 
@@ -196,6 +216,7 @@ beforeEach(() => {
   H.player = null;
   H.transactionRunner = null;
   __resetPendingMarkerRepairsForTests();
+  __resetBoardFreshnessForTests();
 });
 
 describe('computeMark preserves an Echo opt-out on manual unmark (spec § No unmark cascades)', () => {
@@ -246,6 +267,11 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: actedCells });
     H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
     H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => `c${i}`) });
+    // #474: mark-time echo requires each sibling's cached seed to be trusted —
+    // simulate the live useMyDayBoards fan that provides it in production.
+    trustDayBoard(1, 'u1', 111);
+    trustDayBoard(2, 'u1', 222);
+    trustDayBoard(3, 'u1', 333);
     H.player = {
       uid: 'u1',
       displayName: 'Alice',
@@ -281,6 +307,45 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(echoed).toMatchObject({ marked: true, status: 'confirmed', echo: true, itemId: 'shared' });
     // The non-carrier sibling (Day 1) is untouched.
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(false);
+  });
+
+  it('#474: SKIPS the echo for a sibling with no server-confirmed seed watch — the acted Mark still commits alone', async () => {
+    seedBoards();
+    // Drop ALL trust: the sibling is cached (seed 333) but nothing live has
+    // ever server-confirmed it — the stale-cache poison setup.
+    __resetBoardFreshnessForTests();
+    await markShared();
+    // No echoed sibling write rides the batch...
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
+    // ...but the acted board's own Mark and its player fold still do.
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(true);
+    const playerWrite = H.batchSet.mock.calls.find(isPlayerWrite)![1] as {
+      squaresMarked: number;
+      dayStats: Record<number, { squaresMarked: number }>;
+    };
+    expect(playerWrite.squaresMarked).toBe(1); // acted bucket only — no echo fold
+    expect(playerWrite.dayStats[3]).toBeUndefined();
+    expect(H.batchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('#474: SKIPS the echo when the server-confirmed seed MISMATCHES the cached one (remote reshuffle)', async () => {
+    seedBoards();
+    // The live watch has seen the sibling reshuffled to a NEW seed on the
+    // server, but this device's cache still holds the OLD card at 333.
+    __resetBoardFreshnessForTests();
+    trustDayBoard(3, 'u1', 999);
+    await markShared();
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(true);
+  });
+
+  it('#474: trust drops fail-closed when the last watch releases', async () => {
+    seedBoards();
+    __resetBoardFreshnessForTests();
+    const release = trustDayBoard(3, 'u1', 333);
+    release(); // e.g. sign-out tore the fan down — the seed can go stale unobserved
+    await markShared();
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
   });
 
 

@@ -3,6 +3,7 @@ import { collectionGroup, onSnapshot, query, where, type DocumentReference, type
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
 import { isReportHidden, isBanned, isSystemAuthor } from '../data/moderation';
+import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -301,20 +302,44 @@ export function useDayMetasStatus(dayCount: number): {
  * the Feed's Tally Card button gating needs the viewer's marked/unmarked
  * Prompt sets across every unlocked Day Card, and a Board doc exists exactly
  * for the dealt/unlocked Days). One effect owns the whole fan of per-day doc
- * subscriptions — `dayCount` is the Event's `days.length` (bounded, ten on
- * this sailing), so the fan is fixed-size per Event and re-keys only when the
- * schedule length or the viewer changes. Days without a Board simply never
+ * subscriptions — `dayIndexes` is the Event's CANONICAL `days.map(d =>
+ * d.index)` (bounded, ten on this sailing; canonical DayDef.index values, NOT
+ * array positions — day-board paths key on d.index everywhere, the #447
+ * Phase 4b precedent), so the fan is fixed-size per Event and re-keys only
+ * when the schedule or the viewer changes. Days without a Board simply never
  * enter the map.
+ *
+ * This fan is also the feeder for the Echo seed-freshness registry (#474,
+ * src/data/board-freshness.ts): each per-day subscription registers a watch
+ * and reports every snapshot, so the mark-time Echo pass only stamps a
+ * sibling's cached `seed` as `markSeed` once a live, fully server-committed
+ * snapshot has confirmed it. `includeMetadataChanges: true` is load-bearing
+ * for that (same rationale as useDocSub above): without metadata events,
+ * Firestore never re-notifies when the server confirms byte-identical cached
+ * data, and the registry would stay untrusted — silently skipping every echo
+ * — despite a healthy listener. A listener that dies (the terminal error
+ * callback) releases its watch immediately (Codex P2 on #482): a dead
+ * listener can't observe a remote reshuffle, so its latched seed must stop
+ * being trusted without waiting for the effect cleanup.
  */
-export function useMyDayBoards(uid: string | undefined, dayCount: number): ReadonlyMap<number, BoardDoc> {
+export function useMyDayBoards(
+  uid: string | undefined,
+  dayIndexes: readonly number[],
+): ReadonlyMap<number, BoardDoc> {
   const [boards, setBoards] = useState<ReadonlyMap<number, BoardDoc>>(new Map());
+  // Effect-key the CONTENT of the index list, not the array identity —
+  // callers rebuild the array every render.
+  const fanKey = dayIndexes.join(',');
   useEffect(() => {
     setBoards(new Map());
-    if (!uid || dayCount <= 0) return;
-    const unsubs = Array.from({ length: dayCount }, (_, dayIndex) =>
-      onSnapshot(
+    if (!uid || dayIndexes.length === 0) return;
+    const unsubs = dayIndexes.map((dayIndex) => {
+      const releaseWatch = beginDayBoardSeedWatch(dayIndex, uid);
+      const unsub = onSnapshot(
         dayBoardRef(dayIndex, uid),
+        { includeMetadataChanges: true },
         (snap) => {
+          recordDayBoardSeedSnapshot(dayIndex, uid, snap);
           setBoards((prev) => {
             const next = new Map(prev);
             if (snap.exists()) next.set(dayIndex, snap.data() as BoardDoc);
@@ -323,12 +348,21 @@ export function useMyDayBoards(uid: string | undefined, dayCount: number): Reado
           });
         },
         () => {
-          /* permission-denied (signed out mid-flight) — leave the day absent */
+          /* permission-denied (signed out mid-flight) — leave the day absent,
+             and drop the seed-trust watch NOW: this listener is terminated and
+             can no longer observe a remote reshuffle (idempotent with the
+             cleanup below). */
+          releaseWatch();
         },
-      ),
-    );
+      );
+      return () => {
+        releaseWatch();
+        unsub();
+      };
+    });
     return () => unsubs.forEach((u) => u());
-  }, [uid, dayCount]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, fanKey]);
   return boards;
 }
 

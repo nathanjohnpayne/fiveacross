@@ -46,6 +46,7 @@ import {
 import { enqueueWinMoments } from './moments';
 import { cellsToMap, cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
+import { trustedDayBoardSeed } from './board-freshness';
 import { pinDayFirstBingo } from './dayMeta';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
@@ -1447,6 +1448,10 @@ export async function setMark(params: {
   // to today. Sibling boards are read from the PERSISTENT CACHE only (the same
   // offline-safe read discipline as the base fold above); a cache-missed
   // sibling simply isn't echoed here — the open-time reconcile self-heals it.
+  // Neither is a sibling whose cached seed is not server-confirmed under a
+  // live watch (#474, src/data/board-freshness.ts): a stale cached seed
+  // stamped as markSeed would have the rules deny that one write and roll
+  // back the whole batch, acted Mark included.
   echoDayIndexes?: number[];
   database?: Firestore;
 }): Promise<{
@@ -1628,8 +1633,10 @@ async function runSetMark(
   // base fold above, and serialized with every other Mark by the markChains
   // chain, so overlapping calls can't fold onto stale sibling state); a
   // cache-missed sibling is simply skipped — the open-time reconcile self-heals
-  // it. Only confirmed Marks echo: an admin_confirmed-mode Mark starts
-  // `pending` and echoes from `confirmClaim` instead. Unmarks never cascade.
+  // it — and so is a sibling whose cached seed is not ECHO-TRUSTED (#474, the
+  // board-freshness registry check below). Only confirmed Marks echo: an
+  // admin_confirmed-mode Mark starts `pending` and echoes from `confirmClaim`
+  // instead. Unmarks never cascade.
   const echoItemId =
     params.nextMarked && params.claimMode !== 'admin_confirmed' && toggled && !toggled.free
       ? toggled.itemId
@@ -1653,14 +1660,26 @@ async function runSetMark(
     sibSnaps.forEach((snap, i) => {
       if (snap.status !== 'fulfilled' || !snap.value.exists()) return;
       const sib = snap.value.data() as { cells?: unknown; seed?: number };
+      const sibDay = echoDayIndexes[i];
+      // #474: a cache read carries no freshness metadata, and a sibling
+      // reshuffled on ANOTHER device since this device last saw it returns
+      // the OLD seed here — stamping it as markSeed would have
+      // `seededMarkGuard` deny that ONE write and roll back the WHOLE batch,
+      // acted Mark included (the visible-revert incident class). Only echo a
+      // sibling whose cached seed a LIVE server-committed snapshot has
+      // confirmed (the board-freshness registry, fed by useMyDayBoards);
+      // anything else is skipped and the open-time reconcile self-heals it,
+      // exactly like a cache-missed sibling.
+      const trust = trustedDayBoardSeed(sibDay, uid);
+      const sibSeed = typeof sib.seed === 'number' ? sib.seed : undefined;
+      if (!trust.trusted || trust.seed !== sibSeed) return;
       const sibCells = cellsFromData(sib.cells);
       const res = applyEchoes(sibCells, achieved, now);
       if (!res.changed) return;
-      const sibDay = echoDayIndexes[i];
       echoBoards.push({
         dayIndex: sibDay,
         cellsPatch: cellsPatch(changedCells(sibCells, res.cells)),
-        markSeed: typeof sib.seed === 'number' ? sib.seed : undefined,
+        markSeed: sibSeed,
         bucket: {
           dayIndex: sibDay,
           bingoCount: res.bingoCount,

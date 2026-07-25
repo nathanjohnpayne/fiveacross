@@ -16,12 +16,18 @@ import {
   persistentLocalCache,
   connectFirestoreEmulator,
   doc,
+  onSnapshot,
   setDoc,
   getDocFromServer,
   waitForPendingWrites,
   type Firestore,
 } from 'firebase/firestore';
 import { setMark } from '../../src/data/api';
+import {
+  beginDayBoardSeedWatch,
+  recordDayBoardSeedSnapshot,
+  trustedDayBoardSeed,
+} from '../../src/data/board-freshness';
 import type { Cell, PlayerDoc } from '../../src/types';
 import { seedEventDoc } from './seedEvent';
 import { runScopedEmail, runScopedProject } from './runScope';
@@ -146,6 +152,22 @@ describe('#387 — a Mark on a past Day commits and persists', () => {
     });
     await waitForPendingWrites(tab.db);
 
+    // #474: the mark-time echo only rides for a sibling whose seed a LIVE
+    // server-committed snapshot has confirmed — mount the production
+    // `useMyDayBoards` fan's equivalent for the current Day and wait for the
+    // trust latch before marking.
+    const releaseWatch = beginDayBoardSeedWatch(CURRENT_DAY, tab.uid);
+    const unsubWatch = onSnapshot(
+      doc(tab.db, currentBoardPath),
+      { includeMetadataChanges: true },
+      (snap) => recordDayBoardSeedSnapshot(CURRENT_DAY, tab.uid, snap),
+    );
+    const trustDeadline = Date.now() + 15_000;
+    while (trustedDayBoardSeed(CURRENT_DAY, tab.uid).seed !== 111) {
+      if (Date.now() > trustDeadline) throw new Error('echo trust never latched');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
     // The player switches back to the earlier Day and marks a square — the
     // REAL write path, exactly what Board.doMark passes for a past Day view
     // (dayIndex = the viewed past Day, echo across the whole schedule).
@@ -198,5 +220,8 @@ describe('#387 — a Mark on a past Day commits and persists', () => {
     const currentCells = cellsFromData((serverCurrent.data() as { cells?: unknown }).cells);
     expect(currentCells[ECHO_INDEX].marked).toBe(true);
     expect(currentCells[ECHO_INDEX].echo).toBe(true);
+
+    releaseWatch();
+    unsubWatch();
   });
 });

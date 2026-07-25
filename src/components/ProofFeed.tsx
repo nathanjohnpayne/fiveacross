@@ -990,7 +990,8 @@ export default function ProofFeed() {
   // ＋ Proof on a Prompt they marked, 🙋 Got it too on one sitting unmarked on
   // one of their unlocked cards, nothing otherwise — reads these Boards
   // through the pure `tallyActionTarget`.
-  const myBoards = useMyDayBoards(user?.uid, event?.days?.length ?? 0);
+  // Canonical DayDef.index values, not array positions (#447 precedent, #474).
+  const myBoards = useMyDayBoards(user?.uid, event?.days?.map((d) => d.index) ?? []);
   // The viewer's resolved public identity for a Doubt raised from the Feed sheet
   // (#392) — the SAME resolution Board runs for its own who-list sheet: the saved
   // player-row name through `resolveDisplayName`, KNOWN only once the row settles.
