@@ -26,6 +26,8 @@ const H = vi.hoisted(() => ({
   attachProof: vi.fn(),
   track: vi.fn(),
   dayMeta: null as { firstBingo: { uid: string; displayName: string; at: number } } | null,
+  boardFromCache: false,
+  boardPending: false,
   pinDayFirstBingo: vi.fn((..._args: unknown[]) => Promise.resolve()),
   enqueueHeldHonorPin: vi.fn(),
   takeHeldHonorPins: vi.fn(() => [] as Array<{ uid: string; dayIndex: number; at: number }>),
@@ -40,11 +42,23 @@ vi.mock('../hooks/useData', () => ({
   isBanned: (uid: string, list: string[]) => list.includes(uid),
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
-  useBoard: () => ({ data: H.board, loading: false, hasServerData: true }),
+  useBoard: () => ({
+    data: H.board,
+    loading: false,
+    hasServerData: true,
+    fromCache: H.boardFromCache,
+    hasPendingWrites: H.boardPending,
+  }),
   // In daily mode Board reads the VIEWED Day's board here (#246). The suite's
   // fixtures set `H.board` with a `dayIndex` matching the viewed Day, so returning
   // it for any requested index renders that Day's card exactly as before.
-  useDayBoard: () => ({ data: H.board, loading: false, hasServerData: true }),
+  useDayBoard: () => ({
+    data: H.board,
+    loading: false,
+    hasServerData: true,
+    fromCache: H.boardFromCache,
+    hasPendingWrites: H.boardPending,
+  }),
   useMyPlayer: () => ({ data: H.player, loading: false, hasServerData: true }),
   useEventDoc: () => ({ data: H.event, loading: false }),
   useItems: () => ({ items: [], loading: false, hasServerData: true }),
@@ -135,6 +149,7 @@ vi.mock('firebase/firestore', () => ({
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
 
 import Board, { shareCardBingoNumber } from './Board';
+import { drainRetractions } from '../data/moments';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -244,6 +259,8 @@ function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 't
 beforeEach(() => {
   vi.clearAllMocks();
   H.dayMeta = null;
+  H.boardFromCache = false;
+  H.boardPending = false;
   H.user = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null };
   H.event = { claimMode: 'honor', timezone: 'UTC', days: [] } as unknown as EventDoc;
   H.board = null;
@@ -251,6 +268,59 @@ beforeEach(() => {
   H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false });
   H.attachProof.mockResolvedValue(undefined);
   H.getDoc.mockResolvedValue({ exists: () => false, data: () => ({}) });
+});
+
+describe('published Moment retraction drain gate (#377)', () => {
+  it('does not drain from a cache-only board snapshot', async () => {
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    H.boardFromCache = true;
+
+    render(<Board />);
+    await act(async () => {});
+
+    expect(drainRetractions).not.toHaveBeenCalled();
+  });
+
+  it('does not drain from a board snapshot with pending writes', async () => {
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    H.boardPending = true;
+
+    render(<Board />);
+    await act(async () => {});
+
+    expect(drainRetractions).not.toHaveBeenCalled();
+  });
+
+  it('drains from a server-committed daily board snapshot with the board state', async () => {
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    await act(async () => {});
+
+    expect(drainRetractions).toHaveBeenCalledWith('u1', {
+      dayIndex: 0,
+      bingoStands: false,
+      blackoutStands: false,
+    });
+  });
 });
 
 afterEach(() => {

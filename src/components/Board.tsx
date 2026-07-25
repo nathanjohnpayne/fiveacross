@@ -1789,8 +1789,11 @@ export default function Board() {
           // The unmark verdict witnesses the ACTED board only (#267 for
           // blackout; #372 extends the same day-scoping to bingo, so unmarking
           // on one Day cannot drop another Day's still-standing queued bingo).
-          bingoDayIndex: hasDays ? viewedIndex : board?.dayIndex,
-          blackoutDayIndex: hasDays ? viewedIndex : board?.dayIndex,
+          // Legacy single-board Events deliberately enqueue the day-less token:
+          // `drainRetractions` has no Day there, so a stamped board.dayIndex
+          // would never match and the retraction could never commit.
+          bingoDayIndex: hasDays ? viewedIndex : undefined,
+          blackoutDayIndex: hasDays ? viewedIndex : undefined,
         };
         dropPendingWins(uid, fell);
         // The same fall on the PUBLISHED side (#377) — but only as an INTENT.

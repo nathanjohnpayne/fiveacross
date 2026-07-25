@@ -1,4 +1,4 @@
-import { doc, getDoc, getDocFromCache, setDoc, writeBatch } from 'firebase/firestore';
+import { doc, getDoc, getDocFromCache, getDocFromServer, setDoc, writeBatch } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
 import { hasBingo, isBlackout } from '../game/logic';
@@ -620,6 +620,10 @@ const pendingRetractions = new Map<string, Set<string>>();
 const DAY_LESS = 'legacy';
 const retractionToken = (kind: RetractableKind, dayIndex?: number): string =>
   `${kind}:${dayIndex ?? DAY_LESS}`;
+const requeueRetraction = (uid: string, kind: RetractableKind, dayIndex?: number): void => {
+  if (kind === 'bingo') enqueueRetraction(uid, { bingo: true, bingoDayIndex: dayIndex });
+  else enqueueRetraction(uid, { blackout: true, blackoutDayIndex: dayIndex });
+};
 
 /**
  * Record that an observed fall INVALIDATED a (possibly published) win — the
@@ -676,7 +680,9 @@ export function drainRetractions(
     if (!intents.has(token)) return;
     intents.delete(token);
     if (stands) return; // the server says the win is fine — spend nothing
-    void retractWin(uid, kind, board.dayIndex);
+    void retractWin(uid, kind, board.dayIndex).then((consumed) => {
+      if (!consumed) requeueRetraction(uid, kind, board.dayIndex);
+    });
   };
   consider('bingo', board.bingoStands);
   consider('blackout', board.blackoutStands);
@@ -694,15 +700,22 @@ export function resetRetractions(): void {
 const winMomentId = (uid: string, kind: RetractableKind, dayIndex?: number): string =>
   dayIndex === undefined ? `${uid}-${kind}` : `${uid}-${kind}-d${dayIndex}`;
 
-/** Read a Moment from the LOCAL cache only, resolving `undefined` on a miss —
- *  `getDocFromCache` REJECTS when the doc is not cached, and a retraction must
- *  never throw into a fall observer. */
-async function cachedMomentData(id: string): Promise<Record<string, unknown> | undefined> {
+type MomentProbe =
+  | { status: 'exists'; data: Record<string, unknown> }
+  | { status: 'missing' }
+  | { status: 'unknown' };
+
+/** Probe a candidate Moment through the server-only read path. A miss is
+ *  authoritative enough to consume the intent without minting a tombstone; a read
+ *  failure is not, so the caller keeps the intent for a later drain. */
+async function serverMomentData(id: string): Promise<MomentProbe> {
   try {
-    const snap = await getDocFromCache(rawMoment(id));
-    return snap.exists() ? ((snap.data() as Record<string, unknown>) ?? {}) : undefined;
+    const snap = await getDocFromServer(rawMoment(id));
+    return snap.exists()
+      ? { status: 'exists', data: (snap.data() as Record<string, unknown>) ?? {} }
+      : { status: 'missing' };
   } catch {
-    return undefined;
+    return { status: 'unknown' };
   }
 }
 
@@ -753,7 +766,7 @@ async function commitRetraction(
   kind: RetractableKind,
   momentIds: string[],
   dayIndex?: number,
-): Promise<void> {
+): Promise<boolean> {
   const tombstone: RetractionTombstone = {
     uid,
     kind,
@@ -769,9 +782,13 @@ async function commitRetraction(
   for (const id of tombstoneIds) {
     if (!(await tombstoneExists(id))) batch.set(rawMomentRetraction(id), tombstone);
   }
-  await batch.commit().catch((err: unknown) => {
-    console.error('[moments] retraction rejected', { momentIds, kind, uid }, err);
-  });
+  return batch.commit().then(
+    () => true,
+    (err: unknown) => {
+      console.error('[moments] retraction rejected', { momentIds, kind, uid }, err);
+      return false;
+    },
+  );
 }
 
 /**
@@ -779,14 +796,12 @@ async function commitRetraction(
  * ever reached from `drainRetractions` (i.e. with the server's own confirmation
  * that the win fell). Fire-and-forget: it must never block the UI.
  *
- * Nothing is retracted unless a Moment for that (Player, Day) is ACTUALLY in the
- * local cache. That check is load-bearing, not an optimization: minting a
+ * Nothing is retracted unless a Moment for that (Player, Day) is ACTUALLY found
+ * by a server-first probe. That check is load-bearing, not an optimization: minting a
  * tombstone for a win that never published would SPEND the (Player, Day) slot
- * without a Moment ever having existed — permanently silencing a legitimate future
- * win. The cache is a trustworthy witness here because the Feed subscribes to the
- * whole moments collection (`useMoments`), so a published Moment is cached on any
- * running client. A cold-cache device simply does not retract (the fall's own
- * device does); that residual is silence, never a false tombstone.
+ * without a Moment ever having existed — permanently silencing a legitimate
+ * future win. A read failure is not evidence of absence, so the intent is
+ * requeued and retried on a later server-committed board snapshot.
  *
  * BOTH id forms are probed, because both can legitimately hold the live Moment for
  * a given (Player, Day):
@@ -804,29 +819,34 @@ async function commitRetraction(
  * IS per-card there) retracts the day-less id unconditionally and probes no
  * day-scoped form — there is no Day to scope to.
  *
- * The cache probes decide only which Moment DOCS the batch deletes. The
+ * The Moment probes decide only which Moment DOCS the batch deletes. The
  * tombstones are NOT conditioned on which form held the Moment: whenever the Day
  * is known the batch spends BOTH forms (Codex round 2 on PR #467; enforced by the
  * owner-delete rule) — see commitRetraction.
  */
-async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number): Promise<void> {
+async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number): Promise<boolean> {
   const momentIds: string[] = [];
+  let hasUnknownProbe = false;
   if (dayIndex !== undefined) {
     const perCardId = winMomentId(uid, kind, dayIndex);
-    if (await cachedMomentData(perCardId)) momentIds.push(perCardId);
+    const perCard = await serverMomentData(perCardId);
+    if (perCard.status === 'exists') momentIds.push(perCardId);
+    if (perCard.status === 'unknown') hasUnknownProbe = true;
   }
   const legacyId = winMomentId(uid, kind);
-  const legacy = await cachedMomentData(legacyId);
+  const legacyProbe = await serverMomentData(legacyId);
+  if (legacyProbe.status === 'unknown') hasUnknownProbe = true;
+  const legacy = legacyProbe.status === 'exists' ? legacyProbe.data : undefined;
   // On a daily Event the legacy doc must NAME this Day to be the one that fell.
   // A doc with NO `dayIndex` at all (a true pre-#262 Moment) therefore never
   // matches and always survives — deliberately conservative: nothing on the doc
   // says which card it describes, and a wrong retraction is permanent.
   if (legacy && (dayIndex === undefined || legacy.dayIndex === dayIndex)) momentIds.push(legacyId);
-  if (momentIds.length === 0) return;
+  if (momentIds.length === 0) return !hasUnknownProbe;
   // ONE batch for however many docs hold this win, spending BOTH id forms when
   // the Day is known — see commitRetraction for why the sibling form must be
   // spent even when no Moment sits at it.
-  await commitRetraction(uid, kind, momentIds, dayIndex);
+  return commitRetraction(uid, kind, momentIds, dayIndex);
 }
 
 /**
