@@ -22,5 +22,16 @@ export default defineConfig({
     // slower than a pure unit test.
     testTimeout: 30000,
     hookTimeout: 30000,
+    // Run the offline test FILES serially, matching vitest.rules.config.ts.
+    // Every file drives the ONE shared Firestore + Auth emulator through a
+    // real network client, and several go OFFLINE (disableNetwork), terminate
+    // the client, and reconnect — a sequence whose timing assertions are only
+    // as reliable as the emulator's responsiveness. Per-file isolation already
+    // comes from the per-file, per-run demo project ids (tests/offline/
+    // runScope.ts, #473); serial execution is the belt-and-suspenders that
+    // keeps a shared, contended emulator from turning a slow CI runner into a
+    // flaky one. This is what #471 means by preserving `fileParallelism: false`
+    // semantics now that the layer runs in CI.
+    fileParallelism: false,
   },
 });
