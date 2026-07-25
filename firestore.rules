@@ -224,16 +224,22 @@ service cloud.firestore {
     // `daySchedUnchanged` — and one that doesn't is denied outright rather
     // than reclassified: the client's `reshuffleSeed()` guarantees a real
     // reshuffle never keeps its seed, so no legitimate caller lands here.
-    // Unrolled 25× like `boardPristine` (no iteration in the rules language);
-    // indexing errors on a legacy-ARRAY stored board, which the caller absorbs
-    // (`|| !boardCellsChanged()`) so a cells-unchanged metadata merge on a
-    // straggler row stays writable while its cells writes remain denied by the
-    // canonical-map gate.
+    // Unrolled 25× like `boardPristine` (no iteration in the rules language),
+    // and deliberately BARE — no `in` presence guards. This function runs on
+    // EVERY cells-changing write, and the guarded form (4 presence checks per
+    // field per cell) blew Firestore's 1000-expressions-per-request evaluation
+    // budget on ordinary full-cells Mark merges (the frozen deployed wire
+    // shape, tests/rules/mark-wire-compat.test.ts). Bare member access on a
+    // missing key ERRORS instead — and every error path here lands on DENY:
+    // the caller absorbs it (`|| !boardCellsChanged()`), which is false for
+    // any cells-changing write. That is the correct verdict for each shape
+    // that can error: a legacy-ARRAY stored board (string-indexing a list) is
+    // already denied by the canonical-map gate, and a hand-built cell missing
+    // `itemId`/`text` (every canonical cell carries both — dealBoard writes
+    // them and per-cell patches replace whole cells) has no legitimate writer.
+    // A cells-UNCHANGED metadata merge still passes through the diff arm.
     function cellPromptCarried(nc, oc) {
-      return ('itemId' in nc) == ('itemId' in oc)
-        && (!('itemId' in nc) || nc.itemId == oc.itemId)
-        && ('text' in nc) == ('text' in oc)
-        && (!('text' in nc) || nc.text == oc.text);
+      return nc.itemId == oc.itemId && nc.text == oc.text;
     }
     function boardPromptsCarried(newCells, oldCells) {
       return cellPromptCarried(newCells['0'], oldCells['0'])
