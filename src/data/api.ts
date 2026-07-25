@@ -1127,11 +1127,24 @@ export async function reshuffleBoard(params: {
           })
         : null;
 
-    // Both writes in the ONE transaction: the rules' `getAfter()` pairing requires
-    // the counter write to be present alongside the Board replace, so these can
-    // never be split. An explicit counter value, NOT `increment(1)` — the rules
-    // assert `after == before + 1` against `before`, and the transaction's re-read
-    // is what keeps that value fresh under contention.
+    // All three writes in the ONE transaction: the rules' `getAfter()` pairing
+    // requires the counter write to be present alongside the Board replace, so
+    // these can never be split. An explicit counter value, NOT `increment(1)` —
+    // the rules assert `after == before + 1` against `before`, and the
+    // transaction's re-read is what keeps that value fresh under contention.
+    //
+    // The per-spend MARKER (#463): rules evaluate each batched document
+    // independently, so the +1 alone could vouch for any number of Board
+    // replaces in one batch. The server therefore also requires the CREATE of
+    // `reshuffles/{uid}-{nextUsed}` naming this Day — the token this spend
+    // consumes exactly once. Create-only and immutable server-side; the id is
+    // fresh per spend because the counter is monotonic.
+    tx.set(doc(db, 'events', EVENT_ID, 'reshuffles', `${uid}-${nextUsed}`), {
+      uid,
+      n: nextUsed,
+      dayIndex,
+      createdAt: now,
+    });
     tx.set(boardRef, {
       uid,
       dayIndex,

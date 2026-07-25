@@ -152,13 +152,39 @@ service cloud.firestore {
         && getAfter(playerDoc(eventId, uid)).data.reshufflesUsed <= reshuffleAllowance();
     }
 
+    // The per-spend MARKER (#463 finding 1). The counter pairing above is
+    // necessary but NOT sufficient: rules evaluate each document in a batch
+    // independently, and every Board write in the batch reads the SAME player
+    // doc — so one +1 satisfied reshuffleCounterPaired() for EVERY board in the
+    // batch, and a single writeBatch replacing N pristine day-boards plus one
+    // increment laundered N reshuffles out of one allowance (confirmed on the
+    // emulator: 3 boards + one 0→1 was ALLOWED). The batch-wide resource each
+    // spend must consume EXACTLY ONCE is therefore reified as a document: a
+    // Board reshuffle additionally requires the CREATE, in this same batch, of
+    // `reshuffles/{uid}-{n}` (n = the counter value this spend pays for) whose
+    // payload names THIS board's Day. The path pins one marker per spend (the
+    // counter goes +1 exactly once per batch, so every board in the batch
+    // resolves the SAME marker path) and the `dayIndex` binding means that one
+    // marker can vouch for only ONE board — a second board in the same batch
+    // fails the equality. `!exists()` requires the marker to be NEW in this
+    // batch, so a marker pre-created in an earlier request can't vouch either;
+    // `getAfter()` errors (denies) when the batch does not create it.
+    function reshuffleSpendMarkerDoc(eventId, uid) {
+      return /databases/$(database)/documents/events/$(eventId)/reshuffles/$(uid + '-' + string(getAfter(playerDoc(eventId, uid)).data.reshufflesUsed));
+    }
+    function reshuffleSpendMarked(eventId, uid, dayIndex) {
+      return !exists(reshuffleSpendMarkerDoc(eventId, uid))
+        && getAfter(reshuffleSpendMarkerDoc(eventId, uid)).data.dayIndex == int(dayIndex);
+    }
+
     // The EXISTING (pre-write) Board must be pristine — the card being traded away
     // is the one that has to have produced nothing. Reading `resource` (never the
     // incoming payload, which a hand-built client controls) is what makes that
     // check trustworthy, the same discipline `dayLocked` uses for the schedule lock.
-    function reshuffleOk(eventId, uid) {
+    function reshuffleOk(eventId, uid, dayIndex) {
       return boardPristine(resource.data.cells)
-        && reshuffleCounterPaired(eventId, uid);
+        && reshuffleCounterPaired(eventId, uid)
+        && reshuffleSpendMarked(eventId, uid, dayIndex);
     }
 
     // Normal Mark writes are offline-queueable and merge a full replacement
@@ -182,6 +208,65 @@ service cloud.firestore {
       return !('seed' in resource.data)
         || (('markSeed' in request.resource.data)
             && request.resource.data.markSeed == resource.data.seed);
+    }
+
+    // Prompt-content integrity for NON-reshuffle cells writes (#463 finding 2).
+    // `isReshuffleWrite()` discriminates on `seed` alone, so a full cells
+    // replacement that KEEPS the stored seed — new prompts, `markSeed` echoed —
+    // was never classified as a reshuffle and sailed through the Mark arm: a
+    // free, unlimited re-deal (confirmed on the emulator at reshufflesUsed: 3).
+    // Every legitimate non-reshuffle cells write — a Mark, an Echo, a proof
+    // attach/detach — patches marking state and carries each cell's PROMPT
+    // (`itemId` + its denormalized `text`) through unchanged; only a deal
+    // (create) or a reshuffle (seed change, allowance-gated) may change what
+    // the 25 Squares SAY. So a cells write that keeps the seed must carry every
+    // cell's prompt through — presence-guarded per field, same idiom as
+    // `daySchedUnchanged` — and one that doesn't is denied outright rather
+    // than reclassified: the client's `reshuffleSeed()` guarantees a real
+    // reshuffle never keeps its seed, so no legitimate caller lands here.
+    // Unrolled 25× like `boardPristine` (no iteration in the rules language),
+    // and deliberately BARE — no `in` presence guards. This function runs on
+    // EVERY cells-changing write, and the guarded form (4 presence checks per
+    // field per cell) blew Firestore's 1000-expressions-per-request evaluation
+    // budget on ordinary full-cells Mark merges (the frozen deployed wire
+    // shape, tests/rules/mark-wire-compat.test.ts). Bare member access on a
+    // missing key ERRORS instead — and every error path here lands on DENY:
+    // the caller absorbs it (`|| !boardCellsChanged()`), which is false for
+    // any cells-changing write. That is the correct verdict for each shape
+    // that can error: a legacy-ARRAY stored board (string-indexing a list) is
+    // already denied by the canonical-map gate, and a hand-built cell missing
+    // `itemId`/`text` (every canonical cell carries both — dealBoard writes
+    // them and per-cell patches replace whole cells) has no legitimate writer.
+    // A cells-UNCHANGED metadata merge still passes through the diff arm.
+    function cellPromptCarried(nc, oc) {
+      return nc.itemId == oc.itemId && nc.text == oc.text;
+    }
+    function boardPromptsCarried(newCells, oldCells) {
+      return cellPromptCarried(newCells['0'], oldCells['0'])
+        && cellPromptCarried(newCells['1'], oldCells['1'])
+        && cellPromptCarried(newCells['2'], oldCells['2'])
+        && cellPromptCarried(newCells['3'], oldCells['3'])
+        && cellPromptCarried(newCells['4'], oldCells['4'])
+        && cellPromptCarried(newCells['5'], oldCells['5'])
+        && cellPromptCarried(newCells['6'], oldCells['6'])
+        && cellPromptCarried(newCells['7'], oldCells['7'])
+        && cellPromptCarried(newCells['8'], oldCells['8'])
+        && cellPromptCarried(newCells['9'], oldCells['9'])
+        && cellPromptCarried(newCells['10'], oldCells['10'])
+        && cellPromptCarried(newCells['11'], oldCells['11'])
+        && cellPromptCarried(newCells['12'], oldCells['12'])
+        && cellPromptCarried(newCells['13'], oldCells['13'])
+        && cellPromptCarried(newCells['14'], oldCells['14'])
+        && cellPromptCarried(newCells['15'], oldCells['15'])
+        && cellPromptCarried(newCells['16'], oldCells['16'])
+        && cellPromptCarried(newCells['17'], oldCells['17'])
+        && cellPromptCarried(newCells['18'], oldCells['18'])
+        && cellPromptCarried(newCells['19'], oldCells['19'])
+        && cellPromptCarried(newCells['20'], oldCells['20'])
+        && cellPromptCarried(newCells['21'], oldCells['21'])
+        && cellPromptCarried(newCells['22'], oldCells['22'])
+        && cellPromptCarried(newCells['23'], oldCells['23'])
+        && cellPromptCarried(newCells['24'], oldCells['24']);
     }
 
 
@@ -486,6 +571,42 @@ service cloud.firestore {
         allow delete: if isAdmin(eventId);
       }
 
+      // Per-spend reshuffle markers (#463 finding 1) — see reshuffleSpendMarked
+      // above for why these exist: the marker doc is the batch-wide token each
+      // reshuffle spend consumes exactly once, closing the N-boards-per-+1
+      // laundering that per-document rule evaluation otherwise allows.
+      //
+      // CREATE-ONLY and immutable: there is no update path (a marker, once
+      // minted, can never be repointed at another Day), and `!exists()` on the
+      // Board side means only a marker created IN the spending batch counts.
+      // The id is bound to the payload — `{uid}-{n}` with `n` the counter value
+      // this spend pays for — the same id↔payload discipline as doubts/hearts,
+      // and `n` must equal the POST-batch counter (`getAfter`), so a marker can
+      // only ever be minted for the spend the batch is actually paying: a
+      // pre-create for a FUTURE n (to brick a later legitimate spend's
+      // `!exists()`) is denied because the counter isn't there yet, and getting
+      // it there costs the +1 itself. The one unpaired shape that remains — a
+      // counter bump + marker with no Board write, or a junk `dayIndex` — burns
+      // the Player's own allowance and replaces no card: the same self-harm
+      // class as the unpaired +1 residual (specs/reshuffle.md § Residuals).
+      // Reads mirror players/{uid} (the counter this collection shadows is
+      // already signed-in-readable); delete is admin-only moderation, matching
+      // boards — an owner delete would let a spent marker be re-minted.
+      match /reshuffles/{markerId} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.n is int
+          && request.resource.data.n >= 1
+          && request.resource.data.n <= reshuffleAllowance()
+          && markerId == request.auth.uid + '-' + string(request.resource.data.n)
+          && request.resource.data.dayIndex is int
+          && request.resource.data.dayIndex >= 0
+          && getAfter(playerDoc(eventId, request.auth.uid)).data.reshufflesUsed
+               == request.resource.data.n;
+        allow delete: if isAdmin(eventId);
+      }
+
       // Phase 1.5 day-scoped model (daily-cards-spec § "Data model" / "Security
       // rules and functions"): Boards and the per-day honor doc move under
       // `days/{dayIndex}`. `days` is an ARRAY field on the Event doc (a DayDef[],
@@ -566,7 +687,18 @@ service cloud.firestore {
                 || resource == null
                 || seededMarkGuard()
                 || !boardCellsChanged())
-            && (!isReshuffleWrite() || reshuffleOk(eventId, uid));
+            // Same-seed prompt integrity (#463 finding 2): a NON-reshuffle
+            // write that changes cells must carry every cell's prompt through
+            // unchanged — see boardPromptsCarried. Ordered like the arms
+            // above: the common Mark passes the unrolled carry check without
+            // ever running the diff; a legacy-array straggler's metadata
+            // merge ERRORS the carry check (list indexing) and is absorbed by
+            // the diff arm; a same-seed prompt rewrite fails both and denies.
+            && (isReshuffleWrite()
+                || resource == null
+                || boardPromptsCarried(request.resource.data.cells, resource.data.cells)
+                || !boardCellsChanged())
+            && (!isReshuffleWrite() || reshuffleOk(eventId, uid, dayIndex));
           allow delete: if isAdmin(eventId);
         }
 

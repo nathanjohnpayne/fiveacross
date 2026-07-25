@@ -370,6 +370,13 @@ describe("boardPristine()'s echo exemption (spec § Reshuffle pristine-ness)", (
     const batch = writeBatch(d);
     batch.set(doc(d, dayBoardPath(dayIndex, ALICE)), { ...board(ALICE, dayIndex, existingSeed + 1), markVersion: 1 });
     batch.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
+    // The per-spend marker the #463 gate requires alongside the counter +1.
+    batch.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {
+      uid: ALICE,
+      n: 1,
+      dayIndex,
+      createdAt: NOW(),
+    });
     return batch.commit();
   };
 
