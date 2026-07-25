@@ -842,7 +842,8 @@ async function retractWin(uid: string, kind: RetractableKind, dayIndex?: number)
   // matches and always survives — deliberately conservative: nothing on the doc
   // says which card it describes, and a wrong retraction is permanent.
   if (legacy && (dayIndex === undefined || legacy.dayIndex === dayIndex)) momentIds.push(legacyId);
-  if (momentIds.length === 0) return !hasUnknownProbe;
+  if (hasUnknownProbe) return false;
+  if (momentIds.length === 0) return true;
   // ONE batch for however many docs hold this win, spending BOTH id forms when
   // the Day is known — see commitRetraction for why the sibling form must be
   // spent even when no Moment sits at it.

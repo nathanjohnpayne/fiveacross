@@ -497,6 +497,26 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
     expect(peekRetractions('u1')).toEqual(['bingo:3']);
   });
 
+  it('keeps the intent when one sibling form is found but another probe is unknown', async () => {
+    noTombstonesYet();
+    getDocFromServerSpy.mockImplementation((ref: { path: string }) => {
+      if (ref.path === momentAt('u1-bingo-d3')) {
+        return Promise.resolve({
+          exists: () => true,
+          data: () => ({ kind: 'bingo', uid: 'u1', dayIndex: 3 }),
+        });
+      }
+      if (ref.path === momentAt('u1-bingo')) return Promise.reject(new Error('unavailable'));
+      return Promise.resolve({ exists: () => false, data: () => ({}) });
+    });
+
+    fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+    await settle();
+
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+    expect(peekRetractions('u1')).toEqual(['bingo:3']);
+  });
+
   it('retracts a LEGACY day-less Moment that covers the fallen Day — spending BOTH id forms', async () => {
     // Not hypothetical: the writers' legacy same-day dedupe (#267/#372) means a
     // Day's live Moment can genuinely sit at the pre-per-card `${uid}-bingo` id
