@@ -26,6 +26,7 @@ import { setMark } from '../../src/data/api';
 import { cellsToMap, cellsFromData } from '../../src/game/cells';
 import type { Cell, PlayerDoc } from '../../src/types';
 import { seedEventDoc } from './seedEvent';
+import { runScopedEmail, runScopedProject } from './runScope';
 
 // ------------------------------------------------------- specs/cells-map.md ---
 // THE test the #457 schema exists for: two DEVICES of the same account, each
@@ -38,8 +39,8 @@ import { seedEventDoc } from './seedEvent';
 // persistence: the strongest form of the guarantee this repo can state.
 
 const EVENT_ID = 'med-2026';
-const PROJECT_ID = 'demo-cells-map'; // isolated project (emulator budget-leak containment)
-const EMAIL = 'cellsmap@offline.test';
+const PROJECT_ID = runScopedProject('demo-cells-map'); // isolated project (emulator budget-leak containment)
+const EMAIL = runScopedEmail('cellsmap');
 const PASSWORD = 'passw0rd!';
 const DEVICE_A_MARK = 3;
 const DEVICE_B_MARK = 9;

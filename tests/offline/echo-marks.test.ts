@@ -27,6 +27,7 @@ import {
 import { setMark } from '../../src/data/api';
 import type { Cell } from '../../src/types';
 import { cellsToMap, cellsFromData } from '../../src/game/cells';
+import { runScopedEmail, runScopedProject } from './runScope';
 
 // ------------------------------------------------------ specs/echo-marks.md ---
 // The OFFLINE half of Echo Marks (ADR 0006): a Mark made in a ship-wifi dead
@@ -39,8 +40,8 @@ import { cellsToMap, cellsFromData } from '../../src/game/cells';
 // Day-1 echo (its own markSeed), and the ONE aggregated player write together.
 
 const EVENT_ID = 'med-2026'; // must match the mocked src/firebase EVENT_ID
-const PROJECT_ID = 'demo-echo-marks'; // distinct project → isolated data
-const EMAIL = 'echo@offline.test';
+const PROJECT_ID = runScopedProject('demo-echo-marks'); // distinct project → isolated data
+const EMAIL = runScopedEmail('echo');
 const PASSWORD = 'passw0rd!';
 const TAB_APP_NAME = 'gcb-echo-tab';
 // The shared Prompt sits at index 3 on Day 0 and index 8 on Day 1.

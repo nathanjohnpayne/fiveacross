@@ -35,6 +35,7 @@ import {
 import { setMark } from '../../src/data/api';
 import type { BoardDoc, Cell, PlayerDoc } from '../../src/types';
 import { seedEventDoc } from './seedEvent';
+import { runScopedEmail, runScopedProject } from './runScope';
 import { cellsToMap, cellsFromData } from '../../src/game/cells';
 
 // ---------------------------------------------------------- ADR 0006 + 0002 ---
@@ -69,8 +70,8 @@ import { cellsToMap, cellsFromData } from '../../src/game/cells';
 // seedEvent.ts).
 
 const EVENT_ID = 'med-2026'; // must match src/firebase.ts default (setMark reads it)
-const PROJECT_ID = 'demo-mark-win'; // distinct from w0's project → isolated data
-const EMAIL = 'marker@offline.test';
+const PROJECT_ID = runScopedProject('demo-mark-win'); // distinct from w0's project → isolated data
+const EMAIL = runScopedEmail('marker');
 const PASSWORD = 'passw0rd!';
 // A normal (non-free) Square: index 12 is the Free Space center, which the real
 // Board UI refuses to toggle — marking it would be an unreachable scenario.

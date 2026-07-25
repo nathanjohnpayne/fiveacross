@@ -45,11 +45,12 @@ import {
 import { setMark } from '../../src/data/api';
 import type { BoardDoc, Cell, PlayerDoc, TallyEntry } from '../../src/types';
 import { seedEventDoc } from './seedEvent';
+import { runScopedEmail, runScopedProject } from './runScope';
 import { cellsToMap, cellsFromData, type CellsMap } from '../../src/game/cells';
 
 const EVENT_ID = 'med-2026'; // must match src/firebase.ts default (setMark reads it)
-const PROJECT_ID = 'demo-w2-tally'; // distinct project → isolated data
-const EMAIL = 'tally@offline.test';
+const PROJECT_ID = runScopedProject('demo-w2-tally'); // distinct project → isolated data
+const EMAIL = runScopedEmail('tally');
 const PASSWORD = 'passw0rd!';
 const MARKED_CELL = 7; // a normal (non-free) Square; the free centre never tallies
 const ITEM_ID = `item-${MARKED_CELL}`;
