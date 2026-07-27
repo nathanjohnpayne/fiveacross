@@ -769,6 +769,148 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('the owed row-lag heal follows the player to an already-settled board opened before the raced pass settles (#507 round 2)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    type ReconcileResult = Awaited<ReturnType<typeof reconcileEchoes>>;
+    let resolveSlow: ((value: ReconcileResult) => void) | undefined;
+    mocked.mockImplementationOnce(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    mocked.mockImplementationOnce(
+      () =>
+        new Promise<ReconcileResult>((resolve) => {
+          resolveSlow = resolve;
+        }),
+    );
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // Board B settles its complete pass on a consistent row…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …the player opens board A, whose pass hangs…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …the row turns root-lagged while A's pass is in flight (deferred, not
+      // doubled)…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …and the player navigates BACK to the already-settled B before A
+      // settles. The heal is row-scoped — any board's pass evaluates the same
+      // predicate — so the owed pass must be served on B, the board that is
+      // actually open, not left tied to A's key.
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+
+      // A's raced pass settling later changes nothing — the debt was served.
+      await act(async () => {
+        resolveSlow!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+      });
+      expect(mocked).toHaveBeenCalledTimes(3);
+      H.player = { ...(H.player as object) } as typeof H.player;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
+  it('the row-lag episode latch is per-account — a switch-back with a lagged row re-arms the returning account (#507 round 2)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // Account u1 settles its board guard on a consistent row…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …switch to account u2 (a stale-board interlude, then u2's data) whose
+      // row is LAGGED and whose heal does not converge (the pass completes
+      // but the row snapshot stays inconsistent) — u2's episode latches…
+      H.user = { uid: 'u2', displayName: 'Second Sailor', photoURL: null };
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.player = {
+        uid: 'u2',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u2', dayIndex: 0, seed: 7, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …then switch back to u1, whose row has ALSO turned lagged meanwhile.
+      // The episode latch is per-account: u2's still-active episode must not
+      // swallow u1's — u1's settled guard re-arms and the heal runs.
+      H.user = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null };
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+
+      // Still once per episode: further lagged snapshots do not churn.
+      H.player = { ...(H.player as object) } as typeof H.player;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
   it('a COMPLETE pass settles the once-per-board guard — no re-run on a later open of the same card', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);

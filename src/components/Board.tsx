@@ -919,20 +919,29 @@ export default function Board() {
   // CURRENT generation — its own incomplete completion pins the per-visit
   // block instead of bumping again — so the trigger cannot loop.
   const [reconcileRetryNonce, setReconcileRetryNonce] = useState(0);
-  // #506: edge detector for the row-lag re-arm — one re-arm per EPISODE of
-  // row inconsistency, reset when the row reads consistent again, so an
+  // #506: the row-lag EPISODE — scoped to the signed-in uid (Codex P2 round
+  // 2 on #507: a component-global latch let one account's episode swallow
+  // another's after a switch), latched `active` on the transition into row
+  // inconsistency and reset when the row reads consistent again, so an
   // inconsistent row that a failed heal leaves standing cannot re-trigger a
   // pass per snapshot (the per-visit incomplete block owns that retry).
-  const reconcileRowLagEpisodeRef = useRef(false);
-  // The board key OWED a row-lag re-arm by its in-flight pass's settle
-  // (Codex P2 on #507): a lag observed while a pass is already running must
-  // not re-arm immediately (that would double the pass), but that pass may
-  // have captured the previously CONSISTENT row and settle `complete: true`
-  // without ever seeing the lag — with no further snapshot guaranteed to
-  // re-run the effect. So the observation is recorded here and consumed by
-  // `settle`, which drops the guard and bumps the retry nonce — the heal is
-  // scheduled deterministically, never left waiting on unrelated activity.
-  // Cleared when the row reads consistent again before the pass settles.
+  const reconcileRowLagEpisodeRef = useRef<{ uid: string; active: boolean } | null>(null);
+  // Whether the active episode still OWES its one heal pass. The heal is
+  // ROW-scoped, not board-scoped — every board's pass evaluates the same
+  // row predicate — so the debt follows the player to whatever board is
+  // currently OPEN (Codex P2 round 2 on #507: re-arming only the key that
+  // detected the lag left a navigated-to, already-settled board unhealed).
+  // Cleared exactly when a pass LAUNCHES with the lag in view (that pass
+  // reads the row), or when the row reads consistent again.
+  const reconcileRowLagOwedRef = useRef(false);
+  // The board key whose IN-FLIGHT pass's settle owes a retry-nonce bump
+  // (Codex P2 round 1 on #507): a lag observed while a pass is already
+  // running must not re-arm immediately (that would double the pass), but
+  // that pass may have captured the previously CONSISTENT row and settle
+  // `complete: true` without ever seeing the lag — with no further snapshot
+  // guaranteed to re-run the effect. The settle consumes this and bumps the
+  // nonce; the re-armed run then serves the still-owed heal on whatever
+  // board is open at that moment.
   const reconcileRowLagRearmKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const schedule = event?.days ?? [];
@@ -968,24 +977,42 @@ export default function Board() {
     // (`player`, now in the deps), so re-arm the guard for the OPEN board on
     // the transition into row inconsistency — the same `playerRowRootLag`
     // signal `runReconcileEchoes` heals on, same freeze gate — and let the
-    // pass below re-run and heal. While a pass is IN FLIGHT the re-arm is
-    // deferred, not dropped: the running pass may have captured the
-    // previously consistent row, so the owed re-arm is recorded for its
-    // settle to consume (Codex P2 on #507).
+    // pass below re-run and heal. The owed heal follows the OPEN board, not
+    // the board that first detected the lag; while a pass is IN FLIGHT the
+    // re-arm is deferred, not dropped — the running pass may have captured
+    // the previously consistent row, so its settle owes the nonce bump that
+    // brings the debt back to this effect (Codex P2 x2 on #507).
     const rowLag =
       !standingsFrozen(event) &&
       playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
-    if (!rowLag) {
-      reconcileRowLagEpisodeRef.current = false;
+    if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
+      // Account switch: episode state is per-uid; the previous account's
+      // latch (or debt) must never gate — or leak into — this one's.
+      reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
+      reconcileRowLagOwedRef.current = false;
       reconcileRowLagRearmKeyRef.current = null;
-    } else if (!reconcileRowLagEpisodeRef.current) {
-      reconcileRowLagEpisodeRef.current = true;
-      if (reconcileInFlightRef.current.has(key)) {
-        reconcileRowLagRearmKeyRef.current = key;
-      } else {
-        reconciledBoardsRef.current.delete(key);
-        if (incompleteReconcileVisitRef.current?.key === key) {
-          incompleteReconcileVisitRef.current = null;
+    }
+    if (!rowLag) {
+      reconcileRowLagEpisodeRef.current.active = false;
+      reconcileRowLagOwedRef.current = false;
+      reconcileRowLagRearmKeyRef.current = null;
+    } else {
+      if (!reconcileRowLagEpisodeRef.current.active) {
+        reconcileRowLagEpisodeRef.current.active = true;
+        reconcileRowLagOwedRef.current = true;
+      }
+      if (reconcileRowLagOwedRef.current) {
+        if (reconcileInFlightRef.current.has(key)) {
+          reconcileRowLagRearmKeyRef.current = key;
+        } else {
+          // Serve the episode's heal here: drop this key's guard (and any
+          // pin) so the pass below launches and evaluates the lagged row.
+          reconcileRowLagRearmKeyRef.current = null;
+          reconcileRowLagOwedRef.current = false;
+          reconciledBoardsRef.current.delete(key);
+          if (incompleteReconcileVisitRef.current?.key === key) {
+            incompleteReconcileVisitRef.current = null;
+          }
         }
       }
     }
@@ -1012,14 +1039,16 @@ export default function Board() {
     const settle = (complete: boolean) => {
       reconcileInFlightRef.current.delete(key);
       if (reconcileRowLagRearmKeyRef.current === key) {
-        // A row lag surfaced DURING this pass (recorded above), and this pass
-        // may have raced past its own predicate on the previously consistent
-        // row — consume the owed re-arm regardless of how the pass settled:
-        // drop the guard and schedule the retry explicitly. The retried pass
-        // re-reads the row; if it heals (or the row already read consistent),
-        // it settles normally — the episode ref stays latched, so no loop.
+        // A row lag surfaced DURING this pass, and this pass may have raced
+        // past its own predicate on the previously consistent row — the
+        // episode's heal is still OWED (`reconcileRowLagOwedRef` stays true),
+        // so bump the nonce and let the re-armed effect run serve it on
+        // whatever board is open by then. An incomplete pass still drops its
+        // own key (standard later-open retry); a complete one keeps it — the
+        // nonce run re-arms the CURRENT key itself. The debt clears exactly
+        // when a pass launches with the lag in view, so no loop.
         reconcileRowLagRearmKeyRef.current = null;
-        reconciledBoardsRef.current.delete(key);
+        if (!complete) reconciledBoardsRef.current.delete(key);
         setReconcileRetryNonce((n) => n + 1);
         return;
       }
