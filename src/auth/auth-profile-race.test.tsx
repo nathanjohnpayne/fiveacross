@@ -30,6 +30,8 @@ vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
 // AuthProvider now mounts the confirm-path listener (#41) beside the attestation
 // gate; stub it — this suite exercises the profile-bootstrap signal, not the listener.
 vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));
+// The #479 retraction fall observer mounts beside it — same stub, same reason.
+vi.mock('../components/RetractWinMoments', () => ({ default: () => null }));
 // It also mounts the pool-recovery watcher (#70) beside the gate; stub it too — this
 // suite is not about the watcher (its own suite is src/components/w1-deal-auto-retry.test.tsx).
 vi.mock('../components/PoolRecoveryWatcher', () => ({ default: () => null }));

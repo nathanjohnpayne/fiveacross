@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -485,6 +485,42 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     second.delete(doc(alice, momentPath(`${ALICE}-bingo-d5`)));
     second.set(doc(alice, tombstonePath(`${ALICE}-bingo-d5`)), tombstone(ALICE, { dayIndex: 5 }));
     await assertSucceeds(second.commit());
+  });
+
+  it('DENIES a batch that blindly re-sets a standing sibling tombstone — the two-tab race loser must re-probe, not loop (#485)', async () => {
+    // The concurrent shape behind the #485 regression test in
+    // src/data/w2-feed-moments.test.ts: two tabs retract the SAME kind on
+    // DIFFERENT Days at once, and both pre-commit probes race the other's
+    // commit, so both batches include the shared legacy `${uid}-bingo`
+    // tombstone. The first commit mints it; the loser's blind re-set is then a
+    // doc-exists UPDATE on an immutable tombstone and the WHOLE batch denies —
+    // which is exactly what forces the client's requeue-and-retry, whose fresh
+    // probe skips the standing form and lands the accepted single-tombstone
+    // batch (the `accepts a PRE-EXISTING sibling tombstone` case above).
+    const alice = db(ALICE);
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d3`)), moment(ALICE, { dayIndex: 3 })));
+    await assertSucceeds(setDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`)), moment(ALICE, { dayIndex: 5 })));
+    // Tab A wins the race: its Day-3 retraction mints the legacy tombstone.
+    await assertSucceeds(retract(ALICE, `${ALICE}-bingo-d3`, { dayIndex: 3 }));
+    // Tab B's stale-probe batch: delete Day 5's Moment + BOTH tombstone forms —
+    // the legacy set is now a doc-exists update, so the batch denies atomically.
+    const loser = writeBatch(alice as Firestore);
+    loser.delete(doc(alice, momentPath(`${ALICE}-bingo-d5`)));
+    loser.set(doc(alice, tombstonePath(`${ALICE}-bingo`)), tombstone(ALICE, { dayIndex: 5 }));
+    loser.set(doc(alice, tombstonePath(`${ALICE}-bingo-d5`)), tombstone(ALICE, { dayIndex: 5 }));
+    await assertFails(loser.commit());
+    // Nothing half-landed: the Day-5 Moment survived, its tombstone was not
+    // minted, and the retry's fresh-probe batch lands. Assert EXISTENCE, not
+    // just read permission — Moment reads are public, so a bare assertSucceeds
+    // would pass either way (CodeRabbit on PR #494).
+    const survivor = await assertSucceeds(getDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`))));
+    expect(survivor.exists()).toBe(true);
+    const notMinted = await assertSucceeds(getDoc(doc(alice, tombstonePath(`${ALICE}-bingo-d5`))));
+    expect(notMinted.exists()).toBe(false);
+    const retry = writeBatch(alice as Firestore);
+    retry.delete(doc(alice, momentPath(`${ALICE}-bingo-d5`)));
+    retry.set(doc(alice, tombstonePath(`${ALICE}-bingo-d5`)), tombstone(ALICE, { dayIndex: 5 }));
+    await assertSucceeds(retry.commit());
   });
 
   it('an owner Moment delete must CARRY its tombstone — a bare delete cannot bypass retract-once (Codex P1)', async () => {
