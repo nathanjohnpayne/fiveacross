@@ -19,6 +19,7 @@ import { STORAGE_PORT } from './env';
 // same import src/test/w1-event-seed.test.ts already uses against Vitest.
 import { EVENT_SEED, ITEMS, adminRoster, eventWritePayload, seedItemDocId } from '../../../scripts/seed.mjs';
 import { EVENT_ID, FIRESTORE_HOST, FIRESTORE_PORT, PROJECT_ID } from './env';
+import { cellsFromData } from '../../../src/game/cells';
 
 const RULES_PATH = fileURLToPath(new URL('../../../firestore.rules', import.meta.url));
 const STORAGE_RULES_PATH = fileURLToPath(new URL('../../../storage.rules', import.meta.url));
@@ -144,8 +145,7 @@ export async function boardHasMarkedText(
   await testEnv.withSecurityRulesDisabled(async (context) => {
     const db = context.firestore();
     const snap = await getDoc(doc(db, 'events', EVENT_ID, 'boards', uid));
-    const cells =
-      (snap.data() as { cells?: Array<{ text: string; marked: boolean }> } | undefined)?.cells ?? [];
+    const cells = cellsFromData(snap.data()?.cells);
     found = cells.some((c) => c.text === text && c.marked === true);
   });
   return found;

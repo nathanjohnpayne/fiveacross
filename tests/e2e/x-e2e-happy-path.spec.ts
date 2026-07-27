@@ -19,6 +19,7 @@ import {
 } from './support/board';
 import { userAttested } from './support/seed';
 import { EVENT_ID } from './support/env';
+import { cellsFromData } from '../../src/game/cells';
 
 test.describe('x-e2e-happy-path (daily-cards)', () => {
   let testEnv: RulesTestEnvironment;
@@ -167,8 +168,7 @@ async function dayBoardHasMarkedText(
     const snap = await getDoc(
       doc(ctx.firestore(), 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid),
     );
-    const cells =
-      (snap.data() as { cells?: Array<{ text: string; marked: boolean }> } | undefined)?.cells ?? [];
+    const cells = cellsFromData(snap.data()?.cells);
     found = cells.some((c) => c.text === text && c.marked === true);
   });
   return found;
