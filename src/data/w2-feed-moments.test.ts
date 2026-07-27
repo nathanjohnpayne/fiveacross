@@ -89,6 +89,7 @@ import {
   dropPendingWins,
   enqueueRetraction,
   drainRetractions,
+  createRetractionFallObserver,
   peekRetractions,
   resetRetractions,
   pendingActionGeneration,
@@ -665,6 +666,316 @@ describe('retract-once for a PUBLISHED win (#377)', () => {
     await settle();
     expect(setDocSpy).toHaveBeenCalledTimes(1);
     expect(getDocSpy).not.toHaveBeenCalled();
+  });
+});
+
+// --- The route-independent fall observer (#479) ------------------------------
+//
+// #467's fall detectors lived on the Card route, so a win that stopped standing
+// while Board was UNMOUNTED (a proof deleted from the Feed tab, an admin
+// rejecting a confirmed claim) was never observed: the returning Board baselined
+// on the already-fallen state and the published Moment stood forever.
+// `createRetractionFallObserver` is the always-mounted twin (wired per-board by
+// RetractWinMoments): committed-snapshots-only, first-committed-snapshot-is-
+// baseline, and on a genuine committed fall the SAME fell verdict drives the
+// pre-publish drop, the retraction intent, and the drain — against the very
+// snapshot that witnessed the fall.
+
+// A 25-cell board with the given indexes player-marked (the free centre, index
+// 12, is always marked). Row 0–4 marked = a bingo; every index = a blackout.
+const boardCells = (markedIdx: number[]) =>
+  Array.from({ length: 25 }, (_, i) => ({
+    index: i,
+    itemId: i === 12 ? null : `item-${i}`,
+    text: `t${i}`,
+    free: i === 12,
+    marked: i === 12 || markedIdx.includes(i),
+    markedAt: null,
+  }));
+const BINGO_ROW = [0, 1, 2, 3, 4];
+const ALL_MARKED = Array.from({ length: 25 }, (_, i) => i);
+
+type ObservedSnap = Parameters<ReturnType<typeof createRetractionFallObserver>>[0];
+const committedSnap = (markedIdx: number[], over: Partial<ObservedSnap> = {}): ObservedSnap => ({
+  fromCache: false,
+  hasPendingWrites: false,
+  boardUid: 'u1',
+  cells: boardCells(markedIdx),
+  ...over,
+});
+
+describe('createRetractionFallObserver — the route-independent fall observer (#479)', () => {
+  it('retracts a published win that falls across two SERVER-COMMITTED snapshots — the Feed-tab proof-delete shape', async () => {
+    noTombstonesYet();
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap(BINGO_ROW)); // baseline: the bingo stands, server-committed
+    observe(committedSnap([0, 1, 2, 3])); // committed fall — the proof delete's board write acked
+    await settle();
+
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo-d3'));
+    expect(batchSetSpy).toHaveBeenCalledTimes(2); // both tombstone forms, as ever
+    expect(peekRetractions('u1')).toEqual([]);
+  });
+
+  it('drops the PRE-publish pending win with the same fell verdict — the two halves cannot drift', async () => {
+    const observe = createRetractionFallObserver('u1', 3);
+    enqueueWinMoments({ uid: 'u1', bingoTransition: true, blackoutTransition: false, dayIndex: 3 });
+    observe(committedSnap(BINGO_ROW));
+    observe(committedSnap([0, 1, 2, 3]));
+    await settle();
+    expect(peekPendingMoments('u1').bingo).toBe(false);
+    expect(pendingBingoDayIndexes('u1')).toEqual([]);
+  });
+
+  it('BASELINES on its first committed snapshot — an already-fallen board at (re)mount is history, never an edge', async () => {
+    // The app-fully-closed residual, stated as a test: the observer must never
+    // reconcile Feed-vs-board on sight — a false positive here is irreversible.
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap([])); // first committed sight: no bingo — baseline, not a fall
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+    expect(peekRetractions('u1')).toEqual([]);
+  });
+
+  it('still DRAINS a parked intent on its baseline snapshot — the account-switch-return path (#480)', async () => {
+    // The intent survived a failed/denied drain under another identity; the
+    // owning account returns, the observer's first committed snapshot arrives,
+    // and the parked token adjudicates against it.
+    noTombstonesYet();
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    enqueueRetraction('u1', { bingo: true, bingoDayIndex: 3 });
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap([]));
+    await settle();
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(peekRetractions('u1')).toEqual([]);
+  });
+
+  it('ignores cache-only snapshots entirely — a cache replay can neither read as a fall nor move the baseline', async () => {
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap(BINGO_ROW));
+    observe(committedSnap([], { fromCache: true })); // stale cache replay: no bingo
+    observe(committedSnap(BINGO_ROW)); // the server still shows it standing
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+    expect(peekRetractions('u1')).toEqual([]);
+  });
+
+  it('ignores optimistic (pending-writes) snapshots — only the server ACK adjudicates the fall', async () => {
+    noTombstonesYet();
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap(BINGO_ROW));
+    observe(committedSnap([], { hasPendingWrites: true })); // the local unmark, unacked
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled(); // a rejected unmark would roll back
+    observe(committedSnap([])); // the ack: the server agrees the win fell
+    await settle();
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a foreign-uid board and an empty board are no evidence at all', async () => {
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap(BINGO_ROW));
+    observe(committedSnap([], { boardUid: 'u2' })); // account-switch straggler
+    observe(committedSnap([], { cells: [] })); // missing/empty doc
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+    expect(peekRetractions('u1')).toEqual([]);
+    expect(peekRetractions('u2')).toEqual([]);
+  });
+
+  it('scopes the fall to the kind that fell — a blackout fall leaves the standing bingo alone', async () => {
+    noTombstonesYet();
+    serverHolding({
+      [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+      [momentAt('u1-blackout-d3')]: { kind: 'blackout', uid: 'u1', dayIndex: 3 },
+    });
+    const observe = createRetractionFallObserver('u1', 3);
+    observe(committedSnap(ALL_MARKED)); // blackout (and bingo) stand
+    observe(committedSnap(BINGO_ROW)); // one square unmarked: blackout falls, bingo stands
+    await settle();
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-blackout-d3'));
+  });
+
+  it('a LEGACY (day-less) observer retracts the one card’s Moment with the day-less token', async () => {
+    noTombstonesYet();
+    serverHolding({ [momentAt('u1-blackout')]: { kind: 'blackout', uid: 'u1' } });
+    const observe = createRetractionFallObserver('u1');
+    observe(committedSnap(ALL_MARKED));
+    observe(committedSnap(BINGO_ROW));
+    await settle();
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-blackout'));
+    expect(batchSetSpy).toHaveBeenCalledTimes(1); // no sibling form on a legacy Event
+  });
+});
+
+// --- The intent-token lifecycle: drop-on-success, restore-and-retry (#480/#485) --
+//
+// A retraction intent is the lifecycle's ONLY memory, and before this rework it
+// had two leaks: `drainRetractions` consumed the token before the batch settled
+// (a rejection restored it — but an unexpected THROW lost it, #480), and a
+// restored token had no scheduler (`drainRetractions` only ran from Board's
+// cells effect, so a requeued intent parked until an unrelated snapshot or
+// remount — #485). Now every failure path restores the token AND schedules a
+// bounded retry that replays the FULL drain adjudication against the last
+// recorded server-committed evidence; every ambiguous outcome parks (silence).
+describe('retraction retry — a requeued intent actually re-drains (#485)', () => {
+  it('retries a transient probe failure against the RECORDED evidence — no new snapshot required', async () => {
+    vi.useFakeTimers();
+    try {
+      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      getDocFromServerSpy.mockRejectedValueOnce(new Error('unavailable')); // the per-card probe blips
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writeBatchSpy).not.toHaveBeenCalled();
+      expect(peekRetractions('u1')).toEqual(['bingo:3']); // restored, not lost
+
+      // Pre-#485 this token parked forever (no board snapshot follows a failed
+      // probe). The scheduled retry re-drains it off the recorded evidence.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+      expect(peekRetractions('u1')).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a re-mark landing before the retry DROPS the intent — the retry replays the drain, never the commit', async () => {
+    vi.useFakeTimers();
+    try {
+      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      getDocFromServerSpy.mockRejectedValueOnce(new Error('unavailable'));
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(peekRetractions('u1')).toEqual(['bingo:3']);
+
+      // The Player re-marks; the ack arrives server-committed and the win STANDS.
+      drainRetractions('u1', { dayIndex: 3, bingoStands: true, blackoutStands: false });
+      expect(peekRetractions('u1')).toEqual([]); // dropped — spend nothing
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(writeBatchSpy).not.toHaveBeenCalled(); // the retry found nothing to do
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('converges the two-tab shared-legacy-tombstone race: denied as a doc-exists update once, healed by the retry’s fresh probe', async () => {
+    // Two tabs retract the SAME kind on DIFFERENT Days concurrently. Both batches
+    // include the shared legacy `${uid}-bingo` tombstone (each pre-commit probe
+    // raced the other's commit); the first commit mints it, so the second batch's
+    // blind re-set is a doc-exists UPDATE and the rules deny the whole batch
+    // (tests/rules/w2-feed-moments.test.ts pins that denial). The loser must not
+    // requeue forever: its retry re-probes, sees the standing legacy tombstone,
+    // SKIPS that set, and lands the single-tombstone batch the rules accept.
+    vi.useFakeTimers();
+    try {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      serverHolding({ [momentAt('u1-bingo-d5')]: { kind: 'bingo', uid: 'u1', dayIndex: 5 } });
+      let siblingCommitted = false;
+      getDocSpy.mockImplementation((ref: { path: string }) =>
+        Promise.resolve({
+          exists: () => siblingCommitted && ref.path === tombstoneAt('u1-bingo'),
+          data: () => ({}),
+        }),
+      );
+      batchCommitSpy.mockImplementationOnce(() => {
+        siblingCommitted = true; // the sibling tab's batch won the race
+        return Promise.reject(new Error('permission-denied'));
+      });
+
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 5 }, { dayIndex: 5 });
+      await vi.advanceTimersByTimeAsync(0);
+      // Attempt 1: the stale probe let BOTH tombstones into the batch — denied.
+      expect(batchCommitSpy).toHaveBeenCalledTimes(1);
+      expect(batchSetSpy).toHaveBeenCalledTimes(2);
+      expect(peekRetractions('u1')).toEqual(['bingo:5']);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      // Attempt 2: the fresh probe sees the sibling's legacy tombstone and skips
+      // it — only the day-scoped form rides, and the batch lands.
+      expect(batchCommitSpy).toHaveBeenCalledTimes(2);
+      expect(batchSetSpy).toHaveBeenCalledTimes(3);
+      expect(batchSetSpy.mock.calls[2][0].path).toBe(tombstoneAt('u1-bingo-d5'));
+      expect(peekRetractions('u1')).toEqual([]);
+
+      // Converged: nothing further is scheduled.
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(batchCommitSpy).toHaveBeenCalledTimes(2);
+      consoleError.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the retry budget is BOUNDED — a terminal denial parks the intent instead of looping, and a later organic drain still lands it', async () => {
+    vi.useFakeTimers();
+    try {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      batchCommitSpy.mockRejectedValue(new Error('permission-denied')); // e.g. a mid-retract account switch
+
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batchCommitSpy).toHaveBeenCalledTimes(1);
+
+      // Three scheduled retries (2s / 10s / 30s), then the budget is spent.
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(batchCommitSpy).toHaveBeenCalledTimes(4);
+      expect(peekRetractions('u1')).toEqual(['bingo:3']); // parked, not lost — silence
+
+      // The owning account returns / a fresh committed snapshot arrives: the
+      // organic drain retries outside the budget and succeeds.
+      batchCommitSpy.mockResolvedValue(undefined);
+      drainRetractions('u1', { dayIndex: 3, bingoStands: false, blackoutStands: false });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batchCommitSpy).toHaveBeenCalledTimes(5);
+      expect(peekRetractions('u1')).toEqual([]);
+      consoleError.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores the token when the batch construction THROWS — an unexpected rejection never leaks the intent (#480)', async () => {
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    writeBatchSpy.mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+    fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+    await settle();
+    expect(peekRetractions('u1')).toEqual(['bingo:3']); // restored via the rejection arm
+    resetRetractions(); // cancel the scheduled retry before the next case
+  });
+
+  it('a FRESH fall observation resets the retry budget — new evidence is a new adjudication', async () => {
+    vi.useFakeTimers();
+    try {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      batchCommitSpy.mockRejectedValue(new Error('permission-denied'));
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+      await vi.advanceTimersByTimeAsync(3_600_000); // budget spent: 1 + 3 attempts
+      expect(batchCommitSpy).toHaveBeenCalledTimes(4);
+
+      // A NEW fall is observed (regain then re-fall) — the enqueue resets the
+      // budget, so the failure path earns its retries again.
+      batchCommitSpy.mockResolvedValue(undefined);
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batchCommitSpy).toHaveBeenCalledTimes(5);
+      expect(peekRetractions('u1')).toEqual([]);
+      consoleError.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

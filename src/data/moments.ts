@@ -1,6 +1,7 @@
 import { doc, getDoc, getDocFromCache, getDocFromServer, setDoc, writeBatch } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { markerDisplayName } from './attribution';
+import { dropHeldHonorPins } from './dayMeta';
 import { hasBingo, isBlackout } from '../game/logic';
 import type { Cell, MomentDoc, MomentKind } from '../types';
 
@@ -598,12 +599,45 @@ export function dropPendingWins(
 // authorized and would irreversibly silence a STANDING win.
 //
 // So an observed fall only records an INTENT (`enqueueRetraction`). The write
-// happens in `drainRetractions`, which Board calls ONLY from a fully
+// happens in `drainRetractions`, which its callers invoke ONLY from a fully
 // SERVER-COMMITTED board snapshot (`!fromCache && !hasPendingWrites`): if the win
 // no longer stands there, the server agrees it fell and the retraction commits; if
 // it DOES stand (the rollback, or a regain), the intent is dropped and nothing is
 // spent. Offline there is no server-committed snapshot, so the intent simply waits
 // — the correct posture for a permanent action taken on unverified state.
+//
+// THREE fall-observer sites feed the queue, all with the same `fell` verdict shape
+// (#479 widened the original two): Board's unmark verdict (doMark), Board's
+// passive falling edge (its cells effect), and the ROUTE-INDEPENDENT observer
+// (`createRetractionFallObserver`, mounted app-shell via RetractWinMoments) — the
+// #467 detectors lived only on the Card route, so a win that stopped standing
+// while Board was UNMOUNTED (a proof deleted from the Feed tab, an admin
+// rejecting a confirmed claim) was never observed as a falling edge: the
+// returning Board BASELINED on the already-fallen state and the published Moment
+// stood forever. The route-independent observer mirrors the ConfirmWinMoments
+// shape (#41) — always mounted, per-board, edge-triggered — deliberately NOT a
+// board-vs-Feed reconciliation sweep: a reconciler has materially more ways to
+// be wrong, and a false positive here is irreversible.
+//
+// INTENT-TOKEN LIFECYCLE (#480 + #485). A token leaves the queue for good only
+// when its retraction is RESOLVED: the batch committed, the server probe proved
+// the win never published, or a server-committed board showed the win standing
+// (drop). Every FAILURE path restores it — an unknown server probe, a rejected
+// batch, even an unexpected throw — so a mid-retract account switch (the batch
+// runs under the new identity and the owner rules deny it) can retry when the
+// owning account returns. And a restored token is not left parked (#485): before
+// this rework `drainRetractions` only ran from Board's cells effect, so a
+// requeued intent waited for an unrelated snapshot/remount that might never
+// come. `requeueRetraction` now schedules a bounded retry against the LAST
+// server-committed evidence this module recorded for that board — the retry
+// re-runs the full drain adjudication (a re-mark that landed in between drops
+// the intent; it never blindly re-commits), and the budget is finite
+// (`RETRACTION_RETRY_DELAYS_MS`) so a terminal denial — e.g. a sibling tab
+// spending the shared legacy tombstone first and this tab's batch denying as a
+// doc-exists update until its next probe — converges instead of looping: after
+// the budget the token parks, still drainable by any later organic
+// server-committed snapshot. Failing toward PARKED (silence) is the designed
+// direction for every ambiguous outcome.
 //
 // The intent map is MODULE scope, uid-keyed like the pending-Moment queue above, so
 // it survives Board unmounts and route changes. Deliberately memory-only (no
@@ -620,9 +654,80 @@ const pendingRetractions = new Map<string, Set<string>>();
 const DAY_LESS = 'legacy';
 const retractionToken = (kind: RetractableKind, dayIndex?: number): string =>
   `${kind}:${dayIndex ?? DAY_LESS}`;
+
+const addRetractionIntent = (uid: string, kind: RetractableKind, dayIndex?: number): void => {
+  const key = pendingKey(uid);
+  let intents = pendingRetractions.get(key);
+  if (!intents) {
+    intents = new Set();
+    pendingRetractions.set(key, intents);
+  }
+  intents.add(retractionToken(kind, dayIndex));
+};
+
+// --- The requeue → re-drain scheduler (#485) --------------------------------
+//
+// The last SERVER-COMMITTED adjudication evidence per (uid, board), recorded on
+// every `drainRetractions` call — i.e. only ever from a snapshot its caller has
+// already vouched is neither `fromCache` nor `hasPendingWrites`. A scheduled
+// retry replays the drain against THIS evidence rather than skipping the board
+// gate: the intent is re-adjudicated (a win the evidence shows STANDING is
+// dropped, spending nothing) and `retractWin`'s own server probes still run, so
+// the retry path is exactly as conservative as the first attempt. Evidence is
+// superseded by every newer committed snapshot for the same board.
+const committedBoardEvidence = new Map<string, { bingoStands: boolean; blackoutStands: boolean }>();
+const boardEvidenceKey = (uid: string, dayIndex?: number): string =>
+  `${pendingKey(uid)}#${dayIndex ?? DAY_LESS}`;
+
+// The bounded retry budget for ONE requeued token: three attempts with growing
+// spacing, then the token PARKS (still queued, still drained by any later
+// organic server-committed snapshot — exactly the pre-#485 behavior, now as the
+// posture of last resort instead of the only one). Bounded because not every
+// failure is transient: a batch denied under a switched account, or a clock so
+// skewed the rules reject every tombstone `createdAt`, would otherwise retry
+// forever. Parking is silence — the safe direction.
+const RETRACTION_RETRY_DELAYS_MS: readonly number[] = [2_000, 10_000, 30_000];
+const retractionRetryAttempts = new Map<string, number>();
+const retractionRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const retryKey = (uid: string, token: string): string => `${pendingKey(uid)}#${token}`;
+
+/** Forget a token's retry budget and cancel its scheduled retry — called when the
+ *  token reaches ANY resolved state (committed, proven never-published, dropped
+ *  as still-standing) and when a FRESH fall observation re-enqueues it. */
+const clearRetractionRetryState = (uid: string, token: string): void => {
+  const key = retryKey(uid, token);
+  retractionRetryAttempts.delete(key);
+  const timer = retractionRetryTimers.get(key);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    retractionRetryTimers.delete(key);
+  }
+};
+
+/**
+ * Restore a token whose retraction FAILED (#480) and schedule a bounded re-drain
+ * (#485). The re-drain runs only when this module holds server-committed
+ * evidence for the token's own board — no evidence, no retry (fail toward
+ * parked) — and replays `drainRetractions`, never `retractWin` directly, so the
+ * standing re-check is structural. Past the budget the token parks for the next
+ * organic server-committed snapshot.
+ */
 const requeueRetraction = (uid: string, kind: RetractableKind, dayIndex?: number): void => {
-  if (kind === 'bingo') enqueueRetraction(uid, { bingo: true, bingoDayIndex: dayIndex });
-  else enqueueRetraction(uid, { blackout: true, blackoutDayIndex: dayIndex });
+  addRetractionIntent(uid, kind, dayIndex);
+  const token = retractionToken(kind, dayIndex);
+  const key = retryKey(uid, token);
+  const attempts = (retractionRetryAttempts.get(key) ?? 0) + 1;
+  retractionRetryAttempts.set(key, attempts);
+  const delay = RETRACTION_RETRY_DELAYS_MS[attempts - 1];
+  if (delay === undefined) return; // budget exhausted — park (silence, never a loop)
+  if (retractionRetryTimers.has(key)) return; // one scheduled retry per token
+  const timer = setTimeout(() => {
+    retractionRetryTimers.delete(key);
+    const evidence = committedBoardEvidence.get(boardEvidenceKey(uid, dayIndex));
+    if (!evidence) return; // no committed evidence on record — never guess
+    drainRetractions(uid, { dayIndex, ...evidence });
+  }, delay);
+  retractionRetryTimers.set(key, timer);
 };
 
 /**
@@ -639,14 +744,17 @@ export function enqueueRetraction(
   fell: { bingo?: boolean; blackout?: boolean; bingoDayIndex?: number; blackoutDayIndex?: number },
 ): void {
   if (!fell.bingo && !fell.blackout) return;
-  const key = pendingKey(uid);
-  let intents = pendingRetractions.get(key);
-  if (!intents) {
-    intents = new Set();
-    pendingRetractions.set(key, intents);
+  // A FRESH fall observation resets the token's retry budget (#485): this is a
+  // new adjudication of new evidence, not attempt N of the old one. (The
+  // internal failure path re-adds via `requeueRetraction`, which counts.)
+  if (fell.bingo) {
+    addRetractionIntent(uid, 'bingo', fell.bingoDayIndex);
+    clearRetractionRetryState(uid, retractionToken('bingo', fell.bingoDayIndex));
   }
-  if (fell.bingo) intents.add(retractionToken('bingo', fell.bingoDayIndex));
-  if (fell.blackout) intents.add(retractionToken('blackout', fell.blackoutDayIndex));
+  if (fell.blackout) {
+    addRetractionIntent(uid, 'blackout', fell.blackoutDayIndex);
+    clearRetractionRetryState(uid, retractionToken('blackout', fell.blackoutDayIndex));
+  }
 }
 
 /** The queued retraction intents for `uid`, as raw `${kind}:${day}` tokens.
@@ -657,8 +765,11 @@ export function peekRetractions(uid: string): string[] {
 
 /**
  * Adjudicate the queued intents for ONE board against SERVER-COMMITTED truth.
- * Board calls this only from a snapshot that is neither `fromCache` nor
- * `hasPendingWrites` — i.e. the server's own view of the card.
+ * Its callers — Board's cells effect, the route-independent observer
+ * (`createRetractionFallObserver`, #479), and the #485 retry scheduler replaying
+ * evidence those two recorded — only ever invoke it for a snapshot that is
+ * neither `fromCache` nor `hasPendingWrites`, i.e. the server's own view of the
+ * card.
  *
  * Per kind, for the intent whose Day IS this board's:
  *   - the win still STANDS → the fall did not survive the server (a rejected
@@ -673,26 +784,127 @@ export function drainRetractions(
   board: { dayIndex?: number; bingoStands: boolean; blackoutStands: boolean },
 ): void {
   const key = pendingKey(uid);
+  // Record this board's server-committed verdicts FIRST (#485), even when no
+  // intent is queued for it: a token requeued later retries against the newest
+  // evidence, and evidence is only ever born here — inside the caller's
+  // server-committed gate.
+  committedBoardEvidence.set(boardEvidenceKey(uid, board.dayIndex), {
+    bingoStands: board.bingoStands,
+    blackoutStands: board.blackoutStands,
+  });
   const intents = pendingRetractions.get(key);
   if (!intents) return;
   const consider = (kind: RetractableKind, stands: boolean) => {
     const token = retractionToken(kind, board.dayIndex);
     if (!intents.has(token)) return;
     intents.delete(token);
-    if (stands) return; // the server says the win is fine — spend nothing
-    void retractWin(uid, kind, board.dayIndex).then((consumed) => {
-      if (!consumed) requeueRetraction(uid, kind, board.dayIndex);
-    });
+    if (stands) {
+      // The server says the win is fine — spend nothing, and forget the retry
+      // budget: the intent is resolved, not failed.
+      clearRetractionRetryState(uid, token);
+      return;
+    }
+    void retractWin(uid, kind, board.dayIndex).then(
+      (consumed) => {
+        if (consumed) clearRetractionRetryState(uid, token);
+        else requeueRetraction(uid, kind, board.dayIndex);
+      },
+      // #480: `retractWin` is written to never reject, but an intent token is
+      // the only memory this lifecycle has — an unexpected throw must restore
+      // it (and schedule the bounded retry), never leak it with the rejection.
+      () => requeueRetraction(uid, kind, board.dayIndex),
+    );
   };
   consider('bingo', board.bingoStands);
   consider('blackout', board.blackoutStands);
   if (intents.size === 0) pendingRetractions.delete(key);
 }
 
-/** Drop every queued retraction intent. Exported for test isolation only (module
+/**
+ * A route-independent, per-board fall observer (#479) — the retraction twin of
+ * ConfirmWinMoments' always-mounted confirm listener (#41). One observer per
+ * (uid, board); `RetractWinMoments` wires one to each of the Player's OWN board
+ * subscriptions at the app shell, so a published win that stops standing while
+ * the Card route is UNMOUNTED — a proof deleted from the Feed tab, an admin
+ * rejecting a confirmed claim — is still observed as a falling edge instead of
+ * being baselined away by the next Board mount.
+ *
+ * Every path fails toward NOT retracting:
+ *   - only fully SERVER-COMMITTED snapshots participate (neither `fromCache` nor
+ *     `hasPendingWrites`) — an optimistic or cache-replayed snapshot can neither
+ *     move the baseline nor read as a fall nor adjudicate an intent;
+ *   - the FIRST committed snapshot is a BASELINE, never an edge — an observer
+ *     (re)mounted onto an already-fallen board records nothing new (the
+ *     documented app-fully-closed residual), though it still DRAINS: an intent
+ *     parked from an earlier observation (or another route) adjudicates against
+ *     this committed board, which is how a mid-retract account switch resumes
+ *     when the owning account returns (#480);
+ *   - a missing doc, a foreign uid, or an empty board is no evidence at all —
+ *     skipped entirely, baseline untouched.
+ *
+ * On a genuine committed fall it mirrors Board's observer sites exactly: the
+ * same `fell` verdict drives `dropPendingWins` (the pre-publish half — including
+ * the ceremonial generation bump), `dropHeldHonorPins` for a day-scoped bingo
+ * fall, and `enqueueRetraction`; the drain then adjudicates against this very
+ * snapshot. Both Board and this observer may see the same fall — the token Set
+ * dedupes the enqueue, the drain consumes each token once, and the tombstone
+ * probes/rules make the commit itself race-safe, so double observation costs
+ * only reads.
+ */
+export function createRetractionFallObserver(
+  uid: string,
+  dayIndex?: number,
+): (snap: {
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+  /** The board doc's own `uid` field; `undefined` when the doc does not exist. */
+  boardUid: string | undefined;
+  cells: Cell[];
+}) => void {
+  let baseline: { bingo: boolean; blackout: boolean } | null = null;
+  return (snap) => {
+    if (snap.fromCache || snap.hasPendingWrites) return; // committed snapshots only
+    if (snap.boardUid !== uid || snap.cells.length === 0) return; // no evidence — hold
+    const stands = { bingo: hasBingo(snap.cells), blackout: isBlackout(snap.cells) };
+    if (baseline) {
+      const fell: {
+        bingo?: boolean;
+        blackout?: boolean;
+        bingoDayIndex?: number;
+        blackoutDayIndex?: number;
+      } = {};
+      if (baseline.bingo && !stands.bingo) {
+        fell.bingo = true;
+        if (dayIndex !== undefined) fell.bingoDayIndex = dayIndex;
+      }
+      if (baseline.blackout && !stands.blackout) {
+        fell.blackout = true;
+        if (dayIndex !== undefined) fell.blackoutDayIndex = dayIndex;
+      }
+      if (fell.bingo || fell.blackout) {
+        dropPendingWins(uid, fell);
+        enqueueRetraction(uid, fell);
+        if (fell.bingo && dayIndex !== undefined) dropHeldHonorPins(uid, dayIndex);
+      }
+    }
+    baseline = stands;
+    drainRetractions(uid, {
+      dayIndex,
+      bingoStands: stands.bingo,
+      blackoutStands: stands.blackout,
+    });
+  };
+}
+
+/** Drop every queued retraction intent, its recorded board evidence, and the
+ *  retry scheduler's timers/budgets. Exported for test isolation only (module
  *  state persists across unmounts by design); not used by app code. */
 export function resetRetractions(): void {
   pendingRetractions.clear();
+  committedBoardEvidence.clear();
+  retractionRetryAttempts.clear();
+  for (const timer of retractionRetryTimers.values()) clearTimeout(timer);
+  retractionRetryTimers.clear();
 }
 
 /** The tombstone/Moment id for a (Player, kind, Day) win — the writer's own

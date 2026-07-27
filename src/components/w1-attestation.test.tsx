@@ -57,6 +57,10 @@ vi.mock('./ConfirmWinMoments', () => ({
 // subscription this suite does not wire; stub it — this suite is about the attestation
 // gate, not the watcher (its own suite is ./w1-deal-auto-retry.test.tsx).
 vi.mock('./PoolRecoveryWatcher', () => ({ default: () => null }));
+// The #479 retraction fall observer mounts at the same shell spot; stub it for
+// the same reason (its own suites are ./RetractWinMoments.test.tsx and the
+// moments unit suite).
+vi.mock('./RetractWinMoments', () => ({ default: () => null }));
 
 const FAKE_USER = { uid: 'sailor-1', displayName: 'Sailor', photoURL: null };
 

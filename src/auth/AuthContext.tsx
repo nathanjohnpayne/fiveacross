@@ -21,6 +21,7 @@ import { track } from '../analytics';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
+import RetractWinMoments from '../components/RetractWinMoments';
 import PoolRecoveryWatcher from '../components/PoolRecoveryWatcher';
 
 // Connectivity probe for the boot path (#115). The auth bootstrap and the deal
@@ -1088,6 +1089,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           any parked ceremony across the remount. Renders nothing; scoped to the
           mount location only — the attestation gate itself is #117's surface. */}
       {user && <ConfirmWinMoments />}
+      {/* The retraction-path fall observer (#479) mounts at the SAME shell spot
+          and for the same reason: a published win can stop standing while Board
+          is unmounted (a proof deleted from the Feed tab, an admin rejecting a
+          confirmed claim), and Board's remount would baseline the fall away.
+          Renders nothing; all irreversibility gates live in src/data/moments.ts
+          (createRetractionFallObserver). */}
+      {user && <RetractWinMoments />}
       {/* The pool-recovery auto-retry watcher (#70), mounted HERE — above the tab
           Router, beside the attestation gate — for the same reason ConfirmWinMoments
           is: it must survive the exact recovery path. The Card-route DealError panel

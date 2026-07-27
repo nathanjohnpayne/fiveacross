@@ -59,6 +59,8 @@ vi.mock('../analytics', () => ({ track: mocks.track }));
 // suite is about the auth/attestation state machine, not the win-moment surface
 // (mirrors the sibling AuthContext / auth-profile-race suites).
 vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));
+// The #479 retraction fall observer mounts beside it — same stub, same reason.
+vi.mock('../components/RetractWinMoments', () => ({ default: () => null }));
 // It also mounts the pool-recovery watcher (#70), which reads the same unwired `db`;
 // stub it too — this suite is the auth/attestation state machine, not the watcher (its
 // own suite is src/components/w1-deal-auto-retry.test.tsx).

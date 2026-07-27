@@ -58,6 +58,8 @@ vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
 // AuthProvider also mounts ConfirmWinMoments (#41); stub it — this suite is about the
 // pool-recovery watcher, which is real below.
 vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));
+// The #479 retraction fall observer mounts beside it — same stub, same reason.
+vi.mock('../components/RetractWinMoments', () => ({ default: () => null }));
 vi.mock('../data/api', () => ({
   ensureUserProfile: mocks.ensureUserProfile,
   attestAdult: mocks.attestAdult,
