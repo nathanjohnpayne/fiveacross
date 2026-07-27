@@ -828,7 +828,17 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       cells: card((i) => (i === 4 ? 'shared' : `c${i}`), { 4: { marked: true, markedAt: 1 } }),
     });
     H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: card((i) => (i === 9 ? 'shared' : `d${i}`)) });
-    H.player = { uid: 'u1', dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } } };
+    // A CONSISTENT row: the roots ARE the ceremonial-excluded sum of the
+    // buckets, which is what `PlayerDoc` requires (both root totals are
+    // non-optional) and what every fold writes. #496's root-lag signal reads
+    // exactly that invariant, so a fixture omitting the roots would read as a
+    // genuinely self-inconsistent row and trigger the heal.
+    H.player = {
+      uid: 'u1',
+      bingoCount: 0,
+      squaresMarked: 1,
+      dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
+    };
   };
 
   it('writes the missing echo onto the opened board (its own markSeed); the stats write derives from SERVER state after the ack (#491)', async () => {
@@ -945,6 +955,134 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     expect(res.complete).toBe(false); // Board must drop its once-per-board key
   });
 
+  /**
+   * #496 — the ROOT-total half of the stats lag. The per-Day signal (#491) is
+   * blind to it: an offline echo overwrote a cell another device had already
+   * marked, so every `dayStats[d]` bucket converged, while the acted-day batch
+   * wrote roots re-summed from the STALE cached buckets and the post-ack
+   * server-derived transaction died in a reload. The tell is row-internal —
+   * the buckets out-sum the roots, which no consistent write can produce.
+   */
+  describe('#496: the row-internal root-lag heal', () => {
+    /** A Day-2 board standing a completed row 10..14 (through the free centre). */
+    const bingoDay2 = () =>
+      H.dayBoards.set(2, {
+        uid: 'u1',
+        seed: 222,
+        dayIndex: 2,
+        cells: card((i) => (i === 9 ? 'shared' : `d${i}`), {
+          10: { marked: true, markedAt: 7, status: 'confirmed' },
+          11: { marked: true, markedAt: 7, status: 'confirmed' },
+          13: { marked: true, markedAt: 7, status: 'confirmed' },
+          14: { marked: true, markedAt: 7, status: 'confirmed' },
+        }),
+      });
+
+    it('heals understated roots on the open of ANY board, even one whose own bucket is perfectly in step', async () => {
+      seedReconcile();
+      bingoDay2();
+      // Every bucket matches its board's cells — the #491 per-Day signal has
+      // nothing to fire on, on Day 1 or anywhere else. The ROOTS still carry
+      // the pre-Day-2 sum: understated by that Day's whole bucket.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 1,
+        dayStats: {
+          1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 },
+        },
+      };
+      // Opening DAY 1 — not the Day whose bucket the roots are missing.
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true); // the heal succeeded — the guard may settle
+      expect(H.batchCommit).not.toHaveBeenCalled(); // no cell writes needed
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      const stats = statsWrite![1] as {
+        dayStats: Record<number, { bingoCount: number; squaresMarked: number }>;
+        bingoCount: number;
+        squaresMarked: number;
+      };
+      // Rewritten from SERVER state: the roots now equal the row's own buckets.
+      expect(stats.squaresMarked).toBe(5);
+      expect(stats.bingoCount).toBe(1);
+      // The opened Day's bucket rides along unchanged — the heal never
+      // fabricates a bucket from anything but the board's committed cells.
+      expect(stats.dayStats[1]).toMatchObject({ bingoCount: 0, squaresMarked: 1 });
+    });
+
+    it('ignores the ceremonial Day bucket, which the roots never counted (#265)', async () => {
+      seedReconcile();
+      bingoDay2();
+      // Day 2 is the farewell Day: its bucket is deliberately absent from the
+      // roots, so a naive bucket-sum would read this consistent row as lagging
+      // by the whole ceremonial bucket and re-heal on every single open.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 1,
+        dayStats: {
+          1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 },
+        },
+      };
+      const res = await reconcileEchoes({
+        uid: 'u1',
+        dayIndex: 1,
+        dayIndexes: [0, 1, 2],
+        ceremonialDayIndexes: [2],
+      });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+
+    it('never heals the other direction: roots ABOVE the bucket sum are a legacy/partial breakdown, not lag', async () => {
+      seedReconcile();
+      // The pre-Day-Cards roster shape: real root totals, a `dayStats` map
+      // that has only started filling in. A heal here would march the roster
+      // BACKWARDS — exactly the regression #491 removed.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 3,
+        squaresMarked: 40,
+        dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
+      };
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+
+    it('is skipped post-freeze, where the reconcile writes ceremonial buckets only and a root lag could never converge', async () => {
+      seedReconcile();
+      bingoDay2();
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 1,
+        dayStats: {
+          1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 },
+        },
+      };
+      // Day 1 is heal-ELIGIBLE for the per-Day signal only pre-freeze; post
+      // freeze even a ceremonial open must not re-read the server for roots
+      // that the narrowed write can never touch.
+      const res = await reconcileEchoes({
+        uid: 'u1',
+        dayIndex: 1,
+        dayIndexes: [0, 1, 2],
+        ceremonialDayIndexes: [1],
+        statsFrozen: true,
+      });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+  });
 
   it('is a zero-write no-op on an already-reconciled board', async () => {
     seedReconcile();
@@ -956,9 +1094,13 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         9: { marked: true, markedAt: 1, status: 'confirmed', echo: true },
       }),
     });
-    // The row's Day-2 bucket already matches the cells — no stats lag either.
+    // The row's Day-2 bucket already matches the cells, and the roots match
+    // the bucket sum — neither stats-lag signal (#491 per-Day, #496 root) has
+    // anything to fire on.
     H.player = {
       ...(H.player as Record<string, unknown>),
+      bingoCount: 0,
+      squaresMarked: 2,
       dayStats: {
         1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
         2: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
@@ -1019,9 +1161,12 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         9: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
       }),
     });
-    // Row bucket in step with the cells — no #491 stats-lag heal in this test.
+    // Row bucket in step with the cells and roots in step with the bucket sum
+    // — no #491/#496 stats-lag heal in this test.
     H.player = {
       ...(H.player as Record<string, unknown>),
+      bingoCount: 0,
+      squaresMarked: 2,
       dayStats: {
         1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
         2: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
@@ -1184,9 +1329,13 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         14: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
       }),
     });
+    // Roots in step with the bucket: this exercises the repair-PIN path, not
+    // the #496 root-lag heal (which a rootless fixture would also trigger).
     H.player = {
       uid: 'u1',
       displayName: 'Alice',
+      bingoCount: 1,
+      squaresMarked: 4,
       dayStats: { 2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 } },
     };
     const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [2] });
