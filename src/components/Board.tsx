@@ -885,12 +885,19 @@ export default function Board() {
   // different board (or Board remounts): the retry happens once per visit,
   // when the cache plausibly gained siblings, not once per snapshot.
   const incompleteReconcileKeyRef = useRef<string | null>(null);
+  // The board identity the player is CURRENTLY viewing — an async reconcile
+  // continuation may only pin the visit block above if its originating board
+  // is still the viewed one (Codex P2 on #498: board A's slow incomplete
+  // completion landing after the player navigated to B must not re-block A,
+  // or returning to A before B's next snapshot would skip A's retry).
+  const viewedReconcileKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!hasDays || !user || !board || board.uid !== user.uid) return;
     if (!identityKnown || !dayBoardConfirmed) return;
     const schedule = event?.days ?? [];
     if (schedule.length === 0) return;
     const key = `${user.uid}:${board.dayIndex}:${board.seed}`;
+    viewedReconcileKeyRef.current = key;
     if (incompleteReconcileKeyRef.current !== null && incompleteReconcileKeyRef.current !== key) {
       // The player opened a DIFFERENT board — the blocked identity may retry
       // on its next visit.
@@ -913,16 +920,17 @@ export default function Board() {
         // source Mark; or a #491 stats-lag heal that failed) must not settle
         // the once-per-board guard: drop the key so a later open retries with
         // more of the cache populated (Codex P2 on #447), but pin the visit
-        // block above so the retry is per-open, not per-snapshot (#492).
+        // block above so the retry is per-open, not per-snapshot (#492) —
+        // and only while ITS board is still the viewed one.
         if (!res.complete) {
           reconciledBoardsRef.current.delete(key);
-          incompleteReconcileKeyRef.current = key;
+          if (viewedReconcileKeyRef.current === key) incompleteReconcileKeyRef.current = key;
         }
       })
       .catch(() => {
         // A synchronous failure (nothing written) may retry on the next open.
         reconciledBoardsRef.current.delete(key);
-        incompleteReconcileKeyRef.current = key;
+        if (viewedReconcileKeyRef.current === key) incompleteReconcileKeyRef.current = key;
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads.
   }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days]);

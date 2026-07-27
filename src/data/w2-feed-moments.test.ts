@@ -1362,6 +1362,16 @@ describe('the pending-Moment queue — module state that survives Board unmounts
         JSON.stringify({ v: 1, flags: { bingo: true, blackout: false }, generation: 0 }),
       );
       expect(peekPendingMoments('u2')).toEqual({ bingo: true, blackout: false, firstBingo: false });
+
+      // A present-but-EMPTY Day list is corruption too (persistPending never
+      // stores one — an emptied list is removed with its flag), and an empty
+      // list drains exactly like the absent legacy shape — drop the win
+      // (Codex P2 on #498).
+      values.set(
+        `gcb:pending-moments:${EVENT_ID}:u3`,
+        JSON.stringify({ v: 1, flags: { bingo: true, blackout: false, bingoDayIndexes: [] }, generation: 0 }),
+      );
+      expect(peekPendingMoments('u3')).toEqual({ bingo: false, blackout: false, firstBingo: false });
     } finally {
       resetPendingMoments();
       vi.unstubAllGlobals();
