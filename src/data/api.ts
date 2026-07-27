@@ -37,7 +37,7 @@ import {
   firstLineCompletionAt,
   foldEchoStats,
   standingsFrozen,
-  sumDayStats,
+  playerRowRootLag,
   tutorialDayIndexSet,
   ceremonialDayIndexSet,
   type DayStats,
@@ -1727,7 +1727,7 @@ async function runSetMark(
     }),
   );
   // Echoed sibling boards ride the SAME batch, each carrying ITS OWN board's
-  // markSeed — the stale-write rules gate (`seededMarkWriteOk`) is per-board,
+  // markSeed — the stale-write rules gate (`seededMarkGuard`) is per-board,
   // and reusing the source board's seed would be rejected (specs/echo-marks.md).
   for (const echoBoard of echoBoards) {
     batch.set(
@@ -1931,7 +1931,7 @@ async function runSetMark(
   for (const echoBoard of echoBoards) {
     if (echoBoard.bingoTransition || echoBoard.blackoutTransition) {
       // Commit-ack gated like the pin below and the reconcile path (Phase 4b
-      // P1 on #447): a batch the rules reject (stale markSeed/markVersion)
+      // P1 on #447): a batch the rules reject (a stale markSeed)
       // rolls the echo back, and a pre-ack Moment could drain into the Feed
       // for a board state that never committed. Offline the commit pends and
       // the Moment enqueues on reconnect's ack — the acted board's own
@@ -2249,38 +2249,21 @@ async function runReconcileEchoes(
     // reload. Every bucket then matches its board and `bucketLag` never fires,
     // yet the roots stay understated.
     //
-    // The tell is ROW-INTERNAL, so it needs no cache-freshness assumption: the
-    // roots ARE `sumDayStats` over the row's own non-ceremonial buckets
-    // (`aggregatePlayerStats`), so a row whose buckets out-sum its roots is
-    // self-inconsistent at that document version — impossible to reach by any
-    // consistent write, and readable off a stale cache just as truthfully as
-    // off the server. Strictly one-directional like the bucket check: roots
-    // ABOVE the bucket sum are the legitimate shape of a row whose per-day
-    // breakdown is partial (a pre-Day-Cards roster), and never heal from here.
+    // The tell is ROW-INTERNAL (`playerRowRootLag`, src/game/logic.ts — shared
+    // with Board's #506 guard re-arm so the two predicates cannot drift), so it
+    // needs no cache-freshness assumption; see the helper for the per-field
+    // one-directional rule (Codex P1 on #503) and the dominance requirement.
     // Same ceremonial exclusion (#265) the roots were summed with, so a
     // farewell-Day bucket can never look like root lag.
-    const bucketSum = sumDayStats(
-      cachedPlayerData?.dayStats as DayStats | undefined,
-      params.ceremonialDayIndexes ? (i: number) => params.ceremonialDayIndexes!.includes(i) : undefined,
-    );
-    // One-directional PER FIELD, not merely on the whole row (Codex P1 on
-    // #503): the fold rewrites BOTH roots (and the root `firstBingoAt`) from
-    // one merged view, so it is not enough that SOME field lags — the bucket
-    // sum must DOMINATE every root, and exceed at least one. A row that is
-    // partial in one dimension and lagging in the other (0 bingos / 45 squares
-    // of buckets against roots of 3 bingos / 40 squares) would otherwise be
-    // "healed" by writing the bingo root DOWN from 3 to 0 — the exact
-    // regression the one-directional rule exists to forbid.
     // Post-freeze the reconcile writes ceremonial BUCKETS only, never roots
     // (#265) — a root lag could not converge, so re-reading the server on every
     // open would be pure churn (the same reasoning as `healEligible`).
-    const rootSquares = cachedPlayerData?.squaresMarked ?? 0;
-    const rootBingos = cachedPlayerData?.bingoCount ?? 0;
     const rootLag =
       !params.statsFrozen &&
-      bucketSum.squaresMarked >= rootSquares &&
-      bucketSum.bingoCount >= rootBingos &&
-      (bucketSum.squaresMarked > rootSquares || bucketSum.bingoCount > rootBingos);
+      playerRowRootLag(
+        cachedPlayerData,
+        params.ceremonialDayIndexes ? (i: number) => params.ceremonialDayIndexes!.includes(i) : undefined,
+      );
     if (bucketLag || rootLag) {
       try {
         const healed = await reconcileEchoStatsFromServer({
@@ -2370,7 +2353,7 @@ async function runReconcileEchoes(
 
   if (res.bingoTransition || res.blackoutTransition) {
     // Commit-ack gated, exactly like the day-honor pin below (Phase 4b P1 on
-    // #447): a batch the rules reject (stale markSeed / markVersion) rolls the
+    // #447): a batch the rules reject (a stale markSeed) rolls the
     // echo back, and a Moment enqueued before the ack would let the next board
     // render post a win that never committed. Offline the commit pends and the
     // Moment enqueues on reconnect's ack — the same durability the pin has.

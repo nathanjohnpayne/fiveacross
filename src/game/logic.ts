@@ -814,6 +814,33 @@ export function sumDayStats(
   return { bingoCount, squaresMarked };
 }
 
+/** The #496 ROW-INTERNAL root-lag signal, shared by `runReconcileEchoes`'s
+ *  heal predicate and Board's re-arm of its once-per-board reconcile guard
+ *  (#506) so the two can never drift apart. A Player row whose per-Day buckets
+ *  out-sum its root `bingoCount`/`squaresMarked` is self-inconsistent — the
+ *  roots ARE `sumDayStats` over the row's own non-ceremonial buckets
+ *  (`aggregatePlayerStats`) — so the lag is readable off a stale cache just as
+ *  truthfully as off the server. One-directional PER FIELD (Codex P1 on #503):
+ *  the heal rewrites BOTH roots from one merged view, so the bucket sum must
+ *  DOMINATE every root and strictly exceed at least one; a row partial in one
+ *  dimension and lagging in the other must never "heal" a root DOWNWARD.
+ *  Callers gate on their own freeze state — post-freeze the reconcile never
+ *  writes roots, so a root lag could not converge and re-checking is churn. */
+export function playerRowRootLag(
+  row: Pick<Partial<PlayerDoc>, 'dayStats' | 'squaresMarked' | 'bingoCount'> | null | undefined,
+  isCeremonialDay?: (dayIndex: number) => boolean,
+): boolean {
+  if (!row) return false;
+  const bucketSum = sumDayStats(row.dayStats, isCeremonialDay);
+  const rootSquares = row.squaresMarked ?? 0;
+  const rootBingos = row.bingoCount ?? 0;
+  return (
+    bucketSum.squaresMarked >= rootSquares &&
+    bucketSum.bingoCount >= rootBingos &&
+    (bucketSum.squaresMarked > rootSquares || bucketSum.bingoCount > rootBingos)
+  );
+}
+
 /** The cruise-wide First to BINGO time: the earliest `firstBingoAt` across the
  *  MAIN-GAME Days only — tutorial Days are excluded even when their bingo is
  *  numerically earlier (the embark card is trivially easy and live before anyone

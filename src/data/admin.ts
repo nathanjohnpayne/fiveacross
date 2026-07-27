@@ -24,11 +24,6 @@ const player = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
 const marker = (itemId: string, uid: string) =>
   doc(db, 'events', EVENT_ID, 'tally', itemId, 'markers', uid);
 
-function nextMarkVersion(board: { markVersion?: unknown }): number {
-  const previous = board.markVersion;
-  return typeof previous === 'number' && Number.isSafeInteger(previous) && previous >= 0 ? previous + 1 : 1;
-}
-
 export const hideItem = (id: string) => updateDoc(item(id), { status: 'hidden' });
 export const restoreItem = (id: string) => updateDoc(item(id), { status: 'active' });
 export const deleteItem = (id: string) => deleteDoc(item(id));

@@ -31,7 +31,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -874,14 +874,204 @@ export default function Board() {
   // the board, and any echo win it enqueued drains through the standard
   // cells-effect drain — nothing posts directly from here.
   const reconciledBoardsRef = useRef<Set<string>>(new Set());
+  // #492: the board VISIT whose last reconcile pass came back INCOMPLETE (or
+  // failed). `board` is a NEW object on every snapshot, so deleting the
+  // once-per-board key alone made every subsequent snapshot re-run the whole
+  // reconcile — N+2 cache reads through the markChains chain each time, plus
+  // the repair-pin's repeated create-denials — while the board sat on an
+  // incomplete cache. The contract is "a later OPEN retries" (spec §
+  // Open-time), so an incomplete attempt BLOCKS re-runs for as long as the
+  // player keeps looking at that same board, and stops blocking when the
+  // visit ends: the retry happens once per visit, when the cache plausibly
+  // gained siblings, not once per snapshot. Scoped to key AND generation
+  // (#500): a pin from an ENDED visit is inert, so returning to the same
+  // card after ANY departure — including through a state with no
+  // attributable board at all — is a fresh open that retries.
+  const incompleteReconcileVisitRef = useRef<{ key: string; generation: number } | null>(null);
+  // The CURRENT board visit — identity key plus a generation that bumps every
+  // time the viewed identity changes, INCLUDING to "no attributable board"
+  // (#500: a locked/loading Day or account-switch interlude ends the visit —
+  // the early returns below record it — so a same-card return is a later
+  // OPEN, not a continuation). An async reconcile continuation may pin the
+  // visit block above only when BOTH still match its originating visit
+  // (Codex P2 x2 on #498): a slow incomplete completion landing after the
+  // player navigated away must not re-block its board (key mismatch), and one
+  // landing after the player LEFT AND RETURNED belongs to the previous visit
+  // (generation mismatch) — pinning then would swallow the return visit's
+  // retry until yet another navigation.
+  const reconcileVisitRef = useRef<{ key: string | null; generation: number }>({
+    key: null,
+    generation: 0,
+  });
+  // Keys with a reconcile pass launched and not yet settled. Distinguishes
+  // "in flight" from "settled complete" inside `reconciledBoardsRef` so the
+  // #506 row-lag re-arm below never launches a second concurrent pass over
+  // one already running (which will evaluate the same row itself).
+  const reconcileInFlightRef = useRef<Set<string>>(new Set());
+  // #499/#501: the explicit retry trigger. Completion handlers mutate refs,
+  // and ref mutations schedule NO effect re-run — so when a STALE pass's
+  // incomplete completion re-arms the guard for the board the player is
+  // CURRENTLY viewing (its own fresh attempt was skipped by the in-flight
+  // guard), bumping this nonce is what actually re-runs the effect for the
+  // live visit instead of leaving the spec's "a later OPEN retries" promise
+  // waiting on an unrelated snapshot. Bumped ONLY in that
+  // key-matches-but-generation-differs case, and the retried pass carries the
+  // CURRENT generation — its own incomplete completion pins the per-visit
+  // block instead of bumping again — so the trigger cannot loop.
+  const [reconcileRetryNonce, setReconcileRetryNonce] = useState(0);
+  // #506: the row-lag EPISODE — scoped to the signed-in uid (Codex P2 round
+  // 2 on #507: a component-global latch let one account's episode swallow
+  // another's after a switch), latched `active` on the transition into row
+  // inconsistency and reset when the row reads consistent again, so an
+  // inconsistent row that a failed heal leaves standing cannot re-trigger a
+  // pass per snapshot (the per-visit incomplete block owns that retry).
+  const reconcileRowLagEpisodeRef = useRef<{ uid: string; active: boolean } | null>(null);
+  // Whether the active episode still OWES its one heal pass. The heal is
+  // ROW-scoped, not board-scoped — every board's pass evaluates the same
+  // row predicate — so the debt follows the player to whatever board is
+  // currently OPEN (Codex P2 round 2 on #507: re-arming only the key that
+  // detected the lag left a navigated-to, already-settled board unhealed).
+  // Cleared exactly when a pass LAUNCHES with the lag in view (that pass
+  // reads the row), or when the row reads consistent again.
+  const reconcileRowLagOwedRef = useRef(false);
+  // The board key whose IN-FLIGHT pass's settle owes a retry-nonce bump
+  // (Codex P2 round 1 on #507): a lag observed while a pass is already
+  // running must not re-arm immediately (that would double the pass), but
+  // that pass may have captured the previously CONSISTENT row and settle
+  // `complete: true` without ever seeing the lag — with no further snapshot
+  // guaranteed to re-run the effect. The settle consumes this and bumps the
+  // nonce; the re-armed run then serves the still-owed heal on whatever
+  // board is open at that moment.
+  const reconcileRowLagRearmKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!hasDays || !user || !board || board.uid !== user.uid) return;
-    if (!identityKnown || !dayBoardConfirmed) return;
     const schedule = event?.days ?? [];
-    if (schedule.length === 0) return;
+    if (
+      !hasDays ||
+      !user ||
+      !board ||
+      board.uid !== user.uid ||
+      !identityKnown ||
+      !dayBoardConfirmed ||
+      schedule.length === 0
+    ) {
+      // #500: no attributable board on screen ENDS the current visit (the
+      // generation is bumped by the next valid open), so an incomplete block
+      // pinned before a locked/loading-Day or account-switch interlude can
+      // never strand the old card past its visit.
+      reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
+      return;
+    }
     const key = `${user.uid}:${board.dayIndex}:${board.seed}`;
+    if (reconcileVisitRef.current.key !== key) {
+      reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
+      // Any pin belongs to an ended visit now — inert by generation, dropped
+      // for hygiene.
+      incompleteReconcileVisitRef.current = null;
+    }
+    const visitGeneration = reconcileVisitRef.current.generation;
+    // #506: the once-per-board guard is retained for the session, but the
+    // session can outlive the row's consistency — another device's acted-day
+    // batch can understate the roots AFTER this board settled its complete
+    // pass, and with the row absent from the old deps the heal predicate was
+    // never re-evaluated until a reload. The row is already subscribed
+    // (`player`, now in the deps), so re-arm the guard for the OPEN board on
+    // the transition into row inconsistency — the same `playerRowRootLag`
+    // signal `runReconcileEchoes` heals on, same freeze gate — and let the
+    // pass below re-run and heal. The owed heal follows the OPEN board, not
+    // the board that first detected the lag; while a pass is IN FLIGHT the
+    // re-arm is deferred, not dropped — the running pass may have captured
+    // the previously consistent row, so its settle owes the nonce bump that
+    // brings the debt back to this effect (Codex P2 x2 on #507).
+    // The episode bookkeeping consumes the row signal only when the
+    // subscribed row actually BELONGS to the signed-in account (Phase 4b P1
+    // on #507): during an account switch the new user's board can turn valid
+    // before `useMyPlayer`'s keyed effect clears the PREVIOUS account's row,
+    // and a stale lagged row from the old account must not latch — and
+    // thereby consume — the new account's episode, suppressing the real heal
+    // when its own row arrives. A mismatched row is not a row signal at all:
+    // every episode ref is left untouched until an attributable snapshot
+    // (`player` is in the deps) re-runs this effect.
+    if (player === null || player.uid === user.uid) {
+      const rowLag =
+        !standingsFrozen(event) &&
+        playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
+      if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
+        // Account switch: episode state is per-uid; the previous account's
+        // latch (or debt) must never gate — or leak into — this one's.
+        reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
+        reconcileRowLagOwedRef.current = false;
+        reconcileRowLagRearmKeyRef.current = null;
+      }
+      if (!rowLag) {
+        reconcileRowLagEpisodeRef.current.active = false;
+        reconcileRowLagOwedRef.current = false;
+        reconcileRowLagRearmKeyRef.current = null;
+      } else {
+        if (!reconcileRowLagEpisodeRef.current.active) {
+          reconcileRowLagEpisodeRef.current.active = true;
+          reconcileRowLagOwedRef.current = true;
+        }
+        if (reconcileRowLagOwedRef.current) {
+          if (reconcileInFlightRef.current.has(key)) {
+            reconcileRowLagRearmKeyRef.current = key;
+          } else {
+            // Serve the episode's heal here: drop this key's guard (and any
+            // pin) so the pass below launches and evaluates the lagged row.
+            reconcileRowLagRearmKeyRef.current = null;
+            reconcileRowLagOwedRef.current = false;
+            reconciledBoardsRef.current.delete(key);
+            if (incompleteReconcileVisitRef.current?.key === key) {
+              incompleteReconcileVisitRef.current = null;
+            }
+          }
+        }
+      }
+    }
     if (reconciledBoardsRef.current.has(key)) return;
+    const pin = incompleteReconcileVisitRef.current;
+    if (pin !== null && pin.key === key && pin.generation === visitGeneration) {
+      return; // same visit — no per-snapshot churn
+    }
     reconciledBoardsRef.current.add(key);
+    reconcileInFlightRef.current.add(key);
+    // An INCOMPLETE pass (a sibling board this device has never cached — its
+    // cache read rejected, so the achieved set may be missing the source
+    // Mark; or a #491 stats-lag heal that failed) must not settle the
+    // once-per-board guard: drop the key so a later open retries with more
+    // of the cache populated (Codex P2 on #447). Then, by where the player
+    // is looking NOW:
+    //   • still this visit → pin the per-visit block so the retry is
+    //     per-open, not per-snapshot (#492);
+    //   • same card, LATER visit (they left and came back while this pass
+    //     hung; the in-flight guard skipped the return visit's own attempt)
+    //     → the current open's promised retry has no snapshot to ride, so
+    //     bump the retry nonce to schedule it explicitly (#499/#501);
+    //   • different card → nothing; the old card's next open retries.
+    const settle = (complete: boolean) => {
+      reconcileInFlightRef.current.delete(key);
+      if (reconcileRowLagRearmKeyRef.current === key) {
+        // A row lag surfaced DURING this pass, and this pass may have raced
+        // past its own predicate on the previously consistent row — the
+        // episode's heal is still OWED (`reconcileRowLagOwedRef` stays true),
+        // so bump the nonce and let the re-armed effect run serve it on
+        // whatever board is open by then. An incomplete pass still drops its
+        // own key (standard later-open retry); a complete one keeps it — the
+        // nonce run re-arms the CURRENT key itself. The debt clears exactly
+        // when a pass launches with the lag in view, so no loop.
+        reconcileRowLagRearmKeyRef.current = null;
+        if (!complete) reconciledBoardsRef.current.delete(key);
+        setReconcileRetryNonce((n) => n + 1);
+        return;
+      }
+      if (complete) return;
+      reconciledBoardsRef.current.delete(key);
+      if (reconcileVisitRef.current.key !== key) return;
+      if (reconcileVisitRef.current.generation === visitGeneration) {
+        incompleteReconcileVisitRef.current = { key, generation: visitGeneration };
+      } else {
+        setReconcileRetryNonce((n) => n + 1);
+      }
+    };
     void reconcileEchoes({
       uid: user.uid,
       dayIndex: board.dayIndex,
@@ -890,21 +1080,11 @@ export default function Board() {
       ceremonialDayIndexes: [...ceremonialDayIndexSet(schedule)],
       statsFrozen: standingsFrozen(event),
     })
-      .then((res) => {
-        // An INCOMPLETE pass (a sibling board this device has never cached —
-        // its cache read rejected, so the achieved set may be missing the
-        // source Mark) must not settle the once-per-board guard: drop the key
-        // so a later open retries with more of the cache populated (Codex P2
-        // on #447). The pass itself is idempotent and write-free when nothing
-        // echoed, so retrying is cheap.
-        if (!res.complete) reconciledBoardsRef.current.delete(key);
-      })
-      .catch(() => {
-        // A synchronous failure (nothing written) may retry on the next open.
-        reconciledBoardsRef.current.delete(key);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads.
-  }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days]);
+      .then((res) => settle(Boolean(res.complete)))
+      // A synchronous failure (nothing written) may retry on the next open.
+      .catch(() => settle(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads, plus the explicit retry nonce.
+  }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, player, reconcileRetryNonce]);
   // Edge refs for the COSMETIC Celebration UI only (issue #104). The public Moment
   // broadcast moved OFF this snapshot-diffing machinery and ONTO the action path —
   // doMark reads `setMark`'s synchronous win-transition verdict and enqueues into a
