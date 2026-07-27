@@ -1691,24 +1691,27 @@ async function runSetMark(
       });
     });
   }
-  // The ONE aggregated player write (specs/echo-marks.md § Scoring): the
-  // acted-day fold composed with every echoed board's bucket. No echoes → the
-  // existing fold, byte-identical to today.
+  // The batch's player write (specs/echo-marks.md § Scoring, revised by #491):
+  // the ACTED day's fold only. The echoed sibling buckets deliberately do NOT
+  // ride the batch any more — they were derived from PERSISTENT-CACHE sibling
+  // cells, and in the trust-latch window #482 keeps open (offline with the
+  // watch still mounted) those cells can be stale, so folding them here would
+  // overwrite `dayStats[siblingDay]` — and the re-summed roots — BACKWARDS
+  // over another device's committed Marks when the batch drains. Sibling
+  // buckets and roots are instead re-derived from SERVER-COMMITTED state after
+  // the batch's ack (`reconcileEchoStatsFromServer` below). What the echo case
+  // still latches through the batch is the prior root `blackout` (Codex P2 on
+  // #447) plus any locally visible echo blackout: a mark only ADDS cells, so
+  // the latch can never wrongly hold, and the post-ack reconcile re-derives it
+  // from server truth anyway. No echoes → the existing fold, byte-identical to
+  // today.
   const aggregatedWrite =
     echoBoards.length > 0
-      ? foldEchoStats({
-          priorDayStats,
-          echoes: echoBoards.map((b) => b.bucket),
-          now,
-          isTutorialDay: params.tutorialDayIndexes
-            ? (i: number) => params.tutorialDayIndexes!.includes(i)
-            : undefined,
-          isCeremonialDay: params.ceremonialDayIndexes
-            ? (i: number) => params.ceremonialDayIndexes!.includes(i)
-            : undefined,
-          priorBlackout: priorRootBlackout,
-          base: playerWrite,
-        })
+      ? {
+          ...playerWrite,
+          blackout:
+            playerWrite.blackout || priorRootBlackout || echoBoards.some((b) => b.bucket.blackout),
+        }
       : playerWrite;
 
   const batch = writeBatch(database);
@@ -1841,6 +1844,29 @@ async function runSetMark(
   }
 
   const committed = batch.commit();
+  // #491: the echoed sibling buckets did not ride the batch (see the
+  // aggregated-write comment above) — once the server ACKS the batch (which
+  // proves this device is online and every echoed cell is committed), re-derive
+  // each echoed Day's bucket and the re-summed roots from SERVER state, the
+  // one view that already contains every other device's committed Marks.
+  // Fire-and-forget like every post-ack continuation here; a reload that loses
+  // it is healed by the stats-lag check in `runReconcileEchoes` on that
+  // board's next open.
+  if (echoBoards.length > 0) {
+    const echoedDayIndexes = echoBoards.map((b) => b.dayIndex);
+    void committed
+      .then(() =>
+        reconcileEchoStatsFromServer({
+          uid,
+          dayIndexes: echoedDayIndexes,
+          tutorialDayIndexes: params.tutorialDayIndexes,
+          ceremonialDayIndexes: params.ceremonialDayIndexes,
+          statsFrozen: params.statsFrozen,
+          database,
+        }),
+      )
+      .catch(() => undefined);
+  }
   void committed.catch((err: unknown) => {
     if (markerRepairCandidate) forgetMarkerRepair(markerRepairCandidate);
     // A rejection here is NOT the offline case. Offline, commit() PENDS — it
@@ -1938,6 +1964,84 @@ async function runSetMark(
   // the matching Feed Moment off it — the win is tied to the mark that caused
   // it, not to a Board snapshot-diff that dies on unmount (issue #104).
   return { cells, bingo, blackout, bingoTransition, blackoutTransition };
+}
+
+/**
+ * SERVER-DERIVED stat reconcile for echo-touched Days (#491). An echo write is
+ * built from PERSISTENT-CACHE cells, and in the trust-latch window #482
+ * deliberately keeps open (offline with the watch still mounted) those cells
+ * can be stale: another device's Marks on a sibling Day are missing from them,
+ * so a batch-time `foldEchoStats` bucket would overwrite `dayStats[d]` — and
+ * the re-summed root totals — BACKWARDS in the leaderboard when the batch
+ * drains. The cells themselves commute per-cell (#457); the denormalized
+ * bucket does not. So no echo batch carries a sibling Day's bucket: after the
+ * batch's server acknowledgement (which proves this device is online and the
+ * echoed cells are committed), this helper re-reads the player row and each
+ * touched board FROM THE SERVER (`getDocFromServer`, the #494 read
+ * discipline) and writes the buckets and re-summed roots from that
+ * server-committed view — a view that already contains every device's
+ * committed Marks, so the write can only move stats forward to server truth.
+ *
+ * Fail closed: any server read/write failure skips the write entirely — a
+ * missing bucket merely UNDERSTATES this player until the stats-lag heal in
+ * `runReconcileEchoes` catches it on that board's next open, while a
+ * stale-derived bucket would regress stats other devices already committed.
+ * Post-freeze the standard narrowing applies: only ceremonial Day buckets
+ * write, never roots (#265).
+ */
+async function reconcileEchoStatsFromServer(params: {
+  uid: string;
+  /** The echo-touched Days whose buckets to re-derive from server state. */
+  dayIndexes: number[];
+  tutorialDayIndexes?: number[];
+  ceremonialDayIndexes?: number[];
+  statsFrozen?: boolean;
+  database: Firestore;
+}): Promise<void> {
+  const { uid, database } = params;
+  const days = params.statsFrozen
+    ? params.dayIndexes.filter((d) => params.ceremonialDayIndexes?.includes(d))
+    : params.dayIndexes;
+  if (days.length === 0) return;
+  const playerRef = doc(database, 'events', EVENT_ID, 'players', uid);
+  const [playerSnap, ...boardSnaps] = await Promise.all([
+    getDocFromServer(playerRef),
+    ...days.map((d) =>
+      getDocFromServer(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+    ),
+  ]);
+  const playerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
+  const buckets: EchoBucket[] = [];
+  boardSnaps.forEach((snap, i) => {
+    if (!snap.exists()) return;
+    const data = snap.data() as { uid?: string; cells?: unknown };
+    if (data.uid !== uid) return;
+    const cells = cellsFromData(data.cells);
+    buckets.push({
+      dayIndex: days[i],
+      bingoCount: completedLines(cells).length,
+      squaresMarked: countMarked(cells),
+      blackout: isBlackout(cells),
+    });
+  });
+  if (buckets.length === 0) return;
+  const write = foldEchoStats({
+    priorDayStats: playerData?.dayStats as DayStats | undefined,
+    echoes: buckets,
+    now: Date.now(),
+    isTutorialDay: params.tutorialDayIndexes
+      ? (i: number) => params.tutorialDayIndexes!.includes(i)
+      : undefined,
+    isCeremonialDay: params.ceremonialDayIndexes
+      ? (i: number) => params.ceremonialDayIndexes!.includes(i)
+      : undefined,
+    priorBlackout: playerData?.blackout === true,
+  });
+  // Post-freeze: ceremonial buckets only, never roots — `days` was already
+  // narrowed to ceremonial above, so `write.dayStats` carries nothing else.
+  await setDoc(playerRef, params.statsFrozen ? { dayStats: write.dayStats } : write, {
+    merge: true,
+  });
 }
 
 /**
@@ -2098,47 +2202,47 @@ async function runReconcileEchoes(
     }
   }
 
-  if (!res.changed && markerRepairs.length === 0) return none;
-
-  const priorDayStats = cachedPlayerData?.dayStats as DayStats | undefined;
-  const write = foldEchoStats({
-    priorDayStats,
-    echoes: [
-      {
-        dayIndex,
-        bingoCount: res.bingoCount,
-        squaresMarked: res.squaresMarked,
-        blackout: res.blackout,
-      },
-    ],
-    now,
-    isTutorialDay: params.tutorialDayIndexes
-      ? (i: number) => params.tutorialDayIndexes!.includes(i)
-      : undefined,
-    isCeremonialDay: params.ceremonialDayIndexes
-      ? (i: number) => params.ceremonialDayIndexes!.includes(i)
-      : undefined,
-    priorBlackout: cachedPlayerData?.blackout === true,
-  });
+  // #491: the stats-lag heal. This board's `dayStats` bucket can sit BEHIND
+  // its own committed cells — an echo batch no longer carries sibling buckets
+  // (they are server-derived after the ack, and that in-memory continuation
+  // does not survive a reload), so an offline echo that drained across a
+  // reload leaves the cells standing with no bucket update. The board's own
+  // open is the heal point: when the cache-derived bucket EXCEEDS the cached
+  // player row's, re-derive `dayStats[d]` and the roots from server state.
+  // Strictly one-directional (exceeds, never merely differs): a derived view
+  // BELOW the row only means this device's cache is behind the server, and a
+  // write from that view is exactly the regression #491 removes.
+  if (!res.changed) {
+    const rowBucket = cachedPlayerData?.dayStats?.[dayIndex];
+    if (
+      res.squaresMarked > (rowBucket?.squaresMarked ?? 0) ||
+      res.bingoCount > (rowBucket?.bingoCount ?? 0)
+    ) {
+      void reconcileEchoStatsFromServer({
+        uid,
+        dayIndexes: [dayIndex],
+        tutorialDayIndexes: params.tutorialDayIndexes,
+        ceremonialDayIndexes: params.ceremonialDayIndexes,
+        statsFrozen: params.statsFrozen,
+        database,
+      }).catch(() => undefined);
+    }
+    if (markerRepairs.length === 0) return none;
+  }
 
   const batch = writeBatch(database);
   if (res.changed) {
-    // Per-cell merge (#457): only the newly echoed cells ride the write.
+    // Per-cell merge (#457): only the newly echoed cells ride the write. The
+    // player stats write no longer rides this batch — the bucket and roots are
+    // re-derived from SERVER state after the ack (#491, below), so a reconcile
+    // fold built over a stale cached player row can never march the leaderboard
+    // backwards.
     batch.set(
       boardRef,
       ...cellsMergeSet(cellsPatch(changedCells(boardCells, res.cells)), {
         ...(typeof board.seed === 'number' ? { markSeed: board.seed } : {}),
       }),
     );
-    if (params.statsFrozen) {
-      // The same post-freeze narrowing as the Mark path: only a ceremonial
-      // (farewell) Day's bucket still records; the cells always land.
-      if (params.ceremonialDayIndexes?.includes(dayIndex)) {
-        batch.set(playerRef, { dayStats: write.dayStats }, { merge: true });
-      }
-    } else {
-      batch.set(playerRef, write, { merge: true });
-    }
   }
   for (const cell of markerRepairs) {
     batch.set(doc(database, 'events', EVENT_ID, 'tally', cell.itemId as string, 'markers', uid), {
@@ -2156,6 +2260,22 @@ async function runReconcileEchoes(
     // compensation, and must not vanish silently.
     console.error('[reconcileEchoes] batch.commit() rejected — online write failure', { uid, dayIndex }, err);
   });
+  if (res.changed) {
+    // #491: bucket + roots from SERVER state once the ack proves the echoed
+    // cells committed — same discipline as the mark-time echo path.
+    void committed
+      .then(() =>
+        reconcileEchoStatsFromServer({
+          uid,
+          dayIndexes: [dayIndex],
+          tutorialDayIndexes: params.tutorialDayIndexes,
+          ceremonialDayIndexes: params.ceremonialDayIndexes,
+          statsFrozen: params.statsFrozen,
+          database,
+        }),
+      )
+      .catch(() => undefined);
+  }
   if (markerRepairs.length > 0) {
     void committed.then(() => markerRepairs.forEach((cell) => forgetMarkerRepair(markerRepairKey(uid, cell.itemId as string)))).catch(() => undefined);
   }
