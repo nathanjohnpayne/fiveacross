@@ -885,19 +885,28 @@ export default function Board() {
   // different board (or Board remounts): the retry happens once per visit,
   // when the cache plausibly gained siblings, not once per snapshot.
   const incompleteReconcileKeyRef = useRef<string | null>(null);
-  // The board identity the player is CURRENTLY viewing — an async reconcile
-  // continuation may only pin the visit block above if its originating board
-  // is still the viewed one (Codex P2 on #498: board A's slow incomplete
-  // completion landing after the player navigated to B must not re-block A,
-  // or returning to A before B's next snapshot would skip A's retry).
-  const viewedReconcileKeyRef = useRef<string | null>(null);
+  // The CURRENT board visit — identity key plus a generation that bumps every
+  // time the viewed identity changes. An async reconcile continuation may pin
+  // the visit block above only when BOTH still match its originating visit
+  // (Codex P2 x2 on #498): a slow incomplete completion landing after the
+  // player navigated away must not re-block its board (key mismatch), and one
+  // landing after the player LEFT AND RETURNED belongs to the previous visit
+  // (generation mismatch) — pinning then would swallow the return visit's
+  // retry until yet another navigation.
+  const reconcileVisitRef = useRef<{ key: string | null; generation: number }>({
+    key: null,
+    generation: 0,
+  });
   useEffect(() => {
     if (!hasDays || !user || !board || board.uid !== user.uid) return;
     if (!identityKnown || !dayBoardConfirmed) return;
     const schedule = event?.days ?? [];
     if (schedule.length === 0) return;
     const key = `${user.uid}:${board.dayIndex}:${board.seed}`;
-    viewedReconcileKeyRef.current = key;
+    if (reconcileVisitRef.current.key !== key) {
+      reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
+    }
+    const visitGeneration = reconcileVisitRef.current.generation;
     if (incompleteReconcileKeyRef.current !== null && incompleteReconcileKeyRef.current !== key) {
       // The player opened a DIFFERENT board — the blocked identity may retry
       // on its next visit.
@@ -921,16 +930,26 @@ export default function Board() {
         // the once-per-board guard: drop the key so a later open retries with
         // more of the cache populated (Codex P2 on #447), but pin the visit
         // block above so the retry is per-open, not per-snapshot (#492) —
-        // and only while ITS board is still the viewed one.
+        // and only while ITS originating visit is still the current one.
         if (!res.complete) {
           reconciledBoardsRef.current.delete(key);
-          if (viewedReconcileKeyRef.current === key) incompleteReconcileKeyRef.current = key;
+          if (
+            reconcileVisitRef.current.key === key &&
+            reconcileVisitRef.current.generation === visitGeneration
+          ) {
+            incompleteReconcileKeyRef.current = key;
+          }
         }
       })
       .catch(() => {
         // A synchronous failure (nothing written) may retry on the next open.
         reconciledBoardsRef.current.delete(key);
-        if (viewedReconcileKeyRef.current === key) incompleteReconcileKeyRef.current = key;
+        if (
+          reconcileVisitRef.current.key === key &&
+          reconcileVisitRef.current.generation === visitGeneration
+        ) {
+          incompleteReconcileKeyRef.current = key;
+        }
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads.
   }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days]);

@@ -424,6 +424,57 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('an incomplete completion from a PREVIOUS visit (left and returned mid-flight) does not swallow the return visit (#498)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    type ReconcileResult = Awaited<ReturnType<typeof reconcileEchoes>>;
+    let resolveSlow: ((value: ReconcileResult) => void) | undefined;
+    mocked.mockImplementationOnce(
+      () =>
+        new Promise<ReconcileResult>((resolve) => {
+          resolveSlow = resolve;
+        }),
+    );
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // Visit 1 of board A hangs mid-reconcile…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …the player switches to B and RETURNS to A before it settles (the
+      // in-flight guard rightly skips a second attempt)…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2); // B's own pass only
+
+      // …then visit 1's INCOMPLETE result lands. It belongs to the PREVIOUS
+      // A visit, so it must not pin the block against the current one.
+      await act(async () => {
+        resolveSlow!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: false });
+      });
+
+      // The next snapshot of the still-viewed A retries.
+      H.board = { ...(H.board as object) } as typeof H.board;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
   it('a COMPLETE pass settles the once-per-board guard — no re-run on a later open of the same card', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);
