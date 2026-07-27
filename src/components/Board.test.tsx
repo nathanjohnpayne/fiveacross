@@ -911,6 +911,64 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it("a stale previous-account lagged row cannot consume the new account's episode — the real row's lag still heals (#507 4b P1)", async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // Account u1 plays with a LAGGED row whose heal does not converge —
+      // its episode is latched and served…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …the user switches to u2, and u2's board turns valid BEFORE the
+      // player-row subscription catches up — `player` is still u1's stale
+      // lagged row. That stale row must not latch (and consume) u2's
+      // episode; u2's board runs its ordinary first pass only.
+      H.user = { uid: 'u2', displayName: 'Second Sailor', photoURL: null };
+      H.board = { uid: 'u2', dayIndex: 0, seed: 7, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …then u2's REAL row arrives, itself lagged. This is u2's first
+      // attributable row signal: the episode must latch NOW and re-arm the
+      // already-settled board — a stale-row-consumed episode would suppress
+      // this heal for the whole session.
+      H.player = {
+        uid: 'u2',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+
+      // Once per episode, as ever — a further lagged snapshot does not churn.
+      H.player = { ...(H.player as object) } as typeof H.player;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
   it('a COMPLETE pass settles the once-per-board guard — no re-run on a later open of the same card', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);

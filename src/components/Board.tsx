@@ -982,36 +982,47 @@ export default function Board() {
     // re-arm is deferred, not dropped — the running pass may have captured
     // the previously consistent row, so its settle owes the nonce bump that
     // brings the debt back to this effect (Codex P2 x2 on #507).
-    const rowLag =
-      !standingsFrozen(event) &&
-      playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
-    if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
-      // Account switch: episode state is per-uid; the previous account's
-      // latch (or debt) must never gate — or leak into — this one's.
-      reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
-      reconcileRowLagOwedRef.current = false;
-      reconcileRowLagRearmKeyRef.current = null;
-    }
-    if (!rowLag) {
-      reconcileRowLagEpisodeRef.current.active = false;
-      reconcileRowLagOwedRef.current = false;
-      reconcileRowLagRearmKeyRef.current = null;
-    } else {
-      if (!reconcileRowLagEpisodeRef.current.active) {
-        reconcileRowLagEpisodeRef.current.active = true;
-        reconcileRowLagOwedRef.current = true;
+    // The episode bookkeeping consumes the row signal only when the
+    // subscribed row actually BELONGS to the signed-in account (Phase 4b P1
+    // on #507): during an account switch the new user's board can turn valid
+    // before `useMyPlayer`'s keyed effect clears the PREVIOUS account's row,
+    // and a stale lagged row from the old account must not latch — and
+    // thereby consume — the new account's episode, suppressing the real heal
+    // when its own row arrives. A mismatched row is not a row signal at all:
+    // every episode ref is left untouched until an attributable snapshot
+    // (`player` is in the deps) re-runs this effect.
+    if (player === null || player.uid === user.uid) {
+      const rowLag =
+        !standingsFrozen(event) &&
+        playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
+      if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
+        // Account switch: episode state is per-uid; the previous account's
+        // latch (or debt) must never gate — or leak into — this one's.
+        reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
+        reconcileRowLagOwedRef.current = false;
+        reconcileRowLagRearmKeyRef.current = null;
       }
-      if (reconcileRowLagOwedRef.current) {
-        if (reconcileInFlightRef.current.has(key)) {
-          reconcileRowLagRearmKeyRef.current = key;
-        } else {
-          // Serve the episode's heal here: drop this key's guard (and any
-          // pin) so the pass below launches and evaluates the lagged row.
-          reconcileRowLagRearmKeyRef.current = null;
-          reconcileRowLagOwedRef.current = false;
-          reconciledBoardsRef.current.delete(key);
-          if (incompleteReconcileVisitRef.current?.key === key) {
-            incompleteReconcileVisitRef.current = null;
+      if (!rowLag) {
+        reconcileRowLagEpisodeRef.current.active = false;
+        reconcileRowLagOwedRef.current = false;
+        reconcileRowLagRearmKeyRef.current = null;
+      } else {
+        if (!reconcileRowLagEpisodeRef.current.active) {
+          reconcileRowLagEpisodeRef.current.active = true;
+          reconcileRowLagOwedRef.current = true;
+        }
+        if (reconcileRowLagOwedRef.current) {
+          if (reconcileInFlightRef.current.has(key)) {
+            reconcileRowLagRearmKeyRef.current = key;
+          } else {
+            // Serve the episode's heal here: drop this key's guard (and any
+            // pin) so the pass below launches and evaluates the lagged row.
+            reconcileRowLagRearmKeyRef.current = null;
+            reconcileRowLagOwedRef.current = false;
+            reconciledBoardsRef.current.delete(key);
+            if (incompleteReconcileVisitRef.current?.key === key) {
+              incompleteReconcileVisitRef.current = null;
+            }
           }
         }
       }
