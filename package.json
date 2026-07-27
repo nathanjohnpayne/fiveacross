@@ -30,10 +30,10 @@
     "firebase": "^12.16.0",
     "html-to-image": "^1.11.13",
     "html2canvas": "^1.4.1",
-    "lucide-react": "^1.25.0",
-    "posthog-js": "^1.404.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "lucide-react": "^1.27.0",
+    "posthog-js": "^1.407.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.1"
   },
   "devDependencies": {
