@@ -945,6 +945,70 @@ export default function Board() {
   const reconcileRowLagRearmKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const schedule = event?.days ?? [];
+    // #506/#508: the once-per-board guard is retained for the session, but
+    // the session can outlive the row's consistency — another device's
+    // acted-day batch can understate the roots AFTER a board settled its
+    // complete pass, and with the row absent from the old deps the heal
+    // predicate was never re-evaluated until a reload. The row is already
+    // subscribed (`player` is in the deps), so track the row-lag EPISODE —
+    // latched `active` on the transition into inconsistency, reset when the
+    // row reads consistent again — and re-arm the guard for the OPEN board
+    // while the episode still owes its one heal pass.
+    //
+    // The BOOKKEEPING half (uid scoping, the consistent-row reset, the
+    // new-episode latch) runs on every pass whose ROW signal is attributable
+    // — user signed in, schedule known, row subscription settled
+    // (identityKnown), and the subscribed row either loaded-null or
+    // belonging to the signed-in account — INDEPENDENT of whether an
+    // attributable board is on screen (#508, the #507 round-3 P2): a row
+    // that flips lagged→consistent→lagged entirely inside a locked/loading-
+    // Day interlude previously hit the early return below unobserved, so the
+    // latch still read `active` with no owed heal and the returning board
+    // never re-armed, contrary to the once-per-episode re-arm contract. The
+    // effect still runs during such interludes (`player` is in the deps), so
+    // observing the transitions here is sufficient; only the SERVE half
+    // (in-flight defer / guard drop) needs the attributable board and stays
+    // below the guard.
+    //
+    // The row signal is consumed only when the subscribed row actually
+    // BELONGS to the signed-in account (Phase 4b P1 on #507): during an
+    // account switch the new user's board can turn valid before
+    // `useMyPlayer`'s keyed effect clears the PREVIOUS account's row, and a
+    // stale lagged row from the old account must not latch — and thereby
+    // consume — the new account's episode, suppressing the real heal when
+    // its own row arrives. A mismatched (or not-yet-settled) row is not a
+    // row signal at all: every episode ref is left untouched until an
+    // attributable snapshot re-runs this effect.
+    const rowSignalAttributable =
+      hasDays &&
+      !!user &&
+      identityKnown &&
+      schedule.length > 0 &&
+      (player === null || player.uid === user.uid);
+    if (rowSignalAttributable) {
+      const rowLag =
+        !standingsFrozen(event) &&
+        playerRowRootLag(
+          player,
+          (i: number) => ceremonialDayIndexSet(schedule).has(i),
+          (i: number) => tutorialDayIndexSet(schedule).has(i),
+        );
+      if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
+        // Account switch: episode state is per-uid; the previous account's
+        // latch (or debt) must never gate — or leak into — this one's.
+        reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
+        reconcileRowLagOwedRef.current = false;
+        reconcileRowLagRearmKeyRef.current = null;
+      }
+      if (!rowLag) {
+        reconcileRowLagEpisodeRef.current.active = false;
+        reconcileRowLagOwedRef.current = false;
+        reconcileRowLagRearmKeyRef.current = null;
+      } else if (!reconcileRowLagEpisodeRef.current.active) {
+        reconcileRowLagEpisodeRef.current.active = true;
+        reconcileRowLagOwedRef.current = true;
+      }
+    }
     if (
       !hasDays ||
       !user ||
@@ -969,65 +1033,27 @@ export default function Board() {
       incompleteReconcileVisitRef.current = null;
     }
     const visitGeneration = reconcileVisitRef.current.generation;
-    // #506: the once-per-board guard is retained for the session, but the
-    // session can outlive the row's consistency — another device's acted-day
-    // batch can understate the roots AFTER this board settled its complete
-    // pass, and with the row absent from the old deps the heal predicate was
-    // never re-evaluated until a reload. The row is already subscribed
-    // (`player`, now in the deps), so re-arm the guard for the OPEN board on
-    // the transition into row inconsistency — the same `playerRowRootLag`
-    // signal `runReconcileEchoes` heals on, same freeze gate — and let the
-    // pass below re-run and heal. The owed heal follows the OPEN board, not
-    // the board that first detected the lag; while a pass is IN FLIGHT the
-    // re-arm is deferred, not dropped — the running pass may have captured
-    // the previously consistent row, so its settle owes the nonce bump that
-    // brings the debt back to this effect (Codex P2 x2 on #507).
-    // The episode bookkeeping consumes the row signal only when the
-    // subscribed row actually BELONGS to the signed-in account (Phase 4b P1
-    // on #507): during an account switch the new user's board can turn valid
-    // before `useMyPlayer`'s keyed effect clears the PREVIOUS account's row,
-    // and a stale lagged row from the old account must not latch — and
-    // thereby consume — the new account's episode, suppressing the real heal
-    // when its own row arrives. A mismatched row is not a row signal at all:
-    // every episode ref is left untouched until an attributable snapshot
-    // (`player` is in the deps) re-runs this effect.
-    if (player === null || player.uid === user.uid) {
-      const rowLag =
-        !standingsFrozen(event) &&
-        playerRowRootLag(
-          player,
-          (i: number) => ceremonialDayIndexSet(schedule).has(i),
-          (i: number) => tutorialDayIndexSet(schedule).has(i),
-        );
-      if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
-        // Account switch: episode state is per-uid; the previous account's
-        // latch (or debt) must never gate — or leak into — this one's.
-        reconcileRowLagEpisodeRef.current = { uid: user.uid, active: false };
-        reconcileRowLagOwedRef.current = false;
-        reconcileRowLagRearmKeyRef.current = null;
-      }
-      if (!rowLag) {
-        reconcileRowLagEpisodeRef.current.active = false;
-        reconcileRowLagOwedRef.current = false;
-        reconcileRowLagRearmKeyRef.current = null;
+    // The SERVE half of the episode (#506): the owed heal is ROW-scoped and
+    // follows the player to whatever board is OPEN, not the board that first
+    // detected the lag. While a pass is IN FLIGHT the re-arm is deferred,
+    // not dropped — the running pass may have captured the previously
+    // consistent row, so its settle owes the nonce bump that brings the debt
+    // back to this effect (Codex P2 x2 on #507). An episode whose lag was
+    // latched during a no-board interlude serves here on the first
+    // attributable open, exactly like one latched with a board on screen
+    // (#508); a consistent-row pass above has already cleared the debt, so
+    // `owed` here always co-occurs with a still-lagged attributable row.
+    if (rowSignalAttributable && reconcileRowLagOwedRef.current) {
+      if (reconcileInFlightRef.current.has(key)) {
+        reconcileRowLagRearmKeyRef.current = key;
       } else {
-        if (!reconcileRowLagEpisodeRef.current.active) {
-          reconcileRowLagEpisodeRef.current.active = true;
-          reconcileRowLagOwedRef.current = true;
-        }
-        if (reconcileRowLagOwedRef.current) {
-          if (reconcileInFlightRef.current.has(key)) {
-            reconcileRowLagRearmKeyRef.current = key;
-          } else {
-            // Serve the episode's heal here: drop this key's guard (and any
-            // pin) so the pass below launches and evaluates the lagged row.
-            reconcileRowLagRearmKeyRef.current = null;
-            reconcileRowLagOwedRef.current = false;
-            reconciledBoardsRef.current.delete(key);
-            if (incompleteReconcileVisitRef.current?.key === key) {
-              incompleteReconcileVisitRef.current = null;
-            }
-          }
+        // Serve the episode's heal here: drop this key's guard (and any
+        // pin) so the pass below launches and evaluates the lagged row.
+        reconcileRowLagRearmKeyRef.current = null;
+        reconcileRowLagOwedRef.current = false;
+        reconciledBoardsRef.current.delete(key);
+        if (incompleteReconcileVisitRef.current?.key === key) {
+          incompleteReconcileVisitRef.current = null;
         }
       }
     }
