@@ -754,22 +754,47 @@ describe('createRetractionFallObserver — the route-independent fall observer (
     expect(peekRetractions('u1')).toEqual([]);
   });
 
-  it('ignores cache-only snapshots entirely — a cache replay can neither read as a fall nor move the baseline', async () => {
+  it('a cache snapshot can neither FIRE an edge nor drain — only a committed snapshot adjudicates', async () => {
     serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
     const observe = createRetractionFallObserver('u1', 3);
     observe(committedSnap(BINGO_ROW));
-    observe(committedSnap([], { fromCache: true })); // stale cache replay: no bingo
+    observe(committedSnap([], { fromCache: true })); // a cache replay showing no bingo
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled(); // not an edge, not a drain
+    expect(peekRetractions('u1')).toEqual([]);
     observe(committedSnap(BINGO_ROW)); // the server still shows it standing
     await settle();
     expect(writeBatchSpy).not.toHaveBeenCalled();
-    expect(peekRetractions('u1')).toEqual([]);
   });
 
-  it('ignores optimistic (pending-writes) snapshots — only the server ACK adjudicates the fall', async () => {
+  it('ARMS the witness from the persistent cache — a fall that committed before the first live committed snapshot still retracts (Codex P2, PR #494)', async () => {
+    // The app-open race the plain baseline missed: the proof delete / admin
+    // rejection commits remotely while this client is booting from cache (or
+    // right after mount, before the listener's first committed delivery). The
+    // cache replays the previously ACKED standing board — a real past fact —
+    // so the first committed snapshot showing the win gone IS a falling edge.
     noTombstonesYet();
     serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
     const observe = createRetractionFallObserver('u1', 3);
-    observe(committedSnap(BINGO_ROW));
+    observe(committedSnap(BINGO_ROW, { fromCache: true })); // cache boot: the win stood (acked history)
+    observe(committedSnap([])); // first committed snapshot: the fall already landed
+    await settle();
+    expect(writeBatchSpy).toHaveBeenCalledTimes(1);
+    expect(batchDeleteSpy.mock.calls[0][0].path).toBe(momentAt('u1-bingo-d3'));
+  });
+
+  it('ignores optimistic (pending-writes) snapshots — they neither arm the witness nor adjudicate', async () => {
+    noTombstonesYet();
+    serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+    const observe = createRetractionFallObserver('u1', 3);
+    // An optimistic fold showing the win standing must NOT become a witness: if
+    // the rules later reject that mark, its rollback is not a fall.
+    observe(committedSnap(BINGO_ROW, { hasPendingWrites: true }));
+    observe(committedSnap([])); // committed: no win — but no trustworthy witness either
+    await settle();
+    expect(writeBatchSpy).not.toHaveBeenCalled();
+
+    observe(committedSnap(BINGO_ROW)); // committed: the win stands (baseline armed)
     observe(committedSnap([], { hasPendingWrites: true })); // the local unmark, unacked
     await settle();
     expect(writeBatchSpy).not.toHaveBeenCalled(); // a rejected unmark would roll back
@@ -826,11 +851,18 @@ describe('createRetractionFallObserver — the route-independent fall observer (
 // remount — #485). Now every failure path restores the token AND schedules a
 // bounded retry that replays the FULL drain adjudication against the last
 // recorded server-committed evidence; every ambiguous outcome parks (silence).
+const dayBoardAt = (day: number, uid: string) => `events/${EVENT_ID}/days/${day}/boards/${uid}`;
+const fallenBoard = (uid: string) => ({ uid, cells: boardCells([]) });
+const standingBoard = (uid: string) => ({ uid, cells: boardCells(BINGO_ROW) });
+
 describe('retraction retry — a requeued intent actually re-drains (#485)', () => {
-  it('retries a transient probe failure against the RECORDED evidence — no new snapshot required', async () => {
+  it('retries a transient probe failure against a FRESH server read of the board — no new snapshot required', async () => {
     vi.useFakeTimers();
     try {
-      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      serverHolding({
+        [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+        [dayBoardAt(3, 'u1')]: fallenBoard('u1'),
+      });
       getDocFromServerSpy.mockRejectedValueOnce(new Error('unavailable')); // the per-card probe blips
       fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
       await vi.advanceTimersByTimeAsync(0);
@@ -838,7 +870,9 @@ describe('retraction retry — a requeued intent actually re-drains (#485)', () 
       expect(peekRetractions('u1')).toEqual(['bingo:3']); // restored, not lost
 
       // Pre-#485 this token parked forever (no board snapshot follows a failed
-      // probe). The scheduled retry re-drains it off the recorded evidence.
+      // probe). The scheduled retry re-reads the board from the SERVER (never a
+      // remembered verdict — Codex P2, PR #494 round 1), sees the fall stands,
+      // and re-drains.
       await vi.advanceTimersByTimeAsync(2_000);
       expect(writeBatchSpy).toHaveBeenCalledTimes(1);
       expect(peekRetractions('u1')).toEqual([]);
@@ -847,21 +881,44 @@ describe('retraction retry — a requeued intent actually re-drains (#485)', () 
     }
   });
 
-  it('a re-mark landing before the retry DROPS the intent — the retry replays the drain, never the commit', async () => {
+  it('a cross-device re-mark landing before the retry DROPS the intent — the fresh board read shows the win STANDING (Codex P2, PR #494)', async () => {
     vi.useFakeTimers();
     try {
+      serverHolding({
+        [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+        // By retry time the SERVER board shows the win standing again — the
+        // re-mark landed from another tab/device and this client's listener has
+        // not delivered the newer snapshot. Replaying the drain-time verdict
+        // would have spent a standing win; the fresh read spends nothing.
+        [dayBoardAt(3, 'u1')]: standingBoard('u1'),
+      });
+      getDocFromServerSpy.mockRejectedValueOnce(new Error('unavailable'));
+      fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(peekRetractions('u1')).toEqual(['bingo:3']);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(writeBatchSpy).not.toHaveBeenCalled(); // dropped — spend nothing
+      expect(peekRetractions('u1')).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an unreadable board at retry time parks the token — no evidence, no guess', async () => {
+    vi.useFakeTimers();
+    try {
+      // Only the Moment exists in the server oracle; the board read misses
+      // (e.g. the device went offline right after the failure).
       serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
       getDocFromServerSpy.mockRejectedValueOnce(new Error('unavailable'));
       fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
       await vi.advanceTimersByTimeAsync(0);
       expect(peekRetractions('u1')).toEqual(['bingo:3']);
 
-      // The Player re-marks; the ack arrives server-committed and the win STANDS.
-      drainRetractions('u1', { dayIndex: 3, bingoStands: true, blackoutStands: false });
-      expect(peekRetractions('u1')).toEqual([]); // dropped — spend nothing
-
       await vi.advanceTimersByTimeAsync(120_000);
-      expect(writeBatchSpy).not.toHaveBeenCalled(); // the retry found nothing to do
+      expect(writeBatchSpy).not.toHaveBeenCalled();
+      expect(peekRetractions('u1')).toEqual(['bingo:3']); // parked for the next organic drain
     } finally {
       vi.useRealTimers();
     }
@@ -878,7 +935,10 @@ describe('retraction retry — a requeued intent actually re-drains (#485)', () 
     vi.useFakeTimers();
     try {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-      serverHolding({ [momentAt('u1-bingo-d5')]: { kind: 'bingo', uid: 'u1', dayIndex: 5 } });
+      serverHolding({
+        [momentAt('u1-bingo-d5')]: { kind: 'bingo', uid: 'u1', dayIndex: 5 },
+        [dayBoardAt(5, 'u1')]: fallenBoard('u1'),
+      });
       let siblingCommitted = false;
       getDocSpy.mockImplementation((ref: { path: string }) =>
         Promise.resolve({
@@ -919,7 +979,10 @@ describe('retraction retry — a requeued intent actually re-drains (#485)', () 
     vi.useFakeTimers();
     try {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      serverHolding({
+        [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+        [dayBoardAt(3, 'u1')]: fallenBoard('u1'),
+      });
       batchCommitSpy.mockRejectedValue(new Error('permission-denied')); // e.g. a mid-retract account switch
 
       fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
@@ -959,7 +1022,10 @@ describe('retraction retry — a requeued intent actually re-drains (#485)', () 
     vi.useFakeTimers();
     try {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-      serverHolding({ [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 } });
+      serverHolding({
+        [momentAt('u1-bingo-d3')]: { kind: 'bingo', uid: 'u1', dayIndex: 3 },
+        [dayBoardAt(3, 'u1')]: fallenBoard('u1'),
+      });
       batchCommitSpy.mockRejectedValue(new Error('permission-denied'));
       fellThenServerSays('u1', { bingo: true, bingoDayIndex: 3 }, { dayIndex: 3 });
       await vi.advanceTimersByTimeAsync(3_600_000); // budget spent: 1 + 3 attempts
