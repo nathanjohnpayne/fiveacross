@@ -37,6 +37,7 @@ import {
   firstLineCompletionAt,
   foldEchoStats,
   standingsFrozen,
+  sumDayStats,
   tutorialDayIndexSet,
   ceremonialDayIndexSet,
   type DayStats,
@@ -2225,17 +2226,62 @@ async function runReconcileEchoes(
   // Strictly one-directional (exceeds, never merely differs): a derived view
   // BELOW the row only means this device's cache is behind the server, and a
   // write from that view is exactly the regression #491 removes.
+  // #496 widens the predicate with a second, ROW-INTERNAL lag signal (see
+  // `rootLag` below) for the case where the buckets converged but the roots
+  // did not. Both signals route into the SAME server-derived transactional
+  // reconcile, so neither can write anything but server truth.
   if (!res.changed) {
     const rowBucket = cachedPlayerData?.dayStats?.[dayIndex];
     // Post-freeze a non-ceremonial Day's bucket never writes again, so its lag
     // can never converge — skip the heal entirely rather than re-reading the
     // server on every open (CodeRabbit on #495).
     const healEligible = !params.statsFrozen || params.ceremonialDayIndexes?.includes(dayIndex) === true;
-    if (
+    const bucketLag =
       healEligible &&
       (res.squaresMarked > (rowBucket?.squaresMarked ?? 0) ||
-        res.bingoCount > (rowBucket?.bingoCount ?? 0))
-    ) {
+        res.bingoCount > (rowBucket?.bingoCount ?? 0));
+    // #496: the ROOT-total half of the same lag, which the per-Day comparison
+    // above cannot see. Compound case (Codex on #495): an offline echo
+    // overwrote a cell another device had already marked, so every
+    // `dayStats[d]` bucket CONVERGED, while the acted-day batch wrote root
+    // totals re-summed from the STALE cached buckets — and the post-ack
+    // server-derived transaction that would have fixed the roots died in a
+    // reload. Every bucket then matches its board and `bucketLag` never fires,
+    // yet the roots stay understated.
+    //
+    // The tell is ROW-INTERNAL, so it needs no cache-freshness assumption: the
+    // roots ARE `sumDayStats` over the row's own non-ceremonial buckets
+    // (`aggregatePlayerStats`), so a row whose buckets out-sum its roots is
+    // self-inconsistent at that document version — impossible to reach by any
+    // consistent write, and readable off a stale cache just as truthfully as
+    // off the server. Strictly one-directional like the bucket check: roots
+    // ABOVE the bucket sum are the legitimate shape of a row whose per-day
+    // breakdown is partial (a pre-Day-Cards roster), and never heal from here.
+    // Same ceremonial exclusion (#265) the roots were summed with, so a
+    // farewell-Day bucket can never look like root lag.
+    const bucketSum = sumDayStats(
+      cachedPlayerData?.dayStats as DayStats | undefined,
+      params.ceremonialDayIndexes ? (i: number) => params.ceremonialDayIndexes!.includes(i) : undefined,
+    );
+    // One-directional PER FIELD, not merely on the whole row (Codex P1 on
+    // #503): the fold rewrites BOTH roots (and the root `firstBingoAt`) from
+    // one merged view, so it is not enough that SOME field lags — the bucket
+    // sum must DOMINATE every root, and exceed at least one. A row that is
+    // partial in one dimension and lagging in the other (0 bingos / 45 squares
+    // of buckets against roots of 3 bingos / 40 squares) would otherwise be
+    // "healed" by writing the bingo root DOWN from 3 to 0 — the exact
+    // regression the one-directional rule exists to forbid.
+    // Post-freeze the reconcile writes ceremonial BUCKETS only, never roots
+    // (#265) — a root lag could not converge, so re-reading the server on every
+    // open would be pure churn (the same reasoning as `healEligible`).
+    const rootSquares = cachedPlayerData?.squaresMarked ?? 0;
+    const rootBingos = cachedPlayerData?.bingoCount ?? 0;
+    const rootLag =
+      !params.statsFrozen &&
+      bucketSum.squaresMarked >= rootSquares &&
+      bucketSum.bingoCount >= rootBingos &&
+      (bucketSum.squaresMarked > rootSquares || bucketSum.bingoCount > rootBingos);
+    if (bucketLag || rootLag) {
       try {
         const healed = await reconcileEchoStatsFromServer({
           uid,
