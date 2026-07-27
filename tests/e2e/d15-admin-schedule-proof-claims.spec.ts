@@ -17,6 +17,7 @@ import { seedDailyEvent, dismissCoach, readDealtDayGrid, LOCKED_INDEX, TODAY_IND
 import { joinViaSharedLink, signedInUid } from './support/join';
 import { waitForBoardServerConfirmed } from './support/board';
 import { EVENT_ID } from './support/env';
+import { cellsFromData } from '../../src/game/cells';
 
 const SHOTS = process.env.E2E_SHOT_DIR || 'test-results/shots';
 
@@ -300,10 +301,10 @@ test.describe('Admin — Proof & Claims panel', () => {
       // board — a pending claim never counts toward the leaderboard.
       await expect
         .poll(async () => {
-          let cells: Array<{ text: string; status?: string; marked: boolean }> = [];
+          let cells: ReturnType<typeof cellsFromData> = [];
           await env.withSecurityRulesDisabled(async (ctx) => {
             const snap = await getDoc(doc(ctx.firestore(), 'events', EVENT_ID, 'days', String(TODAY_INDEX), 'boards', playerUid));
-            cells = (snap.data()?.cells as typeof cells) ?? [];
+            cells = cellsFromData(snap.data()?.cells);
           });
           return cells.find((c) => c.text === promptText)?.status;
         }, { timeout: 10_000 })
