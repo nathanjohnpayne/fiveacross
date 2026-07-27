@@ -994,7 +994,11 @@ export default function Board() {
     if (player === null || player.uid === user.uid) {
       const rowLag =
         !standingsFrozen(event) &&
-        playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
+        playerRowRootLag(
+          player,
+          (i: number) => ceremonialDayIndexSet(schedule).has(i),
+          (i: number) => tutorialDayIndexSet(schedule).has(i),
+        );
       if (reconcileRowLagEpisodeRef.current?.uid !== user.uid) {
         // Account switch: episode state is per-uid; the previous account's
         // latch (or debt) must never gate — or leak into — this one's.
