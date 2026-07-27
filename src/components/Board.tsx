@@ -924,6 +924,16 @@ export default function Board() {
   // inconsistent row that a failed heal leaves standing cannot re-trigger a
   // pass per snapshot (the per-visit incomplete block owns that retry).
   const reconcileRowLagEpisodeRef = useRef(false);
+  // The board key OWED a row-lag re-arm by its in-flight pass's settle
+  // (Codex P2 on #507): a lag observed while a pass is already running must
+  // not re-arm immediately (that would double the pass), but that pass may
+  // have captured the previously CONSISTENT row and settle `complete: true`
+  // without ever seeing the lag — with no further snapshot guaranteed to
+  // re-run the effect. So the observation is recorded here and consumed by
+  // `settle`, which drops the guard and bumps the retry nonce — the heal is
+  // scheduled deterministically, never left waiting on unrelated activity.
+  // Cleared when the row reads consistent again before the pass settles.
+  const reconcileRowLagRearmKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const schedule = event?.days ?? [];
     if (
@@ -958,20 +968,25 @@ export default function Board() {
     // (`player`, now in the deps), so re-arm the guard for the OPEN board on
     // the transition into row inconsistency — the same `playerRowRootLag`
     // signal `runReconcileEchoes` heals on, same freeze gate — and let the
-    // pass below re-run and heal. Skipped while a pass is in flight: that
-    // pass reads the same cached row itself, and if it raced past its
-    // predicate the next row/board snapshot re-runs this effect after it
-    // settles (bounded: any later snapshot, open, or mark heals).
+    // pass below re-run and heal. While a pass is IN FLIGHT the re-arm is
+    // deferred, not dropped: the running pass may have captured the
+    // previously consistent row, so the owed re-arm is recorded for its
+    // settle to consume (Codex P2 on #507).
     const rowLag =
       !standingsFrozen(event) &&
       playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
     if (!rowLag) {
       reconcileRowLagEpisodeRef.current = false;
-    } else if (!reconcileRowLagEpisodeRef.current && !reconcileInFlightRef.current.has(key)) {
+      reconcileRowLagRearmKeyRef.current = null;
+    } else if (!reconcileRowLagEpisodeRef.current) {
       reconcileRowLagEpisodeRef.current = true;
-      reconciledBoardsRef.current.delete(key);
-      if (incompleteReconcileVisitRef.current?.key === key) {
-        incompleteReconcileVisitRef.current = null;
+      if (reconcileInFlightRef.current.has(key)) {
+        reconcileRowLagRearmKeyRef.current = key;
+      } else {
+        reconciledBoardsRef.current.delete(key);
+        if (incompleteReconcileVisitRef.current?.key === key) {
+          incompleteReconcileVisitRef.current = null;
+        }
       }
     }
     if (reconciledBoardsRef.current.has(key)) return;
@@ -996,6 +1011,18 @@ export default function Board() {
     //   • different card → nothing; the old card's next open retries.
     const settle = (complete: boolean) => {
       reconcileInFlightRef.current.delete(key);
+      if (reconcileRowLagRearmKeyRef.current === key) {
+        // A row lag surfaced DURING this pass (recorded above), and this pass
+        // may have raced past its own predicate on the previously consistent
+        // row — consume the owed re-arm regardless of how the pass settled:
+        // drop the guard and schedule the retry explicitly. The retried pass
+        // re-reads the row; if it heals (or the row already read consistent),
+        // it settles normally — the episode ref stays latched, so no loop.
+        reconcileRowLagRearmKeyRef.current = null;
+        reconciledBoardsRef.current.delete(key);
+        setReconcileRetryNonce((n) => n + 1);
+        return;
+      }
       if (complete) return;
       reconciledBoardsRef.current.delete(key);
       if (reconcileVisitRef.current.key !== key) return;

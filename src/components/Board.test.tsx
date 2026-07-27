@@ -706,6 +706,69 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('a row lag surfacing DURING an in-flight pass that settles complete still re-arms — the settle consumes the owed re-arm (#506)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    type ReconcileResult = Awaited<ReturnType<typeof reconcileEchoes>>;
+    let resolveSlow: ((value: ReconcileResult) => void) | undefined;
+    mocked.mockImplementationOnce(
+      () =>
+        new Promise<ReconcileResult>((resolve) => {
+          resolveSlow = resolve;
+        }),
+    );
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // The pass launches against a CONSISTENT row and hangs…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …the row turns root-lagged WHILE the pass is in flight (the pass
+      // captured the consistent row, so its own predicate will never see the
+      // lag). The re-arm must be deferred, not doubled — no second pass yet.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …then the raced pass settles COMPLETE. Without consuming the owed
+      // re-arm this would settle the guard for the session and the lag would
+      // wait on an unguaranteed snapshot. NO rerender after this point.
+      await act(async () => {
+        resolveSlow!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+      });
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // The retried pass settled — later snapshots of the still-lagged row
+      // are the same episode and do not churn.
+      H.player = { ...(H.player as object) } as typeof H.player;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
   it('a COMPLETE pass settles the once-per-board guard — no re-run on a later open of the same card', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);
