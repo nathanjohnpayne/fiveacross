@@ -371,20 +371,103 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(patch['8']).toMatchObject({ marked: true, echo: true, itemId: 'shared' });
   });
 
-  it('writes ONE aggregated player doc: acted bucket + echoed bucket + re-derived roots', async () => {
+  it('#491: the batch player write is the ACTED bucket only; the echoed bucket + roots re-derive from SERVER state after the ack', async () => {
     seedBoards();
+    // The ack-gated stats reconcile is a TRANSACTION (Codex P1 on #495): its
+    // reads see the server's post-commit truth. Model that by swapping H to
+    // the post-batch server state at transaction time — the Day-3 sibling with
+    // the echo landed, the player row as the batch left it (acted bucket only).
+    H.transactionRunner = async (fn, tx) => {
+      H.dayBoards.set(3, {
+        uid: 'u1',
+        seed: 333,
+        dayIndex: 3,
+        cells: card((i) => (i === 8 ? 'shared' : `b${i}`), {
+          8: { marked: true, markedAt: 9, status: 'confirmed', echo: true },
+        }),
+      });
+      H.player = {
+        uid: 'u1',
+        displayName: 'Alice',
+        dayStats: { 2: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } },
+      };
+      return fn(tx);
+    };
     await markShared();
+    // The BATCH's player write: the acted Day-2 bucket only — no cache-built
+    // sibling bucket can ride a drain and roll back another device's stats.
     const playerWrites = H.batchSet.mock.calls.filter(isPlayerWrite);
     expect(playerWrites).toHaveLength(1);
     const write = playerWrites[0][1] as {
       dayStats: Record<number, { bingoCount: number; squaresMarked: number }>;
-      bingoCount: number;
       squaresMarked: number;
     };
     expect(write.dayStats[2].squaresMarked).toBe(1); // the acted Mark
-    expect(write.dayStats[3].squaresMarked).toBe(1); // the echo
-    expect(write.squaresMarked).toBe(2); // the ONE re-summed root
-    expect(write.bingoCount).toBe(0);
+    expect(write.dayStats[3]).toBeUndefined(); // NEVER in the batch (#491)
+    expect(write.squaresMarked).toBe(1); // acted-day sum only
+    // The ack-gated transactional stats write carries the echoed bucket and
+    // the re-summed roots.
+    await vi.waitFor(() => {
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      const stats = statsWrite![1] as {
+        dayStats: Record<number, { squaresMarked: number }>;
+        squaresMarked: number;
+        bingoCount: number;
+      };
+      expect(stats.dayStats[3].squaresMarked).toBe(1); // the echo, from server cells
+      expect(stats.squaresMarked).toBe(2); // roots re-summed over the server view
+      expect(stats.bingoCount).toBe(0);
+      expect((statsWrite as unknown[])[2]).toEqual({ merge: true });
+    });
+  });
+
+  it('#491 REGRESSION: a stale-cache drain never regresses another device’s sibling dayStats or the root totals', async () => {
+    // Device A marked TWO squares on sibling Day 3 and the server knows it;
+    // device B's persistent cache for Day 3 is STALE (echo-trusted seed, no
+    // A-marks) — the #482 trust-latch window. B marks the shared Prompt.
+    seedBoards();
+    H.transactionRunner = async (fn, tx) => {
+      // Server truth at reconcile time (post-drain): A's two Marks (cells 9,
+      // 10) AND B's echo (8); A's Day-3 bucket standing on the row (B's batch
+      // never touched it) alongside B's acted Day-2 bucket.
+      H.dayBoards.set(3, {
+        uid: 'u1',
+        seed: 333,
+        dayIndex: 3,
+        cells: card((i) => (i === 8 ? 'shared' : `b${i}`), {
+          8: { marked: true, markedAt: 9, status: 'confirmed', echo: true },
+          9: { marked: true, markedAt: 5, status: 'confirmed' },
+          10: { marked: true, markedAt: 6, status: 'confirmed' },
+        }),
+      });
+      H.player = {
+        uid: 'u1',
+        displayName: 'Alice',
+        dayStats: {
+          2: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          3: { bingoCount: 0, squaresMarked: 2, firstBingoAt: null },
+        },
+      };
+      return fn(tx);
+    };
+    await markShared();
+    // The drain's batch never writes dayStats[3] — A's bucket survives it.
+    for (const call of H.batchSet.mock.calls.filter(isPlayerWrite)) {
+      expect((call[1] as { dayStats: Record<number, unknown> }).dayStats[3]).toBeUndefined();
+    }
+    // The server-derived stats write reflects A's Marks PLUS the echo — never
+    // the stale cache view (which would have been squaresMarked: 1).
+    await vi.waitFor(() => {
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      const stats = statsWrite![1] as {
+        dayStats: Record<number, { squaresMarked: number }>;
+        squaresMarked: number;
+      };
+      expect(stats.dayStats[3].squaresMarked).toBe(3); // A's 2 + the echo
+      expect(stats.squaresMarked).toBe(4); // roots: Day-2 (1) + Day-3 (3)
+    });
   });
 
   it('writes the Tally marker ONCE, for the acted Day — echoes never move the single marker slot', async () => {
@@ -459,7 +542,9 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     });
     await markShared({ displayName: undefined });
     await Promise.resolve();
-    expect(H.setDoc).not.toHaveBeenCalled();
+    // No meta pin write — the (#491) server-derived stats write may still run,
+    // so filter to the days/{d}/meta path rather than asserting zero setDoc.
+    expect(H.setDoc.mock.calls.some((call) => segs(call as unknown[])[4] === 'meta')).toBe(false);
   });
 
   it('does NOT echo a pending (admin_confirmed) Mark', async () => {
@@ -746,8 +831,21 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     H.player = { uid: 'u1', dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } } };
   };
 
-  it('writes the missing echo onto the opened board (its own markSeed) plus the aggregated player write', async () => {
+  it('writes the missing echo onto the opened board (its own markSeed); the stats write derives from SERVER state after the ack (#491)', async () => {
     seedReconcile();
+    // The ack-gated stats reconcile is a transaction; its reads see the
+    // server's post-ack truth (the reconcile's echo landed).
+    H.transactionRunner = async (fn, tx) => {
+      H.dayBoards.set(2, {
+        uid: 'u1',
+        seed: 222,
+        dayIndex: 2,
+        cells: card((i) => (i === 9 ? 'shared' : `d${i}`), {
+          9: { marked: true, markedAt: 9, status: 'confirmed', echo: true },
+        }),
+      });
+      return fn(tx);
+    };
     const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2] });
     expect(res.changed).toBe(true);
     const boardWrite = H.batchSet.mock.calls.find((c) => isDayBoardWrite(c, 2))![1] as {
@@ -758,9 +856,93 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     // #457 per-cell merge: the reconcile patch carries ONLY the missing echo.
     expect(Object.keys(boardWrite.cells)).toEqual(['9']);
     expect(boardWrite.cells['9']).toMatchObject({ marked: true, echo: true });
-    const playerWrite = H.batchSet.mock.calls.find(isPlayerWrite)![1] as { squaresMarked: number };
-    expect(playerWrite.squaresMarked).toBe(2);
+    // #491: NO player write rides the batch — a stale cached player row can
+    // never be folded back over the server's stats.
+    expect(H.batchSet.mock.calls.some(isPlayerWrite)).toBe(false);
     expect(H.batchCommit).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      const stats = statsWrite![1] as {
+        dayStats: Record<number, { squaresMarked: number }>;
+        squaresMarked: number;
+      };
+      expect(stats.dayStats[2].squaresMarked).toBe(1);
+      expect(stats.squaresMarked).toBe(2); // Day-1 prior bucket + this echo
+    });
+  });
+
+  it('#491: a stats-lagged board heals on open — cells ahead of the cached bucket trigger a server-derived stats write, stamped from the CELLS and re-pinning the honor', async () => {
+    // The reload case: an offline echo drained durably, but the ack-gated
+    // stats continuation died with the tab — for a board standing a BINGO the
+    // echo completed. The board's cells now EXCEED its cached dayStats bucket;
+    // opening the board must re-derive from server, stamp firstBingoAt with
+    // the time the LINE COMPLETED per the committed cells (not the heal's
+    // clock — Codex P2 on #495), and re-attempt the create-once Day-honor pin
+    // that also died with the tab (Codex P1 on #495).
+    seedReconcile();
+    H.player = { ...(H.player as Record<string, unknown>), displayName: 'Alice' };
+    // Row 10..14 (crossing the free centre) stands complete: 10/11/13 manual,
+    // 14 the echoed square that completed the line at markedAt 7.
+    H.dayBoards.set(2, {
+      uid: 'u1',
+      seed: 222,
+      dayIndex: 2,
+      cells: card((i) => (i === 14 ? 'shared' : `d${i}`), {
+        10: { marked: true, markedAt: 3, status: 'confirmed' },
+        11: { marked: true, markedAt: 4, status: 'confirmed' },
+        13: { marked: true, markedAt: 5, status: 'confirmed' },
+        14: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
+      }),
+    });
+    // The cached player row has NO Day-2 bucket — the lost continuation.
+    const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2] });
+    expect(res.changed).toBe(false);
+    expect(res.complete).toBe(true); // the heal SUCCEEDED — the guard may settle
+    expect(H.batchCommit).not.toHaveBeenCalled(); // no cell writes needed
+    const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+    expect(statsWrite).toBeDefined();
+    const stats = statsWrite![1] as {
+      dayStats: Record<number, { bingoCount: number; squaresMarked: number; firstBingoAt: number | null }>;
+      squaresMarked: number;
+      bingoCount: number;
+    };
+    expect(stats.dayStats[2].squaresMarked).toBe(4);
+    expect(stats.dayStats[2].bingoCount).toBe(1);
+    expect(stats.dayStats[2].firstBingoAt).toBe(7); // cells-derived, not Date.now()
+    expect(stats.squaresMarked).toBe(5);
+    expect(stats.bingoCount).toBe(1);
+    // The lag-heal re-pins the Day honor off the freshly committed stamp.
+    await vi.waitFor(() => {
+      const pin = H.setDoc.mock.calls.find((call) => {
+        const a = segs(call as unknown[]);
+        return a[2] === 'days' && a[3] === '2' && a[4] === 'meta';
+      });
+      expect(pin).toBeDefined();
+      expect((pin![1] as { firstBingo: { uid: string; at: number } }).firstBingo).toMatchObject({
+        uid: 'u1',
+        at: 7,
+      });
+    });
+  });
+
+  it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {
+    seedReconcile();
+    H.dayBoards.set(2, {
+      uid: 'u1',
+      seed: 222,
+      dayIndex: 2,
+      cells: card((i) => (i === 9 ? 'shared' : `d${i}`), {
+        9: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
+      }),
+    });
+    // The device went offline again: the heal's transaction rejects.
+    H.transactionRunner = async () => {
+      throw new Error('unavailable');
+    };
+    const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2] });
+    expect(res.changed).toBe(false);
+    expect(res.complete).toBe(false); // Board must drop its once-per-board key
   });
 
 
@@ -774,11 +956,23 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         9: { marked: true, markedAt: 1, status: 'confirmed', echo: true },
       }),
     });
+    // The row's Day-2 bucket already matches the cells — no stats lag either.
+    H.player = {
+      ...(H.player as Record<string, unknown>),
+      dayStats: {
+        1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        2: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+      },
+    };
     const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2] });
     expect(res.changed).toBe(false);
     expect(res.complete).toBe(true);
     expect(H.batchSet).not.toHaveBeenCalled();
     expect(H.batchCommit).not.toHaveBeenCalled();
+    // And no #491 server-derived stats write either — the heal is lag-gated
+    // and AWAITED inside the reconcile, so this assertion is sound here
+    // (CodeRabbit on #495): no transaction ran at all.
+    expect(H.txSet).not.toHaveBeenCalled();
   });
 
   it('reports complete: false when a sibling board is not in the cache (Codex P2 #447)', async () => {
@@ -802,12 +996,17 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     }
   });
 
-  it('preserves a blackout standing on an untouched board through the reconcile fold (Codex P2 #447)', async () => {
+  it('preserves a blackout standing on an untouched board through the server-derived stats write (Codex P2 #447, #491)', async () => {
     seedReconcile();
     H.player = { ...(H.player as Record<string, unknown>), blackout: true };
     await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2] });
-    const playerWrite = H.batchSet.mock.calls.find(isPlayerWrite)![1] as { blackout: boolean };
-    expect(playerWrite.blackout).toBe(true);
+    // #491: the stats write is post-ack and server-derived; the prior root
+    // blackout latches through it exactly as it did through the batch fold.
+    await vi.waitFor(() => {
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      expect((statsWrite![1] as { blackout: boolean }).blackout).toBe(true);
+    });
   });
 
   it('does not repair a cache tombstone without a locally incomplete-unmark record', async () => {
@@ -820,6 +1019,14 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         9: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
       }),
     });
+    // Row bucket in step with the cells — no #491 stats-lag heal in this test.
+    H.player = {
+      ...(H.player as Record<string, unknown>),
+      dayStats: {
+        1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        2: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+      },
+    };
     H.markerCache.set('shared', false); // cached tombstone
     const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2] });
     expect(res.changed).toBe(false);
@@ -991,10 +1198,16 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     });
     expect(pin).toBeDefined();
     expect((pin![1] as { firstBingo: { at: number } }).firstBingo.at).toBe(7);
-    // And WITHOUT a server-accepted stamp, no repair-pin fires.
+    // And WITHOUT a server-accepted stamp, no pin fires: with the row
+    // unstamped the stats-lag heal now runs first (#491/#495), so force it to
+    // FAIL — an unhealed, unstamped bingo must never mint the honor.
     vi.clearAllMocks();
     H.player = { uid: 'u1', displayName: 'Alice', dayStats: {} };
-    await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [2] });
+    H.transactionRunner = async () => {
+      throw new Error('unavailable');
+    };
+    const failed = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [2] });
+    expect(failed.complete).toBe(false); // the failed heal retries a later open
     await new Promise((r) => setTimeout(r, 0));
     expect(
       H.setDoc.mock.calls.some((call) => {

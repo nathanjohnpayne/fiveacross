@@ -25,7 +25,7 @@ import {
   terminate,
   type Firestore,
 } from 'firebase/firestore';
-import { setMark } from '../../src/data/api';
+import { reconcileEchoes, setMark } from '../../src/data/api';
 import {
   __resetBoardFreshnessForTests,
   beginDayBoardSeedWatch,
@@ -44,7 +44,9 @@ import { runScopedEmail, runScopedProject } from './runScope';
 // shared Prompt on Day 0 through the real setMark, terminate the client BEFORE
 // any sync, show the server still lacks BOTH the Mark and its echo, "reload"
 // (same app name + uid), and watch the recovered queue drain the Mark, the
-// Day-1 echo (its own markSeed), and the ONE aggregated player write together.
+// Day-1 echo (its own markSeed), and the acted-day player write together —
+// then heal the echoed Day's bucket through the #491 server-derived stats
+// reconcile on the board's next open (the ack continuation died with the tab).
 
 const EVENT_ID = 'med-2026'; // must match the mocked src/firebase EVENT_ID
 const PROJECT_ID = runScopedProject('demo-echo-marks'); // distinct project → isolated data
@@ -200,7 +202,7 @@ afterAll(async () => {
 });
 
 describe('offline Echo Marks via setMark (specs/echo-marks.md + ADR 0006)', () => {
-  it('queues the Mark + its Day-1 echo + the ONE aggregated player write offline, and drains them together on reload', async () => {
+  it('queues the Mark + its Day-1 echo + the acted-day player write offline, drains them together on reload, and heals the echoed bucket on next open (#491)', async () => {
     await seedEventDoc();
     const tab = await makeClient(TAB_APP_NAME);
     const day0Path = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
@@ -293,15 +295,40 @@ describe('offline Echo Marks via setMark (specs/echo-marks.md + ADR 0006)', () =
       status: 'confirmed',
     });
 
-    // The ONE aggregated player write: both Day buckets + the re-summed root.
+    // #491: the drained batch carries the ACTED Day-0 bucket only. The Day-1
+    // echo bucket deliberately did NOT ride it (a cache-built sibling bucket
+    // could roll back another device's committed stats), and the ack-gated
+    // server-derived stats continuation died with the terminated tab — so the
+    // sibling bucket is still absent after the drain.
     const player = await getDocFromServer(doc(observer.db, playerPath));
     const stats = player.data() as {
       squaresMarked: number;
       dayStats: Record<number, { squaresMarked: number }>;
     };
-    expect(stats.squaresMarked).toBe(2);
+    expect(stats.squaresMarked).toBe(1);
     expect(stats.dayStats[0].squaresMarked).toBe(1);
-    expect(stats.dayStats[1].squaresMarked).toBe(1);
+    expect(stats.dayStats[1]).toBeUndefined();
+
+    // The heal point (#491): opening the Day-1 board runs the open-time
+    // reconcile, whose stats-lag check sees the committed echo cell EXCEEDING
+    // the cached bucket and re-derives dayStats[1] + the roots from SERVER
+    // state — against the real rules (the standalone owner stats merge).
+    await reconcileEchoes({ uid: reloaded.uid, dayIndex: 1, dayIndexes: [0, 1], database: reloaded.db });
+    const healDeadline = Date.now() + 15_000;
+    for (;;) {
+      const healed = (await getDocFromServer(doc(observer.db, playerPath))).data() as {
+        squaresMarked: number;
+        dayStats: Record<number, { squaresMarked: number }>;
+      };
+      if (healed.dayStats[1]?.squaresMarked === 1 && healed.squaresMarked === 2) break;
+      if (Date.now() > healDeadline) {
+        expect(healed).toMatchObject({
+          squaresMarked: 2,
+          dayStats: { 1: { squaresMarked: 1 } },
+        });
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     await terminate(reloaded.db);
   }, 60000);
@@ -442,8 +469,21 @@ describe('offline Echo Marks via setMark (specs/echo-marks.md + ADR 0006)', () =
     const echoed = cellsFromData(day1Data.cells).find((c) => c.index === 8)!;
     expect(echoed).toMatchObject({ itemId: SHARED, marked: true, status: 'confirmed', echo: true });
     expect(day1Data.markSeed).toBe(333); // the CURRENT seed — rules-accepted
-    const player = await getDocFromServer(doc(reader.db, playerPath));
-    expect((player.data() as { squaresMarked: number }).squaresMarked).toBe(2);
+    // #491: the echoed Day-1 bucket + roots land via the ack-gated
+    // SERVER-DERIVED stats write (the tab is online, so the continuation runs
+    // here) — poll for it, since it follows the batch rather than riding it.
+    const statsDeadline = Date.now() + 15_000;
+    for (;;) {
+      const stats = (await getDocFromServer(doc(reader.db, playerPath))).data() as {
+        squaresMarked: number;
+        dayStats?: Record<number, { squaresMarked: number }>;
+      };
+      if (stats.squaresMarked === 2 && stats.dayStats?.[1]?.squaresMarked === 1) break;
+      if (Date.now() > statsDeadline) {
+        expect(stats).toMatchObject({ squaresMarked: 2, dayStats: { 1: { squaresMarked: 1 } } });
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     await terminate(tab.db);
   }, 60000);

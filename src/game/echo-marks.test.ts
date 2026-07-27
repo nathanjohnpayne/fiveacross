@@ -3,6 +3,7 @@ import type { Cell } from '../types';
 import {
   achievedItemIds,
   applyEchoes,
+  firstLineCompletionAt,
   foldEchoStats,
   foldDayStat,
   isPristine,
@@ -202,6 +203,52 @@ describe('foldEchoStats — the ONE aggregated player write (spec § Contract)',
       now: NOW,
     });
     expect(bare.blackout).toBe(false);
+  });
+});
+
+describe('firstLineCompletionAt — the cells-derived bingo stamp (#491/#495)', () => {
+  it('returns when the earliest completed line COMPLETED (max markedAt per line, min over lines)', () => {
+    // Row 10..14 (free centre at 12): completed when its last cell marked at 7.
+    const cells = board({
+      10: { marked: true, markedAt: 3 },
+      11: { marked: true, markedAt: 4 },
+      13: { marked: true, markedAt: 5 },
+      14: { marked: true, markedAt: 7 },
+    });
+    expect(firstLineCompletionAt(cells)).toBe(7);
+  });
+
+  it('is undefined with no completed line, or when a completing cell lacks markedAt (legacy data)', () => {
+    expect(firstLineCompletionAt(board({ 10: { marked: true, markedAt: 3 } }))).toBeUndefined();
+    const legacy = board({
+      10: { marked: true, markedAt: 3 },
+      11: { marked: true, markedAt: 4 },
+      13: { marked: true, markedAt: 5 },
+      14: { marked: true, markedAt: null }, // marked, but no usable stamp
+    });
+    expect(firstLineCompletionAt(legacy)).toBeUndefined();
+  });
+
+  it('feeds foldEchoStats: a previously unstamped bingo takes the bucket bingoAt over `now`', () => {
+    const write = foldEchoStats({
+      priorDayStats: undefined,
+      echoes: [{ dayIndex: 3, bingoCount: 1, squaresMarked: 4, blackout: false, bingoAt: 7 }],
+      now: NOW,
+    });
+    expect(write.dayStats[3].firstBingoAt).toBe(7);
+    // A prior stamp still wins, and a bucket without bingoAt falls back to now.
+    const prior = foldEchoStats({
+      priorDayStats: { 3: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 5 } },
+      echoes: [{ dayIndex: 3, bingoCount: 1, squaresMarked: 4, blackout: false, bingoAt: 7 }],
+      now: NOW,
+    });
+    expect(prior.dayStats[3].firstBingoAt).toBe(5);
+    const fallback = foldEchoStats({
+      priorDayStats: undefined,
+      echoes: [{ dayIndex: 3, bingoCount: 1, squaresMarked: 4, blackout: false }],
+      now: NOW,
+    });
+    expect(fallback.dayStats[3].firstBingoAt).toBe(NOW);
   });
 });
 
