@@ -81,6 +81,8 @@ vi.mock('../data/moments', () => ({
   // reads the action generation around the witness await, and the drain checks the
   // ceremonial candidate's enqueue stamp (firstBingoCandidateCurrent); inert here.
   dropPendingWins: vi.fn(),
+  enqueueRetraction: vi.fn(),
+  drainRetractions: vi.fn(),
   pendingActionGeneration: vi.fn(() => 0),
   firstBingoCandidateCurrent: vi.fn(() => false),
 }));

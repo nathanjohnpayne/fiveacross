@@ -21,11 +21,29 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [hasServerData, setHasServerData] = useState(false);
+  // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
+  // discipline `useColSub` below already exposes, and for the same reason:
+  // `hasServerData` is a LATCH ("the server has spoken at least once for this
+  // key"), which cannot answer "is THIS snapshot server-committed?".
+  // `fromCache` is cache-vs-server; `hasPendingWrites` is
+  // local-optimistic-vs-server-acked. A snapshot is fully SERVER-COMMITTED only
+  // when BOTH are false. Board's #377 retraction drain needs exactly that: a
+  // retraction is PERMANENT, and `setMark` is fire-and-forget (its verdict is a
+  // local fold, its batch still pending), so a rejected unmark — e.g. a
+  // pre-#458 cells-array straggler whose per-cell patch the canonical-map gate
+  // denies — is rolled back by the server while the local snapshot briefly
+  // showed the win gone. Acting on that would irreversibly silence a STANDING
+  // win. Waiting for both flags to clear means the rollback snapshot (win
+  // standing) is what the drain sees.
+  const [fromCache, setFromCache] = useState(true);
+  const [hasPendingWrites, setHasPendingWrites] = useState(false);
   useEffect(() => {
     // Drop the previous ref's document so stale data from another subscription
     // (e.g. a different signed-in uid) can't render under the new key.
     setData(null);
     setHasServerData(false);
+    setFromCache(true);
+    setHasPendingWrites(false);
     if (!ref) {
       setLoading(false);
       return;
@@ -37,6 +55,8 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
       (snap) => {
         setData(snap.exists() ? (snap.data() as T) : null);
         setLoading(false);
+        setFromCache(snap.metadata.fromCache);
+        setHasPendingWrites(snap.metadata.hasPendingWrites);
         if (!snap.metadata.fromCache) setHasServerData(true);
       },
       () => setLoading(false),
@@ -44,7 +64,7 @@ function useDocSub<T>(ref: DocumentReference<T> | null, key: string) {
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  return { data, loading, hasServerData };
+  return { data, loading, hasServerData, fromCache, hasPendingWrites };
 }
 
 function useColSub<T>(q: Query<T> | null, key: string) {
