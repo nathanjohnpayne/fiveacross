@@ -323,6 +323,189 @@ describe('published Moment retraction drain gate (#377)', () => {
   });
 });
 
+describe('open-time reconcile churn gate (#492)', () => {
+  const reconcileDays = (now: number) => [
+    day({ index: 0, theme: 'get-sporty', unlockAt: now - DAY_MS }),
+    day({ index: 1, theme: 'get-sporty', unlockAt: now - DAY_MS }),
+  ];
+
+  it('an INCOMPLETE pass retries once per board OPEN, not on every snapshot', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: false }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // Every live snapshot delivers a NEW board object for the SAME card.
+      // Pre-#492, the dropped once-per-board key made each one re-run the
+      // whole reconcile (N+2 cache reads through markChains, repeated
+      // repair-pin denials). Now the incomplete attempt blocks the visit.
+      H.board = { ...(H.board as object) } as typeof H.board;
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.board = { ...(H.board as object) } as typeof H.board;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // Opening a DIFFERENT board identity (here: the same Day's replacement
+      // card after a reshuffle — a new seed is a new identity, exactly like
+      // navigating to another Day) runs its own reconcile and unblocks the
+      // first identity…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …so RETURNING to it (a later open, the contract's retry point)
+      // re-runs the incomplete pass with more of the cache populated.
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
+  it('a STALE incomplete completion (landing after navigation) does not re-block its board (#498)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    type ReconcileResult = Awaited<ReturnType<typeof reconcileEchoes>>;
+    let resolveSlow: ((value: ReconcileResult) => void) | undefined;
+    mocked.mockImplementationOnce(
+      () =>
+        new Promise<ReconcileResult>((resolve) => {
+          resolveSlow = resolve;
+        }),
+    );
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // Board A's reconcile hangs (a slow cache pass)…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …the player navigates to board B (new identity) before it settles…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …and A's INCOMPLETE result lands late, while B is the viewed board.
+      await act(async () => {
+        resolveSlow!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: false });
+      });
+
+      // Returning to A is a later OPEN: the stale completion must not have
+      // pinned the visit block, so A retries immediately.
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
+  it('an incomplete completion from a PREVIOUS visit (left and returned mid-flight) does not swallow the return visit (#498)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    type ReconcileResult = Awaited<ReturnType<typeof reconcileEchoes>>;
+    let resolveSlow: ((value: ReconcileResult) => void) | undefined;
+    mocked.mockImplementationOnce(
+      () =>
+        new Promise<ReconcileResult>((resolve) => {
+          resolveSlow = resolve;
+        }),
+    );
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // Visit 1 of board A hangs mid-reconcile…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …the player switches to B and RETURNS to A before it settles (the
+      // in-flight guard rightly skips a second attempt)…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2); // B's own pass only
+
+      // …then visit 1's INCOMPLETE result lands. It belongs to the PREVIOUS
+      // A visit, so it must not pin the block against the current one.
+      await act(async () => {
+        resolveSlow!({ changed: false, bingoTransition: false, blackoutTransition: false, complete: false });
+      });
+
+      // The next snapshot of the still-viewed A retries.
+      H.board = { ...(H.board as object) } as typeof H.board;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
+  it('a COMPLETE pass settles the once-per-board guard — no re-run on a later open of the same card', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      // The first card settled on its complete pass; only the other identity's
+      // own first pass added a call — no retry churn for settled boards.
+      expect(mocked).toHaveBeenCalledTimes(2);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   // ThemeProvider (mounted only by the retint test below) writes

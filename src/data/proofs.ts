@@ -20,11 +20,6 @@ const rawDayBoard = (dayIndex: number, uid: string) =>
   doc(db, 'events', EVENT_ID, 'days', String(dayIndex), 'boards', uid);
 const rawPlayer = (uid: string) => doc(db, 'events', EVENT_ID, 'players', uid);
 
-function nextMarkVersion(board: { markVersion?: unknown } | undefined): number {
-  const previous = board?.markVersion;
-  return typeof previous === 'number' && Number.isSafeInteger(previous) && previous >= 0 ? previous + 1 : 1;
-}
-
 /**
  * The `{ merge: true }` player-stats write a proofed Mark / proof deletion
  * commits: in daily-cards mode (#246) the per-Board result is ONE Day Card's

@@ -15,8 +15,9 @@ import { doc, FieldPath, getDoc, setDoc, writeBatch } from 'firebase/firestore';
 //      marker), each board write carrying ITS OWN markSeed;
 //   2. a stale or BORROWED markSeed on an echoed board is rejected — the
 //      stale-write gate is per-board;
-//   3. a stale `markVersion` is rejected once a current-client write has upgraded
-//      the board, so a full-array sibling projection cannot erase another device's Mark;
+//   3. per-cell patches merge (#457): two devices marking different cells of
+//      one board both land — the structural replacement for the retired
+//      `markVersion` counter this header once advertised;
 //   4. `boardPristine()`'s echo exemption: an echo-only card is still
 //      reshuffleable, a manually-marked one is not.
 //
@@ -368,7 +369,7 @@ describe("boardPristine()'s echo exemption (spec § Reshuffle pristine-ness)", (
   const reshuffle = async (dayIndex: number, existingSeed: number) => {
     const d = db(ALICE);
     const batch = writeBatch(d);
-    batch.set(doc(d, dayBoardPath(dayIndex, ALICE)), { ...board(ALICE, dayIndex, existingSeed + 1), markVersion: 1 });
+    batch.set(doc(d, dayBoardPath(dayIndex, ALICE)), board(ALICE, dayIndex, existingSeed + 1));
     batch.set(doc(d, `events/${EVENT}/players/${ALICE}`), { reshufflesUsed: 1 }, { merge: true });
     // The per-spend marker the #463 gate requires alongside the counter +1.
     batch.set(doc(d, `events/${EVENT}/reshuffles/${ALICE}-1`), {

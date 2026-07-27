@@ -1325,6 +1325,59 @@ describe('the pending-Moment queue — module state that survives Board unmounts
     }
   });
 
+  it('#492: a MALFORMED persisted Day list drops that pending win instead of restoring the any-Day drain shape', () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+    try {
+      // Corrupt storage: bingo claims a win but its Day list is garbage. A
+      // restore must NOT surface `bingo: true` with no Day list (the legacy
+      // any-Day drain could post the Moment on the wrong Day) — fail closed
+      // and drop the bingo. The independently well-formed blackout survives.
+      values.set(
+        `gcb:pending-moments:${EVENT_ID}:u1`,
+        JSON.stringify({
+          v: 1,
+          flags: {
+            bingo: true,
+            blackout: true,
+            bingoDayIndexes: ['not-a-day', -3],
+            blackoutDayIndexes: [5],
+          },
+          generation: 0,
+        }),
+      );
+      __resetPendingMomentsMemoryForTests();
+      expect(peekPendingMoments('u1')).toEqual({ bingo: false, blackout: true, firstBingo: false });
+      expect(pendingBingoDayIndexes('u1')).toEqual([]);
+      expect(pendingBlackoutDayIndexes('u1')).toEqual([5]);
+
+      // An ABSENT Day list is the legacy (non-daily) shape, not corruption —
+      // it still restores.
+      values.set(
+        `gcb:pending-moments:${EVENT_ID}:u2`,
+        JSON.stringify({ v: 1, flags: { bingo: true, blackout: false }, generation: 0 }),
+      );
+      expect(peekPendingMoments('u2')).toEqual({ bingo: true, blackout: false, firstBingo: false });
+
+      // A present-but-EMPTY Day list is corruption too (persistPending never
+      // stores one — an emptied list is removed with its flag), and an empty
+      // list drains exactly like the absent legacy shape — drop the win
+      // (Codex P2 on #498).
+      values.set(
+        `gcb:pending-moments:${EVENT_ID}:u3`,
+        JSON.stringify({ v: 1, flags: { bingo: true, blackout: false, bingoDayIndexes: [] }, generation: 0 }),
+      );
+      expect(peekPendingMoments('u3')).toEqual({ bingo: false, blackout: false, firstBingo: false });
+    } finally {
+      resetPendingMoments();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('clears one drained kind and drops the entry once empty', () => {
     enqueueWinMoments({ uid: 'u1', bingoTransition: true, blackoutTransition: true });
     clearPendingMoment('u1', 'bingo');
