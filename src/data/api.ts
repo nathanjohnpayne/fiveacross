@@ -1726,7 +1726,7 @@ async function runSetMark(
     }),
   );
   // Echoed sibling boards ride the SAME batch, each carrying ITS OWN board's
-  // markSeed — the stale-write rules gate (`seededMarkWriteOk`) is per-board,
+  // markSeed — the stale-write rules gate (`seededMarkGuard`) is per-board,
   // and reusing the source board's seed would be rejected (specs/echo-marks.md).
   for (const echoBoard of echoBoards) {
     batch.set(
@@ -1930,7 +1930,7 @@ async function runSetMark(
   for (const echoBoard of echoBoards) {
     if (echoBoard.bingoTransition || echoBoard.blackoutTransition) {
       // Commit-ack gated like the pin below and the reconcile path (Phase 4b
-      // P1 on #447): a batch the rules reject (stale markSeed/markVersion)
+      // P1 on #447): a batch the rules reject (a stale markSeed)
       // rolls the echo back, and a pre-ack Moment could drain into the Feed
       // for a board state that never committed. Offline the commit pends and
       // the Moment enqueues on reconnect's ack — the acted board's own
@@ -2324,7 +2324,7 @@ async function runReconcileEchoes(
 
   if (res.bingoTransition || res.blackoutTransition) {
     // Commit-ack gated, exactly like the day-honor pin below (Phase 4b P1 on
-    // #447): a batch the rules reject (stale markSeed / markVersion) rolls the
+    // #447): a batch the rules reject (a stale markSeed) rolls the
     // echo back, and a Moment enqueued before the ack would let the next board
     // render post a win that never committed. Offline the commit pends and the
     // Moment enqueues on reconnect's ack — the same durability the pin has.
