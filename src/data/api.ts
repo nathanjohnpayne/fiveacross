@@ -34,6 +34,7 @@ import {
   foldDayStat,
   achievedItemIds,
   applyEchoes,
+  firstLineCompletionAt,
   foldEchoStats,
   standingsFrozen,
   tutorialDayIndexSet,
@@ -1977,17 +1978,25 @@ async function runSetMark(
  * bucket does not. So no echo batch carries a sibling Day's bucket: after the
  * batch's server acknowledgement (which proves this device is online and the
  * echoed cells are committed), this helper re-reads the player row and each
- * touched board FROM THE SERVER (`getDocFromServer`, the #494 read
- * discipline) and writes the buckets and re-summed roots from that
+ * touched board inside ONE Firestore TRANSACTION (server-consistent reads,
+ * retried on contention — Codex P1 on #495: plain server reads followed by a
+ * detached merge could themselves be overtaken by a write landing between
+ * read and write) and commits the buckets and re-summed roots from that
  * server-committed view — a view that already contains every device's
  * committed Marks, so the write can only move stats forward to server truth.
+ * A previously unstamped bingo is stamped with the CELLS-derived completion
+ * time of the Day's earliest line (`firstLineCompletionAt`), so a delayed
+ * offline drain or a reload heal records when the line completed, not when
+ * this reconcile ran (Codex P2 on #495).
  *
- * Fail closed: any server read/write failure skips the write entirely — a
- * missing bucket merely UNDERSTATES this player until the stats-lag heal in
+ * Fail closed: any transaction failure skips the write entirely — a missing
+ * bucket merely UNDERSTATES this player until the stats-lag heal in
  * `runReconcileEchoes` catches it on that board's next open, while a
  * stale-derived bucket would regress stats other devices already committed.
  * Post-freeze the standard narrowing applies: only ceremonial Day buckets
- * write, never roots (#265).
+ * write, never roots (#265). Returns the committed fold (null when nothing
+ * was written) so the reconcile heal can repair a Day honor pin off the
+ * freshly committed stamp.
  */
 async function reconcileEchoStatsFromServer(params: {
   uid: string;
@@ -1997,50 +2006,54 @@ async function reconcileEchoStatsFromServer(params: {
   ceremonialDayIndexes?: number[];
   statsFrozen?: boolean;
   database: Firestore;
-}): Promise<void> {
+}): Promise<{ dayStats: Record<number, StatWrite> } | null> {
   const { uid, database } = params;
   const days = params.statsFrozen
     ? params.dayIndexes.filter((d) => params.ceremonialDayIndexes?.includes(d))
     : params.dayIndexes;
-  if (days.length === 0) return;
+  if (days.length === 0) return null;
   const playerRef = doc(database, 'events', EVENT_ID, 'players', uid);
-  const [playerSnap, ...boardSnaps] = await Promise.all([
-    getDocFromServer(playerRef),
-    ...days.map((d) =>
-      getDocFromServer(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
-    ),
-  ]);
-  const playerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
-  const buckets: EchoBucket[] = [];
-  boardSnaps.forEach((snap, i) => {
-    if (!snap.exists()) return;
-    const data = snap.data() as { uid?: string; cells?: unknown };
-    if (data.uid !== uid) return;
-    const cells = cellsFromData(data.cells);
-    buckets.push({
-      dayIndex: days[i],
-      bingoCount: completedLines(cells).length,
-      squaresMarked: countMarked(cells),
-      blackout: isBlackout(cells),
+  return runTransaction(database, async (tx) => {
+    const [playerSnap, ...boardSnaps] = await Promise.all([
+      tx.get(playerRef),
+      ...days.map((d) =>
+        tx.get(doc(database, 'events', EVENT_ID, 'days', String(d), 'boards', uid)),
+      ),
+    ]);
+    const playerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
+    const buckets: EchoBucket[] = [];
+    boardSnaps.forEach((snap, i) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as { uid?: string; cells?: unknown };
+      if (data.uid !== uid) return;
+      const cells = cellsFromData(data.cells);
+      buckets.push({
+        dayIndex: days[i],
+        bingoCount: completedLines(cells).length,
+        squaresMarked: countMarked(cells),
+        blackout: isBlackout(cells),
+        // The stamp for a previously unstamped bingo: when the line COMPLETED
+        // per the committed cells, not when this reconcile happens to run.
+        bingoAt: firstLineCompletionAt(cells),
+      });
     });
-  });
-  if (buckets.length === 0) return;
-  const write = foldEchoStats({
-    priorDayStats: playerData?.dayStats as DayStats | undefined,
-    echoes: buckets,
-    now: Date.now(),
-    isTutorialDay: params.tutorialDayIndexes
-      ? (i: number) => params.tutorialDayIndexes!.includes(i)
-      : undefined,
-    isCeremonialDay: params.ceremonialDayIndexes
-      ? (i: number) => params.ceremonialDayIndexes!.includes(i)
-      : undefined,
-    priorBlackout: playerData?.blackout === true,
-  });
-  // Post-freeze: ceremonial buckets only, never roots — `days` was already
-  // narrowed to ceremonial above, so `write.dayStats` carries nothing else.
-  await setDoc(playerRef, params.statsFrozen ? { dayStats: write.dayStats } : write, {
-    merge: true,
+    if (buckets.length === 0) return null;
+    const write = foldEchoStats({
+      priorDayStats: playerData?.dayStats as DayStats | undefined,
+      echoes: buckets,
+      now: Date.now(),
+      isTutorialDay: params.tutorialDayIndexes
+        ? (i: number) => params.tutorialDayIndexes!.includes(i)
+        : undefined,
+      isCeremonialDay: params.ceremonialDayIndexes
+        ? (i: number) => params.ceremonialDayIndexes!.includes(i)
+        : undefined,
+      priorBlackout: playerData?.blackout === true,
+    });
+    // Post-freeze: ceremonial buckets only, never roots — `days` was already
+    // narrowed to ceremonial above, so `write.dayStats` carries nothing else.
+    tx.set(playerRef, params.statsFrozen ? { dayStats: write.dayStats } : write, { merge: true });
+    return write;
   });
 }
 
@@ -2214,18 +2227,47 @@ async function runReconcileEchoes(
   // write from that view is exactly the regression #491 removes.
   if (!res.changed) {
     const rowBucket = cachedPlayerData?.dayStats?.[dayIndex];
+    // Post-freeze a non-ceremonial Day's bucket never writes again, so its lag
+    // can never converge — skip the heal entirely rather than re-reading the
+    // server on every open (CodeRabbit on #495).
+    const healEligible = !params.statsFrozen || params.ceremonialDayIndexes?.includes(dayIndex) === true;
     if (
-      res.squaresMarked > (rowBucket?.squaresMarked ?? 0) ||
-      res.bingoCount > (rowBucket?.bingoCount ?? 0)
+      healEligible &&
+      (res.squaresMarked > (rowBucket?.squaresMarked ?? 0) ||
+        res.bingoCount > (rowBucket?.bingoCount ?? 0))
     ) {
-      void reconcileEchoStatsFromServer({
-        uid,
-        dayIndexes: [dayIndex],
-        tutorialDayIndexes: params.tutorialDayIndexes,
-        ceremonialDayIndexes: params.ceremonialDayIndexes,
-        statsFrozen: params.statsFrozen,
-        database,
-      }).catch(() => undefined);
+      try {
+        const healed = await reconcileEchoStatsFromServer({
+          uid,
+          dayIndexes: [dayIndex],
+          tutorialDayIndexes: params.tutorialDayIndexes,
+          ceremonialDayIndexes: params.ceremonialDayIndexes,
+          statsFrozen: params.statsFrozen,
+          database,
+        });
+        // A heal that had to mint the Day's `firstBingoAt` stamp is the lost
+        // continuation of an offline echo win whose tab died before the ack —
+        // the pin half of that continuation is lost too, and the repair-pin
+        // block above ran BEFORE the stamp existed. Re-attempt the create-once
+        // pin off the freshly committed stamp (Codex P1 on #495); identity
+        // gate and no-op-if-pinned semantics match every other pin path.
+        const healedStamp = healed?.dayStats?.[dayIndex]?.firstBingoAt;
+        if (typeof healedStamp === 'number') {
+          const pinName = honorDisplayName(undefined, cachedPlayerData?.displayName);
+          if (pinName) {
+            void pinDayFirstBingo(
+              dayIndex,
+              { uid, displayName: pinName, photoURL: null },
+              healedStamp,
+            ).catch(() => undefined);
+          }
+        }
+      } catch {
+        // Offline again or a transient read failure: the heal must RETRY, so
+        // this pass may not settle Board's once-per-board guard (Codex P2 on
+        // #495) — report incomplete and let a later open re-run it.
+        return { ...none, complete: false };
+      }
     }
     if (markerRepairs.length === 0) return none;
   }

@@ -486,6 +486,44 @@ export interface EchoBucket {
   bingoCount: number;
   squaresMarked: number;
   blackout: boolean;
+  /** Optional cells-derived completion time of the Day's earliest line —
+   *  used by `foldEchoStats` as the `firstBingoAt` stamp for a previously
+   *  unstamped bingo BEFORE falling back to `now`. The server-derived stats
+   *  reconcile (#491, Codex P2 on #495) supplies it so a delayed drain or a
+   *  reload heal stamps the time the line actually completed, not the
+   *  reconnect/open time; in-transaction callers omit it (their `now` IS the
+   *  completion time). */
+  bingoAt?: number;
+}
+
+/**
+ * The completion time of the EARLIEST completed line on a board, derived from
+ * the committed cells: each line completes when its LAST cell was marked
+ * (`max(markedAt)`, the free centre contributing nothing), and the board's
+ * first bingo is the minimum of those over all completed lines. Returns
+ * undefined when no line is complete or when any cell of every complete line
+ * lacks a usable `markedAt` (legacy data) — callers fall back to their clock.
+ */
+export function firstLineCompletionAt(cells: Cell[]): number | undefined {
+  const byIndex = new Map<number, Cell>();
+  for (const c of cells) byIndex.set(c.index, c);
+  let earliest: number | undefined;
+  for (const line of completedLines(cells)) {
+    let latest: number | undefined;
+    let known = true;
+    for (const index of line) {
+      const cell = byIndex.get(index);
+      if (!cell || cell.free) continue;
+      if (typeof cell.markedAt !== 'number') {
+        known = false;
+        break;
+      }
+      if (latest === undefined || cell.markedAt > latest) latest = cell.markedAt;
+    }
+    if (!known || latest === undefined) continue;
+    if (earliest === undefined || latest < earliest) earliest = latest;
+  }
+  return earliest;
 }
 
 /**
@@ -553,7 +591,11 @@ export function foldEchoStats(params: {
   }
   for (const echo of echoes) {
     const firstBingoAt =
-      echo.bingoCount > 0 ? (prior[echo.dayIndex]?.firstBingoAt ?? now) : null;
+      // A previously unstamped bingo takes the bucket's cells-derived
+      // completion time when supplied (#495 Codex P2: a delayed drain or a
+      // reload heal must stamp when the line COMPLETED, not when the stats
+      // reconcile ran), falling back to `now` for in-transaction callers.
+      echo.bingoCount > 0 ? (prior[echo.dayIndex]?.firstBingoAt ?? echo.bingoAt ?? now) : null;
     merged[echo.dayIndex] = {
       bingoCount: echo.bingoCount,
       squaresMarked: echo.squaresMarked,
