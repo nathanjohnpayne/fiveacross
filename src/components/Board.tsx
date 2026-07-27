@@ -31,7 +31,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -874,20 +874,26 @@ export default function Board() {
   // the board, and any echo win it enqueued drains through the standard
   // cells-effect drain — nothing posts directly from here.
   const reconciledBoardsRef = useRef<Set<string>>(new Set());
-  // #492: the board identity whose last reconcile pass came back INCOMPLETE
-  // (or failed). `board` is a NEW object on every snapshot, so deleting the
+  // #492: the board VISIT whose last reconcile pass came back INCOMPLETE (or
+  // failed). `board` is a NEW object on every snapshot, so deleting the
   // once-per-board key alone made every subsequent snapshot re-run the whole
   // reconcile — N+2 cache reads through the markChains chain each time, plus
   // the repair-pin's repeated create-denials — while the board sat on an
   // incomplete cache. The contract is "a later OPEN retries" (spec §
-  // Open-time), so an incomplete attempt now BLOCKS re-runs for as long as
-  // the player keeps looking at that same board, and clears when they open a
-  // different board (or Board remounts): the retry happens once per visit,
-  // when the cache plausibly gained siblings, not once per snapshot.
-  const incompleteReconcileKeyRef = useRef<string | null>(null);
+  // Open-time), so an incomplete attempt BLOCKS re-runs for as long as the
+  // player keeps looking at that same board, and stops blocking when the
+  // visit ends: the retry happens once per visit, when the cache plausibly
+  // gained siblings, not once per snapshot. Scoped to key AND generation
+  // (#500): a pin from an ENDED visit is inert, so returning to the same
+  // card after ANY departure — including through a state with no
+  // attributable board at all — is a fresh open that retries.
+  const incompleteReconcileVisitRef = useRef<{ key: string; generation: number } | null>(null);
   // The CURRENT board visit — identity key plus a generation that bumps every
-  // time the viewed identity changes. An async reconcile continuation may pin
-  // the visit block above only when BOTH still match its originating visit
+  // time the viewed identity changes, INCLUDING to "no attributable board"
+  // (#500: a locked/loading Day or account-switch interlude ends the visit —
+  // the early returns below record it — so a same-card return is a later
+  // OPEN, not a continuation). An async reconcile continuation may pin the
+  // visit block above only when BOTH still match its originating visit
   // (Codex P2 x2 on #498): a slow incomplete completion landing after the
   // player navigated away must not re-block its board (key mismatch), and one
   // landing after the player LEFT AND RETURNED belongs to the previous visit
@@ -897,24 +903,108 @@ export default function Board() {
     key: null,
     generation: 0,
   });
+  // Keys with a reconcile pass launched and not yet settled. Distinguishes
+  // "in flight" from "settled complete" inside `reconciledBoardsRef` so the
+  // #506 row-lag re-arm below never launches a second concurrent pass over
+  // one already running (which will evaluate the same row itself).
+  const reconcileInFlightRef = useRef<Set<string>>(new Set());
+  // #499/#501: the explicit retry trigger. Completion handlers mutate refs,
+  // and ref mutations schedule NO effect re-run — so when a STALE pass's
+  // incomplete completion re-arms the guard for the board the player is
+  // CURRENTLY viewing (its own fresh attempt was skipped by the in-flight
+  // guard), bumping this nonce is what actually re-runs the effect for the
+  // live visit instead of leaving the spec's "a later OPEN retries" promise
+  // waiting on an unrelated snapshot. Bumped ONLY in that
+  // key-matches-but-generation-differs case, and the retried pass carries the
+  // CURRENT generation — its own incomplete completion pins the per-visit
+  // block instead of bumping again — so the trigger cannot loop.
+  const [reconcileRetryNonce, setReconcileRetryNonce] = useState(0);
+  // #506: edge detector for the row-lag re-arm — one re-arm per EPISODE of
+  // row inconsistency, reset when the row reads consistent again, so an
+  // inconsistent row that a failed heal leaves standing cannot re-trigger a
+  // pass per snapshot (the per-visit incomplete block owns that retry).
+  const reconcileRowLagEpisodeRef = useRef(false);
   useEffect(() => {
-    if (!hasDays || !user || !board || board.uid !== user.uid) return;
-    if (!identityKnown || !dayBoardConfirmed) return;
     const schedule = event?.days ?? [];
-    if (schedule.length === 0) return;
+    if (
+      !hasDays ||
+      !user ||
+      !board ||
+      board.uid !== user.uid ||
+      !identityKnown ||
+      !dayBoardConfirmed ||
+      schedule.length === 0
+    ) {
+      // #500: no attributable board on screen ENDS the current visit (the
+      // generation is bumped by the next valid open), so an incomplete block
+      // pinned before a locked/loading-Day or account-switch interlude can
+      // never strand the old card past its visit.
+      reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
+      return;
+    }
     const key = `${user.uid}:${board.dayIndex}:${board.seed}`;
     if (reconcileVisitRef.current.key !== key) {
       reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
+      // Any pin belongs to an ended visit now — inert by generation, dropped
+      // for hygiene.
+      incompleteReconcileVisitRef.current = null;
     }
     const visitGeneration = reconcileVisitRef.current.generation;
-    if (incompleteReconcileKeyRef.current !== null && incompleteReconcileKeyRef.current !== key) {
-      // The player opened a DIFFERENT board — the blocked identity may retry
-      // on its next visit.
-      incompleteReconcileKeyRef.current = null;
+    // #506: the once-per-board guard is retained for the session, but the
+    // session can outlive the row's consistency — another device's acted-day
+    // batch can understate the roots AFTER this board settled its complete
+    // pass, and with the row absent from the old deps the heal predicate was
+    // never re-evaluated until a reload. The row is already subscribed
+    // (`player`, now in the deps), so re-arm the guard for the OPEN board on
+    // the transition into row inconsistency — the same `playerRowRootLag`
+    // signal `runReconcileEchoes` heals on, same freeze gate — and let the
+    // pass below re-run and heal. Skipped while a pass is in flight: that
+    // pass reads the same cached row itself, and if it raced past its
+    // predicate the next row/board snapshot re-runs this effect after it
+    // settles (bounded: any later snapshot, open, or mark heals).
+    const rowLag =
+      !standingsFrozen(event) &&
+      playerRowRootLag(player, (i: number) => ceremonialDayIndexSet(schedule).has(i));
+    if (!rowLag) {
+      reconcileRowLagEpisodeRef.current = false;
+    } else if (!reconcileRowLagEpisodeRef.current && !reconcileInFlightRef.current.has(key)) {
+      reconcileRowLagEpisodeRef.current = true;
+      reconciledBoardsRef.current.delete(key);
+      if (incompleteReconcileVisitRef.current?.key === key) {
+        incompleteReconcileVisitRef.current = null;
+      }
     }
     if (reconciledBoardsRef.current.has(key)) return;
-    if (incompleteReconcileKeyRef.current === key) return; // same visit — no per-snapshot churn
+    const pin = incompleteReconcileVisitRef.current;
+    if (pin !== null && pin.key === key && pin.generation === visitGeneration) {
+      return; // same visit — no per-snapshot churn
+    }
     reconciledBoardsRef.current.add(key);
+    reconcileInFlightRef.current.add(key);
+    // An INCOMPLETE pass (a sibling board this device has never cached — its
+    // cache read rejected, so the achieved set may be missing the source
+    // Mark; or a #491 stats-lag heal that failed) must not settle the
+    // once-per-board guard: drop the key so a later open retries with more
+    // of the cache populated (Codex P2 on #447). Then, by where the player
+    // is looking NOW:
+    //   • still this visit → pin the per-visit block so the retry is
+    //     per-open, not per-snapshot (#492);
+    //   • same card, LATER visit (they left and came back while this pass
+    //     hung; the in-flight guard skipped the return visit's own attempt)
+    //     → the current open's promised retry has no snapshot to ride, so
+    //     bump the retry nonce to schedule it explicitly (#499/#501);
+    //   • different card → nothing; the old card's next open retries.
+    const settle = (complete: boolean) => {
+      reconcileInFlightRef.current.delete(key);
+      if (complete) return;
+      reconciledBoardsRef.current.delete(key);
+      if (reconcileVisitRef.current.key !== key) return;
+      if (reconcileVisitRef.current.generation === visitGeneration) {
+        incompleteReconcileVisitRef.current = { key, generation: visitGeneration };
+      } else {
+        setReconcileRetryNonce((n) => n + 1);
+      }
+    };
     void reconcileEchoes({
       uid: user.uid,
       dayIndex: board.dayIndex,
@@ -923,36 +1013,11 @@ export default function Board() {
       ceremonialDayIndexes: [...ceremonialDayIndexSet(schedule)],
       statsFrozen: standingsFrozen(event),
     })
-      .then((res) => {
-        // An INCOMPLETE pass (a sibling board this device has never cached —
-        // its cache read rejected, so the achieved set may be missing the
-        // source Mark; or a #491 stats-lag heal that failed) must not settle
-        // the once-per-board guard: drop the key so a later open retries with
-        // more of the cache populated (Codex P2 on #447), but pin the visit
-        // block above so the retry is per-open, not per-snapshot (#492) —
-        // and only while ITS originating visit is still the current one.
-        if (!res.complete) {
-          reconciledBoardsRef.current.delete(key);
-          if (
-            reconcileVisitRef.current.key === key &&
-            reconcileVisitRef.current.generation === visitGeneration
-          ) {
-            incompleteReconcileKeyRef.current = key;
-          }
-        }
-      })
-      .catch(() => {
-        // A synchronous failure (nothing written) may retry on the next open.
-        reconciledBoardsRef.current.delete(key);
-        if (
-          reconcileVisitRef.current.key === key &&
-          reconcileVisitRef.current.generation === visitGeneration
-        ) {
-          incompleteReconcileKeyRef.current = key;
-        }
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads.
-  }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days]);
+      .then((res) => settle(Boolean(res.complete)))
+      // A synchronous failure (nothing written) may retry on the next open.
+      .catch(() => settle(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads, plus the explicit retry nonce.
+  }, [hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, player, reconcileRetryNonce]);
   // Edge refs for the COSMETIC Celebration UI only (issue #104). The public Moment
   // broadcast moved OFF this snapshot-diffing machinery and ONTO the action path —
   // doMark reads `setMark`'s synchronous win-transition verdict and enqueues into a
