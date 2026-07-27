@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -510,8 +510,13 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     loser.set(doc(alice, tombstonePath(`${ALICE}-bingo-d5`)), tombstone(ALICE, { dayIndex: 5 }));
     await assertFails(loser.commit());
     // Nothing half-landed: the Day-5 Moment survived, its tombstone was not
-    // minted, and the retry's fresh-probe batch lands.
-    await assertSucceeds(getDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`))));
+    // minted, and the retry's fresh-probe batch lands. Assert EXISTENCE, not
+    // just read permission — Moment reads are public, so a bare assertSucceeds
+    // would pass either way (CodeRabbit on PR #494).
+    const survivor = await assertSucceeds(getDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`))));
+    expect(survivor.exists()).toBe(true);
+    const notMinted = await assertSucceeds(getDoc(doc(alice, tombstonePath(`${ALICE}-bingo-d5`))));
+    expect(notMinted.exists()).toBe(false);
     const retry = writeBatch(alice as Firestore);
     retry.delete(doc(alice, momentPath(`${ALICE}-bingo-d5`)));
     retry.set(doc(alice, tombstonePath(`${ALICE}-bingo-d5`)), tombstone(ALICE, { dayIndex: 5 }));
