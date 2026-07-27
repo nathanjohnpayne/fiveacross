@@ -191,9 +191,20 @@ function restorePending(uid: string): void {
     if (!parsed || parsed.v !== 1 || !parsed.flags) return;
     const bingoDayIndexes = safeDayIndexes(parsed.flags.bingoDayIndexes);
     const blackoutDayIndexes = safeDayIndexes(parsed.flags.blackoutDayIndexes);
+    // Corrupt-storage fail-closed (#492): a Day list that is PRESENT but
+    // malformed parses to undefined, and restoring `bingo: true` with no Day
+    // list would route the win down the legacy any-Day drain — a reload could
+    // post the Moment on whatever Day is on screen. Absent-entirely stays the
+    // legacy (non-daily) shape; malformed DROPS that pending win instead
+    // (conservative: a ceremony can be lost, never wrongly posted — the same
+    // posture as the queue's other fail-safes).
+    const bingoDaysMalformed =
+      parsed.flags.bingoDayIndexes !== undefined && bingoDayIndexes === undefined;
+    const blackoutDaysMalformed =
+      parsed.flags.blackoutDayIndexes !== undefined && blackoutDayIndexes === undefined;
     const flags: StoredPendingFlags = {
-      bingo: parsed.flags.bingo === true,
-      blackout: parsed.flags.blackout === true,
+      bingo: parsed.flags.bingo === true && !bingoDaysMalformed,
+      blackout: parsed.flags.blackout === true && !blackoutDaysMalformed,
       firstBingo: false,
       firstBingoGeneration: 0,
       ...(bingoDayIndexes ? { bingoDayIndexes } : {}),
