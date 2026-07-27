@@ -1056,6 +1056,25 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       expect(H.txSet).not.toHaveBeenCalled();
     });
 
+    it('never heals a row that is partial in ONE dimension and lagging in the other (Codex P1 on #503)', async () => {
+      seedReconcile();
+      // Buckets out-sum the SQUARES root but fall short of the BINGO root —
+      // a legacy roster whose per-Day breakdown has only partly filled in.
+      // The fold rewrites BOTH roots from one merged view, so healing here
+      // would march `bingoCount` DOWN from 3 to 0 (and clear the cruise
+      // `firstBingoAt` with it). Dominance must hold on every field.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 3,
+        squaresMarked: 40,
+        dayStats: { 1: { bingoCount: 0, squaresMarked: 45, firstBingoAt: null } },
+      };
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+
     it('is skipped post-freeze, where the reconcile writes ceremonial buckets only and a root lag could never converge', async () => {
       seedReconcile();
       bingoDay2();
