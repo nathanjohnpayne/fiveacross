@@ -969,6 +969,140 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('a lag→consistent→lag flip entirely inside a no-board interlude re-arms the returning card (#508)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      // The board settles its complete pass with a CONSISTENT row on screen…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // …a root lag latches an episode whose heal is served on the spot (#506)…
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …then the viewed Day loses its attributable board (a locked/loading
+      // interlude) and BOTH row transitions land inside it: the heal's
+      // consistent snapshot…
+      H.board = null;
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 5,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      // …and another device's acted-day batch understates the roots AGAIN —
+      // a NEW episode, still with no board on screen. Nothing serves yet.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 5,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 7, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // Returning to the already-settled card serves the new episode's owed
+      // heal. Pre-#508 the interlude transitions were unobserved — the latch
+      // still read `active` with no owed heal, the guard stayed settled, and
+      // the new root lag waited for a reload.
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+
+      // Once per episode, as ever: a further lagged snapshot does not churn.
+      H.player = { ...(H.player as object) } as typeof H.player;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(3);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
+  it('a NEW lag first observed with no board open serves exactly one heal on the next attributable open (#508)', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    try {
+      const now = Date.now();
+      H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now) } as unknown as EventDoc;
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 3, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      const view = render(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // The row turns lagged with nothing attributable on screen: the
+      // episode latches, but there is no board to serve — and no pass may
+      // launch from a no-board run.
+      H.board = null;
+      view.rerender(<Board />);
+      await act(async () => {});
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 3,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 5, firstBingoAt: null } },
+      } as unknown as PlayerDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(1);
+
+      // The next attributable open serves the owed heal exactly ONCE — the
+      // interlude latch must not double-serve on the return…
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …and later still-lagged snapshots are the SAME episode: no churn.
+      H.player = { ...(H.player as object) } as typeof H.player;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(2);
+    } finally {
+      mocked.mockImplementation(() =>
+        Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+      );
+    }
+  });
+
   it('a COMPLETE pass settles the once-per-board guard — no re-run on a later open of the same card', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);
