@@ -2254,7 +2254,10 @@ async function runReconcileEchoes(
     // needs no cache-freshness assumption; see the helper for the per-field
     // one-directional rule (Codex P1 on #503) and the dominance requirement.
     // Same ceremonial exclusion (#265) the roots were summed with, so a
-    // farewell-Day bucket can never look like root lag.
+    // farewell-Day bucket can never look like root lag. #505 adds the third
+    // root dimension the fold rewrites — `firstBingoAt` — with the tutorial
+    // exclusion the fold's own root derivation uses, so an understated or
+    // missing root stamp heals and a legacy earlier stamp blocks the heal.
     // Post-freeze the reconcile writes ceremonial BUCKETS only, never roots
     // (#265) — a root lag could not converge, so re-reading the server on every
     // open would be pure churn (the same reasoning as `healEligible`).
@@ -2263,6 +2266,7 @@ async function runReconcileEchoes(
       playerRowRootLag(
         cachedPlayerData,
         params.ceremonialDayIndexes ? (i: number) => params.ceremonialDayIndexes!.includes(i) : undefined,
+        params.tutorialDayIndexes ? (i: number) => params.tutorialDayIndexes!.includes(i) : undefined,
       );
     if (bucketLag || rootLag) {
       try {

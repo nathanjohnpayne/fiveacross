@@ -824,21 +824,51 @@ export function sumDayStats(
  *  the heal rewrites BOTH roots from one merged view, so the bucket sum must
  *  DOMINATE every root and strictly exceed at least one; a row partial in one
  *  dimension and lagging in the other must never "heal" a root DOWNWARD.
+ *
+ *  #505 adds the THIRD root dimension the same fold rewrites: `firstBingoAt`,
+ *  `comparePlayers`' third Leaderboard tie-break. Dominance for a timestamp
+ *  runs the other way — EARLIER is more — so the bucket-derived earliest
+ *  (`cruiseFirstBingoAt` over the row's own buckets, tutorial-excluded to
+ *  mirror the fold's root derivation and ceremonial-excluded for the same
+ *  #265 conservatism the sums carry) must be no LATER than the root's stamp.
+ *  A root stamp that PREDATES every bucket's evidence is a legacy/hybrid row
+ *  whose earlier honor the fold would overwrite with a later value — never a
+ *  heal trigger; conversely a root stamp that is MISSING or LATER than the
+ *  bucket evidence understates the row in the tie-break and now counts as
+ *  lag on its own, even when both numeric roots already agree.
+ *
  *  Callers gate on their own freeze state — post-freeze the reconcile never
  *  writes roots, so a root lag could not converge and re-checking is churn. */
 export function playerRowRootLag(
-  row: Pick<Partial<PlayerDoc>, 'dayStats' | 'squaresMarked' | 'bingoCount'> | null | undefined,
+  row:
+    | Pick<Partial<PlayerDoc>, 'dayStats' | 'squaresMarked' | 'bingoCount' | 'firstBingoAt'>
+    | null
+    | undefined,
   isCeremonialDay?: (dayIndex: number) => boolean,
+  isTutorialDay?: (dayIndex: number) => boolean,
 ): boolean {
   if (!row) return false;
   const bucketSum = sumDayStats(row.dayStats, isCeremonialDay);
   const rootSquares = row.squaresMarked ?? 0;
   const rootBingos = row.bingoCount ?? 0;
-  return (
-    bucketSum.squaresMarked >= rootSquares &&
-    bucketSum.bingoCount >= rootBingos &&
-    (bucketSum.squaresMarked > rootSquares || bucketSum.bingoCount > rootBingos)
+  const bucketFirst = cruiseFirstBingoAt(
+    row.dayStats,
+    (i: number) => (isTutorialDay?.(i) ?? false) || (isCeremonialDay?.(i) ?? false),
   );
+  const rootFirst = row.firstBingoAt ?? null;
+  const countsDominate =
+    bucketSum.squaresMarked >= rootSquares && bucketSum.bingoCount >= rootBingos;
+  // Timestamp dominance: the bucket evidence must be at least as EARLY as the
+  // root. A stamp-less bucket view can never dominate a stamped root — that
+  // root is legacy evidence the buckets cannot justify, and the fold would
+  // regress it (#505).
+  const firstDominates =
+    bucketFirst == null ? rootFirst == null : rootFirst == null || bucketFirst <= rootFirst;
+  const strictlyExceeds =
+    bucketSum.squaresMarked > rootSquares ||
+    bucketSum.bingoCount > rootBingos ||
+    (bucketFirst != null && (rootFirst == null || bucketFirst < rootFirst));
+  return countsDominate && firstDominates && strictlyExceeds;
 }
 
 /** The cruise-wide First to BINGO time: the earliest `firstBingoAt` across the

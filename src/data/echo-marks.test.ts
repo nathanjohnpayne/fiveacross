@@ -1103,6 +1103,138 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     });
   });
 
+  /**
+   * #505 — the `firstBingoAt` dimension of the same root lag. The fold the
+   * heal commits rewrites THREE root fields; the #496/#503 gate covered only
+   * the two numeric ones, leaving the Leaderboard tie-break stamp
+   * (`comparePlayers`' third key) both unhealable when understated and
+   * unprotected when a legacy root stamp predates the buckets' evidence.
+   */
+  describe('#505: the firstBingoAt dimension of the root-lag signal', () => {
+    /** A Day-2 board standing a completed row 10..14 (through the free centre). */
+    const bingoDay2 = () =>
+      H.dayBoards.set(2, {
+        uid: 'u1',
+        seed: 222,
+        dayIndex: 2,
+        cells: card((i) => (i === 9 ? 'shared' : `d${i}`), {
+          10: { marked: true, markedAt: 7, status: 'confirmed' },
+          11: { marked: true, markedAt: 7, status: 'confirmed' },
+          13: { marked: true, markedAt: 7, status: 'confirmed' },
+          14: { marked: true, markedAt: 7, status: 'confirmed' },
+        }),
+      });
+    /** A row whose numeric roots are exactly in step with its buckets — only
+     *  the root stamp varies per test. */
+    const rowWithRootStamp = (firstBingoAt?: number | null) => {
+      H.player = {
+        uid: 'u1',
+        bingoCount: 1,
+        squaresMarked: 5,
+        ...(firstBingoAt === undefined ? {} : { firstBingoAt }),
+        dayStats: {
+          1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 },
+        },
+      };
+    };
+
+    it('heals a MISSING root firstBingoAt when the buckets carry the stamp, even with both numeric roots in step', async () => {
+      seedReconcile();
+      bingoDay2();
+      rowWithRootStamp(undefined);
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.batchCommit).not.toHaveBeenCalled(); // no cell writes needed
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      const stats = statsWrite![1] as {
+        bingoCount: number;
+        squaresMarked: number;
+        firstBingoAt: number | null;
+      };
+      // Rewritten from SERVER state: the root stamp now equals the earliest
+      // bucket evidence, and the (already-consistent) numeric roots hold.
+      expect(stats.firstBingoAt).toBe(7);
+      expect(stats.bingoCount).toBe(1);
+      expect(stats.squaresMarked).toBe(5);
+    });
+
+    it("heals a root firstBingoAt LATER than the buckets' own evidence", async () => {
+      seedReconcile();
+      bingoDay2();
+      rowWithRootStamp(99);
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      expect((statsWrite![1] as { firstBingoAt: number | null }).firstBingoAt).toBe(7);
+    });
+
+    it('does not churn a row whose root stamp matches the bucket-derived earliest', async () => {
+      seedReconcile();
+      bingoDay2();
+      rowWithRootStamp(7);
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+
+    it('never regresses: a legacy root stamp EARLIER than every bucket blocks the heal, even with dominating counts', async () => {
+      seedReconcile();
+      bingoDay2();
+      // The #505 legacy/hybrid shape: the buckets dominate BOTH numeric roots
+      // (understated counts — the #496 signal alone would heal), but the root
+      // stamp predates every populated bucket. The fold derives the root
+      // stamp purely from the buckets, so a heal would replace the legitimate
+      // earlier honor with 7 — the gate must treat the row as NOT dominated.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 0,
+        squaresMarked: 1,
+        firstBingoAt: 3,
+        dayStats: {
+          1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 },
+        },
+      };
+      const res = await reconcileEchoes({ uid: 'u1', dayIndex: 1, dayIndexes: [0, 1, 2] });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+
+    it("a tutorial Day's stamp is not root-stamp evidence — the fold's root derivation excludes it", async () => {
+      seedReconcile();
+      bingoDay2();
+      // Day 2 is tutorial: its bucket counts toward the sums (embark play is
+      // real), but its stamp is excluded from the cruise-wide root, so the
+      // app-consistent row carries NO root stamp. Reading the tutorial
+      // bucket's stamp as understatement would re-heal on every open.
+      H.player = {
+        uid: 'u1',
+        bingoCount: 1,
+        squaresMarked: 5,
+        dayStats: {
+          1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+          2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: 7 },
+        },
+      };
+      const res = await reconcileEchoes({
+        uid: 'u1',
+        dayIndex: 1,
+        dayIndexes: [0, 1, 2],
+        tutorialDayIndexes: [2],
+      });
+      expect(res.changed).toBe(false);
+      expect(res.complete).toBe(true);
+      expect(H.txSet).not.toHaveBeenCalled();
+    });
+  });
+
   it('is a zero-write no-op on an already-reconciled board', async () => {
     seedReconcile();
     H.dayBoards.set(2, {
