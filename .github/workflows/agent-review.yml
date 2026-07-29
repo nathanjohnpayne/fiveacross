@@ -177,6 +177,48 @@ jobs:
               }
             );
 
+            // Config must come from the PR BASE, not this default-branch
+            // checkout (#763/#769). This job checks out the default branch so
+            // the HELPER code is trusted — correct, and unchanged — but the
+            // helper was then handed the default branch's review-policy.yml. A
+            // PR targeting a stricter non-default base was therefore judged by
+            // the LOOSER policy, and since `needsExternal` is overwritten by
+            // the helper result below, that could flip it to false and skip the
+            // external-review label entirely.
+            //
+            // Resolution goes through the SHARED helper that
+            // merge-clearance-gate.sh and codex-review-check.sh also use, so
+            // every policy decision in the fleet reads one implementation
+            // rather than four near-copies. For a default-base PR it returns
+            // the checked-out path and makes no API call; it fails (exit 2)
+            // only for a positively-identified non-default base whose policy
+            // cannot be read, which is the one case where silently using the
+            // default-branch copy would be the bypass.
+            let policyConfigPath = '.github/review-policy.yml';
+            let policyReadFailed = false;
+            try {
+              policyConfigPath = childProcess.execFileSync(
+                'bash',
+                [
+                  'scripts/workflow/resolve_base_policy.sh',
+                  '--repo', `${context.repo.owner}/${context.repo.repo}`,
+                  '--base-ref', pr.base.ref,
+                  '--base-sha', pr.base.sha,
+                  '--default-branch', context.payload.repository.default_branch,
+                  '--default-config', '.github/review-policy.yml',
+                ],
+                {encoding: 'utf8', env: process.env}
+              ).trim();
+              console.log(`Governing review policy: ${policyConfigPath}`);
+            } catch (e) {
+              policyReadFailed = true;
+              core.warning(
+                `Could not resolve the governing review policy ` +
+                `(${e.message}); requiring external review fail-closed rather ` +
+                `than judging this PR by the default-branch policy.`
+              );
+            }
+
             // Exclude lockfiles, minified, and generated files from line count
             // to match REVIEW_POLICY.md threshold definition
             const excludePatterns = [
@@ -200,8 +242,15 @@ jobs:
               return new RegExp('^' + re + '$');
             }
 
+            // Both sides of a rename (#763): GitHub reports the destination in
+            // .filename and the source in .previous_filename, so matching only
+            // .filename would let a PR move a protected file to an unprotected
+            // path without tripping this. Same fix as
+            // external_review_fingerprint.sh, applied to this inline twin.
             const touchesProtected = files.some(f =>
-              protectedPaths.some(p => globToRegex(p).test(f.filename))
+              [f.filename, f.previous_filename]
+                .filter(Boolean)
+                .some(name => protectedPaths.some(p => globToRegex(p).test(name)))
             );
 
             // Use >= to match REVIEW_POLICY.md definition
@@ -209,31 +258,44 @@ jobs:
             let externalReviewFingerprint = '';
             let filesPath = '';
             const repo = `${context.repo.owner}/${context.repo.repo}`;
-            try {
-              filesPath = path.join(os.tmpdir(), `mergepath-pr-${pr.number}-files.json`);
-              fs.writeFileSync(filesPath, JSON.stringify(files));
-              const fingerprintRaw = childProcess.execFileSync(
-                'bash',
-                [
-                  'scripts/workflow/external_review_fingerprint.sh',
-                  '--repo', repo,
-                  '--pr', String(pr.number),
-                  '--ref', pr.head.sha,
-                  '--config', '.github/review-policy.yml',
-                  '--files-json', filesPath,
-                ],
-                {encoding: 'utf8', env: process.env}
-              );
-              const fingerprint = JSON.parse(fingerprintRaw);
-              needsExternal = Boolean(fingerprint.requires_review);
-              externalReviewFingerprint = fingerprint.fingerprint || '';
-            } catch (e) {
-              core.warning(
-                `External-review fingerprint calculation failed; ` +
-                `labeling fail-closed (${e.message}).`
-              );
+            if (policyReadFailed) {
+              // Base policy unknown — see the fail-closed note above. Skip the
+              // helper entirely: running it against the default-branch config
+              // is exactly the bypass being closed, and its result would
+              // OVERWRITE needsExternal.
               needsExternal = true;
               externalReviewFingerprint = '';
+              console.log(
+                'External-review fail-closed: base review policy unreadable; ' +
+                'requiring review and skipping the fingerprint calculation.'
+              );
+            } else {
+              try {
+                filesPath = path.join(os.tmpdir(), `mergepath-pr-${pr.number}-files.json`);
+                fs.writeFileSync(filesPath, JSON.stringify(files));
+                const fingerprintRaw = childProcess.execFileSync(
+                  'bash',
+                  [
+                    'scripts/workflow/external_review_fingerprint.sh',
+                    '--repo', repo,
+                    '--pr', String(pr.number),
+                    '--ref', pr.head.sha,
+                    '--config', policyConfigPath,
+                    '--files-json', filesPath,
+                  ],
+                  {encoding: 'utf8', env: process.env}
+                );
+                const fingerprint = JSON.parse(fingerprintRaw);
+                needsExternal = Boolean(fingerprint.requires_review);
+                externalReviewFingerprint = fingerprint.fingerprint || '';
+              } catch (e) {
+                core.warning(
+                  `External-review fingerprint calculation failed; ` +
+                  `labeling fail-closed (${e.message}).`
+                );
+                needsExternal = true;
+                externalReviewFingerprint = '';
+              }
             }
 
             // PROPAGATION-LANE-DEFER (#656): this job and pr-review-policy.yml's
@@ -317,7 +379,7 @@ jobs:
                       '--pr', String(pr.number),
                       '--head', pr.head.sha,
                       '--current-fingerprint', externalReviewFingerprint,
-                      '--config', '.github/review-policy.yml',
+                      '--config', policyConfigPath,
                       '--files-json', filesPath,
                     ],
                     {encoding: 'utf8', env: process.env}
@@ -1033,10 +1095,14 @@ jobs:
               # + protected-paths computation as the required check, with
               # the label as a force-on signal and the propagation lane's
               # HEAD-pinned verified marker as the exemption, all evaluated
-              # on the LIVE head. When the required-check gate is disabled,
-              # it additionally requires codex-review-check.sh to confirm
-              # current-head Codex/Phase-4b clearance before returning
-              # true. Label-event proxies (current-label reads,
+              # on the LIVE head. It returns true on the strength of the
+              # merge-clearance gate only when that gate is ENFORCED —
+              # enabled in the governing policy AND observably a required
+              # status check on the PR's base branch (#772; config-enabled
+              # alone is not evidence the gate can hold a merge). Otherwise
+              # — including when enforcement is undeterminable — it requires
+              # codex-review-check.sh to confirm current-head Codex/Phase-4b
+              # clearance before returning true. Label-event proxies (current-label reads,
               # unlabeled-removal overrides) remain rejected: a label event
               # is not head-pinned proof of a downstream gate or clearance.
               # Fail closed: any nonzero exit or unexpected output from the
@@ -2006,9 +2072,10 @@ jobs:
           #    CodeRabbit disposition is stale for the merge head. Abort.
           # 2. Re-run merge-clearance-gate.sh --derive-rate-limit-protection
           #    against the (now-pinned) live head and require `true`: the
-          #    same active-or-already-satisfied external-review protection
-          #    predicate used at rc=5 time. Any error or non-true output
-          #    aborts.
+          #    same enforced-gate-or-already-satisfied external-review
+          #    protection predicate used at rc=5 time (#772 — an ENFORCED
+          #    required check on the base branch, not merely one enabled in
+          #    config). Any error or non-true output aborts.
           if [ "${CR_RATE_LIMIT_DOWNGRADED:-false}" = "true" ]; then
             if [ -z "${CURRENT_HEAD_SHA:-}" ] || [ "$CURRENT_HEAD_SHA" != "$HEAD_SHA" ]; then
               echo "::error::Head drifted after the rc=5 rate-limit downgrade (event=$HEAD_SHA live=${CURRENT_HEAD_SHA:-unset}) — the CodeRabbit disposition is stale for the merge head. Aborting auto-merge."
