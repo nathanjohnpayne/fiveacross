@@ -92,6 +92,17 @@ describe('resetShell', () => {
     expect(order).toEqual(['unregister', 'reload']);
   });
 
+  it('never throws when reload() itself throws', async () => {
+    // CodeRabbit on #513: every caller uses `void resetShell()`, so an escaping
+    // throw is an unhandled rejection rather than a contained no-op.
+    installBrowserMocks();
+    await expect(
+      resetShell(() => {
+        throw new Error('navigation blocked');
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it('reloads WITHOUT tearing down the shell while offline', async () => {
     // Codex P1 on #513. The precache is the only copy of index.html and the
     // bundle a disconnected device has; deleting it mid-cruise replaces the
@@ -203,6 +214,22 @@ describe('enforceBuildFloor', () => {
     const reload = vi.fn();
     await expect(enforceBuildFloor('2026-07-20T14:17:04.539Z', reload)).resolves.toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('re-checks the attempt across the floor fetch — no double teardown per load', async () => {
+    // CodeRabbit on #513: this starts at module scope, so a render crash can
+    // spend the attempt from the ErrorBoundary while the fetch is in flight.
+    installBrowserMocks();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => {
+        markResetAttempted(); // the boundary got there first, mid-flight
+        return { ok: true, json: async () => ({ floor: FLOOR }) } as unknown as Response;
+      }),
+    );
+    const reload = vi.fn();
+    await expect(enforceBuildFloor('2026-07-20T14:17:04.539Z', reload)).resolves.toBe(false);
     expect(reload).not.toHaveBeenCalled();
   });
 

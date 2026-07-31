@@ -136,7 +136,15 @@ export async function clearShell(): Promise<void> {
  */
 export async function resetShell(reload: () => void = () => window.location.reload()): Promise<void> {
   if (!definitelyOffline()) await clearShell();
-  reload();
+  try {
+    reload();
+  } catch {
+    // `clearShell` cannot throw but `reload` can — no `window` under SSR/tests,
+    // and a blocked navigation throws. Every caller uses `void resetShell()`,
+    // so an escaping throw would become an unhandled rejection rather than the
+    // contained no-op this module promises (CodeRabbit on #513). The teardown
+    // above still stands, so the next navigation lands on a fresh shell anyway.
+  }
 }
 
 /**
@@ -159,6 +167,12 @@ export async function enforceBuildFloor(
   if (resetAttempted() || definitelyOffline()) return false;
   const floor = await fetchBuildFloor();
   if (!buildBelowFloor(buildStamp, floor)) return false;
+  // Re-check across the await (CodeRabbit on #513). This starts at module scope,
+  // so a render crash can spend the attempt from `ErrorBoundary.componentDidCatch`
+  // while the floor fetch is still in flight; without this the same page load
+  // would tear down and reload twice. The one-attempt latch already bounds it —
+  // this makes the second, redundant teardown not happen at all.
+  if (resetAttempted()) return false;
   // Only proceed once the attempt is DURABLY recorded — an uncountable attempt
   // is an unbounded reload loop (Codex P1 on #513). The floor stays armed for
   // the next load, so this defers the rescue rather than cancelling it.

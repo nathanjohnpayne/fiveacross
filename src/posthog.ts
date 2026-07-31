@@ -293,11 +293,27 @@ export async function initPostHog(): Promise<void> {
 
 export const posthogReady = (): boolean => ready;
 
-/** Capture an explicit event. Called by analytics.ts `track()` alongside GA4. */
-export function phCapture(name: string, params?: Record<string, unknown>): void {
+/**
+ * Capture an explicit event. Called by analytics.ts `track()` alongside GA4.
+ *
+ * `options` exists for events emitted immediately before the page goes away
+ * (CodeRabbit on #513). The default transport batches, so a capture followed by
+ * a reload — `app_crash`, whose whole job is to be visible AFTER the crash that
+ * produced it — can be dropped before it ever leaves the tab. Callers in that
+ * position pass `{ transport: 'sendBeacon', send_instantly: true }`, which
+ * survives the page context being destroyed.
+ */
+export function phCapture(
+  name: string,
+  params?: Record<string, unknown>,
+  options?: { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_instantly?: boolean },
+): void {
   if (!ready) return;
   try {
-    posthog.capture(name, params);
+    // Kept arity-exact for the common path: every existing caller passes no
+    // options and must keep producing a two-argument `capture` call.
+    if (options) posthog.capture(name, params, options);
+    else posthog.capture(name, params);
   } catch {
     /* analytics must never throw into product code */
   }

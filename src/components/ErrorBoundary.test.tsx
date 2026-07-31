@@ -152,6 +152,24 @@ describe('ErrorBoundary', () => {
     expect(phCapture).toHaveBeenCalledWith(
       'app_crash',
       expect.objectContaining({ message: 'cells.every is not a function', build_stamp: expect.any(String) }),
+      expect.anything(),
+    );
+  });
+
+  it('beacons the crash report so the auto-reload cannot drop it', () => {
+    // CodeRabbit on #513. The default batched transport would lose this event
+    // when auto-recovery reloads a moment later — self-defeating, since
+    // `app_crash` is what makes the next stale-shell wave visible at all.
+    resetAttempted.mockReturnValue(false);
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(phCapture).toHaveBeenCalledWith(
+      'app_crash',
+      expect.any(Object),
+      { transport: 'sendBeacon', send_instantly: true },
     );
   });
 });

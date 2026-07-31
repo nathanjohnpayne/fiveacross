@@ -49,13 +49,22 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
     // the fact that it reached the BOUNDARY (i.e. it blanked the app rather
     // than being swallowed somewhere harmless) plus the build that did it, so
     // a stale-shell wave is legible as one build going bad in the dashboard.
-    phCapture('app_crash', {
-      message: error.message,
-      build_stamp: __BUILD_STAMP__,
-      component_stack: info.componentStack?.slice(0, 2000) ?? null,
-      auto_recovering: recovering,
-      offline,
-    });
+    phCapture(
+      'app_crash',
+      {
+        message: error.message,
+        build_stamp: __BUILD_STAMP__,
+        component_stack: info.componentStack?.slice(0, 2000) ?? null,
+        auto_recovering: recovering,
+        offline,
+      },
+      // Beacon, because auto-recovery reloads the page a moment from now and
+      // the default batched transport would lose this event on the way out
+      // (CodeRabbit on #513). That would be self-defeating: `app_crash` is the
+      // signal that makes the NEXT stale-shell wave visible at all — the last
+      // one was only diagnosable because the raw throw reached PostHog.
+      { transport: 'sendBeacon', send_instantly: true },
+    );
     // Keep the raw error on the console for local dev and for a bug report's
     // attached log — `phCapture` is a no-op until PostHog init resolves.
     console.error('App crashed', error);
