@@ -18,5 +18,7 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client", "vite-plugin-pwa/client", "vitest/globals"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "// exclude": "src/sw.ts runs in a ServiceWorkerGlobalScope, not the DOM. Its `lib: WebWorker` is mutually exclusive with the DOM lib above — pulling it into this program silently retypes globals like addEventListener for EVERY file (it broke the pull-to-refresh specs). It gets its own program in tsconfig.sw.json, which `npm run typecheck` also runs.",
+  "exclude": ["src/sw.ts"]
 }

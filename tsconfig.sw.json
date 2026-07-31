@@ -1,0 +1,20 @@
+{
+  "// why": "Separate program for the service worker (#514). src/sw.ts runs in a ServiceWorkerGlobalScope: its `WebWorker` lib and the app's `DOM` lib define the same global names differently, so a single program cannot typecheck both — a `/// <reference lib=\"webworker\" />` inside src/ retypes addEventListener for every file in the project. `npm run typecheck` runs this alongside tsconfig.json so the worker is never left unchecked.",
+  "compilerOptions": {
+    "target": "ES2021",
+    "useDefineForClassFields": true,
+    "lib": ["ES2021", "WebWorker"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vite/client", "vite-plugin-pwa/info"]
+  },
+  "include": ["src/sw.ts", "src/sw-rescue.ts", "src/buildFloor.ts", "src/canonical-redirect.ts", "src/data/proofMediaCache.ts", "src/vite-env.d.ts"]
+}
