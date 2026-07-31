@@ -14,7 +14,15 @@
     "noEmit": true,
     "strict": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["vite/client", "vite-plugin-pwa/info"]
+    "types": ["vite/client", "vite-plugin-pwa/info", "vitest/globals"]
   },
-  "include": ["src/sw.ts", "src/sw-rescue.ts", "src/buildFloor.ts", "src/canonical-redirect.ts", "src/data/proofMediaCache.ts", "src/vite-env.d.ts"]
+  "include": [
+    "src/sw.ts",
+    "src/sw-worker.test.ts",
+    "src/sw-rescue.ts",
+    "src/buildFloor.ts",
+    "src/canonical-redirect.ts",
+    "src/data/proofMediaCache.ts",
+    "src/vite-env.d.ts"
+  ]
 }

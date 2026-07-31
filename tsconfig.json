@@ -19,6 +19,6 @@
     "types": ["vite/client", "vite-plugin-pwa/client", "vitest/globals"]
   },
   "include": ["src"],
-  "// exclude": "src/sw.ts runs in a ServiceWorkerGlobalScope, not the DOM. Its `lib: WebWorker` is mutually exclusive with the DOM lib above — pulling it into this program silently retypes globals like addEventListener for EVERY file (it broke the pull-to-refresh specs). It gets its own program in tsconfig.sw.json, which `npm run typecheck` also runs.",
-  "exclude": ["src/sw.ts"]
+  "// exclude": "src/sw.ts runs in a ServiceWorkerGlobalScope, not the DOM. Its `lib: WebWorker` is mutually exclusive with the DOM lib above — pulling it into this program silently retypes globals like addEventListener for EVERY file (it broke the pull-to-refresh specs). Its test is excluded for the same reason: TypeScript follows the import, so leaving the test here drags the worker lib back in through the side door. Both live in tsconfig.sw.json, which `npm run typecheck` also runs — they are typechecked, just not by this program. Vitest still RUNS the test from here; the vitest `include` glob is independent of tsconfig.",
+  "exclude": ["src/sw.ts", "src/sw-worker.test.ts"]
 }
