@@ -108,16 +108,37 @@ export function definitelyOffline(): boolean {
  *
  * So we ask the origin directly. `/build-floor.json` is the natural probe: it is
  * tiny, deliberately un-precached (the workbox glob excludes `.json`), and
- * served `no-cache`, so a 200 proves the ORIGIN answered rather than a cache.
- * Any failure — offline, DNS, timeout, a captive portal's interception — reads
- * as "do not destroy anything".
+ * served `no-cache`, so a real 200 proves the ORIGIN answered, not a cache.
+ *
+ * A bare `res.ok` is NOT enough (Phase 4b P1 on #513): `fetch` follows
+ * redirects by default, so a captive portal that bounces this request to its
+ * own login page and returns a readable 2xx would have passed — licensing the
+ * teardown in the single state it was written to refuse. Three independent
+ * barriers now have to hold, because a portal only has to defeat one:
+ *   1. `redirect: 'error'` — a portal bounce rejects instead of resolving;
+ *   2. the FINAL response URL must still be same-origin, for interceptors that
+ *      proxy in place rather than redirect;
+ *   3. the body must actually parse as the build-floor document, which no
+ *      login page will.
+ * Any failure at all — offline, DNS, timeout, interception — reads as "do not
+ * destroy anything".
  */
 export async function originReachable(fetchImpl: typeof fetch = fetch, timeoutMs = 5000): Promise<boolean> {
   if (definitelyOffline()) return false;
   const { signal, cleanup } = probeTimeoutSignal(timeoutMs);
   try {
-    const res = await fetchImpl(`/build-floor.json?ts=${Date.now()}`, { cache: 'no-store', signal });
-    return res.ok;
+    const res = await fetchImpl(`/build-floor.json?ts=${Date.now()}`, {
+      cache: 'no-store',
+      signal,
+      redirect: 'error',
+    });
+    if (!res.ok) return false;
+    if (res.redirected) return false;
+    if (res.url && typeof location !== 'undefined' && new URL(res.url, location.href).origin !== location.origin) {
+      return false;
+    }
+    const body: unknown = await res.json();
+    return typeof (body as { floor?: unknown } | null)?.floor === 'string';
   } catch {
     return false;
   } finally {

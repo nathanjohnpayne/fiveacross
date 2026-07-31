@@ -37,10 +37,23 @@ function installBrowserMocks({
       return true;
     }),
   });
-  // Default: the origin answers, so the destructive teardown is licensed.
-  // Individual tests override to model an unreachable origin.
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true } as unknown as Response));
+  // Default: the origin answers with a real build-floor document, so the
+  // destructive teardown is licensed. Tests override to model interception.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okFloorResponse()));
   return { deleted };
+}
+
+/** A response that clears all three `originReachable` barriers. */
+function okFloorResponse(
+  over: Partial<{ ok: boolean; redirected: boolean; url: string; json: () => Promise<unknown> }> = {},
+) {
+  return {
+    ok: true,
+    redirected: false,
+    url: 'http://localhost:3000/build-floor.json',
+    json: async () => ({ floor: '1970-01-01T00:00:00.000Z' }),
+    ...over,
+  } as unknown as Response;
 }
 
 beforeEach(() => {
@@ -121,11 +134,56 @@ describe('resetShell', () => {
     expect(reload).toHaveBeenCalledOnce();
   });
 
-  it('does NOT tear down when the origin answers non-OK (portal interception)', async () => {
+  it('does NOT tear down when the origin answers non-OK', async () => {
     const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false } as unknown as Response));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okFloorResponse({ ok: false })));
     await resetShell(vi.fn());
     expect(deleted).toEqual([]);
+  });
+
+  // Phase 4b P1 on #513: `fetch` follows redirects by default, so a captive
+  // portal returning a readable 2xx login page satisfies a bare `res.ok` — and
+  // would license the teardown in the exact state the probe exists to refuse.
+  // A portal only has to defeat ONE barrier, so all three are pinned.
+  it('does NOT tear down when the probe was REDIRECTED (captive portal bounce)', async () => {
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okFloorResponse({ redirected: true })));
+    await resetShell(vi.fn());
+    expect(deleted).toEqual([]);
+  });
+
+  it('does NOT tear down when the final URL is CROSS-ORIGIN (in-place interception)', async () => {
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okFloorResponse({ url: 'http://portal.ship/login' })));
+    await resetShell(vi.fn());
+    expect(deleted).toEqual([]);
+  });
+
+  it('does NOT tear down when the body is not a build-floor document', async () => {
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        okFloorResponse({
+          json: async () => {
+            throw new Error('<html>portal login</html>');
+          },
+        }),
+      ),
+    );
+    await resetShell(vi.fn());
+    expect(deleted).toEqual([]);
+  });
+
+  it('requests the probe with redirect:error so a bounce rejects outright', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(okFloorResponse());
+    installBrowserMocks();
+    vi.stubGlobal('fetch', fetchSpy);
+    await resetShell(vi.fn());
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('/build-floor.json'),
+      expect.objectContaining({ redirect: 'error', cache: 'no-store' }),
+    );
   });
 
   it('tears down when a caller has already PROVEN connectivity, without re-probing', async () => {
