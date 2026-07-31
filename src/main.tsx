@@ -10,8 +10,10 @@ import { isSyntheticProbe } from './synthetic-probe';
 import type { ThemeId } from './types';
 import App from './App';
 import ConsentNotice from './components/ConsentNotice';
+import ErrorBoundary from './components/ErrorBoundary';
 import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
+import { enforceBuildFloor } from './shellRecovery';
 import './theme/themes.css';
 import './index.css';
 
@@ -21,6 +23,16 @@ import './index.css';
 // session replays. All ph* calls guard on init, so skipping this suppresses
 // PostHog entirely for those loads.
 if (!isSyntheticProbe() && !isLocalDevHost(window.location.hostname)) void initPostHog();
+
+// The out-of-tree half of the #342 force-reload floor (src/shellRecovery.ts).
+// Runs HERE, at module scope, and not inside `UpdatePrompt` like the friendly
+// banner path, because its whole job is to reach clients whose React tree never
+// renders — the 2026-07-24 blank-screen incident, where the in-tree floor check
+// died with the crash it was supposed to rescue. Fire-and-forget: it resolves
+// to a no-op for every current build (the floor ships inert), and it is bounded
+// by a one-attempt-per-tab guard so a misconfigured floor cannot reload-loop.
+// Skipped for the uptime synthetic (#142) so a probe run is never a reload.
+if (!isSyntheticProbe()) void enforceBuildFloor(__BUILD_STAMP__);
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('root element missing');
@@ -93,10 +105,19 @@ createRoot(rootEl).render(
     {/* Same stable mount point again: a new deploy must be able to prompt a
         reload on every screen, signed-out SignIn included (#178). */}
     <UpdatePrompt />
-    <AuthProvider>
-      <BrowserRouter>
-        <ThemedApp />
-      </BrowserRouter>
-    </AuthProvider>
+    {/* Wraps ONLY the auth-gated tree, and sits BELOW the three toasts above on
+        purpose (src/components/ErrorBoundary.tsx): a crash in the app must not
+        be able to unmount `UpdatePrompt`, because that component is the only
+        caller of `updateServiceWorker(true)` — i.e. the only in-app way a
+        client ever moves off a broken build. Without the boundary React tears
+        down the entire root, siblings included, and the client is stranded on
+        the shell that just crashed (the 2026-07-24 blank-screen incident). */}
+    <ErrorBoundary>
+      <AuthProvider>
+        <BrowserRouter>
+          <ThemedApp />
+        </BrowserRouter>
+      </AuthProvider>
+    </ErrorBoundary>
   </React.StrictMode>,
 );

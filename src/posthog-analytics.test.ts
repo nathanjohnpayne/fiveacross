@@ -250,6 +250,140 @@ describe('PostHog init with a key', () => {
     expect(ph.capture).toHaveBeenCalledWith('bingo', { lines: 1 });
   });
 
+  it('replays a capture that arrived BEFORE init settled (#513 — the startup-crash report)', async () => {
+    // Phase 4b P2 on #513. `initPostHog` is fire-and-forget and awaits ingest
+    // probes while main.tsx renders synchronously, so a STARTUP crash — the
+    // exact case `app_crash` exists to report — lands in the not-ready window
+    // and used to be dropped outright, before any transport option could help.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phCapture('app_crash', { message: 'boom' }, { transport: 'sendBeacon', send_instantly: true });
+    expect(ph.capture).not.toHaveBeenCalled(); // not ready yet — queued, not lost
+
+    await mod.initPostHog();
+    expect(ph.capture).toHaveBeenCalledWith(
+      'app_crash',
+      { message: 'boom' },
+      { transport: 'sendBeacon', send_instantly: true },
+    );
+  });
+
+  it('replays a queued capture that survived a RECOVERY RELOAD (#513)', async () => {
+    // Codex P2 on #513: the queue's main customer reloads the page immediately
+    // after queueing, and the same-origin build-floor probe can beat the
+    // EXTERNAL ingest probes (the shipboard blocked-proxy case). A memory-only
+    // queue dies with that navigation, so the crash would vanish regardless.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+
+    // Load 1: crash queues the report, then the page goes away before init.
+    const first = await import('./posthog');
+    first.phCapture('app_crash', { message: 'boom' }, { transport: 'sendBeacon', send_instantly: true });
+
+    // Load 2: fresh module registry — module memory is gone, sessionStorage is not.
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    const second = await import('./posthog');
+    await second.initPostHog();
+
+    expect(ph.capture).toHaveBeenCalledWith(
+      'app_crash',
+      { message: 'boom' },
+      { transport: 'sendBeacon', send_instantly: true },
+    );
+  });
+
+  it('sends a pre-init capture EXACTLY ONCE when init settles without a navigation', async () => {
+    // Codex P2 on #513: the event lives in both the in-memory queue and its own
+    // persisted mirror, so replaying the concatenation double-counted every
+    // startup event — inflating `app_crash` counts with phantom crashes.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+    expect((ph.capture as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1);
+  });
+
+  it('a second load queuing its own event does not overwrite the first load’s', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    (await import('./posthog')).phCapture('app_crash', { message: 'first' });
+
+    vi.resetModules();
+    const second = await import('./posthog');
+    second.phCapture('app_crash', { message: 'second' });
+
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    vi.clearAllMocks();
+    await (await import('./posthog')).initPostHog();
+    const names = (ph.capture as unknown as { mock: { calls: [string, Record<string, unknown>][] } }).mock.calls.map(
+      (c) => c[1].message,
+    );
+    expect(names).toEqual(['first', 'second']);
+  });
+
+  it('drains the persisted queue exactly once, so a replay cannot re-send forever', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const first = await import('./posthog');
+    first.phCapture('app_crash', { message: 'boom' });
+
+    vi.resetModules();
+    await (await import('./posthog')).initPostHog();
+
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    vi.clearAllMocks();
+    await (await import('./posthog')).initPostHog();
+    expect(ph.capture).not.toHaveBeenCalled();
+  });
+
+  it('drops persisted entries it cannot durably DELETE, rather than re-sending them forever', async () => {
+    // Phase 4b P2 on #513: a readable-but-nonmutating store can accept
+    // removeItem and keep the blob, which would violate exactly-once on every
+    // future load with no way to stop. Losing the event is the lesser harm.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => JSON.stringify([{ name: 'app_crash', params: { message: 'stuck' } }]),
+      setItem: () => {},
+      removeItem: () => {}, // accepted, but the blob survives
+    });
+    const ph = (await import('posthog-js')).default;
+    await (await import('./posthog')).initPostHog();
+    expect(ph.capture).not.toHaveBeenCalled();
+  });
+
+  it('replays a queued capture AFTER the pending identify, so it is not orphaned anonymous', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('uid-1');
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const captureOrder = (ph.capture as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(identifyOrder).toBeLessThan(captureOrder);
+  });
+
   it('defaults api_host to the personal proxy (chain primary) when VITE_POSTHOG_HOST is unset (#149/#344)', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');

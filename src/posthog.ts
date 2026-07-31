@@ -289,17 +289,135 @@ export async function initPostHog(): Promise<void> {
     pendingIdentifyUid = null;
     phIdentify(uid);
   }
+  // Replay queued captures AFTER the identify above, so an `app_crash` from the
+  // probe window is attributed to the signed-in player rather than orphaned
+  // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
+  // — they are from a PRIOR load (the crash that triggered a recovery reload),
+  // so they are both older and the ones that matter most.
+  const carriedNow = carried();
+  // Replay the PERSISTED entries only once their deletion is confirmed (Phase
+  // 4b P2 on #513). If the store would not let them go, replaying means
+  // re-sending them on every future load with no way to stop; dropping them is
+  // the lesser harm, on this module's standing rule that losing a telemetry
+  // event beats corrupting the data. In-memory entries are unaffected — they
+  // die with this page either way, so they can never double-send.
+  const drained = clearPersistedCaptures();
+  const queued = [...(drained ? carriedNow : []), ...pendingCaptures];
+  carriedCaptures = [];
+  pendingCaptures = [];
+  for (const c of queued) phCapture(c.name, c.params, c.options);
 }
 
 export const posthogReady = (): boolean => ready;
 
-/** Capture an explicit event. Called by analytics.ts `track()` alongside GA4. */
-export function phCapture(name: string, params?: Record<string, unknown>): void {
-  if (!ready) return;
+/** Capture options for events emitted just before the page goes away. */
+export type CaptureOptions = { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_instantly?: boolean };
+
+/**
+ * Capture an explicit event. Called by analytics.ts `track()` alongside GA4.
+ *
+ * `options` exists for events emitted immediately before the page goes away
+ * (CodeRabbit on #513). The default transport batches, so a capture followed by
+ * a reload — `app_crash`, whose whole job is to be visible AFTER the crash that
+ * produced it — can be dropped before it ever leaves the tab. Callers in that
+ * position pass `{ transport: 'sendBeacon', send_instantly: true }`, which
+ * survives the page context being destroyed.
+ */
+export function phCapture(name: string, params?: Record<string, unknown>, options?: CaptureOptions): void {
+  if (!ready) {
+    // Queue instead of dropping (Phase 4b P2 on #513). `initPostHog` is
+    // fire-and-forget and awaits ~1.5s of ingest-host probes, while main.tsx
+    // renders synchronously right after — so a STARTUP crash, the exact case
+    // `app_crash` exists to report, reliably lands in this window and used to
+    // vanish through the `ready` gate before any transport option could help.
+    // Same replay pattern as `pendingIdentifyUid` below. Bounded: a crash loop
+    // must not grow this without limit, and the earliest events are the ones
+    // worth keeping, so it drops newest-over-oldest once full.
+    if (carried().length + pendingCaptures.length < MAX_PENDING_CAPTURES) {
+      pendingCaptures.push({ name, params, options });
+      // Also persist, because the queue's most important customer immediately
+      // reloads the page (Codex P2 on #513): `componentDidCatch` starts
+      // `resetShell()` right after queueing, and its same-origin probe can
+      // finish well before the EXTERNAL PostHog ingest probes — especially when
+      // a proxy is blocked, which is the shipboard case. Module memory would
+      // die with that navigation, so the startup crash this queue exists to
+      // rescue would still vanish. sessionStorage survives the reload.
+      persistPendingCaptures();
+    }
+    return;
+  }
   try {
-    posthog.capture(name, params);
+    // Kept arity-exact for the common path: every existing caller passes no
+    // options and must keep producing a two-argument `capture` call.
+    if (options) posthog.capture(name, params, options);
+    else posthog.capture(name, params);
   } catch {
     /* analytics must never throw into product code */
+  }
+}
+
+/** Captures that arrived before init settled, replayed by `initPostHog`. */
+type PendingCapture = { name: string; params?: Record<string, unknown>; options?: CaptureOptions };
+const MAX_PENDING_CAPTURES = 20;
+let pendingCaptures: PendingCapture[] = [];
+
+/** Survives the recovery reload; drained by `initPostHog`. Session-scoped, so a
+ *  queue that never drains dies with the tab rather than following the player. */
+const PENDING_CAPTURES_KEY = 'gcb:ph-pending-captures';
+
+/**
+ * Entries queued by a PRIOR load, read from storage exactly once (Codex P2 on
+ * #513). Keeping them in their own array is what makes each event have exactly
+ * ONE representation: `pendingCaptures` is strictly this load's queue, this is
+ * strictly the previous load's, and the persisted blob is simply the two
+ * concatenated. Merging both into one array and also persisting it — the
+ * previous shape — double-counted every event whenever init settled without a
+ * navigation, since the in-memory copy and its own persisted mirror were both
+ * replayed. `null` means "not read yet"; `[]` means "read, nothing there".
+ */
+let carriedCaptures: PendingCapture[] | null = null;
+
+// Every storage touch is swallowed: analytics must never throw into product
+// code, and a lost telemetry event is always preferable to a broken app.
+function carried(): PendingCapture[] {
+  if (carriedCaptures !== null) return carriedCaptures;
+  try {
+    const raw = sessionStorage?.getItem(PENDING_CAPTURES_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    carriedCaptures = Array.isArray(parsed)
+      ? parsed.filter((c): c is PendingCapture => !!c && typeof (c as PendingCapture).name === 'string')
+      : [];
+  } catch {
+    carriedCaptures = [];
+  }
+  return carriedCaptures;
+}
+
+/** Mirrors the whole queue — prior load's entries included, so a second load
+ *  that queues its own pre-init event cannot overwrite the first one's. */
+function persistPendingCaptures(): void {
+  try {
+    const all = [...carried(), ...pendingCaptures].slice(0, MAX_PENDING_CAPTURES);
+    sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(all));
+  } catch {
+    /* quota/policy/absent — the in-memory queue still covers the no-reload case */
+  }
+}
+
+/**
+ * Deletes the persisted queue and reports whether the deletion is CONFIRMED
+ * GONE (Phase 4b P2 on #513) — the same read-back discipline the shell-reset
+ * latch uses, for the same reason. A readable-but-nonmutating store can accept
+ * `removeItem` and leave the blob intact; the "exactly once" contract would
+ * then be violated on every subsequent load, forever, since each one would
+ * re-read and re-send the same crash reports.
+ */
+function clearPersistedCaptures(): boolean {
+  try {
+    sessionStorage?.removeItem(PENDING_CAPTURES_KEY);
+    return sessionStorage?.getItem(PENDING_CAPTURES_KEY) == null;
+  } catch {
+    return false;
   }
 }
 
