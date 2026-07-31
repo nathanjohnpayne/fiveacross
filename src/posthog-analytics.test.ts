@@ -272,6 +272,49 @@ describe('PostHog init with a key', () => {
     );
   });
 
+  it('replays a queued capture that survived a RECOVERY RELOAD (#513)', async () => {
+    // Codex P2 on #513: the queue's main customer reloads the page immediately
+    // after queueing, and the same-origin build-floor probe can beat the
+    // EXTERNAL ingest probes (the shipboard blocked-proxy case). A memory-only
+    // queue dies with that navigation, so the crash would vanish regardless.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+
+    // Load 1: crash queues the report, then the page goes away before init.
+    const first = await import('./posthog');
+    first.phCapture('app_crash', { message: 'boom' }, { transport: 'sendBeacon', send_instantly: true });
+
+    // Load 2: fresh module registry — module memory is gone, sessionStorage is not.
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    const second = await import('./posthog');
+    await second.initPostHog();
+
+    expect(ph.capture).toHaveBeenCalledWith(
+      'app_crash',
+      { message: 'boom' },
+      { transport: 'sendBeacon', send_instantly: true },
+    );
+  });
+
+  it('drains the persisted queue exactly once, so a replay cannot re-send forever', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const first = await import('./posthog');
+    first.phCapture('app_crash', { message: 'boom' });
+
+    vi.resetModules();
+    await (await import('./posthog')).initPostHog();
+
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    vi.clearAllMocks();
+    await (await import('./posthog')).initPostHog();
+    expect(ph.capture).not.toHaveBeenCalled();
+  });
+
   it('replays a queued capture AFTER the pending identify, so it is not orphaned anonymous', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');

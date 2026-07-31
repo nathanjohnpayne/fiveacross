@@ -291,12 +291,13 @@ export async function initPostHog(): Promise<void> {
   }
   // Replay queued captures AFTER the identify above, so an `app_crash` from the
   // probe window is attributed to the signed-in player rather than orphaned
-  // under the anonymous id (Phase 4b P2 on #513).
-  if (pendingCaptures.length > 0) {
-    const queued = pendingCaptures;
-    pendingCaptures = [];
-    for (const c of queued) phCapture(c.name, c.params, c.options);
-  }
+  // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
+  // — they are from a PRIOR load (the crash that triggered a recovery reload),
+  // so they are both older and the ones that matter most.
+  const queued = [...takePersistedCaptures(), ...pendingCaptures];
+  pendingCaptures = [];
+  persistPendingCaptures();
+  for (const c of queued) phCapture(c.name, c.params, c.options);
 }
 
 export const posthogReady = (): boolean => ready;
@@ -324,7 +325,17 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
     // Same replay pattern as `pendingIdentifyUid` below. Bounded: a crash loop
     // must not grow this without limit, and the earliest events are the ones
     // worth keeping, so it drops newest-over-oldest once full.
-    if (pendingCaptures.length < MAX_PENDING_CAPTURES) pendingCaptures.push({ name, params, options });
+    if (pendingCaptures.length < MAX_PENDING_CAPTURES) {
+      pendingCaptures.push({ name, params, options });
+      // Also persist, because the queue's most important customer immediately
+      // reloads the page (Codex P2 on #513): `componentDidCatch` starts
+      // `resetShell()` right after queueing, and its same-origin probe can
+      // finish well before the EXTERNAL PostHog ingest probes — especially when
+      // a proxy is blocked, which is the shipboard case. Module memory would
+      // die with that navigation, so the startup crash this queue exists to
+      // rescue would still vanish. sessionStorage survives the reload.
+      persistPendingCaptures();
+    }
     return;
   }
   try {
@@ -341,6 +352,37 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
 type PendingCapture = { name: string; params?: Record<string, unknown>; options?: CaptureOptions };
 const MAX_PENDING_CAPTURES = 20;
 let pendingCaptures: PendingCapture[] = [];
+
+/** Survives the recovery reload; drained by `initPostHog`. Session-scoped, so a
+ *  queue that never drains dies with the tab rather than following the player. */
+const PENDING_CAPTURES_KEY = 'gcb:ph-pending-captures';
+
+// Every storage touch is swallowed: analytics must never throw into product
+// code, and a lost telemetry event is always preferable to a broken app.
+function persistPendingCaptures(): void {
+  try {
+    sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(pendingCaptures));
+  } catch {
+    /* quota/policy/absent — the in-memory queue still covers the no-reload case */
+  }
+}
+
+/** Reads and CLEARS the persisted queue — draining once, so a replay failure
+ *  cannot leave the same events re-sending on every subsequent load. */
+function takePersistedCaptures(): PendingCapture[] {
+  try {
+    const raw = sessionStorage?.getItem(PENDING_CAPTURES_KEY);
+    sessionStorage?.removeItem(PENDING_CAPTURES_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((c): c is PendingCapture => !!c && typeof (c as PendingCapture).name === 'string')
+      .slice(0, MAX_PENDING_CAPTURES);
+  } catch {
+    return [];
+  }
+}
 
 // The most recent identify that arrived before init settled (#342) — replayed
 // by initPostHog once the SDK is live, cleared by phReset so a sign-out during
