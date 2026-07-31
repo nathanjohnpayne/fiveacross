@@ -349,6 +349,23 @@ describe('PostHog init with a key', () => {
     expect(ph.capture).not.toHaveBeenCalled();
   });
 
+  it('drops persisted entries it cannot durably DELETE, rather than re-sending them forever', async () => {
+    // Phase 4b P2 on #513: a readable-but-nonmutating store can accept
+    // removeItem and keep the blob, which would violate exactly-once on every
+    // future load with no way to stop. Losing the event is the lesser harm.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => JSON.stringify([{ name: 'app_crash', params: { message: 'stuck' } }]),
+      setItem: () => {},
+      removeItem: () => {}, // accepted, but the blob survives
+    });
+    const ph = (await import('posthog-js')).default;
+    await (await import('./posthog')).initPostHog();
+    expect(ph.capture).not.toHaveBeenCalled();
+  });
+
   it('replays a queued capture AFTER the pending identify, so it is not orphaned anonymous', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');

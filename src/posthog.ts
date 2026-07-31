@@ -294,10 +294,17 @@ export async function initPostHog(): Promise<void> {
   // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
   // — they are from a PRIOR load (the crash that triggered a recovery reload),
   // so they are both older and the ones that matter most.
-  const queued = [...carried(), ...pendingCaptures];
+  const carriedNow = carried();
+  // Replay the PERSISTED entries only once their deletion is confirmed (Phase
+  // 4b P2 on #513). If the store would not let them go, replaying means
+  // re-sending them on every future load with no way to stop; dropping them is
+  // the lesser harm, on this module's standing rule that losing a telemetry
+  // event beats corrupting the data. In-memory entries are unaffected — they
+  // die with this page either way, so they can never double-send.
+  const drained = clearPersistedCaptures();
+  const queued = [...(drained ? carriedNow : []), ...pendingCaptures];
   carriedCaptures = [];
   pendingCaptures = [];
-  clearPersistedCaptures();
   for (const c of queued) phCapture(c.name, c.params, c.options);
 }
 
@@ -397,11 +404,20 @@ function persistPendingCaptures(): void {
   }
 }
 
-function clearPersistedCaptures(): void {
+/**
+ * Deletes the persisted queue and reports whether the deletion is CONFIRMED
+ * GONE (Phase 4b P2 on #513) — the same read-back discipline the shell-reset
+ * latch uses, for the same reason. A readable-but-nonmutating store can accept
+ * `removeItem` and leave the blob intact; the "exactly once" contract would
+ * then be violated on every subsequent load, forever, since each one would
+ * re-read and re-send the same crash reports.
+ */
+function clearPersistedCaptures(): boolean {
   try {
     sessionStorage?.removeItem(PENDING_CAPTURES_KEY);
+    return sessionStorage?.getItem(PENDING_CAPTURES_KEY) == null;
   } catch {
-    /* absent/blocked — nothing to clear */
+    return false;
   }
 }
 
