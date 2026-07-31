@@ -1,11 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   ACTIVE_STAMP_URL,
+  FORCED_FLAG_URL,
   SHELL_META_CACHE,
   UNKNOWN_ACTIVE_STAMP,
   fetchFloorInWorker,
+  fetchFloorWithRetry,
+  markForcedActivation,
   readActiveStamp,
   shouldForceActivate,
+  takeForcedActivation,
   writeActiveStamp,
 } from './sw-rescue';
 
@@ -69,12 +73,79 @@ function fakeCacheStorage(initial?: unknown) {
     put: vi.fn(async (k: string, v: Response) => {
       store.set(k, v);
     }),
+    delete: vi.fn(async (k: string) => store.delete(k)),
   };
   return { open: vi.fn(async () => cache), _store: store, _cache: cache } as unknown as CacheStorage & {
     _store: Map<string, Response>;
     _cache: typeof cache;
   };
 }
+
+describe('fetchFloorWithRetry', () => {
+  const ok = () => ({
+    ok: true,
+    redirected: false,
+    url: `${location.origin}/build-floor.json`,
+    json: async () => ({ floor: ARMED_FLOOR }),
+  });
+
+  it('retries a transient failure — the worker only ever gets ONE install', async () => {
+    // Phase 4b P1 on #515. A waiting worker never re-runs `install`, and the
+    // browser finds the same `sw.js` byte-identical on later navigations, so a
+    // probe lost to a flaky connection is never retried and the rescue silently
+    // never fires. The failure window is the worst one available: a reload on a
+    // bad connection, which is this app's normal network.
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('flaky'))
+      .mockRejectedValueOnce(new Error('flaky'))
+      .mockResolvedValue(ok());
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      fetchFloorWithRetry(fetchImpl as unknown as typeof fetch, () => 1, { sleep, delayMs: 5 }),
+    ).resolves.toBe(ARMED_FLOOR);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops at the attempt budget and does not sleep after the last one', async () => {
+    // Trailing sleep on a genuinely offline device is pure install latency.
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('offline'));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      fetchFloorWithRetry(fetchImpl as unknown as typeof fetch, () => 1, { attempts: 3, sleep }),
+    ).resolves.toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry once a floor is read — including the inert one', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      redirected: false,
+      url: `${location.origin}/build-floor.json`,
+      json: async () => ({ floor: INERT_FLOOR }),
+    });
+    const sleep = vi.fn();
+    await expect(
+      fetchFloorWithRetry(fetchImpl as unknown as typeof fetch, () => 1, { sleep }),
+    ).resolves.toBe(INERT_FLOOR);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('cache-busts each attempt separately', async () => {
+    // A retry that reuses the first attempt's URL can be answered by whatever
+    // intermediary failed it the first time.
+    const fetchImpl = vi.fn().mockRejectedValue(new Error('offline'));
+    let t = 100;
+    await fetchFloorWithRetry(fetchImpl as unknown as typeof fetch, () => (t += 1), {
+      attempts: 3,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    });
+    const urls = fetchImpl.mock.calls.map((c) => c[0] as string);
+    expect(new Set(urls).size).toBe(3);
+  });
+});
 
 describe('the active-stamp record', () => {
   it('round-trips a stamp', async () => {
@@ -183,5 +254,52 @@ describe('fetchFloorInWorker', () => {
     const fetchImpl = vi.fn().mockResolvedValue(okFloorResponse({ redirected: true }));
     const floor = await fetchFloorInWorker(fetchImpl as unknown as typeof fetch, 1);
     expect(shouldForceActivate({ activeStamp: null, ownStamp: NEW_SHELL, floor })).toBe(false);
+  });
+});
+
+describe('the forced-activation marker', () => {
+  const A = '2026-07-28T01:22:17.835Z';
+  const B = '2026-07-31T00:00:00.000Z';
+
+  it('is honoured by the worker that wrote it', async () => {
+    const cs = fakeCacheStorage();
+    await markForcedActivation(cs, A);
+    await expect(takeForcedActivation(cs, A)).resolves.toBe(true);
+  });
+
+  it('is consumed on read, so a later activation cannot inherit it', async () => {
+    const cs = fakeCacheStorage();
+    await markForcedActivation(cs, A);
+    await takeForcedActivation(cs, A);
+    await expect(takeForcedActivation(cs, A)).resolves.toBe(false);
+  });
+
+  it('is IGNORED by a different worker — an orphaned marker cannot ambush one', async () => {
+    // Phase 4b P2 on #515: this handler can record the flag and then have the
+    // whole installation discarded (Workbox's precache listener rejecting on one
+    // unavailable asset is enough) while the cache entry survives. Without the
+    // stamp binding, a later worker that never chose to force would claim and
+    // navigate every open tab — possibly long after the floor was disarmed.
+    const cs = fakeCacheStorage();
+    await markForcedActivation(cs, A);
+    await expect(takeForcedActivation(cs, B)).resolves.toBe(false);
+  });
+
+  it('CLEARS an orphaned marker rather than leaving it to ambush a later worker', async () => {
+    const cs = fakeCacheStorage();
+    await markForcedActivation(cs, A);
+    await takeForcedActivation(cs, B); // wrong worker; still clears
+    await expect(takeForcedActivation(cs, A)).resolves.toBe(false);
+  });
+
+  it('reports false with no marker, and never throws when storage refuses', async () => {
+    await expect(takeForcedActivation(fakeCacheStorage(), A)).resolves.toBe(false);
+    const broken = { open: async () => Promise.reject(new Error('blocked')) } as unknown as CacheStorage;
+    await expect(takeForcedActivation(broken, A)).resolves.toBe(false);
+    await expect(markForcedActivation(broken, A)).resolves.toBeUndefined();
+  });
+
+  it('uses its own key, distinct from the active-stamp record', () => {
+    expect(FORCED_FLAG_URL).not.toBe(ACTIVE_STAMP_URL);
   });
 });

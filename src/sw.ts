@@ -31,7 +31,7 @@ import {
   PROOF_MEDIA_URL_PATTERN,
 } from './data/proofMediaCache';
 import {
-  fetchFloorInWorker,
+  fetchFloorWithRetry,
   markForcedActivation,
   readActiveStamp,
   shouldForceActivate,
@@ -96,14 +96,16 @@ self.addEventListener('install', (event: ExtendableEvent) => {
     (async () => {
       try {
         const [floor, activeStamp] = await Promise.all([
-          fetchFloorInWorker(fetch, Date.now()),
+          // Retried: this worker gets exactly one `install`, and a waiting
+          // worker never gets another (Phase 4b P1 on #515).
+          fetchFloorWithRetry(fetch, () => Date.now()),
           readActiveStamp(caches),
         ]);
         if (!shouldForceActivate({ activeStamp, ownStamp: __BUILD_STAMP__, floor })) return;
         forcedActivation = true;
         // Persist BEFORE promoting: once `skipWaiting()` resolves, `activate`
         // can be entered by a worker instance that never ran this handler.
-        await markForcedActivation(caches);
+        await markForcedActivation(caches, __BUILD_STAMP__);
         await self.skipWaiting();
       } catch {
         // Install must never fail on account of the rescue: a worker that
@@ -120,7 +122,7 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
       // a worker teardown, and consuming it clears the flag so a later ordinary
       // activation cannot inherit a stale force and re-navigate the player's
       // windows. The module flag is only a fallback for storage refusing us.
-      const forced = (await takeForcedActivation(caches)) || forcedActivation;
+      const forced = (await takeForcedActivation(caches, __BUILD_STAMP__)) || forcedActivation;
       // Record what is now in charge, so the NEXT worker can tell whether the
       // shell it is replacing is below a future floor. Written on every
       // activation, not just forced ones — an unrecorded stamp reads as ancient.

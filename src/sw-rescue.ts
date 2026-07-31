@@ -116,27 +116,37 @@ export async function writeActiveStamp(cacheStorage: CacheStorage, stamp: string
  * shell — so a stranded player sees the blank screen again and has to reload a
  * second time, which is precisely the dead end they were stuck in.
  */
-export async function markForcedActivation(cacheStorage: CacheStorage): Promise<void> {
+export async function markForcedActivation(cacheStorage: CacheStorage, ownStamp: string): Promise<void> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
-    await cache.put(FORCED_FLAG_URL, new Response('1'));
+    await cache.put(FORCED_FLAG_URL, new Response(JSON.stringify({ stamp: ownStamp })));
   } catch {
     /* storage refused — the caller's in-memory flag is the remaining fallback */
   }
 }
 
 /**
- * Consumes the flag: reports whether a forced activation is pending and clears
- * it in the same step, so a later ordinary activation cannot inherit a stale
- * "force" and re-navigate the player's windows out from under them.
+ * Consumes the flag: reports whether a forced activation is pending FOR THIS
+ * WORKER, and clears it either way.
+ *
+ * The stamp binding matters because the marker outlives the worker that wrote
+ * it (Phase 4b P2 on #515). This handler can record the flag and then have the
+ * whole installation discarded — Workbox's separate precache install listener
+ * rejecting on one unavailable asset is enough — while the cache entry
+ * survives. Without the binding, some later worker that never chose to force
+ * would consume that orphaned boolean and claim-and-navigate every open tab,
+ * potentially long after the floor was disarmed. Clearing on mismatch is
+ * deliberate: an orphaned marker is garbage, and leaving it would let it
+ * ambush a different worker later.
  */
-export async function takeForcedActivation(cacheStorage: CacheStorage): Promise<boolean> {
+export async function takeForcedActivation(cacheStorage: CacheStorage, ownStamp: string): Promise<boolean> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
     const hit = await cache.match(FORCED_FLAG_URL);
     if (!hit) return false;
     await cache.delete(FORCED_FLAG_URL);
-    return true;
+    const body: unknown = await hit.json();
+    return (body as { stamp?: unknown } | null)?.stamp === ownStamp;
   } catch {
     return false;
   }
@@ -160,6 +170,50 @@ export async function takeForcedActivation(cacheStorage: CacheStorage): Promise<
  *      proxy in place rather than redirect;
  *   3. the body must carry a `floor` string, which no login page will.
  */
+/**
+ * The floor read as `install` actually uses it: retried, because this worker
+ * gets exactly ONE chance at it (Phase 4b P1 on #515).
+ *
+ * A waiting worker never re-runs `install`. The browser re-fetches `/sw.js` on
+ * later navigations, finds it byte-identical, and does nothing — so a floor
+ * probe that failed transiently is never retried, the rescue silently never
+ * fires, and the dead page still cannot send `SKIP_WAITING`. The failure window
+ * is also the worst possible one: the probe happens during a reload on a bad
+ * connection, which is the normal state of this app's network.
+ *
+ * Retries make that single chance count. They cannot make it unconditional —
+ * the honest limits are that the marker is armed only while this worker is
+ * installing, and that a genuinely offline device recovers on the next
+ * navigation after connectivity returns, or when every window closes and the
+ * waiting worker activates on its own. Baking the floor into the build was the
+ * alternative and is worse: it would tie the emergency lever to a redeploy,
+ * which is exactly what #342 built `build-floor.json` to avoid.
+ *
+ * `sleep` is injected so tests do not spend real time.
+ */
+export async function fetchFloorWithRetry(
+  fetchImpl: typeof fetch,
+  now: () => number,
+  opts: {
+    attempts?: number;
+    timeoutMs?: number;
+    delayMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<string | null> {
+  const attempts = opts.attempts ?? 3;
+  const delayMs = opts.delayMs ?? 2000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const floor = await fetchFloorInWorker(fetchImpl, now(), opts.timeoutMs);
+    if (floor !== null) return floor;
+    // Don't sleep after the final attempt — that is pure added install latency
+    // for a device that is simply offline.
+    if (attempt < attempts - 1) await sleep(delayMs);
+  }
+  return null;
+}
+
 export async function fetchFloorInWorker(
   fetchImpl: typeof fetch,
   timestamp: number,
