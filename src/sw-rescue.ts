@@ -32,6 +32,10 @@ export const SHELL_META_CACHE = 'gcb-shell-meta';
 /** Synthetic same-origin key for that record — never fetched over the network. */
 export const ACTIVE_STAMP_URL = '/__gcb-active-build-stamp';
 
+/** Synthetic key carrying "this worker force-activated" from `install` to
+ *  `activate`. Same cache, same never-fetched convention. */
+export const FORCED_FLAG_URL = '/__gcb-forced-activation';
+
 /**
  * Stand-in stamp for an active shell that recorded none. Every worker built
  * before #514 is in this state, which is exactly the stranded cohort, so
@@ -98,6 +102,43 @@ export async function writeActiveStamp(cacheStorage: CacheStorage, stamp: string
     await cache.put(ACTIVE_STAMP_URL, new Response(JSON.stringify({ stamp })));
   } catch {
     /* storage refused — the next worker reads null and treats it as ancient */
+  }
+}
+
+/**
+ * Records that this worker force-activated, so `activate` still knows even if
+ * the browser tore the worker down in between (Codex P1 on #515).
+ *
+ * The service-worker lifecycle explicitly permits that teardown, and module
+ * state does not survive it. Losing the decision costs the rescue its whole
+ * point: `skipWaiting()` has already happened, but without the claim and the
+ * navigate, the reload that DISCOVERED the update finishes on the old broken
+ * shell — so a stranded player sees the blank screen again and has to reload a
+ * second time, which is precisely the dead end they were stuck in.
+ */
+export async function markForcedActivation(cacheStorage: CacheStorage): Promise<void> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    await cache.put(FORCED_FLAG_URL, new Response('1'));
+  } catch {
+    /* storage refused — the caller's in-memory flag is the remaining fallback */
+  }
+}
+
+/**
+ * Consumes the flag: reports whether a forced activation is pending and clears
+ * it in the same step, so a later ordinary activation cannot inherit a stale
+ * "force" and re-navigate the player's windows out from under them.
+ */
+export async function takeForcedActivation(cacheStorage: CacheStorage): Promise<boolean> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    const hit = await cache.match(FORCED_FLAG_URL);
+    if (!hit) return false;
+    await cache.delete(FORCED_FLAG_URL);
+    return true;
+  } catch {
+    return false;
   }
 }
 

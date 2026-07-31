@@ -45,16 +45,21 @@ function installFakeWorker() {
   };
   vi.stubGlobal('self', self);
 
-  const cacheStore = new Map<string, Response>();
   const cache = {
-    match: vi.fn(async (k: string) => cacheStore.get(k)),
+    match: vi.fn(async (k: string) => sharedCacheStore.get(k)),
     put: vi.fn(async (k: string, v: Response) => {
-      cacheStore.set(k, v);
+      sharedCacheStore.set(k, v);
     }),
+    delete: vi.fn(async (k: string) => sharedCacheStore.delete(k)),
   };
   vi.stubGlobal('caches', { open: vi.fn(async () => cache) });
-  return { self, handlers, cacheStore, navigated, clients };
+  return { self, handlers, cacheStore: sharedCacheStore, navigated, clients };
 }
+
+// Cache storage OUTLIVES a worker instance in the browser, so the fake must too
+// — otherwise a "worker was torn down" test would also wipe the very storage
+// the fix relies on, and would pass for the wrong reason. Reset per test.
+let sharedCacheStore = new Map<string, Response>();
 
 function stubFloor(floor: string | null) {
   vi.stubGlobal(
@@ -73,6 +78,7 @@ async function fire(handlers: Handlers, type: string, data?: unknown) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.resetModules();
+  sharedCacheStore = new Map();
 });
 
 afterEach(() => {
@@ -194,6 +200,49 @@ describe('the rescue (#514)', () => {
     await fire(w.handlers, 'activate');
     expect(w.self.clients.claim).toHaveBeenCalledOnce();
     expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('still claims and navigates when the worker was TORN DOWN between install and activate', async () => {
+    // Codex P1 on #515. The lifecycle permits the browser to discard the worker
+    // global between the two events, and module state does not survive it.
+    // Losing the decision leaves `skipWaiting()` done but the navigation
+    // skipped — so the reload that DISCOVERED the update finishes on the old
+    // broken shell and the stranded player must reload a second time, which is
+    // the exact dead end this feature exists to end.
+    const first = installFakeWorker();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(first.handlers, 'install');
+    expect(first.self.skipWaiting).toHaveBeenCalledOnce();
+
+    // Worker torn down: fresh module registry, fresh globals — but the same
+    // Cache storage, exactly as the browser behaves.
+    vi.resetModules();
+    const second = installFakeWorker();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(second.handlers, 'activate');
+
+    expect(second.self.clients.claim).toHaveBeenCalledOnce();
+    expect(second.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('consumes the persisted decision, so a LATER ordinary activation does not re-navigate', async () => {
+    // A stale "force" left in storage would yank the player's windows on some
+    // unrelated future activation.
+    const first = installFakeWorker();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(first.handlers, 'install');
+    await fire(first.handlers, 'activate');
+
+    vi.resetModules();
+    const later = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    await fire(later.handlers, 'activate');
+    expect(later.self.clients.claim).not.toHaveBeenCalled();
+    expect(later.navigated).toEqual([]);
   });
 
   it('does NOT claim or navigate when activation was not forced', async () => {

@@ -30,7 +30,14 @@ import {
   PROOF_MEDIA_CACHE_NAME,
   PROOF_MEDIA_URL_PATTERN,
 } from './data/proofMediaCache';
-import { fetchFloorInWorker, readActiveStamp, shouldForceActivate, writeActiveStamp } from './sw-rescue';
+import {
+  fetchFloorInWorker,
+  markForcedActivation,
+  readActiveStamp,
+  shouldForceActivate,
+  takeForcedActivation,
+  writeActiveStamp,
+} from './sw-rescue';
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{ url: string; revision: string | null }> };
 
@@ -74,11 +81,14 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
 
 // --- The rescue (#514) ------------------------------------------------------
 //
-// Set during `install` and read during `activate`. Module state is safe across
-// that pair in a single worker lifetime; if the browser tears the worker down
-// in between, this resets to false and we simply skip the claim-and-navigate.
-// That degrades to "the new shell is active, and the player's next reload lands
-// on it" — still a rescue, just not an instant one.
+// In-memory MIRROR of the persisted decision, not the source of truth (Codex P1
+// on #515). The lifecycle permits the browser to tear the worker down between
+// `install` and `activate`, and module state does not survive that — losing the
+// decision would leave `skipWaiting()` done but the claim-and-navigate skipped,
+// so the reload that DISCOVERED the update finishes on the old broken shell and
+// the stranded player has to reload a second time. That is the dead end this
+// whole PR exists to end, so the decision is persisted in `gcb-shell-meta` and
+// this flag only covers the case where storage refused the write.
 let forcedActivation = false;
 
 self.addEventListener('install', (event: ExtendableEvent) => {
@@ -91,6 +101,9 @@ self.addEventListener('install', (event: ExtendableEvent) => {
         ]);
         if (!shouldForceActivate({ activeStamp, ownStamp: __BUILD_STAMP__, floor })) return;
         forcedActivation = true;
+        // Persist BEFORE promoting: once `skipWaiting()` resolves, `activate`
+        // can be entered by a worker instance that never ran this handler.
+        await markForcedActivation(caches);
         await self.skipWaiting();
       } catch {
         // Install must never fail on account of the rescue: a worker that
@@ -103,11 +116,16 @@ self.addEventListener('install', (event: ExtendableEvent) => {
 self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(
     (async () => {
+      // Consume the persisted decision FIRST — it is the source of truth across
+      // a worker teardown, and consuming it clears the flag so a later ordinary
+      // activation cannot inherit a stale force and re-navigate the player's
+      // windows. The module flag is only a fallback for storage refusing us.
+      const forced = (await takeForcedActivation(caches)) || forcedActivation;
       // Record what is now in charge, so the NEXT worker can tell whether the
       // shell it is replacing is below a future floor. Written on every
       // activation, not just forced ones — an unrecorded stamp reads as ancient.
       await writeActiveStamp(caches, __BUILD_STAMP__);
-      if (!forcedActivation) return;
+      if (!forced) return;
       try {
         await self.clients.claim();
         // Drive the reload from HERE. The whole point is that the page cannot
