@@ -31,6 +31,7 @@ import {
   PROOF_MEDIA_URL_PATTERN,
 } from './data/proofMediaCache';
 import {
+  clearForcedActivation,
   fetchFloorWithRetry,
   markForcedActivation,
   readActiveStamp,
@@ -95,6 +96,14 @@ self.addEventListener('install', (event: ExtendableEvent) => {
   event.waitUntil(
     (async () => {
       try {
+        // Start from a clean slate (Phase 4b P2 on #515). A discarded
+        // installation is retried from the IDENTICAL script, so a marker left
+        // by a previous attempt carries this same `__BUILD_STAMP__` and the
+        // stamp binding cannot tell the two apart. If the floor were disarmed
+        // in between, this attempt would decline to force and still inherit the
+        // earlier marker — turning an ordinary activation into a forced
+        // claim-and-navigation of every open tab. Each attempt re-earns it.
+        await clearForcedActivation(caches);
         const [floor, activeStamp] = await Promise.all([
           // Retried: this worker gets exactly one `install`, and a waiting
           // worker never gets another (Phase 4b P1 on #515).

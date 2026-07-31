@@ -53,6 +53,14 @@ function installFakeWorker() {
     delete: vi.fn(async (k: string) => sharedCacheStore.delete(k)),
   };
   vi.stubGlobal('caches', { open: vi.fn(async () => cache) });
+  // The install-time floor probe retries with real delays between attempts, so
+  // a failing-probe test would otherwise sit through them. Firing timers
+  // immediately keeps the retry LOGIC exercised — the attempts still happen, in
+  // order — while costing no wall-clock.
+  vi.stubGlobal('setTimeout', ((fn: () => void) => {
+    fn();
+    return 0;
+  }) as unknown as typeof setTimeout);
   return { self, handlers, cacheStore: sharedCacheStore, navigated, clients };
 }
 
@@ -252,6 +260,30 @@ describe('the rescue (#514)', () => {
     await fire(later.handlers, 'activate');
     expect(later.self.clients.claim).not.toHaveBeenCalled();
     expect(later.navigated).toEqual([]);
+  });
+
+  it('clears a marker from a PREVIOUS install attempt of the same worker', async () => {
+    // Phase 4b P2 on #515. A discarded installation is retried from the
+    // IDENTICAL script, so both attempts carry the same `__BUILD_STAMP__` and
+    // the stamp binding cannot tell them apart. Attempt 1 forces under an armed
+    // floor; the floor is then disarmed and attempt 2 installs normally — it
+    // must NOT inherit attempt 1's marker and navigate every open tab.
+    const first = installFakeWorker();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(first.handlers, 'install');
+    expect(first.self.skipWaiting).toHaveBeenCalledOnce();
+
+    vi.resetModules();
+    const retry = installFakeWorker();
+    stubFloor(INERT_FLOOR); // operator disarmed the floor in between
+    await import('./sw');
+    await fire(retry.handlers, 'install');
+    await fire(retry.handlers, 'activate');
+
+    expect(retry.self.skipWaiting).not.toHaveBeenCalled();
+    expect(retry.self.clients.claim).not.toHaveBeenCalled();
+    expect(retry.navigated).toEqual([]);
   });
 
   it('does NOT claim or navigate when activation was not forced', async () => {

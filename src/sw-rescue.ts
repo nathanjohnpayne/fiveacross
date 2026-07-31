@@ -126,6 +126,28 @@ export async function markForcedActivation(cacheStorage: CacheStorage, ownStamp:
 }
 
 /**
+ * Drops any marker left by a previous install ATTEMPT of this same worker
+ * (Phase 4b P2 on #515).
+ *
+ * The stamp binding alone cannot cover this: a discarded installation is
+ * retried from the identical `sw.js`, so both attempts carry the same
+ * `__BUILD_STAMP__` and the marker written by the first is indistinguishable
+ * from one written by the second. If the floor is disarmed in between, the
+ * retry installs normally, declines to force — and would still inherit the
+ * first attempt's marker, turning its ordinary activation into a forced
+ * claim-and-navigation of every open tab. So each attempt starts from a clean
+ * slate and re-earns the marker.
+ */
+export async function clearForcedActivation(cacheStorage: CacheStorage): Promise<void> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    await cache.delete(FORCED_FLAG_URL);
+  } catch {
+    /* nothing to clear, or storage refused */
+  }
+}
+
+/**
  * Consumes the flag: reports whether a forced activation is pending FOR THIS
  * WORKER, and clears it either way.
  *
