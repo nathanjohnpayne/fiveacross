@@ -186,13 +186,16 @@ describe('resetShell', () => {
     );
   });
 
-  it('tears down when a caller has already PROVEN connectivity, without re-probing', async () => {
-    const fetchSpy = vi.fn();
+  it('has NO connectivity-proven bypass — every teardown runs the hardened probe', async () => {
+    // Phase 4b P1 on #513: an earlier revision let `enforceBuildFloor` skip the
+    // probe because its floor fetch had "already reached the origin". But
+    // `fetchBuildFloor` carries none of the redirect/same-origin/payload
+    // barriers, so a portal returning parseable floor JSON walked straight back
+    // in through the side door. One caller, one probe, one guarantee.
     const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
-    vi.stubGlobal('fetch', fetchSpy);
-    await resetShell(vi.fn(), true);
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(deleted).toEqual(['workbox-precache-v2-x']);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okFloorResponse({ redirected: true })));
+    await resetShell(vi.fn());
+    expect(deleted).toEqual([]);
   });
 
   it('reloads WITHOUT tearing down the shell while offline', async () => {
@@ -259,11 +262,23 @@ describe('enforceBuildFloor', () => {
   const FLOOR = '2026-07-24T00:00:00.000Z';
 
   function stubFloorFetch(floor: string | null) {
+    // Must satisfy BOTH the floor read and `resetShell`'s hardened probe —
+    // there is no bypass, so the same response has to clear every barrier.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okFloorResponse({ json: async () => ({ floor }) })));
+  }
+
+  it('runs the hardened probe before tearing down, even on the floor path', async () => {
+    // The floor said "reset", but the origin is behind a portal — the rescue
+    // must still refuse to delete the only shell this device has.
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ floor }) } as unknown as Response),
+      vi.fn().mockResolvedValue(okFloorResponse({ redirected: true, json: async () => ({ floor: FLOOR }) })),
     );
-  }
+    const reload = vi.fn();
+    await enforceBuildFloor('2026-07-20T14:17:04.539Z', reload);
+    expect(deleted).toEqual([]);
+  });
 
   it('resets a build BELOW the floor — the stranded-client rescue', async () => {
     installBrowserMocks();

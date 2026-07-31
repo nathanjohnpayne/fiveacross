@@ -189,16 +189,16 @@ export async function clearShell(): Promise<void> {
  * better move: worst case the crash recurs and the boundary's panel comes back,
  * which keeps a retry path alive instead of destroying it.
  *
- * `connectivityProven` lets a caller that ALREADY completed a same-origin
- * request skip the redundant probe — `enforceBuildFloor` just fetched the floor
- * from this very origin, so re-asking would be a second request for a fact it
- * has already established.
+ * There is deliberately NO "connectivity already proven" bypass. An earlier
+ * revision let `enforceBuildFloor` skip the probe on the grounds that its floor
+ * fetch had just reached this origin — but `fetchBuildFloor` applies none of
+ * the barriers above, so a portal returning parseable floor JSON re-opened the
+ * whole hole through the side door (Phase 4b P1 on #513). One caller, one probe,
+ * one set of guarantees: the duplicate request costs ~100 bytes at most once per
+ * tab, and only on a path that is about to delete the app's own shell.
  */
-export async function resetShell(
-  reload: () => void = () => window.location.reload(),
-  connectivityProven = false,
-): Promise<void> {
-  if (connectivityProven || (await originReachable())) await clearShell();
+export async function resetShell(reload: () => void = () => window.location.reload()): Promise<void> {
+  if (await originReachable()) await clearShell();
   try {
     reload();
   } catch {
@@ -240,8 +240,9 @@ export async function enforceBuildFloor(
   // is an unbounded reload loop (Codex P1 on #513). The floor stays armed for
   // the next load, so this defers the rescue rather than cancelling it.
   if (!markResetAttempted()) return false;
-  // The floor fetch above WAS a completed same-origin request, so connectivity
-  // is already proven here — no second probe (Phase 4b P1 on #513).
-  await resetShell(reload, true);
+  // `resetShell` runs its own hardened probe — a successful floor fetch is NOT
+  // accepted as proof of reachability, because `fetchBuildFloor` carries none
+  // of the redirect/same-origin/payload barriers (Phase 4b P1 on #513).
+  await resetShell(reload);
   return true;
 }
