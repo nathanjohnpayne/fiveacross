@@ -11,9 +11,10 @@ import ErrorBoundary from './ErrorBoundary';
 const resetShell = vi.hoisted(() => vi.fn());
 const resetAttempted = vi.hoisted(() => vi.fn());
 const markResetAttempted = vi.hoisted(() => vi.fn());
+const definitelyOffline = vi.hoisted(() => vi.fn());
 const phCapture = vi.hoisted(() => vi.fn());
 
-vi.mock('../shellRecovery', () => ({ resetShell, resetAttempted, markResetAttempted }));
+vi.mock('../shellRecovery', () => ({ resetShell, resetAttempted, markResetAttempted, definitelyOffline }));
 vi.mock('../posthog', () => ({ phCapture }));
 
 function Boom(): never {
@@ -23,6 +24,8 @@ function Boom(): never {
 beforeEach(() => {
   vi.clearAllMocks();
   resetAttempted.mockReturnValue(true); // default: attempt already spent
+  markResetAttempted.mockReturnValue(true); // default: the store is durable
+  definitelyOffline.mockReturnValue(false); // default: online
   // React logs the caught error; silence it so the suite output stays readable.
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -95,6 +98,36 @@ describe('ErrorBoundary', () => {
     );
     expect(markResetAttempted).toHaveBeenCalledOnce();
     expect(resetShell).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT auto-recover while offline — the panel beats the browser error page', () => {
+    // Codex P1 on #513. Offline, the teardown would delete the only copy of the
+    // shell this device has. Skipping it keeps THIS panel on screen, and leaves
+    // the attempt unspent for when connectivity returns.
+    resetAttempted.mockReturnValue(false);
+    definitelyOffline.mockReturnValue(true);
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(resetShell).not.toHaveBeenCalled();
+    expect(markResetAttempted).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+
+  it('does NOT auto-recover when the attempt cannot be durably recorded', () => {
+    // Codex P1 on #513: a readable-but-unwritable store would otherwise re-arm
+    // the reset on every load — an unbounded destructive reload loop.
+    resetAttempted.mockReturnValue(false);
+    markResetAttempted.mockReturnValue(false);
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(resetShell).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 
   it('does NOT auto-recover again once the attempt is spent — no reload loop', () => {

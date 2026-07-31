@@ -1,7 +1,7 @@
 import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { phCapture } from '../posthog';
-import { markResetAttempted, resetAttempted, resetShell } from '../shellRecovery';
+import { definitelyOffline, markResetAttempted, resetAttempted, resetShell } from '../shellRecovery';
 
 /**
  * The app's only error boundary (the 2026-07-24 blank-screen incident).
@@ -36,6 +36,15 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
+    // Auto-recovery needs all three (the last two are Codex P1s on #513):
+    //  - the tab still has its one attempt;
+    //  - we are not definitely offline — tearing the precache down with no
+    //    network strands the player on the browser's offline page instead of
+    //    this panel, which is worse than the crash (src/shellRecovery.ts);
+    //  - the attempt RECORDS durably. A readable-but-unwritable store would
+    //    otherwise re-arm the reset on every load: an unbounded reload loop.
+    const offline = definitelyOffline();
+    const recovering = !resetAttempted() && !offline && markResetAttempted();
     // PostHog's exception autocapture already reports the raw throw; this adds
     // the fact that it reached the BOUNDARY (i.e. it blanked the app rather
     // than being swallowed somewhere harmless) plus the build that did it, so
@@ -44,15 +53,13 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
       message: error.message,
       build_stamp: __BUILD_STAMP__,
       component_stack: info.componentStack?.slice(0, 2000) ?? null,
-      auto_recovering: !resetAttempted(),
+      auto_recovering: recovering,
+      offline,
     });
     // Keep the raw error on the console for local dev and for a bug report's
     // attached log — `phCapture` is a no-op until PostHog init resolves.
     console.error('App crashed', error);
-    if (!resetAttempted()) {
-      markResetAttempted();
-      void resetShell();
-    }
+    if (recovering) void resetShell();
   }
 
   render(): ReactNode {

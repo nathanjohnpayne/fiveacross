@@ -56,12 +56,39 @@ export function resetAttempted(): boolean {
   }
 }
 
-/** Records the automatic attempt BEFORE it runs, so a reload can observe it. */
-export function markResetAttempted(): void {
+/**
+ * Records the automatic attempt BEFORE it runs, and reports whether that record
+ * is DURABLE. Callers must not auto-recover on `false` (Codex P1 on #513).
+ *
+ * A store can be readable but unwritable — quota exhaustion, storage policy,
+ * and some private modes accept `setItem` and silently drop it. In that state a
+ * swallowed failure is not a harmless best-effort miss: `resetAttempted()` keeps
+ * answering false on every load, so each crash re-arms the automatic reset and
+ * the "one attempt per tab" bound becomes an unbounded, destructive reload loop
+ * — exactly the failure this guard exists to prevent. Hence the read-back: only
+ * a value that survives the write counts as an attempt we can actually count.
+ */
+export function markResetAttempted(): boolean {
   try {
-    session()?.setItem(ATTEMPT_KEY, '1');
+    const store = session();
+    if (!store) return false;
+    store.setItem(ATTEMPT_KEY, '1');
+    return store.getItem(ATTEMPT_KEY) === '1';
   } catch {
-    /* unwritable store — the caller's own guard still bounds the attempt */
+    return false;
+  }
+}
+
+/**
+ * True only when the browser is DEFINITELY offline. `navigator.onLine === true`
+ * is famously weak (it means "a link exists", not "the internet is reachable"),
+ * but a `false` is trustworthy, and one-directional trust is all this needs.
+ */
+export function definitelyOffline(): boolean {
+  try {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  } catch {
+    return false;
   }
 }
 
@@ -98,9 +125,17 @@ export async function clearShell(): Promise<void> {
  * Full recovery: drop the shell, then reload onto whatever the server is
  * serving now. `reload()` is injected so tests can assert the sequence without
  * a jsdom navigation.
+ *
+ * OFFLINE IS A HARD SKIP on the teardown (Codex P1 on #513). The precache is
+ * the only copy of `index.html` and the bundle a disconnected device has; on a
+ * ship, deleting it and reloading does not recover anything — it lands the
+ * player on the browser's offline error page and the installed PWA cannot open
+ * again until connectivity returns. Reloading onto the SAME cached shell is the
+ * strictly better move: worst case the crash simply recurs and the boundary's
+ * panel comes back, which keeps a retry path alive instead of destroying it.
  */
 export async function resetShell(reload: () => void = () => window.location.reload()): Promise<void> {
-  await clearShell();
+  if (!definitelyOffline()) await clearShell();
   reload();
 }
 
@@ -121,10 +156,13 @@ export async function enforceBuildFloor(
   buildStamp: string,
   reload: () => void = () => window.location.reload(),
 ): Promise<boolean> {
-  if (resetAttempted()) return false;
+  if (resetAttempted() || definitelyOffline()) return false;
   const floor = await fetchBuildFloor();
   if (!buildBelowFloor(buildStamp, floor)) return false;
-  markResetAttempted();
+  // Only proceed once the attempt is DURABLY recorded — an uncountable attempt
+  // is an unbounded reload loop (Codex P1 on #513). The floor stays armed for
+  // the next load, so this defers the rescue rather than cancelling it.
+  if (!markResetAttempted()) return false;
   await resetShell(reload);
   return true;
 }

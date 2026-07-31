@@ -20,10 +20,12 @@ const unregister = vi.fn();
 function installBrowserMocks({
   cacheKeys = [],
   registrations = 1,
-}: { cacheKeys?: string[]; registrations?: number } = {}) {
+  onLine = true,
+}: { cacheKeys?: string[]; registrations?: number; onLine?: boolean } = {}) {
   const deleted: string[] = [];
   unregister.mockReset().mockResolvedValue(true);
   vi.stubGlobal('navigator', {
+    onLine,
     serviceWorker: {
       getRegistrations: vi.fn().mockResolvedValue(Array.from({ length: registrations }, () => ({ unregister }))),
     },
@@ -89,12 +91,25 @@ describe('resetShell', () => {
     await resetShell(() => order.push('reload'));
     expect(order).toEqual(['unregister', 'reload']);
   });
+
+  it('reloads WITHOUT tearing down the shell while offline', async () => {
+    // Codex P1 on #513. The precache is the only copy of index.html and the
+    // bundle a disconnected device has; deleting it mid-cruise replaces the
+    // recovery panel with the browser's offline error page and the installed
+    // PWA cannot reopen until connectivity returns.
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'], onLine: false });
+    const reload = vi.fn();
+    await resetShell(reload);
+    expect(unregister).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
+    expect(reload).toHaveBeenCalledOnce(); // the retry path stays alive
+  });
 });
 
 describe('the one-attempt guard', () => {
   it('starts unspent and latches once marked', () => {
     expect(resetAttempted()).toBe(false);
-    markResetAttempted();
+    expect(markResetAttempted()).toBe(true);
     expect(resetAttempted()).toBe(true);
   });
 
@@ -107,6 +122,25 @@ describe('the one-attempt guard', () => {
       },
     });
     expect(resetAttempted()).toBe(true);
+  });
+
+  it('reports FAILURE when the write throws', () => {
+    vi.stubGlobal('sessionStorage', {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('quota');
+      },
+    });
+    expect(markResetAttempted()).toBe(false);
+  });
+
+  it('reports FAILURE when the store silently drops the write', () => {
+    // Codex P1 on #513: the dangerous case is readable-but-unwritable, where
+    // setItem resolves but nothing persists. Without the read-back this looked
+    // like a spent attempt, so every load re-armed the reset — an unbounded
+    // destructive reload loop, the exact failure this guard exists to prevent.
+    vi.stubGlobal('sessionStorage', { getItem: () => null, setItem: () => {} });
+    expect(markResetAttempted()).toBe(false);
   });
 });
 
@@ -157,6 +191,27 @@ describe('enforceBuildFloor', () => {
   it('does not reload when the floor cannot be read (offline mid-cruise)', async () => {
     installBrowserMocks();
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    const reload = vi.fn();
+    await expect(enforceBuildFloor('2026-07-20T14:17:04.539Z', reload)).resolves.toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('does not even probe the floor while definitely offline', async () => {
+    const fetchSpy = vi.fn();
+    installBrowserMocks({ onLine: false });
+    vi.stubGlobal('fetch', fetchSpy);
+    const reload = vi.fn();
+    await expect(enforceBuildFloor('2026-07-20T14:17:04.539Z', reload)).resolves.toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('declines to reset when the attempt cannot be durably recorded', async () => {
+    // Codex P1 on #513: resetting without a countable attempt is the reload
+    // loop. The floor stays armed, so the rescue is deferred, not cancelled.
+    installBrowserMocks();
+    stubFloorFetch(FLOOR);
+    vi.stubGlobal('sessionStorage', { getItem: () => null, setItem: () => {} });
     const reload = vi.fn();
     await expect(enforceBuildFloor('2026-07-20T14:17:04.539Z', reload)).resolves.toBe(false);
     expect(reload).not.toHaveBeenCalled();
