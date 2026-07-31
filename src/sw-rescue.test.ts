@@ -107,9 +107,20 @@ describe('the active-stamp record', () => {
   });
 });
 
+/** A floor response that clears all three interception barriers. */
+function okFloorResponse(over: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    redirected: false,
+    url: `${location.origin}/build-floor.json`,
+    json: async () => ({ floor: ARMED_FLOOR }),
+    ...over,
+  };
+}
+
 describe('fetchFloorInWorker', () => {
   it('reads the floor with no-store so no cache can answer', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ floor: ARMED_FLOOR }) });
+    const fetchImpl = vi.fn().mockResolvedValue(okFloorResponse());
     await expect(fetchFloorInWorker(fetchImpl as unknown as typeof fetch, 1234)).resolves.toBe(ARMED_FLOOR);
     expect(fetchImpl).toHaveBeenCalledWith(
       '/build-floor.json?ts=1234',
@@ -140,5 +151,37 @@ describe('fetchFloorInWorker', () => {
 
   it('a null floor can never force an activation', async () => {
     expect(shouldForceActivate({ activeStamp: null, ownStamp: NEW_SHELL, floor: null })).toBe(false);
+  });
+
+  // Phase 4b P1 on #515. Here a forged floor is not merely a bad reachability
+  // signal — it is an ACTIVATION COMMAND. A captive portal answering with a
+  // parseable `{ floor }` would have the worker skipWaiting, claim every
+  // client, and reload every window. Same three barriers as `originReachable`
+  // in src/shellRecovery.ts, because a portal only has to defeat one.
+  it('requests with redirect:error so a portal bounce rejects outright', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okFloorResponse());
+    await fetchFloorInWorker(fetchImpl as unknown as typeof fetch, 1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining('/build-floor.json'),
+      expect.objectContaining({ redirect: 'error', cache: 'no-store' }),
+    );
+  });
+
+  it('rejects a REDIRECTED floor response', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okFloorResponse({ redirected: true }));
+    await expect(fetchFloorInWorker(fetchImpl as unknown as typeof fetch, 1)).resolves.toBeNull();
+  });
+
+  it('rejects a floor whose FINAL url is cross-origin (in-place interception)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(okFloorResponse({ url: 'http://portal.ship/login' }));
+    await expect(fetchFloorInWorker(fetchImpl as unknown as typeof fetch, 1)).resolves.toBeNull();
+  });
+
+  it('a forged floor cannot reach the activation decision at all', async () => {
+    // The end-to-end statement of the barrier: a portal's floor resolves to
+    // null, and a null floor can never force an activation.
+    const fetchImpl = vi.fn().mockResolvedValue(okFloorResponse({ redirected: true }));
+    const floor = await fetchFloorInWorker(fetchImpl as unknown as typeof fetch, 1);
+    expect(shouldForceActivate({ activeStamp: null, ownStamp: NEW_SHELL, floor })).toBe(false);
   });
 });

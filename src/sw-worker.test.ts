@@ -62,9 +62,18 @@ function installFakeWorker() {
 let sharedCacheStore = new Map<string, Response>();
 
 function stubFloor(floor: string | null) {
+  // Shaped like a REAL same-origin answer — `redirected: false` and a
+  // same-origin `url` — so these lifecycle tests cannot pass by accident if the
+  // interception barriers in `fetchFloorInWorker` regress. A bare
+  // `{ ok, json }` would sail through on undefined fields (Phase 4b P1 on #515).
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValue({ ok: true, json: async () => ({ floor }) } as unknown as Response),
+    vi.fn().mockResolvedValue({
+      ok: true,
+      redirected: false,
+      url: `${location.origin}/build-floor.json`,
+      json: async () => ({ floor }),
+    } as unknown as Response),
   );
 }
 

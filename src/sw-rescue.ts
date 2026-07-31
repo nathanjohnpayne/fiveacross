@@ -147,6 +147,18 @@ export async function takeForcedActivation(cacheStorage: CacheStorage): Promise<
  * neither the HTTP cache nor this worker's own precache can answer — and
  * `/build-floor.json` is excluded from the precache glob for that reason.
  * Any failure resolves to null, which `shouldForceActivate` reads as "no force".
+ *
+ * HARDENED LIKE `originReachable` IN src/shellRecovery.ts, and for a worse
+ * consequence (Phase 4b P1 on #515). `fetch` follows redirects by default, so a
+ * captive portal can answer this request from its own login page with a
+ * parseable `{ "floor": ... }` body — and here that is not merely a bad
+ * reachability signal, it is an ACTIVATION COMMAND: the worker would
+ * `skipWaiting()`, claim every client, and reload every window on a portal's
+ * say-so. Same three barriers, since a portal only has to defeat one:
+ *   1. `redirect: 'error'` — a portal bounce rejects instead of resolving;
+ *   2. the FINAL response URL must still be same-origin, for interceptors that
+ *      proxy in place rather than redirect;
+ *   3. the body must carry a `floor` string, which no login page will.
  */
 export async function fetchFloorInWorker(
   fetchImpl: typeof fetch,
@@ -159,8 +171,16 @@ export async function fetchFloorInWorker(
   // the environment this app lives in.
   const { signal, cleanup } = probeTimeoutSignal(timeoutMs);
   try {
-    const res = await fetchImpl(`/build-floor.json?ts=${timestamp}`, { cache: 'no-store', signal });
+    const res = await fetchImpl(`/build-floor.json?ts=${timestamp}`, {
+      cache: 'no-store',
+      signal,
+      redirect: 'error',
+    });
     if (!res.ok) return null;
+    if (res.redirected) return null;
+    if (res.url && typeof location !== 'undefined' && new URL(res.url, location.href).origin !== location.origin) {
+      return null;
+    }
     const body: unknown = await res.json();
     const floor = (body as { floor?: unknown } | null)?.floor;
     return typeof floor === 'string' ? floor : null;
