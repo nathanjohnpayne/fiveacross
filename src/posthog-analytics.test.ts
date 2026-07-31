@@ -298,6 +298,40 @@ describe('PostHog init with a key', () => {
     );
   });
 
+  it('sends a pre-init capture EXACTLY ONCE when init settles without a navigation', async () => {
+    // Codex P2 on #513: the event lives in both the in-memory queue and its own
+    // persisted mirror, so replaying the concatenation double-counted every
+    // startup event — inflating `app_crash` counts with phantom crashes.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+    expect((ph.capture as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1);
+  });
+
+  it('a second load queuing its own event does not overwrite the first load’s', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    (await import('./posthog')).phCapture('app_crash', { message: 'first' });
+
+    vi.resetModules();
+    const second = await import('./posthog');
+    second.phCapture('app_crash', { message: 'second' });
+
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    vi.clearAllMocks();
+    await (await import('./posthog')).initPostHog();
+    const names = (ph.capture as unknown as { mock: { calls: [string, Record<string, unknown>][] } }).mock.calls.map(
+      (c) => c[1].message,
+    );
+    expect(names).toEqual(['first', 'second']);
+  });
+
   it('drains the persisted queue exactly once, so a replay cannot re-send forever', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');

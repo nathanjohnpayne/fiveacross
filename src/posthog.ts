@@ -294,9 +294,10 @@ export async function initPostHog(): Promise<void> {
   // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
   // — they are from a PRIOR load (the crash that triggered a recovery reload),
   // so they are both older and the ones that matter most.
-  const queued = [...takePersistedCaptures(), ...pendingCaptures];
+  const queued = [...carried(), ...pendingCaptures];
+  carriedCaptures = [];
   pendingCaptures = [];
-  persistPendingCaptures();
+  clearPersistedCaptures();
   for (const c of queued) phCapture(c.name, c.params, c.options);
 }
 
@@ -325,7 +326,7 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
     // Same replay pattern as `pendingIdentifyUid` below. Bounded: a crash loop
     // must not grow this without limit, and the earliest events are the ones
     // worth keeping, so it drops newest-over-oldest once full.
-    if (pendingCaptures.length < MAX_PENDING_CAPTURES) {
+    if (carried().length + pendingCaptures.length < MAX_PENDING_CAPTURES) {
       pendingCaptures.push({ name, params, options });
       // Also persist, because the queue's most important customer immediately
       // reloads the page (Codex P2 on #513): `componentDidCatch` starts
@@ -357,30 +358,50 @@ let pendingCaptures: PendingCapture[] = [];
  *  queue that never drains dies with the tab rather than following the player. */
 const PENDING_CAPTURES_KEY = 'gcb:ph-pending-captures';
 
+/**
+ * Entries queued by a PRIOR load, read from storage exactly once (Codex P2 on
+ * #513). Keeping them in their own array is what makes each event have exactly
+ * ONE representation: `pendingCaptures` is strictly this load's queue, this is
+ * strictly the previous load's, and the persisted blob is simply the two
+ * concatenated. Merging both into one array and also persisting it — the
+ * previous shape — double-counted every event whenever init settled without a
+ * navigation, since the in-memory copy and its own persisted mirror were both
+ * replayed. `null` means "not read yet"; `[]` means "read, nothing there".
+ */
+let carriedCaptures: PendingCapture[] | null = null;
+
 // Every storage touch is swallowed: analytics must never throw into product
 // code, and a lost telemetry event is always preferable to a broken app.
+function carried(): PendingCapture[] {
+  if (carriedCaptures !== null) return carriedCaptures;
+  try {
+    const raw = sessionStorage?.getItem(PENDING_CAPTURES_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    carriedCaptures = Array.isArray(parsed)
+      ? parsed.filter((c): c is PendingCapture => !!c && typeof (c as PendingCapture).name === 'string')
+      : [];
+  } catch {
+    carriedCaptures = [];
+  }
+  return carriedCaptures;
+}
+
+/** Mirrors the whole queue — prior load's entries included, so a second load
+ *  that queues its own pre-init event cannot overwrite the first one's. */
 function persistPendingCaptures(): void {
   try {
-    sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(pendingCaptures));
+    const all = [...carried(), ...pendingCaptures].slice(0, MAX_PENDING_CAPTURES);
+    sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(all));
   } catch {
     /* quota/policy/absent — the in-memory queue still covers the no-reload case */
   }
 }
 
-/** Reads and CLEARS the persisted queue — draining once, so a replay failure
- *  cannot leave the same events re-sending on every subsequent load. */
-function takePersistedCaptures(): PendingCapture[] {
+function clearPersistedCaptures(): void {
   try {
-    const raw = sessionStorage?.getItem(PENDING_CAPTURES_KEY);
     sessionStorage?.removeItem(PENDING_CAPTURES_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((c): c is PendingCapture => !!c && typeof (c as PendingCapture).name === 'string')
-      .slice(0, MAX_PENDING_CAPTURES);
   } catch {
-    return [];
+    /* absent/blocked — nothing to clear */
   }
 }
 
