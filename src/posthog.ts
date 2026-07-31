@@ -289,9 +289,20 @@ export async function initPostHog(): Promise<void> {
     pendingIdentifyUid = null;
     phIdentify(uid);
   }
+  // Replay queued captures AFTER the identify above, so an `app_crash` from the
+  // probe window is attributed to the signed-in player rather than orphaned
+  // under the anonymous id (Phase 4b P2 on #513).
+  if (pendingCaptures.length > 0) {
+    const queued = pendingCaptures;
+    pendingCaptures = [];
+    for (const c of queued) phCapture(c.name, c.params, c.options);
+  }
 }
 
 export const posthogReady = (): boolean => ready;
+
+/** Capture options for events emitted just before the page goes away. */
+export type CaptureOptions = { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_instantly?: boolean };
 
 /**
  * Capture an explicit event. Called by analytics.ts `track()` alongside GA4.
@@ -303,12 +314,19 @@ export const posthogReady = (): boolean => ready;
  * position pass `{ transport: 'sendBeacon', send_instantly: true }`, which
  * survives the page context being destroyed.
  */
-export function phCapture(
-  name: string,
-  params?: Record<string, unknown>,
-  options?: { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_instantly?: boolean },
-): void {
-  if (!ready) return;
+export function phCapture(name: string, params?: Record<string, unknown>, options?: CaptureOptions): void {
+  if (!ready) {
+    // Queue instead of dropping (Phase 4b P2 on #513). `initPostHog` is
+    // fire-and-forget and awaits ~1.5s of ingest-host probes, while main.tsx
+    // renders synchronously right after — so a STARTUP crash, the exact case
+    // `app_crash` exists to report, reliably lands in this window and used to
+    // vanish through the `ready` gate before any transport option could help.
+    // Same replay pattern as `pendingIdentifyUid` below. Bounded: a crash loop
+    // must not grow this without limit, and the earliest events are the ones
+    // worth keeping, so it drops newest-over-oldest once full.
+    if (pendingCaptures.length < MAX_PENDING_CAPTURES) pendingCaptures.push({ name, params, options });
+    return;
+  }
   try {
     // Kept arity-exact for the common path: every existing caller passes no
     // options and must keep producing a two-argument `capture` call.
@@ -318,6 +336,11 @@ export function phCapture(
     /* analytics must never throw into product code */
   }
 }
+
+/** Captures that arrived before init settled, replayed by `initPostHog`. */
+type PendingCapture = { name: string; params?: Record<string, unknown>; options?: CaptureOptions };
+const MAX_PENDING_CAPTURES = 20;
+let pendingCaptures: PendingCapture[] = [];
 
 // The most recent identify that arrived before init settled (#342) — replayed
 // by initPostHog once the SDK is live, cleared by phReset so a sign-out during

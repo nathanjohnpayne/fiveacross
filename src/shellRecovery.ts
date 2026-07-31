@@ -19,6 +19,7 @@
 // inside a component that a crash can take with it.
 
 import { buildBelowFloor, fetchBuildFloor } from './buildFloor';
+import { probeTimeoutSignal } from './canonical-redirect';
 
 /**
  * Marks that this tab already spent its ONE automatic reset. A shell reset ends
@@ -83,12 +84,44 @@ export function markResetAttempted(): boolean {
  * True only when the browser is DEFINITELY offline. `navigator.onLine === true`
  * is famously weak (it means "a link exists", not "the internet is reachable"),
  * but a `false` is trustworthy, and one-directional trust is all this needs.
+ *
+ * Note what this is NOT sufficient for: `!definitelyOffline()` is not permission
+ * to destroy the shell — see `originReachable` (Phase 4b P1 on #513).
  */
 export function definitelyOffline(): boolean {
   try {
     return typeof navigator !== 'undefined' && navigator.onLine === false;
   } catch {
     return false;
+  }
+}
+
+/**
+ * POSITIVE proof that a replacement shell can actually be fetched — the only
+ * thing that licenses the destructive teardown (Phase 4b P1 on #513).
+ *
+ * The earlier `!definitelyOffline()` gate was too weak, and on this app's own
+ * primary surface: ship Wi-Fi and captive portals leave `navigator.onLine`
+ * TRUE while the origin is unreachable. In that state the boundary would delete
+ * the only precached shell and reload into a browser error page — precisely the
+ * stranding this module exists to prevent, re-created by the fix for it.
+ *
+ * So we ask the origin directly. `/build-floor.json` is the natural probe: it is
+ * tiny, deliberately un-precached (the workbox glob excludes `.json`), and
+ * served `no-cache`, so a 200 proves the ORIGIN answered rather than a cache.
+ * Any failure — offline, DNS, timeout, a captive portal's interception — reads
+ * as "do not destroy anything".
+ */
+export async function originReachable(fetchImpl: typeof fetch = fetch, timeoutMs = 5000): Promise<boolean> {
+  if (definitelyOffline()) return false;
+  const { signal, cleanup } = probeTimeoutSignal(timeoutMs);
+  try {
+    const res = await fetchImpl(`/build-floor.json?ts=${Date.now()}`, { cache: 'no-store', signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    cleanup();
   }
 }
 
@@ -126,16 +159,25 @@ export async function clearShell(): Promise<void> {
  * serving now. `reload()` is injected so tests can assert the sequence without
  * a jsdom navigation.
  *
- * OFFLINE IS A HARD SKIP on the teardown (Codex P1 on #513). The precache is
- * the only copy of `index.html` and the bundle a disconnected device has; on a
- * ship, deleting it and reloading does not recover anything — it lands the
- * player on the browser's offline error page and the installed PWA cannot open
- * again until connectivity returns. Reloading onto the SAME cached shell is the
- * strictly better move: worst case the crash simply recurs and the boundary's
- * panel comes back, which keeps a retry path alive instead of destroying it.
+ * THE TEARDOWN REQUIRES POSITIVE PROOF that the origin is reachable (Codex P1
+ * and Phase 4b P1 on #513). The precache is the only copy of `index.html` and
+ * the bundle a disconnected device has; deleting it without a replacement in
+ * reach does not recover anything — it lands the player on the browser's
+ * offline error page and the installed PWA cannot open again until
+ * connectivity returns. Reloading onto the SAME cached shell is the strictly
+ * better move: worst case the crash recurs and the boundary's panel comes back,
+ * which keeps a retry path alive instead of destroying it.
+ *
+ * `connectivityProven` lets a caller that ALREADY completed a same-origin
+ * request skip the redundant probe — `enforceBuildFloor` just fetched the floor
+ * from this very origin, so re-asking would be a second request for a fact it
+ * has already established.
  */
-export async function resetShell(reload: () => void = () => window.location.reload()): Promise<void> {
-  if (!definitelyOffline()) await clearShell();
+export async function resetShell(
+  reload: () => void = () => window.location.reload(),
+  connectivityProven = false,
+): Promise<void> {
+  if (connectivityProven || (await originReachable())) await clearShell();
   try {
     reload();
   } catch {
@@ -177,6 +219,8 @@ export async function enforceBuildFloor(
   // is an unbounded reload loop (Codex P1 on #513). The floor stays armed for
   // the next load, so this defers the rescue rather than cancelling it.
   if (!markResetAttempted()) return false;
-  await resetShell(reload);
+  // The floor fetch above WAS a completed same-origin request, so connectivity
+  // is already proven here — no second probe (Phase 4b P1 on #513).
+  await resetShell(reload, true);
   return true;
 }

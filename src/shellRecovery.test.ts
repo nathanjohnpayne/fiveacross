@@ -37,6 +37,9 @@ function installBrowserMocks({
       return true;
     }),
   });
+  // Default: the origin answers, so the destructive teardown is licensed.
+  // Individual tests override to model an unreachable origin.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true } as unknown as Response));
   return { deleted };
 }
 
@@ -103,6 +106,37 @@ describe('resetShell', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('does NOT tear down when the origin is unreachable despite navigator.onLine === true', async () => {
+    // Phase 4b P1 on #513 — the ship Wi-Fi / captive-portal case, which is this
+    // app's primary surface. `onLine` stays true while the origin is not
+    // reachable, so the weaker `!definitelyOffline()` gate would have deleted
+    // the only shell and reloaded into an error page: the exact stranding this
+    // module exists to prevent, re-created by the fix for it.
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'], onLine: true });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('captive portal')));
+    const reload = vi.fn();
+    await resetShell(reload);
+    expect(unregister).not.toHaveBeenCalled();
+    expect(deleted).toEqual([]);
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT tear down when the origin answers non-OK (portal interception)', async () => {
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false } as unknown as Response));
+    await resetShell(vi.fn());
+    expect(deleted).toEqual([]);
+  });
+
+  it('tears down when a caller has already PROVEN connectivity, without re-probing', async () => {
+    const fetchSpy = vi.fn();
+    const { deleted } = installBrowserMocks({ cacheKeys: ['workbox-precache-v2-x'] });
+    vi.stubGlobal('fetch', fetchSpy);
+    await resetShell(vi.fn(), true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(deleted).toEqual(['workbox-precache-v2-x']);
+  });
+
   it('reloads WITHOUT tearing down the shell while offline', async () => {
     // Codex P1 on #513. The precache is the only copy of index.html and the
     // bundle a disconnected device has; deleting it mid-cruise replaces the
@@ -114,6 +148,14 @@ describe('resetShell', () => {
     expect(unregister).not.toHaveBeenCalled();
     expect(deleted).toEqual([]);
     expect(reload).toHaveBeenCalledOnce(); // the retry path stays alive
+  });
+
+  it('skips the probe entirely when definitely offline', async () => {
+    const fetchSpy = vi.fn();
+    installBrowserMocks({ onLine: false });
+    vi.stubGlobal('fetch', fetchSpy);
+    await resetShell(vi.fn());
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

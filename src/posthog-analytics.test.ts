@@ -250,6 +250,46 @@ describe('PostHog init with a key', () => {
     expect(ph.capture).toHaveBeenCalledWith('bingo', { lines: 1 });
   });
 
+  it('replays a capture that arrived BEFORE init settled (#513 — the startup-crash report)', async () => {
+    // Phase 4b P2 on #513. `initPostHog` is fire-and-forget and awaits ingest
+    // probes while main.tsx renders synchronously, so a STARTUP crash — the
+    // exact case `app_crash` exists to report — lands in the not-ready window
+    // and used to be dropped outright, before any transport option could help.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phCapture('app_crash', { message: 'boom' }, { transport: 'sendBeacon', send_instantly: true });
+    expect(ph.capture).not.toHaveBeenCalled(); // not ready yet — queued, not lost
+
+    await mod.initPostHog();
+    expect(ph.capture).toHaveBeenCalledWith(
+      'app_crash',
+      { message: 'boom' },
+      { transport: 'sendBeacon', send_instantly: true },
+    );
+  });
+
+  it('replays a queued capture AFTER the pending identify, so it is not orphaned anonymous', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('uid-1');
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const captureOrder = (ph.capture as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(identifyOrder).toBeLessThan(captureOrder);
+  });
+
   it('defaults api_host to the personal proxy (chain primary) when VITE_POSTHOG_HOST is unset (#149/#344)', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
