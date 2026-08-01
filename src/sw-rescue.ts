@@ -36,6 +36,43 @@ export const ACTIVE_STAMP_URL = '/__gcb-active-build-stamp';
  *  `activate`. Same cache, same never-fetched convention. */
 export const FORCED_FLAG_URL = '/__gcb-forced-activation';
 
+/** Synthetic key holding when the ACTIVE worker last re-read the floor. */
+export const FLOOR_CHECKED_URL = '/__gcb-floor-checked-at';
+
+/** How rarely the active worker re-reads the floor. It wakes on ordinary
+ *  navigations, so this is the throttle that keeps an emergency lever from
+ *  becoming a request on every page load. */
+export const FLOOR_RECHECK_INTERVAL_MS = 30 * 60_000;
+
+/**
+ * True when the active worker is due another floor read, recording the attempt
+ * as it answers. Persisted, because a service worker is terminated whenever it
+ * goes idle — an in-memory timestamp would reset constantly and turn the
+ * throttle into no throttle at all.
+ *
+ * Fails to `false` when storage refuses: an un-throttleable check is worse than
+ * a missed one, since the floor is armed only during an incident anyway.
+ */
+export async function dueForFloorRecheck(
+  cacheStorage: CacheStorage,
+  now: number,
+  intervalMs = FLOOR_RECHECK_INTERVAL_MS,
+): Promise<boolean> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    const hit = await cache.match(FLOOR_CHECKED_URL);
+    if (hit) {
+      const body: unknown = await hit.json();
+      const at = (body as { at?: unknown } | null)?.at;
+      if (typeof at === 'number' && now - at < intervalMs) return false;
+    }
+    await cache.put(FLOOR_CHECKED_URL, new Response(JSON.stringify({ at: now })));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Stand-in stamp for an active shell that recorded none. Every worker built
  * before #514 is in this state, which is exactly the stranded cohort, so
@@ -67,11 +104,40 @@ export function shouldForceActivate(input: {
   activeStamp: string | null;
   ownStamp: string;
   floor: unknown;
+  /** False when there is no existing worker at all — a FIRST install. */
+  hasActiveWorker?: boolean;
 }): boolean {
+  // A first install has no shell to rescue (Phase 4b P2 on #515). Without this,
+  // `readActiveStamp()` returning null on a brand-new registration is
+  // indistinguishable from a legacy pre-#514 worker, so an armed floor would
+  // have a fresh client claim and re-navigate a page that is ALREADY running
+  // the current build — discarding whatever the player did while the initial
+  // precache was still installing, sign-in included.
+  if (input.hasActiveWorker === false) return false;
   const active = input.activeStamp ?? UNKNOWN_ACTIVE_STAMP;
   if (!buildBelowFloor(active, input.floor)) return false;
   if (buildBelowFloor(input.ownStamp, input.floor)) return false;
   return true;
+}
+
+/**
+ * Should the ACTIVE worker act on a floor it has just re-read? (Phase 4b P1 on
+ * #515.)
+ *
+ * The install-time check alone cannot deliver the lever this feature advertises.
+ * A worker installs, reads the floor — inert, which is what it ships as, so this
+ * is the NORMAL case for every client — and settles into `waiting`. Arming the
+ * floor afterwards changes nothing: later update checks find the same
+ * byte-identical `sw.js` and never dispatch `install` again, and the dead page
+ * cannot message the waiting worker. The floor would then only ever work when
+ * paired with a redeploy, which is precisely the coupling #342 created
+ * `build-floor.json` to remove.
+ *
+ * So the ACTIVE worker re-reads the floor too, on its own wake-ups, and acts
+ * when the build it is serving is condemned.
+ */
+export function shouldActiveWorkerEvict(ownStamp: string, floor: unknown): boolean {
+  return buildBelowFloor(ownStamp, floor);
 }
 
 /**

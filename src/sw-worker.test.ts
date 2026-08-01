@@ -40,6 +40,11 @@ function installFakeWorker() {
       handlers[type] = fn;
     },
     skipWaiting: vi.fn(async () => {}),
+    registration: {
+      active: {} as unknown,        // an existing shell, unless a test says otherwise
+      waiting: null as null | { postMessage: (m: unknown) => void },
+      unregister: vi.fn(async () => true),
+    },
     clients: { claim: vi.fn(async () => {}), matchAll: vi.fn(async () => clients) },
     __WB_MANIFEST: [{ url: 'index.html', revision: 'abc' }],
   };
@@ -52,7 +57,15 @@ function installFakeWorker() {
     }),
     delete: vi.fn(async (k: string) => sharedCacheStore.delete(k)),
   };
-  vi.stubGlobal('caches', { open: vi.fn(async () => cache) });
+  const deletedCaches: string[] = [];
+  vi.stubGlobal('caches', {
+    open: vi.fn(async () => cache),
+    keys: vi.fn(async () => ['workbox-precache-v2-x', 'proof-media']),
+    delete: vi.fn(async (k: string) => {
+      deletedCaches.push(k);
+      return true;
+    }),
+  });
   // The install-time floor probe retries with real delays between attempts, so
   // a failing-probe test would otherwise sit through them. Firing timers
   // immediately keeps the retry LOGIC exercised — the attempts still happen, in
@@ -61,7 +74,7 @@ function installFakeWorker() {
     fn();
     return 0;
   }) as unknown as typeof setTimeout);
-  return { self, handlers, cacheStore: sharedCacheStore, navigated, clients };
+  return { self, handlers, cacheStore: sharedCacheStore, navigated, clients, deletedCaches };
 }
 
 // Cache storage OUTLIVES a worker instance in the browser, so the fake must too
@@ -89,6 +102,16 @@ function stubFloor(floor: string | null) {
 async function fire(handlers: Handlers, type: string, data?: unknown) {
   const pending: Promise<unknown>[] = [];
   handlers[type]?.({ waitUntil: (p: Promise<unknown>) => pending.push(p), data });
+  await Promise.all(pending);
+}
+
+/** Fires a navigation `fetch`, which is what wakes the active worker. */
+async function fireNavigation(handlers: Handlers) {
+  const pending: Promise<unknown>[] = [];
+  handlers.fetch?.({
+    request: { mode: 'navigate' },
+    waitUntil: (p: Promise<unknown>) => pending.push(p),
+  } as unknown);
   await Promise.all(pending);
 }
 
@@ -304,5 +327,77 @@ describe('the rescue (#514)', () => {
     await fire(w.handlers, 'install');
     await expect(fire(w.handlers, 'activate')).resolves.toBeUndefined();
     expect(w.self.clients.claim).toHaveBeenCalledOnce();
+  });
+});
+
+describe('the ACTIVE worker re-reads the floor (#515 Phase 4b P1)', () => {
+  it('promotes an already-waiting worker when the floor is armed LATER', async () => {
+    // The case the install-time check structurally cannot cover: this worker
+    // installed while the floor was inert — the normal state, since that is
+    // what it ships as — and is now serving. Arming the floor afterwards never
+    // re-fires `install`, because `sw.js` is byte-identical, and the dead page
+    // cannot message the waiting worker. Without this the lever would only work
+    // alongside a redeploy, which is the coupling #342 exists to remove.
+    const w = installFakeWorker();
+    const postMessage = vi.fn();
+    w.self.registration.waiting = { postMessage };
+    stubFloor(FLOOR_PAST_THIS_BUILD); // condemns the build this worker serves
+    await import('./sw');
+    await fireNavigation(w.handlers);
+    expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' });
+    expect(w.self.registration.unregister).not.toHaveBeenCalled();
+  });
+
+  it('evicts itself when there is no replacement to promote', async () => {
+    const w = installFakeWorker();
+    stubFloor(FLOOR_PAST_THIS_BUILD);
+    await import('./sw');
+    await fireNavigation(w.handlers);
+    expect(w.deletedCaches).toEqual(['workbox-precache-v2-x']); // proof media spared
+    expect(w.self.registration.unregister).toHaveBeenCalledOnce();
+  });
+
+  it('does nothing under the inert floor', async () => {
+    const w = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    await fireNavigation(w.handlers);
+    expect(w.deletedCaches).toEqual([]);
+    expect(w.self.registration.unregister).not.toHaveBeenCalled();
+  });
+
+  it('throttles: a second navigation does not re-read the floor', async () => {
+    const w = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    await fireNavigation(w.handlers);
+    const callsAfterFirst = (globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    await fireNavigation(w.handlers);
+    expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it('ignores non-navigation requests entirely', async () => {
+    const w = installFakeWorker();
+    stubFloor(FLOOR_PAST_THIS_BUILD);
+    await import('./sw');
+    const pending: Promise<unknown>[] = [];
+    w.handlers.fetch?.({ request: { mode: 'cors' }, waitUntil: (p: Promise<unknown>) => pending.push(p) } as unknown);
+    await Promise.all(pending);
+    expect(w.self.registration.unregister).not.toHaveBeenCalled();
+  });
+});
+
+describe('a FIRST install is not a stranded shell (#515 Phase 4b P2)', () => {
+  it('does not force-activate when there is no existing worker at all', async () => {
+    // `readActiveStamp()` returns null both for a legacy pre-#514 worker and
+    // for a brand-new registration. Treating the latter as ancient would have a
+    // fresh client claim and re-navigate a page already running the current
+    // build — discarding whatever the player did while the precache installed.
+    const w = installFakeWorker();
+    w.self.registration.active = null;
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
   });
 });

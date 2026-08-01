@@ -32,9 +32,11 @@ import {
 } from './data/proofMediaCache';
 import {
   clearForcedActivation,
+  dueForFloorRecheck,
   fetchFloorWithRetry,
   markForcedActivation,
   readActiveStamp,
+  shouldActiveWorkerEvict,
   shouldForceActivate,
   takeForcedActivation,
   writeActiveStamp,
@@ -110,7 +112,11 @@ self.addEventListener('install', (event: ExtendableEvent) => {
           fetchFloorWithRetry(fetch, () => Date.now()),
           readActiveStamp(caches),
         ]);
-        if (!shouldForceActivate({ activeStamp, ownStamp: __BUILD_STAMP__, floor })) return;
+        // `registration.active` is null only on a FIRST install, where there
+        // is no shell to rescue — without this a fresh client would claim and
+        // re-navigate a page already running the current build (Phase 4b P2).
+        const hasActiveWorker = self.registration.active !== null;
+        if (!shouldForceActivate({ activeStamp, ownStamp: __BUILD_STAMP__, floor, hasActiveWorker })) return;
         forcedActivation = true;
         // Persist BEFORE promoting: once `skipWaiting()` resolves, `activate`
         // can be entered by a worker instance that never ran this handler.
@@ -156,6 +162,50 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
         );
       } catch {
         /* claim refused — the new shell is active regardless */
+      }
+    })(),
+  );
+});
+
+// The ACTIVE worker re-reads the floor as well (Phase 4b P1 on #515).
+//
+// Without this the lever only works when paired with a redeploy. A worker
+// installs, reads the floor — inert, which is what it ships as, so this is the
+// normal case for every client — and settles into `waiting`. Arming the floor
+// afterwards changes nothing, because later update checks find the same
+// byte-identical `sw.js` and never dispatch `install` again, and the dead page
+// cannot message the waiting worker. #342 built `build-floor.json` precisely so
+// the emergency lever would NOT require a deploy, and the spec claims that.
+//
+// A worker has no timers that survive termination, so this rides `fetch` — the
+// event an ordinary navigation already generates — throttled by a persisted
+// timestamp. It never calls `respondWith`, so routing is untouched: workbox's
+// own handlers still serve the request.
+self.addEventListener('fetch', (event: FetchEvent) => {
+  if (event.request.mode !== 'navigate') return;
+  event.waitUntil(
+    (async () => {
+      try {
+        if (!(await dueForFloorRecheck(caches, Date.now()))) return;
+        const floor = await fetchFloorWithRetry(fetch, () => Date.now(), { attempts: 1 });
+        if (!shouldActiveWorkerEvict(__BUILD_STAMP__, floor)) return;
+        const waiting = self.registration.waiting;
+        if (waiting) {
+          // A replacement is already installed — promote it. This is the same
+          // message `UpdatePrompt` sends, sent from somewhere that does not
+          // need the page to be alive.
+          waiting.postMessage({ type: 'SKIP_WAITING' });
+          return;
+        }
+        // No replacement to promote, so evict instead: drop the precache and
+        // unregister, which sends the next navigation to the network for a
+        // fresh shell. Deliberately drastic, and reachable only on an armed
+        // floor — the same trade `src/shellRecovery.ts` makes client-side.
+        const keys = await caches.keys();
+        await Promise.all(keys.filter((k) => k.startsWith('workbox-precache')).map((k) => caches.delete(k)));
+        await self.registration.unregister();
+      } catch {
+        /* a floor re-check must never interfere with serving the page */
       }
     })(),
   );
