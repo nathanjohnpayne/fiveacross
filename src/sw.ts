@@ -195,6 +195,11 @@ self.addEventListener('fetch', (event: FetchEvent) => {
         // an incident silences every reload for half an hour.
         await recordFloorCheck(caches, Date.now(), floor !== null);
         if (!shouldActiveWorkerEvict(__BUILD_STAMP__, floor)) return;
+        // From here the eviction itself must also be retryable: a successful
+        // READ followed by a failed TEARDOWN would otherwise leave a condemned
+        // worker registered AND silenced for the full interval, which is the
+        // opposite of what the floor was armed to do (Phase 4b P2 on #515).
+        try {
         // ALWAYS evict; never promote a waiting worker (Phase 4b P1 on #515).
         // An earlier revision posted `SKIP_WAITING` to any waiting worker, which
         // is unsound: this worker cannot read that worker's build stamp, so a
@@ -208,9 +213,14 @@ self.addEventListener('fetch', (event: FetchEvent) => {
         // with no stamp comparison needed. Deliberately drastic, reachable only
         // on an armed floor, and the same trade `src/shellRecovery.ts` makes
         // client-side, `proof-media` spared included.
-        const keys = await caches.keys();
-        await Promise.all(keys.filter((k) => k.startsWith('workbox-precache')).map((k) => caches.delete(k)));
-        await self.registration.unregister();
+          const keys = await caches.keys();
+          await Promise.all(keys.filter((k) => k.startsWith('workbox-precache')).map((k) => caches.delete(k)));
+          await self.registration.unregister();
+        } catch {
+          // Roll the throttle back to the short failure interval so the very
+          // next navigation retries, instead of waiting out the success window.
+          await recordFloorCheck(caches, Date.now(), false);
+        }
       } catch {
         /* a floor re-check must never interfere with serving the page */
       }

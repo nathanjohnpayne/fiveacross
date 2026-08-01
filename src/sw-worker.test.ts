@@ -364,6 +364,19 @@ describe('the ACTIVE worker re-reads the floor (#515 Phase 4b P1)', () => {
     expect(w.self.registration.unregister).toHaveBeenCalledOnce();
   });
 
+  it('re-arms the short retry when the TEARDOWN fails after a successful read', async () => {
+    // Phase 4b P2 on #515: a successful read followed by a failed teardown left
+    // a condemned worker registered AND silenced for the full success interval
+    // — the opposite of what arming the floor is for.
+    const w = installFakeWorker();
+    w.self.registration.unregister = vi.fn().mockRejectedValue(new Error('teardown blocked'));
+    stubFloor(FLOOR_PAST_THIS_BUILD);
+    await import('./sw');
+    await fireNavigation(w.handlers);
+    const rec = w.cacheStore.get('/__gcb-floor-checked-at');
+    await expect(rec!.clone().json()).resolves.toMatchObject({ ok: false });
+  });
+
   it('does nothing under the inert floor', async () => {
     const w = installFakeWorker();
     stubFloor(INERT_FLOOR);
