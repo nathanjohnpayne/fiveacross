@@ -195,18 +195,19 @@ self.addEventListener('fetch', (event: FetchEvent) => {
         // an incident silences every reload for half an hour.
         await recordFloorCheck(caches, Date.now(), floor !== null);
         if (!shouldActiveWorkerEvict(__BUILD_STAMP__, floor)) return;
-        const waiting = self.registration.waiting;
-        if (waiting) {
-          // A replacement is already installed — promote it. This is the same
-          // message `UpdatePrompt` sends, sent from somewhere that does not
-          // need the page to be alive.
-          waiting.postMessage({ type: 'SKIP_WAITING' });
-          return;
-        }
-        // No replacement to promote, so evict instead: drop the precache and
-        // unregister, which sends the next navigation to the network for a
-        // fresh shell. Deliberately drastic, and reachable only on an armed
-        // floor — the same trade `src/shellRecovery.ts` makes client-side.
+        // ALWAYS evict; never promote a waiting worker (Phase 4b P1 on #515).
+        // An earlier revision posted `SKIP_WAITING` to any waiting worker, which
+        // is unsound: this worker cannot read that worker's build stamp, so a
+        // floor newer than BOTH would swap one condemned build for another — and
+        // the replacement would inherit the throttle record this worker just
+        // wrote, so it would not re-evict for the full interval either.
+        //
+        // Evicting sidesteps the question entirely. Dropping the precache and
+        // unregistering sends the next navigation to the NETWORK, which serves
+        // whatever is currently deployed — necessarily at or above the floor,
+        // with no stamp comparison needed. Deliberately drastic, reachable only
+        // on an armed floor, and the same trade `src/shellRecovery.ts` makes
+        // client-side, `proof-media` spared included.
         const keys = await caches.keys();
         await Promise.all(keys.filter((k) => k.startsWith('workbox-precache')).map((k) => caches.delete(k)));
         await self.registration.unregister();

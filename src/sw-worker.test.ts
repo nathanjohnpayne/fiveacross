@@ -331,21 +331,28 @@ describe('the rescue (#514)', () => {
 });
 
 describe('the ACTIVE worker re-reads the floor (#515 Phase 4b P1)', () => {
-  it('promotes an already-waiting worker when the floor is armed LATER', async () => {
+  it('EVICTS rather than promoting a waiting worker, whose build it cannot vouch for', async () => {
     // The case the install-time check structurally cannot cover: this worker
     // installed while the floor was inert — the normal state, since that is
     // what it ships as — and is now serving. Arming the floor afterwards never
     // re-fires `install`, because `sw.js` is byte-identical, and the dead page
     // cannot message the waiting worker. Without this the lever would only work
     // alongside a redeploy, which is the coupling #342 exists to remove.
+    // Phase 4b P1 on #515: an active worker cannot read a waiting worker's
+    // build stamp, so promoting it could swap one condemned build for another —
+    // and the replacement would inherit the throttle record just written, so it
+    // would not re-evict for the full interval either. Eviction sidesteps the
+    // question: the next navigation goes to the network, which serves whatever
+    // is deployed, necessarily at or above the floor.
     const w = installFakeWorker();
     const postMessage = vi.fn();
     w.self.registration.waiting = { postMessage };
     stubFloor(FLOOR_PAST_THIS_BUILD); // condemns the build this worker serves
     await import('./sw');
     await fireNavigation(w.handlers);
-    expect(postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' });
-    expect(w.self.registration.unregister).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(w.self.registration.unregister).toHaveBeenCalledOnce();
+    expect(w.deletedCaches).toEqual(['workbox-precache-v2-x']);
   });
 
   it('evicts itself when there is no replacement to promote', async () => {
