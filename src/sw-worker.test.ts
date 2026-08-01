@@ -36,9 +36,11 @@ function installFakeWorker() {
   const navigated: string[] = [];
   const clients = [{ url: 'https://gaycruisebingo.com/more', navigate: vi.fn(async (u: string) => navigated.push(u) )}];
   const self = {
-    addEventListener: (type: string, fn: (event: unknown) => void) => {
+    // A vi.fn so its `invocationCallOrder` can be compared against the workbox
+    // registrations — that ordering is load-bearing, see the #517 test below.
+    addEventListener: vi.fn((type: string, fn: (event: unknown) => void) => {
       handlers[type] = fn;
-    },
+    }),
     skipWaiting: vi.fn(async () => {}),
     registration: {
       active: {} as unknown,        // an existing shell, unless a test says otherwise
@@ -419,5 +421,49 @@ describe('a FIRST install is not a stranded shell (#515 Phase 4b P2)', () => {
     await import('./sw');
     await fire(w.handlers, 'install');
     expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+});
+
+describe('listener registration ORDER (#517)', () => {
+  it('registers the fetch listener BEFORE workbox touches routing', async () => {
+    // The bug this pins shipped to production and was invisible to every other
+    // test here. A `fetch` listener added AFTER workbox`s router never receives
+    // navigation events: once the router calls `event.respondWith()`, the
+    // browser stops dispatching that request to later listeners. Requests
+    // workbox does not handle still arrive, so the listener looked alive while
+    // the floor re-check silently never ran on a single navigation.
+    //
+    // Every other test in this file dispatches the handler by calling it
+    // directly, which proves its LOGIC and says nothing about whether the
+    // browser would ever hand it an event. This asserts the one property that
+    // decides that.
+    const w = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+
+    const addFetch = w.self.addEventListener.mock.calls
+      .map((c, i) => ({ type: c[0] as string, order: w.self.addEventListener.mock.invocationCallOrder[i] }))
+      .find((c) => c.type === 'fetch');
+    expect(addFetch, 'no fetch listener was registered at all').toBeDefined();
+
+    const workboxFirstTouch = Math.min(
+      precacheAndRoute.mock.invocationCallOrder[0] ?? Infinity,
+      registerRoute.mock.invocationCallOrder[0] ?? Infinity,
+    );
+    expect(workboxFirstTouch).toBeLessThan(Infinity);
+    expect(addFetch!.order).toBeLessThan(workboxFirstTouch);
+  });
+
+  it('the fetch handler reaches the floor record on a navigation', async () => {
+    // Behavioural companion to the ordering assertion: proves the handler runs
+    // end to end and persists its outcome, which is the side effect whose
+    // ABSENCE in production is how #517 was found.
+    const w = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    await fireNavigation(w.handlers);
+    const rec = w.cacheStore.get('/__gcb-floor-checked-at');
+    expect(rec, 'the navigation never reached recordFloorCheck').toBeDefined();
+    await expect(rec!.clone().json()).resolves.toMatchObject({ ok: true });
   });
 });
