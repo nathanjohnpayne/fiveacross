@@ -45,6 +45,65 @@ import {
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{ url: string; revision: string | null }> };
 
+// --- The active-worker floor re-check (#515 Phase 4b P1; rewired by #517) ----
+//
+// REGISTERED BEFORE WORKBOX, AND THAT ORDERING IS THE WHOLE FIX. A `fetch`
+// listener added AFTER workbox`s router never receives navigation events at
+// all: once the router calls `event.respondWith()`, the browser stops
+// dispatching that request to later listeners. Requests workbox does NOT handle
+// still arrive, which is why the original placement looked like it worked —
+// instrumenting the deployed worker showed it seeing `cors` and `no-cors` and
+// never once `navigate`, so the re-check silently never ran in production
+// (#517). Moving the registration above `precacheAndRoute` is what makes
+// navigations visible; `sw-worker.test.ts` pins the order so it cannot drift.
+//
+// Why this event at all: a worker has no timers that survive termination, so
+// the re-check rides the navigation an ordinary reload already produces. It
+// never calls `respondWith`, so routing is untouched — workbox still serves the
+// request — and it is throttled by a PERSISTED timestamp, because a worker is
+// killed whenever it goes idle and an in-memory throttle would reset constantly.
+//
+// Why the re-check is needed: without it the floor lever only works paired with
+// a redeploy. A worker installs, reads the floor — inert, which is what it ships
+// as, so this is the normal case for every client — and settles into `waiting`.
+// Arming the floor afterwards changes nothing, because later update checks find
+// the same byte-identical `sw.js` and never dispatch `install` again, and a dead
+// page cannot message the waiting worker. #342 built `build-floor.json`
+// precisely so the emergency lever would NOT require a deploy.
+self.addEventListener('fetch', (event: FetchEvent) => {
+  if (event.request.mode !== 'navigate') return;
+  event.waitUntil(maybeRecheckFloor());
+});
+
+async function maybeRecheckFloor(): Promise<void> {
+  try {
+    if (!(await dueForFloorRecheck(caches, Date.now()))) return;
+    const floor = await fetchFloorWithRetry(fetch, () => Date.now(), { attempts: 1 });
+    // Record the OUTCOME, not merely the attempt: a failed read backs off for a
+    // minute, a successful one for the full interval, so one transient failure
+    // on the first navigation of an incident cannot silence every reload for
+    // half an hour.
+    await recordFloorCheck(caches, Date.now(), floor !== null);
+    if (!shouldActiveWorkerEvict(__BUILD_STAMP__, floor)) return;
+    try {
+      // ALWAYS evict; never promote a waiting worker. This worker cannot read
+      // that worker`s build stamp, so a floor newer than both would swap one
+      // condemned build for another — and the replacement would inherit the
+      // throttle record just written. Going to the network sidesteps the
+      // comparison: whatever is deployed is necessarily at or above the floor.
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k.startsWith('workbox-precache')).map((k) => caches.delete(k)));
+      await self.registration.unregister();
+    } catch {
+      // Roll the throttle back to the short failure interval so the very next
+      // navigation retries, instead of waiting out the success window.
+      await recordFloorCheck(caches, Date.now(), false);
+    }
+  } catch {
+    /* a floor re-check must never interfere with serving the page */
+  }
+}
+
 precacheAndRoute(self.__WB_MANIFEST);
 cleanupOutdatedCaches();
 
@@ -163,66 +222,6 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
         );
       } catch {
         /* claim refused — the new shell is active regardless */
-      }
-    })(),
-  );
-});
-
-// The ACTIVE worker re-reads the floor as well (Phase 4b P1 on #515).
-//
-// Without this the lever only works when paired with a redeploy. A worker
-// installs, reads the floor — inert, which is what it ships as, so this is the
-// normal case for every client — and settles into `waiting`. Arming the floor
-// afterwards changes nothing, because later update checks find the same
-// byte-identical `sw.js` and never dispatch `install` again, and the dead page
-// cannot message the waiting worker. #342 built `build-floor.json` precisely so
-// the emergency lever would NOT require a deploy, and the spec claims that.
-//
-// A worker has no timers that survive termination, so this rides `fetch` — the
-// event an ordinary navigation already generates — throttled by a persisted
-// timestamp. It never calls `respondWith`, so routing is untouched: workbox's
-// own handlers still serve the request.
-self.addEventListener('fetch', (event: FetchEvent) => {
-  if (event.request.mode !== 'navigate') return;
-  event.waitUntil(
-    (async () => {
-      try {
-        if (!(await dueForFloorRecheck(caches, Date.now()))) return;
-        const floor = await fetchFloorWithRetry(fetch, () => Date.now(), { attempts: 1 });
-        // Record the OUTCOME, not merely the attempt (Phase 4b P2 on #515): a
-        // failed read backs off for a minute, a successful one for the full
-        // interval. Otherwise one transient failure on the first navigation of
-        // an incident silences every reload for half an hour.
-        await recordFloorCheck(caches, Date.now(), floor !== null);
-        if (!shouldActiveWorkerEvict(__BUILD_STAMP__, floor)) return;
-        // From here the eviction itself must also be retryable: a successful
-        // READ followed by a failed TEARDOWN would otherwise leave a condemned
-        // worker registered AND silenced for the full interval, which is the
-        // opposite of what the floor was armed to do (Phase 4b P2 on #515).
-        try {
-        // ALWAYS evict; never promote a waiting worker (Phase 4b P1 on #515).
-        // An earlier revision posted `SKIP_WAITING` to any waiting worker, which
-        // is unsound: this worker cannot read that worker's build stamp, so a
-        // floor newer than BOTH would swap one condemned build for another — and
-        // the replacement would inherit the throttle record this worker just
-        // wrote, so it would not re-evict for the full interval either.
-        //
-        // Evicting sidesteps the question entirely. Dropping the precache and
-        // unregistering sends the next navigation to the NETWORK, which serves
-        // whatever is currently deployed — necessarily at or above the floor,
-        // with no stamp comparison needed. Deliberately drastic, reachable only
-        // on an armed floor, and the same trade `src/shellRecovery.ts` makes
-        // client-side, `proof-media` spared included.
-          const keys = await caches.keys();
-          await Promise.all(keys.filter((k) => k.startsWith('workbox-precache')).map((k) => caches.delete(k)));
-          await self.registration.unregister();
-        } catch {
-          // Roll the throttle back to the short failure interval so the very
-          // next navigation retries, instead of waiting out the success window.
-          await recordFloorCheck(caches, Date.now(), false);
-        }
-      } catch {
-        /* a floor re-check must never interfere with serving the page */
       }
     })(),
   );
