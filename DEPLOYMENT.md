@@ -590,6 +590,31 @@ firebase hosting:releases:list
 firebase hosting:clone <site-id>:@<VERSION_ID> <site-id>:live
 ```
 
+## Emergency: evicting stale cached shells (the build floor)
+
+`public/build-floor.json` carries an ISO `floor` timestamp and ships **inert** (`1970-01-01T00:00:00.000Z`). Bump it only to force clients off a shell that is actively broken — the 2026-07-24 blank-screen incident being the case it exists for. Every client whose build is older than the floor is evicted; see `specs/app-update-reload-prompt.md` for the full mechanism.
+
+**Arm the floor BEFORE you deploy, not after. This ordering is load-bearing, not a preference.**
+
+```bash
+# 1. Set the floor to a timestamp NEWER than the broken build and NOT newer
+#    than the build you are about to ship, then commit it.
+$EDITOR public/build-floor.json
+
+# 2. Deploy. The new sw.js differs byte-wise, so every client installs it, and
+#    that install reads the floor you just armed.
+npm run deploy:hosting
+```
+
+Why the order matters. A client stranded on a broken shell is controlled by an **old** service worker — one built before the rescue existed, so it has no floor logic of its own. The only code that can rescue it is a *newly installing* worker, and a worker reads the floor exactly once, during `install`. So:
+
+- **Floor armed, then deploy** — the new worker installs, reads an armed floor, promotes itself, and navigates the dead tab. The cohort is rescued.
+- **Deploy, then arm the floor** — the new worker already installed under an inert floor and is now `waiting`. Later update checks find the same byte-identical `sw.js` and never re-run `install`, and the crashed page cannot message the waiting worker. Arming the floor now reaches nobody in that cohort until you deploy again.
+
+Once a client is running a build that carries the rescue, its **active** worker also re-reads the floor on ordinary navigations (throttled), so a later arming does reach it without a deploy. That covers future incidents. It cannot cover a cohort whose active worker predates the feature — hence the ordering above for the first use, and any incident where the stranded clients are on an older build.
+
+Reset the floor to `1970-01-01T00:00:00.000Z` and deploy once the incident is over, so it is not left armed against future builds.
+
 ## Post-Deployment Verification
 
 A synthetic check asserts the deployed app **actually mounts and renders its root**, not merely that Firebase Hosting returns `200` for the shell (issue #142). The 2026-07-09 outage (#141) was invisible to a 200-only check: the HTML shell and `<title>` loaded (`200 OK`) and only the client JS crashed on init (`auth/invalid-api-key`), leaving a blank page. The synthetic loads the live site in headless Chromium and fails unless the `GAY CRUISE BINGO` root heading renders and no Firebase init error or uncaught exception appears on load. It is load-and-assert only — it never signs in or writes, so it creates no Auth/Firestore/Storage side effects.

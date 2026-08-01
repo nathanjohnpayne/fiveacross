@@ -4,8 +4,10 @@ import {
   FORCED_FLAG_URL,
   SHELL_META_CACHE,
   UNKNOWN_ACTIVE_STAMP,
+  dueForFloorRecheck,
   fetchFloorInWorker,
   fetchFloorWithRetry,
+  recordFloorCheck,
   markForcedActivation,
   readActiveStamp,
   shouldForceActivate,
@@ -69,7 +71,11 @@ function fakeCacheStorage(initial?: unknown) {
   const store = new Map<string, Response>();
   if (initial !== undefined) store.set(ACTIVE_STAMP_URL, new Response(JSON.stringify(initial)));
   const cache = {
-    match: vi.fn(async (k: string) => store.get(k)),
+    // `.clone()` because a Response body can only be read ONCE, and the real
+    // Cache API hands back a fresh Response per `match`. Returning the stored
+    // instance made a second read throw on a locked body — a fixture artifact
+    // that looked exactly like a storage failure.
+    match: vi.fn(async (k: string) => store.get(k)?.clone()),
     put: vi.fn(async (k: string, v: Response) => {
       store.set(k, v);
     }),
@@ -301,5 +307,42 @@ describe('the forced-activation marker', () => {
 
   it('uses its own key, distinct from the active-stamp record', () => {
     expect(FORCED_FLAG_URL).not.toBe(ACTIVE_STAMP_URL);
+  });
+});
+
+describe('the active-worker floor throttle', () => {
+  it('is due when nothing has ever been recorded', async () => {
+    await expect(dueForFloorRecheck(fakeCacheStorage(), 1_000_000)).resolves.toBe(true);
+  });
+
+  it('stays quiet for the full interval after a SUCCESSFUL read', async () => {
+    const cs = fakeCacheStorage();
+    await recordFloorCheck(cs, 1_000_000, true);
+    await expect(dueForFloorRecheck(cs, 1_000_000 + 60_000)).resolves.toBe(false);
+    await expect(dueForFloorRecheck(cs, 1_000_000 + 31 * 60_000)).resolves.toBe(true);
+  });
+
+  it('backs off only briefly after a FAILED read', async () => {
+    // Phase 4b P2 on #515: recording the attempt before knowing the outcome let
+    // one transient ship-Wi-Fi failure on the first navigation of an incident
+    // silence every subsequent reload for half an hour — the worst possible
+    // half hour to be silent in.
+    const cs = fakeCacheStorage();
+    await recordFloorCheck(cs, 1_000_000, false);
+    await expect(dueForFloorRecheck(cs, 1_000_000 + 30_000)).resolves.toBe(false);
+    await expect(dueForFloorRecheck(cs, 1_000_000 + 61_000)).resolves.toBe(true);
+  });
+
+  it('treats a record with no outcome field as a success, so an upgrade does not probe every navigation', async () => {
+    const cs = fakeCacheStorage();
+    const cache = await cs.open(SHELL_META_CACHE);
+    await cache.put('/__gcb-floor-checked-at', new Response(JSON.stringify({ at: 1_000_000 })));
+    await expect(dueForFloorRecheck(cs, 1_000_000 + 60_000)).resolves.toBe(false);
+  });
+
+  it('fails closed when storage refuses, rather than probing on every navigation', async () => {
+    const broken = { open: async () => Promise.reject(new Error('blocked')) } as unknown as CacheStorage;
+    await expect(dueForFloorRecheck(broken, 1)).resolves.toBe(false);
+    await expect(recordFloorCheck(broken, 1, true)).resolves.toBeUndefined();
   });
 });

@@ -44,32 +44,53 @@ export const FLOOR_CHECKED_URL = '/__gcb-floor-checked-at';
  *  becoming a request on every page load. */
 export const FLOOR_RECHECK_INTERVAL_MS = 30 * 60_000;
 
+/** Backoff after a FAILED read, kept short on purpose — see below. */
+export const FLOOR_RECHECK_FAILURE_INTERVAL_MS = 60_000;
+
 /**
- * True when the active worker is due another floor read, recording the attempt
- * as it answers. Persisted, because a service worker is terminated whenever it
- * goes idle — an in-memory timestamp would reset constantly and turn the
- * throttle into no throttle at all.
+ * True when the active worker is due another floor read. Read-only: the outcome
+ * is recorded separately by `recordFloorCheck`, because a failed probe must not
+ * buy the same silence a successful one does (Phase 4b P2 on #515).
  *
- * Fails to `false` when storage refuses: an un-throttleable check is worse than
- * a missed one, since the floor is armed only during an incident anyway.
+ * Persisting the timestamp before knowing the outcome meant one transient
+ * ship-Wi-Fi failure on the first navigation of an incident silenced every
+ * subsequent reload for the full half hour, even if connectivity returned a
+ * second later — the worst possible half hour to be silent in. A failed read
+ * now backs off for a minute; only a successful one takes the long interval.
+ *
+ * Fails to `false` when storage refuses: an un-throttleable check that probes on
+ * every navigation is worse than a missed one, since the floor is armed only
+ * during an incident anyway.
  */
 export async function dueForFloorRecheck(
   cacheStorage: CacheStorage,
   now: number,
   intervalMs = FLOOR_RECHECK_INTERVAL_MS,
+  failureIntervalMs = FLOOR_RECHECK_FAILURE_INTERVAL_MS,
 ): Promise<boolean> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
     const hit = await cache.match(FLOOR_CHECKED_URL);
-    if (hit) {
-      const body: unknown = await hit.json();
-      const at = (body as { at?: unknown } | null)?.at;
-      if (typeof at === 'number' && now - at < intervalMs) return false;
-    }
-    await cache.put(FLOOR_CHECKED_URL, new Response(JSON.stringify({ at: now })));
-    return true;
+    if (!hit) return true;
+    const body = (await hit.json()) as { at?: unknown; ok?: unknown } | null;
+    const at = body?.at;
+    if (typeof at !== 'number') return true;
+    // A record with no explicit `ok` predates this distinction — treat it as a
+    // success so an upgrade cannot start probing on every navigation.
+    const wait = body?.ok === false ? failureIntervalMs : intervalMs;
+    return now - at >= wait;
   } catch {
     return false;
+  }
+}
+
+/** Records the outcome of a floor read, which is what the throttle keys off. */
+export async function recordFloorCheck(cacheStorage: CacheStorage, now: number, ok: boolean): Promise<void> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    await cache.put(FLOOR_CHECKED_URL, new Response(JSON.stringify({ at: now, ok })));
+  } catch {
+    /* storage refused — `dueForFloorRecheck` fails closed on the same failure */
   }
 }
 

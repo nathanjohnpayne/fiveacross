@@ -34,6 +34,7 @@ import {
   clearForcedActivation,
   dueForFloorRecheck,
   fetchFloorWithRetry,
+  recordFloorCheck,
   markForcedActivation,
   readActiveStamp,
   shouldActiveWorkerEvict,
@@ -188,6 +189,11 @@ self.addEventListener('fetch', (event: FetchEvent) => {
       try {
         if (!(await dueForFloorRecheck(caches, Date.now()))) return;
         const floor = await fetchFloorWithRetry(fetch, () => Date.now(), { attempts: 1 });
+        // Record the OUTCOME, not merely the attempt (Phase 4b P2 on #515): a
+        // failed read backs off for a minute, a successful one for the full
+        // interval. Otherwise one transient failure on the first navigation of
+        // an incident silences every reload for half an hour.
+        await recordFloorCheck(caches, Date.now(), floor !== null);
         if (!shouldActiveWorkerEvict(__BUILD_STAMP__, floor)) return;
         const waiting = self.registration.waiting;
         if (waiting) {
