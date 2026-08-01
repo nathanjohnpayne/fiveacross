@@ -2,12 +2,6 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
-import {
-  PROOF_MEDIA_URL_PATTERN,
-  PROOF_MEDIA_CACHE_NAME,
-  PROOF_MEDIA_CACHE_MAX_ENTRIES,
-  PROOF_MEDIA_CACHE_MAX_AGE_SECONDS,
-} from './src/data/proofMediaCache';
 
 function appVersion(): string {
   if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA.slice(0, 40);
@@ -69,6 +63,17 @@ export default defineConfig(({ command, mode }) => {
         // precache out from under a live session with no reload, leaving stale
         // code running (and old hashed chunks 404-able) until a manual restart.
         registerType: 'prompt',
+        // #514: `injectManifest` because the worker now carries LOGIC — an
+        // install-time build-floor check that can promote itself with no page
+        // cooperation, which is the only way to reach a client whose React tree
+        // has already crashed (see src/sw.ts and src/sw-rescue.ts). The
+        // generated worker had nowhere to put that. Everything generateSW used
+        // to do for us is ported verbatim in src/sw.ts, ticket references
+        // included, because silently dropping one of those behaviours is the
+        // real hazard of hand-rolling this file.
+        strategies: 'injectManifest',
+        srcDir: 'src',
+        filename: 'sw.ts',
         includeAssets: ['favicon.svg', 'og-default.png', 'apple-touch-icon.png'],
         manifest: {
           name: 'Gay Cruise Bingo',
@@ -89,35 +94,17 @@ export default defineConfig(({ command, mode }) => {
             { src: 'pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
           ]
         },
-        workbox: {
-          globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
-          navigateFallback: 'index.html',
-          // Never intercept Firebase Hosting's reserved /__/* namespace: the
-          // Google sign-in popup navigates to /__/auth/handler (same origin),
-          // and without this denylist the navigation fallback serves the SPA
-          // shell into the popup instead of the OAuth handler, dead-ending
-          // sign-in for every SW-controlled signed-out client (#182).
-          navigateFallbackDenylist: [/^\/__\//],
-          // #363: cache proof media (immutable Storage objects — see
-          // src/data/proofMediaCache.ts) so Feed photos stop refetching on
-          // every visit and survive offline revisits. CacheFirst because the
-          // objects never change; statuses [0, 200] because <img> loads are
-          // no-cors and the cross-origin responses are opaque (status 0).
-          runtimeCaching: [
-            {
-              urlPattern: PROOF_MEDIA_URL_PATTERN,
-              handler: 'CacheFirst',
-              options: {
-                cacheName: PROOF_MEDIA_CACHE_NAME,
-                expiration: {
-                  maxEntries: PROOF_MEDIA_CACHE_MAX_ENTRIES,
-                  maxAgeSeconds: PROOF_MEDIA_CACHE_MAX_AGE_SECONDS,
-                  purgeOnQuotaError: true
-                },
-                cacheableResponse: { statuses: [0, 200] }
-              }
-            }
-          ]
+        // Under `injectManifest` this block only decides WHAT gets precached;
+        // the routing that used to live here (navigation fallback + its /__/*
+        // denylist #182, and the proof-media CacheFirst #363) now lives in
+        // src/sw.ts, which is the file to read and the file to keep in sync.
+        //
+        // The glob deliberately still excludes `.json`, which is what keeps
+        // `/build-floor.json` OUT of the precache: the floor is the one file a
+        // stale shell must be able to read fresh, and precaching it would let a
+        // stale worker answer its own eviction notice.
+        injectManifest: {
+          globPatterns: ['**/*.{js,css,html,svg,png,woff2}']
         }
       })
     ],

@@ -1,7 +1,11 @@
 // proofMediaCache — the single source of truth for how proof media is cached
-// client-side (#363). Zero-dependency on purpose: vite.config.ts imports these
+// client-side (#363). Zero-dependency on purpose: src/sw.ts imports these
 // constants to build the service worker's runtime-caching route, so this module
-// must never pull in firebase (or anything browser-only) at import time.
+// must never pull in firebase (or anything browser-only) at import time — it is
+// pulled into the SERVICE WORKER bundle, where nothing browser-only exists.
+// (The importer was vite.config.ts until #514 moved the route into the
+// hand-written worker; the zero-dependency constraint is unchanged and is now
+// load-bearing for a second reason.)
 //
 // Proof media is immutable by construction: each object lives at
 // proofs/{eventId}/{uid}/{proofId}.{ext} — a path unique per Proof that is
