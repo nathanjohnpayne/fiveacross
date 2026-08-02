@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Gay Cruise Bingo — live multiplayer bingo PWA (Phase 0).",
+  "engines": {
+    "node": ">=22.22.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -161,6 +161,7 @@ If two machines need different template structure, resolve it like normal source
 
 ## Prerequisites
 
+- Node 22.22 or newer — a deploy builds the bundle locally, and the root `package.json` declares `engines.node: >=22.22.0` (`react-router` 8 sets the floor). npm only warns on a mismatch, so an older Node will happily build and publish on an unsupported engine; `.nvmrc` pins the major for `nvm use`.
 - [Firebase CLI](https://firebase.google.com/docs/cli) (`firebase-tools`) installed globally
 - [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (`gcloud`) installed
 - [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) installed and signed in
