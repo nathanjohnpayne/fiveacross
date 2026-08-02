@@ -1,5 +1,7 @@
 # Gay Cruise Bingo
 
+<!-- scratch probe for mergepath#845 fact-gathering; PR will be closed, no merge -->
+
 A live, multiplayer bingo web app (PWA) to play with your friends on a gay cruise. Sign in, get a randomized card of things that might happen on the sailing, and mark them off as they go down — with a shared leaderboard, party themes, PWA install, and printed cards as the offline fallback.
 
 **Live:** https://gaycruisebingo.web.app · **Setup & runbook:** [`docs/app/README.md`](docs/app/README.md)

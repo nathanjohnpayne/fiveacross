@@ -1,0 +1,47 @@
+name: canary-845-probe
+
+# Scratch, throwaway workflow for mergepath#845 fact-gathering (FACT 2: does a
+# PENDING required check actually block merge?). Scoped to this file's own
+# path so it only fires on the scratch PR that introduces it. The PR will be
+# closed and this branch deleted; nothing here is meant to reach main.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/canary-845-probe.yml"
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST in_progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api repos/${{ github.repository }}/check-runs \
+            -f name="Merge clearance gate" \
+            -f head_sha="$HEAD_SHA" \
+            -f status="in_progress" \
+            -f "output[title]=canary-845-probe" \
+            -f "output[summary]=scratch probe pending window for mergepath#845" \
+            --jq '.id' > check_run_id.txt
+          echo "check_run_id=$(cat check_run_id.txt)" >> "$GITHUB_OUTPUT"
+        id: post
+
+      - name: Pending window (measurement slot)
+        run: sleep 180
+
+      - name: PATCH conclusion=success
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH repos/${{ github.repository }}/check-runs/${{ steps.post.outputs.check_run_id }} \
+            -f status="completed" \
+            -f conclusion="success" \
+            -f "output[title]=canary-845-probe" \
+            -f "output[summary]=scratch probe closed for mergepath#845"
