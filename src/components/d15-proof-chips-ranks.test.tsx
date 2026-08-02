@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
 
 // specs/d15-proof-chips-ranks.md, RTL/jsdom layer (#218). Hook filtering is
@@ -9,8 +9,8 @@ import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
 // precedent mirrors w2-leaderboard.test.tsx.
 
 const navigateMock = vi.fn();
-vi.mock('react-router-dom', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('react-router-dom')>();
+vi.mock('react-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router')>();
   return { ...actual, useNavigate: () => navigateMock };
 });
 

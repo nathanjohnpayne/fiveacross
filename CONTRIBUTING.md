@@ -20,6 +20,8 @@ If code conflicts with a spec, or a change would violate [`rules/repo_rules.md`]
 
 Full setup (env mapping, seeding, custom domain) lives in the [app guide §2–3](docs/app/README.md). The short version:
 
+**Node 22.22 or newer is required** — `react-router` 8 declares `engines.node: >=22.22.0`, the root `package.json` declares the same floor, and `.nvmrc` pins the line so `nvm use` picks it up. npm only *warns* on a version mismatch, so an older Node lets the commands below run on an unsupported engine rather than stopping you. [`app-ci`](.github/workflows/app-ci.yml) runs on Node 22, which is what your local checks should match.
+
 ```bash
 cp .env.example .env.local     # fill from `firebase apps:sdkconfig WEB` — app guide §2
 npm install

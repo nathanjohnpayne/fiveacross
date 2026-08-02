@@ -20,7 +20,7 @@ const H = vi.hoisted(() => ({
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', analytics: null }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
-vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }));
+vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'me' }, loading: false }) }));
 vi.mock('../data/proofs', () => ({
   reportProof: vi.fn(() => Promise.resolve()),

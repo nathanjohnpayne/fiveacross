@@ -19,6 +19,8 @@ Vite + React 18 + TypeScript (strict) · Firebase (Auth · Firestore · Storage 
 
 The full setup — env, seeding, deploy, and custom domain — lives in the **[app guide](docs/app/README.md)**. The short version:
 
+**Node 22.22 or newer is required** (`react-router` 8 sets the floor; `.nvmrc` pins the line, so `nvm use` selects it). On an older Node, `npm install` warns via `EBADENGINE` and then lets every command below run anyway — the failures that follow are unsupported-engine failures, not bugs.
+
 ```bash
 cp .env.example .env.local     # fill from `firebase apps:sdkconfig WEB` — see app guide §2
 npm install

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { EventDoc } from '../types';
 import type { Cell } from '../types';
 

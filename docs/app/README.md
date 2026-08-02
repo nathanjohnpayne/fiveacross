@@ -43,6 +43,8 @@ Map the JSON fields into `.env.local`: `apiKey`→`VITE_FIREBASE_API_KEY`, `auth
 
 ## 3. Install & run
 
+**Node 22.22+.** `react-router` 8 declares `engines.node: >=22.22.0` and the root `package.json` mirrors that floor; `.nvmrc` pins the major so `nvm use` selects it. npm treats an engine mismatch as a warning rather than an error, so an older Node will install and run — on an unsupported engine — instead of stopping. The same floor applies to the deploy commands in §5, which build the bundle locally.
+
 ```bash
 npm install
 npm run dev        # local dev at http://localhost:5173

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Navigate, matchPath, useLocation, useNavigate } from 'react-router-dom';
+import { Navigate, matchPath, useLocation, useNavigate } from 'react-router';
 import { FALLBACK_PATH } from './tabs';
 import { Palette, CalendarDays, Lightbulb, GraduationCap, Download, Wrench, LogOut, ALargeSmall } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';

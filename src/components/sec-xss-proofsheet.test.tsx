@@ -42,7 +42,7 @@ vi.mock('../analytics', () => ({ track: H.track }));
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', analytics: null }));
 // ProofFeed navigates to the Card tab from Tally Card actions (#261); mock
 // the router hook so these router-free renders keep working.
-vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }));
+vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
 
 // ProofFeed reads the merged Feed via useFeed (#34); this XSS suite only exercises
 // Proof media sinks, so wrap H.proofs as proof Feed entries (no Moments).

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { DayDef, EventDoc, PlayerDoc } from '../types';
 
 // specs/d15-scoring-aggregates.md, RTL/jsdom layer. Leaderboard is presentational

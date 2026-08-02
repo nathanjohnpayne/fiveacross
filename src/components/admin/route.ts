@@ -1,4 +1,4 @@
-import { matchPath } from 'react-router-dom';
+import { matchPath } from 'react-router';
 
 /**
  * The admin console's route vocabulary (specs/admin-console-ia.md § "Routes").

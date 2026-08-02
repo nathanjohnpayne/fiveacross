@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { TABS, visibleTabs } from './tabs';
 import TabBar from './TabBar';
 

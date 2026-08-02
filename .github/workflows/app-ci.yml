@@ -27,7 +27,12 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          # 22, not 20: react-router 8 declares `engines.node: >=22.22.0`, so a
+          # Node 20 runner installs it under an EBADENGINE warning and runs the
+          # jsdom suite on an engine the router does not support. 22 also lines
+          # the runner up with the Cloud Functions runtime (functions/package.json
+          # `engines.node: 22`) and the synthetic-uptime workflow.
+          node-version: '22'
           cache: npm
 
       - name: Install dependencies
