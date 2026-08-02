@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MemoryRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, Navigate } from 'react-router';
 import { TABS, FALLBACK_PATH, visibleTabs, type TabId } from './tabs';
 import TabBar from './TabBar';
 
@@ -43,7 +43,7 @@ describe('visibleTabs', () => {
   });
 });
 
-// react-router-dom's NavLink/Navigate use useLayoutEffect internally, which
+// react-router's NavLink/Navigate use useLayoutEffect internally, which
 // logs React's stock "does nothing on the server" warning under
 // renderToStaticMarkup. Harmless here: every assertion below reads markup
 // produced by the synchronous render pass itself, not by the layout effect.

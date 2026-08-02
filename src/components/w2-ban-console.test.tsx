@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { EventDoc, ItemDoc, ProofDoc, PlayerDoc } from '../types';
 
 // specs/w2-ban-console.md, component layer (RTL-jsdom). Two surfaces:

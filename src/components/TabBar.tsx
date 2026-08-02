@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom';
+import { NavLink } from 'react-router';
 import { Grid3x3, Radio, Trophy, Ellipsis } from 'lucide-react';
 import { visibleTabs } from './tabs';
 import type { TabId } from './tabs';

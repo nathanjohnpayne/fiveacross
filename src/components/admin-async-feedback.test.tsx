@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { EventDoc, ItemDoc } from '../types';
 
 // specs/admin-async-feedback.md (#411), component layer (RTL-jsdom). Drives the

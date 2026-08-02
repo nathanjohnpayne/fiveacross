@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import type { EventDoc, ItemDoc, ProofDoc } from '../types';
 
 // specs/admin-console-ia.md, component layer (RTL-jsdom). Drives the REAL

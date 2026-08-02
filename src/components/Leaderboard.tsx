@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useLatestProofByUid, isBanned } from '../hooks/useData';
 import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/logic';
 import { THEMES } from '../theme/themes';

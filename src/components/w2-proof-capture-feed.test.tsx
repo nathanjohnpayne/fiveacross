@@ -48,7 +48,7 @@ vi.mock('../data/proofs', () => ({ reportProof: H.reportProof, deleteProof: H.de
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 // ProofFeed navigates to the Card tab from Tally Card actions (#261); mock
 // the router hook so these router-free renders keep working.
-vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }));
+vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
 
 import ProofFeed from './ProofFeed';

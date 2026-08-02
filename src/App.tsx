@@ -1,5 +1,5 @@
 import { type ReactElement } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router';
 import { useAuth } from './auth/AuthContext';
 import SignIn, { DealError } from './components/SignIn';
 import CachedCardFallback from './components/CachedCardFallback';

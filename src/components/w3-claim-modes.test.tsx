@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { User } from 'firebase/auth';
 import type { BoardDoc, Cell, ClaimDoc, EventDoc, PlayerDoc } from '../types';
 

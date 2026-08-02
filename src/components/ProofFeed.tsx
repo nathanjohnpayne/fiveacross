@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { Play, Pause, Heart } from 'lucide-react';
 import { useFeed, useEventDoc, useMyDayBoards, useAllDoubts, useAllHearts, useMyPlayer } from '../hooks/useData';
 import { requestOpenSquare } from '../hooks/useOpenSquare';

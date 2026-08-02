@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import type { DayDef, EventDoc, ItemDoc } from '../types';
 
 // specs/d15-approvals.md, component layer (RTL-jsdom). Drives the REAL Admin

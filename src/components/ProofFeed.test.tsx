@@ -38,7 +38,7 @@ vi.mock('firebase/firestore', () => {
 vi.mock('../data/proofs', () => ({ reportProof: vi.fn(), deleteProof: vi.fn() }));
 // ProofFeed's ＋ Proof / 🙋 Got it too navigate to the Card tab (#261); the
 // module mock keeps the default-export integration renders router-free.
-vi.mock('react-router-dom', () => ({ useNavigate: () => H.navigate }));
+vi.mock('react-router', () => ({ useNavigate: () => H.navigate }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
 // #392: keep the real pure derivations (openDoubts/doubtStatusFor/isDoubtSatisfied)
