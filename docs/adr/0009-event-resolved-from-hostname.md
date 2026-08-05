@@ -40,5 +40,6 @@ Four refinements the review surfaced, each stated because the naive version is t
 
 - Rules are `allow get: if true; allow list: if false` — resolvable, never enumerable.
 - `edition` on this document brands the **pre-auth shell** (`src/editions.ts`): the signed-out gate's wordmark, its one-line description, and its offline note. This is the surface that most needs it and the one an Event-doc answer arrives too late for — `events/{eventId}` requires `signedIn()`, so the Event doc cannot brand the screen whose job is to get you signed in.
+- The same table brands the **browser chrome** (#586) — document title, iOS home-screen label, PWA manifest names — but only a single-Event build can bake it, because `index.html` and the manifest are built once and the lookup answers per hostname. A hostname-resolved build corrects the title and the iOS label in the DOM after resolution and takes its manifest from the edge Worker (#546); the manifest is fetched as a file at install time, so it is the one part of the identity resolution cannot repair on its own.
 - The not-found branch renders the analytics disclosure alongside it. Analytics initialise at module scope, before resolution, so a visitor who never reaches the app has still been counted.
 - Renaming a Slug means repointing documents and deciding a redirect policy; addresses are durable by default.
