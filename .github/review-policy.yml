@@ -162,8 +162,36 @@ feedback_policy:
 # To reverse: set enabled: false, delete .coderabbit.yml, uninstall the
 # CodeRabbit GitHub App. All agent instructions use conditional language
 # and will skip Phase 2.5 automatically.
+#
+# DISABLED 2026-08-04 per operator request. CodeRabbit is advisory here — it
+# never carried the merge gate, which is Codex (Phase 4a) plus the automated
+# Phase 4b leg — but its rate-limit behavior made it the dominant source of
+# latency and stalls: it does not auto-retry after its window elapses, so
+# `coderabbit-wait.sh` had to parse the published window, sleep it, and
+# re-trigger (#138), with a measured p99 review latency of ~19 minutes and a
+# 1245s poll ceiling (#623) on every PR. Its unresolved threads also count
+# toward branch protection's conversation-resolution gate, so an advisory bot
+# could block a merge outright.
+#
+# Review path after this change: `@codex review` (Phase 4a) on every PR, with
+# the automated Phase 4b cross-agent leg where the classifier calls for it.
+#
+# The repo-level opt-out is `.coderabbit.yml`'s `reviews.auto_review.enabled:
+# false` — CodeRabbit's documented way to disable auto-review for a repository
+# (docs.coderabbit.ai/configuration/auto-review). DELETING the file does not
+# achieve this: `auto_review.enabled` defaults to TRUE, so an absent config
+# means "review everything", not "review nothing". The file is therefore kept
+# with the flag off, paired with `coderabbit.enabled: false` here so the agent
+# also stops waiting on Phase 2.5.
+#
+# `scripts/ci/check_coderabbit_config` originally failed that pairing: its
+# safety-posture floor rejects a present file with the flag off, because a lone
+# flip "silently turns CodeRabbit off". That reasoning does not apply to a
+# PAIRED opt-out, which is explicit in review-policy.yml — the same argument the
+# gate already accepts for the file-absent case (#248). The gate now treats the
+# paired form as valid; see .sync-overrides.yml for the propagation exception.
 coderabbit:
-  enabled: true
+  enabled: false
 
   # GitHub login of the CodeRabbit bot. Comments by this login are what
   # `scripts/coderabbit-wait.sh` filters on when classifying PR activity.
@@ -432,9 +460,9 @@ codex:
   cli_login: nathanpayne-codex
 
   # Maximum number of `@codex review` rounds before escalating as runaway.
-  # The 3rd round trips the guard. Normal termination is either approval,
+  # The 6th round trips the guard. Normal termination is either approval,
   # disagreement (repeat-after-rebuttal), or timeout → Phase 4b fallback.
-  max_review_rounds: 2
+  max_review_rounds: 5
 
   # Poll timeout per round, in seconds, for `codex-review-request.sh`.
   # If Codex has not posted a review within this window, treat as timeout
@@ -696,7 +724,7 @@ phase_4b_automation:
   # Declarative cap for callers that loop this one-review-round helper after
   # CHANGES_REQUESTED. The reference orchestrator performs one adapter pass per
   # invocation and does not persist round state.
-  max_review_rounds: 2
+  max_review_rounds: 5
 
   # Fail closed: an ambiguous / non-schema-conformant adapter verdict must
   # NEVER become an APPROVED. The orchestrator falls back to the manual

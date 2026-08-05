@@ -321,10 +321,10 @@ export const ITEMS = [
 ];
 
 // The two curated tutorial pools (daily-cards-spec § "Tutorial item lists"), the
-// SAME content as `EMBARK_ITEMS`/`FAREWELL_ITEMS` in `src/data/seed.ts`; kept as
+// SAME content as `EASY_ITEMS`/`CLOSING_ITEMS` in `src/data/seed.ts`; kept as
 // separate literals here for the same no-cross-module-import reason as ITEMS
 // above. `src/data/seed-and-composition.test.ts` asserts they stay in sync.
-export const EMBARK_ITEMS = [
+export const EASY_ITEMS = [
   { text: `Get your favorite dessert`, spicy: false, pool: 'embark' },
   { text: `Find your muster station`, spicy: false, pool: 'embark' },
   { text: `Get lost finding your cabin`, spicy: false, pool: 'embark' },
@@ -355,7 +355,7 @@ export const EMBARK_ITEMS = [
   { text: `Overhear someone already complaining`, spicy: false, pool: 'embark' },
 ];
 
-export const FAREWELL_ITEMS = [
+export const CLOSING_ITEMS = [
   { text: `One last sunrise or sunset photo`, spicy: false, pool: 'farewell' },
   { text: `Say goodbye to your cruise boyfriend`, spicy: false, pool: 'farewell' },
   { text: `Exchange numbers with your new best friend`, spicy: false, pool: 'farewell' },
@@ -398,7 +398,7 @@ export function seedItemDocId(text) {
 // tagged). Curated pools are seeded `status: 'active'` directly (no
 // pending-approval gate — that gate is `main`-only, per daily-cards-spec §
 // "Item pools and the approval flow").
-export const ALL_ITEMS = [...ITEMS, ...EMBARK_ITEMS, ...FAREWELL_ITEMS];
+export const ALL_ITEMS = [...ITEMS, ...EASY_ITEMS, ...CLOSING_ITEMS];
 
 export function seedItemMutations(existingDocs, now = Date.now(), pool = ALL_ITEMS) {
   return {

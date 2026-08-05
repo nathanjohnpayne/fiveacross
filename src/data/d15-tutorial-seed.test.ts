@@ -1,59 +1,59 @@
 import { describe, it, expect } from 'vitest';
-import { DAYS, EMBARK_ITEMS, FAREWELL_ITEMS, SEED_ITEMS } from './seed';
-import { EVENT_SEED, EMBARK_ITEMS as SCRIPT_EMBARK_ITEMS, FAREWELL_ITEMS as SCRIPT_FAREWELL_ITEMS } from '../../scripts/seed.mjs';
+import { DAYS, EASY_ITEMS, CLOSING_ITEMS, SEED_ITEMS } from './seed';
+import { EVENT_SEED, EASY_ITEMS as SCRIPT_EASY_ITEMS, CLOSING_ITEMS as SCRIPT_CLOSING_ITEMS } from '../../scripts/seed.mjs';
 
 // Covers specs/d15-tutorial-seed.md (#207): the two curated tutorial pools
 // (embark/farewell, 28 entries each) and the ten-Day `EventDoc.timezone`/`days[]`
 // mapping, per plans/daily-cards-spec.md § "Tutorial item lists", "Itinerary and
 // schedule", and "Free space per day".
 
-describe('EMBARK_ITEMS — the curated Welcome Aboard pool (28)', () => {
+describe('EASY_ITEMS — the curated Welcome Aboard pool (28)', () => {
   it('has exactly 28 entries, all tame, all tagged pool: embark', () => {
-    expect(EMBARK_ITEMS).toHaveLength(28);
-    expect(EMBARK_ITEMS.every((i) => i.spicy === false)).toBe(true);
-    expect(EMBARK_ITEMS.every((i) => i.pool === 'embark')).toBe(true);
+    expect(EASY_ITEMS).toHaveLength(28);
+    expect(EASY_ITEMS.every((i) => i.spicy === false)).toBe(true);
+    expect(EASY_ITEMS.every((i) => i.pool === 'embark')).toBe(true);
   });
 
   it('has no duplicate text within the pool', () => {
-    expect(new Set(EMBARK_ITEMS.map((i) => i.text)).size).toBe(28);
+    expect(new Set(EASY_ITEMS.map((i) => i.text)).size).toBe(28);
   });
 });
 
-describe('FAREWELL_ITEMS — the curated So Long, Farewell pool (28)', () => {
+describe('CLOSING_ITEMS — the curated So Long, Farewell pool (28)', () => {
   it('has exactly 28 entries, all tame, all tagged pool: farewell', () => {
-    expect(FAREWELL_ITEMS).toHaveLength(28);
-    expect(FAREWELL_ITEMS.every((i) => i.spicy === false)).toBe(true);
-    expect(FAREWELL_ITEMS.every((i) => i.pool === 'farewell')).toBe(true);
+    expect(CLOSING_ITEMS).toHaveLength(28);
+    expect(CLOSING_ITEMS.every((i) => i.spicy === false)).toBe(true);
+    expect(CLOSING_ITEMS.every((i) => i.pool === 'farewell')).toBe(true);
   });
 
   it('has no duplicate text within the pool', () => {
-    expect(new Set(FAREWELL_ITEMS.map((i) => i.text)).size).toBe(28);
+    expect(new Set(CLOSING_ITEMS.map((i) => i.text)).size).toBe(28);
   });
 });
 
-describe('EMBARK_ITEMS / FAREWELL_ITEMS — no cross-pool or main-pool duplicates', () => {
+describe('EASY_ITEMS / CLOSING_ITEMS — no cross-pool or main-pool duplicates', () => {
   it('has no duplicate text across embark and farewell', () => {
-    const combined = [...EMBARK_ITEMS.map((i) => i.text), ...FAREWELL_ITEMS.map((i) => i.text)];
+    const combined = [...EASY_ITEMS.map((i) => i.text), ...CLOSING_ITEMS.map((i) => i.text)];
     expect(new Set(combined).size).toBe(56);
   });
 
   it('has no duplicate text against the frozen main pool (SEED_ITEMS)', () => {
     const mainTexts = new Set(SEED_ITEMS.map((i) => i.text));
-    for (const item of [...EMBARK_ITEMS, ...FAREWELL_ITEMS]) {
+    for (const item of [...EASY_ITEMS, ...CLOSING_ITEMS]) {
       expect(mainTexts.has(item.text)).toBe(false);
     }
   });
 });
 
 describe('scripts/seed.mjs — tutorial pool literals stay in sync with src/data/seed.ts', () => {
-  it('exports the same 28-entry EMBARK_ITEMS as src/data/seed.ts', () => {
-    expect(SCRIPT_EMBARK_ITEMS.length).toBe(28);
-    expect(SCRIPT_EMBARK_ITEMS).toEqual(EMBARK_ITEMS);
+  it('exports the same 28-entry EASY_ITEMS as src/data/seed.ts', () => {
+    expect(SCRIPT_EASY_ITEMS.length).toBe(28);
+    expect(SCRIPT_EASY_ITEMS).toEqual(EASY_ITEMS);
   });
 
-  it('exports the same 28-entry FAREWELL_ITEMS as src/data/seed.ts', () => {
-    expect(SCRIPT_FAREWELL_ITEMS.length).toBe(28);
-    expect(SCRIPT_FAREWELL_ITEMS).toEqual(FAREWELL_ITEMS);
+  it('exports the same 28-entry CLOSING_ITEMS as src/data/seed.ts', () => {
+    expect(SCRIPT_CLOSING_ITEMS.length).toBe(28);
+    expect(SCRIPT_CLOSING_ITEMS).toEqual(CLOSING_ITEMS);
   });
 });
 

@@ -35,7 +35,7 @@ import { expect, type Page } from '@playwright/test';
 import { seedEmulatorEvent } from './seed';
 import { EVENT_ID } from './env';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
-import { ITEMS, EMBARK_ITEMS, FAREWELL_ITEMS, seedItemDocId } from '../../../scripts/seed.mjs';
+import { ITEMS, EASY_ITEMS, CLOSING_ITEMS, seedItemDocId } from '../../../scripts/seed.mjs';
 
 const HOUR = 3_600_000;
 
@@ -71,8 +71,8 @@ export async function seedDailyEvent(
   const farewellUnlockAt =
     opts.frozenAt != null || opts.farewellUnlocked === true ? now - 2 * HOUR : now + 48 * HOUR;
   const mainSnapshotIds = idsOf(ITEMS as SeedItem[]);
-  const embarkSnapshotIds = idsOf(EMBARK_ITEMS as SeedItem[]);
-  const farewellSnapshotIds = idsOf(FAREWELL_ITEMS as SeedItem[]);
+  const embarkSnapshotIds = idsOf(EASY_ITEMS as SeedItem[]);
+  const farewellSnapshotIds = idsOf(CLOSING_ITEMS as SeedItem[]);
 
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
@@ -81,8 +81,8 @@ export async function seedDailyEvent(
     // must exist. pool is stamped for fidelity; dealDayCard reads only
     // text/spicy/isFreeSpace (pool membership is the snapshot itself).
     for (const { items, pool } of [
-      { items: EMBARK_ITEMS as SeedItem[], pool: 'embark' },
-      { items: FAREWELL_ITEMS as SeedItem[], pool: 'farewell' },
+      { items: EASY_ITEMS as SeedItem[], pool: 'embark' },
+      { items: CLOSING_ITEMS as SeedItem[], pool: 'farewell' },
     ]) {
       for (const it of items) {
         await setDoc(doc(db, 'events', EVENT_ID, 'items', seedItemDocId(it.text)), {

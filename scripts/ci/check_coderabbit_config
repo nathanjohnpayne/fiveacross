@@ -142,11 +142,29 @@ fi
 posture_fail=0
 
 auto_review_enabled=$(yq -r '.reviews.auto_review.enabled' "$CONFIG" 2>/dev/null || echo "null")
-if [ "$auto_review_enabled" = "false" ]; then
+if [ "$auto_review_enabled" = "false" ] && [ "$coderabbit_enabled" != "false" ]; then
   echo "FAIL: reviews.auto_review.enabled is false — CodeRabbit auto-review is disabled."
   echo "      Default is true; remove the override. If this repo truly opts out of CodeRabbit,"
-  echo "      set 'coderabbit.enabled: false' in .github/review-policy.yml AND delete .coderabbit.yml."
+  echo "      ALSO set 'coderabbit.enabled: false' in .github/review-policy.yml so the opt-out is"
+  echo "      paired and explicit rather than a silent unilateral flip."
   posture_fail=1
+elif [ "$auto_review_enabled" = "false" ]; then
+  # PAIRED OPT-OUT — the deliberate, documented form of disabling CodeRabbit.
+  #
+  # The floor above exists because a lone flip "silently turns CodeRabbit off"
+  # and nothing else would catch it. That reasoning does not apply when
+  # review-policy.yml ALSO declares `coderabbit.enabled: false`: the opt-out is
+  # then explicit, agent-visible, and reviewed — exactly the argument this gate
+  # already accepts for the file-absent case above (#248).
+  #
+  # Deleting the file is NOT an equivalent opt-out. CodeRabbit documents
+  # `reviews.auto_review.enabled` as defaulting to TRUE, so an absent config
+  # means "review every eligible PR". A repo that deletes the file to satisfy
+  # this gate ends up with the App still reviewing while its agents skip Phase
+  # 2.5 — unwatched threads accruing against the conversation-resolution gate.
+  # Accepting the paired form is what makes the documented opt-out reachable.
+  # Local patch pending upstream fix: nathanjohnpayne/mergepath#911.
+  echo "check_coderabbit_config: NOTE (reviews.auto_review.enabled=false paired with coderabbit.enabled=false — deliberate repo-level opt-out)"
 fi
 
 request_changes=$(yq -r '.reviews.request_changes_workflow' "$CONFIG" 2>/dev/null || echo "null")

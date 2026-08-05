@@ -540,7 +540,7 @@ export function firstLineCompletionAt(cells: Cell[]): number | undefined {
  * stamp the acted-day fold deliberately left alone. Root `blackout` is true
  * when ANY board touched by this write completes (ticket: "blackout if any
  * board completes"); root sums/exclusions reuse `sumDayStats` /
- * `cruiseFirstBingoAt` so the tutorial and ceremonial rules hold unchanged.
+ * `eventFirstBingoAt` so the tutorial and ceremonial rules hold unchanged.
  */
 export function foldEchoStats(params: {
   priorDayStats: DayStats | undefined;
@@ -623,7 +623,7 @@ export function foldEchoStats(params: {
   // clobber the server's earlier value). With no base (deal/reconcile paths)
   // the prior view came from a real read, so the root always writes.
   if (!base || 'firstBingoAt' in base) {
-    out.firstBingoAt = cruiseFirstBingoAt(merged, isTutorialDay);
+    out.firstBingoAt = eventFirstBingoAt(merged, isTutorialDay);
   }
   return out;
 }
@@ -828,7 +828,7 @@ export function sumDayStats(
  *  #505 adds the THIRD root dimension the same fold rewrites: `firstBingoAt`,
  *  `comparePlayers`' third Leaderboard tie-break. Dominance for a timestamp
  *  runs the other way — EARLIER is more — so the bucket-derived earliest
- *  (`cruiseFirstBingoAt` over the row's own buckets, tutorial-excluded to
+ *  (`eventFirstBingoAt` over the row's own buckets, tutorial-excluded to
  *  mirror the fold's root derivation and ceremonial-excluded for the same
  *  #265 conservatism the sums carry) must be no LATER than the root's stamp.
  *  A root stamp that PREDATES every bucket's evidence is a legacy/hybrid row
@@ -851,7 +851,7 @@ export function playerRowRootLag(
   const bucketSum = sumDayStats(row.dayStats, isCeremonialDay);
   const rootSquares = row.squaresMarked ?? 0;
   const rootBingos = row.bingoCount ?? 0;
-  const bucketFirst = cruiseFirstBingoAt(
+  const bucketFirst = eventFirstBingoAt(
     row.dayStats,
     (i: number) => (isTutorialDay?.(i) ?? false) || (isCeremonialDay?.(i) ?? false),
   );
@@ -871,12 +871,11 @@ export function playerRowRootLag(
   return countsDominate && firstDominates && strictlyExceeds;
 }
 
-/** The cruise-wide First to BINGO time: the earliest `firstBingoAt` across the
- *  MAIN-GAME Days only — tutorial Days are excluded even when their bingo is
- *  numerically earlier (the embark card is trivially easy and live before anyone
- *  boards, so it must never decide the headline honor). Returns `null` when no
- *  main-game Day carries a first bingo. */
-export function cruiseFirstBingoAt(
+/** The Event-wide First to BINGO time: the earliest `firstBingoAt` across
+ *  non-Tutorial Days only. Tutorial Days are excluded even when their bingo is
+ *  numerically earlier, regardless of the pool they draw from. Returns `null`
+ *  when no non-Tutorial Day carries a first bingo. */
+export function eventFirstBingoAt(
   dayStats: DayStats | undefined,
   isTutorialDay: (dayIndex: number) => boolean,
 ): number | null {
@@ -889,9 +888,10 @@ export function cruiseFirstBingoAt(
   return earliest;
 }
 
-/** Derive a Player's cruise-wide root totals from their per-Day `dayStats`:
- *  bingos/squares summed over all Days, First to BINGO restricted to main-game
- *  Days. This is exactly the `PlayerDoc` root shape the Leaderboard ranks on. */
+/** Derive a Player's Event-wide root totals from their per-Day `dayStats`:
+ *  bingos/squares summed over all Days, First to BINGO restricted to
+ *  non-Tutorial Days. This is exactly the `PlayerDoc` root shape the
+ *  Leaderboard ranks on. */
 export function aggregatePlayerStats(
   dayStats: DayStats | undefined,
   isTutorialDay: (dayIndex: number) => boolean,
@@ -899,7 +899,7 @@ export function aggregatePlayerStats(
 ): DayStat {
   return {
     ...sumDayStats(dayStats, isCeremonialDay),
-    firstBingoAt: cruiseFirstBingoAt(dayStats, isTutorialDay),
+    firstBingoAt: eventFirstBingoAt(dayStats, isTutorialDay),
   };
 }
 
@@ -916,14 +916,14 @@ export function effectiveCruiseFirstBingoAt(
   isTutorialDay: (dayIndex: number) => boolean,
 ): number | null {
   if (player.dayStats && Object.keys(player.dayStats).length > 0) {
-    return cruiseFirstBingoAt(player.dayStats, isTutorialDay);
+    return eventFirstBingoAt(player.dayStats, isTutorialDay);
   }
   return player.firstBingoAt;
 }
 
-/** The uid of the cruise-wide First to BINGO holder across a roster — the
- *  earliest effective (tutorial-excluded) first bingo. `undefined` when nobody
- *  holds a qualifying main-game bingo. */
+/** The uid of the Event-wide First to BINGO holder across a roster — the
+ *  earliest effective Tutorial-excluded first bingo. `undefined` when nobody
+ *  holds a qualifying non-Tutorial bingo. */
 export function cruiseFirstBingoUid(
   players: readonly PlayerDoc[],
   isTutorialDay: (dayIndex: number) => boolean,
@@ -999,7 +999,7 @@ export function foldDayStat(params: {
     blackout: boolean;
     firstBingoAt?: number | null;
   } = { dayStats: { [dayIndex]: dayBucket }, bingoCount, squaresMarked, blackout };
-  if (!preserve) out.firstBingoAt = cruiseFirstBingoAt(merged, isTutorialDay);
+  if (!preserve) out.firstBingoAt = eventFirstBingoAt(merged, isTutorialDay);
   return out;
 }
 

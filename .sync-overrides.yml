@@ -1,0 +1,32 @@
+# Per-repo sync overrides — see docs/sync-overrides.md
+#
+# Documented, intentional divergences from the Mergepath canonical mirror.
+version: 1
+
+skip_paths:
+  - path: scripts/ci/
+    reason: >-
+      check_coderabbit_config carries a local patch so its universal
+      safety-posture floor accepts a PAIRED CodeRabbit opt-out
+      (reviews.auto_review.enabled false in .coderabbit.yml together with
+      coderabbit.enabled false in .github/review-policy.yml) rather than
+      failing it. The floor exists because a lone flip silently turns
+      CodeRabbit off and nothing else would catch it; a paired opt-out is not
+      silent, since it is declared in review-policy.yml where the agents read
+      it — the same argument the gate already accepts for the file-absent case
+      (#248). The alternative the unpatched gate forces, deleting
+      .coderabbit.yml, does not actually disable CodeRabbit: its docs define
+      reviews.auto_review.enabled as defaulting to TRUE, so an absent config
+      means review every eligible PR, leaving the App reviewing while agents
+      skip Phase 2.5 and unwatched threads block the conversation-resolution
+      gate. TEMPORARY — the fix belongs upstream, tracked at
+      nathanjohnpayne/mergepath#911; remove this entry once the canonical gate
+      accepts the paired form. All 24 of the gate's own unit tests pass against
+      the patched version. SCOPE: the skip is the whole scripts/ci/ kit, which
+      is broader than the one patched file and is NOT narrowable — validate-
+      overrides.sh requires every skip_paths[].path to match a manifest
+      paths[].path, and the manifest declares scripts/ci/ as a single kit
+      entry; substitutions only apply to type: templated paths, of which
+      there are none. So the whole kit stops receiving upstream fixes while
+      this entry exists, which is the real cost of carrying it and the
+      reason to land mergepath#911 promptly rather than settle here.

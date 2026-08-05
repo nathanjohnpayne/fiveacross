@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   sumDayStats,
-  cruiseFirstBingoAt,
+  eventFirstBingoAt,
   aggregatePlayerStats,
   foldDayStat,
   tutorialDayIndexSet,
@@ -82,13 +82,13 @@ describe('sumDayStats (aggregate-sum)', () => {
   });
 });
 
-describe('cruiseFirstBingoAt (tutorial-exclusion)', () => {
+describe('eventFirstBingoAt (tutorial-exclusion)', () => {
   it('ignores an embark-day (index 0) firstBingoAt even when it is earliest', () => {
     const dayStats: DayStats = {
       0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 }, // earliest, but embark
       2: { bingoCount: 1, squaresMarked: 6, firstBingoAt: 900 },
     };
-    expect(cruiseFirstBingoAt(dayStats, isTutorialDay)).toBe(900);
+    expect(eventFirstBingoAt(dayStats, isTutorialDay)).toBe(900);
   });
 
   it('ignores a farewell-day (index 9) firstBingoAt even when it is earliest', () => {
@@ -96,7 +96,7 @@ describe('cruiseFirstBingoAt (tutorial-exclusion)', () => {
       9: { bingoCount: 1, squaresMarked: 24, firstBingoAt: 50 }, // farewell, ceremonial
       4: { bingoCount: 1, squaresMarked: 6, firstBingoAt: 700 },
     };
-    expect(cruiseFirstBingoAt(dayStats, isTutorialDay)).toBe(700);
+    expect(eventFirstBingoAt(dayStats, isTutorialDay)).toBe(700);
   });
 
   it('a Days-2–9 entry wins normally, taking the earliest across main-game Days', () => {
@@ -104,7 +104,7 @@ describe('cruiseFirstBingoAt (tutorial-exclusion)', () => {
       3: { bingoCount: 1, squaresMarked: 6, firstBingoAt: 800 },
       5: { bingoCount: 1, squaresMarked: 6, firstBingoAt: 400 },
     };
-    expect(cruiseFirstBingoAt(dayStats, isTutorialDay)).toBe(400);
+    expect(eventFirstBingoAt(dayStats, isTutorialDay)).toBe(400);
   });
 
   it('is null when only tutorial Days carry a first bingo', () => {
@@ -112,7 +112,7 @@ describe('cruiseFirstBingoAt (tutorial-exclusion)', () => {
       0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 100 },
       9: { bingoCount: 1, squaresMarked: 24, firstBingoAt: 200 },
     };
-    expect(cruiseFirstBingoAt(dayStats, isTutorialDay)).toBeNull();
+    expect(eventFirstBingoAt(dayStats, isTutorialDay)).toBeNull();
   });
 });
 
