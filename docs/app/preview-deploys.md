@@ -130,17 +130,17 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 
 | Step | `fiveacross.vercel.app` | `vacaybingo.vercel.app` |
 |---|---|---|
-| 0. Repo wiring (`vercel.json` rule + allowlist entry) | **Done** — #622, on `main` | **#628** — must merge before this host can proxy auth correctly |
-| 1. Vercel project | **Done** | Pending #628 |
-| 2. Minted host confirmed exact | **Done** | Pending |
-| 3. Production env vars | **Done** — nine `VITE_*`, Production scope | Pending |
-| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | Pending |
-| 5. Firebase authorized domain | **Outstanding** | Pending |
-| 6. Google OAuth redirect URI | **Outstanding — console-only** | Pending |
+| 0. Repo wiring (`vercel.json` rule + allowlist entry) | **Done** — #622 | **Done** — #628 |
+| 1. Vercel project | **Done** | **Done** |
+| 2. Minted host confirmed exact | **Done** | **Done** |
+| 3. Production env vars | **Done** — nine `VITE_*`, Production scope | **Done** — same nine, own `authDomain`, `VITE_EDITION=vacay` |
+| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | **Done** — production branch `main` |
+| 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
+| 6. Google OAuth redirect URI | **Outstanding — console-only** | **Outstanding — console-only** |
 
-Step 0 is not optional and not merely cosmetic. Until #628 is on `main`, `vercel.json` matches only `fiveacross.vercel.app`, so a request to `vacaybingo.vercel.app/__/auth/*` falls through to the **Gay Cruise Bingo** rule and the OAuth helper runs against the wrong Firebase project — a failure that survives both console registrations and would look like an inexplicable auth bug. Provision that host only after #628 lands.
+Step 0 is not optional and not merely cosmetic. A mirror host whose `vercel.json` rule is missing falls through to the **Gay Cruise Bingo** rule, so its OAuth helper runs against the wrong Firebase project — a failure that survives both console registrations and reads as an inexplicable auth bug. Never provision a mirror host before its rule is on `main`.
 
-`fiveacross.vercel.app` is live and rebuilds automatically on a merge to `main`. **No mirror can complete sign-in yet** — step 6 is outstanding on every one of them.
+Both mirrors are live, serve the Bodega Event with Vacay branding, and rebuild automatically on a merge to `main`. **Neither can complete sign-in yet** — step 6 is outstanding on both.
 
 > **Do not advertise either mirror URL until step 6 is done for that host.** This is the one thing on this page that can burn a player.
 >
