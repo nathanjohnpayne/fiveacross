@@ -48,7 +48,19 @@ The rest of the email config is **non-secret** `firebase-functions/params` (safe
 
 - `EMAIL_FROM` — default `Gay Cruise Bingo <gaycruisebingo@nathanpayne.com>`. Sends from the **already-verified `nathanpayne.com`** Resend domain (free-plan single-domain limit — **no new DNS**). This is independent of the `gaycruisebingo.com` Hosting domain.
 - `ADMIN_NOTIFY_EMAIL` — optional comma-separated shared-inbox override; empty ⇒ notify the Event `admins` roster (resolved to verified Google emails) only.
-- `APP_BASE_URL` — default `https://gaycruisebingo.com`; base for the Admin-console deep link in the email body.
+- `APP_BASE_URL` — default `https://gaycruisebingo.com`; base for the Admin-console deep link in the email body, and the fallback origin for the daily email's Feed CTA when an Event has no `hostnames` mapping.
+- `EMAIL_UNSUBSCRIBE_URL` — default `https://us-central1-gaycruisebingo.cloudfunctions.net/emailUnsubscribe`; the public address of the unsubscribe endpoint, used as both the visible Unsubscribe link and the `List-Unsubscribe` header target in the daily engagement email (#616). **Any project other than `gaycruisebingo` MUST set this** — the default points at this project, so leaving it would mail an unsubscribe link that cannot honor the opt-out. Set it in `functions/.env.<projectId>`.
+
+### 1a-i. Daily themed engagement email (#616)
+
+`dailyEngagementEmail` (an `onSchedule` trigger, `*/15 * * * *` UTC) and `emailUnsubscribe` (the HTTP unsubscribe endpoint) ship with the same `RESEND_API_KEY` secret above; no additional secret is needed. Both pin the Admin-SDK runtime identity, so no IAM change is required beyond what the existing functions already have. Full behaviour is in `specs/daily-engagement-email.md`.
+
+Two things to check after the deploy:
+
+1. **The Cloud Scheduler job exists** — per #318 the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function with no job behind it and no error: `gcloud scheduler jobs list --project <projectId>` must show a job for `dailyEngagementEmail` alongside `unlockDay`.
+2. **The unsubscribe endpoint answers** — `curl -sI "$EMAIL_UNSUBSCRIBE_URL?e=x&u=y&t=z"` should return `200` with an HTML confirmation page (a GET never changes state; only a POST does). If it 403s, the function was deployed without public invoker access.
+
+Nothing sends until an Event admin turns it on: `events/{eventId}.settings.dailyEmailEnabled` is read as OFF unless explicitly `true`.
 
 ### 1b. One-time rollout sweep for the server-authoritative hide (#43)
 

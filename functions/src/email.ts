@@ -15,6 +15,15 @@ export interface EmailPayload {
   subject: string;
   html: string;
   text?: string;
+  /**
+   * Extra RFC 5322 headers. Added for the daily engagement email's
+   * `List-Unsubscribe` / `List-Unsubscribe-Post` pair (#616), which is what
+   * makes a mail client surface its own native unsubscribe control — a header,
+   * not a body link, so it cannot be expressed any other way. Omitted entirely
+   * when absent, so the moderation notifier's payload is byte-identical to
+   * before.
+   */
+  headers?: Record<string, string>;
 }
 
 /** The transport seam — the real one calls `new Resend(...).emails.send`. */
@@ -29,6 +38,8 @@ export interface SendEmailArgs {
   html: string;
   text?: string;
   idempotencyKey: string;
+  /** Extra RFC 5322 headers — see `EmailPayload.headers` (#616). */
+  headers?: Record<string, string>;
   /** Override the `EMAIL_FROM` param default (mainly for tests). */
   from?: string;
   /** Override the Resend transport (mainly for tests). */
@@ -59,7 +70,16 @@ export async function sendEmail(args: SendEmailArgs): Promise<boolean> {
         send = (payload, opts) => client.emails.send(payload, opts) as Promise<{ error: unknown }>;
       }
     }
-    const payload: EmailPayload = { from, to: args.to, subject: args.subject, html: args.html, text: args.text };
+    const payload: EmailPayload = {
+      from,
+      to: args.to,
+      subject: args.subject,
+      html: args.html,
+      text: args.text,
+      // Spread rather than assigned: an `headers: undefined` key would reach
+      // Resend's JSON body as an explicit null on some serializers.
+      ...(args.headers ? { headers: args.headers } : {}),
+    };
     const { error } = await send(payload, { idempotencyKey: args.idempotencyKey });
     if (error) {
       console.error('resend send failed', error);

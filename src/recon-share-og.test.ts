@@ -40,7 +40,22 @@ describe('recon: share Function + escapeHtml + OG_RENDERER_URL removed from func
     expect(functionsIndex).not.toMatch(/OG_RENDERER_URL/);
     // HTTPS callables are legitimate server APIs (for example bug intake); the
     // removed OG pipeline specifically used an onRequest HTTP renderer.
-    expect(functionsIndex).not.toMatch(/import\s*\{[^}]*\bonRequest\b[^}]*\}\s*from 'firebase-functions\/v2\/https'/s);
+    //
+    // This used to ban the `onRequest` IMPORT outright, which was a proxy for
+    // "no HTTP renderer" rather than the thing itself, and #616 is the case
+    // that shows the proxy was too coarse: RFC 8058 one-click unsubscribe is a
+    // bare POST from the mail client, with no Firebase SDK, no session and no
+    // callable envelope, so the daily email's unsubscribe endpoint cannot be a
+    // callable. Banning the import would have forced either a broken
+    // unsubscribe or a workaround written to dodge a regex — neither of which
+    // ADR 0005 asks for; ADR 0005 removed the Cloud Run OG RENDERER.
+    //
+    // So the guard is now an ALLOW-LIST of the onRequest exports that exist,
+    // which is strictly tighter in the dimension that matters: a re-added
+    // `share`/OG renderer fails this even if it is named something new, and any
+    // future HTTP surface has to be declared here deliberately.
+    const onRequestExports = [...functionsIndex.matchAll(/export const (\w+) = onRequest\b/g)].map((m) => m[1]);
+    expect(onRequestExports).toEqual(['emailUnsubscribe']);
   });
 
   it('keeps moderateProof intact', () => {

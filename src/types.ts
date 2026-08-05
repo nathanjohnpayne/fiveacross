@@ -199,6 +199,13 @@ export interface EventDoc {
     photoProofSource?: 'camera_or_library' | 'camera_only';
     stripPhotoExif?: boolean; // geotags never leave the phone
     visionGate?: boolean;     // existing moderation function, now toggleable
+    // Daily themed engagement email (#616, specs/daily-engagement-email.md).
+    // The Event-level admin enable toggle, and the ONLY thing that decides
+    // whether anyone is emailed at all. Optional here and read as OFF unless
+    // EXPLICITLY `true` server-side (`dailyEmailEnabled`, functions/src/dailyEmail.ts)
+    // — an Event doc seeded before this field existed, or one whose read
+    // half-failed, must never start mailing a roster.
+    dailyEmailEnabled?: boolean;
   };
 }
 
