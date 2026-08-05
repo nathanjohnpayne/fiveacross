@@ -9,6 +9,7 @@ import {
   brandHtmlIdentity,
   buildTimeEdition,
   applyEditionDocumentIdentity,
+  wordmarkSegments,
 } from './editions';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 
@@ -72,6 +73,28 @@ describe('editions — the pre-auth brand', () => {
       expect(all).not.toMatch(/cruise|sailing|at sea|aboard/i);
       expect(brand.documentTitle).not.toMatch(/cruise/i);
     }
+  });
+});
+
+// #602: the app header renders the wordmark as `lead<b>bold</b>`. The split is
+// DERIVED from `wordmark` + `wordmarkBold` so the gate's wordmark and the
+// header's can never disagree on the words, only on the weight.
+describe('editions — the header wordmark split (#602)', () => {
+  it('splits each Edition wordmark before its bold suffix', () => {
+    expect(wordmarkSegments(editionBrand('gcb'))).toEqual({ lead: 'GAY CRUISE ', bold: 'BINGO' });
+    expect(wordmarkSegments(editionBrand('vacay'))).toEqual({ lead: 'VACAY ', bold: 'BINGO' });
+  });
+
+  it('follows the active Edition by default, like editionBrand()', () => {
+    setActiveEdition('vacay');
+    expect(wordmarkSegments()).toEqual({ lead: 'VACAY ', bold: 'BINGO' });
+  });
+
+  it('degrades to an unbolded wordmark when the bold segment is not a suffix', () => {
+    // The failure mode of a mis-edited table row must be a missing font
+    // weight, never missing or duplicated words in the product name.
+    const misedited = { ...editionBrand('gcb'), wordmarkBold: 'CRUISE' };
+    expect(wordmarkSegments(misedited)).toEqual({ lead: 'GAY CRUISE BINGO', bold: '' });
   });
 });
 
