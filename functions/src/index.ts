@@ -245,26 +245,21 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
 );
 
 /**
- * Phase 1.5 daily scheduler (issue #202, daily-cards-spec § "Unlock mechanics" /
+ * Phase 1.5 scheduler (issue #202, daily-cards-spec § "Unlock mechanics" /
  * "Scoring and social surfaces"). The decision logic + idempotent writes live in
- * `unlockDay.ts` so they are unit-testable without a Functions runtime; these are
- * the thin trigger seams. Like the bug-report intake, these read `events` and write
- * snapshots / finale state through the Admin SDK, so they MUST pin
+ * `unlockDay.ts` so they are unit-testable without a Functions runtime; this is
+ * the thin trigger seam. Like the bug-report intake, it reads `events` and writes
+ * snapshots / finale state through the Admin SDK, so it MUST pin
  * `ADMIN_SDK_SERVICE_ACCOUNT`: the project's default Gen2 compute identity has no
- * Firestore data-plane access, so an unpinned run would fail its first 08:00 read.
+ * Firestore data-plane access, so an unpinned run would fail its first read.
  *
- * Design choice (the issue leaves it to the implementer): TWO daily runs in
- * Europe/Rome rather than a single one. Both call the same idempotent core
- * (`runScheduledUnlock`) for every active event — the 08:00 run owns the Day
- * snapshots and the Day-10 08:00 freeze + podium beat; the 20:00 run catches the
- * Day-9 20:00 last-call beat. Every beat is self-guarded (`unlockAt` +
- * `snapshotItemIds` for snapshots, `frozenAt` for the freeze, an existing
- * `last_call` Moment for last-call), so a run on any other day, or a retry, is a
- * no-op. Firestore-triggered functions stay us-central1 (the global default).
- *
- * SCHEDULE (#552): ONE quarter-hourly UTC trigger drives every beat. An earlier
- * design ran TWO daily Europe/Rome triggers with split 08:00/20:00
- * responsibilities; that is gone. See `unlockDay` below for why.
+ * SCHEDULE (#552): ONE quarter-hourly UTC trigger drives every beat, calling this
+ * same idempotent core for every active Event. Every beat is self-guarded
+ * (`unlockAt` + `snapshotItemIds` for snapshots, `frozenAt` for the freeze, an
+ * existing `last_call` Moment for last-call), so a run that lands when nothing is
+ * due — or a retry — is a no-op. See `unlockDay` below for why the cadence is
+ * what it is. Firestore-triggered functions stay us-central1 (the global
+ * default).
  */
 async function runScheduledUnlockForActiveEvents(): Promise<void> {
   const adminDb = db as unknown as AdminFirestore;
@@ -279,7 +274,7 @@ async function runScheduledUnlockForActiveEvents(): Promise<void> {
 }
 
 /**
- * ONE hourly UTC trigger, replacing the two `Europe/Rome` ones (#552).
+ * ONE quarter-hourly UTC trigger, replacing the two `Europe/Rome` ones (#552).
  *
  * The Rome pins were correct only for a Mediterranean sailing. In August they
  * fire at 23:00 and 11:00 Pacific, so a Bodega Day due at 06:00 PT would not
