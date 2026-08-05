@@ -4,7 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { THEMES } from './themes';
+import {
+  THEMES,
+  themesForEdition,
+  themesForEditionIncluding,
+  defaultThemeForEdition,
+  activeEdition,
+  setActiveEdition,
+  DEFAULT_EDITION,
+} from './themes';
 import { ThemeProvider, useTheme } from './ThemeContext';
 import { contrastRatio, hexToRgb, parseThemeBlocks } from './contrast';
 
@@ -409,6 +417,155 @@ describe('Theme metadata (specs/w1-themes.md)', () => {
           `Theme "${t.id}" description leaks a mark: "${t.description}"`,
         ).not.toMatch(pattern);
       }
+    }
+  });
+});
+
+// --- Edition scoping (#555) --------------------------------------------------
+//
+// `THEMES` is the complete REGISTRY and must stay complete: Leaderboard,
+// dayIdentity, DaySwitcher and Board all look a Theme up BY ID for its emoji
+// and label, so narrowing the registry would turn those into silent fallbacks.
+// Only the PICKER is scoped. These pin that split.
+
+describe('themesForEdition — pickable list is scoped, registry is not', () => {
+  const ids = (edition?: string | null) => themesForEdition(edition).map((t) => t.id);
+
+  it('defaults to the legacy Edition, so today\'s picker is unchanged', () => {
+    // Edition is not resolved anywhere yet (#543). If this default ever became
+    // "shared only", the cruise's own tutorial Themes would vanish from its
+    // switcher the moment this shipped — a silent production regression.
+    expect(DEFAULT_EDITION).toBe('gcb');
+    expect(ids()).toContain('welcome-aboard');
+    expect(ids()).toContain('so-long-farewell');
+  });
+
+  it('never offers a Bodega Theme on the Gay Cruise Bingo picker', () => {
+    for (const id of ['the-birds', 'side-quests', 'fog-froth-farewells']) {
+      expect(ids('gcb')).not.toContain(id);
+    }
+  });
+
+  it('offers EXACTLY the Bodega Themes on the Vacay picker', () => {
+    // The regression this pins (Codex on #577): the first cut treated a Theme
+    // with no declared Edition as shared, and every Atlantis party Theme was
+    // undeclared — so the Bodega picker opened with Dog Tag T-Dance in it.
+    expect(ids('vacay')).toEqual(['the-birds', 'side-quests', 'fog-froth-farewells']);
+  });
+
+  it('keeps every legacy party Theme out of Vacay by name', () => {
+    for (const id of [
+      'neon-playground',
+      'get-sporty',
+      'duty-free',
+      'glamiators',
+      'summer-white',
+      'dog-tag',
+      'revival-disco',
+      'seriously-pink',
+      'uniforms-without-borders',
+      'neon-pink-playground',
+      'sporty-splash',
+      'under-the-stars',
+      'atlantis-classics',
+    ]) {
+      expect(ids('vacay')).not.toContain(id);
+    }
+  });
+
+  it('PARTITIONS the registry — every Theme is pickable on exactly one Edition', () => {
+    // Stronger than the two lists above: a Theme added without an Edition can
+    // no longer slip through as "shared", and a Theme claimed by both Editions
+    // has to be a deliberate, visible choice rather than an omission.
+    const gcb = ids('gcb');
+    const vacay = ids('vacay');
+    expect([...gcb, ...vacay].sort()).toEqual(THEMES.map((t) => t.id).sort());
+    expect(gcb.filter((id) => vacay.includes(id))).toEqual([]);
+  });
+
+  it('falls back to the legacy Edition for an Edition nothing recognises', () => {
+    // Degrading to the legacy experience beats degrading to an empty picker.
+    expect(ids('not-an-edition')).toEqual(ids('gcb'));
+  });
+
+  it('follows the ACTIVE Edition when no argument is passed', () => {
+    try {
+      setActiveEdition('vacay');
+      expect(ids()).toEqual(['the-birds', 'side-quests', 'fog-froth-farewells']);
+      expect(activeEdition()).toBe('vacay');
+      setActiveEdition(null);
+      expect(activeEdition()).toBe(DEFAULT_EDITION);
+      expect(ids()).toContain('welcome-aboard');
+    } finally {
+      setActiveEdition(DEFAULT_EDITION);
+    }
+  });
+
+  it('leaves the REGISTRY complete regardless of Edition', () => {
+    // The id->emoji lookups depend on this; a scoped registry breaks them.
+    const registry = THEMES.map((t) => t.id);
+    for (const id of ['the-birds', 'welcome-aboard', 'neon-playground']) {
+      expect(registry).toContain(id);
+    }
+  });
+});
+
+// The admin controls display a stored Theme as well as change it, so their list
+// cannot be a plain scoped list: a `<select>` whose value matches no option
+// silently renders the first one instead.
+describe('themesForEditionIncluding — never misreports what is already set', () => {
+  it('adds an off-Edition current Theme, at the front', () => {
+    const list = themesForEditionIncluding('the-birds', 'gcb').map((t) => t.id);
+    expect(list[0]).toBe('the-birds');
+    expect(list).toContain('neon-playground');
+  });
+
+  it('does not duplicate a current Theme that is already in scope', () => {
+    const list = themesForEditionIncluding('neon-playground', 'gcb').map((t) => t.id);
+    expect(list.filter((id) => id === 'neon-playground')).toHaveLength(1);
+    expect(list).toEqual(themesForEdition('gcb').map((t) => t.id));
+  });
+
+  it('is just the scoped list when nothing is set yet', () => {
+    expect(themesForEditionIncluding(undefined, 'vacay').map((t) => t.id)).toEqual([
+      'the-birds',
+      'side-quests',
+      'fog-froth-farewells',
+    ]);
+  });
+});
+
+// The last resort in the chain player pick -> Event `defaultTheme` -> Edition
+// default. It matters most where the chain is shortest: the signed-out shell
+// reads no Event doc at all, so this line alone decides what a Vacay build wears
+// before sign-in (Codex on #577).
+describe('defaultThemeForEdition — the pre-auth fallback', () => {
+  it('keeps neon-playground for the legacy Edition', () => {
+    expect(defaultThemeForEdition('gcb')).toBe('neon-playground');
+  });
+
+  it('gives Vacay its own Day 1 Theme, not the cruise default', () => {
+    expect(defaultThemeForEdition('vacay')).toBe('the-birds');
+  });
+
+  it('falls back to the legacy default for an unknown Edition', () => {
+    expect(defaultThemeForEdition('not-an-edition')).toBe('neon-playground');
+  });
+
+  it('follows the ACTIVE Edition with no argument', () => {
+    try {
+      setActiveEdition('vacay');
+      expect(defaultThemeForEdition()).toBe('the-birds');
+    } finally {
+      setActiveEdition(DEFAULT_EDITION);
+    }
+  });
+
+  it('every Edition default is PICKABLE on its own Edition', () => {
+    // Otherwise the switcher would open with no chip active on a fresh device.
+    for (const edition of ['gcb', 'vacay']) {
+      const id = defaultThemeForEdition(edition);
+      expect(themesForEdition(edition).map((t) => t.id)).toContain(id);
     }
   });
 });

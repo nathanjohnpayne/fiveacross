@@ -144,9 +144,10 @@ Vercel **preview** deploys get the same rewrites, but sign-in additionally needs
 ## 8. Configuration knobs
 
 - **Claim mode** (`events/med-2026.claimMode`): `honor` (default) · `proof_required` · `verified`. The card UI adapts; `verified` marks are `pending` until confirmed (confirmation UI is Phase 1).
-- **Default theme** (`defaultTheme`): any of the 8 theme ids in `src/theme/themes.ts`.
+- **Default theme** (`defaultTheme`): any Theme **pickable on this build's Edition** — not any id in `src/theme/themes.ts`, which is the full cross-Edition registry. The admin console's Appearance control offers exactly the valid set, so pick there rather than writing the field by hand. See [`specs/w1-themes.md`](../../specs/w1-themes.md) § Registry vs. picker. Omit it and the Edition's own default applies: `neon-playground` for `gcb`, 🐦 The Birds for `vacay`. (This bullet used to name a fixed count of Themes; it went stale twice, so it now names the rule instead.)
 - **Admins** (`admins: string[]`): uids that can edit the event and moderate.
-- **Event id**: `VITE_EVENT_ID` (defaults to `med-2026`). The schema is event-scoped, so future cruises are new event docs.
+- **Event id**: `VITE_EVENT_ID` (defaults to `med-2026`). The schema is event-scoped, so future events are new event docs.
+- **Edition** (`VITE_EDITION`): which branded product line this build serves — `gcb` (the default when unset, so existing builds and `.env` files need no change) or `vacay`. It scopes every Theme picker, player and admin, and selects the Edition default Theme above. A Vacay/Bodega build must set it; a Gay Cruise Bingo build should leave it unset.
 
 ## Project structure
 
