@@ -28,11 +28,16 @@ export type Resolution =
        *  field; callers fall back to `eventId` as the closest available
        *  identifier. */
       slug: string | null;
-      /** Whether this Event shows the 18+ acknowledgement (#608). Unlike
-       *  `edition`, this is never `null`: there is no "unknown" posture a gate
-       *  could render, so the env short-circuit — which reads no hostname
-       *  document at all — reports the fail-closed default rather than deferring. */
+      /** Whether this Event shows the 18+ acknowledgement (#608). Never `null`,
+       *  unlike `edition`: there is no "unknown" posture a gate could render, so
+       *  an unknown answer resolves to the gated one. */
       adultContent: boolean;
+      /** Whether `adultContent` came from a LIVE read of `hostnames/{host}`, as
+       *  opposed to a build-time seed, a cached entry, or the fail-closed
+       *  default. Only a proven `true` latches the session (`sessionRaised`);
+       *  only a proven `false` is allowed to stand without revalidation. See the
+       *  rule at the top of `src/adultContent.ts`. */
+      adultContentProven: boolean;
       /** Where the answer came from — surfaced for diagnostics, never for logic. */
       source: 'cache' | 'network' | 'env';
     }
@@ -168,6 +173,9 @@ const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => (
   canonicalHost: doc.canonicalHost,
   edition: doc.edition,
   adultContent: doc.adultContent,
+  // A cache hit is not evidence about the posture NOW — the document may have
+  // been stamped since. Only the network read proves anything.
+  adultContentProven: source === 'network',
   slug: doc.slug ?? null,
   source,
 });
@@ -253,20 +261,36 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
     // reads no hostname document, so there is nothing to derive from, and the
     // legacy Gay Cruise Bingo build it serves is 18+ anyway.
     //
-    // `envAdultContent` is the deliberate opt-out (#608, Codex P2 on #615). A
-    // single-Event build is exactly the shape the repo documents for a small
-    // standalone deployment (`VITE_EVENT_ID` + `VITE_EDITION`), and without a
-    // build-time input such a deployment could never be anything but adults-only:
-    // it never reads `hostnames/{host}`, so the server derivation has nowhere to
-    // publish to. It mirrors `VITE_EDITION` — a build-time SEED for the one fact
-    // a single-Event bundle owns outright — and only a literal `'false'` opts
-    // out, so a typo, a blank, or an unset var all still gate.
+    // `envAdultContent` is the build-time opt-out — a SEED, and deliberately not
+    // an answer (Phase 4b P1). A single-Event build is the shape the repo
+    // documents for a small standalone deployment, and without some build-time
+    // input it could never be anything but adults-only. But a baked `false` that
+    // simply STOOD would be the worst version of that: the build never reads a
+    // routing document, so an admin who later approves an explicit Prompt or
+    // flips `forceAdult` would change nothing on those clients — not on a reload,
+    // not ever, short of a rebuild — while the ticket advertises exactly that
+    // transition.
+    //
+    // So the seed is marked UNPROVEN (`adultContentProven: false` below). It
+    // paints the first frame, and `revalidateAdultContent` then has to confirm it
+    // against `hostnames/{host}` like any other ungated claim. If that read says
+    // `true`, the gate goes up. If the document does not exist, there is no
+    // channel through which this posture could ever be revoked — so the posture
+    // returns to gated rather than standing forever on a promise nobody can keep.
+    // A deployment that wants to be non-adult needs a routing document, which is
+    // the same document the derivation already writes to.
+    //
+    // Only a literal `'false'` seeds the opt-out; a typo, a blank, or an unset
+    // var all gate.
+    const envUngated = opts.envAdultContent === 'false';
     return {
       kind: 'event',
       eventId: envEventId,
       canonicalHost: null,
       edition: null,
-      adultContent: opts.envAdultContent === 'false' ? false : ADULT_CONTENT_DEFAULT,
+      adultContent: envUngated ? false : ADULT_CONTENT_DEFAULT,
+      // Never proven: a build-time string is a claim about the past.
+      adultContentProven: false,
       slug: null,
       source: 'env',
     };
@@ -286,14 +310,25 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   // simply never fires on those devices.
   //
   // So a cached `false` is treated as a REVALIDATION CANDIDATE rather than an
-  // answer: fall through to the network read below. Note what this deliberately
-  // does NOT do — it does not fail the resolution and it does not force the
-  // gate on. If the read fails, `staleOrNotFound` serves this very entry, cached
-  // `false` and all, exactly as before. An offline device cannot learn about a
-  // flip by any means, and stranding it (or gating a tame Event's cached board
-  // behind an attestation its Player has never been asked for) would be a worse
-  // answer than the one it already has. The exposure this closes is the ONLINE
-  // device that would otherwise never ask.
+  // answer: fall through to the network read below.
+  //
+  // AND, if that read fails, the posture resolves to GATED — not back to the
+  // cached `false` (Phase 4b P1, correcting the first cut of this rule). The
+  // reasoning that talked me into the softer version was about the offline cost:
+  // gating asks a Player of a tame Event for an attestation nobody offered them,
+  // and `bootstrapUser`'s offline branch holds on "Loading…" without a cached
+  // stamp. But that argument answers the wrong question. A failed revalidation
+  // does not mean "the posture is still false" — it means the posture is
+  // UNKNOWN, and this field is monotone, so the one direction it could have
+  // moved in is the direction that matters. Serving a cached `false` on no
+  // evidence is precisely the fail-open the whole design is built to refuse.
+  //
+  // The offline cost is real and is paid deliberately. Two things bound it: an
+  // Event that has ALREADY flipped caches `true` and short-circuits normally, so
+  // this only touches the never-yet-adult case; and the gate is provisional, not
+  // latched (`setActiveAdultContent(..., { proven: false })`), so the first
+  // successful revalidation lowers it again. It is a gate until we can ask, not
+  // a gate forever.
   //
   // A cached `true` still short-circuits, so the gated path — every Gay Cruise
   // Bingo host, and every Event that has already flipped — keeps the pure
@@ -335,13 +370,25 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
 }
 
 /** Revalidation failed. A stale-but-active cached mapping is still the best
- *  answer available — an expired entry beats a dead app when the network is
- *  simply unreachable. */
+ *  answer available for ROUTING — an expired entry beats a dead app when the
+ *  network is simply unreachable.
+ *
+ *  Its POSTURE is a different question, and gets the opposite answer (Phase 4b
+ *  P1). Routing is effectively immutable: a hostname's Event assignment is
+ *  durable, which is why serving a stale one is safe at all. `adultContent` is
+ *  the one field on the document that is expected to change, in exactly one
+ *  direction, and we have just failed to find out whether it has. So the Event
+ *  still resolves — the player is not stranded on a not-found screen — but it
+ *  resolves GATED, and unproven, so the first successful revalidation can lower
+ *  it again. */
 function staleOrNotFound(
   cached: CacheRead | null,
   hostname: string,
   reason: 'missing' | 'unreachable',
 ): Resolution {
-  if (cached && isServable(cached.doc)) return asEvent(cached.doc, 'cache');
+  if (cached && isServable(cached.doc)) {
+    const stale = asEvent(cached.doc, 'cache');
+    return stale.kind === 'event' ? { ...stale, adultContent: true, adultContentProven: false } : stale;
+  }
   return { kind: 'not-found', hostname, reason };
 }

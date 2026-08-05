@@ -2,7 +2,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   ADULT_CONTENT_DEFAULT,
   adultContentRequired,
+  adultContentSettledAdult,
   coerceAdultContent,
+  resetAdultContentForTests,
   setActiveAdultContent,
 } from './adultContent';
 import { readCache, resolveEvent, writeCache, type StorageLike } from './eventResolution';
@@ -13,7 +15,7 @@ import type { HostnameDoc } from './types';
 // the same bytes. The GATE half — what the app renders once a posture is
 // installed — is `components/adult-content-gate.test.tsx`.
 
-afterEach(() => setActiveAdultContent(true));
+afterEach(() => resetAdultContentForTests());
 
 const HOST = 'bodega-bay.fiveacross.app';
 const DOC: HostnameDoc = {
@@ -122,12 +124,12 @@ describe('the network and cache paths agree about the same bytes', () => {
     expect(resolution.kind === 'event' && resolution.source).toBe('cache');
   });
 
-  // …and revalidation FAILING must not strand the device or gate it. An offline
-  // client cannot learn about a flip by any means, and forcing the gate on would
-  // ask a Player of a tame Event for an attestation they were never offered —
-  // holding them on the loading screen instead of their cached board. The
-  // exposure this closes is the online device that would never ask.
-  it('falls back to the cached non-adult mapping when revalidation fails', async () => {
+  // …and a FAILED revalidation resolves to GATED (Phase 4b P1). The first cut of
+  // this rule fell back to the cached `false` on the grounds that an offline
+  // device cannot learn about a flip anyway — but that answers the wrong
+  // question. Failure does not mean "still false", it means UNKNOWN, and the one
+  // direction this monotone field could have moved in is the one that matters.
+  it('gates when revalidation of a cached non-adult posture FAILS', async () => {
     const storage = fakeStorage();
     writeCache(storage, HOST, DOC, 1000);
     const fetchDoc = vi.fn(async () => {
@@ -136,13 +138,54 @@ describe('the network and cache paths agree about the same bytes', () => {
     const resolution = await resolveEvent({ hostname: HOST, fetchDoc, storage, now: () => 2000 });
     expect(resolution.kind).toBe('event');
     if (resolution.kind !== 'event') return;
-    expect(resolution.adultContent).toBe(false);
-    expect(resolution.source).toBe('cache');
+    // The EVENT still resolves — routing is durable, so the player is not
+    // stranded on a not-found screen — but its posture is the safe one.
+    expect(resolution.eventId).toBe(DOC.eventId);
+    expect(resolution.adultContent).toBe(true);
+    // …and UNPROVEN, so this is a gate until we can ask, not a gate forever:
+    // the first successful revalidation lowers it again.
+    expect(resolution.adultContentProven).toBe(false);
   });
 
-  // Codex P2 on #615. A single-Event build never reads a hostname document, so
-  // without a build-time input it could never be anything but adults-only —
-  // there is nowhere for the server derivation to publish `false`.
+  it('does not latch the session on that provisional gate', async () => {
+    // The distinction the `proven` flag exists for. A gate we assumed must stay
+    // lowerable; a gate a live read established must not.
+    setActiveAdultContent(true, { proven: false });
+    expect(adultContentSettledAdult()).toBe(false);
+    setActiveAdultContent(false, { proven: true });
+    expect(adultContentRequired()).toBe(false);
+  });
+
+  it('LATCHES once a live read has said adult, and never lowers again', async () => {
+    setActiveAdultContent(true, { proven: true });
+    expect(adultContentSettledAdult()).toBe(true);
+    // Every route back down is refused: a stale edge read, a malformed answer,
+    // a lost race between two in-flight polls.
+    setActiveAdultContent(false, { proven: true });
+    setActiveAdultContent(false, { proven: false });
+    expect(adultContentRequired()).toBe(true);
+  });
+
+  // Phase 4b P1. The baked opt-out is a SEED, not an answer: it paints the first
+  // frame and then has to be confirmed like any other ungated claim. Marking it
+  // unproven is what makes `revalidateAdultContent` able to override it — and
+  // what stops it latching the session against a later `true`.
+  it('marks a single-Event build\u2019s baked opt-out UNPROVEN', async () => {
+    const r = await resolveEvent({
+      hostname: HOST,
+      fetchDoc: async () => {
+        throw new Error('the env short-circuit must never touch the network');
+      },
+      envEventId: 'bodega-bay-2026',
+      envAdultContent: 'false',
+    });
+    expect(r.kind === 'event' && r.adultContent).toBe(false);
+    expect(r.kind === 'event' && r.adultContentProven).toBe(false);
+  });
+
+  // Codex P2 on #615. A single-Event build never reads a hostname document for
+  // ROUTING, so without a build-time input it could never be anything but
+  // adults-only — there is nowhere for the server derivation to publish `false`.
   it('lets a single-Event build opt out with VITE_ADULT_CONTENT=false', async () => {
     const resolve = (envAdultContent: string | null) =>
       resolveEvent({

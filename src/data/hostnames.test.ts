@@ -24,7 +24,7 @@ vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: mocks.applyReso
 
 import { fetchHostnameDoc, bootstrapEventResolution } from './hostnames';
 import { activeEdition, setActiveEdition, DEFAULT_EDITION } from '../editions';
-import { adultContentRequired, setActiveAdultContent } from '../adultContent';
+import { adultContentRequired, resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 
 const snap = (data: unknown) => ({ exists: () => data != null, data: () => data });
 
@@ -38,7 +38,11 @@ const DOC = {
 beforeEach(() => {
   vi.clearAllMocks();
   setActiveEdition(DEFAULT_EDITION);
-  setActiveAdultContent(true);
+  // resetAdultContentForTests, not setActiveAdultContent(true): a live read
+  // that returned `true` LATCHES the session (the monotone mirror), so
+  // re-installing would not clear it and every later case would inherit the
+  // gate from whichever test ran first.
+  resetAdultContentForTests();
 });
 
 describe('fetchHostnameDoc — the read must reach the server', () => {

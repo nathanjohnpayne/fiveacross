@@ -297,14 +297,30 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
  * the project's default Gen2 compute identity has no Firestore data-plane
  * access, so an unpinned run would fail its first read. Neither writes anything
  * under `events/`, so neither can re-fire itself or the other.
+ *
+ * Both also set `retry: true`, and that is load-bearing rather than defensive
+ * (Phase 4b P1). `adultContent.ts` deliberately THROWS on a failed stamp instead
+ * of swallowing it — but event-driven Functions do not retry failed invocations
+ * by default, so without this the throw bought nothing: a transient hostname
+ * query or update failure would leave the routing document at `false`
+ * indefinitely, and nothing would try again unless another qualifying Prompt
+ * happened to be written. That is precisely the fail-open the throw was added to
+ * close.
+ *
+ * Retrying is safe because both handlers are idempotent by construction: the
+ * stamp skips documents already at `true`, and the cheap predicates short-circuit
+ * before any read, so a redelivery on a write that never qualified cannot fail
+ * and cannot loop. The one cost is that a PERMANENT failure (a broken IAM
+ * binding) retries for up to seven days — which for a fail-closed security flag
+ * is the behaviour you want, and is loud in the logs rather than silent.
  */
 export const deriveAdultContentOnItem = onDocumentWritten(
-  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
   (event) => applyItemAdultContent(event.params.eventId, event.data?.after.data() as AdultItemDoc | undefined),
 );
 
 export const deriveAdultContentOnEvent = onDocumentWritten(
-  { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
   (event) => applyEventAdultContent(event.params.eventId, event.data?.after.data() as AdultEventDoc | undefined),
 );
 

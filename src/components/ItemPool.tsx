@@ -5,7 +5,7 @@ import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } fro
 import { track } from '../analytics';
 import LoadingState from './LoadingState';
 import { editionBrand } from '../editions';
-import { adultContentRequired } from '../adultContent';
+import { useAdultContent } from '../hooks/useAdultContent';
 
 // Pre-sail framing (ADR 0003): a Board freezes the moment a Player joins, so
 // a Prompt added afterward can never land on THAT Player's own card — it only
@@ -35,7 +35,7 @@ export default function ItemPool() {
   // (#608): on an Event with no adult content there is nothing to categorise,
   // so the control is hidden rather than shown-and-inert. `spicy` then stays
   // false on every submission, which is what the derivation reads.
-  const adult = adultContentRequired();
+  const adult = useAdultContent();
   // The submitter's own pending submissions (#210): `useItems` reads only
   // `status == 'active'`, so a fresh `pending` add would otherwise vanish from
   // this list the instant it lands. Merged in below, tagged "pending review".

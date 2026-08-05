@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
-import { adultContentRequired } from '../adultContent';
+import { useAdultContent } from '../hooks/useAdultContent';
 import { editionBrand } from '../editions';
 
 /** Elements the Tab-trap below will cycle between while the dialog is open. */
@@ -43,7 +43,7 @@ export default function AcceptableUse({
   // Event with explicit Prompts is 18+ in general vocabulary; a `gcb` Event with
   // a tame pool is not 18+ at all. Neither derives the other.
   const brand = editionBrand();
-  const adult = adultContentRequired();
+  const adult = useAdultContent();
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);

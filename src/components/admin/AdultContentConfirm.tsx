@@ -98,6 +98,17 @@ export function useAdultContentFlipConfirm(): {
   dialog: ReactNode;
 } {
   const [pending, setPending] = useState<PendingFlip | null>(null);
+  // The failure state lives HERE, with the pending action, and not inside the
+  // dialog (Phase 4b P2). The dialog is rendered from two different branches of
+  // `ReviewQueue` — the populated queue and the "All clear." empty state — and
+  // confirming the LAST pending Prompt moves it from one to the other while the
+  // write is still in flight. React reconciles those as different trees, so a
+  // dialog that owned its own `failed` would be torn down and rebuilt at exactly
+  // the moment the rejection arrived, silently discarding the only report the
+  // admin gets. State that belongs to an action has to outlive the DOM the
+  // action was started from.
+  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const guard = (
     wouldFlip: boolean,
@@ -118,13 +129,24 @@ export function useAdultContentFlipConfirm(): {
   const dialog = pending ? (
     <AdultContentConfirmDialog
       pending={pending}
-      onCancel={() => setPending(null)}
-      onConfirm={async () => {
-        // Await BEFORE dismissing, and let a rejection propagate: the dialog
-        // owns the failure surface now (see its `failed` state), so tearing it
-        // down first would drop the only report the admin can act on.
-        await pending.run();
+      busy={busy}
+      failed={failed}
+      onCancel={() => {
         setPending(null);
+        setFailed(false);
+      }}
+      onConfirm={() => {
+        setBusy(true);
+        setFailed(false);
+        // Await BEFORE dismissing: the dialog is the failure surface, so tearing
+        // it down first would drop the only report the admin can act on.
+        void Promise.resolve(pending.run())
+          .then(() => {
+            setPending(null);
+            setFailed(false);
+          })
+          .catch(() => setFailed(true))
+          .finally(() => setBusy(false));
       }}
     />
   ) : null;
@@ -140,23 +162,24 @@ export function useAdultContentFlipConfirm(): {
  */
 export function AdultContentConfirmDialog({
   pending,
+  busy,
+  failed,
   onCancel,
   onConfirm,
 }: {
   pending: PendingFlip;
+  /** Both driven by the hook, never by this component's own state — see the note
+   *  on `failed` there. A rejected write must not disappear along with the
+   *  dialog (Codex P2 on #615): `guard()` resolves the caller's AsyncButton the
+   *  moment the dialog opens, so its inline "Didn't work — try again" affordance
+   *  is already spent by the time the real write runs. If this closed on
+   *  rejection, a rules denial or a dropped connection would look exactly like a
+   *  successful approval. */
+  busy: boolean;
+  failed: boolean;
   onCancel: () => void;
-  /** Rejects if the write fails, so the dialog can hold its ground. */
-  onConfirm: () => void | Promise<void>;
+  onConfirm: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  // A rejected write must not disappear along with the dialog (Codex P2 on
-  // #615). `guard()` resolves the caller's AsyncButton the moment the dialog
-  // opens, so its inline "Didn't work — try again" affordance is already spent by
-  // the time the real write runs: if this closed on rejection, a rules denial or
-  // a dropped connection would look exactly like a successful approval. So the
-  // dialog STAYS OPEN on failure and says so, and the confirm button re-enables
-  // for a retry.
-  const [failed, setFailed] = useState(false);
   const title = 'This makes the whole Event 18+';
   return (
     // Backdrop guarded by `busy` like both buttons (the ReshuffleSheet
@@ -188,13 +211,7 @@ export function AdultContentConfirmDialog({
             type="button"
             className="btn primary"
             disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              setFailed(false);
-              void Promise.resolve(onConfirm())
-                .catch(() => setFailed(true))
-                .finally(() => setBusy(false));
-            }}
+            onClick={onConfirm}
           >
             {confirmLabelFor(pending.reason)}
           </button>

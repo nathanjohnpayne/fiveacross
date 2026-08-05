@@ -52,27 +52,127 @@ export function coerceAdultContent(value: unknown): boolean {
 }
 
 /**
- * The resolved posture for this session — the only copy of it.
+ * THE ONE RULE, and everything below is a consequence of it:
  *
- * Installed once by `bootstrapEventResolution`, BEFORE React mounts, exactly
- * like the resolved Edition. Read through the accessor, never captured at import
- * time: a module-level constant would freeze whatever was true before resolution
- * ran, which on a hostname-resolved build is "nothing has resolved yet".
+ *     A GATED posture may be ASSUMED. An UNGATED posture must be PROVEN.
+ *
+ * Both directions of every decision in this feature fall out of it. A cached
+ * `false` may not short-circuit resolution, because it is a claim that has to be
+ * re-proven (`eventResolution.ts` step 1). A revalidation that FAILS resolves to
+ * gated, because "we could not ask" is not proof. A single-Event build may bake
+ * `VITE_ADULT_CONTENT=false`, but that seed only survives until a live read
+ * either confirms it or fails to. And once a server read has said `true`, this
+ * session never goes back — see `sessionRaised` below.
+ *
+ * The rule exists because the two errors are not symmetric. Over-gating costs a
+ * player one checkbox they did not need. Under-gating shows explicit content to
+ * someone who was never asked, which is the harm the acknowledgement exists to
+ * prevent, and it cannot be undone after the fact.
+ */
+
+/**
+ * The resolved posture for this session.
+ *
+ * Seeded by `bootstrapEventResolution` BEFORE React mounts, exactly like the
+ * resolved Edition — but unlike the Edition it does NOT stop there. The Event's
+ * pool can turn adult while a tab is open (an admin approves the first explicit
+ * Prompt), and a tab that resolved once at launch would serve the rest of that
+ * session ungated. So this is a REACTIVE store: `revalidateAdultContent`
+ * installs fresh answers, and subscribers re-render.
  */
 let currentAdultContent: boolean | null = null;
 
+/**
+ * Has a live read said `true` at any point in this session?
+ *
+ * The Event's flag is monotone on the server, and this is the client-side
+ * mirror of that. Without it, revalidation would be a channel for UN-gating an
+ * Event that has already turned adult: one read served from a stale edge, one
+ * malformed response, one lost race between two in-flight polls, and a session
+ * that had already been told `true` would go back to showing no gate.
+ *
+ * A latch, not a lock: it only ever refuses to lower. The gate can still be
+ * lifted by the ONE transition that is safe — from the provisional gated
+ * posture we assume when we have not yet proven otherwise — because that is
+ * resolving uncertainty rather than retracting a posture.
+ */
+let sessionRaised = false;
+
+type Listener = () => void;
+const listeners = new Set<Listener>();
+
 /** Whether this Event asks Players to acknowledge they are 18 or older.
  *
- *  Answers the fail-closed default until the resolver installs something, so a
- *  gate rendered before resolution (or in a build that never resolves) is the
+ *  Answers the fail-closed default until something is installed, so a gate
+ *  rendered before resolution — or in a build that never resolves — is the
  *  over-gating one. */
 export function adultContentRequired(): boolean {
   return currentAdultContent ?? ADULT_CONTENT_DEFAULT;
 }
 
-/** Install the resolved posture. Anything but a literal `false` installs `true`,
- *  so a caller cannot widen the fail direction by passing through a malformed
- *  value it did not validate. */
-export function setActiveAdultContent(adultContent: boolean | null | undefined): void {
-  currentAdultContent = coerceAdultContent(adultContent);
+/**
+ * Subscribe to posture changes. Returns an unsubscribe.
+ *
+ * The React seam (`useAdultContent`) is built on this rather than on a context
+ * because the posture is resolved before React exists and is read from
+ * non-component code (`AuthContext`'s callbacks, the flip confirm's guard). One
+ * store, two readers.
+ */
+export function subscribeAdultContent(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => void listeners.delete(listener);
 }
+
+function emit(): void {
+  for (const listener of [...listeners]) listener();
+}
+
+/**
+ * Install a posture.
+ *
+ * `proven` distinguishes the two kinds of `false` and is the whole reason this
+ * takes a second argument. An UNPROVEN `false` — a build-time seed, a cached
+ * entry — is provisional: it may paint the first frame, but it is not allowed
+ * to survive a failed attempt to confirm it. A PROVEN `false` came from a live
+ * server read of `hostnames/{host}` and stands until something raises it.
+ *
+ * Raising to `true` is always accepted and always latches. Lowering to `false`
+ * is refused once the session has been raised.
+ */
+export function setActiveAdultContent(
+  adultContent: boolean | null | undefined,
+  { proven = false }: { proven?: boolean } = {},
+): void {
+  const next = coerceAdultContent(adultContent);
+  if (next) {
+    if (proven) sessionRaised = true;
+    if (currentAdultContent !== true) {
+      currentAdultContent = true;
+      emit();
+    }
+    return;
+  }
+  // Ungating. Refused outright once a live read has said `true` — the monotone
+  // latch — and otherwise accepted.
+  if (sessionRaised) return;
+  if (currentAdultContent !== false) {
+    currentAdultContent = false;
+    emit();
+  }
+}
+
+/** Whether a live read has raised this session's posture. Exported for tests and
+ *  for the revalidator, which stops polling once the answer can no longer
+ *  change: the flag is monotone, so `true` is terminal. */
+export function adultContentSettledAdult(): boolean {
+  return sessionRaised;
+}
+
+/** Test seam: forget everything, including the latch. Production code never
+ *  calls this — a session that has been raised stays raised. */
+export function resetAdultContentForTests(): void {
+  currentAdultContent = null;
+  sessionRaised = false;
+  listeners.clear();
+}
+

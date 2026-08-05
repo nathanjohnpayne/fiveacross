@@ -19,11 +19,13 @@ import {
 } from '../data/api';
 import { track } from '../analytics';
 import { adultContentRequired } from '../adultContent';
+import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
 import PoolRecoveryWatcher from '../components/PoolRecoveryWatcher';
+import AdultContentWatcher from '../components/AdultContentWatcher';
 
 // Connectivity probe for the boot path (#115). The auth bootstrap and the deal
 // are both network-bound: a create-once transaction (ensureUserProfile) and a
@@ -339,6 +341,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // set only where the authoritative read actually landed, re-armed false on
   // every auth change and every connectivity flip.
   const [profileBootstrapOk, setProfileBootstrapOk] = useState(false);
+  // The 18+ posture as REACTIVE state (Phase 4b P1). The callbacks below keep
+  // reading `adultContentRequired()` directly — they run outside render and
+  // want the value at call time — but every DERIVED gate in this provider
+  // (`needsAttestation`, `mayDeal`, `canRenderEventContent`) has to recompute
+  // when the Event turns adult under an open tab, and only a subscription
+  // makes that happen.
+  const attestationRequired = useAdultContent();
   // A ref mirror of `attestedAuthoritative` so async code (attest()'s catch) can
   // read the LATEST value without a stale closure (Codex #117 round 9, finding B):
   // the attest-failure rollback must NOT downgrade a User the bootstrap already
@@ -859,7 +868,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // after a bootstrap FAILURE and would deal on a timed-out `ensureUserProfile`
   // (Codex P2 on #615). The offline branch never sets it, and `online` gates
   // besides.
-  const mayDeal = adultContentRequired() ? attested === true && attestedAuthoritative : profileBootstrapOk;
+  const mayDeal = attestationRequired ? attested === true && attestedAuthoritative : profileBootstrapOk;
   useEffect(() => {
     if (user && mayDeal && online) void runDeal(user);
   }, [user, mayDeal, online, runDeal]);
@@ -1129,7 +1138,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // flips `hostnames/{host}.adultContent`, the next resolution installs `true`,
   // and this one condition re-gates every un-attested Player through the
   // re-prompt that already exists.
-  const attestationRequired = adultContentRequired();
   const needsAttestation = attestationRequired && user != null && profileReady && attested === false;
   // Event content may render once the age gate is settled — or once it is
   // established that this Event has no age gate and the profile bootstrap has
@@ -1165,6 +1173,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           player attests. Its uid-keyed module state (getConfirmState) also carries
           any parked ceremony across the remount. Renders nothing; scoped to the
           mount location only — the attestation gate itself is #117's surface. */}
+      {/* Keeps the 18+ posture current while a tab stays open (Phase 4b P1).
+          Deliberately NOT gated on `user`, unlike the watchers below it: the
+          posture decides what the SIGNED-OUT gate renders. */}
+      <AdultContentWatcher />
       {user && <ConfirmWinMoments />}
       {/* The retraction-path fall observer (#479) mounts at the SAME shell spot
           and for the same reason: a published win can stop standing while Board

@@ -171,6 +171,24 @@ describe('moderateProof export gating (#126)', () => {
     expect(typeof on.notifyItemModeration).toBe('function');
   });
 
+  // Phase 4b P1 on #615. `adultContent.ts` deliberately THROWS on a failed stamp
+  // rather than swallowing it — but event-driven Functions do not retry by
+  // default, so without `retry: true` the throw bought nothing: a transient
+  // failure would leave the routing document at `false` indefinitely and nothing
+  // would try again. The throw and this flag are one mechanism; asserting the
+  // manifest is the only way to keep them from drifting apart.
+  it('enables retries on both adult-content derivation triggers', async () => {
+    const mod = await importIndex();
+    for (const name of ['deriveAdultContentOnItem', 'deriveAdultContentOnEvent']) {
+      expect(mod[name].__endpoint.eventTrigger.retry, name).toBe(true);
+      // …and both still pin the Admin identity: they read a collection no client
+      // may `list` and write one no client may write at all.
+      expect(mod[name].__endpoint.serviceAccountEmail, name).toBe(
+        'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+      );
+    }
+  });
+
   it('pins bug-report intake to the Firebase Admin runtime identity', async () => {
     const mod = await importIndex();
     // Of the DEPLOYING project — this harness deploys as `gaycruisebingo-test`.

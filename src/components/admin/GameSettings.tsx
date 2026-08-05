@@ -10,7 +10,7 @@ import {
   setForceAdult,
 } from '../../data/admin';
 import { themesForEditionIncluding } from '../../theme/themes';
-import { adultContentRequired } from '../../adultContent';
+import { useAdultContent } from '../../hooks/useAdultContent';
 import { useAdultContentFlipConfirm } from './AdultContentConfirm';
 import type { ClaimMode, EventDoc } from '../../types';
 
@@ -180,7 +180,7 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
   // only this Event's manual reason for it, so the row can honestly say when
   // the Event is already 18+ from its pool and the switch would change nothing.
   const forceAdult = event?.settings?.forceAdult === true;
-  const alreadyAdult = adultContentRequired();
+  const alreadyAdult = useAdultContent();
   const { guard, dialog } = useAdultContentFlipConfirm();
 
   return (

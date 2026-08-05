@@ -4,7 +4,7 @@ import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
-import { coerceAdultContent, setActiveAdultContent } from '../adultContent';
+import { adultContentSettledAdult, coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
@@ -119,7 +119,7 @@ export async function bootstrapEventResolution(
     // `adultContent` has no build-time seed — the env short-circuit reports the
     // fail-closed default, so installing it there is a no-op that writes the
     // value the accessor would have answered anyway.
-    setActiveAdultContent(resolution.adultContent);
+    setActiveAdultContent(resolution.adultContent, { proven: resolution.adultContentProven });
     // …and the browser chrome around it (#586). Unconditional, unlike the
     // setter above: the guard there protects the ENV-SEEDED Edition from being
     // reset by a lookup that never ran, whereas this only reads whatever
@@ -147,5 +147,56 @@ function safeLocalStorage(): Storage | null {
     return typeof localStorage === 'undefined' ? null : localStorage;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Re-read THIS origin's 18+ posture and install it (Phase 4b P1).
+ *
+ * The posture is the one field on `hostnames/{host}` that is expected to change
+ * mid-session: an admin approves the first explicit Prompt, the derivation
+ * stamps the routing document, and every already-open tab is now serving an
+ * adults-only Event with no acknowledgement. Startup resolution cannot cover
+ * that — it runs once, before the flip — so the posture is polled.
+ *
+ * Only the posture. This deliberately does NOT re-resolve the Event, re-stamp
+ * the mapping cache, or touch the Edition: routing is durable and re-deciding it
+ * mid-session is exactly the kind of churn `resolveEvent`'s 12-hour TTL exists to
+ * avoid. One `get`, one field.
+ *
+ * `getDocFromServer`, not `getDoc`, for the reason the fetch above documents and
+ * one more: a cache-served answer is not evidence about the posture NOW, and
+ * `proven` is what licenses UN-gating.
+ *
+ * Runs on EVERY build shape, including the single-Event short-circuit. That
+ * build resolves its Event from `VITE_EVENT_ID` and never reads a routing
+ * document for routing — but if it baked `VITE_ADULT_CONTENT=false` it is
+ * holding an ungated posture that nothing can currently revoke, and this is the
+ * revocation channel. A build with no routing document therefore returns to the
+ * gated posture on its first successful read, which is the honest answer: an
+ * opt-out with no channel to withdraw it is not one this design can offer.
+ *
+ * Never throws. A failed read leaves the current posture alone rather than
+ * lowering it — "we could not ask" is not proof of anything, and the caller
+ * polls again.
+ */
+export async function revalidateAdultContent(
+  hostname: string = window.location.hostname,
+): Promise<void> {
+  // The flag is monotone, so `true` from a live read is terminal: nothing a
+  // later poll could say would change the answer. Stop paying for the read.
+  if (adultContentSettledAdult()) return;
+  try {
+    const snap = await getDocFromServer(doc(db, 'hostnames', hostname.toLowerCase()));
+    if (!snap.exists()) {
+      // No routing document for this origin. A single-Event build seeded ungated
+      // has just learned that its opt-out can never be withdrawn; gate it. A
+      // build that was already gated is unaffected.
+      setActiveAdultContent(true, { proven: false });
+      return;
+    }
+    setActiveAdultContent(coerceAdultContent(snap.data()?.adultContent), { proven: true });
+  } catch {
+    /* unreachable — leave the posture as it stands and let the caller retry */
   }
 }

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { adultContentRequired } from '../adultContent';
+import { useAdultContent } from '../hooks/useAdultContent';
 
 // Versioned so a change to the disclosure copy re-shows the notice once to
 // everyone: the v1 key was dismissed under the old GA4-only wording, which never
@@ -36,6 +36,7 @@ function isDismissed(): boolean {
  */
 export default function ConsentNotice() {
   const [dismissed, setDismissed] = useState(isDismissed);
+  const adult = useAdultContent();
 
   if (dismissed) return null;
 
@@ -51,7 +52,7 @@ export default function ConsentNotice() {
   return (
     <div className="consent-notice" role="note">
       <p>
-        {adultContentRequired() ? 'This is an 18+ app. ' : ''}We use analytics&mdash;Google Analytics and PostHog, including
+        {adult ? 'This is an 18+ app. ' : ''}We use analytics&mdash;Google Analytics and PostHog, including
         session replay&mdash;to see what&rsquo;s working and improve the app. Nothing here is sold.
       </p>
       <button className="btn" onClick={dismiss}>

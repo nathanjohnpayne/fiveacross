@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { adultContentRequired } from '../adultContent';
+import { useAdultContent } from '../hooks/useAdultContent';
 import { editionBrand } from '../editions';
 
 // The wordmark, the signed-out line and the offline note come from the resolved
@@ -34,7 +34,7 @@ import { editionBrand } from '../editions';
 export default function SignIn() {
   const { user, signIn, signInReady, attest } = useAuth();
   const reprompt = user != null;
-  const adult = adultContentRequired();
+  const adult = useAdultContent();
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const brand = editionBrand();

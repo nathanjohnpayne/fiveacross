@@ -168,6 +168,42 @@ describe('the 🔞 tick the snapshot has not caught up with (Codex P2 on #615)',
   });
 });
 
+// Phase 4b P2. Confirming the LAST pending Prompt removes it from the pending
+// query by Firestore's latency compensation — immediately, before the server has
+// accepted or rejected — so the queue is empty while the write is still in
+// flight. A dialog living below the `!total` early return unmounts right then:
+// the admin watches the confirm vanish and "All clear." appear, and a rejection
+// takes its own error state down with it. The write silently did not happen, on
+// the one action in this console that cannot be undone.
+describe('the last pending Prompt (Phase 4b P2)', () => {
+  it('keeps the dialog up after the queue empties under it', async () => {
+    const { rerender } = queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(await screen.findByText('This makes the whole Event 18+')).toBeTruthy();
+
+    // Latency compensation drops the row; the queue is now empty.
+    rerender(
+      <ReviewQueue event={null} reports={[]} pendingItems={[]} claims={[]} adminUid="admin" />,
+    );
+    expect(screen.getByText('This makes the whole Event 18+')).toBeTruthy();
+    expect(approveItem).not.toHaveBeenCalled();
+  });
+
+  it('still surfaces a rejection after the queue has emptied', async () => {
+    approveItem.mockRejectedValueOnce(new Error('permission-denied'));
+    const { rerender } = queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
+    rerender(
+      <ReviewQueue event={null} reports={[]} pendingItems={[]} claims={[]} adminUid="admin" />,
+    );
+    expect(await screen.findByRole('alert')).toHaveProperty(
+      'textContent',
+      expect.stringContaining('try again'),
+    );
+  });
+});
+
 describe('bulk approve — the easy one to miss', () => {
   it('confirms, and names the explicit count out of the batch', async () => {
     queue([item('a', false), item('b', true), item('c', false)]);
