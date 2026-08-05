@@ -130,14 +130,17 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 
 | Step | `fiveacross.vercel.app` | `vacaybingo.vercel.app` |
 |---|---|---|
-| 1. Vercel project | **Done** | **Done** |
-| 2. Minted host confirmed exact | **Done** | **Done** |
-| 3. Production env vars | **Done** — nine `VITE_*`, Production scope | **Done** — same nine, `VITE_FIREBASE_AUTH_DOMAIN` set to its own host |
-| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | **Done** — production branch `main` |
-| 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
-| 6. Google OAuth redirect URI | **Outstanding — console-only** | **Outstanding — console-only** |
+| 0. Repo wiring (`vercel.json` rule + allowlist entry) | **Done** — #622, on `main` | **#628** — must merge before this host can proxy auth correctly |
+| 1. Vercel project | **Done** | Pending #628 |
+| 2. Minted host confirmed exact | **Done** | Pending |
+| 3. Production env vars | **Done** — nine `VITE_*`, Production scope | Pending |
+| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | Pending |
+| 5. Firebase authorized domain | **Outstanding** | Pending |
+| 6. Google OAuth redirect URI | **Outstanding — console-only** | Pending |
 
-Both mirrors are live, both rebuild automatically on a merge to `main`, and **neither can complete sign-in yet.**
+Step 0 is not optional and not merely cosmetic. Until #628 is on `main`, `vercel.json` matches only `fiveacross.vercel.app`, so a request to `vacaybingo.vercel.app/__/auth/*` falls through to the **Gay Cruise Bingo** rule and the OAuth helper runs against the wrong Firebase project — a failure that survives both console registrations and would look like an inexplicable auth bug. Provision that host only after #628 lands.
+
+`fiveacross.vercel.app` is live and rebuilds automatically on a merge to `main`. **No mirror can complete sign-in yet** — step 6 is outstanding on every one of them.
 
 > **Do not advertise either mirror URL until step 6 is done for that host.** This is the one thing on this page that can burn a player.
 >
@@ -233,12 +236,19 @@ If and when a mirror does need hostname resolution, drop `VITE_EVENT_ID` from th
 
 ```
 Collection: hostnames
-Document id: vacaybingo.vercel.app
-  event:   "bodega-bay-2026"
-  edition: "vacay"
+Document id: vacaybingo.vercel.app     (lowercase; the lookup lowercases the hostname)
+  eventId:       "bodega-bay-2026"     REQUIRED, non-empty
+  status:        "active"              REQUIRED, one of active | disabled | archived
+  edition:       "vacay"
+  canonicalHost: "vacaybingo.vercel.app"   ← the mirror itself, NOT the brand domain
+  isCanonical:   true
 ```
 
-Field names and semantics are `specs/hostnames-lookup.md`. Creating the document while `VITE_EVENT_ID` is still set is harmless but inert — nothing reads it — so it is not a safe way to "pre-stage" a switch, and the switch needs a rebuild either way.
+Field names are `eventId` and `status`, **not** `event` and no status: `fetchHostnameDoc` (`src/data/hostnames.ts`) returns `null` unless `eventId` is a non-empty string *and* `status` is a recognised value, and a `null` renders the not-found screen rather than the Event. A document written from the shorthand in the ticket would look correct in the console and resolve to nothing. Full field table: [`specs/hostnames-lookup.md`](../../specs/hostnames-lookup.md).
+
+**`canonicalHost` must name the mirror itself, and `isCanonical` must be `true`.** This is the field where a reasonable-looking value breaks the mirror. Pointing it at the brand's real domain does two harmful things: an Alias document is redirected to its canonical host at the edge before the app starts, which is the serve-in-place violation this whole host exists to avoid; and `canonicalOrigin()` (`src/canonicalHost.ts`) feeds the share-card and leaderboard links, so every link a player shared from the mirror would point at the very hostname that was unreachable. A mirror is its own canonical.
+
+Creating the document while `VITE_EVENT_ID` is still set is harmless but inert — nothing reads it — so it is not a safe way to "pre-stage" a switch, and the switch needs a rebuild either way.
 
 ### Verifying the mirror
 
