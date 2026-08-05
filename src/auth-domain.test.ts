@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAuthDomain, isAuthConfiguredForHost } from './auth-domain';
+import { resolveAuthDomain, isAuthConfiguredForHost, isSignInReachableOnHost } from './auth-domain';
 
 describe('resolveAuthDomain', () => {
   it.each(['gaycruisebingo.com', 'gaycruisebingo.vercel.app', 'gaycruisebingo.firebaseapp.com'])(
@@ -65,5 +65,34 @@ describe('isAuthConfiguredForHost — can sign-in complete on this origin?', () 
         resolveAuthDomain(CONFIGURED, host) === host,
       );
     }
+  });
+});
+
+// Codex P1, round 5 on #576: the pre-mount gate must not dark origins where
+// sign-in COMPLETES via a documented path even though auth is not configured
+// on the origin itself.
+describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
+  const CONFIGURED = 'gaycruisebingo.com';
+
+  it('is reachable everywhere isAuthConfiguredForHost already says so', () => {
+    expect(isSignInReachableOnHost(CONFIGURED, 'gaycruisebingo.com')).toBe(true);
+    expect(isSignInReachableOnHost(CONFIGURED, 'gaycruisebingo.vercel.app')).toBe(true);
+    // ADR 0010's same-origin escape hatch (authDomain pinned to this host).
+    expect(isSignInReachableOnHost('bodega-bay.vacaybingo.com', 'bodega-bay.vacaybingo.com')).toBe(
+      true,
+    );
+  });
+
+  it('mounts web.app so the AuthProvider handoff to firebaseapp.com can run', () => {
+    // The ship-network fallback host: signed-out visits history-replace to
+    // gaycruisebingo.firebaseapp.com BEFORE auth (specs/w1-auth-google.md), so
+    // the gate must not report auth-unconfigured here.
+    expect(isAuthConfiguredForHost(CONFIGURED, 'gaycruisebingo.web.app')).toBe(false);
+    expect(isSignInReachableOnHost(CONFIGURED, 'gaycruisebingo.web.app')).toBe(true);
+  });
+
+  it('still blocks an unconfigured wildcard host', () => {
+    expect(isSignInReachableOnHost(CONFIGURED, 'bodega-bay.vacaybingo.com')).toBe(false);
+    expect(isSignInReachableOnHost(CONFIGURED, 'anything-else.example.com')).toBe(false);
   });
 });

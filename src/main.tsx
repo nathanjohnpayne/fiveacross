@@ -17,7 +17,7 @@ import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
 import { bootstrapEventResolution } from './data/hostnames';
-import { isAuthConfiguredForHost } from './auth-domain';
+import { isSignInReachableOnHost } from './auth-domain';
 import './theme/themes.css';
 import './index.css';
 
@@ -156,10 +156,13 @@ void bootstrapEventResolution()
     // configured for — hostname resolution is exactly what made that possible
     // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
     // would render a Google button that cannot return to this origin, so it is
-    // reported as a state rather than discovered mid-sign-in.
+    // reported as a state rather than discovered mid-sign-in. "Reachable" is
+    // deliberately wider than "configured": `gaycruisebingo.web.app` mounts so
+    // AuthProvider's documented handoff to `firebaseapp.com` can run
+    // (src/auth-domain.ts, Codex P1 round 5 on #576).
     const authBlocked =
       resolution.kind === 'event' &&
-      !isAuthConfiguredForHost(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname);
+      !isSignInReachableOnHost(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname);
     if (authBlocked) {
       root.render(
         <React.StrictMode>
