@@ -185,6 +185,15 @@ feedback_policy:
 #
 # Review path after this change: `@codex review` (Phase 4a) on every PR, with
 # the automated Phase 4b cross-agent leg where the classifier calls for it.
+#
+# ⚠️ REQUIRED OUT-OF-BAND STEP: disable or uninstall the CodeRabbit GitHub App
+# for this repo. Deleting `.coderabbit.yml` does NOT stop the App — CodeRabbit
+# documents `reviews.auto_review.enabled` as defaulting to TRUE for eligible
+# PRs, so an absent config means "review everything", not "review nothing".
+# Until the App is disabled it will keep auto-reviewing and leaving threads
+# that hold the conversation-resolution gate, while agents skip Phase 2.5 and
+# nobody is watching for them — the worst of both states. The two keys here
+# make the AGENT stop waiting; only the App-level change makes CodeRabbit stop.
 coderabbit:
   enabled: false
 

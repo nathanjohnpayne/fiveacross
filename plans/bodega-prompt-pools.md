@@ -174,9 +174,13 @@ Sunday's whole card, 06:00 to the 11:00 check-out freeze. These are deliberately
 
 | # | Day | pool | tutorial | scoring | theme | `unlockAt` |
 |---|---|---|---|---|---|---|
-| 0 | Friday, Aug 7 | easy | false | competitive | 🐦 The Birds Have Entered the Group Chat | `0` (open sentinel) |
-| 1 | Saturday, Aug 8 | main | false | competitive | 🌊 Bodega Bay Side Quests | Sat 06:00 `America/Los_Angeles` |
-| 2 | Sunday, Aug 9 | closing | false | competitive | ☕ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
+| 0 | Friday, Aug 7 | `embark` | false | `competitive` | 🐦 The Birds Have Entered the Group Chat | `0` (open sentinel) |
+| 1 | Saturday, Aug 8 | `main` | false | `competitive` | 🌊 Bodega Bay Side Quests | Sat 06:00 `America/Los_Angeles` |
+| 2 | Sunday, Aug 9 | `farewell` | false | `competitive` | ☕ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
+
+**The `pool` column shows persisted literals, not the neutral names.** Unlike the other renamed fields, `pool` values are load-bearing in code: `snapshotPoolsFor` hard-codes `dayPool === 'main' ? ['main','embark'] : [dayPool]`, `standingsFrozen` tests `d.pool === 'farewell'`, and `firestore.rules` validates `pool in ['main','embark','farewell']`. Seeding the neutral labels breaks Easy Mix (a main Day looks for `embark`, finds nothing) and the finale (nothing matches `farewell`, so the freeze never fires). Read `embark` as the easy pool and `farewell` as the closing pool until the pool migration lands.
+
+**`scoring` and `standingsFreezeAt` are seeded but not yet read.** No current code consumes either field. With Sunday on the `farewell` pool, `standingsFrozen` returns true the moment that Day unlocks — so **standings freeze at Sunday 06:00, not 11:00**, and Sunday's card is ceremonial in practice despite the `competitive` label. Getting the competitive Sunday this table describes requires the scoring migration to land first; until then the honest options are to accept a ceremonial Sunday or to add a fourth ceremonial Day and leave Sunday on the `main` pool.
 
 This group is early to rise and early to bed, so the card is waiting before anyone is up rather than arriving mid-morning.
 
