@@ -81,6 +81,39 @@
     --primary:#e2814d;--secondary:#2ec5b6;--accent:#ffd23f;--cell:#131a1c;
     --border:rgba(226,129,77,.35);--on-gradient:#000}
 
+  /* Vacay Bingo (Bodega Bay POC) day themes — fiveacrossbingo PRD § Theme direction.
+     Sonoma Coast, deliberately non-tropical: fog silver, sea-glass green, Pacific blue,
+     weathered red, postcard cream. Same Theme token contract as every other day theme. */
+  [data-theme='birds-group-chat']{--bg:#0d1113;--panel:#151b1e;--ink:#f2efe6;--dim:#a8b3ac;
+    --primary:#7fb8a4;--secondary:#c94f3d;--accent:#efe8d5;--cell:#151b1e;
+    --border:rgba(127,184,164,.35);--on-gradient:#0d1113}
+  [data-theme='bodega-side-quests']{--bg:#0a141c;--panel:#102030;--ink:#eef5f5;--dim:#9db4bd;
+    --primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;--cell:#102030;
+    --border:rgba(46,127,168,.4);--on-gradient:#f5fbfb}
+  [data-theme='fog-froth-farewells']{--bg:#efece4;--panel:#faf7ef;--ink:#33302b;--dim:#8a857b;
+    --primary:#b0764f;--secondary:#a8b8b2;--accent:#d1826e;--cell:#faf7ef;
+    --border:rgba(51,48,43,.16);--on-gradient:#faf7ef}
+
+  /* Vacay brand chrome: the "VACAY BINGO by Five Across" lockup (one-identity rule) */
+  .vlock{text-align:center;line-height:1.15;padding:6px 0 2px}
+  .vlock .vb{font-family:'Bebas Neue','Arial Narrow',sans-serif;font-size:27px;letter-spacing:.06em;color:var(--ink)}
+  .vlock .by{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+  .vlock .tag{font-size:10.5px;font-style:italic;color:var(--primary);margin-top:2px}
+  .postcard{border:1.5px solid var(--border);border-radius:4px;background:var(--panel);
+    padding:10px 12px;position:relative;font-size:10.5px;color:var(--dim);line-height:1.45}
+  .postcard::after{content:"";position:absolute;top:7px;right:8px;width:26px;height:20px;
+    border:1.5px dashed var(--border);border-radius:2px}
+  .suggestcard{border:1.5px dashed var(--primary);border-radius:12px;padding:8px 11px;
+    display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--dim)}
+  .suggestcard b{color:var(--ink);display:block;font-size:11.5px}
+  .lovewin{border:1.5px solid var(--accent);border-radius:12px;padding:9px 11px;text-align:center}
+  .lovewin .ph{height:84px;border-radius:8px;background:
+    linear-gradient(160deg,color-mix(in srgb,var(--primary) 45%,var(--panel)),
+    color-mix(in srgb,var(--secondary) 40%,var(--panel)));display:flex;align-items:flex-end;
+    justify-content:flex-end;padding:6px;font-size:12px}
+  .lovewin .cap2{font-size:10px;color:var(--dim);margin-top:5px}
+  .lovewin .hearts{font-size:12px;color:var(--accent)}
+
   /* ---------- phone frame: iPhone 15 Pro canvas (393×852pt, 19.5:9), themed via tokens ---------- */
   .mini{width:393px;min-height:852px;background:var(--bg);color:var(--ink);border:2px solid #2a2a2e;
     border-radius:47px;overflow:hidden;display:flex;flex-direction:column;position:relative}
@@ -942,9 +975,9 @@
         <div class="row"><div class="grow">✍️ Marco marked "Cabaret hands during karaoke"<span class="who">Day 8 · 22m ago</span></div></div>
       </div>
       <div class="tabs">
-        <div class="tab"><span>▦</span>Card</div>
-        <div class="tab on"><span>◉</span>Feed</div>
-        <div class="tab"><span>♛</span>Ranks</div>
+        <div class="tab"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div>
+        <div class="tab on"><span><svg data-lucide="radio" class="lucide lucide-radio" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" /> </svg></span>Feed</div>
+        <div class="tab"><span><svg data-lucide="trophy" class="lucide lucide-trophy" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /> <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /> <path d="M18 9h1.5a1 1 0 0 0 0-5H18" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6 9H4.5a1 1 0 0 1 0-5H6" /> </svg></span>Ranks</div>
         <div class="tab"><span>⋯</span>More</div>
       </div>
     </div>
@@ -1076,6 +1109,79 @@
       <div class="foot">Gay Cruise Bingo 🚢</div>
     </div>
     <p class="cap"><b>Final standings—the podium, portable (issue #449)</b>The frozen farewell podium as a card: champion and cruise-wide First to BINGO as labeled honoree blocks, the ten daily honors as day-vs-name rows, "Final standings · N days" dating it as the last word. Shared from a full-width "Share final standings" button at the bottom of the podium itself—the ceremony ends on the thing everyone wants to do with it. Names clamp to one line; honor names ellipsize before day labels give way.</p>
+  </div>
+
+</div>
+
+<h2>Vacay Bingo · Weekend in Bodega Bay—the first Five Across edition</h2>
+<p class="sub">Same Daily Cards system, new emotional layer (fiveacrossbingo PRD § Brand Identity and Expression). One-identity rule: every frame shows VACAY BINGO by Five Across—never competing brands—regardless of which domain the player entered through. Five Across keeps the foundation (grid, type, navigation, mechanics); Vacay owns colors, imagery, prompt language, and recap treatment. Bodega is deliberately non-tropical: fog silver, sea-glass green, Pacific blue, weathered red, postcard cream—a Sonoma Coast weekend preserved in a scrapbook. Personalities: Five Across is the charismatic host ("Bring everyone into the game."); Vacay is the spontaneous friend who suggests the detour ("Take the detour.").</p>
+<div class="frames">
+
+  <div class="unit" id="frame-vacay-join">
+    <div class="mini" data-theme="birds-group-chat">
+      <div class="board" style="gap:10px;justify-content:center">
+        <div class="vlock"><div class="vb">VACAY BINGO</div><div class="by">by Five Across</div><div class="tag">Take the detour. <span style="opacity:.75">For the story.</span></div></div>
+        <div class="postcard"><b style="color:var(--ink)">Weekend in Bodega Bay</b><br>Aug 7–9 · hosted by Kim · 🐦 Day 1: The Birds Have Entered the Group Chat<br><span style="font-size:9.5px">bodega-bay.vacaybingo.com</span></div>
+        <div class="btnrow"><span class="btn ok">Continue with Google</span></div>
+        <div class="note">Prompts are invitations, not chores. Take the fun detour, share the story if you want—five across earns a BINGO.</div>
+      </div>
+    </div>
+    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through either hostname lands here after canonicalization: one identity, the Vacay lockup with the Five Across endorsement line, the event as a postcard (dashed stamp corner), and the same Google sign-in. No cruise copy, no 18+ attestation—Bodega's audience rating is its own. Installed-PWA name: Vacay Bingo.</p>
+  </div>
+
+  <div class="unit" id="frame-vacay-card-sidequests">
+    <div class="mini" data-theme="bodega-side-quests">
+      <div class="hdr">
+        <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
+        <div class="today"><div class="port">🌊 Saturday · Bodega Bay</div><div class="theme">Side Quests</div></div>
+      </div>
+      <div class="board" style="gap:7px">
+        <div class="schedrow" style="border-bottom:none;font-size:10.5px">Sat 8 · 🌊 Bodega Bay Side Quests <span class="pill">12 easy · 12 exploratory</span><span class="dd dis" style="margin-left:auto">Free: Main character on the coast</span></div>
+        <div class="mini5" style="width:100%;margin:2px 0">
+          <div class="sq on"></div><div class="sq"></div><div class="sq"></div><div class="sq on"></div><div class="sq"></div>
+          <div class="sq"></div><div class="sq on line"></div><div class="sq"></div><div class="sq"></div><div class="sq"></div>
+          <div class="sq"></div><div class="sq"></div><div class="sq freec"></div><div class="sq"></div><div class="sq on"></div>
+          <div class="sq"></div><div class="sq"></div><div class="sq"></div><div class="sq on"></div><div class="sq"></div>
+          <div class="sq on"></div><div class="sq"></div><div class="sq"></div><div class="sq"></div><div class="sq"></div>
+        </div>
+        <div class="note" style="text-align:left">Sample squares: walk to a Bodega Head viewpoint · best boat name in the harbor · original suspense-movie still · ask a local for a favorite detour · kite at Doran Beach · windblown group selfie.</div>
+        <div class="suggestcard">💡<div class="grow"><b>Put it on tomorrow's card</b>Something happen today that belongs on Sunday's card? Suggest it—approved ideas appear at 6:00.</div><span class="btn">Suggest</span></div>
+      </div>
+      <div class="tabs">
+        <div class="tab on"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div>
+        <div class="tab"><span><svg data-lucide="radio" class="lucide lucide-radio" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" /> </svg></span>Feed</div>
+        <div class="tab"><span><svg data-lucide="trophy" class="lucide lucide-trophy" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /> <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /> <path d="M18 9h1.5a1 1 0 0 0 0-5H18" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6 9H4.5a1 1 0 0 1 0-5H6" /> </svg></span>Ranks</div>
+        <div class="tab"><span>⋯</span>More</div>
+      </div>
+    </div>
+    <p class="cap"><b>Saturday card—Side Quests + co-creation</b>Pacific blue and seafoam with a buoy-orange accent; the grid, marking, tally, and navigation are untouched Five Across mechanics (board drawn abstractly here—the real card uses the standard prompt-text cells). The 50/50 easy/exploratory mix reads in the day chip. The dashed "Put it on tomorrow's card" card sits under the grid on Fri/Sat only (hidden after Saturday's cutoff—no later trip day remains); submissions go to the organizer's overnight approval queue, and 2–4 approved ideas join Sunday's snapshot.</p>
+  </div>
+
+  <div class="unit" id="frame-vacay-finale">
+    <div class="mini" data-theme="fog-froth-farewells">
+      <div class="hdr">
+        <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
+        <div class="today"><div class="port">🌫️ Sunday · Fog, Froth &amp; Farewells</div><div class="theme">Final standings</div></div>
+      </div>
+      <div class="board" style="gap:9px">
+        <div class="secthead">Most-loved photo of the trip</div>
+        <div class="lovewin"><div class="ph"><span class="hearts">❤ 9</span></div><div class="cap2">Priya · "Original suspense-movie still" · frozen at trip end</div></div>
+        <div class="secthead">Podium</div>
+        <div class="rank"><div class="n">1</div><div class="avatar"></div>Maya ⭐ <span class="pill">First BINGO</span><div class="stats">5 bingos<br>52 squares</div></div>
+        <div class="rank"><div class="n">2</div><div class="avatar"></div>Priya<div class="stats">4 bingos<br>55 squares</div></div>
+        <div class="rank"><div class="n">3</div><div class="avatar"></div>Jess<div class="stats">4 bingos<br>48 squares</div></div>
+        <div class="secthead">Daily honors</div>
+        <div class="honors"><div class="honor"><b>🐦 D1</b>Jess</div><div class="honor"><b>🌊 D2</b>Maya</div><div class="honor"><b>🌫️ D3</b>Priya</div></div>
+        <div class="note">Sunday counts until the trip-end freeze—no ceremonial day on a three-day weekend. We did it for the story.</div>
+      </div>
+      <div class="tabs">
+        <div class="tab"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div>
+        <div class="tab"><span><svg data-lucide="radio" class="lucide lucide-radio" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" /> </svg></span>Feed</div>
+        <div class="tab on"><span><svg data-lucide="trophy" class="lucide lucide-trophy" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /> <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /> <path d="M18 9h1.5a1 1 0 0 0 0-5H18" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6 9H4.5a1 1 0 0 1 0-5H6" /> </svg></span>Ranks</div>
+        <div class="tab"><span>⋯</span>More</div>
+      </div>
+    </div>
+    <p class="cap"><b>Finale—scrapbook, not scoreboard</b>The light postcard-cream theme proves the token contract handles a light mode. Most-Loved Photo leads (frozen at the standings freeze; ties share the honor; if no photo earned a heart, this block becomes plain photo highlights), then the podium and Daily Honors. Hearts never touch bingo scoring. If the finale is descoped for launch (PRD descope ladder), this frame minus the Most-Loved block is the shipping state.</p>
   </div>
 
 </div>
