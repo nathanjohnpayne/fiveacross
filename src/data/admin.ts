@@ -210,8 +210,8 @@ export type ResnapshotDayResult =
  * failure"). Invokes the EXISTING `unlockDayNow` callable
  * (`functions/src/index.ts`), which is admin-gated server-side
  * (`manualUnlockNow` denies a non-admin caller uid with `permission-denied`)
- * and forces the SAME idempotent `stampDaySnapshot` the 08:00/20:00 scheduler
- * beats use — so a forced unlock can never diverge from the scheduled path's
+ * and forces the SAME idempotent `stampDaySnapshot` the scheduled unlock sweep
+ * uses — so a forced unlock can never diverge from the scheduled path's
  * semantics, and a retry (or a race with the scheduler firing first) is a
  * safe no-op (`already-stamped`). Scoped to the single event this build
  * points at (`EVENT_ID`), matching every other write in this module — no

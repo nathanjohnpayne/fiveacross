@@ -210,9 +210,17 @@ export interface FinaleTimes {
  * midnight/DST cross); if Day 9 is somehow absent it falls back to
  * `farewellUnlockAt - 12h` (the 08:00→08:00 gap less the last night). Returns
  * `null` when there is no farewell Day (a non-Phase-1.5 event), so callers skip
- * the finale entirely. DST caveat: the 12h wall gap assumes the sailing window
- * does not cross a Europe/Rome DST switch — true for this event; the 20:00 cron
- * lands inside `[lastCallAt, farewellUnlockAt)` under standard time.
+ * the finale entirely.
+ *
+ * NO DST CAVEAT (#552). This used to warn that the 12h wall gap assumed the
+ * event window did not cross a `Europe/Rome` DST switch, and that the 20:00 cron
+ * landed inside `[lastCallAt, farewellUnlockAt)` under standard time. Both
+ * halves are retired. Every boundary here is derived from the Day schedule's own
+ * `unlockAt` values — absolute instants — so there is no local-time shift to
+ * reason about; and the scheduler is a single fixed-offset UTC trigger that
+ * sweeps often enough to land inside any beat's window rather than a wall-clock
+ * cron aimed at one. Do not reintroduce a timezone assumption here: the whole
+ * point of #552 is that this file's arithmetic is timezone-free.
  */
 export function finaleTimes(days: DayLike[]): FinaleTimes | null {
   const farewell = days.find((d) => d.pool === 'farewell');

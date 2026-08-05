@@ -245,22 +245,21 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
 );
 
 /**
- * Phase 1.5 daily scheduler (issue #202, daily-cards-spec § "Unlock mechanics" /
+ * Phase 1.5 scheduler (issue #202, daily-cards-spec § "Unlock mechanics" /
  * "Scoring and social surfaces"). The decision logic + idempotent writes live in
- * `unlockDay.ts` so they are unit-testable without a Functions runtime; these are
- * the thin trigger seams. Like the bug-report intake, these read `events` and write
- * snapshots / finale state through the Admin SDK, so they MUST pin
+ * `unlockDay.ts` so they are unit-testable without a Functions runtime; this is
+ * the thin trigger seam. Like the bug-report intake, it reads `events` and writes
+ * snapshots / finale state through the Admin SDK, so it MUST pin
  * `ADMIN_SDK_SERVICE_ACCOUNT`: the project's default Gen2 compute identity has no
- * Firestore data-plane access, so an unpinned run would fail its first 08:00 read.
+ * Firestore data-plane access, so an unpinned run would fail its first read.
  *
- * Design choice (the issue leaves it to the implementer): TWO daily runs in
- * Europe/Rome rather than a single one. Both call the same idempotent core
- * (`runScheduledUnlock`) for every active event — the 08:00 run owns the Day
- * snapshots and the Day-10 08:00 freeze + podium beat; the 20:00 run catches the
- * Day-9 20:00 last-call beat. Every beat is self-guarded (`unlockAt` +
- * `snapshotItemIds` for snapshots, `frozenAt` for the freeze, an existing
- * `last_call` Moment for last-call), so a run on any other day, or a retry, is a
- * no-op. Firestore-triggered functions stay us-central1 (the global default).
+ * SCHEDULE (#552): ONE quarter-hourly UTC trigger drives every beat, calling this
+ * same idempotent core for every active Event. Every beat is self-guarded
+ * (`unlockAt` + `snapshotItemIds` for snapshots, `frozenAt` for the freeze, an
+ * existing `last_call` Moment for last-call), so a run that lands when nothing is
+ * due — or a retry — is a no-op. See `unlockDay` below for why the cadence is
+ * what it is. Firestore-triggered functions stay us-central1 (the global
+ * default).
  */
 async function runScheduledUnlockForActiveEvents(): Promise<void> {
   const adminDb = db as unknown as AdminFirestore;
@@ -274,13 +273,60 @@ async function runScheduledUnlockForActiveEvents(): Promise<void> {
   }
 }
 
+/**
+ * ONE quarter-hourly UTC trigger, replacing the two `Europe/Rome` ones (#552).
+ *
+ * The Rome pins were correct only for a Mediterranean sailing. In August they
+ * fire at 23:00 and 11:00 Pacific, so a Bodega Day due at 06:00 PT would not
+ * snapshot until 11:00 AM — a five-hour window with every card locked, on a
+ * trip where the whole point is that the card is waiting when people wake up.
+ * A per-timezone trigger per Event does not scale either: it would mean a
+ * deploy every time an Event is created somewhere new.
+ *
+ * QUARTER-HOURLY, not hourly. An earlier revision used `0 * * * *` on the
+ * reasoning that "unlock times are whole hours". That is only true in
+ * whole-hour-offset zones. `unlockAt` is an absolute instant derived from the
+ * Event's LOCAL schedule, so a 06:00 unlock in `Asia/Kolkata` (UTC+5:30) is
+ * 00:30 UTC and `Pacific/Chatham` (UTC+12:45) lands on :45 — an hourly cron
+ * would leave those Days locked for up to 59 minutes, which is the very
+ * failure this trigger exists to remove, just relocated to other timezones.
+ * Every real IANA offset is a multiple of 15 minutes, so a 15-minute cadence
+ * covers all of them. (Written in prose deliberately: the cron literal contains
+ * the block-comment terminator, so it belongs in the code below, not here.)
+ *
+ * SAFE TO RUN 96x A DAY because every beat is self-guarded, not schedule-timed
+ * (`runScheduledUnlock`, functions/src/unlockDay.ts):
+ *   - a Day snapshot writes only when `unlockAt` has passed AND
+ *     `snapshotItemIds` is still absent, re-checked inside a transaction, so a
+ *     second run is a no-op rather than a re-stamp;
+ *   - the freeze is a transactional `frozenAt` flip, so exactly one run wins;
+ *   - `last_call` and `podium` Moments dedupe on an existing-Moment check.
+ * The schedule was never what made these fire once — it only decided how soon
+ * they fired. Running every 15 minutes makes them prompt without repeating.
+ *
+ * This also retires the DST caveat in specs/d15-scheduler-unlock.md: with a
+ * fixed-offset UTC schedule there is no local-time shift to reason about, and
+ * the 12h last-call lead is derived from the Day schedule rather than a cron.
+ *
+ * DEPLOY NOTE. This revision REMOVES the `unlockDayFinaleLastCall` export, so
+ * the deploy carrying it must delete an already-deployed function. The
+ * canonical path runs `firebase deploy --non-interactive`, which REFUSES that
+ * delete rather than prompting — so the first such deploy fails unless it is
+ * given `--force` (firebase's `--force` = "delete Cloud Functions missing from
+ * the current deploy"). `op-firebase-deploy` forwards extra args, so:
+ *
+ *     op-firebase-deploy <project> --only functions --force
+ *
+ * ONE-TIME, and deliberately not baked into the shared deploy script: a
+ * standing `--force` would silently delete any function accidentally omitted
+ * from any future deploy. Note this is a DIFFERENT flag from
+ * `scripts/deploy.sh --force`, which only bypasses the branch/freshness guards.
+ *
+ * The admin "unlock now" callable (`unlockDayNow`, below) is unchanged and
+ * remains the manual fallback for function lag or failure.
+ */
 export const unlockDay = onSchedule(
-  { schedule: '0 8 * * *', timeZone: 'Europe/Rome', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
-  () => runScheduledUnlockForActiveEvents(),
-);
-
-export const unlockDayFinaleLastCall = onSchedule(
-  { schedule: '0 20 * * *', timeZone: 'Europe/Rome', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  { schedule: '*/15 * * * *', timeZone: 'Etc/UTC', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   () => runScheduledUnlockForActiveEvents(),
 );
 
