@@ -4,7 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { THEMES, themesForEdition, DEFAULT_EDITION } from './themes';
+import {
+  THEMES,
+  themesForEdition,
+  themesForEditionIncluding,
+  activeEdition,
+  setActiveEdition,
+  DEFAULT_EDITION,
+} from './themes';
 import { ThemeProvider, useTheme } from './ThemeContext';
 import { contrastRatio, hexToRgb, parseThemeBlocks } from './contrast';
 
@@ -438,19 +445,58 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     }
   });
 
-  it('offers exactly the Bodega Themes on the Vacay picker, and no cruise ones', () => {
-    const vacay = ids('vacay');
-    for (const id of ['the-birds', 'side-quests', 'fog-froth-farewells']) {
-      expect(vacay).toContain(id);
-    }
-    expect(vacay).not.toContain('welcome-aboard');
-    expect(vacay).not.toContain('so-long-farewell');
+  it('offers EXACTLY the Bodega Themes on the Vacay picker', () => {
+    // The regression this pins (Codex on #577): the first cut treated a Theme
+    // with no declared Edition as shared, and every Atlantis party Theme was
+    // undeclared — so the Bodega picker opened with Dog Tag T-Dance in it.
+    expect(ids('vacay')).toEqual(['the-birds', 'side-quests', 'fog-froth-farewells']);
   });
 
-  it('offers the shared party Themes on every Edition', () => {
-    // Themes that predate Editions carry no scope and must not be lost by it.
-    for (const edition of ['gcb', 'vacay']) {
-      expect(ids(edition)).toContain('neon-playground');
+  it('keeps every legacy party Theme out of Vacay by name', () => {
+    for (const id of [
+      'neon-playground',
+      'get-sporty',
+      'duty-free',
+      'glamiators',
+      'summer-white',
+      'dog-tag',
+      'revival-disco',
+      'seriously-pink',
+      'uniforms-without-borders',
+      'neon-pink-playground',
+      'sporty-splash',
+      'under-the-stars',
+      'atlantis-classics',
+    ]) {
+      expect(ids('vacay')).not.toContain(id);
+    }
+  });
+
+  it('PARTITIONS the registry — every Theme is pickable on exactly one Edition', () => {
+    // Stronger than the two lists above: a Theme added without an Edition can
+    // no longer slip through as "shared", and a Theme claimed by both Editions
+    // has to be a deliberate, visible choice rather than an omission.
+    const gcb = ids('gcb');
+    const vacay = ids('vacay');
+    expect([...gcb, ...vacay].sort()).toEqual(THEMES.map((t) => t.id).sort());
+    expect(gcb.filter((id) => vacay.includes(id))).toEqual([]);
+  });
+
+  it('falls back to the legacy Edition for an Edition nothing recognises', () => {
+    // Degrading to the legacy experience beats degrading to an empty picker.
+    expect(ids('not-an-edition')).toEqual(ids('gcb'));
+  });
+
+  it('follows the ACTIVE Edition when no argument is passed', () => {
+    try {
+      setActiveEdition('vacay');
+      expect(ids()).toEqual(['the-birds', 'side-quests', 'fog-froth-farewells']);
+      expect(activeEdition()).toBe('vacay');
+      setActiveEdition(null);
+      expect(activeEdition()).toBe(DEFAULT_EDITION);
+      expect(ids()).toContain('welcome-aboard');
+    } finally {
+      setActiveEdition(DEFAULT_EDITION);
     }
   });
 
@@ -460,5 +506,30 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     for (const id of ['the-birds', 'welcome-aboard', 'neon-playground']) {
       expect(registry).toContain(id);
     }
+  });
+});
+
+// The admin controls display a stored Theme as well as change it, so their list
+// cannot be a plain scoped list: a `<select>` whose value matches no option
+// silently renders the first one instead.
+describe('themesForEditionIncluding — never misreports what is already set', () => {
+  it('adds an off-Edition current Theme, at the front', () => {
+    const list = themesForEditionIncluding('the-birds', 'gcb').map((t) => t.id);
+    expect(list[0]).toBe('the-birds');
+    expect(list).toContain('neon-playground');
+  });
+
+  it('does not duplicate a current Theme that is already in scope', () => {
+    const list = themesForEditionIncluding('neon-playground', 'gcb').map((t) => t.id);
+    expect(list.filter((id) => id === 'neon-playground')).toHaveLength(1);
+    expect(list).toEqual(themesForEdition('gcb').map((t) => t.id));
+  });
+
+  it('is just the scoped list when nothing is set yet', () => {
+    expect(themesForEditionIncluding(undefined, 'vacay').map((t) => t.id)).toEqual([
+      'the-birds',
+      'side-quests',
+      'fog-froth-farewells',
+    ]);
   });
 });

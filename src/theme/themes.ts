@@ -12,9 +12,13 @@ export interface ThemeMeta {
   description: string;
 }
 
-// The eight party themes, surfaced in the theme switcher. Descriptions track
+// The complete Theme REGISTRY, across every Edition. Descriptions track
 // daily-cards-spec § "Theme reference", paraphrased where needed to keep the
 // brand mark out of user-facing copy (PRD non-goal; see w1-themes guard test).
+//
+// This list is NOT what any picker renders — see `themesForEdition` (#555). It
+// must stay complete because `Leaderboard`, `dayIdentity`, `DaySwitcher` and
+// `Board` look Themes up BY ID here, and the contrast suites iterate it.
 export const THEMES: ThemeMeta[] = [
   {
     id: 'neon-playground',
@@ -155,25 +159,77 @@ export const THEMES: ThemeMeta[] = [
   },
 ];
 
+/** The Edition every Theme belonged to before Editions existed. */
+export const DEFAULT_EDITION = 'gcb';
+
+const GCB: readonly string[] = [DEFAULT_EDITION];
+const VACAY: readonly string[] = ['vacay'];
+
 /**
- * Which Editions a Theme belongs to. Absent from this map = available
- * everywhere (the shared party Themes, which predate Editions).
+ * Which Editions each Theme may be PICKED on.
  *
  * This exists so a Bodega Theme never turns up in the Gay Cruise Bingo picker,
  * and vice versa — the one-identity rule: after a player enters through an
  * Edition's hostname, the experience shows that Edition and nothing else.
+ *
+ * TOTAL, not partial, and that is the point. The first cut typed this
+ * `Partial<Record<...>>` and read "absent" as "shared by every Edition", which
+ * made the scoping vacuous in the direction that mattered: the nine Atlantis
+ * party Themes have no business on a Bodega weekend, and every one of them was
+ * absent, so the Vacay picker would have opened with Dog Tag T-Dance in it
+ * (Codex on #577). A total map turns that class of mistake into a compile
+ * error — add a ThemeId without declaring its Editions and this object stops
+ * type-checking. There is deliberately no "shared" escape hatch: if a Theme
+ * ever genuinely belongs to both, it lists both.
  */
-const THEME_EDITIONS: Partial<Record<ThemeId, readonly string[]>> = {
-  'the-birds': ['vacay'],
-  'side-quests': ['vacay'],
-  'fog-froth-farewells': ['vacay'],
-  // Gay Cruise Bingo's own tutorial Themes are cruise-specific content.
-  'welcome-aboard': ['gcb'],
-  'so-long-farewell': ['gcb'],
+const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
+  // Gay Cruise Bingo party Themes — Atlantis signature nights, cruise-specific
+  // content down to the dress codes.
+  'neon-playground': GCB,
+  'get-sporty': GCB,
+  'duty-free': GCB,
+  glamiators: GCB,
+  'summer-white': GCB,
+  'dog-tag': GCB,
+  'revival-disco': GCB,
+  'seriously-pink': GCB,
+  'uniforms-without-borders': GCB,
+  'neon-pink-playground': GCB,
+  'sporty-splash': GCB,
+  'under-the-stars': GCB,
+  'atlantis-classics': GCB,
+  // Gay Cruise Bingo's own tutorial Themes — embark/disembark framing.
+  'welcome-aboard': GCB,
+  'so-long-farewell': GCB,
+  // Bodega Bay (#555).
+  'the-birds': VACAY,
+  'side-quests': VACAY,
+  'fog-froth-farewells': VACAY,
 };
 
 /**
- * The Themes a player may PICK on this Edition.
+ * The Edition this session is serving.
+ *
+ * Seeded from `VITE_EDITION` so a single-Edition build is correct with no
+ * runtime resolution at all, and settable so #543's hostname lookup can install
+ * the resolved Edition once it knows it. Read through `activeEdition()` rather
+ * than captured at import time — a module-level constant would freeze whatever
+ * was true before resolution ran.
+ */
+let currentEdition: string = import.meta.env.VITE_EDITION || DEFAULT_EDITION;
+
+export function activeEdition(): string {
+  return currentEdition;
+}
+
+/** Install the resolved Edition. Falsy resets to the legacy Edition rather than
+ *  emptying the picker, which is the safer failure. */
+export function setActiveEdition(edition: string | null | undefined): void {
+  currentEdition = edition || DEFAULT_EDITION;
+}
+
+/**
+ * The Themes a player or Admin may PICK on this Edition.
  *
  * Deliberately NOT a filter over the exported `THEMES`, which stays the
  * complete registry: four components (`Leaderboard`, `dayIdentity`,
@@ -181,21 +237,40 @@ const THEME_EDITIONS: Partial<Record<ThemeId, readonly string[]>> = {
  * and narrowing the registry would silently turn those lookups into fallbacks.
  * Registry and pickable list are different things; only the latter is scoped.
  *
- * An unknown or absent Edition falls back to `gcb`, NOT to "shared only".
- * Edition is not resolved anywhere yet (that is #543's hostname lookup), so
- * every current caller passes nothing — and a "shared only" default would
- * silently drop `welcome-aboard` / `so-long-farewell` out of the Gay Cruise
- * Bingo picker the moment this lands. Defaulting to the legacy Edition keeps
- * today's production behaviour byte-identical and makes this change purely
- * additive until a caller starts passing a real Edition.
+ * Every picker goes through here, admin ones included. Scoping only the player
+ * switcher left the two admin controls (`GameSettings` Appearance and
+ * `SchedulePanel`'s per-Day select) mapping the raw registry, so adding the
+ * Bodega Themes would have offered 🐦 The Birds as a Mediterranean cruise's
+ * `defaultTheme` (Codex on #577).
+ *
+ * An unknown Edition falls back to `gcb` rather than to an empty list: an
+ * Edition string that nothing recognises should degrade to the legacy
+ * experience, not to a picker with nothing in it.
  */
-export const DEFAULT_EDITION = 'gcb';
-
 export function themesForEdition(edition?: string | null): ThemeMeta[] {
-  const ed = edition || DEFAULT_EDITION;
-  return THEMES.filter((t) => {
-    const editions = THEME_EDITIONS[t.id];
-    if (!editions) return true; // shared, pre-Edition Themes
-    return editions.includes(ed);
-  });
+  const ed = edition || currentEdition;
+  const known = THEMES.some((t) => THEME_EDITIONS[t.id].includes(ed));
+  const scope = known ? ed : DEFAULT_EDITION;
+  return THEMES.filter((t) => THEME_EDITIONS[t.id].includes(scope));
+}
+
+/**
+ * `themesForEdition`, plus `keep` when that Theme is already SET but sits
+ * outside this Edition.
+ *
+ * For controls that both display and change a stored Theme. A `<select>` whose
+ * `value` matches no `<option>` falls back to rendering the first one, so a
+ * plain scoped list would quietly show a Day as "Neon Playground" when it is
+ * stored as something else — narrowing what may be picked must not misreport
+ * what is set. The off-Edition entry leads the list so it is visible rather
+ * than buried.
+ */
+export function themesForEditionIncluding(
+  keep?: ThemeId | null,
+  edition?: string | null,
+): ThemeMeta[] {
+  const list = themesForEdition(edition);
+  if (!keep || list.some((t) => t.id === keep)) return list;
+  const current = THEMES.find((t) => t.id === keep);
+  return current ? [current, ...list] : list;
 }

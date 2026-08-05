@@ -8,7 +8,7 @@ import {
   setReportHideThreshold,
   setEasyMixRatio,
 } from '../../data/admin';
-import { THEMES } from '../../theme/themes';
+import { themesForEditionIncluding } from '../../theme/themes';
 import type { ClaimMode, EventDoc } from '../../types';
 
 // A −/+ stepper for `settings.reportHideThreshold` (#222), floored at 1 on
@@ -275,8 +275,14 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
             <div className="sub">What new players see first.</div>
           </div>
         </div>
+        {/* Scoped to this Edition, not the whole registry (#555): an Admin must
+            not be able to set a Bodega Theme as a cruise's `defaultTheme`, or
+            vice versa — the player picker's scoping means the choice would be
+            unreachable in the switcher anyway. An already-set off-Edition
+            default is kept in the list so it still shows as the active chip
+            rather than vanishing. */}
         <div className="themes">
-          {THEMES.map((t) => (
+          {themesForEditionIncluding(event?.defaultTheme).map((t) => (
             <button
               key={t.id}
               className={'chip' + (event?.defaultTheme === t.id ? ' active' : '')}
