@@ -31,6 +31,24 @@ describe('resolveAuthDomain', () => {
     );
   });
 
+  it('pins the Vacay Bingo mirror to its own handler (#625)', () => {
+    // Vacay is an Edition of the fiveacross project, so this host's configured
+    // authDomain and proxy target are fiveacross's — the brand differs, the
+    // Firebase project does not.
+    expect(resolveAuthDomain('fiveacross.firebaseapp.com', 'vacaybingo.vercel.app')).toBe(
+      'vacaybingo.vercel.app',
+    );
+  });
+
+  it('does not redirect a mirror to its canonical custom domain (#625)', () => {
+    // The serve-in-place rule: a mirror that hands off to vacaybingo.com is
+    // useless in the one case it exists for. resolveAuthDomain must return the
+    // mirror host itself, never the brand's canonical hostname.
+    expect(resolveAuthDomain('vacaybingo.com', 'vacaybingo.vercel.app')).toBe(
+      'vacaybingo.vercel.app',
+    );
+  });
+
   it.each([
     'gaycruisebingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
     'gaycruisebingo-git-some-other-branch-nathanjohnpaynes-projects.vercel.app',
@@ -39,6 +57,12 @@ describe('resolveAuthDomain', () => {
     // and a lookalike suffix. Neither is registered in either console.
     'fiveacross-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
     'fiveacross.vercel.app.evil.example',
+    'vacaybingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
+    'vacaybingo.vercel.app.evil.example',
+    // Neither the brand's canonical domain nor a wildcard Event host under it is
+    // first-party: those sign in via ADR 0010's escape hatch (authDomain pinned
+    // by their own build), not via this list.
+    'vacaybingo.com',
   ])('does not treat %s as first-party — the match is exact, never a pattern', (hostname) => {
     expect(resolveAuthDomain('gaycruisebingo.vercel.app', hostname)).toBe('gaycruisebingo.vercel.app');
   });
@@ -93,6 +117,10 @@ describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
     // The Five Across backup host (#585) must mount and sign in, not render the
     // auth-unconfigured screen — that is the entire point of the mirror.
     expect(isSignInReachableOnHost('fiveacross.firebaseapp.com', 'fiveacross.vercel.app')).toBe(
+      true,
+    );
+    // The Vacay Bingo backup host (#625), same reasoning.
+    expect(isSignInReachableOnHost('fiveacross.firebaseapp.com', 'vacaybingo.vercel.app')).toBe(
       true,
     );
     // ADR 0010's same-origin escape hatch (authDomain pinned to this host).
