@@ -10,7 +10,7 @@ import vision from '@google-cloud/vision';
 import sharp from 'sharp';
 import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import { shouldNotify, notifyAdminsOfModeration, type ModeratedDoc } from './notify';
-import { visionModerationEnabled, shouldScanProof } from './visionGate';
+import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
 import { handleSubmitBugReport } from './bugReports';
 import {
@@ -29,7 +29,37 @@ const visionClient = new vision.ImageAnnotatorClient();
 // The Firestore/Storage-authorized runtime identity. The project's default Gen2
 // compute account deliberately has NO Firestore or Storage data-plane access, so
 // every Admin-SDK function that reads/writes those planes must pin this account.
-const ADMIN_SDK_SERVICE_ACCOUNT = 'firebase-adminsdk-fbsvc@gaycruisebingo.iam.gserviceaccount.com';
+//
+// PER-PROJECT, not a constant (ADR 0008). This repo deploys to two Firebase
+// projects, and a Service Account only exists inside its own project — pinning
+// the `gaycruisebingo` account while deploying `fiveacross` fails the deploy
+// outright with `iam.serviceaccounts.actAs` on a cross-project resource, and
+// would be wrong even if it succeeded: it would run Bodega's functions under an
+// identity holding gaycruisebingo's Firestore data-plane access, collapsing the
+// very boundary ADR 0008 exists to draw.
+//
+// Derived from the project, NOT read from `functions/.env*`. `serviceAccount`
+// is part of the endpoint manifest, so it is resolved during TRIGGER DISCOVERY,
+// whose subprocess env firebase-tools seals — `.env` files are loaded only
+// afterwards. A `process.env.ADMIN_SDK_SERVICE_ACCOUNT` override would read as
+// `undefined` there and silently fall back, which is worse than not offering
+// one. `resolveProjectId` reads the two things discovery DOES guarantee; see
+// the long note in visionGate.ts for the full mechanics.
+//
+// This reproduces the previous literal exactly on `gaycruisebingo`. It assumes
+// the Admin SDK account keeps the `firebase-adminsdk-fbsvc` id, which holds for
+// both current projects; a project whose id differs would need the account read
+// from disk at discovery, the way visionGate.ts reads its flag.
+//
+// The value must already be a FULL email here — firebase-functions v2's
+// trailing-`@` shorthand (`firebase-adminsdk-fbsvc@`) is not safe: firebase-tools
+// (verified against 15.25.1) expands the shorthand only on the Cloud Functions
+// service-config path (gcp/cloudfunctionsv2.js → proto.formatServiceAccount),
+// while gcp/cloudscheduler.js `jobFromEndpoint` copies `endpoint.serviceAccount`
+// VERBATIM into the Cloud Scheduler OIDC token for `unlockDay`, so the raw
+// shorthand would reach Cloud Scheduler as an invalid email and fail the deploy
+// at the scheduler step (found on the sibling fix PR #590, closed for this one).
+const ADMIN_SDK_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${resolveProjectId() ?? 'gaycruisebingo'}.iam.gserviceaccount.com`;
 
 /**
  * Private, authenticated bug intake; App Check enforcement follows #44's
