@@ -18,9 +18,12 @@ Every host that can complete Google sign-in is registered **three times**, all b
 |---|---|---|
 | `gaycruisebingo.com`, `gaycruisebingo.vercel.app`, `gaycruisebingo.firebaseapp.com` | Yes | Production, registered on the `gaycruisebingo` project. |
 | `gaycruisebingo-git-preview-…vercel.app` | Yes | The stable preview alias — one branch URL, registered once (Parts 1–4). |
-| `fiveacross.vercel.app` | Yes | The Five Across mirror, registered on the `fiveacross` project (last section). |
+| `fiveacross.vercel.app` | Yes† | The Five Across mirror, registered on the `fiveacross` project (last section). |
+| `vacaybingo.vercel.app` | Yes† | The Vacay Bingo mirror — also registered on the `fiveacross` project; Vacay is an Edition of it, not its own project. |
 | A single-Event Firebase custom domain, e.g. `bodega-bay.fiveacross.app` | Yes | Its build pins `authDomain` to itself — ADR 0010's same-origin escape hatch. |
 | Any per-deployment or per-branch preview host, `…-<hash>-…vercel.app` | **No, and never** | The hostname changes per push, so there is nothing stable to register. |
+
+† Both mirrors are provisioned and serving, but their console registrations are **outstanding** — see § The brand mirrors → Current state. Until those land they render a Google button that fails, so neither URL should be handed out yet.
 
 A per-deployment preview host therefore renders the `auth-unconfigured` screen — "This address is not open yet". That screen is the gate working as designed, not a regression: before #576 those hosts showed a Google button that silently dead-ended, which was strictly worse. On a `*.vercel.app` hostname the screen now adds a developer note pointing back here (#585, `src/components/EventNotFound.tsx`), because the person reading it on that host is by construction someone who just pushed a branch.
 
@@ -99,7 +102,7 @@ If a sign-in attempt fails oddly after a long idle, reload the preview URL to re
 
 ---
 
-## The Five Across mirror
+## The brand mirrors
 
 `fiveacross.vercel.app` is the Five Across backup host (#585): a **second Vercel project**, building this same repository and the same `main` branch, against the `fiveacross` Firebase project ([ADR 0008](../adr/0008-five-across-second-firebase-project.md)).
 
@@ -123,13 +126,34 @@ Rewrites match in array order, so requests on the mirror host take this rule and
 
 The two alternatives the ticket floated were both worse. A **long-lived mirror branch** carrying its own `vercel.json` makes the backup host a permanent fork of `main` that has to be re-synced by hand — and a backup host quietly serving stale code is precisely the failure it exists to prevent, discovered at the worst possible moment. **Build-time templating** cannot work at all: Vercel reads `vercel.json` from the source before the build command runs, so a `vercel.json` written during the build is never read. (Generating `.vercel/output/config.json` via the Build Output API would work, but it means hand-rolling what the Vite framework preset does for free, on both projects.)
 
+### Current state
+
+| Step | `fiveacross.vercel.app` | `vacaybingo.vercel.app` |
+|---|---|---|
+| 1. Vercel project | **Done** | **Done** |
+| 2. Minted host confirmed exact | **Done** | **Done** |
+| 3. Production env vars | **Done** — nine `VITE_*`, Production scope | **Done** — same nine, `VITE_FIREBASE_AUTH_DOMAIN` set to its own host |
+| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | **Done** — production branch `main` |
+| 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
+| 6. Google OAuth redirect URI | **Outstanding — console-only** | **Outstanding — console-only** |
+
+Both mirrors are live, both rebuild automatically on a merge to `main`, and **neither can complete sign-in yet.**
+
+> **Do not advertise either mirror URL until step 6 is done for that host.** This is the one thing on this page that can burn a player.
+>
+> Because each mirror host is in `FIRST_PARTY_AUTH_HOSTS`, `isAuthConfiguredForHost` returns true there, so the app **mounts and renders a real Google sign-in button** — it does *not* show the `auth-unconfigured` screen. Until steps 5 and 6 are done for that host, tapping it fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. The window is inherent to any allowlist entry: the code half has to land before the console half can reference it. Harmless while the host is unadvertised, unrecoverable-by-the-player once it is not.
+
 ### Setup runbook
 
-**Not yet done.** Steps 1–4 are Vercel dashboard work under Nathan's account and step 6 is console-only; an agent must not attempt them. Step 5 has an API path. Until all of it is done, `fiveacross.vercel.app` does not resolve, and the `FIRST_PARTY_AUTH_HOSTS` entry that ships with this document is inert — it can only affect a browser sitting on that exact hostname, which does not exist yet.
+Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path but needs a credential with Identity Toolkit access on `fiveacross` — ordinary local ADC gets `PERMISSION_DENIED`.
 
 1. **Create the project.** Vercel dashboard → **Add New → Project** → import `nathanjohnpayne/gaycruisebingo` → **Project Name: `fiveacross`**. Framework preset **Vite**, build command `npm run build`, output `dist`, production branch `main`. (CLI equivalent: `vercel project add fiveacross`, then `vercel git connect` from a linked checkout — the dashboard flow is less fiddly and shows you step 2's answer immediately.)
 
-2. **Confirm the minted production host is exactly `fiveacross.vercel.app`.** This is the load-bearing check of the whole runbook. Vercel assigns `<project>.vercel.app` when that subdomain is free and falls back to `<project>-<scope>.vercel.app` when it is not; `fiveacross.vercel.app` was unclaimed when this was written, but the `.vercel.app` namespace is global and shared with every other Vercel user. If Vercel mints anything else, **stop**: `vercel.json`'s `has` condition and `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` both hard-code this literal string, and a mismatch means the mirror's auth helper proxies to the wrong Firebase project. Fix the two constants in a follow-up PR before doing steps 5 and 6. (You can also add the alias explicitly under **Settings → Domains** if the project minted a longer default but the short name is free.)
+   `vercel project add` creates the project with **no framework preset**, which defaults the output directory to `build` and fails the first deploy with *"No Output Directory named `build` found"* even though the Vite build succeeded. The CLI has no flag for this; either use the dashboard, or `PATCH https://api.vercel.com/v9/projects/<projectId>?teamId=<orgId>` with `{"framework":"vite","outputDirectory":"dist","buildCommand":"npm run build"}`.
+
+   `vercel link` also writes a `.env.local` holding a `VERCEL_OIDC_TOKEN` **and appends `.vercel` + `.env*` to `.gitignore`.** In this repo both are unwanted — `.gitignore` is tracked and already covers what it needs to. Revert the `.gitignore` edit and delete the generated `.env.local` before committing anything.
+
+2. **Confirm the minted production host is exactly `fiveacross.vercel.app`.** This is the load-bearing check of the whole runbook. ✅ *Confirmed on provisioning — `vercel project ls` and `vercel inspect` both report `https://fiveacross.vercel.app` as the production alias.* Vercel assigns `<project>.vercel.app` when that subdomain is free and falls back to `<project>-<scope>.vercel.app` when it is not; `fiveacross.vercel.app` was unclaimed when this was written, but the `.vercel.app` namespace is global and shared with every other Vercel user. If Vercel mints anything else, **stop**: `vercel.json`'s `has` condition and `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` both hard-code this literal string, and a mismatch means the mirror's auth helper proxies to the wrong Firebase project. Fix the two constants in a follow-up PR before doing steps 5 and 6. (You can also add the alias explicitly under **Settings → Domains** if the project minted a longer default but the short name is free.)
 
 3. **Set Production environment variables** (Settings → Environment Variables, **Production** scope only). Take the `VITE_FIREBASE_*` values from the `fiveacross` console (Project settings → General → Your apps → Web app), **not** from the gcb project:
 
@@ -149,7 +173,7 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 
    `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and never consults the `hostnames/{host}` lookup, which is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build** — a mismatch ships the backup host under different branding and chrome than the host it is backing up.
 
-4. **Turn off preview builds on this project.** Settings → Git → **Ignored Build Step**, command:
+4. **Connect Git and turn off preview builds.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. Then Settings → Git → **Ignored Build Step**, command:
 
    ```bash
    [ "$VERCEL_ENV" != "production" ]
@@ -182,20 +206,58 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 
    Google's propagation note applies: a `redirect_uri_mismatch` in the first few minutes after saving is not necessarily a mistake.
 
+### The Vacay Bingo mirror (#625)
+
+`vacaybingo.vercel.app` is the third and last of the family, alongside `gaycruisebingo.vercel.app` and `fiveacross.vercel.app`. It follows the runbook above unchanged except for the values below, because **Vacay is an Edition of the `fiveacross` Firebase project, not a project of its own** — ADR 0008 splits the data plane by cohort, not by brand. Same Firebase project, same registrations console, same `/__/auth/*` proxy destination; only the Vercel project and the baked Edition differ.
+
+| Setting | Value |
+|---|---|
+| Vercel project name | `vacaybingo` |
+| Required minted host | `vacaybingo.vercel.app` (exact — the hard stop in step 2 applies identically) |
+| `VITE_FIREBASE_AUTH_DOMAIN` | `vacaybingo.vercel.app` |
+| `VITE_EDITION` | `vacay` |
+| Every other `VITE_*` | identical to the `fiveacross` mirror |
+| Firebase authorized domain | `vacaybingo.vercel.app`, on the **`fiveacross`** project |
+| OAuth redirect URI | `https://vacaybingo.vercel.app/__/auth/handler` on the **`fiveacross`** web client |
+| OAuth JS origin | `https://vacaybingo.vercel.app` |
+
+**It serves the branded app in place and must never redirect to `vacaybingo.com`.** A mirror that bounces to the canonical host is worthless in the one situation it exists for — the canonical host being unreachable. Nothing in the code does this today; the rule is written down so nobody adds it as a convenience later.
+
+#### The `hostnames` document, and why the mirror does not use it
+
+[#625](https://github.com/nathanjohnpayne/gaycruisebingo/issues/625) specifies a Firestore `hostnames/vacaybingo.vercel.app` document so the mirror resolves its Brand and Event the way DNS does. **The provisioned mirror does not use it, deliberately**, and the two are mutually exclusive rather than complementary: setting `VITE_EVENT_ID` makes a *single-Event build*, which per ADR 0009 serves exactly that Event and **never consults the `hostnames/{host}` lookup**. A hostname-resolved build would instead have to complete a Firestore `getDocFromServer` before first paint, and `shouldMountOnBootstrapFailure` makes it fail **closed** to the `unreachable` screen when that read fails.
+
+That is the wrong trade for a backup host. The mirror's entire job is to work when something else is broken, so it should depend on as little as possible at boot — an env-pinned build has no pre-paint network dependency at all. The hostnames document is the right mechanism for a mirror that must serve *many* Events, which is the follow-up design #625 itself defers ("Event slugs on mirrors are the follow-up design ticket").
+
+If and when a mirror does need hostname resolution, drop `VITE_EVENT_ID` from that project's env and create the document:
+
+```
+Collection: hostnames
+Document id: vacaybingo.vercel.app
+  event:   "bodega-bay-2026"
+  edition: "vacay"
+```
+
+Field names and semantics are `specs/hostnames-lookup.md`. Creating the document while `VITE_EVENT_ID` is still set is harmless but inert — nothing reads it — so it is not a safe way to "pre-stage" a switch, and the switch needs a rebuild either way.
+
 ### Verifying the mirror
 
-1. `https://fiveacross.vercel.app/` loads the Bodega Event — with **no** Vercel login wall (if you hit one, step 1 created a preview deployment, not a production one).
-2. The auth iframe request in the network panel goes to `https://fiveacross.vercel.app/__/auth/iframe`, not to `fiveacross.firebaseapp.com`. If it points at `firebaseapp.com`, the `FIRST_PARTY_AUTH_HOSTS` entry or the `has` condition does not match the minted host.
-3. Google sign-in completes in a fresh session (a private window, so no existing session masks a broken registration) and the board deals.
-4. The board is the same Event the primary Bodega host serves — same Event id, same Edition chrome, same theme.
+1. `https://fiveacross.vercel.app/` loads the Bodega Event — with **no** Vercel login wall (if you hit one, step 1 created a preview deployment, not a production one). ✅
+2. The `<title>`, iOS home-screen label and PWA manifest all read the Edition's name, and the bundle carries the `fiveacross` project id, the Bodega Event id, and a non-empty `apiKey`. An empty `apiKey` in the bundle means the env vars did not reach the build — though the Vite blank-key guard should have failed the build first. ✅
+3. `/__/auth/iframe` returns Firebase's helper shell rather than the SPA's `index.html` — compare the two response bodies, they must differ. If they are identical, the auth rewrite lost its priority over the catch-all. ✅
+4. The auth iframe request in the network panel goes to `https://fiveacross.vercel.app/__/auth/iframe`, not to `fiveacross.firebaseapp.com`. If it points at `firebaseapp.com`, the `FIRST_PARTY_AUTH_HOSTS` entry or the `has` condition does not match the minted host. ✅
+5. Google sign-in completes in a fresh session (a private window, so no existing session masks a broken registration) and the board deals. **Blocked on steps 5 and 6.**
+6. The board is the same Event the primary Bodega host serves — same Event id, same Edition chrome, same theme. **Check after sign-in works.**
+
+Note that steps 3–4 prove the rewrite fires and reaches Firebase Hosting, but they cannot prove *which* Firebase project it reached: Firebase serves a byte-identical helper shell from every project, so no black-box request distinguishes `fiveacross` from `gaycruisebingo` here. That the correct one is reached follows from the deployed `vercel.json`, and is confirmed for real only by step 5's sign-in.
 
 ### Operating it
 
-The mirror deploys **automatically on every push to `main`**; the primary Firebase Hosting deploy is manual (`scripts/deploy.sh`). So the mirror can be *ahead* of the primary, serving merged-but-not-yet-deployed code. That is usually harmless and occasionally not — before an event, deploy the primary first and treat the mirror as already current.
+Once Git is connected, the mirror deploys **automatically on every push to `main`**; the primary Firebase Hosting deploy is manual (`scripts/deploy.sh`). So the mirror can be *ahead* of the primary, serving merged-but-not-yet-deployed code. That is usually harmless and occasionally not — before an event, deploy the primary first and treat the mirror as already current.
 
 Add the mirror to the post-deploy check for Five Across: after any deploy that touches `src/**`, load `https://fiveacross.vercel.app/` once and confirm the app mounts, alongside the `SYNTHETIC_URL` check the primary host gets from `scripts/deploy.sh`. The mirror is not covered by that synthetic — it is a different deploy pipeline entirely.
 
-Handing the mirror to players is a manual decision: it is a backup URL to give out when the primary host is unreachable, not a second address to advertise.
+Handing a mirror to players is a manual decision: it is a backup URL to give out when the primary host is unreachable, not a second address to advertise. And not before that host’s OAuth registration is done — see the warning under Current state.
 
 ## Troubleshooting
 
