@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   ADULT_CONTENT_DEFAULT,
   adultContentRequired,
@@ -92,6 +92,74 @@ describe('the network and cache paths agree about the same bytes', () => {
     expect(resolution.kind).toBe('event');
     if (resolution.kind !== 'event') return;
     expect(resolution.adultContent).toBe(false);
+  });
+
+  // Codex P1 on #615. `adultContent` is the one cached field that moves in only
+  // one direction, and it is the direction that matters: a fresh cache hit
+  // holding `false` would short-circuit for the whole 12-hour TTL, so a device
+  // could keep booting past a gate the Event acquired hours ago and the
+  // mid-Event re-gate path would simply never fire there.
+  it('revalidates a cached NON-adult posture instead of short-circuiting on it', async () => {
+    const storage = fakeStorage();
+    writeCache(storage, HOST, DOC, 1000); // adultContent: false, and FRESH
+    const fetchDoc = vi.fn(async () => ({ ...DOC, adultContent: true }));
+    const resolution = await resolveEvent({ hostname: HOST, fetchDoc, storage, now: () => 2000 });
+    expect(fetchDoc, 'a cached false must not answer on its own').toHaveBeenCalledTimes(1);
+    expect(resolution.kind).toBe('event');
+    if (resolution.kind !== 'event') return;
+    expect(resolution.adultContent).toBe(true);
+    expect(resolution.source).toBe('network');
+  });
+
+  it('still short-circuits on a cached GATED posture — the offline-first path is untouched', async () => {
+    const storage = fakeStorage();
+    writeCache(storage, HOST, { ...DOC, adultContent: true }, 1000);
+    const fetchDoc = vi.fn(async () => {
+      throw new Error('a fresh gated cache must never touch the network');
+    });
+    const resolution = await resolveEvent({ hostname: HOST, fetchDoc, storage, now: () => 2000 });
+    expect(fetchDoc).not.toHaveBeenCalled();
+    expect(resolution.kind === 'event' && resolution.source).toBe('cache');
+  });
+
+  // …and revalidation FAILING must not strand the device or gate it. An offline
+  // client cannot learn about a flip by any means, and forcing the gate on would
+  // ask a Player of a tame Event for an attestation they were never offered —
+  // holding them on the loading screen instead of their cached board. The
+  // exposure this closes is the online device that would never ask.
+  it('falls back to the cached non-adult mapping when revalidation fails', async () => {
+    const storage = fakeStorage();
+    writeCache(storage, HOST, DOC, 1000);
+    const fetchDoc = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    const resolution = await resolveEvent({ hostname: HOST, fetchDoc, storage, now: () => 2000 });
+    expect(resolution.kind).toBe('event');
+    if (resolution.kind !== 'event') return;
+    expect(resolution.adultContent).toBe(false);
+    expect(resolution.source).toBe('cache');
+  });
+
+  // Codex P2 on #615. A single-Event build never reads a hostname document, so
+  // without a build-time input it could never be anything but adults-only —
+  // there is nowhere for the server derivation to publish `false`.
+  it('lets a single-Event build opt out with VITE_ADULT_CONTENT=false', async () => {
+    const resolve = (envAdultContent: string | null) =>
+      resolveEvent({
+        hostname: HOST,
+        fetchDoc: async () => {
+          throw new Error('the env short-circuit must never touch the network');
+        },
+        envEventId: 'bodega-bay-2026',
+        envAdultContent,
+      });
+    const off = await resolve('false');
+    expect(off.kind === 'event' && off.adultContent).toBe(false);
+    // Only the literal string. A typo, a blank, an unset var — all still gate.
+    for (const bad of ['False', 'FALSE', '0', 'no', '', null]) {
+      const on = await resolve(bad);
+      expect(on.kind === 'event' && on.adultContent, JSON.stringify(bad)).toBe(true);
+    }
   });
 
   // The env short-circuit reads no hostname document at all, so unlike `edition`

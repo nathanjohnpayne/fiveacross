@@ -382,6 +382,33 @@ describe('the 18+ gate follows the EVENT, not the Edition (#608)', () => {
     expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
+  // Codex P2 on #615. `profileReady` is true after a bootstrap FAILURE too — that
+  // is its contract — so reading it as the deal authority would call joinAndDeal
+  // on a timed-out `ensureUserProfile`, creating Event rows before the profile
+  // bootstrap it is supposed to follow ever landed. The authority is
+  // `profileBootstrapOk`, the direct analogue of `attestedAuthoritative`.
+  it('does NOT deal when the profile bootstrap failed, even with no age gate', async () => {
+    mocks.readAdultAttestation.mockRejectedValue(new Error('network request failed'));
+    mocks.auth.currentUser = FAKE_USER;
+    mountWithProbe();
+    await signIn(FAKE_USER);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    expect(rePrompted()).toBe(false); // …and still no age prompt: none is owed
+  });
+
+  it('deals once the retried bootstrap actually succeeds', async () => {
+    mocks.readAdultAttestation
+      .mockRejectedValueOnce(new Error('network request failed'))
+      .mockResolvedValue(null);
+    mocks.auth.currentUser = FAKE_USER;
+    mountWithProbe();
+    await signIn(FAKE_USER);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByText('retry'));
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+  });
+
   it('re-gates every un-attested Player the moment the Event turns 18+', async () => {
     // The retroactive path, and the whole reason the posture rides the pre-auth
     // routing document: an admin approves the first explicit Prompt, the

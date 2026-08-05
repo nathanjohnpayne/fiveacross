@@ -127,11 +127,21 @@ async function adminFirestore(): Promise<AdultFirestore> {
  * to every client precisely so the collection cannot become a directory.
  *
  * Each write is independently try/caught so one failure never abandons the
- * remaining aliases. Returns how many documents it stamped.
+ * remaining aliases — but the failures are COLLECTED and rethrown once the loop
+ * is done, so the trigger fails and the platform retries it (Codex P2 on #615).
+ * Swallowing them would acknowledge the trigger while an alias keeps serving the
+ * un-gated sign-in shell for an Event that now has active explicit content, with
+ * no guaranteed second attempt: the derived flag is a fail-closed security
+ * posture, and "logged and forgotten" is not a fail direction it can afford.
+ * Retrying is safe because the stamp is idempotent — the already-stamped
+ * documents are skipped on the way through.
+ *
+ * Returns how many documents it stamped.
  */
 export async function raiseAdultContentForEvent(db: AdultFirestore, eventId: string): Promise<number> {
   const snap = await db.collection('hostnames').where('eventId', '==', eventId).get();
   let stamped = 0;
+  const failed: string[] = [];
   for (const d of snap.docs) {
     if (d.data()?.adultContent === true) continue; // already gated — monotone, nothing to do
     try {
@@ -139,7 +149,14 @@ export async function raiseAdultContentForEvent(db: AdultFirestore, eventId: str
       stamped++;
     } catch (err) {
       console.error('raiseAdultContentForEvent: per-host stamp failed', eventId, d.id, err);
+      failed.push(d.id);
     }
+  }
+  if (failed.length > 0) {
+    throw new Error(
+      `raiseAdultContentForEvent: ${failed.length} hostname document(s) for ${eventId} still serve ` +
+        `an un-gated shell: ${failed.join(', ')}`,
+    );
   }
   return stamped;
 }
@@ -154,48 +171,48 @@ async function defaultRaise(eventId: string): Promise<number> {
 }
 
 /**
- * Best-effort: a Prompt write that leaves an ACTIVE, spicy, main-pool Prompt in
- * the Event gates that Event.
+ * A Prompt write that leaves an ACTIVE, spicy, main-pool Prompt in the Event
+ * gates that Event.
  *
  * The cheap predicate runs BEFORE any read, so the overwhelming majority of item
  * writes — tame Prompts, pending submissions, report-count bumps on non-spicy
  * rows, our own auto-hide's `status: 'hidden'` flip — cost nothing at all.
- * Never throws (ADR 0001): a failure here must not crash the pipeline the
- * approval flow and the moderation notifiers share.
+ *
+ * THROWS on a failed stamp, deliberately parting company with the never-throw
+ * discipline next door (Codex P2 on #615). `autohide.ts` swallows because it
+ * shares an `onDocumentWritten` path with the #101 notifiers and must not take
+ * them down. This is a DEDICATED trigger: nothing else rides it, the approval
+ * write it reacts to has already committed, and a throw costs only a Cloud
+ * Functions retry of an idempotent operation. Against that, swallowing would
+ * leave a public fail-closed flag reading `false` on an Event with active
+ * explicit content, with no second attempt — which is the failure this whole
+ * module exists to prevent.
  */
 export async function applyItemAdultContent(
   eventId: string,
   after: AdultItemDoc | undefined,
   deps: AdultContentDeps = {},
 ): Promise<number> {
-  try {
-    if (!itemImpliesAdultContent(after)) return 0;
-    return await (deps.raiseAdultContent ?? defaultRaise)(eventId);
-  } catch (err) {
-    console.error('applyItemAdultContent failed', eventId, err);
-    return 0;
-  }
+  if (!itemImpliesAdultContent(after)) return 0;
+  return (deps.raiseAdultContent ?? defaultRaise)(eventId);
 }
 
 /**
- * Best-effort: an Event whose `settings.forceAdult` is on gates that Event.
+ * An Event whose `settings.forceAdult` is on gates that Event.
  *
  * Fires on the after-state rather than on the false→true transition, for the
- * same retry reason as the item path: a swallowed failure would otherwise leave
- * an Event an admin explicitly marked adult serving an un-gated shell until the
+ * same retry reason as the item path: a crossing test would otherwise leave an
+ * Event an admin explicitly marked adult serving an un-gated shell until the
  * flag was toggled off and on again. Admin config writes are rare, and the raise
  * skips already-stamped documents, so re-checking is nearly free.
+ *
+ * Throws on a failed stamp, for the platform retry — see `applyItemAdultContent`.
  */
 export async function applyEventAdultContent(
   eventId: string,
   after: AdultEventDoc | undefined,
   deps: AdultContentDeps = {},
 ): Promise<number> {
-  try {
-    if (!eventForcesAdultContent(after)) return 0;
-    return await (deps.raiseAdultContent ?? defaultRaise)(eventId);
-  } catch (err) {
-    console.error('applyEventAdultContent failed', eventId, err);
-    return 0;
-  }
+  if (!eventForcesAdultContent(after)) return 0;
+  return (deps.raiseAdultContent ?? defaultRaise)(eventId);
 }

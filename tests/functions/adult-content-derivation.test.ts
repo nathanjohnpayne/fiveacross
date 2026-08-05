@@ -123,18 +123,29 @@ describe('the stamp: every routing document for the Event', () => {
     expect(updates['hostnames/b.example.com']).toEqual({ adultContent: true });
   });
 
-  it('finishes the remaining aliases when one write fails', async () => {
+  // Every alias is still attempted — one bad document must not abandon the rest —
+  // but the failure is then RETHROWN so Cloud Functions retries. Acknowledging the
+  // trigger would leave that alias serving the un-gated shell with no second
+  // attempt (Codex P2 on #615). Retrying is safe: the stamp is idempotent.
+  it('finishes the remaining aliases when one write fails, then throws for retry', async () => {
     const { db } = fakeDb({ 'a.example.com': { eventId: 'e1' }, 'b.example.com': { eventId: 'e1' } });
+    const stamped: Record<string, Record<string, unknown>> = {};
     const failing: AdultFirestore = {
       ...db,
       doc: (path: string) => ({
-        update: async () => {
-          if (path.endsWith('a.example.com')) throw new Error('nope');
+        update: async (data: Record<string, unknown>) => {
+          stamped[path] = data;
+          // Exact path, not `endsWith` — CodeQL reads a host suffix test as
+          // incomplete URL sanitization, and an exact match is what this double
+          // means anyway.
+          if (path === 'hostnames/a.example.com') throw new Error('nope');
           return undefined;
         },
       }),
     };
-    expect(await raiseAdultContentForEvent(failing, 'e1')).toBe(1);
+    await expect(raiseAdultContentForEvent(failing, 'e1')).rejects.toThrow(/a.example.com/);
+    // …and the good alias was still stamped on the way through.
+    expect(stamped['hostnames/b.example.com']).toEqual({ adultContent: true });
   });
 });
 
@@ -178,18 +189,35 @@ describe('the triggers, end to end', () => {
     expect(raiseAdultContent).toHaveBeenCalledTimes(1);
   });
 
-  // ADR 0001: a failure here must not crash the pipeline the approval flow and
-  // the moderation notifiers share. The client's own fail-closed read is what
-  // keeps the Event gated in the meantime.
-  it('never throws', async () => {
+  // These triggers deliberately DO throw, parting company with the never-throw
+  // discipline in `autohide.ts` (Codex P2 on #615). That module swallows because
+  // it shares a document path with the #101 notifiers and must not take them
+  // down; these are dedicated triggers whose approval write has already
+  // committed, so a throw costs only a retry of an idempotent operation — and
+  // swallowing would leave a public fail-closed flag reading `false` on an Event
+  // with active explicit content, with no second attempt.
+  it('propagates a stamp failure so the platform retries', async () => {
     const raiseAdultContent = vi.fn(async () => {
       throw new Error('firestore is having a day');
     });
     await expect(
       applyItemAdultContent('e1', { status: 'active', spicy: true, pool: 'main' }, { raiseAdultContent }),
-    ).resolves.toBe(0);
+    ).rejects.toThrow(/having a day/);
     await expect(
       applyEventAdultContent('e1', { settings: { forceAdult: true } }, { raiseAdultContent }),
+    ).rejects.toThrow(/having a day/);
+  });
+
+  // …but a write that could never gate the Event still costs nothing and cannot
+  // fail, so no amount of ordinary Prompt traffic can put these triggers into a
+  // retry loop.
+  it('cannot fail on a write that never reaches the stamp', async () => {
+    const raiseAdultContent = vi.fn(async () => {
+      throw new Error('should never be called');
+    });
+    await expect(
+      applyItemAdultContent('e1', { status: 'pending', spicy: true, pool: 'main' }, { raiseAdultContent }),
     ).resolves.toBe(0);
+    await expect(applyEventAdultContent('e1', { settings: {} }, { raiseAdultContent })).resolves.toBe(0);
   });
 });

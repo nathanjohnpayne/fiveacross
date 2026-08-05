@@ -179,6 +179,12 @@ export interface ResolveOptions {
   storage?: StorageLike | null;
   /** `VITE_EVENT_ID`. Its PRESENCE marks a single-Event build. */
   envEventId?: string | null;
+  /** `VITE_ADULT_CONTENT`, verbatim. Only a literal `'false'` opts a
+   *  single-Event build out of the 18+ posture (#608); read as a raw string
+   *  rather than a boolean so the fail-closed coercion lives in ONE place and
+   *  an unset/blank/typo'd var cannot un-gate a build. Ignored entirely on the
+   *  hostname-resolved path, which defers to the routing document. */
+  envAdultContent?: string | null;
   /** Hard ceiling on the network read. */
   timeoutMs?: number;
   /** Injected for tests; defaults to a real timer. */
@@ -243,24 +249,59 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
 
   // 0. Single-Event build: answer immediately, never touch the network.
   if (envEventId) {
-    // `adultContent` is the fail-closed default here, NOT `null` like `edition`
-    // (#608). The Edition splits because a single-Event build BAKES its own via
-    // `VITE_EDITION`, so deferring to the seed is right; the 18+ posture has no
-    // build-time seed to defer to, and the legacy Gay Cruise Bingo build this
-    // path serves is 18+ anyway — so the default reproduces today's gate exactly.
+    // `adultContent` defaults CLOSED here, like everywhere else — this path
+    // reads no hostname document, so there is nothing to derive from, and the
+    // legacy Gay Cruise Bingo build it serves is 18+ anyway.
+    //
+    // `envAdultContent` is the deliberate opt-out (#608, Codex P2 on #615). A
+    // single-Event build is exactly the shape the repo documents for a small
+    // standalone deployment (`VITE_EVENT_ID` + `VITE_EDITION`), and without a
+    // build-time input such a deployment could never be anything but adults-only:
+    // it never reads `hostnames/{host}`, so the server derivation has nowhere to
+    // publish to. It mirrors `VITE_EDITION` — a build-time SEED for the one fact
+    // a single-Event bundle owns outright — and only a literal `'false'` opts
+    // out, so a typo, a blank, or an unset var all still gate.
     return {
       kind: 'event',
       eventId: envEventId,
       canonicalHost: null,
       edition: null,
-      adultContent: ADULT_CONTENT_DEFAULT,
+      adultContent: opts.envAdultContent === 'false' ? false : ADULT_CONTENT_DEFAULT,
       slug: null,
       source: 'env',
     };
   }
 
   const cached = readCache(storage, hostname, now());
-  if (cached && !cached.stale && isServable(cached.doc)) return asEvent(cached.doc, 'cache');
+  // A fresh cache hit wins outright — UNLESS it would UN-GATE the Event (#608,
+  // Codex P1 on #615).
+  //
+  // `adultContent` is the one cached field that can only ever move in one
+  // direction, and it is the direction that matters: an admin approves the first
+  // explicit Prompt, the derivation stamps the routing document `true`, and every
+  // device holding a cached `false` would keep short-circuiting to it for the
+  // rest of the 12-hour TTL — booting straight past the 18+ gate the Event has
+  // since acquired. The re-prompt path #608 relies on ("a spicy Prompt approved
+  // mid-Event flips the flag and the existing re-prompt gate does the rest")
+  // simply never fires on those devices.
+  //
+  // So a cached `false` is treated as a REVALIDATION CANDIDATE rather than an
+  // answer: fall through to the network read below. Note what this deliberately
+  // does NOT do — it does not fail the resolution and it does not force the
+  // gate on. If the read fails, `staleOrNotFound` serves this very entry, cached
+  // `false` and all, exactly as before. An offline device cannot learn about a
+  // flip by any means, and stranding it (or gating a tame Event's cached board
+  // behind an attestation its Player has never been asked for) would be a worse
+  // answer than the one it already has. The exposure this closes is the ONLINE
+  // device that would otherwise never ask.
+  //
+  // A cached `true` still short-circuits, so the gated path — every Gay Cruise
+  // Bingo host, and every Event that has already flipped — keeps the pure
+  // offline-first cold boot ADR 0006 specifies, at no cost.
+  const cacheMayUnGate = cached?.doc.adultContent === false;
+  if (cached && !cached.stale && !cacheMayUnGate && isServable(cached.doc)) {
+    return asEvent(cached.doc, 'cache');
+  }
 
   const TIMED_OUT = Symbol('timeout');
   let doc: HostnameDoc | null;

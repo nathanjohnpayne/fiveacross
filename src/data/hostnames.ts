@@ -84,6 +84,9 @@ export async function bootstrapEventResolution(
     // PRESENCE marks a single-Event build, and short-circuits the lookup
     // entirely — see resolveEvent step 0.
     envEventId: import.meta.env.VITE_EVENT_ID || null,
+    // The 18+ opt-out for that same single-Event build (#608). Passed as the
+    // raw string; `resolveEvent` owns the fail-closed reading of it.
+    envAdultContent: import.meta.env.VITE_ADULT_CONTENT || null,
   });
   if (resolution.kind === 'event') {
     applyResolvedEventId(resolution.eventId);

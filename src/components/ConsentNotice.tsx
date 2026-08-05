@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { adultContentRequired } from '../adultContent';
 
 // Versioned so a change to the disclosure copy re-shows the notice once to
 // everyone: the v1 key was dismissed under the old GA4-only wording, which never
@@ -16,8 +17,15 @@ function isDismissed(): boolean {
 }
 
 /**
- * A lightweight, dismissible disclosure that this 18+ app uses analytics (GA4 and
+ * A lightweight, dismissible disclosure that this app uses analytics (GA4 and
  * PostHog, including session replay).
+ *
+ * The "18+" clause is CONDITIONAL as of #608 (Codex P2 on #615). This notice
+ * mounts globally, including over the signed-out gate, so on an Event with no
+ * adult content it was still making the age claim the sign-in gate had just
+ * stopped making — the first screen a wedding party sees, contradicting the
+ * screen behind it. The analytics disclosure itself is unconditional; only the
+ * age claim follows `hostnames/{host}.adultContent`.
  * This is deliberately NOT a consent-management platform and NOT a gate:
  * `firebase.ts` already loads GA4 unconditionally (when supported + a
  * measurement id is configured), so dismissing this notice does not opt
@@ -43,7 +51,7 @@ export default function ConsentNotice() {
   return (
     <div className="consent-notice" role="note">
       <p>
-        This is an 18+ app. We use analytics&mdash;Google Analytics and PostHog, including
+        {adultContentRequired() ? 'This is an 18+ app. ' : ''}We use analytics&mdash;Google Analytics and PostHog, including
         session replay&mdash;to see what&rsquo;s working and improve the app. Nothing here is sold.
       </p>
       <button className="btn" onClick={dismiss}>

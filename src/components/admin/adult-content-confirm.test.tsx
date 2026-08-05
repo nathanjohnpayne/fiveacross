@@ -14,7 +14,7 @@ import type { ItemDoc } from '../../types';
 // `active` — so the box is a REQUEST, and warning there would put a consequence
 // notice on the one action that has none.
 
-const approveItem = vi.fn(async () => {});
+const approveItem = vi.fn(async (..._a: unknown[]) => {});
 const bulkApproveItems = vi.fn(async () => {});
 
 vi.mock('../../firebase', () => ({
@@ -116,6 +116,55 @@ describe('approving the first explicit Prompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(approveItem).toHaveBeenCalledWith('a', 'admin'));
     expect(screen.queryByText('This makes the whole Event 18+')).toBeNull();
+  });
+});
+
+describe('the failure surface (Codex P2 on #615)', () => {
+  // `guard()` resolves the caller's AsyncButton the moment the dialog opens, so
+  // its inline "Didn't work" affordance is already spent by the time the real
+  // write runs. If the dialog closed on rejection, a rules denial would look
+  // exactly like a successful approval.
+  it('keeps the dialog up and says so when the write rejects', async () => {
+    approveItem.mockRejectedValueOnce(new Error('permission-denied'));
+    queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('try again'));
+    expect(screen.getByText('This makes the whole Event 18+')).toBeTruthy();
+  });
+
+  it('lets the admin retry from the same dialog', async () => {
+    approveItem.mockRejectedValueOnce(new Error('permission-denied'));
+    queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    const confirm = await screen.findByRole('button', { name: /Approve and make this Event 18\+/ });
+    fireEvent.click(confirm);
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: /Approve and make this Event 18\+/ }));
+    await waitFor(() => expect(screen.queryByText('This makes the whole Event 18+')).toBeNull());
+    expect(approveItem).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('the 🔞 tick the snapshot has not caught up with (Codex P2 on #615)', () => {
+  // The toggle writes to Firestore and the row re-renders from the NEXT
+  // snapshot. An admin who ticks and immediately approves would otherwise hand
+  // the guard a stale `false` — and the write that actually flips the Event
+  // would skip its confirm.
+  it("confirms on the admin's own tick, before the snapshot returns", async () => {
+    queue([item('a', false)]);
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    expect(await screen.findByText('This makes the whole Event 18+')).toBeTruthy();
+    expect(approveItem).not.toHaveBeenCalled();
+  });
+
+  it('counts that tick in the bulk confirm too', async () => {
+    queue([item('a', false), item('b', false)]);
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve all' }));
+    expect(await screen.findByText(/1 of the 2 prompts you’re approving is explicit/)).toBeTruthy();
+    expect(bulkApproveItems).not.toHaveBeenCalled();
   });
 });
 

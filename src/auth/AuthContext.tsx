@@ -329,6 +329,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // deal until the authoritative read confirms the stamp. Re-armed false per auth
   // change; never set true offline (the cache lift is provisional).
   const [attestedAuthoritative, setAttestedAuthoritative] = useState(false);
+  // Whether the online bootstrap SUCCEEDED, as distinct from having SETTLED
+  // (Codex P2 on #615). `profileReady` is true after a bootstrap FAILURE too —
+  // that is its contract, and every consumer that renders on it is right to.
+  // But on an Event with no age gate it is also the only remaining deal
+  // authority, and a failed `ensureUserProfile` must not license creating
+  // board/player rows any more than a missing attestation stamp does. So the
+  // deal reads THIS, which is the direct analogue of `attestedAuthoritative`:
+  // set only where the authoritative read actually landed, re-armed false on
+  // every auth change and every connectivity flip.
+  const [profileBootstrapOk, setProfileBootstrapOk] = useState(false);
   // A ref mirror of `attestedAuthoritative` so async code (attest()'s catch) can
   // read the LATEST value without a stale closure (Codex #117 round 9, finding B):
   // the attest-failure rollback must NOT downgrade a User the bootstrap already
@@ -588,6 +598,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Board (or re-prompt) renders, not the stale panel. A confirmed-attested User
       // then deals, and a genuine re-deal failure re-sets dealError from runDeal.
       clearDealError();
+      // The authoritative read landed — the deal may proceed on an Event that
+      // asks for no attestation. Set ONLY here, never in the failure arm above.
+      setProfileBootstrapOk(true);
     }
     setProfileReady(true);
     // Online gate resolved — release the "Loading…" hold and render (finding B).
@@ -609,6 +622,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfileReady(false);
       setAttested(undefined);
       setAttestedAuthoritative(false);
+      setProfileBootstrapOk(false);
       setUser(u);
       if (!u) {
         if (handoffSignedOutWebApp()) {
@@ -692,6 +706,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // succeeded THIS session, durable authority, not a stale cross-offline read
       // and not a merely optimistic pre-commit lift).
       if (!attestCommittedUidsRef.current.has(u.uid)) setAttestedAuthoritative(false);
+      // Same reasoning for the non-adult path's authority (Codex P2 on #615): a
+      // pre-offline success must not survive the dead zone as a licence to
+      // create rows during the reconnect window, before the fresh read lands.
+      setProfileBootstrapOk(false);
       // A mid-bootstrap connectivity LOSS SUPERSEDES the in-flight ONLINE bootstrap
       // (whose ensureUserProfile transaction may never settle offline and would
       // otherwise strand "Loading…") and switches to the cache-first path: release
@@ -836,9 +854,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // authoritatively" signal on that path is `profileReady`, which the ONLINE
   // branch sets only after `ensureUserProfile` has actually run — so the
   // write-safety property (never create board/player rows before the profile
-  // bootstrap settles, never offline) is preserved rather than dropped. The
-  // offline branch never sets it, and `online` gates besides.
-  const mayDeal = adultContentRequired() ? attested === true && attestedAuthoritative : profileReady;
+  // bootstrap SUCCEEDS, never offline) is preserved rather than dropped —
+  // `profileBootstrapOk`, not `profileReady`, because the latter is also true
+  // after a bootstrap FAILURE and would deal on a timed-out `ensureUserProfile`
+  // (Codex P2 on #615). The offline branch never sets it, and `online` gates
+  // besides.
+  const mayDeal = adultContentRequired() ? attested === true && attestedAuthoritative : profileBootstrapOk;
   useEffect(() => {
     if (user && mayDeal && online) void runDeal(user);
   }, [user, mayDeal, online, runDeal]);
@@ -869,6 +890,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (profileAttemptRef.current !== attempt) return;
       const optimisticSticky = attestedUidsRef.current.has(u.uid);
       const committedSticky = attestCommittedUidsRef.current.has(u.uid);
+      // The retry re-runs the SAME work `bootstrapUser`'s online branch does, so
+      // it grants the same authority on success (#608, Codex P2 on #615): without
+      // this, an Event with no age gate whose first bootstrap failed would sit on
+      // the retry surface forever — the retry would land, clear the error, and
+      // still never license the deal.
+      setProfileBootstrapOk(true);
       // UI: server stamp OR optimistic attest (no re-prompt). AUTHORITY: server
       // stamp OR a COMMITTED same-session attest — never an optimistic pre-commit
       // lift (round 7).

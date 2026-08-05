@@ -120,9 +120,11 @@ export function useAdultContentFlipConfirm(): {
       pending={pending}
       onCancel={() => setPending(null)}
       onConfirm={async () => {
-        const run = pending.run;
+        // Await BEFORE dismissing, and let a rejection propagate: the dialog
+        // owns the failure surface now (see its `failed` state), so tearing it
+        // down first would drop the only report the admin can act on.
+        await pending.run();
         setPending(null);
-        await run();
       }}
     />
   ) : null;
@@ -143,9 +145,18 @@ export function AdultContentConfirmDialog({
 }: {
   pending: PendingFlip;
   onCancel: () => void;
+  /** Rejects if the write fails, so the dialog can hold its ground. */
   onConfirm: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  // A rejected write must not disappear along with the dialog (Codex P2 on
+  // #615). `guard()` resolves the caller's AsyncButton the moment the dialog
+  // opens, so its inline "Didn't work — try again" affordance is already spent by
+  // the time the real write runs: if this closed on rejection, a rules denial or
+  // a dropped connection would look exactly like a successful approval. So the
+  // dialog STAYS OPEN on failure and says so, and the confirm button re-enables
+  // for a retry.
+  const [failed, setFailed] = useState(false);
   const title = 'This makes the whole Event 18+';
   return (
     // Backdrop guarded by `busy` like both buttons (the ReshuffleSheet
@@ -164,6 +175,11 @@ export function AdultContentConfirmDialog({
         <div className="warnbox">
           <b>This can't be undone.</b>
         </div>
+        {failed && (
+          <p className="muted" role="alert">
+            That didn&rsquo;t go through. Nothing changed &mdash; try again.
+          </p>
+        )}
         <div className="sheet-actions">
           <button type="button" className="btn" disabled={busy} onClick={onCancel}>
             Cancel
@@ -174,7 +190,10 @@ export function AdultContentConfirmDialog({
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              void Promise.resolve(onConfirm()).finally(() => setBusy(false));
+              setFailed(false);
+              void Promise.resolve(onConfirm())
+                .catch(() => setFailed(true))
+                .finally(() => setBusy(false));
             }}
           >
             {confirmLabelFor(pending.reason)}

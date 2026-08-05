@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
 import {
   confirmClaim,
@@ -217,11 +218,15 @@ function ItemQueueRow({
  */
 function ApprovalQueueRow({
   item: it,
+  spicy,
   adminUid,
   onToggleSpicy,
   onApprove,
 }: {
   item: ItemDoc;
+  /** The queue's optimistic view of `it.spicy` — the admin's own tick, before
+   *  the Firestore snapshot carrying it has come back. */
+  spicy: boolean;
   adminUid: string;
   onToggleSpicy: (id: string, spicy: boolean) => void;
   /** Routed through the queue's flip confirm (#610) rather than calling
@@ -240,7 +245,7 @@ function ApprovalQueueRow({
       <label style={{ fontSize: 12 }}>
         <input
           type="checkbox"
-          checked={it.spicy}
+          checked={spicy}
           onChange={(e) => onToggleSpicy(it.id, e.target.checked)}
         />{' '}
         🔞 Spicy
@@ -290,9 +295,24 @@ export default function ReviewQueue({
   // alone. Cancelling applies NONE of the batch — a partial apply would flip the
   // Event anyway and leave the admin unsure which half landed.
   const { guard, dialog } = useAdultContentFlipConfirm();
-  const explicitPending = pendingItems.filter((it) => it.spicy);
+  // The 🔞 toggle writes to Firestore and the row re-renders from the NEXT
+  // snapshot, so an admin who ticks the box and immediately taps Approve can
+  // hand the guard a `spicy` that is already out of date — and the confirm for
+  // the write that actually flips the Event would be skipped (Codex P2 on
+  // #615). This optimistic overlay records the admin's own intent the instant
+  // they express it and outranks the snapshot until it catches up. Deliberately
+  // ONE-WAY toward `true`: an un-tick that has not landed yet must not be
+  // trusted to suppress a confirm, which is the same fail-closed direction the
+  // whole posture takes.
+  const [optimisticSpicy, setOptimisticSpicy] = useState<Record<string, boolean>>({});
+  const isSpicy = (it: ItemDoc) => it.spicy || optimisticSpicy[it.id] === true;
+  const toggleSpicy = (id: string, spicy: boolean) => {
+    setOptimisticSpicy((prev) => ({ ...prev, [id]: spicy }));
+    setItemSpicy(id, spicy);
+  };
+  const explicitPending = pendingItems.filter(isSpicy);
   const approveOne = (it: ItemDoc) =>
-    guard(it.spicy, 'approve', () => approveItem(it.id, adminUid));
+    guard(isSpicy(it), 'approve', () => approveItem(it.id, adminUid));
   const approveAll = () =>
     guard(explicitPending.length > 0, 'bulk-approve', () => bulkApproveItems(pendingItems, adminUid), {
       explicitCount: explicitPending.length,
@@ -361,8 +381,9 @@ export default function ReviewQueue({
             <ApprovalQueueRow
               key={it.id}
               item={it}
+              spicy={isSpicy(it)}
               adminUid={adminUid}
-              onToggleSpicy={setItemSpicy}
+              onToggleSpicy={toggleSpicy}
               onApprove={approveOne}
             />
           ))}
