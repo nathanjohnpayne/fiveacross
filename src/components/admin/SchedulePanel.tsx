@@ -10,8 +10,8 @@ import type { DayDef, ThemeId } from '../../types';
  * failure"). Renders ONLY inside a `ScheduleRow` whose Day is
  * `dayDueForManualUnlock` — a Day that's still locked, or already
  * snapshot-stamped, has nothing for this button to fix. Calls
- * `unlockDayNow`, the SAME admin-gated callable the 08:00/20:00 scheduler
- * beats invoke internally, so a forced unlock can never diverge from the
+ * `unlockDayNow`, the SAME admin-gated callable the scheduled unlock sweep
+ * invokes internally, so a forced unlock can never diverge from the
  * scheduled path's semantics; the Admin-gate itself is enforced server-side
  * (the callable throws `permission-denied` for a non-admin uid) — this
  * button only ever renders inside the Schedule surface, which the enclosing
