@@ -3,6 +3,11 @@
   "rewrites": [
     {
       "source": "/__/auth/:path*",
+      "has": [{ "type": "host", "value": { "eq": "fiveacross.vercel.app" } }],
+      "destination": "https://fiveacross.firebaseapp.com/__/auth/:path*"
+    },
+    {
+      "source": "/__/auth/:path*",
       "destination": "https://gaycruisebingo.firebaseapp.com/__/auth/:path*"
     },
     {

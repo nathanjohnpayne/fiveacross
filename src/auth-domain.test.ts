@@ -22,10 +22,23 @@ describe('resolveAuthDomain', () => {
     expect(resolveAuthDomain('gaycruisebingo.vercel.app', alias)).toBe(alias);
   });
 
+  it('pins the Five Across mirror to its own handler so the backup host signs in same-origin (#585)', () => {
+    // The mirror is a fiveacross build, so its configured authDomain is a
+    // fiveacross host — pinning must still win, because vercel.json proxies
+    // /__/auth/* on this hostname to fiveacross.firebaseapp.com.
+    expect(resolveAuthDomain('fiveacross.firebaseapp.com', 'fiveacross.vercel.app')).toBe(
+      'fiveacross.vercel.app',
+    );
+  });
+
   it.each([
     'gaycruisebingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
     'gaycruisebingo-git-some-other-branch-nathanjohnpaynes-projects.vercel.app',
     'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app.evil.example',
+    // The mirror's own near-misses: a per-deployment host on the mirror project
+    // and a lookalike suffix. Neither is registered in either console.
+    'fiveacross-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
+    'fiveacross.vercel.app.evil.example',
   ])('does not treat %s as first-party — the match is exact, never a pattern', (hostname) => {
     expect(resolveAuthDomain('gaycruisebingo.vercel.app', hostname)).toBe('gaycruisebingo.vercel.app');
   });
@@ -77,6 +90,11 @@ describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
   it('is reachable everywhere isAuthConfiguredForHost already says so', () => {
     expect(isSignInReachableOnHost(CONFIGURED, 'gaycruisebingo.com')).toBe(true);
     expect(isSignInReachableOnHost(CONFIGURED, 'gaycruisebingo.vercel.app')).toBe(true);
+    // The Five Across backup host (#585) must mount and sign in, not render the
+    // auth-unconfigured screen — that is the entire point of the mirror.
+    expect(isSignInReachableOnHost('fiveacross.firebaseapp.com', 'fiveacross.vercel.app')).toBe(
+      true,
+    );
     // ADR 0010's same-origin escape hatch (authDomain pinned to this host).
     expect(isSignInReachableOnHost('bodega-bay.vacaybingo.com', 'bodega-bay.vacaybingo.com')).toBe(
       true,
@@ -106,5 +124,17 @@ describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
   it('still blocks an unconfigured wildcard host', () => {
     expect(isSignInReachableOnHost(CONFIGURED, 'bodega-bay.vacaybingo.com')).toBe(false);
     expect(isSignInReachableOnHost(CONFIGURED, 'anything-else.example.com')).toBe(false);
+  });
+
+  it('still blocks a per-deployment host on the mirror project (#585)', () => {
+    // Registering the mirror's production alias registers exactly one host. Its
+    // own preview deployments remain unregisterable, so they keep rendering the
+    // auth-unconfigured signpost rather than a dead-ending Google button.
+    expect(
+      isSignInReachableOnHost(
+        'fiveacross.firebaseapp.com',
+        'fiveacross-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
+      ),
+    ).toBe(false);
   });
 });

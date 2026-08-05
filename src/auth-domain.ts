@@ -19,6 +19,25 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // the Safari storage-partitioning failure out of preview sign-in too.
   // Console setup: docs/app/preview-deploys.md.
   'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app',
+  // The Five Across backup host (#585): the PRODUCTION alias of a second Vercel
+  // project building this same repo with the `fiveacross` env. It exists because
+  // a Five Across Event served only from Firebase Hosting has no reachable
+  // fallback if a venue network blocks that host — the failure gcb already had,
+  // and survived, on `gaycruisebingo.vercel.app` (ADR 0007, #599). Independent
+  // CDN, independent certificate, independent hostname class.
+  //
+  // Its registrations live in the OTHER Firebase project: `fiveacross`'s
+  // authorized domains and the `fiveacross` Google OAuth web client, not
+  // gaycruisebingo's. `vercel.json`'s FIRST rewrite is host-conditional on this
+  // exact hostname and proxies `/__/auth/*` to `fiveacross.firebaseapp.com`, so
+  // pinning here is what keeps that helper same-origin — a plain `.com` build
+  // would proxy to the wrong Firebase project.
+  //
+  // A production alias, not a branch URL, on purpose: the gcb project's preview
+  // deployments sit behind Vercel Standard Protection (ADR 0007 § Consequences),
+  // which would put a player-facing backup host behind a vercel.com login wall.
+  // Console setup: docs/app/preview-deploys.md § The Five Across mirror.
+  'fiveacross.vercel.app',
 ]);
 
 /** Keep production OAuth helper storage on the same origin as the app. */
