@@ -126,6 +126,30 @@ export function editionBrand(edition: string = activeEdition()): EditionBrand {
   return BRANDS[edition] ?? BRANDS[DEFAULT_EDITION];
 }
 
+/**
+ * Which Edition a BUILD may bake, from the two env vars (#586).
+ *
+ * This mirrors the runtime rule rather than restating it loosely. `VITE_EVENT_ID`'s
+ * PRESENCE marks a single-Event build (ADR 0009 step 0), and only such a build
+ * owns an Edition: a hostname-resolved bundle defers to
+ * `hostnames/{host}.edition`, where an Edition-less mapping resets to the
+ * default — which is exactly why `setActiveEdition('')` does the same. A
+ * leftover `VITE_EDITION` in a multi-Event `.env.local` must therefore not bake
+ * another product's name into a bundle every Event shares.
+ *
+ * The manifest is what makes this more than tidiness. The document title is
+ * repairable after resolution; `name` / `short_name` are read from the manifest
+ * FILE at install time, so a stale Edition baked there installs every Event on
+ * that build under the wrong name, permanently, on the player's home screen.
+ */
+export function buildTimeEdition(
+  envEventId: string | null | undefined,
+  envEdition: string | null | undefined,
+): string {
+  if (!envEventId) return DEFAULT_EDITION;
+  return envEdition || DEFAULT_EDITION;
+}
+
 /** The `index.html` placeholders, and the field each one carries. Adding a row
  *  here is the whole cost of branding a new static tag. */
 const HTML_IDENTITY_TOKENS: Record<string, keyof EditionBrand> = {
