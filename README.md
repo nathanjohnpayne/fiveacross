@@ -1,6 +1,6 @@
 # Five Across
 
-A live, phone-first social bingo platform (PWA) for a group sharing one occasion — a trip, a wedding, a conference, a festival. Sign in, get a randomized card of things that might happen there, and mark them off as they do, with a shared Feed, a leaderboard, per-Day Themes, PWA install, and Marks that keep working offline and sync on reconnect. Printed cards are the Gay Cruise Bingo Edition's own fallback, not a platform feature — each Edition states its own offline story.
+A live, phone-first social bingo platform (PWA) for a group sharing one occasion — a trip, a wedding, a conference, a festival. Sign in, get a randomized card of things that might happen there, and mark them off as they do, with a shared Feed, a leaderboard, per-Day Themes, PWA install, and Honor-mode Marks that queue durably offline and sync on reconnect. Proof media needs signal, and the stricter Claim Modes need connectivity to complete a Mark at all (ADR [0006](docs/adr/0006-offline-resilience.md)). Printed cards are the Gay Cruise Bingo Edition's own fallback for total failure, not a platform feature — each Edition states its own offline story.
 
 The platform wears an **Edition** per class of occasion and runs one **Event** per occasion, addressed by its own hostname. See [`BRAND.md`](BRAND.md) for the Brand / Edition / Namespace model and [`CONTEXT.md`](CONTEXT.md) for the domain language.
 
@@ -30,7 +30,7 @@ Two production Firebase projects back these — `gaycruisebingo` and `fiveacross
 
 Vite · React 19 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · GA4 and PostHog · Cloudflare DNS and edge redirects.
 
-The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, proof thumbnails, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate and stays off until deliberately enabled. Player stats stay client-authoritative by design (ADR 0001).
+The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate (`ENABLE_VISION_MODERATION`) and stays off until deliberately enabled — and because the thumbnail write lives inside that same handler, the default off state means proof uploads get **neither** Vision scanning nor server-side thumbnails. Player stats stay client-authoritative by design (ADR 0001).
 
 ## Quick start
 
@@ -62,7 +62,7 @@ CF_ZONE_ID=<five-across-zone> SYNTHETIC_URL=https://<five-across-host>/ \
   scripts/deploy.sh -- fiveacross --only hosting
 ```
 
-The per-Edition env files, zone ids and the current Bodega recipe live in the app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md) — use those rather than adapting the Gay Cruise Bingo command by hand.
+What is documented: the deploy flow itself in app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md), and the build-time knobs a Five Across bundle needs — `VITE_EVENT_ID` (leave it **empty** so the build resolves its Event from the hostname) and `VITE_EDITION` — in app guide §8. What is **not** documented anywhere yet: the Five Across Cloudflare zone id, and the concrete current Bodega invocation. `CF_ZONE_ID` is only described generically as per-repo. Until [#541](https://github.com/nathanjohnpayne/gaycruisebingo/issues/541) lands that env durably, get those two values from whoever last deployed rather than inferring them — do not adapt the Gay Cruise Bingo command by hand.
 
 ## Documentation
 
