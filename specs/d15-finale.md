@@ -25,13 +25,13 @@ Implements `plans/daily-cards-spec.md` § "Scoring and social surfaces" → "The
 - **Given** it is 20:00 on Day 9, **when** the scheduled trigger fires, **then** a last-call Moment posts naming the current leader and their margin. (Test: last-call-copy.)
 - **Given** it is 08:00 on Day 10, **when** the scheduled trigger fires, **then** `frozenAt` is set, the farewell Day unlocks, and a podium Moment posts with the champion, cruise-wide First to BINGO, and ten daily honors. (Test: podium-payload.)
 - **Given** the cruise has ended (`frozenAt` set) and the farewell Day is unlocked, **when** a Player opens the app, **then** the farewell Day (podium included) is the default view; before the freeze it is never pinned. (Test: default-view-pin.)
-- **Given** the podium, **then** its cruise-wide First to BINGO never credits an embark- or farewell-only mark. (Test: tutorial-exclusion.)
+- **Given** the podium, **then** its cruise-wide First to BINGO never credits a Tutorial Day's mark. (Test: tutorial-exclusion.)
 - **Given** the podium, **then** the champion/standings are computed EXCLUDING the farewell Day, so a post-freeze farewell mark never changes the podium. (Test: ceremonial-farewell.)
 - **Given** the event doc, **then** `frozenAt` is admin/Function-writable only, never client-writable directly by a Player. (Test: rules.)
 
 ## Test coverage
 
-- `tests/functions/d15-finale.test.ts` (functions layer, `vitest.functions.config.ts`) — `lastCallStandingsCopy` names the correct leader + margin from a fixture player set and degrades on a tie/empty board; `buildPodiumPayload` excludes an embark/farewell-only first-bingo from the cruise-wide honor, excludes the farewell Day from the champion totals, and includes all ten daily honors when present.
+- `tests/functions/d15-finale.test.ts` (functions layer, `vitest.functions.config.ts`) — `lastCallStandingsCopy` names the correct leader + margin from a fixture player set and degrades on a tie/empty board; `buildPodiumPayload` excludes a Tutorial Day's first bingo from the cruise-wide honor, excludes the farewell Day from the champion totals, and includes all ten daily honors when present.
 - `src/components/FarewellPodium.test.tsx` (RTL/jsdom) — renders champion, cruise-wide First to BINGO, and ten daily-honor rows from a fixture payload, above the goodbye banner mount point.
 - `src/data/d15-finale.test.ts` (Vitest unit) — `farewellPinIndex` pins only once `frozenAt` is set and the farewell Day is unlocked, never before; `buildPodium` picks the champion, excludes the ceremonial farewell Day, and excludes tutorial Days from the cruise-wide First to BINGO.
 - `tests/rules/d15-finale.test.ts` (rules emulator) — `EventDoc.frozenAt` is writable by an admin/Function but rejected for a non-admin Player.

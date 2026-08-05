@@ -871,11 +871,10 @@ export function playerRowRootLag(
   return countsDominate && firstDominates && strictlyExceeds;
 }
 
-/** The cruise-wide First to BINGO time: the earliest `firstBingoAt` across the
- *  MAIN-GAME Days only — tutorial Days are excluded even when their bingo is
- *  numerically earlier (the embark card is trivially easy and live before anyone
- *  boards, so it must never decide the headline honor). Returns `null` when no
- *  main-game Day carries a first bingo. */
+/** The Event-wide First to BINGO time: the earliest `firstBingoAt` across
+ *  non-Tutorial Days only. Tutorial Days are excluded even when their bingo is
+ *  numerically earlier, regardless of the pool they draw from. Returns `null`
+ *  when no non-Tutorial Day carries a first bingo. */
 export function eventFirstBingoAt(
   dayStats: DayStats | undefined,
   isTutorialDay: (dayIndex: number) => boolean,
@@ -889,9 +888,10 @@ export function eventFirstBingoAt(
   return earliest;
 }
 
-/** Derive a Player's cruise-wide root totals from their per-Day `dayStats`:
- *  bingos/squares summed over all Days, First to BINGO restricted to main-game
- *  Days. This is exactly the `PlayerDoc` root shape the Leaderboard ranks on. */
+/** Derive a Player's Event-wide root totals from their per-Day `dayStats`:
+ *  bingos/squares summed over all Days, First to BINGO restricted to
+ *  non-Tutorial Days. This is exactly the `PlayerDoc` root shape the
+ *  Leaderboard ranks on. */
 export function aggregatePlayerStats(
   dayStats: DayStats | undefined,
   isTutorialDay: (dayIndex: number) => boolean,
@@ -921,9 +921,9 @@ export function effectiveCruiseFirstBingoAt(
   return player.firstBingoAt;
 }
 
-/** The uid of the cruise-wide First to BINGO holder across a roster — the
- *  earliest effective (tutorial-excluded) first bingo. `undefined` when nobody
- *  holds a qualifying main-game bingo. */
+/** The uid of the Event-wide First to BINGO holder across a roster — the
+ *  earliest effective Tutorial-excluded first bingo. `undefined` when nobody
+ *  holds a qualifying non-Tutorial bingo. */
 export function cruiseFirstBingoUid(
   players: readonly PlayerDoc[],
   isTutorialDay: (dayIndex: number) => boolean,

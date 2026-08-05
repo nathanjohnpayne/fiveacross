@@ -398,7 +398,7 @@ After posting a trigger, `codex-review-request.sh` waits a short, bounded window
 
      - **Clearance (happy path).** Codex posts a review with no unaddressed **`required`-tier** inline findings (P0/P1 by default; see [§ Feedback Disposition Policy](#feedback-disposition-policy)) on the current HEAD, OR reacts 👍 on or after the current HEAD commit, OR posts a HEAD-anchored affirmative issue-comment verdict (`Didn't find any major issues` + a `Reviewed commit: <sha>` line whose sha prefixes HEAD) with no unaddressed required-tier findings on HEAD (#600/#567). Proceed to step 16a. A verdict-only response is recognized by both the request poll (step 12a) and the merge-gate check (step 16a, `codex-review-check.sh` as of #600) — `codex-review-request.sh`'s poll terminates on it rather than reaching `review_timeout_seconds` (#609).
      - **Disagreement (escalate).** Codex re-flags the same finding after the agent posted a rebuttal. This is "repeat-after-rebuttal." See [Disagreements and Tiebreaking](#disagreements-and-tiebreaking).
-     - **Runaway (escalate).** The round counter exceeds `codex.max_review_rounds` (default: 2). The 3rd round trips this guard. See [Disagreements and Tiebreaking](#disagreements-and-tiebreaking).
+     - **Runaway (escalate).** The round counter exceeds `codex.max_review_rounds` (configured as 5 here). The 6th round trips this guard. See [Disagreements and Tiebreaking](#disagreements-and-tiebreaking).
      - **Timeout or account block (fall back).** `codex-review-request.sh` exits with code `4` (`FALLBACK_REQUIRED`) for the current round — either a genuine timeout (`blocked_reason: null`) or a detected account-/connection-level block (`blocked_reason: "usage_limit" | "not_connected"`, #722; short-circuited immediately rather than waited out). The agent falls back to Phase 4b either way. There is no "second timeout" escalation — a single timeout already routes to human mediation via the 4b handoff — but on a non-null `blocked_reason` the handoff should name the account action required, since re-triggering cannot help until a human resolves it.
 
 16a. Before merging, the agent runs `scripts/codex-review-check.sh <PR#>` to verify the merge gate. All of the following must be true:
@@ -749,7 +749,7 @@ In Phase 4a, the agent escalates to the human when either of the following fires
 
 1. **Repeat-after-rebuttal.** The agent posted a reply to a Codex inline finding explaining why the finding does not apply. Codex's next review re-flags the same or substantively-equivalent finding. The agent treats this as a disagreement: Codex is not convinced by the rebuttal, and the agent stops trying to change Codex's mind autonomously. Continuing the loop past this point is rude to the reviewer and wastes API calls.
 
-2. **Runaway rounds.** The round counter exceeds `codex.max_review_rounds` (default: 2). The 3rd `@codex review` request trips this guard. This catches cases where Codex keeps finding new, distinct issues on each pass without the review converging. Even if each individual finding is valid, three rounds of novel issues is a signal that the PR scope is too broad and a human should weigh in.
+2. **Runaway rounds.** The round counter exceeds `codex.max_review_rounds` (configured as 5 here). The 6th `@codex review` request trips this guard. This catches cases where Codex keeps finding new, distinct issues on each pass without the review converging. Even if each individual finding is valid, six rounds of novel issues is a signal that the PR scope is too broad and a human should weigh in.
 
 **Timeout is NOT a disagreement signal.** A Codex response timeout (`codex-review-request.sh` exit code `4` = `FALLBACK_REQUIRED`) routes the PR directly to Phase 4b per step 15a above. It is a fallback trigger, not a tiebreaker trigger. Phase 4b itself mediates via the human through the manual handoff, so there is nothing for the disagreement detector to add on top.
 
@@ -883,7 +883,7 @@ codex:
   request_by_default: true                    # post `@codex review` on EVERY PR, not just above-threshold (#486)
   bot_login: "chatgpt-codex-connector[bot]"   # REST API form, with [bot] suffix
   cli_login: nathanpayne-codex                # manual CLI fallback (Phase 4b)
-  max_review_rounds: 2                        # runaway guard; 3rd round escalates
+  max_review_rounds: 5                        # runaway guard; 6th round escalates
   review_timeout_seconds: 840                 # per-round poll timeout (measured verdict p99/max, #623)
   require_ci_green: true                      # merge gate
   allow_phase_4b_substitute: true             # accept Phase 4b APPROVED on HEAD as gate (c) clearance (#218)

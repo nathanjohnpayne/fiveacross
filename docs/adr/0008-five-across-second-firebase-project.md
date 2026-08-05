@@ -1,18 +1,23 @@
 ---
 status: accepted
+implemented: false
 ---
 
 # One repository, two production Firebase projects: Five Across is a new project, not a new tenant
 
-The existing Firestore and Storage rules give **path scoping, not tenant isolation** — any signed-in account can read every Event's doc, items, players, active proofs, tally, doubts, and moments, and proof media under `proofs/{eventId}/{uid}/{file}` is likewise readable by path (see [x-multi-event-schema](../../specs/x-multi-event-schema.md) § "Rules / indexes / hosting implications"). Sequential Events within one community could accept that; an adults-only cohort and an unrelated general-audience group cannot. Rather than land the full membership-isolation workstream under a three-day deadline, Five Across begins on a **new production Firebase project** while Gay Cruise Bingo stays on `gaycruisebingo`. Both are deployment targets of this same repository, with the same source, tests, and release process — this is a data boundary, not a fork.
+> **Decision accepted; the project split and membership admission are not yet fully implemented.** The repository alias is only deploy wiring. Until Five Across has its own provisioned project, host configuration, and authentication/membership enforcement, it must not be presented as an active cohort-isolation boundary.
+
+The existing Firestore and Storage rules give **path scoping, not tenant isolation** — any signed-in account can read every Event's doc, items, players, active proofs, tally, doubts, and moments, and proof media under `proofs/{eventId}/{uid}/{file}` is likewise readable by path (see [x-multi-event-schema](../../specs/x-multi-event-schema.md) § "Rules / indexes / hosting implications"). Sequential Events within one community could accept that; an adults-only cohort and an unrelated general-audience group cannot. Five Across will use a **separate production Firebase project** while Gay Cruise Bingo remains on `gaycruisebingo`. That gives the applications separate Firebase resources, credentials, and deploy targets: an authenticated session or Firestore request for one project cannot read the other project's resources. Both targets still use this repository's source, tests, and release process — this is a data-plane boundary, not a fork.
+
+**A separate project is not cohort admission.** A person who can reach either public app can normally complete Google sign-in in either Firebase project; once signed in, the current rules permit the reads described above within that project. Cohort isolation therefore remains deferred until authentication admission or membership-scoped rules are enforced. Do not describe the project split alone as preventing Bodega users from accessing Gay Cruise Bingo, or vice versa.
 
 The reason is the read-scope gap, **not brand positioning**. Brand positioning alone never justifies a new project.
 
 ## Consequences
 
 - Two `.env.local` files, two `.firebaserc` aliases (`gaycruisebingo` and `fiveacross`), and two deploy runs. The Vite blank-API-key guard applies to both.
-- **Always pass the project explicitly.** `.firebaserc`'s `default` remains `gaycruisebingo`, and `scripts/firebase/op-firebase-deploy` falls back to that default when no project id is given — so a Five Across deploy run without one would publish to the legacy project, defeating the very boundary this ADR creates. Use `op-firebase-deploy fiveacross …`; the named aliases exist so the id is a word rather than a guess.
+- **Use the guarded deploy wrapper with an explicit target.** `.firebaserc`'s `default` remains `gaycruisebingo`, and the underlying helper falls back to it when no project is given — so a Five Across deploy must pass `fiveacross` through `scripts/deploy.sh`, never call `op-firebase-deploy` directly. Before the first production deploy, provision the Five Across cache zone and production URL, then use `CF_ZONE_ID=<five-across-zone> SYNTHETIC_URL=https://<five-across-production-host>/ scripts/deploy.sh -- fiveacross`. This retains the main/freshness/clean-tree checks, cache purge, and post-deploy synthetic while selecting the non-default Firebase project.
 - Blaze billing, first-time API enablement, and a cold Functions deploy are one-time costs on the new project. App Check is opt-in via `VITE_RECAPTCHA_SITE_KEY` and can start unset.
-- Bodega players have **no access path** to Gay Cruise Bingo data, and vice versa — the property the isolation workstream would otherwise have had to prove.
+- The projects have no shared Firebase data plane, but that is not a user-admission boundary: a Google user can still sign into both public applications until membership enforcement lands. The isolation workstream remains the owner of that property.
 - Analytics deliberately does *not* split: one PostHog project carries `brand_id` / `edition_id` / `event_id` dimensions, because cross-event comparison is the question the platform exists to answer. A second managed reverse proxy (`d.vacaybingo.com`) keeps the old brand's hostname out of the new edition's network traffic.
 - The projects may collapse into one only after non-self-writable membership and two-cohort isolation tests land. Additional projects after that need a contractual, ownership, or compliance reason.

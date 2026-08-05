@@ -40,9 +40,9 @@ export interface FinalePlayer {
   dayStats?: Record<number, FinaleDayStat>;
 }
 
-/** The subset of a `DayDef` the finale content reads. A Day is "tutorial" when
- *  its `tutorial` flag is set OR its pool is embark/farewell (the flag and the
- *  pool travel together in the seed, but either alone marks it). */
+/** The subset of a `DayDef` the finale content reads. A Day is Tutorial only
+ *  when its `tutorial` flag is set; pool identity and Tutorial framing are
+ *  independent. */
 export interface FinaleDay {
   index: number;
   tutorial?: boolean;
@@ -107,10 +107,10 @@ export function farewellDayIndex(days: readonly FinaleDay[] | undefined): number
   return f ? f.index : -1;
 }
 
-/** A Player's EFFECTIVE cruise First to BINGO: the earliest `firstBingoAt` across
- *  MAIN-GAME Days only when the Player has a `dayStats` breakdown, else the legacy
- *  root `firstBingoAt` (a roster predating Day Cards carries no `dayStats`). Mirrors
- *  `effectiveCruiseFirstBingoAt` in `src/game/logic.ts`. */
+/** A Player's EFFECTIVE Event-wide First to BINGO: the earliest `firstBingoAt`
+ *  across non-Tutorial Days when the Player has a `dayStats` breakdown, else the
+ *  legacy root `firstBingoAt` (a roster predating Day Cards carries no `dayStats`).
+ *  Mirrors `effectiveCruiseFirstBingoAt` in `src/game/logic.ts`. */
 function effectiveFirstBingoAt(
   player: Pick<FinalePlayer, 'firstBingoAt' | 'dayStats'>,
   isTutorialDay: (dayIndex: number) => boolean,
@@ -230,7 +230,7 @@ export interface PodiumHonor {
 export interface PodiumPayload {
   /** Top of the frozen standings (farewell Day excluded); `null` on an empty board. */
   champion: PodiumChampion | null;
-  /** Cruise-wide First to BINGO across main-game Days; `null` when none qualifies. */
+  /** Event-wide First to BINGO across non-Tutorial Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
   /** Each Day's pinned First to BINGO, sorted by Day index (present honors only). */
   dailyHonors: PodiumHonor[];
@@ -241,8 +241,8 @@ export interface PodiumPayload {
  *
  *   - champion: the top of the standings re-aggregated to EXCLUDE the farewell Day
  *     (its marks are all post-freeze and ceremonial), `null` when nobody has played;
- *   - firstBingo: the cruise-wide First to BINGO, main-game Days only — an
- *     embark/farewell-only earliest bingo never wins the headline honor;
+ *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
+ *     identity alone never decides the headline honor;
  *   - dailyHonors: the ten Days' own pinned First to BINGO honors, straight from the
  *     `meta.firstBingo` docs, sorted by Day index (a Day with no bingo is omitted).
  */
