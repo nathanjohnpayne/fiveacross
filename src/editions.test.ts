@@ -7,6 +7,7 @@ import {
   setActiveEdition,
   editionBrand,
   brandHtmlIdentity,
+  buildTimeEdition,
   applyEditionDocumentIdentity,
 } from './editions';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
@@ -96,6 +97,25 @@ describe('editions — the chrome identity (#586)', () => {
     // is not.
     for (const edition of EDITIONS) {
       expect(editionBrand(edition).appShortName.length, edition).toBeLessThanOrEqual(12);
+    }
+  });
+});
+
+describe('buildTimeEdition — only a single-Event build owns an Edition', () => {
+  it('bakes VITE_EDITION for a single-Event build', () => {
+    expect(buildTimeEdition('bodega-bay-2026', 'vacay')).toBe('vacay');
+    expect(buildTimeEdition('med-2026', '')).toBe(DEFAULT_EDITION);
+  });
+
+  it('IGNORES VITE_EDITION when there is no VITE_EVENT_ID', () => {
+    // The contract a hostname-resolved build lives by: the lookup owns the
+    // Edition, and an Edition-less mapping resets to the default — which is
+    // what `setActiveEdition('')` already does at runtime. Without this, a
+    // stale `VITE_EDITION=vacay` in a multi-Event .env.local would bake Vacay
+    // into a bundle every Event shares, and the manifest half of that is
+    // unrepairable: it is fetched as a file at install time.
+    for (const absent of ['', null, undefined]) {
+      expect(buildTimeEdition(absent, 'vacay')).toBe(DEFAULT_EDITION);
     }
   });
 });
