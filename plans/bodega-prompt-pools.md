@@ -117,7 +117,7 @@ Saturday's discovery pool, blended 50/50 with the easy pool.
 
 ## Closing pool — final day (40) *(stored under the legacy `farewell` pool value)*
 
-Sunday's whole card, 06:00 to the 11:00 check-out freeze. These are deliberately achievable in a packing-and-coffee morning; only a handful ask you to leave the house.
+The wrap-up card, which unlocks at the 11:00 check-out freeze alongside the podium. These are deliberately achievable from a kitchen or a passenger seat; only a handful ask you to leave the house.
 
 1. One last sunrise or foggy-morning photo
 2. Photograph whatever is keeping you upright this morning
@@ -176,11 +176,20 @@ Sunday's whole card, 06:00 to the 11:00 check-out freeze. These are deliberately
 |---|---|---|---|---|---|---|
 | 0 | Friday, Aug 7 | `embark` | false | `competitive` | 🐦 The Birds Have Entered the Group Chat | `0` (open sentinel) |
 | 1 | Saturday, Aug 8 | `main` | false | `competitive` | 🌊 Bodega Bay Side Quests | Sat 06:00 `America/Los_Angeles` |
-| 2 | Sunday, Aug 9 | `farewell` | false | `competitive` | ☕ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
+| 2 | Sunday, Aug 9 | `main` | false | `competitive` | ☕ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
+| 3 | The wrap-up | `farewell` | **true** | `ceremonial` | ☕ Fog, Froth & Farewells | Sun 11:00 `America/Los_Angeles` |
 
 **The `pool` column shows persisted literals, not the neutral names.** Unlike the other renamed fields, `pool` values are load-bearing in code: `snapshotPoolsFor` hard-codes `dayPool === 'main' ? ['main','embark'] : [dayPool]`, `standingsFrozen` tests `d.pool === 'farewell'`, and `firestore.rules` validates `pool in ['main','embark','farewell']`. Seeding the neutral labels breaks Easy Mix (a main Day looks for `embark`, finds nothing) and the finale (nothing matches `farewell`, so the freeze never fires). Read `embark` as the easy pool and `farewell` as the closing pool until the pool migration lands.
 
-**`scoring` and `standingsFreezeAt` are seeded but not yet read.** No current code consumes either field. With Sunday on the `farewell` pool, `standingsFrozen` returns true the moment that Day unlocks — so **standings freeze at Sunday 06:00, not 11:00**, and Sunday's card is ceremonial in practice despite the `competitive` label. Getting the competitive Sunday this table describes requires the scoring migration to land first; until then the honest options are to accept a ceremonial Sunday or to add a fourth ceremonial Day and leave Sunday on the `main` pool.
+**Why four Days for a three-day trip.** `standingsFrozen` returns true the moment a `farewell`-pool Day unlocks, and `finaleTimes` anchors the freeze and podium on that same `unlockAt`. A `farewell` Sunday would therefore freeze standings at its own 06:00 unlock and make the whole final morning ceremonial; moving Sunday off `farewell` entirely would make `finaleTimes` return null, so there would be no freeze, no podium and no Most-Loved Photo at all.
+
+Keeping Sunday on `main` and adding a ceremonial wrap-up Day at 11:00 resolves both. Sunday plays competitively all morning because nothing farewell-pool has opened yet; the wrap-up's unlock **is** the Standings Freeze, so the podium fires exactly at check-out. `tutorial: true` on the wrap-up keeps a ceremonial bingo from taking the Event-wide First to BINGO, and `buildPodium` already excludes the farewell Day from champion totals.
+
+This needs **no code change**, and it stays correct after the scoring migration lands: `standingsFreezeAt` is seeded to the same instant as the wrap-up's `unlockAt`, so the inferred and stated freeze agree.
+
+The last-call Moment does not fire on this shape — `finaleTimes` computes it as Sunday's unlock + 12h, which lands after the freeze, so the window is empty. Harmless on a weekend.
+
+The 40 closing prompts sit on the wrap-up card rather than Sunday's, which suits them: they are read in the car, not over the last coffee. Sunday morning deals `main` + `embark` at the usual 50/50.
 
 This group is early to rise and early to bed, so the card is waiting before anyone is up rather than arriving mid-morning.
 
@@ -196,6 +205,6 @@ Scope of the exposure, for the record: player submissions only ever enter the **
 
 Pre-stamping also means Friday's card is frozen from seed time, so run the seed with its final pool — this is the Day where Kim's edits have the earliest deadline.
 
-**The Sunday window is five hours** — 06:00 unlock to the 11:00 check-out freeze. The earlier start bought two hours back, which materially changes Sunday from "a card nobody finishes" to a real if brisk final morning. Still packing-heavy, so the closing pool stays deliberately achievable from a kitchen; if you want the drive home to count, push `standingsFreezeAt` to early afternoon instead.
+**The Sunday window is five hours** — 06:00 unlock to the 11:00 freeze, when the wrap-up Day opens. The earlier start bought two hours back, which materially changes Sunday from "a card nobody finishes" to a real if brisk final morning. Still packing-heavy, so the closing pool stays deliberately achievable from a kitchen; if you want the drive home to count, push `standingsFreezeAt` to early afternoon instead.
 
 **The community-prompt review cutoff moves with it.** Approved suggestions only reach a Day if they are approved *before* that Day's snapshot, so the organiser's deadline is now 06:00, not 08:00. For an early-to-bed group that means suggestions get reviewed **the night before**, not over morning coffee — worth saying out loud in the organiser's runbook, because a 7am review would now silently miss the card entirely.
