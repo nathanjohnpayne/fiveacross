@@ -37,7 +37,22 @@ export type ThemeId =
   | 'neon-pink-playground'
   | 'sporty-splash'
   | 'under-the-stars'
-  | 'atlantis-classics';
+  | 'atlantis-classics'
+  // Bodega Bay Day themes (#555, Five Across / Vacay edition). Scoped OUT of
+  // the Gay Cruise Bingo switcher by `themesForEdition`, but they stay in the
+  // `THEMES` registry so id->emoji/label lookups and the contrast suites cover
+  // them like any other Theme.
+  | 'the-birds'
+  | 'side-quests'
+  | 'fog-froth-farewells'
+  // Five Across Themes (#617). Occasion-neutral by design — the fiveacross
+  // register serves a conference hall, a wedding, or a birthday weekend
+  // equally, so nothing here names a place or an occasion. Scoped to the
+  // fiveacross Edition by `themesForEdition`, in the registry for the same
+  // reason as the Bodega trio above.
+  | 'marquee'
+  | 'confetti-hour'
+  | 'afterglow';
 
 // One Day of the cruise (daily-cards-spec § "Data model"). Ordered inside
 // `EventDoc.days` (length 10 for the July sailing, but the model assumes no
@@ -126,6 +141,26 @@ export interface EventDoc {
     stripPhotoExif?: boolean; // geotags never leave the phone
     visionGate?: boolean;     // existing moderation function, now toggleable
   };
+}
+
+/**
+ * A `hostnames/{host}` document — the public, pre-auth hostname → Event lookup
+ * (ADR 0009, specs/hostnames-lookup.md). One document per public address, keyed
+ * by full hostname, so an Event's canonical address and each of its aliases are
+ * separate documents pointing at the same Event.
+ *
+ * Lives here rather than beside the resolver because it is a Firestore document
+ * contract consumed by the resolver, the Firestore seam and the seed — three
+ * places that must not be free to disagree about what `status` means.
+ */
+export interface HostnameDoc {
+  eventId: string;
+  canonicalHost: string;
+  edition: string;
+  /** `active` is the ONLY value that serves an Event. Never defaulted. */
+  status: 'active' | 'disabled' | 'archived';
+  slug?: string;
+  isCanonical?: boolean;
 }
 
 export interface ItemDoc {

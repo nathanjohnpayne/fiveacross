@@ -176,8 +176,8 @@ The wrap-up card, which unlocks at the 11:00 check-out freeze alongside the podi
 |---|---|---|---|---|---|---|
 | 0 | Friday, Aug 7 | `embark` | false | `competitive` | 🐦 The Birds Have Entered the Group Chat | `0` (open sentinel) |
 | 1 | Saturday, Aug 8 | `main` | false | `competitive` | 🌊 Bodega Bay Side Quests | Sat 06:00 `America/Los_Angeles` |
-| 2 | Sunday, Aug 9 | `main` | false | `competitive` | ☕ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
-| 3 | The wrap-up | `farewell` | **true** | `ceremonial` | ☕ Fog, Froth & Farewells | Sun 11:00 `America/Los_Angeles` |
+| 2 | Sunday, Aug 9 | `main` | false | `competitive` | 🌫️ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
+| 3 | The wrap-up | `farewell` | **true** | `ceremonial` | 🌫️ Fog, Froth & Farewells | Sun 11:00 `America/Los_Angeles` |
 
 **The `pool` column shows persisted literals, not the neutral names.** Unlike the other renamed fields, `pool` values are load-bearing in code: `snapshotPoolsFor` hard-codes `dayPool === 'main' ? ['main','embark'] : [dayPool]`, `standingsFrozen` tests `d.pool === 'farewell'`, and `firestore.rules` validates `pool in ['main','embark','farewell']`. Seeding the neutral labels breaks Easy Mix (a main Day looks for `embark`, finds nothing) and the finale (nothing matches `farewell`, so the freeze never fires). Read `embark` as the easy pool and `farewell` as the closing pool until the pool migration lands.
 

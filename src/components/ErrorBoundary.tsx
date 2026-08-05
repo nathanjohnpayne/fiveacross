@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
+import { editionBrand } from '../editions';
 import { phCapture } from '../posthog';
 import { definitelyOffline, markResetAttempted, resetAttempted, resetShell } from '../shellRecovery';
 
@@ -27,6 +28,24 @@ import { definitelyOffline, markResetAttempted, resetAttempted, resetShell } fro
  * own context — no auth, no Firestore, no theme, no router. Whatever just broke
  * badly enough to unmount the tree is exactly what a recovery screen must not
  * depend on.
+ *
+ * Its ONE dependency is the Edition brand (#543, ADR 0009), and it earns the
+ * exemption rather than being an exception to the rule: `editionBrand()` is a
+ * synchronous table lookup with a `?? BRANDS[DEFAULT_EDITION]` fallback — no
+ * hook, no context, no I/O, and no input for which it throws. Its default
+ * argument resolves through `activeEdition()`, which by the time anything can
+ * crash is the Edition `bootstrapEventResolution` installed, and before that a
+ * `VITE_EDITION` literal Vite has already inlined (#586 made that seed lazy so
+ * the Vite config could import this table; the laziness is invisible here).
+ * `src/editions.ts` is already in the boot graph (`SignIn`, `theme/themes.ts`,
+ * `bootstrapEventResolution`), so importing it adds no failure mode that is not
+ * already fatal: a module that failed to evaluate would take the bundle down
+ * before this boundary existed to render. Holding the strings instead is the
+ * thing that actually costs a player something — the wordmark and the offline
+ * note here WERE the `gcb` literals, so a Bodega guest whose tree crashed was
+ * shown another product's name and told to go find the printed cards for a
+ * cruise that is not happening (the #543/#576 defect, on the third and last
+ * surface that reuses this shell).
  */
 export default class ErrorBoundary extends Component<{ children: ReactNode }, { crashed: boolean }> {
   state = { crashed: false };
@@ -73,18 +92,19 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
 
   render(): ReactNode {
     if (!this.state.crashed) return this.props.children;
+    // Read at render, not construction: a class component has no hook, and the
+    // Edition is installed by `bootstrapEventResolution` before mount anyway.
+    const brand = editionBrand();
     return (
       <div className="signin" role="alert">
-        <h1>GAY CRUISE BINGO</h1>
+        <h1>{brand.wordmark}</h1>
         <p className="muted">
           Something went wrong on this device. Your marks are safe&mdash;they live on the server, not in this tab.
         </p>
         <button className="btn primary block" onClick={() => void resetShell()}>
           Reset &amp; reload
         </button>
-        <p className="muted" style={{ fontSize: 11 }}>
-          Lost signal at sea? The printed cards and PDF still work.
-        </p>
+        <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
       </div>
     );
   }

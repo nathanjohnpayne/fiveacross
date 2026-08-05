@@ -5,11 +5,26 @@ import type { Cell, CardSnapshot, CardSnapshotDay } from '../types';
 // definition of record lives in src/types.ts with the other domain contracts.
 export type { CardSnapshot, CardSnapshotDay };
 
-// The active Event id, derived the SAME way src/firebase.ts does. Read inline
-// (not imported from ../firebase) so this pure localStorage helper never pulls
+// The active Event id, seeded the SAME way src/firebase.ts does. Deliberately
+// NOT imported from ../firebase so this pure localStorage helper never pulls
 // the Firebase app-init module into a consumer's import graph — a bare
 // save/load round-trip must run in a unit test without Firebase config.
-const EVENT_ID = import.meta.env.VITE_EVENT_ID || 'med-2026';
+//
+// Kept in sync by `setCardCacheEventId`, which startup resolution calls
+// alongside `applyResolvedEventId` (#543). Without that, a multi-Event build —
+// which ships with NO `VITE_EVENT_ID`, since its presence is what marks a
+// bundle as single-Event — would leave this at the 'med-2026' default while
+// every Firestore path used the resolved id. The cache would then key on a
+// different Event than the data it caches, which is precisely the cross-Event
+// bleed the key comment below promises to prevent.
+let EVENT_ID = import.meta.env.VITE_EVENT_ID || 'med-2026';
+
+/** Point the cache at the resolved Event. Startup only, before any read or
+ *  write — re-pointing it later orphans everything already stored under the
+ *  previous key rather than migrating it. */
+export function setCardCacheEventId(id: string): void {
+  EVENT_ID = id;
+}
 
 // Bump when the stored shape changes: an older-version blob reads as a MISS
 // (null), never as a mis-shaped card.

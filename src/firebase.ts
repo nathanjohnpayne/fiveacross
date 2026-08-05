@@ -71,8 +71,34 @@ if (import.meta.env.VITE_RECAPTCHA_SITE_KEY) {
   }
 }
 
-/** Which event this build points at (schema supports many; v1 uses one). */
-export const EVENT_ID = import.meta.env.VITE_EVENT_ID || 'med-2026';
+/**
+ * Which Event this session is serving.
+ *
+ * A `let`, not a `const`, because it is resolved from the hostname at startup
+ * (#543, ADR 0009) rather than baked at build time. ESM exports are LIVE
+ * BINDINGS, so every importer observes the resolved value once
+ * `applyResolvedEventId` runs — and that is only safe because no consumer
+ * captures it at import time: the seven `src/data/` modules all read `EVENT_ID`
+ * INSIDE helper functions, so each call re-reads the binding
+ * (`specs/x-multi-event-schema.md` § "Recommended migration seam"). A consumer
+ * that ever writes `const id = EVENT_ID` at module scope would silently freeze
+ * the pre-resolution value — that is the one way to break this.
+ *
+ * The initial value is the `VITE_EVENT_ID` fallback, so a single-Event build
+ * (Gay Cruise Bingo) is already correct even if resolution never runs.
+ */
+export let EVENT_ID = import.meta.env.VITE_EVENT_ID || 'med-2026';
+
+/**
+ * Install the resolved Event id. Call exactly once, at startup, BEFORE the
+ * React tree mounts: every Firestore path derives from this, so changing it
+ * under live listeners would leave subscriptions pointed at the previous Event.
+ * In-session Event switching is a separate, larger change — it needs the Event
+ * id folded into every subscription key first (`useData.ts`).
+ */
+export function applyResolvedEventId(id: string): void {
+  EVENT_ID = id;
+}
 
 // Analytics only loads in supported (browser, https) contexts with a measurement
 // id — and never for the uptime synthetic (#142), whose load-only probe must not

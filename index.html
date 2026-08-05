@@ -10,12 +10,26 @@
          (which Android uses, and which is deliberately shorter — #364), so the
          two platforms are set independently. Without this tag iOS would fall
          back to <title>, which happens to match today; it is set explicitly so
-         retitling the page cannot silently rename the installed icon. -->
-    <meta name="apple-mobile-web-app-title" content="Gay Cruise Bingo" />
+         retitling the page cannot silently rename the installed icon.
+
+         The two Edition placeholders below are substituted at BUILD time from
+         `VITE_EDITION` against the brand table in src/editions.ts (#586) — see
+         `brandHtmlIdentity` there and the `edition-html-identity` plugin in
+         vite.config.ts, which fails the build if either one survives. They are
+         not Vite's own env-substitution syntax: these are derived brand copy,
+         not raw env values, and the plugin runs ahead of Vite's env
+         replacement. A hostname-resolved build has no single Edition to bake,
+         so it corrects both tags after resolution instead (editions.ts
+         `applyEditionDocumentIdentity`).
+
+         Deliberately not spelling a placeholder out in this comment: the
+         fail-closed scan reads the whole file, comments included, so an example
+         here would either break the build or ship as visible text. -->
+    <meta name="apple-mobile-web-app-title" content="%EDITION_APP_NAME%" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
-    <title>Gay Cruise Bingo</title>
+    <title>%EDITION_DOCUMENT_TITLE%</title>
     <meta name="description" content="Live multiplayer bingo for the high seas. Trieste to Barcelona, July 2026." />
 
     <!-- Static default Open Graph for bare-URL unfurl (ADR 0005). No server-rendered

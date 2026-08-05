@@ -264,12 +264,32 @@ else
   if ! SYNTHETIC_URL="$SYNTHETIC_URL" npm run --silent test:synthetic; then
     cat >&2 <<EOF
 
-✗ Post-deploy synthetic FAILED: the deployed app did not mount cleanly at
-  $SYNTHETIC_URL (blank page, a Firebase init error such as auth/invalid-api-key,
-  or an uncaught exception). The deploy is live but likely broken.
+✗ Post-deploy synthetic FAILED at $SYNTHETIC_URL. The deploy is live.
 
-  Roll back now — Firebase Console → Hosting → Release history → Roll back is
-  the one-click path; or via the CLI (see DEPLOYMENT.md § Rollback Procedure):
+  CONFIRM BEFORE ROLLING BACK (10 seconds). Open $SYNTHETIC_URL in a browser:
+
+    • Blank page / spinner forever  → real outage. Roll back, instructions below.
+    • The sign-in gate renders      → the PROBE failed, not the app. Do NOT roll
+                                      back a healthy release. Read the Playwright
+                                      output above, then file the probe bug.
+
+  Rolling back a working release costs more than one extra minute of checking.
+  This exact false alarm happened on 2026-08-05: the synthetic waited for the
+  \`GAY CRUISE BINGO\` heading, the Vacay-Edition host correctly rendered
+  \`VACAY BINGO\`, and a completely healthy Bodega Bay deploy was reported as a
+  broken one with these rollback instructions attached (fixed since — the mount
+  signal is Edition-free now, see tests/synthetic/app-mounts.spec.ts).
+
+  Read the failure line above to tell the two apart:
+    "Firebase init error(s) detected"  → real: bad/rotated key, wrong project.
+    "uncaught exception(s) during load" → real: the client threw before paint.
+    "the sign-in gate never rendered"   → real IF the page is blank in a browser;
+                                          a probe bug if the gate is right there.
+    anything else (browser launch,
+    navigation timeout, DNS/TLS)        → probe or network, not the release.
+
+  Roll back — Firebase Console → Hosting → Release history → Roll back is the
+  one-click path; or via the CLI (see DEPLOYMENT.md § Rollback Procedure):
     firebase hosting:releases:list                          # find the prior version id
     firebase hosting:clone <site-id>:@<VERSION_ID> <site-id>:live
 

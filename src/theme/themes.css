@@ -258,3 +258,138 @@
   --shadow: rgba(226, 129, 77, 0.4);
   --on-gradient: #000;
 }
+
+/* --------------------------------------------------------------------------
+   Bodega Bay Day themes (#555). Dark-ground like every other Theme here: the
+   brief's palettes (eggshell, fog silver, chowder cream) read as INK and
+   ACCENT against an ink-black or coffee ground rather than as backgrounds, so
+   the eight TEXT_PAIRS clear 4.5:1 without re-tuning the shared component CSS.
+   Themes change the emotional framing only -- no navigation or mechanics.
+   -------------------------------------------------------------------------- */
+
+/* The Birds Have Entered the Group Chat -- Hitchcock coastal suspense.
+   Eggshell on ink black, sea green, restrained warning red. Original artwork
+   only: no film stills, poster art, logos, or implied affiliation. */
+[data-theme='the-birds'] {
+  --bg: #0b0f0e;
+  --panel: #151c19;
+  --ink: #f2efe6;
+  --dim: #a9b5ac;
+  --primary: #6fbf9f;
+  --secondary: #e07a6f;
+  --accent: #e8d9a0;
+  --cell: #151c19;
+  --border: rgba(111, 191, 159, 0.35);
+  --shadow: rgba(111, 191, 159, 0.4);
+  --on-gradient: #000;
+}
+
+/* Bodega Bay Side Quests -- adventurous Sonoma Coast.
+   Deep Pacific blue, seafoam, fog white, buoy orange. */
+[data-theme='side-quests'] {
+  --bg: #041826;
+  --panel: #082738;
+  --ink: #eef7fb;
+  --dim: #a3c3d4;
+  --primary: #74e0c8;
+  --secondary: #ff9d4d;
+  --accent: #ffd98a;
+  --cell: #082738;
+  --border: rgba(116, 224, 200, 0.35);
+  --shadow: rgba(116, 224, 200, 0.4);
+  --on-gradient: #000;
+}
+
+/* Fog, Froth & Farewells -- the last slow morning.
+   Fog silver, chowder cream, coffee brown, dusk coral.
+
+   THE ONE LIGHT THEME, and deliberately so: plans/daily-cards-wireframes.html
+   builds the Bodega finale on a postcard-cream ground and says outright that
+   the frame exists to prove the token contract handles a light mode. Shipping
+   this one dark would have made the wireframe wrong about the thing it was
+   drawn to demonstrate (Codex on #577).
+
+   The palette is the wireframe's, DARKENED where WCAG AA required it and
+   nowhere else. Three of the eight audited pairs failed at the sketch values --
+   --dim (3.11 on --bg), --primary (3.53 on --panel) and --accent (2.75 on
+   --cell) -- because a mid-tone hue that reads fine against a dark ground has
+   nowhere to go against a light one. Each kept its hue and lost only luminance:
+   fog silver #8a857b -> #66625a, coffee brown #b0764f -> #8a5533, dusk coral
+   #d1826e -> #a8462f. w1-themes.test.tsx parses this file and audits every
+   Theme, so those numbers are checked rather than asserted.
+
+   --on-gradient flips to the cream rather than black: it is the fill ON the
+   marked-cell gradient, which runs between --primary and --secondary, and on a
+   light Theme both of those are the dark end. */
+[data-theme='fog-froth-farewells'] {
+  --bg: #efece4;
+  --panel: #faf7ef;
+  --ink: #33302b;
+  --dim: #66625a;
+  --primary: #8a5533;
+  --secondary: #4f6b63;
+  --accent: #a8462f;
+  --cell: #faf7ef;
+  --border: rgba(138, 85, 51, 0.3);
+  --shadow: rgba(51, 48, 43, 0.18);
+  --on-gradient: #faf7ef;
+}
+
+/* --------------------------------------------------------------------------
+   Five Across themes (#617). Occasion-neutral by contract: the fiveacross
+   register (#608) has to read naturally at a conference, a wedding, or a
+   birthday weekend, so these palettes carry mood, not place — no coastline,
+   no ports, no venue. Dark-ground like the Bodega trio so the eight audited
+   TEXT_PAIRS clear 4.5:1 without re-tuning shared component CSS; ratios are
+   pinned by the same suites that police every other Theme here.
+   -------------------------------------------------------------------------- */
+
+/* Marquee -- doors open, lights up. The fiveacross Edition default: the
+   pre-auth gate wears it, so it reads as "an event is about to happen"
+   before the app knows anything else. Bulb gold and ticket red on warm
+   black. */
+[data-theme='marquee'] {
+  --bg: #120d08;
+  --panel: #1d1610;
+  --ink: #f7f0e1;
+  --dim: #b5a88e;
+  --primary: #e8b64c;
+  --secondary: #e2695a;
+  --accent: #ffd98a;
+  --cell: #1d1610;
+  --border: rgba(232, 182, 76, 0.35);
+  --shadow: rgba(232, 182, 76, 0.4);
+  --on-gradient: #000;
+}
+
+/* Confetti Hour -- the peak of the celebration.
+   Pink, teal, and gold popping on midnight blue. */
+[data-theme='confetti-hour'] {
+  --bg: #0d1020;
+  --panel: #171b32;
+  --ink: #f1f3fc;
+  --dim: #aab1d6;
+  --primary: #ff7eb6;
+  --secondary: #5fe3cf;
+  --accent: #ffd23f;
+  --cell: #171b32;
+  --border: rgba(95, 227, 207, 0.35);
+  --shadow: rgba(255, 126, 182, 0.4);
+  --on-gradient: #000;
+}
+
+/* Afterglow -- the slow, happy wind-down.
+   Dusk violet, ember orange, orchid. */
+[data-theme='afterglow'] {
+  --bg: #150f1c;
+  --panel: #211830;
+  --ink: #f5eef7;
+  --dim: #b8aac6;
+  --primary: #f09a6a;
+  --secondary: #c583e0;
+  --accent: #ffc98a;
+  --cell: #211830;
+  --border: rgba(240, 154, 106, 0.35);
+  --shadow: rgba(197, 131, 224, 0.4);
+  --on-gradient: #000;
+}

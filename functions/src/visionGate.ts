@@ -71,7 +71,14 @@ export function visionModerationEnabled(
   return enabled;
 }
 
-function resolveProjectId(env: NodeJS.ProcessEnv): string | undefined {
+/**
+ * The deploying/running project id, from the two sources firebase-tools
+ * guarantees in the SEALED trigger-discovery subprocess (see the note on
+ * `visionModerationEnabled`): `GCLOUD_PROJECT`, else `FIREBASE_CONFIG.projectId`.
+ * Exported because `index.ts` needs the same answer to pin a per-project runtime
+ * service account at discovery time, where `.env` files are not loaded.
+ */
+export function resolveProjectId(env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (env.GCLOUD_PROJECT) {
     return env.GCLOUD_PROJECT;
   }

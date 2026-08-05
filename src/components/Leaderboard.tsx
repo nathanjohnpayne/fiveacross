@@ -4,6 +4,7 @@ import { useEventDoc, useDayMetasStatus, useLeaderboard, useLatestProofByUid, is
 import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/logic';
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
+import { canonicalOrigin } from '../canonicalHost';
 import { renderLeaderboardShareCard, shareCardBlob, SHARE_CARD_APP_NAME, type LeaderboardShareRow } from './ShareCard';
 import Avatar from './Avatar';
 import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
@@ -293,7 +294,9 @@ export default function Leaderboard() {
         filename: 'gay-cruise-bingo-leaderboard.png',
         title: `${SHARE_CARD_APP_NAME}—Leaderboard`,
         text: 'Check out the Gay Cruise Bingo leaderboard 🏆',
-        url: window.location.origin,
+        // Canonical hostname (#556), not the raw origin — a Player on a
+        // validated Alias must never hand that address off in a share link.
+        url: canonicalOrigin(),
       });
     } catch {
       // shareCardBlob is designed to never throw, but a share failure must

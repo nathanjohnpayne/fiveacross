@@ -93,7 +93,11 @@ vi.mock('../data/admin', () => ({
   unbanUser: (...a: unknown[]) => H.unbanUser(...a),
 }));
 vi.mock('../data/proofs', () => ({ deleteProof: (...a: unknown[]) => H.deleteProof(...a) }));
-vi.mock('../theme/themes', () => ({ THEMES: [{ id: 'neon-playground', emoji: '🎉', label: 'Neon' }] }));
+// Admin pickers read the EDITION-SCOPED list, not the registry (#555).
+vi.mock('../theme/themes', () => {
+  const THEMES = [{ id: 'neon-playground', emoji: '🎉', label: 'Neon' }];
+  return { THEMES, themesForEdition: () => THEMES, themesForEditionIncluding: () => THEMES };
+});
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user }) }));
 
 import Admin from './Admin';

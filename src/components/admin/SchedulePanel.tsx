@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { setDayTheme, setDayTonight, unlockDayNow, resnapshotDayNow } from '../../data/admin';
 import { dayDueForManualUnlock } from '../../game/logic';
-import { THEMES } from '../../theme/themes';
+import { themesForEditionIncluding } from '../../theme/themes';
 import type { DayDef, ThemeId } from '../../types';
 
 /**
@@ -316,7 +316,12 @@ function ScheduleRow({
           disabled={locked}
           onChange={(e) => onChangeTheme(day.index, e.target.value as ThemeId)}
         >
-          {THEMES.map((t) => (
+          {/* Scoped to this Edition (#555) — an Admin must not be able to set a
+              Bodega Theme on a cruise Day. `…Including(day.theme)` keeps the
+              Day's CURRENT Theme in the list even if it is off-Edition, so the
+              select never falls back to displaying its first option in place of
+              what is actually stored. */}
+          {themesForEditionIncluding(day.theme).map((t) => (
             <option key={t.id} value={t.id}>
               {t.emoji} {t.label}
             </option>

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import ErrorBoundary from './ErrorBoundary';
+import { DEFAULT_EDITION, setActiveEdition } from '../editions';
 
 // The 2026-07-24 blank-screen incident, pinned. A stale precached shell threw
 // during render; with no boundary React unmounted the ENTIRE root — including
@@ -32,6 +33,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // The resolved Edition is module state, so a test that installs one would
+  // otherwise brand every test after it.
+  setActiveEdition(DEFAULT_EDITION);
 });
 
 describe('ErrorBoundary', () => {
@@ -171,5 +175,51 @@ describe('ErrorBoundary', () => {
       expect.any(Object),
       { transport: 'sendBeacon', send_instantly: true },
     );
+  });
+});
+
+// The #543/#576 defect on its third and last surface. The crash panel reuses
+// the `.signin` shell the gate and `DealError` reuse, but kept its own copy of
+// the `gcb` wordmark and offline note — so the screen whose whole job is to
+// reassure a player greeted a Bodega Bay guest with another product's name and
+// sent them after printed cards for a cruise that is not happening. The sibling
+// proof for the other two surfaces is src/components/signin-edition-brand.test.tsx.
+//
+// `../editions` is deliberately NOT mocked: the point is that the component
+// reads the real brand table rather than holding strings, which a stubbed
+// module would hide.
+describe('ErrorBoundary — the crash panel wears the resolved Edition', () => {
+  it('shows the cruise brand on the legacy Edition', () => {
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('GAY CRUISE BINGO');
+    expect(screen.getByText(/lost signal at sea/i)).toBeInTheDocument();
+  });
+
+  it('shows the Vacay brand once the resolver installs that Edition', () => {
+    setActiveEdition('vacay');
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('VACAY BINGO');
+    expect(screen.getByText(/marks sync when you reconnect/i)).toBeInTheDocument();
+    expect(screen.queryByText(/at sea/i)).toBeNull();
+  });
+
+  it('falls back to the legacy brand on an unknown Edition rather than a blank wordmark', () => {
+    // `setActiveEdition` already coerces the unknown value, but the panel is
+    // the surface that would render the hole if it ever stopped doing so.
+    setActiveEdition('not-a-real-edition');
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('GAY CRUISE BINGO');
   });
 });

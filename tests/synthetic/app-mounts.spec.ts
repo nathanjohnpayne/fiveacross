@@ -6,9 +6,9 @@ import { test, expect } from '@playwright/test';
 // client JS threw `auth/invalid-api-key` on init and painted a blank page.
 //
 // Two assertions, both high-level and flake-resistant:
-//   1. The signed-out root renders — the `GAY CRUISE BINGO` heading is the
-//      SignIn gate App shows on `!user` (src/components/SignIn.tsx). Its presence
-//      proves React mounted AND Firebase init did not throw before first paint.
+//   1. The signed-out root renders — the SignIn gate App shows on `!user`
+//      (src/components/SignIn.tsx). Its presence proves React mounted AND
+//      Firebase init did not throw before first paint.
 //   2. No Firebase init error (`auth/invalid-api-key` et al.) and no uncaught
 //      exception reached the console during load.
 //
@@ -25,6 +25,36 @@ const FIREBASE_INIT_ERROR = /auth\/invalid-api-key|invalid-api-key|Firebase:[^]*
 // a `SYNTHETIC_URL` like https://host/app/. Mirrors the config default.
 const SYNTHETIC_URL = process.env.SYNTHETIC_URL ?? 'https://gaycruisebingo.com/';
 
+// The mount signal, deliberately free of marketing copy.
+//
+// This used to be `getByRole('heading', { name: 'GAY CRUISE BINGO' })` — the
+// `gcb` Edition's wordmark. Once Editions shipped (#543, ADR 0009) that string
+// became per-host copy: a Vacay host renders `VACAY BINGO`, so the assertion
+// could NEVER match there. Reproduced 2026-08-05 deploying the Bodega Bay host
+// (https://bodega-bay.vacaybingo.com): the app mounted cleanly — both error
+// assertions below passed — and the synthetic still failed, so `scripts/deploy.sh`
+// told the operator to roll back a completely healthy release, two days before
+// the event it was deployed for.
+//
+// So the signal must not be brand copy. `src/editions.test.ts` and
+// `signin-edition-brand.test.tsx` already guard the copy itself; uptime should
+// not. Two accepted forms, whichever the live build carries:
+//
+//   • `[data-testid="signin-gate"]` — the contract, added alongside this change
+//     on the SignIn gate root. Explicit, Edition-free, and visible to anyone
+//     editing that component.
+//   • `.signin input[type="checkbox"]` — the 18+ acknowledgement, which every
+//     build shipped before that testid already renders. Kept ONLY so the window
+//     between this merging and each host's next deploy does not turn the
+//     scheduled uptime check (.github/workflows/synthetic-uptime.yml) into a
+//     false outage against a not-yet-redeployed origin. Drop it once every live
+//     host has shipped a build containing the testid.
+//
+// Both are unique to the signed-out gate: `ErrorBoundary` and `DealError` reuse
+// the `.signin` shell but render neither, so a crash screen still reads as
+// "did not mount" rather than passing this check.
+const MOUNT_SIGNAL = '[data-testid="signin-gate"], .signin input[type="checkbox"]';
+
 test('the deployed app mounts and renders its root', async ({ page }) => {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -38,12 +68,13 @@ test('the deployed app mounts and renders its root', async ({ page }) => {
 
   await page.goto(SYNTHETIC_URL, { waitUntil: 'domcontentloaded' });
 
-  // Mount signal: the SignIn gate heading. A generous window so a slow-but-
-  // working cold load still passes; a crashed/blank app never renders it. Errors
-  // keep accumulating in the listeners above during this wait, so a crash-on-init
-  // is reported by the precise assertions below rather than a bare timeout.
+  // A generous window so a slow-but-working cold load still passes; a
+  // crashed/blank app never renders it. Errors keep accumulating in the
+  // listeners above during this wait, so a crash-on-init is reported by the
+  // precise assertions below rather than a bare timeout.
   const rendered = await page
-    .getByRole('heading', { name: 'GAY CRUISE BINGO' })
+    .locator(MOUNT_SIGNAL)
+    .first()
     .waitFor({ state: 'visible', timeout: 20_000 })
     .then(() => true)
     .catch(() => false);
@@ -65,6 +96,6 @@ test('the deployed app mounts and renders its root', async ({ page }) => {
   //    catches a blank page even when nothing threw.
   expect(
     rendered,
-    'the GAY CRUISE BINGO root heading never rendered — the app did not mount (blank page)',
+    `the sign-in gate never rendered — the app did not mount (blank page). Looked for ${MOUNT_SIGNAL}`,
   ).toBe(true);
 });

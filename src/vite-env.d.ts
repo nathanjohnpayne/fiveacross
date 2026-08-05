@@ -11,6 +11,12 @@ interface ImportMetaEnv {
   readonly VITE_FIREBASE_APP_ID: string;
   readonly VITE_FIREBASE_MEASUREMENT_ID: string;
   readonly VITE_EVENT_ID: string;
+  // Which Edition this build serves (#555): 'gcb' | 'vacay'. Optional: absent
+  // means the legacy `gcb` Edition, so existing builds and .env files need no
+  // change. Also brands a single-Event build's pre-auth shell
+  // (src/editions.ts); hostname-resolved builds take the Edition from
+  // `hostnames/{host}.edition` instead (#543).
+  readonly VITE_EDITION?: string;
   readonly VITE_RECAPTCHA_SITE_KEY: string;
 }
 

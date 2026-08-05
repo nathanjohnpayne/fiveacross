@@ -1,3 +1,6 @@
+import { firebaseAuthOriginRedirectUrl } from './canonical-redirect';
+import { isLocalDevHost } from './local-host';
+
 // Exact hostnames only — never a prefix or suffix match. Every entry here must
 // ALSO be registered in Firebase Auth's authorized domains and as
 // `https://<host>/__/auth/handler` on the Google OAuth web client, neither of
@@ -21,4 +24,68 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
 /** Keep production OAuth helper storage on the same origin as the app. */
 export function resolveAuthDomain(configuredAuthDomain: string, hostname: string): string {
   return FIRST_PARTY_AUTH_HOSTS.has(hostname) ? hostname : configuredAuthDomain;
+}
+
+/**
+ * Whether Google sign-in can actually COMPLETE on this origin (#543, ADR 0010).
+ *
+ * Hostname resolution is what makes this check necessary. Before it, one build
+ * served one hostname and "the app runs here" implied "sign-in works here". It
+ * no longer does. ADR 0010's central auth origin and handoff are not
+ * implemented, so an origin whose `authDomain` is some OTHER host falls to the
+ * cross-origin popup helper — which Safari's storage partitioning breaks on
+ * mobile, and which in any case needs a `https://<host>/__/auth/handler` entry
+ * on the Google OAuth web client that only a human can add in the console
+ * (Codex P1 on #576).
+ *
+ * Ready means the OAuth helper is same-origin, which happens two ways:
+ *
+ *  - the host is a registered first-party host (the allowlist above), or
+ *  - the build pins `authDomain` to this very host — ADR 0010's "same-origin
+ *    escape hatch", which works for any hostname registered as an exact
+ *    Firebase Hosting custom domain. A single-Edition build like Bodega uses
+ *    exactly this, so the check does not dark it.
+ *
+ * Both collapse to the same question, which is why this is one line:
+ * does `resolveAuthDomain` end up pointing at us?
+ *
+ * Anything else is an address the auth stack has never been configured for.
+ * Saying so beats rendering a Google button that dead-ends: a broken sign-in on
+ * a phone in a rental house is unrecoverable by the player and silent to us.
+ */
+export function isAuthConfiguredForHost(configuredAuthDomain: string, hostname: string): boolean {
+  return resolveAuthDomain(configuredAuthDomain, hostname) === hostname;
+}
+
+/**
+ * Whether mounting the app on this origin can lead to a COMPLETED sign-in —
+ * the predicate behind main.tsx's pre-mount auth gate (Codex P1 on #576).
+ *
+ * `isAuthConfiguredForHost` alone is too strict for that gate, because "auth is
+ * not configured HERE" does not always mean "sign-in dead-ends here":
+ *
+ *  - `gaycruisebingo.web.app` deliberately keeps the configured `.com`
+ *    authDomain (see `resolveAuthDomain`), because `AuthProvider` history-
+ *    replaces every signed-out web.app visit to `gaycruisebingo.firebaseapp.com`
+ *    BEFORE any auth transaction starts (specs/w1-auth-google.md,
+ *    src/canonical-redirect.ts). Blocking the mount there would strand the
+ *    documented ship-network fallback host on an "auth unconfigured" screen —
+ *    the app must mount so the handoff can run. `firebaseAuthOriginRedirectUrl`
+ *    is the single source of truth for which hosts have that handoff, so this
+ *    asks it rather than keeping a second list.
+ *
+ *  - Local and emulator origins (`localhost`, `127.0.0.1`, `::1`, `*.local`)
+ *    are outside this gate's threat model entirely. The Playwright webServer
+ *    serves `127.0.0.1` with the demo project's `firebaseapp.com` authDomain,
+ *    and ordinary `npm run dev` copies whatever `.env.local` holds — both sign
+ *    in fine (Auth Emulator popup / dev popup) and neither is a
+ *    production-origin misconfiguration, which is the only thing this gate
+ *    exists to report (Codex P2 round 5 on #576).
+ */
+export function isSignInReachableOnHost(configuredAuthDomain: string, hostname: string): boolean {
+  if (isAuthConfiguredForHost(configuredAuthDomain, hostname)) return true;
+  if (isLocalDevHost(hostname)) return true;
+  // Only the hostname decides the handoff; path/search/hash merely shape the
+  // target URL, which is discarded here.
+  return firebaseAuthOriginRedirectUrl({ hostname, pathname: '/', search: '', hash: '' }) !== null;
 }

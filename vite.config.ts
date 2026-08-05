@@ -1,7 +1,14 @@
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
+// The SAME brand table the app renders the sign-in gate from (#580's one-table
+// rule, extended to the browser chrome in #586). Importing it rather than
+// restating four strings here is the whole point: a second copy is how the
+// wordmark and the tab end up disagreeing. src/editions.ts is kept free of
+// module-scope `import.meta.env` / `document` so it can be loaded in this Node
+// context — see the note at the top of that file before adding anything to it.
+import { brandHtmlIdentity, buildTimeEdition, editionBrand, type EditionBrand } from './src/editions';
 
 function appVersion(): string {
   if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA.slice(0, 40);
@@ -12,8 +19,45 @@ function appVersion(): string {
   }
 }
 
+/**
+ * Bake the build's Edition into `index.html`'s static chrome tags (#586).
+ *
+ * All the substitution and its fail-closed check live in `brandHtmlIdentity`
+ * (src/editions.ts), beside the brand table they read, so they are unit-tested
+ * without running a build. This is only the Vite seam.
+ *
+ * A hostname-resolved build has no single Edition to bake; it repairs the same
+ * two tags after resolution instead (`applyEditionDocumentIdentity`), and
+ * whatever this baked is simply overwritten.
+ */
+function editionHtmlIdentity(brand: EditionBrand): Plugin {
+  return {
+    name: 'edition-html-identity',
+    // 'pre' so this runs BEFORE Vite's own `%VITE_FOO%` env replacement, which
+    // Vite appends to the END of the pre-hook list (in dev and in build alike).
+    // Ordering is load-bearing rather than tidy: that hook leaves any `%…%` it
+    // does not recognise verbatim in the output, so losing the race would ship
+    // the literal placeholder rather than fail.
+    enforce: 'pre',
+    transformIndexHtml: (html) => brandHtmlIdentity(html, brand),
+  };
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
+  // Resolved for EVERY command and mode, dev server included, because both
+  // index.html and the PWA manifest below are branded from it. `loadEnv` rather
+  // than `process.env`: VITE_EDITION normally lives in the gitignored
+  // .env.local, which nothing has read into the process at this point.
+  const env = loadEnv(mode, process.cwd(), 'VITE_');
+  // `buildTimeEdition` decides whether this build may bake an Edition at all —
+  // a hostname-resolved bundle defers to the lookup and takes the default, so a
+  // stale VITE_EDITION cannot brand a bundle every Event shares. Always an
+  // EXPLICIT id, never `editionBrand()`'s default argument: that resolves
+  // through `activeEdition()`, which reads `import.meta.env` and does not exist
+  // here.
+  const brand = editionBrand(buildTimeEdition(env.VITE_EVENT_ID, env.VITE_EDITION));
+
   // Guard: never let a production build ship with a blank Firebase web config.
   // Vite statically inlines import.meta.env.* at build time (see src/firebase.ts),
   // so an empty VITE_FIREBASE_API_KEY compiles into a bundle whose top-level
@@ -31,7 +75,6 @@ export default defineConfig(({ command, mode }) => {
   // set only by the runner and never by `npm run deploy` / `deploy:hosting`. What
   // remains is the local/agent production build — exactly the outage vector.
   if (command === 'build' && mode === 'production' && !process.env.GITHUB_ACTIONS) {
-    const env = loadEnv(mode, process.cwd(), 'VITE_');
     // `.trim()` so a whitespace-only or leftover-placeholder key is rejected too
     // — it is just as broken as an empty one (still `auth/invalid-api-key`).
     if (!env.VITE_FIREBASE_API_KEY?.trim()) {
@@ -56,6 +99,7 @@ export default defineConfig(({ command, mode }) => {
     },
     plugins: [
       react(),
+      editionHtmlIdentity(brand),
       VitePWA({
         // 'prompt': the new SW installs and WAITS instead of activating under the
         // running page; UpdatePrompt (src/components/UpdatePrompt.tsx, #178) owns
@@ -75,15 +119,25 @@ export default defineConfig(({ command, mode }) => {
         srcDir: 'src',
         filename: 'sw.ts',
         includeAssets: ['favicon.svg', 'og-default.png', 'apple-touch-icon.png'],
+        // The installed app's identity, from the build's Edition rather than
+        // from a hardcoded product name (#586). This is what Android's install
+        // prompt, home-screen label and app info read — a Vacay Event used to
+        // install itself as "Gay Bingo" on a general-audience guest's phone,
+        // and an installed app keeps that name until it is uninstalled.
+        //
+        // This is the BUILD-TIME half only. A hostname-resolved build cannot be
+        // fixed here (one bundle, many Editions) and cannot be fixed at runtime
+        // either — the manifest is fetched as a file at install time — so it
+        // gets a per-hostname manifest from the edge Worker (#546).
         manifest: {
-          name: 'Gay Cruise Bingo',
+          name: brand.appName,
           // The home-screen label, and Android's only source for it — iOS reads
           // `apple-mobile-web-app-title` from index.html instead, which is why
-          // the two platforms can differ here (#364). Kept under the ~12-char
-          // truncation point so Android renders it whole; dropping "Cruise"
-          // rather than "Gay" is the deliberate trade (#359).
-          short_name: 'Gay Bingo',
-          description: 'Live multiplayer bingo for the high seas.',
+          // the two platforms can differ (#364). `EditionBrand.appShortName`
+          // owns the ~12-char budget per Edition; for `gcb` that is still "Gay
+          // Bingo", dropping "Cruise" rather than "Gay" (#359).
+          short_name: brand.appShortName,
+          description: brand.appDescription,
           theme_color: '#07060d',
           background_color: '#07060d',
           display: 'standalone',
