@@ -22,4 +22,11 @@ skip_paths:
       gate. TEMPORARY — the fix belongs upstream, tracked at
       nathanjohnpayne/mergepath#911; remove this entry once the canonical gate
       accepts the paired form. All 24 of the gate's own unit tests pass against
-      the patched version.
+      the patched version. SCOPE: the skip is the whole scripts/ci/ kit, which
+      is broader than the one patched file and is NOT narrowable — validate-
+      overrides.sh requires every skip_paths[].path to match a manifest
+      paths[].path, and the manifest declares scripts/ci/ as a single kit
+      entry; substitutions only apply to type: templated paths, of which
+      there are none. So the whole kit stops receiving upstream fixes while
+      this entry exists, which is the real cost of carrying it and the
+      reason to land mergepath#911 promptly rather than settle here.

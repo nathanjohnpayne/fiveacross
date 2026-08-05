@@ -470,7 +470,7 @@ codex:
   cli_login: nathanpayne-codex
 
   # Maximum number of `@codex review` rounds before escalating as runaway.
-  # The 3rd round trips the guard. Normal termination is either approval,
+  # The 6th round trips the guard. Normal termination is either approval,
   # disagreement (repeat-after-rebuttal), or timeout → Phase 4b fallback.
   max_review_rounds: 5
 

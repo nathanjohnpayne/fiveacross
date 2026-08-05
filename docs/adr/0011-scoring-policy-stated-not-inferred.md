@@ -3,7 +3,9 @@ status: accepted
 implemented: false
 ---
 
-> **Decision accepted; code not yet migrated.** Nothing described below exists in the tree at the time of writing: there is no `DayDef.scoring` or `EventDoc.standingsFreezeAt`, `ceremonialDayIndexSet` and the client freeze derivation still infer from `pool === 'farewell'`, and the functions mirror still excludes the easy and closing pools from First to BINGO. The divergence in the Consequences section is therefore **live**, not fixed. This ADR records the decision and the defect it exposed so the implementation lands against a written intent; the code and its parity test are tracked separately.
+> **Decision accepted; scoring migration not yet implemented.** There is still no `DayDef.scoring` or `EventDoc.standingsFreezeAt`, and `ceremonialDayIndexSet` plus the client freeze derivation still infer from `pool === 'farewell'`. That work is tracked separately.
+>
+> **The divergence this audit exposed IS fixed**, ahead of the rest: `functions/src/finaleContent.ts` now excludes Tutorial Days by the flag alone, matching the client, and `tests/functions/finale-parity.test.ts` feeds one fixture schedule to both implementations and fails if either moves alone. It was pulled forward because the Bodega schedule aims it at a real Event — an easy-pool Friday with `tutorial: false` would have had the card and the Feed name different players as First to BINGO.
 
 # A Day's Scoring Policy is stated, not inferred from its Pool — and the Standings Freeze is an Event setting
 
@@ -18,4 +20,4 @@ Once implemented:
 - `ceremonialDayIndexSet` will key off `scoring`, and the client freeze derivation off `standingsFreezeAt`, in both the app and the functions package. **After that lands, a reader who finds `pool === 'farewell'` in a scoring path is looking at a regression, not the design** — until then it is simply the current code.
 - Most-Loved Photo will freeze against `standingsFreezeAt` under the same rule and carry the same parity test.
 
-**The divergence this audit exposed is live today.** The client excludes only `tutorial` Days from First to BINGO (`src/game/logic.ts`), while `functions/src/finaleContent.ts` also excludes the easy and closing **pools**. Invisible on Gay Cruise Bingo, where those Days are also `tutorial: true` — but on any Event where they aren't, the card and the Feed print contradictory podiums, crediting different players. The fix aligns the functions side to the client and adds a **parity test feeding one fixture schedule to both implementations, asserting identical output**. The two packages stay decoupled by design; the test is what stops them drifting again.
+**The divergence this audit exposed, now fixed.** The client excluded only `tutorial` Days from First to BINGO (`src/game/logic.ts`), while `functions/src/finaleContent.ts` also excluded the easy and closing **pools**. Invisible on Gay Cruise Bingo, where those Days are also `tutorial: true` — but on any Event where they aren't, the card and the Feed print contradictory podiums, crediting different players. The fix aligned the functions side to the client and added a **parity test feeding one fixture schedule to both implementations, asserting identical output**. The two packages stay decoupled by design; the test is what stops them drifting again.

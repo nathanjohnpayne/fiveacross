@@ -74,12 +74,27 @@ export function compareFinalePlayers(a: Rankable, b: Rankable): number {
   return af - bf;
 }
 
-/** The tutorial (embark/farewell) Day indexes from an Event's schedule. The
- *  cruise-wide First to BINGO honor excludes these Days. */
+/** The Tutorial Day indexes from an Event's schedule. The Event-wide First to
+ *  BINGO honor excludes these Days.
+ *
+ *  MUST stay identical to `tutorialDayIndexSet` in `src/game/logic.ts`. The two
+ *  packages are deliberately decoupled, so this is a mirror, not an import —
+ *  and `tests/functions/finale-parity.test.ts` feeds one fixture schedule to
+ *  both and asserts identical output, because a mirror without a parity test is
+ *  how they drifted in the first place.
+ *
+ *  This previously ALSO excluded `pool === 'embark' | 'farewell'`, which the
+ *  client never did. That was invisible on Gay Cruise Bingo, whose curated Days
+ *  carry `tutorial: true` anyway — and wrong on any Event where a curated pool
+ *  is competitive play. A Five Across Event opening on the easy pool with
+ *  `tutorial: false` would have had the card credit a first bingo that the
+ *  scheduler's podium excluded: two contradictory answers to "who was First to
+ *  BINGO", one on the card and one in the Feed. Pool identity and Tutorial
+ *  framing are independent (ADR 0011); only the flag belongs here. */
 export function tutorialDayIndexes(days: readonly FinaleDay[] | undefined): Set<number> {
   const s = new Set<number>();
   for (const d of days ?? []) {
-    if (d.tutorial === true || d.pool === 'embark' || d.pool === 'farewell') s.add(d.index);
+    if (d.tutorial === true) s.add(d.index);
   }
   return s;
 }
