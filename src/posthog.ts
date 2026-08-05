@@ -266,6 +266,20 @@ export async function initPostHog(): Promise<void> {
     ready = false;
     return;
   }
+  // Replay dimensions registered while init was still probing (#556), BEFORE
+  // the identify below — `posthog.identify()` itself emits an `$identify` /
+  // `$set` capture the moment it transitions the anonymous user (Codex P2 on
+  // #556), so registering first means THAT capture carries brand/edition/
+  // Event context too, not just the ones queued after it.
+  if (pendingRegister !== null) {
+    const props = pendingRegister;
+    pendingRegister = null;
+    try {
+      posthog.register(props);
+    } catch {
+      /* no-op */
+    }
+  }
   // Replay an identity that arrived while init was still probing (Codex P2 on
   // #342): Firebase restores a cached signed-in user fast on reload, and a
   // phIdentify() landing in the probe window used to no-op via the `ready`
@@ -276,21 +290,7 @@ export async function initPostHog(): Promise<void> {
     pendingIdentifyUid = null;
     phIdentify(uid);
   }
-  // Replay dimensions registered while init was still probing (#556), BEFORE
-  // any queued capture below — `posthog.register()`'s super-properties are
-  // attached to every FUTURE capture, so registering first means a replayed
-  // pre-init capture (e.g. an `app_crash`) still carries brand/edition/Event
-  // context instead of going out bare.
-  if (pendingRegister !== null) {
-    const props = pendingRegister;
-    pendingRegister = null;
-    try {
-      posthog.register(props);
-    } catch {
-      /* no-op */
-    }
-  }
-  // Replay queued captures AFTER the identify above, so an `app_crash` from the
+  // Replay queued captures AFTER both of the above, so an `app_crash` from the
   // probe window is attributed to the signed-in player rather than orphaned
   // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
   // — they are from a PRIOR load (the crash that triggered a recovery reload),
@@ -448,6 +448,16 @@ export function phIdentify(uid: string): void {
 // kept distinct anyway so a future no-op call cannot look like "unset").
 let pendingRegister: Record<string, unknown> | null = null;
 
+// The full MERGED set of super-properties registered so far this load
+// (#556, Codex P2) — distinct from `pendingRegister` above, which is only
+// the not-yet-applied portion. Kept so `phReset` can reapply it: PostHog's
+// `reset()` clears its persisted `register()` state along with the
+// identity, and without a copy here a second Player signing in on the same
+// tab (no full page reload) would send every subsequent capture with no
+// brand/edition/Event/Day context at all, silently, until something called
+// `phRegister` again.
+let registeredDims: Record<string, unknown> = {};
+
 /**
  * Register PostHog super-properties: attached to every capture from THIS
  * point forward, including autocaptured pageviews and events already queued
@@ -458,6 +468,7 @@ let pendingRegister: Record<string, unknown> | null = null;
  * dropped on the startup race.
  */
 export function phRegister(props: Record<string, unknown>): void {
+  registeredDims = { ...registeredDims, ...props };
   if (!ready) {
     pendingRegister = { ...(pendingRegister ?? {}), ...props };
     return;
@@ -475,6 +486,9 @@ export function phReset(): void {
   if (!ready) return;
   try {
     posthog.reset();
+    // Reapply the dimensions `reset()` just cleared (#556, Codex P2) — see
+    // `registeredDims`'s own doc above for why this must not be skipped.
+    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
   } catch {
     /* no-op */
   }

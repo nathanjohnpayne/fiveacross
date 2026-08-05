@@ -549,6 +549,61 @@ describe('PostHog init with a key', () => {
       .invocationCallOrder[0];
     expect(registerOrder).toBeLessThan(captureOrder);
   });
+
+  it('replays a registration BEFORE the pending identify, so identify()s own capture is dimensioned too (Codex P2 on #556)', async () => {
+    // posthog.identify() itself emits an $identify/$set capture the moment
+    // it transitions the anonymous user — that capture must carry
+    // brand/edition/Event context too, not just events queued after it.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phRegister({ brand_id: 'five-across' });
+    mod.phIdentify('sailor-9');
+    await mod.initPostHog();
+
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(registerOrder).toBeLessThan(identifyOrder);
+  });
+
+  it('reapplies registered dimensions after posthog.reset() clears them (Codex P2 on #556)', async () => {
+    // reset() clears PostHog's persisted register() state along with the
+    // identity — without a reapply, a second Player signing in on the same
+    // tab (no full page reload) would send captures with no brand/edition/
+    // Event/Day context at all until something called phRegister again.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb' });
+    mod.phRegister({ day_index: 2 });
+    vi.mocked(ph.register).mockClear();
+
+    mod.phReset();
+    expect(ph.reset).toHaveBeenCalled();
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across', edition_id: 'gcb', day_index: 2 });
+  });
+
+  it('reset() is a no-op on dimensions when nothing was ever registered', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+
+    mod.phReset();
+    expect(ph.reset).toHaveBeenCalled();
+    expect(ph.register).not.toHaveBeenCalled();
+  });
 });
 
 describe('ingest-host failover chain (#342/#344 — shipboard SNI filter blocked the gcb proxy)', () => {

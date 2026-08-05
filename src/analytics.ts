@@ -93,6 +93,33 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
  */
 export const BRAND_ID = 'five-across';
 
+// The full MERGED set of GA4 default event params registered so far this
+// load (#556, Codex P2 finding). `setDefaultEventParameters` OVERWRITES
+// Firebase Analytics' single pending pre-init value on each call rather than
+// merging it (`@firebase/analytics` keeps exactly one
+// `defaultEventParametersForInit` slot) — so calling it twice before GA4
+// finishes loading (`registerAnalyticsDimensions` at startup, then
+// `registerDayIndexDimension` once the Event doc arrives) would otherwise
+// silently drop whatever the first call set. Passing the full merged set on
+// EVERY call is correct whether GA4 has finished loading or not: once it
+// has, gtag's own `"set"` command merges anyway, so resending
+// already-applied keys is a harmless no-op.
+let ga4Dims: Record<string, unknown> = {};
+
+/** Register `props` as default params on BOTH sinks — the shared mechanism
+ *  behind `registerAnalyticsDimensions` and `registerDayIndexDimension`. */
+function registerBothSinks(props: Record<string, unknown>): void {
+  ga4Dims = { ...ga4Dims, ...props };
+  try {
+    setDefaultEventParameters(ga4Dims);
+  } catch {
+    /* no-op */
+  }
+  // `phRegister` keeps its own merged copy (posthog.ts) for the reset()
+  // case, so it only needs THIS call's incremental props, not the full set.
+  phRegister(props);
+}
+
 /**
  * Register the Event-identity dimensions every subsequent analytics event on
  * BOTH sinks must carry (#556, part of #532): `brand_id`, `edition_id`,
@@ -115,18 +142,12 @@ export const BRAND_ID = 'five-across';
  * separate Slug to report and the Event id is the closest identifier there is.
  */
 export function registerAnalyticsDimensions(resolved: { eventId: string; eventSlug: string | null }): void {
-  const dims = {
+  registerBothSinks({
     brand_id: BRAND_ID,
     edition_id: activeEdition(),
     event_id: resolved.eventId,
     event_slug: resolved.eventSlug ?? resolved.eventId,
-  };
-  try {
-    setDefaultEventParameters(dims);
-  } catch {
-    /* no-op */
-  }
-  phRegister(dims);
+  });
 }
 
 /**
@@ -148,11 +169,5 @@ export function registerAnalyticsDimensions(resolved: { eventId: string; eventSl
  */
 export function registerDayIndexDimension(dayIndex: number | null): void {
   if (dayIndex == null) return;
-  const dims = { day_index: dayIndex };
-  try {
-    setDefaultEventParameters(dims);
-  } catch {
-    /* no-op */
-  }
-  phRegister(dims);
+  registerBothSinks({ day_index: dayIndex });
 }
