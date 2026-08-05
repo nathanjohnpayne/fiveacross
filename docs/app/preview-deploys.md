@@ -152,10 +152,12 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 4. **Turn off preview builds on this project.** Settings → Git → **Ignored Build Step**, command:
 
    ```bash
-   [ "$VERCEL_ENV" = "production" ] || exit 0
+   [ "$VERCEL_ENV" != "production" ]
    ```
 
    Without this, every push to every branch builds twice across the two projects, and the mirror mints per-deployment hosts that can never sign in.
+
+   **The exit codes are inverted from the intuitive reading**, and getting them backwards silently disables the mirror rather than the previews — the failure would only surface as "the backup host is serving last month's code", at the moment you need it. Vercel **skips** the build on exit `0` and **proceeds** on any non-zero exit. The command above therefore exits `0` (skip) on a preview and non-zero (build) on production, which is what you want. After saving, push something to `main` and confirm a production deployment actually runs.
 
 5. **Firebase Auth authorized domains on `fiveacross`.** Console: **Firebase console (fiveacross project) → Authentication → Settings → Authorized domains → Add domain** → `fiveacross.vercel.app`. Scriptable, with a deploy credential for `fiveacross` active — read, append, write back:
 

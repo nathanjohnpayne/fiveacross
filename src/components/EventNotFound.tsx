@@ -44,9 +44,16 @@ export default function EventNotFound({
   // screenshot round trip that filed this ticket. Suffix match, not the exact
   // matching the auth allowlist demands: this only chooses which sentence to
   // print, and choosing it for a lookalike host costs nothing.
+  //
+  // The alias is spelled out rather than left to the doc reference (Codex P3 on
+  // #585): this screen is most often met as a phone screenshot, and a URL you
+  // can read off the image is the difference between acting on it and asking
+  // about it. Duplicating the literal costs a stale string if the alias ever
+  // changes — cheap, and `src/auth-domain.ts` is where that change would have
+  // to start anyway.
   const previewHint =
     reason === 'auth-unconfigured' && hostname.endsWith('.vercel.app')
-      ? 'Developer note: per-deployment preview hosts can never sign in — Firebase and Google both match hostnames exactly, and neither accepts a wildcard. Push the branch to `preview` and use the stable alias instead (docs/app/preview-deploys.md).'
+      ? 'Developer note: per-deployment preview hosts can never sign in — Firebase and Google both match hostnames exactly, and neither accepts a wildcard. Push the branch with `git push --force origin HEAD:preview` and reopen it on the stable alias, gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app (docs/app/preview-deploys.md).'
       : null;
 
   return (

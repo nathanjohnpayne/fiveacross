@@ -15,7 +15,11 @@ describe('EventNotFound — auth-unconfigured on a preview host (#585)', () => {
       />,
     );
     const hint = screen.getByText(/Developer note/i);
-    expect(hint.textContent).toMatch(/preview/i);
+    // The alias itself, not just a pointer at the docs: this screen is usually
+    // read off a phone screenshot (Codex P3 on #585).
+    expect(hint.textContent).toContain(
+      'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app',
+    );
     expect(hint.textContent).toMatch(/docs\/app\/preview-deploys\.md/);
     // The player-facing copy is unchanged; the hint is additive.
     expect(screen.getByRole('heading').textContent).toBe('This address is not open yet');
