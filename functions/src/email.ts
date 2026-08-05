@@ -16,6 +16,18 @@ export interface EmailPayload {
   html: string;
   text?: string;
   /**
+   * `Reply-To`. The Resend Node SDK spells this `replyTo` (camelCase) on the
+   * SEND options — verified against the installed `resend@4.8.0` types, where
+   * `CreateEmailOptions.replyTo?: string | string[]`. Do not "correct" it to
+   * the `reply_to` that appears elsewhere in those same typings: that is the
+   * RESPONSE shape (the `Email` object the API returns), and sending it as a
+   * request field would be silently ignored rather than rejected.
+   *
+   * Omitted from the payload entirely when empty, so a deployment that
+   * configures no reply address sends exactly what it sent before.
+   */
+  replyTo?: string;
+  /**
    * Extra RFC 5322 headers. Added for the daily engagement email's
    * `List-Unsubscribe` / `List-Unsubscribe-Post` pair (#616), which is what
    * makes a mail client surface its own native unsubscribe control — a header,
@@ -42,6 +54,9 @@ export interface SendEmailArgs {
   headers?: Record<string, string>;
   /** Override the `EMAIL_FROM` param default (mainly for tests). */
   from?: string;
+  /** Override the `EMAIL_REPLY_TO` param default (mainly for tests). Resolved
+   *  exactly like `from`: an explicit value wins, otherwise the param. */
+  replyTo?: string;
   /** Override the Resend transport (mainly for tests). */
   sender?: EmailSender;
 }
@@ -58,11 +73,18 @@ export async function sendEmail(args: SendEmailArgs): Promise<boolean> {
   // its own outer catch (#101 Codex R3 F3).
   try {
     let from = args.from;
+    let replyTo = args.replyTo;
     let send = args.sender;
     if (!send || from === undefined) {
       // Only the real (non-injected) path — inside the Functions runtime.
-      const { RESEND_API_KEY, EMAIL_FROM } = await import('./params');
+      // `replyTo` resolves HERE, inside the same guard, rather than in its own:
+      // a fully-injected caller (both `from` and `sender`) must stay free of
+      // `firebase-functions`, which is the whole reason this block is
+      // conditional. Widening the condition to `replyTo === undefined` would
+      // drag the params module into every unit test that injects a transport.
+      const { RESEND_API_KEY, EMAIL_FROM, EMAIL_REPLY_TO } = await import('./params');
       if (from === undefined) from = EMAIL_FROM.value();
+      if (replyTo === undefined) replyTo = EMAIL_REPLY_TO.value();
       if (!send) {
         const apiKey = RESEND_API_KEY.value(); // throws here if the secret is unresolved
         const { Resend } = await import('resend');
@@ -77,7 +99,11 @@ export async function sendEmail(args: SendEmailArgs): Promise<boolean> {
       html: args.html,
       text: args.text,
       // Spread rather than assigned: an `headers: undefined` key would reach
-      // Resend's JSON body as an explicit null on some serializers.
+      // Resend's JSON body as an explicit null on some serializers. An EMPTY
+      // `replyTo` is dropped by the same rule — the param's default is `''`,
+      // and `Reply-To: ` with no address is a malformed header, not an absent
+      // one.
+      ...(replyTo ? { replyTo } : {}),
       ...(args.headers ? { headers: args.headers } : {}),
     };
     const { error } = await send(payload, { idempotencyKey: args.idempotencyKey });

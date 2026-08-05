@@ -11,6 +11,19 @@ export const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
 export const EMAIL_FROM = defineString('EMAIL_FROM', {
   default: 'Gay Cruise Bingo <gaycruisebingo@nathanpayne.com>',
 });
+/**
+ * Address replies land in, applied to every transactional send.
+ *
+ * DEFAULTS TO EMPTY, meaning no `Reply-To` header at all — the pre-existing
+ * behaviour, so a project that sets nothing is byte-identical to before. It is
+ * a separate param from `EMAIL_FROM` because the two answer different
+ * questions: `EMAIL_FROM` must be an address on a Resend-VERIFIED sending
+ * domain, while replies want a mailbox a human actually reads. On the Five
+ * Across deployment those are deliberately different hosts — mail is sent from
+ * the Resend-verified subdomain and replies go to the Google-hosted apex,
+ * because the Resend receiving side is switched off.
+ */
+export const EMAIL_REPLY_TO = defineString('EMAIL_REPLY_TO', { default: '' });
 /** Optional shared-inbox override, comma-separated. Empty = roster only. */
 export const ADMIN_NOTIFY_EMAIL = defineString('ADMIN_NOTIFY_EMAIL', { default: '' });
 /** Base URL for the Admin-console deep link in notification bodies. */
