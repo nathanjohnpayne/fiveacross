@@ -238,6 +238,34 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
 }
 
 /**
+ * The dimension keys #556 registers (`src/analytics.ts`'s
+ * `registerAnalyticsDimensions` / `registerDayIndexDimension`) —
+ * system-controlled: nothing legitimate ever sets these explicitly on an
+ * event's own properties, so they always come from the CURRENT
+ * `registeredDims`, never inherited from whatever the event itself carried
+ * in (#611, retro Phase 4b P1 on PR #584). This INVERTS the general "event
+ * wins" posture an ordinary per-call property would otherwise get: PostHog
+ * PERSISTS `register()`'d super-properties to localStorage ACROSS SESSIONS
+ * (and tabs), so the SDK's own automatic first capture inside
+ * `posthog.init()` can embed the PRIOR session's
+ * `event_id`/`edition_id`/`event_slug`/`day_index` directly into its
+ * `properties` bag before `before_send` ever runs — exactly the shape
+ * "event wins" was meant to defer to (a more-specific per-call value), and
+ * exactly the shape that must NOT win here (a stale, cross-session leftover
+ * masquerading as one). A key ABSENT from `registeredDims` (most commonly
+ * `day_index` before the Event doc has loaded) is DELETED from the outgoing
+ * event rather than left as whatever was inherited — an unknown dimension
+ * must report as unknown, never as a stale guess.
+ */
+const CONTROLLED_DIMENSION_KEYS: readonly string[] = [
+  'brand_id',
+  'edition_id',
+  'event_id',
+  'event_slug',
+  'day_index',
+];
+
+/**
  * `before_send` hook: reduce URL-bearing fields to path-only so query-string /
  * hash credentials (e.g. Firebase auth-handler OAuth params) are never stored,
  * even though replay content is otherwise unmasked. Covers the event `properties`
@@ -246,22 +274,37 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
  * otherwise persist the full entry URL (Codex P1 on #195) — AND the rrweb Meta
  * (type 4) / Custom-event (type 5) hrefs inside `$snapshot` replay data (#197).
  *
- * ALSO merges in `registeredDims` — the brand/edition/Event/Slug/Day
- * dimensions (#556) — into every outgoing event's `properties` (Phase 4b P1
- * on PR #584). This is the mechanism that actually GUARANTEES every event
- * carries them, independent of exactly when `posthog.register()` applied
- * relative to `posthog.init()`'s own synchronous work: `before_send` is the
- * single point every captured event — autocaptured or explicit, the very
- * first `\$pageview` included — passes through right before it leaves the
- * SDK, so reading the already-populated module state here removes any
- * dependency on internal SDK ordering `phRegister`'s queue-and-replay alone
- * could not close. Existing event properties win on key collision (a
- * call-specific value is more specific than a session-wide default).
+ * ALSO applies `registeredDims` — the brand/edition/Event/Slug/Day dimensions
+ * (#556) — to every outgoing event's `properties` (Phase 4b P1 on PR #584).
+ * This is the mechanism that actually GUARANTEES every event carries them,
+ * independent of exactly when `posthog.register()` applied relative to
+ * `posthog.init()`'s own synchronous work: `before_send` is the single point
+ * every captured event — autocaptured or explicit, the very first
+ * `\$pageview` included — passes through right before it leaves the SDK, so
+ * reading the already-populated module state here removes any dependency on
+ * internal SDK ordering `phRegister`'s queue-and-replay alone could not
+ * close. The five `CONTROLLED_DIMENSION_KEYS` always win from
+ * `registeredDims` (see that constant's own doc for why — #611); any OTHER
+ * registered default (none exist today) keeps the general "event wins" merge.
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
-  if (Object.keys(registeredDims).length > 0) {
-    event.properties = { ...registeredDims, ...event.properties };
+  const incoming = event.properties;
+  const hasStaleControlledKey = incoming != null && CONTROLLED_DIMENSION_KEYS.some((k) => k in incoming);
+  if (Object.keys(registeredDims).length > 0 || hasStaleControlledKey) {
+    const properties: Record<string, unknown> = { ...incoming };
+    // Non-controlled dimensions (none exist today, kept for forward
+    // compatibility) defer to whatever the event itself already set.
+    for (const [key, value] of Object.entries(registeredDims)) {
+      if (!CONTROLLED_DIMENSION_KEYS.includes(key) && !(key in properties)) properties[key] = value;
+    }
+    // The controlled keys always come from CURRENT registeredDims (#611) —
+    // present here, override; absent here, delete rather than inherit.
+    for (const key of CONTROLLED_DIMENSION_KEYS) {
+      if (key in registeredDims) properties[key] = registeredDims[key];
+      else delete properties[key];
+    }
+    event.properties = properties;
   }
   scrubUrlBag(event.properties);
   scrubUrlBag(event.$set);
@@ -311,6 +354,27 @@ export async function initPostHog(): Promise<void> {
   } catch {
     ready = false;
     return;
+  }
+  // Apply a reset requested WHILE init was still probing (#611, retro Phase
+  // 4b P1 on PR #584), BEFORE anything else below — `posthog.init()` loads
+  // whatever identity/distinct_id PostHog had PERSISTED from a prior
+  // session, so a signed-out visitor whose `phReset()` landed in this window
+  // (the exact case `pendingIdentifyUid` already guards on the identify
+  // side) would otherwise have every capture in this session — including the
+  // automatic first `$pageview` — attribute to that stale persisted user
+  // until some LATER event happened to call `phReset()` again. Must run
+  // before the `pendingRegister` replay too: `posthog.reset()` clears
+  // persisted `register()` state along with the identity, so resetting
+  // first and re-registering after (mirroring `phReset`'s own ready-branch
+  // order) is what makes THIS session's dimensions win instead of getting
+  // wiped by a reset that runs after they were already applied.
+  if (pendingReset) {
+    pendingReset = false;
+    try {
+      posthog.reset();
+    } catch {
+      /* no-op */
+    }
   }
   // Replay dimensions registered while init was still probing (#556), BEFORE
   // the identify below — `posthog.identify()` itself emits an `$identify` /
@@ -473,10 +537,24 @@ function clearPersistedCaptures(): boolean {
 // the probe window never resurrects the identity afterwards.
 let pendingIdentifyUid: string | null = null;
 
+// A reset requested WHILE the SDK was still not ready (#611, retro Phase 4b
+// P1 on PR #584) — applied by `initPostHog` immediately after `posthog.init()`
+// succeeds, BEFORE any capture is replayed. Without this, a signed-out
+// visitor whose `phReset()` call landed in the init-probe window used to
+// just no-op: `posthog.init()` still loads whatever identity PostHog
+// PERSISTED from a PRIOR session, so every capture in the new, signed-out
+// session — including the automatic first `$pageview` — kept attributing to
+// that stale user until something else happened to call `phReset()` again.
+let pendingReset = false;
+
 /** Tie subsequent events to the signed-in User by uid (no PII properties). */
 export function phIdentify(uid: string): void {
   if (!ready) {
     pendingIdentifyUid = uid;
+    // A later identify supersedes an earlier queued reset (#611) — the
+    // Player signed back in before init ever settled, so there is no longer
+    // a stale-persisted-identity window for `initPostHog` to guard against.
+    pendingReset = false;
     return;
   }
   try {
@@ -529,7 +607,13 @@ export function phRegister(props: Record<string, unknown>): void {
 /** Clear the identity association on sign-out. */
 export function phReset(): void {
   pendingIdentifyUid = null;
-  if (!ready) return;
+  if (!ready) {
+    // Queue it (#611, retro Phase 4b P1 on PR #584) — see `pendingReset`'s
+    // own doc above for why silently returning here used to leak a stale
+    // persisted identity into the whole rest of the signed-out session.
+    pendingReset = true;
+    return;
+  }
   try {
     posthog.reset();
     // Reapply the dimensions `reset()` just cleared (#556, Codex P2) — see

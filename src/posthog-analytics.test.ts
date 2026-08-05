@@ -273,17 +273,71 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
     });
   });
 
-  it('does not clobber an explicit event property that collides with a dimension key', async () => {
+  it('OVERRIDES a controlled dimension key even when the event itself already set it (#611 — inverts the round-2 "event wins" posture)', async () => {
+    // The controlled dimension keys (brand_id/edition_id/event_id/
+    // event_slug/day_index) are system-controlled — nothing legitimate sets
+    // them explicitly, and PostHog persists register()'d super-properties
+    // across SESSIONS, so a value already sitting on `properties` is more
+    // likely a stale cross-session leftover than a genuine per-call
+    // override. The current registeredDims value always wins for these
+    // five keys specifically (see CONTROLLED_DIMENSION_KEYS's own doc).
     vi.resetModules();
     const mod = await import('./posthog');
     mod.phRegister({ day_index: 1 });
     const out = mod.sanitizeUrls({
       uuid: 'p',
       event: 'custom',
-      properties: { day_index: 9 }, // the event's OWN value is more specific — it wins
+      properties: { day_index: 9 },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
-    expect(out?.properties.day_index).toBe(9);
+    expect(out?.properties.day_index).toBe(1);
+  });
+
+  it('still lets an event property win for a NON-controlled default (general merge posture preserved)', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    mod.phRegister({ some_future_default: 'registered' });
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: 'custom',
+      properties: { some_future_default: 'from-the-event' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.some_future_default).toBe('from-the-event');
+  });
+
+  it('DELETES a stale controlled dimension inherited from a PRIOR session\'s persisted super-property (#611 regression)', () => {
+    // The exact bug: PostHog persists register()'d super-properties to
+    // localStorage across sessions/tabs, so the SDK's own automatic capture
+    // can embed the PREVIOUS session's event_id/edition_id into
+    // event.properties BEFORE before_send ever runs — even before THIS
+    // session's phRegister has been called at all (registeredDims is
+    // genuinely empty here, unlike the tests above).
+    const out = sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { event_id: 'stale-prior-session-event', edition_id: 'gcb', $browser: 'Chrome' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.event_id).toBeUndefined();
+    expect(out?.properties.edition_id).toBeUndefined();
+    expect(out?.properties.$browser).toBe('Chrome'); // non-controlled properties untouched
+  });
+
+  it('deletes day_index specifically when it is unavailable this session but was set in a prior one', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    // brand/edition/event registered (pre-auth), but the Event doc — and so
+    // day_index — has not loaded yet THIS session.
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'med-2026' });
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { day_index: 7 }, // leftover from a prior session/tab
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.day_index).toBeUndefined();
+    expect(out?.properties).toMatchObject({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'med-2026' });
   });
 
   it('is a no-op when nothing has been registered yet', async () => {
@@ -616,6 +670,79 @@ describe('PostHog init with a key', () => {
     // must not leak the stubbed fetch into later tests and cascade.
     vi.unstubAllGlobals();
     expect(ph.identify).not.toHaveBeenCalled();
+  });
+
+  it('a reset requested while SIGNED OUT during the probe window is applied on the real SDK once init settles (#611, retro Phase 4b P1)', async () => {
+    // The bug: previously phReset() while `!ready` just cleared
+    // pendingIdentifyUid and returned — nothing told initPostHog to actually
+    // call posthog.reset() once the SDK came up, so `posthog.init()` loaded
+    // whatever identity PostHog had PERSISTED from a PRIOR session and every
+    // capture in this signed-out session kept attributing to it.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ type: 'opaque' } as Response));
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog();
+    mod.phReset(); // the signed-out ThemedApp effect fires before the probe settles
+    expect(ph.reset).not.toHaveBeenCalled(); // not ready yet — queued, not lost
+    await initSettled;
+    vi.unstubAllGlobals();
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('the queued reset is applied BEFORE any queued capture, so nothing attributes to a stale persisted identity (#611)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phReset();
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const captureOrder = (ph.capture as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(captureOrder);
+  });
+
+  it('the queued reset is applied BEFORE the queued dimension registration, so this session\'s dims are not wiped by it (#611)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phReset();
+    mod.phRegister({ brand_id: 'five-across' });
+    await mod.initPostHog();
+
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across' });
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(registerOrder);
+  });
+
+  it('a later identify supersedes an earlier queued reset (#611) — same "last call wins" posture the reset side already had', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phReset(); // momentarily signed out
+    mod.phIdentify('sailor-9'); // signs back in before init ever settled
+    await mod.initPostHog();
+
+    expect(ph.reset).not.toHaveBeenCalled();
+    expect(ph.identify).toHaveBeenCalledWith('sailor-9');
   });
 
   it('forwards super-properties directly once ready (#556)', async () => {
