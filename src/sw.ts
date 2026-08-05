@@ -138,8 +138,28 @@ registerRoute(
 // #178: the friendly path. `registerType: 'prompt'` means this worker waits,
 // and `UpdatePrompt`'s Reload button is what releases it. Unchanged, and still
 // the DEFAULT — the rescue below only ever fires on an armed floor.
+//
+// #605 adds the second message: a WAITING worker answers with its own build
+// stamp so the page can tell one waiting build from another. Nothing else can
+// tell them apart — every worker is served from `/sw.js`, so `scriptURL` is
+// identical and the stamp only exists inside the script — and without that
+// identity "Not now" could only be a session-long or a permanent dismissal,
+// never a per-build one. The reply goes back on the caller's `MessagePort`
+// (`event.ports[0]`), so it reaches the asking page and no other client.
+//
+// The two message names are spelled out here rather than imported from
+// `src/updateDismissal.ts` (which holds the page half of this contract) because
+// the worker is a SEPARATE typecheck program — `tsconfig.sw.json`, `WebWorker`
+// lib, no `localStorage` — so importing that module would drag DOM-only globals
+// into a program that cannot type them. `sw-worker.test.ts` pins both names.
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
-  if ((event.data as { type?: unknown } | null)?.type === 'SKIP_WAITING') void self.skipWaiting();
+  const type = (event.data as { type?: unknown } | null)?.type;
+  if (type === 'SKIP_WAITING') void self.skipWaiting();
+  else if (type === 'GET_BUILD_STAMP') {
+    // Best-effort: a caller that sent no port gets no answer, which the page
+    // reads as "unidentifiable" and treats as fail-open (src/updateDismissal.ts).
+    event.ports?.[0]?.postMessage({ type: 'BUILD_STAMP', stamp: __BUILD_STAMP__ });
+  }
 });
 
 // --- The rescue (#514) ------------------------------------------------------

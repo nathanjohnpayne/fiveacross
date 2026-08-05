@@ -149,6 +149,31 @@ describe('the friendly path (#178) still works', () => {
     expect(w.self.skipWaiting).toHaveBeenCalledOnce();
   });
 
+  it('answers GET_BUILD_STAMP on the caller`s port, so the page can name the waiting build (#605)', async () => {
+    // The page cannot otherwise tell one waiting build from another — every
+    // worker is served from `/sw.js` — and without an identity "Not now" could
+    // only be a session dismissal, which is the #605 defect. Dispatched
+    // directly at the handler: that proves the REPLY, not that a browser
+    // delivers this message to a worker in the `waiting` state (#513's lesson
+    // about what a handler-level test can and cannot establish). Only a real
+    // browser proves delivery.
+    const w = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    const port = { postMessage: vi.fn() };
+    w.handlers.message?.({ data: { type: 'GET_BUILD_STAMP' }, ports: [port] } as unknown);
+    expect(port.postMessage).toHaveBeenCalledWith({ type: 'BUILD_STAMP', stamp: __BUILD_STAMP__ });
+    // A stamp query must never promote the worker — that is Reload's job alone.
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a GET_BUILD_STAMP that arrives with no port to answer on', async () => {
+    const w = installFakeWorker();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    expect(() => fire(w.handlers, 'message', { type: 'GET_BUILD_STAMP' })).not.toThrow();
+  });
+
   it('ignores unrelated messages', async () => {
     const w = installFakeWorker();
     stubFloor(INERT_FLOOR);
