@@ -134,7 +134,7 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 | 1. Vercel project | **Done** | **Done** |
 | 2. Minted host confirmed exact | **Done** | **Done** |
 | 3. Production env vars | **Done** — nine `VITE_*`, Production scope | **Done** — same nine, own `authDomain`, `VITE_EDITION=vacay` |
-| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | **Done** — production branch `main` |
+| 4. Git connected (no Ignored Build Step — see below) | **Done** — production branch `main` | **Done** — production branch `main` |
 | 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
 | 6. Google OAuth redirect URI | **Outstanding — console-only** | **Outstanding — console-only** |
 
@@ -176,15 +176,17 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and never consults the `hostnames/{host}` lookup, which is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build** — a mismatch ships the backup host under different branding and chrome than the host it is backing up.
 
-4. **Connect Git and turn off preview builds.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. Then Settings → Git → **Ignored Build Step**, command:
+4. **Connect Git. Do not set an Ignored Build Step.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. Stop there.
+
+   An Ignored Build Step is the obvious optimisation — the mirror projects rebuild on every push to every branch, which is noise and build minutes — and both mirrors ran with `[ "$VERCEL_ENV" != "production" ]` briefly. It is **not worth it**, for an asymmetry that is easy to talk yourself out of: the upside is saved build minutes on preview branches whose hosts cannot sign in anyway, and the downside is a backup host that silently stops updating. You find out about the downside at the exact moment the backup is load-bearing.
+
+   The concrete scare: on 2026-08-05 every Git-triggered deployment on both mirror projects came back `CANCELED`, production ones included, while the hosts kept happily serving an older manually-pushed build. That is indistinguishable at a glance from a healthy mirror. The likeliest culprit is Vercel's own auto-cancelation of concurrent/queued builds rather than the ignore step (an API-triggered production build succeeded *with* the step still in place), but "likeliest" is not a standard worth applying to the fallback host two days before an event. Both projects now have no ignore step, and duplicate preview builds are accepted as the cost of a mirror that always tracks `main`.
+
+   **Whatever you do here, never assume a merge reached the mirrors.** Vercel can cancel a queued deployment when several commits land close together, which is normal on a busy day and leaves no visible mark on the running site. After any merge that matters, check that the latest **production** deployment is `READY` on the sha you expect:
 
    ```bash
-   [ "$VERCEL_ENV" != "production" ]
+   vercel ls fiveacross    # and: vercel ls vacaybingo
    ```
-
-   Without this, every push to every branch builds twice across the two projects, and the mirror mints per-deployment hosts that can never sign in.
-
-   **The exit codes are inverted from the intuitive reading**, and getting them backwards silently disables the mirror rather than the previews — the failure would only surface as "the backup host is serving last month's code", at the moment you need it. Vercel **skips** the build on exit `0` and **proceeds** on any non-zero exit. The command above therefore exits `0` (skip) on a preview and non-zero (build) on production, which is what you want. After saving, push something to `main` and confirm a production deployment actually runs.
 
 5. **Firebase Auth authorized domains on `fiveacross`.** Console: **Firebase console (fiveacross project) → Authentication → Settings → Authorized domains → Add domain** → `fiveacross.vercel.app`. Scriptable, with a deploy credential for `fiveacross` active — read, append, write back:
 
