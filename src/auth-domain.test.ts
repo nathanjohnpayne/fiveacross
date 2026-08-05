@@ -91,6 +91,18 @@ describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
     expect(isSignInReachableOnHost(CONFIGURED, 'gaycruisebingo.web.app')).toBe(true);
   });
 
+  it.each(['localhost', '127.0.0.1', '::1', '[::1]', 'dev.local'])(
+    'mounts local/emulator origin %s regardless of the copied authDomain',
+    (hostname) => {
+      // The Playwright webServer serves 127.0.0.1 with the demo project's
+      // firebaseapp.com authDomain; plain dev copies .env.local. Neither is a
+      // production-origin misconfiguration, so the gate stays out of the way
+      // and the emulator popup sign-in path stays reachable.
+      expect(isSignInReachableOnHost('demo-gaycruisebingo.firebaseapp.com', hostname)).toBe(true);
+      expect(isSignInReachableOnHost(CONFIGURED, hostname)).toBe(true);
+    },
+  );
+
   it('still blocks an unconfigured wildcard host', () => {
     expect(isSignInReachableOnHost(CONFIGURED, 'bodega-bay.vacaybingo.com')).toBe(false);
     expect(isSignInReachableOnHost(CONFIGURED, 'anything-else.example.com')).toBe(false);

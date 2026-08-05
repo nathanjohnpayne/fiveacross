@@ -1,4 +1,5 @@
 import { firebaseAuthOriginRedirectUrl } from './canonical-redirect';
+import { isLocalDevHost } from './local-host';
 
 // Exact hostnames only — never a prefix or suffix match. Every entry here must
 // ALSO be registered in Firebase Auth's authorized domains and as
@@ -72,9 +73,18 @@ export function isAuthConfiguredForHost(configuredAuthDomain: string, hostname: 
  *    the app must mount so the handoff can run. `firebaseAuthOriginRedirectUrl`
  *    is the single source of truth for which hosts have that handoff, so this
  *    asks it rather than keeping a second list.
+ *
+ *  - Local and emulator origins (`localhost`, `127.0.0.1`, `::1`, `*.local`)
+ *    are outside this gate's threat model entirely. The Playwright webServer
+ *    serves `127.0.0.1` with the demo project's `firebaseapp.com` authDomain,
+ *    and ordinary `npm run dev` copies whatever `.env.local` holds — both sign
+ *    in fine (Auth Emulator popup / dev popup) and neither is a
+ *    production-origin misconfiguration, which is the only thing this gate
+ *    exists to report (Codex P2 round 5 on #576).
  */
 export function isSignInReachableOnHost(configuredAuthDomain: string, hostname: string): boolean {
   if (isAuthConfiguredForHost(configuredAuthDomain, hostname)) return true;
+  if (isLocalDevHost(hostname)) return true;
   // Only the hostname decides the handoff; path/search/hash merely shape the
   // target URL, which is discarded here.
   return firebaseAuthOriginRedirectUrl({ hostname, pathname: '/', search: '', hash: '' }) !== null;
