@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 // wordmark and the tab end up disagreeing. src/editions.ts is kept free of
 // module-scope `import.meta.env` / `document` so it can be loaded in this Node
 // context — see the note at the top of that file before adding anything to it.
-import { DEFAULT_EDITION, brandHtmlIdentity, editionBrand, type EditionBrand } from './src/editions';
+import { brandHtmlIdentity, buildTimeEdition, editionBrand, type EditionBrand } from './src/editions';
 
 function appVersion(): string {
   if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA.slice(0, 40);
@@ -50,11 +50,13 @@ export default defineConfig(({ command, mode }) => {
   // than `process.env`: VITE_EDITION normally lives in the gitignored
   // .env.local, which nothing has read into the process at this point.
   const env = loadEnv(mode, process.cwd(), 'VITE_');
-  // Always an EXPLICIT id, never the default argument: `editionBrand()` with no
-  // argument resolves through `activeEdition()`, which reads `import.meta.env`
-  // and does not exist here. An empty or unknown value falls back to the legacy
-  // Edition, matching what the app does with an unrecognised one.
-  const brand = editionBrand(env.VITE_EDITION || DEFAULT_EDITION);
+  // `buildTimeEdition` decides whether this build may bake an Edition at all —
+  // a hostname-resolved bundle defers to the lookup and takes the default, so a
+  // stale VITE_EDITION cannot brand a bundle every Event shares. Always an
+  // EXPLICIT id, never `editionBrand()`'s default argument: that resolves
+  // through `activeEdition()`, which reads `import.meta.env` and does not exist
+  // here.
+  const brand = editionBrand(buildTimeEdition(env.VITE_EVENT_ID, env.VITE_EDITION));
 
   // Guard: never let a production build ship with a blank Firebase web config.
   // Vite statically inlines import.meta.env.* at build time (see src/firebase.ts),
