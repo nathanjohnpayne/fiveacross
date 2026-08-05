@@ -229,6 +229,27 @@ export function setActiveEdition(edition: string | null | undefined): void {
 }
 
 /**
+ * The Theme an Edition wears when nothing more specific has resolved.
+ *
+ * Last resort in the chain player pick → Event `defaultTheme` → **here**. It
+ * matters most where the chain is shortest: the signed-out shell reads no Event
+ * doc at all (`useEventDoc(false)`), so before #555 a Vacay build opened in Neon
+ * Playground — Gay Cruise Bingo's skin on the one pre-auth surface ADR 0009 says
+ * must be Edition-correct — and only changed after sign-in (Codex on #577). It
+ * also covers an Event doc that simply has no `defaultTheme`.
+ *
+ * Bodega's is its Day 1 Theme, so the gate matches the first card.
+ */
+const EDITION_DEFAULT_THEME: Record<string, ThemeId> = {
+  gcb: 'neon-playground',
+  vacay: 'the-birds',
+};
+
+export function defaultThemeForEdition(edition: string = currentEdition): ThemeId {
+  return EDITION_DEFAULT_THEME[edition] ?? EDITION_DEFAULT_THEME[DEFAULT_EDITION]!;
+}
+
+/**
  * The Themes a player or Admin may PICK on this Edition.
  *
  * Deliberately NOT a filter over the exported `THEMES`, which stays the

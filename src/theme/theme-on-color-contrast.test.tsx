@@ -293,18 +293,46 @@ describe('.board-area[data-theme] paints its own flat themed surface (specs/them
     });
   }
 
-  it('documents the pre-fix regression: summer-white --ink floated over every dark page theme fails 4.5:1', () => {
-    // The #296 gap in one assertion: with no painted surface, the one light
-    // theme's near-black --ink rendered directly over whichever theme the
-    // PAGE was wearing. Against every other (dark-bg) theme that pairing is
-    // catastrophically under the floor — which no per-theme check could see.
+  // A Theme is LIGHT when its --bg is lighter than its --ink. Derived rather
+  // than listed: `summer-white` used to be the only one, and #555's
+  // `fog-froth-farewells` made that assumption false — a hardcoded list would
+  // have gone stale again on the next light Theme instead of failing loudly.
+  // `contrastRatio(x, black)` is monotonic in relative luminance, so it works
+  // as a lightness proxy without importing a second helper.
+  const lightness = (hex: string) => contrastRatio(hexToRgb(hex), hexToRgb('#000000'));
+  const isLight = (id: string) =>
+    lightness(themeBlocks[id]!.bg) > lightness(themeBlocks[id]!.ink);
+
+  it('documents the pre-fix regression: summer-white --ink floated over a DARK page theme fails 4.5:1', () => {
+    // The #296 gap in one assertion: with no painted surface, a light theme's
+    // near-black --ink rendered directly over whichever theme the PAGE was
+    // wearing. Against a dark-bg theme that pairing is catastrophically under
+    // the floor — which no per-theme check could see.
     const ink = hexToRgb(themeBlocks['summer-white']!.ink);
-    for (const t of THEMES) {
-      if (t.id === 'summer-white') continue;
+    const darkThemes = THEMES.filter((t) => t.id !== 'summer-white' && !isLight(t.id));
+    expect(darkThemes.length).toBeGreaterThan(0);
+    for (const t of darkThemes) {
       const pageBg = hexToRgb(themeBlocks[t.id]!.bg);
       expect(
         contrastRatio(ink, pageBg),
         `summer-white --ink over ${t.id} --bg should document the pre-fix failure`,
+      ).toBeLessThan(TEXT_MIN);
+    }
+  });
+
+  it('the same regression runs the other way: a DARK theme\'s --ink over a light page', () => {
+    // The mirror case, which only became reachable once a second light Theme
+    // existed. It is the same structural bug — the fix is the painted surface,
+    // not the palette — so it belongs beside the original rather than as a
+    // footnote to it.
+    const lightThemes = THEMES.filter((t) => isLight(t.id));
+    expect(lightThemes.length).toBeGreaterThanOrEqual(2);
+    for (const light of lightThemes) {
+      const pageBg = hexToRgb(themeBlocks[light.id]!.bg);
+      const dark = THEMES.find((t) => !isLight(t.id))!;
+      expect(
+        contrastRatio(hexToRgb(themeBlocks[dark.id]!.ink), pageBg),
+        `${dark.id} --ink over ${light.id} --bg should document the same pre-fix failure`,
       ).toBeLessThan(TEXT_MIN);
     }
   });

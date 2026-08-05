@@ -300,18 +300,37 @@
   --on-gradient: #000;
 }
 
-/* Fog, Froth & Farewells -- soft final-morning warmth.
-   Fog silver, chowder cream, coffee brown, dusk coral. */
+/* Fog, Froth & Farewells -- the last slow morning.
+   Fog silver, chowder cream, coffee brown, dusk coral.
+
+   THE ONE LIGHT THEME, and deliberately so: plans/daily-cards-wireframes.html
+   builds the Bodega finale on a postcard-cream ground and says outright that
+   the frame exists to prove the token contract handles a light mode. Shipping
+   this one dark would have made the wireframe wrong about the thing it was
+   drawn to demonstrate (Codex on #577).
+
+   The palette is the wireframe's, DARKENED where WCAG AA required it and
+   nowhere else. Three of the eight audited pairs failed at the sketch values --
+   --dim (3.11 on --bg), --primary (3.53 on --panel) and --accent (2.75 on
+   --cell) -- because a mid-tone hue that reads fine against a dark ground has
+   nowhere to go against a light one. Each kept its hue and lost only luminance:
+   fog silver #8a857b -> #66625a, coffee brown #b0764f -> #8a5533, dusk coral
+   #d1826e -> #a8462f. w1-themes.test.tsx parses this file and audits every
+   Theme, so those numbers are checked rather than asserted.
+
+   --on-gradient flips to the cream rather than black: it is the fill ON the
+   marked-cell gradient, which runs between --primary and --secondary, and on a
+   light Theme both of those are the dark end. */
 [data-theme='fog-froth-farewells'] {
-  --bg: #1b1512;
-  --panel: #27201a;
-  --ink: #f6efe2;
-  --dim: #c4b7a9;
-  --primary: #f2a48c;
-  --secondary: #d9c9b4;
-  --accent: #ffd9a8;
-  --cell: #27201a;
-  --border: rgba(242, 164, 140, 0.35);
-  --shadow: rgba(242, 164, 140, 0.4);
-  --on-gradient: #000;
+  --bg: #efece4;
+  --panel: #faf7ef;
+  --ink: #33302b;
+  --dim: #66625a;
+  --primary: #8a5533;
+  --secondary: #4f6b63;
+  --accent: #a8462f;
+  --cell: #faf7ef;
+  --border: rgba(138, 85, 51, 0.3);
+  --shadow: rgba(51, 48, 43, 0.18);
+  --on-gradient: #faf7ef;
 }

@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { ThemeProvider } from './theme/ThemeContext';
 import { todaysDayTheme } from './theme/autoTheme';
+import { defaultThemeForEdition } from './theme/themes';
 import { useEventDoc, useMyPlayer } from './hooks/useData';
 import { initPostHog, phIdentify, phReset, isLocalDevHost } from './posthog';
 import { isSyntheticProbe } from './synthetic-probe';
@@ -51,7 +52,12 @@ function ThemedApp() {
   const { user, loading } = useAuth();
   const { data: event } = useEventDoc(!!user);
   const { data: player } = useMyPlayer(user?.uid);
-  const defaultTheme: ThemeId = event?.defaultTheme ?? 'neon-playground';
+  // Edition default, not a hardcoded cruise Theme (#555). This line runs on the
+  // signed-out shell too, where `useEventDoc(false)` means there is no Event doc
+  // at all — so a Vacay build opened in Neon Playground and only changed skin
+  // after sign-in, on the one pre-auth surface ADR 0009 says must be
+  // Edition-correct (Codex on #577). `gcb` still resolves to neon-playground.
+  const defaultTheme: ThemeId = event?.defaultTheme ?? defaultThemeForEdition();
   // `now` stands in for `Date.now()` in `todaysDayTheme` below, bumped by the
   // timer right after it — same pattern Board.tsx uses for its own unlock
   // rollover (Codex P2, PR #230). Without it, a Player who leaves the app

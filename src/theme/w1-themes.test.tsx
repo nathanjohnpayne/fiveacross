@@ -8,6 +8,7 @@ import {
   THEMES,
   themesForEdition,
   themesForEditionIncluding,
+  defaultThemeForEdition,
   activeEdition,
   setActiveEdition,
   DEFAULT_EDITION,
@@ -531,5 +532,40 @@ describe('themesForEditionIncluding — never misreports what is already set', (
       'side-quests',
       'fog-froth-farewells',
     ]);
+  });
+});
+
+// The last resort in the chain player pick -> Event `defaultTheme` -> Edition
+// default. It matters most where the chain is shortest: the signed-out shell
+// reads no Event doc at all, so this line alone decides what a Vacay build wears
+// before sign-in (Codex on #577).
+describe('defaultThemeForEdition — the pre-auth fallback', () => {
+  it('keeps neon-playground for the legacy Edition', () => {
+    expect(defaultThemeForEdition('gcb')).toBe('neon-playground');
+  });
+
+  it('gives Vacay its own Day 1 Theme, not the cruise default', () => {
+    expect(defaultThemeForEdition('vacay')).toBe('the-birds');
+  });
+
+  it('falls back to the legacy default for an unknown Edition', () => {
+    expect(defaultThemeForEdition('not-an-edition')).toBe('neon-playground');
+  });
+
+  it('follows the ACTIVE Edition with no argument', () => {
+    try {
+      setActiveEdition('vacay');
+      expect(defaultThemeForEdition()).toBe('the-birds');
+    } finally {
+      setActiveEdition(DEFAULT_EDITION);
+    }
+  });
+
+  it('every Edition default is PICKABLE on its own Edition', () => {
+    // Otherwise the switcher would open with no chip active on a fresh device.
+    for (const edition of ['gcb', 'vacay']) {
+      const id = defaultThemeForEdition(edition);
+      expect(themesForEdition(edition).map((t) => t.id)).toContain(id);
+    }
   });
 });

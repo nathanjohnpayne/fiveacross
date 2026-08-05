@@ -90,9 +90,12 @@
   [data-theme='side-quests']{--bg:#0a141c;--panel:#102030;--ink:#eef5f5;--dim:#9db4bd;
     --primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;--cell:#102030;
     --border:rgba(46,127,168,.4);--on-gradient:#f5fbfb}
-  [data-theme='fog-froth-farewells']{--bg:#efece4;--panel:#faf7ef;--ink:#33302b;--dim:#8a857b;
-    --primary:#b0764f;--secondary:#a8b8b2;--accent:#d1826e;--cell:#faf7ef;
-    --border:rgba(51,48,43,.16);--on-gradient:#faf7ef}
+  /* Kept in sync with src/theme/themes.css. The sketch values for --dim, --primary
+     and --accent failed WCAG AA against this light ground (3.11 / 3.53 / 2.75), so
+     the shipped tokens keep each hue and drop only luminance. */
+  [data-theme='fog-froth-farewells']{--bg:#efece4;--panel:#faf7ef;--ink:#33302b;--dim:#66625a;
+    --primary:#8a5533;--secondary:#4f6b63;--accent:#a8462f;--cell:#faf7ef;
+    --border:rgba(138,85,51,.3);--on-gradient:#faf7ef}
 
   /* Vacay brand chrome: the "VACAY BINGO by Five Across" lockup (one-identity rule) */
   .vlock{text-align:center;line-height:1.15;padding:6px 0 2px}

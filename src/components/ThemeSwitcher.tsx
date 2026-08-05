@@ -1,5 +1,5 @@
 import { useTheme } from '../theme/ThemeContext';
-import { themesForEdition } from '../theme/themes';
+import { themesForEditionIncluding } from '../theme/themes';
 import { useAuth } from '../auth/AuthContext';
 import { savePlayerTheme, clearPlayerTheme } from '../data/api';
 import { track } from '../analytics';
@@ -35,7 +35,16 @@ export default function ThemeSwitcher() {
       >
         🧭 Auto — match the day
       </button>
-      {themesForEdition().map((t) => (
+      {/* `…Including(preference)` for the same reason the admin controls use it,
+          and more urgently here: `ThemeContext` validates a saved pick against
+          the whole REGISTRY, so an off-Edition preference is still APPLIED. A
+          plain scoped list would leave the player wearing that skin with Auto
+          inactive and no chip showing what is selected — a picker disagreeing
+          with the screen it is on (Codex on #577). Kept rather than cleared:
+          clearing is a destructive fix for a display bug, and a player who
+          moves between Editions on one device would silently lose their pick.
+          `preference` is `'auto'` or a ThemeId; `'auto'` matches no Theme. */}
+      {themesForEditionIncluding(preference === 'auto' ? null : preference).map((t) => (
         <button
           key={t.id}
           className={'chip' + (preference === t.id ? ' active' : '')}
