@@ -11,7 +11,7 @@
  * `unlockDay.ts`'s decoupled-pure-decision posture).
  *
  * The ranking + tutorial-exclusion semantics MIRROR `src/game/logic.ts`'s
- * `comparePlayers` / `cruiseFirstBingoAt`. The app package and the functions
+ * `comparePlayers` / `eventFirstBingoAt`. The app package and the functions
  * package are deliberately decoupled (the same split `autohide.ts` keeps from
  * `moderation.ts`), so this file re-states that logic locally rather than
  * importing across the package boundary. If the app's tie-break order or the

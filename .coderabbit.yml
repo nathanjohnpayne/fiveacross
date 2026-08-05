@@ -10,7 +10,15 @@ tone_instructions: >-
 
 reviews:
   auto_review:
-    enabled: true
+    # DISABLED 2026-08-04 per operator request, together with
+    # `coderabbit.enabled: false` in .github/review-policy.yml. Both are
+    # required: the policy key stops the agent WAITING for CodeRabbit, and this
+    # key stops CodeRabbit REVIEWING. Without this one the App keeps posting
+    # review threads, and an unresolved thread holds branch protection's
+    # conversation-resolution gate — so an advisory bot nobody is waiting on
+    # would still block merges. The merge gate is Codex (Phase 4a) plus the
+    # automated Phase 4b leg; CodeRabbit never carried it.
+    enabled: false
     drafts: false
     # base_branches EXTENDS the auto-review set; it does NOT replace the
     # default branch — CodeRabbit always auto-reviews PRs targeting the

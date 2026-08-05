@@ -49,8 +49,8 @@ export function eventWritePayload(
   includeDays?: boolean,
 ): Record<string, unknown>;
 export const ITEMS: SeedPrompt[];
-export const EMBARK_ITEMS: SeedPrompt[];
-export const FAREWELL_ITEMS: SeedPrompt[];
+export const EASY_ITEMS: SeedPrompt[];
+export const CLOSING_ITEMS: SeedPrompt[];
 export const ALL_ITEMS: SeedPrompt[];
 export function seedItemDocId(text: string): string;
 export function verifySeedPool(

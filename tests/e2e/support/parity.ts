@@ -15,7 +15,7 @@ import type { RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { seedEmulatorEvent } from './seed';
 import { EVENT_ID } from './env';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
-import { ITEMS, EMBARK_ITEMS, FAREWELL_ITEMS, seedItemDocId } from '../../../scripts/seed.mjs';
+import { ITEMS, EASY_ITEMS, CLOSING_ITEMS, seedItemDocId } from '../../../scripts/seed.mjs';
 
 const HOUR = 3_600_000;
 
@@ -73,8 +73,8 @@ export async function seedParityFixture(): Promise<ParityFixture> {
   const now = PARITY_NOW;
 
   const mainIds = idsOf(ITEMS as SeedItem[]);
-  const embarkIds = idsOf(EMBARK_ITEMS as SeedItem[]);
-  const farewellIds = idsOf(FAREWELL_ITEMS as SeedItem[]);
+  const embarkIds = idsOf(EASY_ITEMS as SeedItem[]);
+  const farewellIds = idsOf(CLOSING_ITEMS as SeedItem[]);
   const sharedItemId = seedItemDocId(SHARED_ITEM_TEXT);
 
   // Storage bytes first (owner-scoped create per storage.rules), so the proof
@@ -95,8 +95,8 @@ export async function seedParityFixture(): Promise<ParityFixture> {
     // The two curated tutorial pools as real item docs (deal-from-snapshot
     // resolves each id to its doc) — mirrors support/daily.ts.
     for (const { items, pool } of [
-      { items: EMBARK_ITEMS as SeedItem[], pool: 'embark' },
-      { items: FAREWELL_ITEMS as SeedItem[], pool: 'farewell' },
+      { items: EASY_ITEMS as SeedItem[], pool: 'embark' },
+      { items: CLOSING_ITEMS as SeedItem[], pool: 'farewell' },
     ]) {
       for (const it of items) {
         await setDoc(doc(db, 'events', EVENT_ID, 'items', seedItemDocId(it.text)), {

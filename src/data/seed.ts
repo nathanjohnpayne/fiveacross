@@ -93,7 +93,7 @@ export const SEED_ITEMS: { text: string; spicy: boolean }[] = [
 // so they carry no spicy split). Curated pools are admin-editable but never go
 // through the pending-approval gate #210 adds to `main`; seeded with
 // `status: 'active'` directly (see scripts/seed.mjs's write path).
-export const EMBARK_ITEMS: { text: string; spicy: false; pool: 'embark' }[] = [
+export const EASY_ITEMS: { text: string; spicy: false; pool: 'embark' }[] = [
   { text: `Get your favorite dessert`, spicy: false, pool: 'embark' },
   { text: `Find your muster station`, spicy: false, pool: 'embark' },
   { text: `Get lost finding your cabin`, spicy: false, pool: 'embark' },
@@ -124,7 +124,7 @@ export const EMBARK_ITEMS: { text: string; spicy: false; pool: 'embark' }[] = [
   { text: `Overhear someone already complaining`, spicy: false, pool: 'embark' },
 ];
 
-export const FAREWELL_ITEMS: { text: string; spicy: false; pool: 'farewell' }[] = [
+export const CLOSING_ITEMS: { text: string; spicy: false; pool: 'farewell' }[] = [
   { text: `One last sunrise or sunset photo`, spicy: false, pool: 'farewell' },
   { text: `Say goodbye to your cruise boyfriend`, spicy: false, pool: 'farewell' },
   { text: `Exchange numbers with your new best friend`, spicy: false, pool: 'farewell' },
