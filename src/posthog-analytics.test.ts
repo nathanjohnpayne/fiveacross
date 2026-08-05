@@ -243,6 +243,62 @@ describe('canonicalizeOrigin — sanitizeUrls swaps in the canonical hostname (C
   });
 });
 
+describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-readiness ordering (Phase 4b P1 on PR #584)', () => {
+  // Each test resets modules and imports a fresh `./posthog` instance so
+  // `registeredDims` (module state) never leaks into the file's other
+  // describe blocks, which use the static top-level import.
+
+  it('merges dimensions into an event captured BEFORE the SDK is ready — the automatic first $pageview included', async () => {
+    // The regression this guards (Codex round-2 P2 + Phase 4b P1 on PR
+    // #584): a slow hostname-resolved build could let PostHog's own
+    // automatic initial $pageview fire before `posthog.register()` had a
+    // chance to apply to the real SDK — before_send is the one point every
+    // captured event passes through regardless, so merging `registeredDims`
+    // here closes the gap no queue-and-replay TIMING fix alone could.
+    vi.resetModules();
+    const mod = await import('./posthog');
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'bodega-bay-2026' });
+    // Simulate the automatic $pageview reaching before_send while the SDK
+    // is STILL not ready — posthog.register() has not actually run yet.
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { $current_url: 'https://gcb.com/x' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties).toMatchObject({
+      brand_id: 'five-across',
+      edition_id: 'gcb',
+      event_id: 'bodega-bay-2026',
+    });
+  });
+
+  it('does not clobber an explicit event property that collides with a dimension key', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    mod.phRegister({ day_index: 1 });
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: 'custom',
+      properties: { day_index: 9 }, // the event's OWN value is more specific — it wins
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.day_index).toBe(9);
+  });
+
+  it('is a no-op when nothing has been registered yet', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { $browser: 'Chrome' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties).toEqual({ $browser: 'Chrome' });
+  });
+});
+
 describe('isLocalDevHost (#194 — no capture from local dev)', () => {
   it('is true for localhost, loopback, and .local hosts', () => {
     for (const h of ['localhost', '127.0.0.1', '::1', '[::1]', 'gcb.local', 'my-mac.local']) {

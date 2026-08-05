@@ -245,9 +245,24 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
  * `$initial_current_url` / `$initial_referrer` on the first pageview and would
  * otherwise persist the full entry URL (Codex P1 on #195) — AND the rrweb Meta
  * (type 4) / Custom-event (type 5) hrefs inside `$snapshot` replay data (#197).
+ *
+ * ALSO merges in `registeredDims` — the brand/edition/Event/Slug/Day
+ * dimensions (#556) — into every outgoing event's `properties` (Phase 4b P1
+ * on PR #584). This is the mechanism that actually GUARANTEES every event
+ * carries them, independent of exactly when `posthog.register()` applied
+ * relative to `posthog.init()`'s own synchronous work: `before_send` is the
+ * single point every captured event — autocaptured or explicit, the very
+ * first `\$pageview` included — passes through right before it leaves the
+ * SDK, so reading the already-populated module state here removes any
+ * dependency on internal SDK ordering `phRegister`'s queue-and-replay alone
+ * could not close. Existing event properties win on key collision (a
+ * call-specific value is more specific than a session-wide default).
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
+  if (Object.keys(registeredDims).length > 0) {
+    event.properties = { ...registeredDims, ...event.properties };
+  }
   scrubUrlBag(event.properties);
   scrubUrlBag(event.$set);
   scrubUrlBag(event.$set_once);

@@ -3,6 +3,7 @@ import { analytics } from './firebase';
 import { phCapture, phRegister } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
 import { activeEdition } from './editions';
+import { resolvedCanonicalHost } from './canonicalHost';
 
 /**
  * GA4 event catalog — the single source of truth for every analytics event
@@ -59,6 +60,21 @@ export const GA4_EVENTS = [
 export type GA4EventName = (typeof GA4_EVENTS)[number];
 
 /**
+ * Fresh, canonicalized `page_location` for THIS call, computed at DISPATCH
+ * time rather than registered as a static default (#556, Phase 4b P1 on PR
+ * #584) — this app is a `BrowserRouter` SPA, so a value frozen at whatever
+ * pathname was current when dimensions were first registered would leave
+ * every LATER tracked event attributed to the boot route. `null` when no
+ * canonical host is resolved (a single-Event build, where GA4's own
+ * automatic `page_location` already matches `window.location` exactly, so
+ * there is nothing to override).
+ */
+function currentPageLocation(): string | null {
+  const host = resolvedCanonicalHost();
+  return host ? `https://${host}${window.location.pathname}` : null;
+}
+
+/**
  * Fire an analytics event to BOTH sinks — GA4 and PostHog (#96) — from one call
  * site. Each sink is independently guarded and never throws, so one being
  * unavailable (or failing) never blocks the other. Same event name + params go
@@ -70,7 +86,11 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
     // Firebase's `logEvent` overloads key off literal reserved event names
     // (e.g. `login`), so a union type like `GA4EventName` matches no single
     // overload — widen to `string` (the SDK's generic-event overload).
-    if (analytics) logEvent(analytics, name as string, params as Record<string, unknown>);
+    if (analytics) {
+      const pageLocation = currentPageLocation();
+      const ga4Params = pageLocation ? { ...params, page_location: pageLocation } : params;
+      logEvent(analytics, name as string, ga4Params as Record<string, unknown>);
+    }
   } catch {
     /* no-op */
   }
@@ -141,37 +161,21 @@ function registerBothSinks(props: Record<string, unknown>): void {
  * (see `Resolution.slug`'s own doc in eventResolution.ts), so it has no
  * separate Slug to report and the Event id is the closest identifier there is.
  *
- * `canonicalHost`, when resolved, ALSO overrides GA4's `page_location`
- * default (#556, Codex round-2 P2) — the automatic and explicit
- * `page_location` field otherwise mirrors `window.location.href`, which
- * could carry a validated Alias's hostname before its edge redirect. `null`
- * (a single-Event build, with no separate Alias concept — see
- * `Resolution.canonicalHost`'s own doc) is a no-op: `window.location` is
- * already the only address that build has. GA4-only, deliberately NOT
- * folded into `registerBothSinks` — PostHog's equivalent (`$current_url`) is
- * fixed in posthog.ts's `before_send` hook instead, because an automatically
- * captured event's OWN properties would not reliably honor a `register()`'d
- * override the way GA4's page-scoped `set` does.
+ * Does NOT register `page_location` as a static default (that was tried in
+ * an earlier round and reverted, Phase 4b P1 on PR #584 — a `BrowserRouter`
+ * SPA route change would leave it frozen at the boot pathname forever).
+ * `track()`'s `currentPageLocation()` computes it fresh on every call
+ * instead; PostHog's equivalent (`$current_url`) is fixed at the
+ * `sanitizeUrls`/`before_send` layer in posthog.ts, which runs per capture
+ * and so is never stale either.
  */
-export function registerAnalyticsDimensions(resolved: {
-  eventId: string;
-  eventSlug: string | null;
-  canonicalHost: string | null;
-}): void {
+export function registerAnalyticsDimensions(resolved: { eventId: string; eventSlug: string | null }): void {
   registerBothSinks({
     brand_id: BRAND_ID,
     edition_id: activeEdition(),
     event_id: resolved.eventId,
     event_slug: resolved.eventSlug ?? resolved.eventId,
   });
-  if (resolved.canonicalHost) {
-    ga4Dims = { ...ga4Dims, page_location: `https://${resolved.canonicalHost}${window.location.pathname}` };
-    try {
-      setDefaultEventParameters(ga4Dims);
-    } catch {
-      /* no-op */
-    }
-  }
 }
 
 /**

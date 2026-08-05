@@ -23,12 +23,31 @@ import { isSignInReachableOnHost } from './auth-domain';
 import './theme/themes.css';
 import './index.css';
 
-// Initialize client-side PostHog once (alongside GA4). No-op without a key (#96),
-// skipped for the uptime synthetic (#142), and skipped on local-dev hosts (#194)
-// so dev sessions and Vite HMR errors never pollute production analytics or
-// session replays. All ph* calls guard on init, so skipping this suppresses
-// PostHog entirely for those loads.
-if (!isSyntheticProbe() && !isLocalDevHost(window.location.hostname)) void initPostHog();
+/**
+ * Initialize client-side PostHog once (alongside GA4). No-op without a key
+ * (#96), skipped for the uptime synthetic (#142), and skipped on local-dev
+ * hosts (#194) so dev sessions and Vite HMR errors never pollute production
+ * analytics or session replays. All ph* calls guard on init, so skipping
+ * this suppresses PostHog entirely for those loads.
+ *
+ * Called from `bootstrapEventResolution().then()`/`.catch()` below, NOT at
+ * module scope (Phase 4b P1 on #556, PR #584) — module scope used to start
+ * PostHog's own async ingest-host probe racing bootstrapEventResolution, so
+ * a hostname-resolved build with a slow Firestore read could let PostHog
+ * finish first and fire its automatic initial `$pageview` (and start
+ * session replay) BEFORE `registerAnalyticsDimensions` had even been
+ * called — not merely before it had "applied" to the SDK, but before the
+ * dimensions existed anywhere in this app's memory at all. Every render
+ * path already GATES on `bootstrapEventResolution` resolving first (see
+ * that function's own doc below), so starting PostHog here costs no extra
+ * time-to-first-paint; it only guarantees PostHog's own init — and
+ * therefore its first capture — never begins until AFTER dimension
+ * registration has run (when the resolution is a `kind: 'event'`) or, for
+ * every other outcome, after there was a chance to register at all.
+ */
+function startPostHogAfterResolution(): void {
+  if (!isSyntheticProbe() && !isLocalDevHost(window.location.hostname)) void initPostHog();
+}
 
 // The out-of-tree half of the #342 force-reload floor (src/shellRecovery.ts).
 // Runs HERE, at module scope, and not inside `UpdatePrompt` like the friendly
@@ -174,12 +193,12 @@ void bootstrapEventResolution()
     // ConsentNotice's disclosure obligation a few lines down. Skipped for the
     // uptime synthetic (#142), matching `initPostHog`'s own guard above.
     if (resolution.kind === 'event' && !isSyntheticProbe()) {
-      registerAnalyticsDimensions({
-        eventId: resolution.eventId,
-        eventSlug: resolution.slug,
-        canonicalHost: resolution.canonicalHost,
-      });
+      registerAnalyticsDimensions({ eventId: resolution.eventId, eventSlug: resolution.slug });
     }
+    // Only NOW does PostHog itself start (#556, Phase 4b P1) — see
+    // `startPostHogAfterResolution`'s own doc for why this ordering is
+    // load-bearing, not incidental.
+    startPostHogAfterResolution();
     // An Event can resolve on an origin the AUTH stack has never been
     // configured for — hostname resolution is exactly what made that possible
     // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
@@ -205,14 +224,15 @@ void bootstrapEventResolution()
         <React.StrictMode>
           <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
           {/* The 18+ analytics disclosure has to survive this branch too. GA4
-              loads on `firebase.ts` import and `initPostHog()` ran at module
-              scope above, so collection has ALREADY started by the time we
-              decide NOT to mount the app — and this is exactly the branch a
-              first-time visitor to an unknown wildcard host lands on (Codex on
-              #576). Safe to put beside the deliberately dependency-free
-              not-found screen: `ConsentNotice` imports `useState` and nothing
-              else — no auth, no Firestore, no router, no theme — so it cannot
-              become a new way for the fallback itself to fail. */}
+              loads on `firebase.ts` import, and `startPostHogAfterResolution()`
+              a few lines above already ran for this outcome too, so collection
+              has ALREADY started by the time we decide NOT to mount the app —
+              and this is exactly the branch a first-time visitor to an unknown
+              wildcard host lands on (Codex on #576). Safe to put beside the
+              deliberately dependency-free not-found screen: `ConsentNotice`
+              imports `useState` and nothing else — no auth, no Firestore, no
+              router, no theme — so it cannot become a new way for the
+              fallback itself to fail. */}
           <ConsentNotice />
         </React.StrictMode>
       ) : (
@@ -221,6 +241,11 @@ void bootstrapEventResolution()
     );
   })
   .catch(() => {
+    // The resolution promise itself rejected — no dimensions could have been
+    // registered either way, but PostHog still needs to run for whichever
+    // screen renders below (same disclosure obligation as the other
+    // branches).
+    startPostHogAfterResolution();
     if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
       root.render(appTree);
       return;
@@ -229,7 +254,8 @@ void bootstrapEventResolution()
       <React.StrictMode>
         <EventNotFound hostname={window.location.hostname} reason="unreachable" />
         {/* Same disclosure obligation as the not-found branch above: analytics
-            started at module scope before this decision was made. */}
+            started via the `startPostHogAfterResolution()` call above before
+            this decision was made. */}
         <ConsentNotice />
       </React.StrictMode>,
     );

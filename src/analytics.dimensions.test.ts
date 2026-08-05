@@ -1,16 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Covers specs/posthog-analytics.md § Dimensions (#556, part of #532): the
 // brand/edition/Event/Slug/Day dimensions registered ONCE rather than
 // threaded through every `track()` call site.
 
-const { setDefaultEventParameters, phRegister } = vi.hoisted(() => ({
+const { setDefaultEventParameters, phRegister, logEvent } = vi.hoisted(() => ({
   setDefaultEventParameters: vi.fn(),
   phRegister: vi.fn(),
+  logEvent: vi.fn(),
 }));
 
 vi.mock('./firebase', () => ({ analytics: null }));
-vi.mock('firebase/analytics', () => ({ logEvent: vi.fn(), setDefaultEventParameters }));
+vi.mock('firebase/analytics', () => ({ logEvent, setDefaultEventParameters }));
 vi.mock('./posthog', () => ({ phCapture: vi.fn(), phRegister }));
 vi.mock('./editions', () => ({ activeEdition: () => 'gcb' }));
 
@@ -34,7 +35,7 @@ describe('BRAND_ID (#556)', () => {
 describe('registerAnalyticsDimensions (#556)', () => {
   it('registers brand_id/edition_id/event_id/event_slug on BOTH sinks', async () => {
     const { registerAnalyticsDimensions } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay', canonicalHost: null });
+    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay' });
     const expected = {
       brand_id: 'five-across',
       edition_id: 'gcb',
@@ -49,7 +50,7 @@ describe('registerAnalyticsDimensions (#556)', () => {
     // A single-Event build's Resolution never reads a hostnames/{host}
     // document, so it has no separate Slug — see Resolution.slug's own doc.
     const { registerAnalyticsDimensions } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null, canonicalHost: null });
+    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });
     expect(phRegister).toHaveBeenCalledWith(expect.objectContaining({ event_slug: 'med-2026' }));
   });
 
@@ -58,39 +59,20 @@ describe('registerAnalyticsDimensions (#556)', () => {
     setDefaultEventParameters.mockImplementationOnce(() => {
       throw new Error('ga4 unavailable');
     });
-    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null, canonicalHost: null });
+    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });
     expect(phRegister).toHaveBeenCalled();
   });
 
-  it('does not override page_location when no canonical host is resolved (single-Event build)', async () => {
+  it('does NOT register page_location as a static default (Phase 4b P1 on PR #584)', async () => {
+    // A BrowserRouter route change would leave a STATIC page_location frozen
+    // at the boot pathname forever — track()'s currentPageLocation() covers
+    // this instead (see the describe block below).
     const { registerAnalyticsDimensions } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null, canonicalHost: null });
-    expect(setDefaultEventParameters).toHaveBeenCalledTimes(1);
-    expect(setDefaultEventParameters).toHaveBeenLastCalledWith(expect.not.objectContaining({ page_location: expect.anything() }));
-  });
-
-  it('overrides GA4 page_location to the canonical origin when a canonical host is resolved (Codex round 2 on #556)', async () => {
-    // GA4's automatic + explicit page_location otherwise mirrors
-    // window.location.href, which could carry a validated Alias's hostname
-    // before its edge redirect.
-    const { registerAnalyticsDimensions } = await import('./analytics');
-    registerAnalyticsDimensions({
-      eventId: 'bodega-bay-2026',
-      eventSlug: 'bodega-bay',
-      canonicalHost: 'bodega-bay.vacaybingo.com',
-    });
-    expect(setDefaultEventParameters).toHaveBeenLastCalledWith({
-      brand_id: 'five-across',
-      edition_id: 'gcb',
-      event_id: 'bodega-bay-2026',
-      event_slug: 'bodega-bay',
-      page_location: `https://bodega-bay.vacaybingo.com${window.location.pathname}`,
-    });
-    // GA4-only — PostHog's equivalent is fixed in posthog.ts's before_send
-    // hook instead, so phRegister must NOT receive page_location.
-    expect(phRegister).toHaveBeenCalledWith(
+    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay' });
+    expect(setDefaultEventParameters).toHaveBeenCalledWith(
       expect.not.objectContaining({ page_location: expect.anything() }),
     );
+    expect(phRegister).toHaveBeenCalledWith(expect.not.objectContaining({ page_location: expect.anything() }));
   });
 });
 
@@ -123,7 +105,7 @@ describe('registerDayIndexDimension (#556)', () => {
     // used to silently drop brand/edition/Event — the first GA4 events after
     // init would carry `day_index` alone.
     const { registerAnalyticsDimensions, registerDayIndexDimension } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay', canonicalHost: null });
+    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay' });
     registerDayIndexDimension(2);
     expect(setDefaultEventParameters).toHaveBeenLastCalledWith({
       brand_id: 'five-across',
@@ -135,5 +117,61 @@ describe('registerDayIndexDimension (#556)', () => {
     // PostHog's own `register()` already merges server-side, so phRegister
     // only needs to forward the INCREMENTAL props for this call.
     expect(phRegister).toHaveBeenLastCalledWith({ day_index: 2 });
+  });
+});
+
+describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1 on PR #584)', () => {
+  // This suite needs `analytics` truthy (the GA4 gate in track()) and
+  // control over the resolved canonical host, so it re-mocks both modules
+  // locally rather than using the file-level `vi.mock` above (which pins
+  // `analytics: null` for the rest of this file's tests).
+  afterEach(() => {
+    vi.doUnmock('./firebase');
+    vi.doUnmock('./canonicalHost');
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('does not add page_location when no canonical host is resolved (single-Event build)', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {} }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { track } = await import('./analytics');
+    track('login', { method: 'google' });
+    expect(logEvent).toHaveBeenCalledWith({}, 'login', { method: 'google' });
+  });
+
+  it('adds a canonicalized page_location matching the CURRENT pathname when a canonical host is resolved', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {} }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => 'bodega-bay.vacaybingo.com' }));
+    window.history.replaceState({}, '', '/leaderboard');
+    const { track } = await import('./analytics');
+    track('share_click', { surface: 'leaderboard' });
+    expect(logEvent).toHaveBeenCalledWith({}, 'share_click', {
+      surface: 'leaderboard',
+      page_location: 'https://bodega-bay.vacaybingo.com/leaderboard',
+    });
+  });
+
+  it('reflects a BrowserRouter navigation on the VERY NEXT call — never freezes at the boot route', async () => {
+    // The regression this guards: an earlier version registered
+    // page_location ONCE (at dimension-registration time) as a static GA4
+    // default, so every event tracked after a client-side route change kept
+    // reporting the BOOT pathname.
+    vi.doMock('./firebase', () => ({ analytics: {} }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => 'bodega-bay.vacaybingo.com' }));
+    const { track } = await import('./analytics');
+
+    window.history.replaceState({}, '', '/feed');
+    track('join_event');
+    expect(logEvent).toHaveBeenLastCalledWith({}, 'join_event', {
+      page_location: 'https://bodega-bay.vacaybingo.com/feed',
+    });
+
+    // A BrowserRouter push — no reload, no re-registration.
+    window.history.pushState({}, '', '/leaderboard');
+    track('share_click', { surface: 'leaderboard' });
+    expect(logEvent).toHaveBeenLastCalledWith({}, 'share_click', {
+      surface: 'leaderboard',
+      page_location: 'https://bodega-bay.vacaybingo.com/leaderboard',
+    });
   });
 });
