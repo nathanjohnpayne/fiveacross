@@ -22,13 +22,13 @@ Two production Firebase projects back these — `gaycruisebingo` and `fiveacross
 - **Tally** publishes a public, attributed per-Prompt record — a count plus tap-to-see-who-else-got-it — while your board's layout stays private. **Doubts** let one Player publicly ask another to back up a Mark; **Hearts** add warmth and touch no stats.
 - The **Feed** carries Proofs (photo / audio / text), Moments that broadcast the big beats, and admin-authored Notices. The **Leaderboard** ranks bingos → squares → earliest first-bingo with a pinned First to BINGO, and a **Standings Freeze** computes the finale.
 - **Share Cards** for a BINGO, the leaderboard and the final standings render on-device and go straight to the native share sheet (ADR [0005](docs/adr/0005-client-side-share-images.md)) — no server in the path.
-- Google sign-in with an 18+ acknowledgement, Edition-scoped Themes, offline-durable Marks (ADR [0006](docs/adr/0006-offline-resilience.md)), and PostHog analytics dimensioned by Brand / Edition / Event.
+- Google sign-in with an 18+ acknowledgement, Edition-scoped Themes, offline-durable Marks (ADR [0006](docs/adr/0006-offline-resilience.md)), and analytics dual-dispatched to GA4 and PostHog, dimensioned by Brand / Edition / Event.
 
 ## Stack
 
-Vite · React 18 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · PostHog · Cloudflare DNS and edge redirects.
+Vite · React 18 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · GA4 and PostHog · Cloudflare DNS and edge redirects.
 
-The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, admin moderation email, and bug-report intake with thumbnails. Player stats stay client-authoritative by design (ADR 0001).
+The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, proof thumbnails, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate and stays off until deliberately enabled. Player stats stay client-authoritative by design (ADR 0001).
 
 ## Quick start
 

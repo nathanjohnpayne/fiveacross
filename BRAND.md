@@ -18,7 +18,9 @@ The domain's ubiquitous language — Brand, Edition, Namespace, Slug, Event, Day
 | `vacay` | Vacay Bingo | Travel — trips, house weekends, road trips | **Trip** — travel without water. Moderate camp. |
 | `fiveacross` | Five Across | Occasion-neutral — weddings, conferences, festivals | **General** — Event, place, everyone. Minimal camp. |
 
-`gcb` and `vacay` are live in `BRANDS` (`src/editions.ts`). The general-audience `fiveacross` Edition is decided but not yet built; it lands with the Edition lexicon in [#608](https://github.com/nathanjohnpayne/gaycruisebingo/issues/608), which also converts the cruise vocabulary still embedded in shared copy into per-register tokens and overrides. `gcb` is the fallback Edition: an unknown or absent Edition resolves to it, so an unrecognised host degrades to the shipped experience rather than an unbranded screen.
+`gcb` and `vacay` are live in `BRANDS` (`src/editions.ts`). The general-audience `fiveacross` Edition is decided but not yet built; it lands with the Edition lexicon in [#608](https://github.com/nathanjohnpayne/gaycruisebingo/issues/608), which also converts the cruise vocabulary still embedded in shared copy into per-register tokens and overrides.
+
+`gcb` is the fallback **Edition**, which is a narrower guarantee than it sounds: it covers a hostname document that resolves but names an unknown or absent `edition`, so a misconfigured Edition field degrades to the shipped experience rather than an unbranded screen. It does **not** cover a hostname that fails to resolve at all — a missing or inactive `hostnames/{host}` document, or a revalidation failure with no usable cached mapping, renders the not-found state (`src/eventResolution.ts`). Resolution fails closed; only the Edition field falls back.
 
 The Edition is resolved **pre-auth** from `hostnames/{host}.edition` (ADR [0009](docs/adr/0009-event-resolved-from-hostname.md)), because the sign-in gate has to be branded and the Event document requires an authenticated read. A single-Event build may seed it from `VITE_EDITION`; a bundle serving many Events may not.
 
