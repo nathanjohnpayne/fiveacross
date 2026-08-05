@@ -173,9 +173,38 @@ describe('moderateProof export gating (#126)', () => {
 
   it('pins bug-report intake to the Firebase Admin runtime identity', async () => {
     const mod = await importIndex();
+    // Of the DEPLOYING project — this harness deploys as `gaycruisebingo-test`.
     expect(mod.submitBugReport.__endpoint.serviceAccountEmail).toBe(
-      'firebase-adminsdk-fbsvc@gaycruisebingo.iam.gserviceaccount.com',
+      'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
     );
+  });
+
+  // ADR 0008: this repo deploys to two Firebase projects. A Service Account only
+  // exists inside its own project, so a hardcoded `gaycruisebingo` pin failed the
+  // `fiveacross` deploy outright with `iam.serviceaccounts.actAs` on a
+  // cross-project resource — and would have been wrong even if it had succeeded,
+  // running Bodega's functions under an identity holding gaycruisebingo's
+  // Firestore data-plane access. Every Admin-SDK-pinned export must follow the
+  // deploying project.
+  it('derives the Admin runtime identity from the DEPLOYING project, so the second Firebase project deploys (ADR 0008)', async () => {
+    const priorConfig = process.env.FIREBASE_CONFIG;
+    const priorProject = process.env.GCLOUD_PROJECT;
+    process.env.FIREBASE_CONFIG = JSON.stringify({
+      storageBucket: 'fiveacross.appspot.com',
+      projectId: 'fiveacross',
+    });
+    process.env.GCLOUD_PROJECT = 'fiveacross';
+    try {
+      const mod = await importIndex();
+      const expected = 'firebase-adminsdk-fbsvc@fiveacross.iam.gserviceaccount.com';
+      expect(mod.submitBugReport.__endpoint.serviceAccountEmail).toBe(expected);
+      // unlockDay is the one the Bodega event actually depends on.
+      expect(mod.unlockDay.__endpoint.serviceAccountEmail).toBe(expected);
+      expect(mod.unlockDayNow.__endpoint.serviceAccountEmail).toBe(expected);
+    } finally {
+      process.env.FIREBASE_CONFIG = priorConfig;
+      process.env.GCLOUD_PROJECT = priorProject;
+    }
   });
 });
 
