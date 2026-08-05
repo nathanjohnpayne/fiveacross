@@ -442,6 +442,14 @@ service cloud.firestore {
     //   property of this rule, not a stylistic choice. Do not collapse the two
     //   into `allow read` — that silently grants `list`.
     //
+    //   A single-document `onSnapshot` IS a `get`, and is therefore allowed.
+    //   Only QUERIES are `list`. Worth stating outright because the natural
+    //   reading of "get but not list" is that live listening is off the table
+    //   here, and it is not — the 18+ posture watcher (#608,
+    //   `src/data/hostnames.ts` `watchAdultContent`) listens to exactly one
+    //   document under this rule, which is what lets the gate arrive on the same
+    //   round trip as the content it gates.
+    //
     //   WHY NO CLIENT WRITES AT ALL. The mapping is authoritative routing
     //   state. A client that could write it could point an existing hostname
     //   at an Event it should not see, or squat an address before its Event is

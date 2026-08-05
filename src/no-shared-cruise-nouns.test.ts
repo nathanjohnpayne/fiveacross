@@ -37,11 +37,10 @@ const ALLOWED = new Map<string, string>([
   // #535 and GCB-scoped by `themesForEdition` — they never render elsewhere.
   ['theme/themes.ts', 'GCB-scoped Theme ids + labels, deliberately kept (#535)'],
   ['types.ts', 'the ThemeId union naming those same GCB-scoped ids'],
-  // Owned by a sibling ticket that lands the Edition read at this site.
-  // (`Nav.tsx` and `dayIdentity.tsx` were here too until #602 shipped and both
-  // literals became `editionBrand()` reads — the allowlist shrank rather than
-  // being left to rot, which is what the size assertion below is for.)
-  ['components/ShareCard.tsx', 'SHARE_CARD_APP_NAME — #607 owns this constant'],
+  // Nothing else. `Nav.tsx` and `dayIdentity.tsx` were here until #602 shipped,
+  // and `ShareCard.tsx` until Phase 4b folded its app name into the Edition —
+  // the allowlist shrinks as the leaks close rather than being left to rot,
+  // which is what the size assertion below is for.
 ]);
 
 /** The nouns. Word-bounded, so `report`, `transport` and `passport` are safe. */
@@ -145,7 +144,7 @@ describe('no cruise noun survives in a string every Edition shares', () => {
   // widening it is a visible, reviewed line in the diff rather than a one-word
   // edit nobody reads.
   it('keeps the allowlist small and reasoned', () => {
-    expect(ALLOWED.size).toBe(5);
+    expect(ALLOWED.size).toBe(4);
     for (const [file, reason] of ALLOWED) {
       expect(reason.length, `${file} needs a real reason`).toBeGreaterThan(20);
     }

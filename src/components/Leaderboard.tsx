@@ -5,7 +5,7 @@ import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { canonicalOrigin } from '../canonicalHost';
-import { renderLeaderboardShareCard, shareCardBlob, SHARE_CARD_APP_NAME, type LeaderboardShareRow } from './ShareCard';
+import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
 import Avatar from './Avatar';
 import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
@@ -72,7 +72,7 @@ export function leaderboardShareCopy(
   event: Pick<EventDoc, 'name' | 'days'> | null | undefined,
   now = Date.now(),
 ): { eventName: string; contextLine: string | undefined; statLine: string | undefined; cacheKey: string } {
-  const eventName = event?.name ?? SHARE_CARD_APP_NAME;
+  const eventName = event?.name ?? shareCardAppName();
   const days = [...(event?.days ?? [])].sort((a, b) => a.index - b.index);
   const unlocked = days.filter((d) => d.unlockAt <= now);
   const currentDay = unlocked.length ? unlocked[unlocked.length - 1] : days[0];
@@ -293,7 +293,7 @@ export default function Leaderboard() {
       await shareCardBlob({
         blob,
         filename: `${editionLexicon().fileSlug}-leaderboard.png`,
-        title: `${SHARE_CARD_APP_NAME}—Leaderboard`,
+        title: `${shareCardAppName()}—Leaderboard`,
         text: `Check out the ${editionBrand().appName} leaderboard 🏆`,
         // Canonical hostname (#556), not the raw origin — a Player on a
         // validated Alias must never hand that address off in a share link.

@@ -1,9 +1,8 @@
 import { useEffect } from 'react';
-import { adultContentSettledAdult } from '../adultContent';
-import { revalidateAdultContent } from '../data/hostnames';
+import { setActiveAdultContent } from '../adultContent';
 
 /**
- * Keeps this session's 18+ posture current (Phase 4b P1).
+ * Keeps this session's 18+ posture current (Phase 4b).
  *
  * WHAT IT FIXES. `hostnames/{host}.adultContent` is resolved once, before React
  * mounts. But the Event's pool can turn adult while a tab is open — an admin
@@ -15,64 +14,54 @@ import { revalidateAdultContent } from '../data/hostnames';
  * #608's re-prompt path ("the existing re-prompt gate does the rest") only works
  * if something re-asks. This is that something.
  *
- * WHY POLLING AND NOT A LISTENER. A Firestore `onSnapshot` on
- * `hostnames/{host}` would be live and cheaper per client — but it is a
- * long-lived listener on a collection whose rule grants `get` and denies `list`
- * precisely so it can stay world-readable pre-auth, and the whole point of that
- * carve-out is that it serves single reads to anonymous clients. A poll keeps
- * this on the same `get` the resolver already uses, and it is trivially
- * bounded: the flag is monotone, so the poll STOPS the first time a live read
- * says `true` (`adultContentSettledAdult`). The steady state for an adult Event
- * is zero reads, not one per interval forever.
+ * A LISTENER, NOT A POLL, and the earlier poll was a mistake worth naming
+ * (Phase 4b round 3). I had reasoned that a listener would need `list`, which
+ * `firestore.rules` denies on this collection. It does not: `onSnapshot` on an
+ * EXACT document path is a `get`, which the rule grants — the `list` denial only
+ * blocks queries. The correction matters because the poll lost the race that
+ * actually matters: a Player's Prompts arrive over their own live `items`
+ * listener the instant an admin approves, so a five-minute posture poll left a
+ * window in which explicit content reached the screen minutes before the
+ * acknowledgement gating it. The listener puts the gate on the same round trip
+ * as the content.
  *
- * CADENCE. Five minutes, plus an immediate read whenever the tab becomes
- * visible or the network returns — which is what actually covers the real
- * cases, since the device that matters here is a phone that has been in a
- * pocket. The interval alone would be a read per client per five minutes for
- * a never-adult Event; the event-driven reads make the interval a backstop
- * rather than the mechanism, so it is set long rather than tight.
+ * The mount / visibility / online triggers the poll needed are GONE with it, not
+ * kept as belt-and-braces: a Firestore listener already re-delivers on
+ * reconnect and after a backgrounded tab wakes, so they would be three extra
+ * moving parts firing redundant reads. Bounded the same way as before — the flag
+ * is monotone, so `watchAdultContent` detaches the listener the moment a
+ * server-backed snapshot says `true`.
  *
  * Renders nothing. Mounted beside the other shell-level watchers in
- * `AuthProvider` (`ConfirmWinMoments`, `PoolRecoveryWatcher`), and — unlike
- * those — NOT gated on a signed-in user: the posture decides what the
- * signed-OUT gate renders, so it has to be tracked before there is a user.
+ * `AuthProvider` — and, unlike those, NOT gated on a signed-in user: the posture
+ * decides what the signed-OUT gate renders, so it has to be tracked before there
+ * is a user.
+ *
+ * The Firestore seam is imported DYNAMICALLY, inside the effect. `AuthProvider`
+ * mounts this component, so a static import would put `data/hostnames` — and
+ * through it the `db` singleton — into the module graph of every consumer of the
+ * auth context, which is very nearly the whole app. `cardCache.ts` keeps its own
+ * copy of the Event id for exactly this reason ("it must stay free of the
+ * Firebase import graph"); same discipline, same seam. The module is already
+ * loaded by `main.tsx`'s bootstrap, so the import resolves on a microtask and
+ * costs nothing at runtime.
  */
-export const ADULT_CONTENT_POLL_MS = 5 * 60 * 1000;
-
 export default function AdultContentWatcher(): null {
   useEffect(() => {
+    let stop: (() => void) | null = null;
     let cancelled = false;
-    const check = () => {
-      // Monotone: once a live read has said `true`, nothing can change the
-      // answer, so tear the whole watcher down rather than keep a dead timer.
-      if (adultContentSettledAdult()) {
-        stop();
-        return;
-      }
-      if (!cancelled) void revalidateAdultContent();
-    };
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') check();
-    };
-    let timer: ReturnType<typeof setInterval> | null = setInterval(check, ADULT_CONTENT_POLL_MS);
-    function stop() {
-      if (timer !== null) {
-        clearInterval(timer);
-        timer = null;
-      }
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('online', check);
-    }
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('online', check);
-    // One read on mount: this is the launch-inside-the-trigger-window case, and
-    // the case where startup resolution fell back to the provisional gate
-    // because the network was briefly unreachable. Both want an answer now
-    // rather than in five minutes.
-    check();
+    void import('../data/hostnames')
+      .then(({ watchAdultContent }) => {
+        if (cancelled) return;
+        stop = watchAdultContent();
+      })
+      // If the watcher cannot even be STARTED, this session has no way to
+      // observe a flip — which is the same state as a listener that errors, and
+      // gets the same answer. Provisional, so a later success can lower it.
+      .catch(() => setActiveAdultContent(true, { proven: false }));
     return () => {
       cancelled = true;
-      stop();
+      stop?.();
     };
   }, []);
   return null;

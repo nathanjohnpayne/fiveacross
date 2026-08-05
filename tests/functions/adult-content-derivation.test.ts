@@ -3,9 +3,11 @@ import {
   applyEventAdultContent,
   applyItemAdultContent,
   eventForcesAdultContent,
+  eventIsAdult,
   isDealablePool,
   itemImpliesAdultContent,
   raiseAdultContentForEvent,
+  reconcileHostnameAdultContent,
   type AdultFirestore,
 } from '../../functions/src/adultContent';
 
@@ -75,7 +77,11 @@ describe('the override: settings.forceAdult', () => {
 });
 
 // A minimal admin-SDK double: the `hostnames` query plus per-doc updates.
-function fakeDb(hosts: Record<string, { eventId: string; adultContent?: boolean }>) {
+function fakeDb(
+  hosts: Record<string, { eventId: string; adultContent?: boolean }>,
+  docs: Record<string, Record<string, unknown>> = {},
+  items: Record<string, unknown>[] = [],
+) {
   const updates: Record<string, Record<string, unknown>> = {};
   const db: AdultFirestore = {
     doc: (path: string) => ({
@@ -83,14 +89,18 @@ function fakeDb(hosts: Record<string, { eventId: string; adultContent?: boolean 
         updates[path] = { ...(updates[path] ?? {}), ...data };
         return undefined;
       },
+      get: async () => ({ exists: path in docs, data: () => docs[path] }),
     }),
-    collection: () => ({
+    collection: (path: string) => ({
       where: (_f: string, _op: string, value: unknown) => ({
-        get: async () => ({
-          docs: Object.entries(hosts)
-            .filter(([, d]) => d.eventId === value)
-            .map(([id, d]) => ({ id, data: () => d as Record<string, unknown> })),
-        }),
+        get: async () =>
+          path.endsWith('/items')
+            ? { docs: items.map((d, i) => ({ id: `i${i}`, data: () => d })) }
+            : {
+                docs: Object.entries(hosts)
+                  .filter(([, d]) => d.eventId === value)
+                  .map(([id, d]) => ({ id, data: () => d as Record<string, unknown> })),
+              },
       }),
     }),
   };
@@ -222,5 +232,122 @@ describe('the triggers, end to end', () => {
       applyItemAdultContent('e1', { status: 'pending', spicy: true, pool: 'main' }, { raiseAdultContent }),
     ).resolves.toBe(0);
     await expect(applyEventAdultContent('e1', { settings: {} }, { raiseAdultContent })).resolves.toBe(0);
+  });
+});
+
+// --- Routing-document reconciliation (Phase 4b round 3) -------------------------
+//
+// The item and Event triggers cover every way an Event can BECOME adult. They do
+// not cover the opposite order: a routing document that appears AFTER it already
+// is. Two ways that happens, and neither leaves a qualifying source document to
+// change again — an alias added to a running Event, and a document created
+// concurrently with a derivation run, after that run's query snapshot was taken.
+
+describe('eventIsAdult — derived from source, not from the routing documents', () => {
+  it('reads the forceAdult override off the Event', async () => {
+    const { db } = fakeDb({}, { 'events/e1': { settings: { forceAdult: true } } });
+    expect(await eventIsAdult(db, 'e1')).toBe(true);
+  });
+
+  it('finds an active explicit Prompt in the dealable pool', async () => {
+    const { db } = fakeDb({}, { 'events/e1': {} }, [{ status: 'active', spicy: true, pool: 'main' }]);
+    expect(await eventIsAdult(db, 'e1')).toBe(true);
+  });
+
+  it('applies the SAME status and pool rules the triggers do', async () => {
+    // The query filters on `spicy` alone — a `status`+`spicy` query would need a
+    // composite index — so status and pool are applied in code, and must agree
+    // with `itemImpliesAdultContent` exactly.
+    const { db } = fakeDb({}, { 'events/e1': {} }, [
+      { status: 'pending', spicy: true, pool: 'main' },
+      { status: 'active', spicy: true, pool: 'embark' },
+      { status: 'hidden', spicy: true, pool: 'main' },
+    ]);
+    expect(await eventIsAdult(db, 'e1')).toBe(false);
+  });
+
+  it('says no for an Event with a tame pool and no override', async () => {
+    const { db } = fakeDb({}, { 'events/e1': { settings: {} } }, [
+      { status: 'active', spicy: false, pool: 'main' },
+    ]);
+    expect(await eventIsAdult(db, 'e1')).toBe(false);
+  });
+});
+
+describe('reconcileHostnameAdultContent', () => {
+  it('stamps an alias added to an Event that is already adult', async () => {
+    const eventIsAdultFn = vi.fn(async () => true);
+    const stampHost = vi.fn(async () => {});
+    expect(
+      await reconcileHostnameAdultContent(
+        'alias.example.com',
+        { eventId: 'e1', status: 'active' },
+        { eventIsAdult: eventIsAdultFn, stampHost },
+      ),
+    ).toBe(true);
+    expect(stampHost).toHaveBeenCalledWith('alias.example.com');
+  });
+
+  // The concurrent-creation race the item trigger's query snapshot misses: the
+  // stamp writes the documents it saw, and this one was not in the result set.
+  it('closes the race where a document is created mid-derivation', async () => {
+    const stampHost = vi.fn(async () => {});
+    await reconcileHostnameAdultContent(
+      'racing.example.com',
+      { eventId: 'e1', adultContent: false },
+      { eventIsAdult: async () => true, stampHost },
+    );
+    expect(stampHost).toHaveBeenCalledWith('racing.example.com');
+  });
+
+  it('leaves a routing document for a tame Event alone', async () => {
+    const stampHost = vi.fn(async () => {});
+    expect(
+      await reconcileHostnameAdultContent(
+        'tame.example.com',
+        { eventId: 'e1' },
+        { eventIsAdult: async () => false, stampHost },
+      ),
+    ).toBe(false);
+    expect(stampHost).not.toHaveBeenCalled();
+  });
+
+  // This is the ONE trigger whose own writes land on the collection it observes,
+  // so the early return is the loop guard — and it must cost no read.
+  it('returns before any read on an already-gated document (the loop guard)', async () => {
+    const eventIsAdultFn = vi.fn(async () => true);
+    expect(
+      await reconcileHostnameAdultContent(
+        'a.example.com',
+        { eventId: 'e1', adultContent: true },
+        { eventIsAdult: eventIsAdultFn, stampHost: async () => {} },
+      ),
+    ).toBe(false);
+    expect(eventIsAdultFn).not.toHaveBeenCalled();
+  });
+
+  it('ignores a delete and a document that routes nowhere', async () => {
+    const eventIsAdultFn = vi.fn(async () => true);
+    const deps = { eventIsAdult: eventIsAdultFn, stampHost: async () => {} };
+    expect(await reconcileHostnameAdultContent('gone.example.com', undefined, deps)).toBe(false);
+    expect(await reconcileHostnameAdultContent('odd.example.com', { status: 'active' }, deps)).toBe(false);
+    expect(eventIsAdultFn).not.toHaveBeenCalled();
+  });
+
+  // Same posture as its siblings: a failed stamp throws so the platform retries
+  // an idempotent operation rather than leaving the alias serving un-gated.
+  it('propagates a stamp failure for the platform retry', async () => {
+    await expect(
+      reconcileHostnameAdultContent(
+        'a.example.com',
+        { eventId: 'e1' },
+        {
+          eventIsAdult: async () => true,
+          stampHost: async () => {
+            throw new Error('firestore is having a day');
+          },
+        },
+      ),
+    ).rejects.toThrow(/having a day/);
   });
 });

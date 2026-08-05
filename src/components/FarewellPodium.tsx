@@ -6,7 +6,7 @@ import { canonicalOrigin } from '../canonicalHost';
 import {
   renderFarewellShareCard,
   shareCardBlob,
-  SHARE_CARD_APP_NAME,
+  shareCardAppName,
   type FarewellShareCardData,
 } from './ShareCard';
 import { leaderboardShareCopy } from './Leaderboard';
@@ -203,7 +203,7 @@ export default function FarewellPodium({
       await shareCardBlob({
         blob,
         filename: `${editionLexicon().fileSlug}-final-standings.png`,
-        title: `${SHARE_CARD_APP_NAME}—Final standings`,
+        title: `${shareCardAppName()}—Final standings`,
         text: `Final standings from ${editionBrand().appName} 🏆`,
         // Canonical hostname (#556), not the raw origin — see Leaderboard's
         // shareLeaderboard for the rationale.

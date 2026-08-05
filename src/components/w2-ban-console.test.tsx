@@ -101,7 +101,7 @@ vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user }) }));
 vi.mock('./ShareCard', () => ({
   renderLeaderboardShareCard: vi.fn(() => Promise.resolve(null)),
   shareCardBlob: vi.fn(() => Promise.resolve()),
-  SHARE_CARD_APP_NAME: 'Gay Cruise Bingo',
+  shareCardAppName: () => 'Gay Cruise Bingo',
 }));
 // Render nothing for the avatar so the Player's name appears exactly once (in the
 // row's `.name` div), not also duplicated inside the avatar.

@@ -1,4 +1,4 @@
-import { doc, getDocFromServer } from 'firebase/firestore';
+import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
 import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
@@ -151,52 +151,84 @@ function safeLocalStorage(): Storage | null {
 }
 
 /**
- * Re-read THIS origin's 18+ posture and install it (Phase 4b P1).
+ * Watch THIS origin's 18+ posture and keep it installed (Phase 4b).
  *
  * The posture is the one field on `hostnames/{host}` that is expected to change
  * mid-session: an admin approves the first explicit Prompt, the derivation
  * stamps the routing document, and every already-open tab is now serving an
  * adults-only Event with no acknowledgement. Startup resolution cannot cover
- * that — it runs once, before the flip — so the posture is polled.
+ * that — it runs once, before the flip.
+ *
+ * A LISTENER, not a poll (Phase 4b round 3). The first cut polled on an
+ * interval, on the mistaken reasoning that a listener would need `list`. It does
+ * not: `onSnapshot` on an EXACT document path exercises the same `get` the rule
+ * already grants — the `list` denial only blocks queries. The distinction
+ * matters because a poll loses the race that matters. The Prompts a Player sees
+ * arrive over their own live `items` listener the moment an admin approves, so a
+ * five-minute posture poll means explicit content can reach the screen minutes
+ * before the acknowledgement that gates it. A listener makes the gate arrive on
+ * the same round trip as the content.
  *
  * Only the posture. This deliberately does NOT re-resolve the Event, re-stamp
  * the mapping cache, or touch the Edition: routing is durable and re-deciding it
- * mid-session is exactly the kind of churn `resolveEvent`'s 12-hour TTL exists to
- * avoid. One `get`, one field.
+ * mid-session is the churn `resolveEvent`'s 12-hour TTL exists to avoid.
  *
- * `getDocFromServer`, not `getDoc`, for the reason the fetch above documents and
- * one more: a cache-served answer is not evidence about the posture NOW, and
- * `proven` is what licenses UN-gating.
+ * PROVEN vs provisional, which is what licenses UN-gating. A snapshot served
+ * from Firestore's local cache is not evidence about the posture NOW, so it may
+ * raise the gate but never lower it; only a server-backed snapshot
+ * (`metadata.fromCache === false`) can prove `false`. Same rule the resolver
+ * follows, same reason.
+ *
+ * ON ERROR, GATE. A listener that errors — permission, transport, a dead origin
+ * — leaves the posture UNKNOWN, and unknown resolves to gated (Phase 4b round
+ * 3). Preserving a previously proven `false` through a failure was the exact
+ * hazard: after the Event has transitioned, a transient failure reading THIS
+ * document would leave the session ungated while every other Firestore read
+ * happily delivers the newly active explicit Prompt. The gate installed here is
+ * provisional, so a later successful server snapshot saying `false` lowers it
+ * again.
  *
  * Runs on EVERY build shape, including the single-Event short-circuit. That
  * build resolves its Event from `VITE_EVENT_ID` and never reads a routing
- * document for routing — but if it baked `VITE_ADULT_CONTENT=false` it is
- * holding an ungated posture that nothing can currently revoke, and this is the
- * revocation channel. A build with no routing document therefore returns to the
- * gated posture on its first successful read, which is the honest answer: an
+ * document for routing — but if it baked `VITE_ADULT_CONTENT=false` it holds an
+ * ungated posture that nothing can currently revoke, and this is the revocation
+ * channel. A missing document therefore gates, which is the honest answer: an
  * opt-out with no channel to withdraw it is not one this design can offer.
  *
- * Never throws. A failed read leaves the current posture alone rather than
- * lowering it — "we could not ask" is not proof of anything, and the caller
- * polls again.
+ * Returns an unsubscribe. Never throws.
  */
-export async function revalidateAdultContent(
-  hostname: string = window.location.hostname,
-): Promise<void> {
-  // The flag is monotone, so `true` from a live read is terminal: nothing a
-  // later poll could say would change the answer. Stop paying for the read.
-  if (adultContentSettledAdult()) return;
-  try {
-    const snap = await getDocFromServer(doc(db, 'hostnames', hostname.toLowerCase()));
-    if (!snap.exists()) {
-      // No routing document for this origin. A single-Event build seeded ungated
-      // has just learned that its opt-out can never be withdrawn; gate it. A
-      // build that was already gated is unaffected.
-      setActiveAdultContent(true, { proven: false });
-      return;
-    }
-    setActiveAdultContent(coerceAdultContent(snap.data()?.adultContent), { proven: true });
-  } catch {
-    /* unreachable — leave the posture as it stands and let the caller retry */
-  }
+export function watchAdultContent(hostname: string = window.location.hostname): () => void {
+  // The flag is monotone, so a proven `true` is terminal: no later snapshot could
+  // change the answer. Never open the listener at all.
+  if (adultContentSettledAdult()) return () => {};
+  // `settled` rather than calling the unsubscribe directly: a snapshot can be
+  // delivered before `onSnapshot` has returned its unsubscribe, so the terminal
+  // case has to be recorded and acted on once the handle exists.
+  let settled = false;
+  let unsubscribe: (() => void) | null = null;
+  const detach = () => {
+    settled = true;
+    unsubscribe?.();
+  };
+  unsubscribe = onSnapshot(
+    doc(db, 'hostnames', hostname.toLowerCase()),
+    (snap) => {
+      // Server-backed snapshots prove; cached ones may only ever RAISE.
+      const proven = snap.metadata.fromCache === false;
+      if (!snap.exists()) {
+        // No routing document: no channel through which an ungated posture
+        // could ever be withdrawn, so it is not one we can hold.
+        setActiveAdultContent(true, { proven: false });
+        return;
+      }
+      const adult = coerceAdultContent(snap.data()?.adultContent);
+      if (!adult && !proven) return; // a cached `false` proves nothing
+      setActiveAdultContent(adult, { proven });
+      // Monotone: a proven `true` is terminal, so stop listening.
+      if (adult && proven) detach();
+    },
+    () => setActiveAdultContent(true, { proven: false }),
+  );
+  if (settled) unsubscribe();
+  return detach;
 }

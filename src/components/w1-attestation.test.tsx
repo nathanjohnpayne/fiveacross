@@ -58,6 +58,11 @@ vi.mock('./ConfirmWinMoments', () => ({
 // subscription this suite does not wire; stub it — this suite is about the attestation
 // gate, not the watcher (its own suite is ./w1-deal-auto-retry.test.tsx).
 vi.mock('./PoolRecoveryWatcher', () => ({ default: () => null }));
+// AuthProvider also mounts the 18+ posture watcher (#608). This suite drives
+// the posture directly with `setActiveAdultContent`, and its Firebase mock is
+// deliberately narrow, so stub the seam rather than widen the mock — the
+// watcher has its own suite in ./adult-content-revalidation.test.tsx.
+vi.mock('../data/hostnames', () => ({ watchAdultContent: () => () => {} }));
 // The #479 retraction fall observer mounts at the same shell spot; stub it for
 // the same reason (its own suites are ./RetractWinMoments.test.tsx and the
 // moments unit suite).

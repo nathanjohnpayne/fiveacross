@@ -8,7 +8,7 @@ import {
   CONFETTI_COUNT_BLACKOUT,
   type ConfettiPiece,
 } from '../game/motion';
-import { renderBingoShareCard, shareCardBlob, SHARE_CARD_APP_NAME } from './ShareCard';
+import { renderBingoShareCard, shareCardBlob, shareCardAppName } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
 import type { Cell } from '../types';
 
@@ -84,7 +84,7 @@ export default function Celebration({
   // is not identity (no per-user staleness to leak) and has a benign
   // app-name fallback, pinned by the "falls back to the app name" test.
   const { data: event } = useEventDoc();
-  const eventName = event?.name ?? SHARE_CARD_APP_NAME;
+  const eventName = event?.name ?? shareCardAppName();
 
   // EAGER pre-render (Codex P2, PR #111 round 2 finding 2): rasterization
   // starts at MOUNT — the card's data is fixed by then — not at tap time. A
@@ -168,7 +168,7 @@ export default function Celebration({
       await shareCardBlob({
         blob,
         filename: `${editionLexicon().fileSlug}-${kind}.png`,
-        title: SHARE_CARD_APP_NAME,
+        title: shareCardAppName(),
         text,
         url,
       });

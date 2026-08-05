@@ -15,6 +15,7 @@ import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from '
 import {
   applyEventAdultContent,
   applyItemAdultContent,
+  reconcileHostnameAdultContent,
   type AdultEventDoc,
   type AdultItemDoc,
 } from './adultContent';
@@ -322,6 +323,26 @@ export const deriveAdultContentOnItem = onDocumentWritten(
 export const deriveAdultContentOnEvent = onDocumentWritten(
   { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
   (event) => applyEventAdultContent(event.params.eventId, event.data?.after.data() as AdultEventDoc | undefined),
+);
+
+/**
+ * The third side of the same invariant (Phase 4b round 3).
+ *
+ * The two triggers above cover every way an Event can BECOME adult. This covers
+ * the opposite order: a routing document that appears AFTER it already is — an
+ * alias added to a running Event, or a document created concurrently with a
+ * derivation run, after that run's `hostnames` query snapshot was taken. In both
+ * cases no qualifying source document will ever change again, so nothing would
+ * re-derive and the new host would serve the un-gated shell indefinitely.
+ *
+ * Watches `hostnames` itself, which is why it is the one trigger here whose own
+ * writes land on the collection it observes. That is safe and needs no separate
+ * loop guard: the handler returns before any read when the document is already
+ * `adultContent: true`, which is exactly what its own stamp produces.
+ */
+export const reconcileHostnameOnWrite = onDocumentWritten(
+  { document: 'hostnames/{host}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
+  (event) => reconcileHostnameAdultContent(event.params.host, event.data?.after.data()),
 );
 
 /**

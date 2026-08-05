@@ -101,6 +101,7 @@ interface AdultDocSnapshot {
 }
 interface AdultDocRef {
   update(data: Record<string, unknown>): Promise<unknown>;
+  get(): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }>;
 }
 interface AdultQueryRef {
   get(): Promise<{ docs: AdultDocSnapshot[] }>;
@@ -215,4 +216,89 @@ export async function applyEventAdultContent(
 ): Promise<number> {
   if (!eventForcesAdultContent(after)) return 0;
   return (deps.raiseAdultContent ?? defaultRaise)(eventId);
+}
+
+// --- Routing-document reconciliation (Phase 4b round 3) -------------------------
+//
+// The two triggers above fire on ITEM and EVENT writes, which covers every way an
+// Event can BECOME adult. It does not cover the other direction of the same
+// invariant: a routing document that appears AFTER the Event is already adult.
+//
+// Two ways that happens, and neither has a qualifying source document left to
+// change:
+//
+//   - An alias is added later — a second hostname for a running Event, which is
+//     an ordinary operational act (ADR 0009 makes canonical and alias separate
+//     records). Nothing writes an item or the Event doc, so nothing re-derives,
+//     and the new host serves the un-gated shell indefinitely.
+//   - A routing document is created CONCURRENTLY with a derivation run, after
+//     that run's `hostnames` query snapshot was taken. The stamp writes the
+//     documents it saw; this one was never in the result set.
+//
+// So the invariant is closed from the other side: when a routing document is
+// written and is not already stamped, ask the Event whether it is adult.
+
+/**
+ * Is this Event adults-only RIGHT NOW, derived from source rather than from the
+ * routing documents?
+ *
+ * The same rule the triggers apply — `settings.forceAdult || (any active spicy
+ * Prompt in a dealable pool)` — but computed from scratch, because the caller is
+ * a routing document that may have existed for milliseconds and carries no
+ * history.
+ *
+ * The Prompt query filters on `spicy` ALONE and applies status/pool in code.
+ * That is deliberate: a `status`+`spicy` query would need a composite index, and
+ * a pool is 30–50 Prompts, so the whole spicy subset is a trivial read. One less
+ * thing that can be forgotten in `firestore.indexes.json` and silently fail in
+ * production.
+ */
+export async function eventIsAdult(db: AdultFirestore, eventId: string): Promise<boolean> {
+  const eventSnap = await db.doc(`events/${eventId}`).get();
+  if (eventSnap.exists && eventForcesAdultContent(eventSnap.data() as AdultEventDoc | undefined)) {
+    return true;
+  }
+  const spicy = await db.collection(`events/${eventId}/items`).where('spicy', '==', true).get();
+  return spicy.docs.some((d) => itemImpliesAdultContent(d.data() as AdultItemDoc | undefined));
+}
+
+export interface HostnameReconcileDeps {
+  /** Defaults to `eventIsAdult` against the admin SDK. */
+  eventIsAdult?: (eventId: string) => Promise<boolean>;
+  /** Defaults to stamping the one document. */
+  stampHost?: (host: string) => Promise<void>;
+}
+
+async function defaultEventIsAdult(eventId: string): Promise<boolean> {
+  return eventIsAdult(await adminFirestore(), eventId);
+}
+
+async function defaultStampHost(host: string): Promise<void> {
+  await (await adminFirestore()).doc(`hostnames/${host}`).update({ adultContent: true });
+}
+
+/**
+ * A routing document was written. If it is not already gated and its Event is
+ * adult, stamp it.
+ *
+ * The cheap checks run first, so the overwhelming majority of writes to this
+ * collection — including OUR OWN stamp, which re-fires this trigger — cost
+ * nothing: an already-`true` document returns before any read, which is also the
+ * loop guard. A document with no `eventId` routes nowhere and is skipped.
+ *
+ * THROWS on a failed stamp, like its siblings, so the platform retries an
+ * idempotent operation rather than leaving a public fail-closed flag at `false`.
+ */
+export async function reconcileHostnameAdultContent(
+  host: string,
+  after: Record<string, unknown> | undefined,
+  deps: HostnameReconcileDeps = {},
+): Promise<boolean> {
+  if (!after) return false; // deleted — nothing routes here any more
+  if (after.adultContent === true) return false; // already gated (and our own write)
+  const eventId = typeof after.eventId === 'string' ? after.eventId : '';
+  if (!eventId) return false;
+  if (!(await (deps.eventIsAdult ?? defaultEventIsAdult)(eventId))) return false;
+  await (deps.stampHost ?? defaultStampHost)(host);
+  return true;
 }

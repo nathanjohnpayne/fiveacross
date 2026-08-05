@@ -8,34 +8,56 @@ import {
 } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
 
-// Covers the posture staying CURRENT while a tab is open (Phase 4b P1).
+// Covers the posture staying CURRENT while a tab is open (Phase 4b).
 //
 // The gap this closes: `hostnames/{host}.adultContent` was resolved once, before
-// React mounted, into a plain module variable. So a tab that was already open
-// when an admin approved the first explicit Prompt never re-read the routing
-// document and never re-rendered the gate — and a launch that landed inside the
-// derivation's asynchronous window read the old `false` and stayed ungated for
-// the whole session. #608's re-prompt path only works if something re-asks.
+// React mounted, into a plain module variable. So a tab already open when an
+// admin approved the first explicit Prompt never re-read the routing document
+// and never re-rendered the gate — and a launch landing inside the derivation's
+// asynchronous window read the old `false` and stayed ungated for the whole
+// session. #608's re-prompt path only works if something re-asks.
+//
+// Round 3 replaced the poll that did the re-asking with a document LISTENER, and
+// these tests encode why the correction matters: a Player's Prompts arrive over
+// their own live `items` listener the instant an admin approves, so a five-minute
+// posture poll left a window in which explicit content reached the screen before
+// the acknowledgement gating it.
 
-const mocks = vi.hoisted(() => ({ getDocFromServer: vi.fn() }));
+const mocks = vi.hoisted(() => ({ onSnapshot: vi.fn() }));
 
 vi.mock('firebase/firestore', () => ({
   doc: (_db: unknown, ...path: string[]) => ({ path: path.join('/') }),
   getDoc: vi.fn(),
-  getDocFromServer: mocks.getDocFromServer,
+  getDocFromServer: vi.fn(),
+  onSnapshot: mocks.onSnapshot,
 }));
 vi.mock('../firebase', () => ({ db: {}, applyResolvedEventId: vi.fn() }));
 vi.mock('../data/cardCache', () => ({ setCardCacheEventId: vi.fn() }));
 vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: vi.fn() }));
 
-import { revalidateAdultContent } from '../data/hostnames';
-import AdultContentWatcher, { ADULT_CONTENT_POLL_MS } from './AdultContentWatcher';
+import { watchAdultContent } from '../data/hostnames';
+import AdultContentWatcher from './AdultContentWatcher';
 
-const snap = (data: unknown) => ({ exists: () => data != null, data: () => data });
 const HOST = 'bodega-bay.fiveacross.app';
+const unsubscribe = vi.fn();
+
+/** A Firestore document snapshot. `fromCache` is the whole point — it is what
+ *  separates a claim from proof. */
+const snap = (data: unknown, fromCache = false) => ({
+  exists: () => data != null,
+  data: () => data,
+  metadata: { fromCache },
+});
+
+/** Drive the most recently opened listener's callbacks by hand. */
+function listener() {
+  const call = mocks.onSnapshot.mock.calls[mocks.onSnapshot.mock.calls.length - 1];
+  return { next: call[1] as (s: unknown) => void, onError: call[2] as (e: unknown) => void };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.onSnapshot.mockReturnValue(unsubscribe);
   resetAdultContentForTests();
 });
 afterEach(() => {
@@ -43,53 +65,93 @@ afterEach(() => {
   resetAdultContentForTests();
 });
 
-describe('revalidateAdultContent — the revocation channel', () => {
-  it('raises the gate when the routing document has been stamped', async () => {
+describe('watchAdultContent — a document listener, not a poll', () => {
+  it('listens to the EXACT routing document, which is a `get`, not a `list`', () => {
     setActiveAdultContent(false, { proven: true });
-    mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: true }));
-    await revalidateAdultContent(HOST);
+    watchAdultContent(HOST);
+    expect(mocks.onSnapshot.mock.calls[0][0]).toMatchObject({ path: `hostnames/${HOST}` });
+  });
+
+  it('lowercases the hostname into the document path', () => {
+    setActiveAdultContent(false, { proven: true });
+    watchAdultContent('Bodega-Bay.FiveAcross.app');
+    expect(mocks.onSnapshot.mock.calls[0][0]).toMatchObject({ path: `hostnames/${HOST}` });
+  });
+
+  it('raises the gate the moment the routing document is stamped', () => {
+    setActiveAdultContent(false, { proven: true });
+    watchAdultContent(HOST);
+    act(() => listener().next(snap({ adultContent: true })));
     expect(adultContentRequired()).toBe(true);
-    // A live read, so the session latches: nothing can lower it again.
+    // A server-backed snapshot, so the session latches.
     expect(adultContentSettledAdult()).toBe(true);
   });
 
-  it('lowers a PROVISIONAL gate once it can actually ask', async () => {
-    // The gate startup resolution puts up when revalidation failed. It is a gate
-    // until we can ask, not a gate forever.
-    setActiveAdultContent(true, { proven: false });
-    mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: false }));
-    await revalidateAdultContent(HOST);
-    expect(adultContentRequired()).toBe(false);
-  });
-
-  it('never lowers a gate a live read established', async () => {
-    setActiveAdultContent(true, { proven: true });
-    mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: false }));
-    await revalidateAdultContent(HOST);
-    expect(adultContentRequired()).toBe(true);
-  });
-
-  // The single-Event build case. A baked `VITE_ADULT_CONTENT=false` with no
-  // routing document is an opt-out nothing can ever withdraw — so it is not one
-  // this design can honour.
-  it('gates a build whose origin has no routing document at all', async () => {
-    setActiveAdultContent(false, { proven: false });
-    mocks.getDocFromServer.mockResolvedValue(snap(null));
-    await revalidateAdultContent(HOST);
-    expect(adultContentRequired()).toBe(true);
-  });
-
-  it('leaves the posture alone when the read fails — silence is not proof', async () => {
+  it('detaches once the answer can no longer change', () => {
     setActiveAdultContent(false, { proven: true });
-    mocks.getDocFromServer.mockRejectedValue(new Error('offline'));
-    await expect(revalidateAdultContent(HOST)).resolves.toBeUndefined();
+    watchAdultContent(HOST);
+    act(() => listener().next(snap({ adultContent: true })));
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it('never opens a listener at all once the posture has latched', () => {
+    setActiveAdultContent(true, { proven: true });
+    watchAdultContent(HOST);
+    expect(mocks.onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('lowers a PROVISIONAL gate once a server snapshot says otherwise', () => {
+    setActiveAdultContent(true, { proven: false });
+    watchAdultContent(HOST);
+    act(() => listener().next(snap({ adultContent: false })));
     expect(adultContentRequired()).toBe(false);
   });
 
-  it('stops reading once the answer can no longer change', async () => {
-    setActiveAdultContent(true, { proven: true });
-    await revalidateAdultContent(HOST);
-    expect(mocks.getDocFromServer).not.toHaveBeenCalled();
+  // The provenance rule on the listener's own terms: a snapshot served from
+  // Firestore's local cache is not evidence about the posture NOW.
+  it('lets a CACHED snapshot raise the gate but never lower it', () => {
+    setActiveAdultContent(true, { proven: false });
+    watchAdultContent(HOST);
+    act(() => listener().next(snap({ adultContent: false }, true)));
+    expect(adultContentRequired(), 'a cached false proves nothing').toBe(true);
+
+    resetAdultContentForTests();
+    setActiveAdultContent(false, { proven: true });
+    watchAdultContent(HOST);
+    act(() => listener().next(snap({ adultContent: true }, true)));
+    expect(adultContentRequired(), 'a cached true still raises').toBe(true);
+    expect(adultContentSettledAdult(), '…but does not latch').toBe(false);
+  });
+
+  // Phase 4b round 3. The previous cut preserved a proven `false` through a
+  // failure. After the Event has transitioned that is the exact hazard: this one
+  // read fails while every OTHER Firestore read happily delivers the newly
+  // active explicit Prompt.
+  it('GATES when the listener errors — a failure proves nothing', () => {
+    setActiveAdultContent(false, { proven: true });
+    watchAdultContent(HOST);
+    act(() => listener().onError(new Error('permission-denied')));
+    expect(adultContentRequired()).toBe(true);
+    // Provisional, so a later successful server snapshot lowers it again.
+    expect(adultContentSettledAdult()).toBe(false);
+    act(() => listener().next(snap({ adultContent: false })));
+    expect(adultContentRequired()).toBe(false);
+  });
+
+  // The single-Event build case: a baked `VITE_ADULT_CONTENT=false` with no
+  // routing document is an opt-out nothing can ever withdraw.
+  it('gates an origin with no routing document at all', () => {
+    setActiveAdultContent(false, { proven: false });
+    watchAdultContent(HOST);
+    act(() => listener().next(snap(null)));
+    expect(adultContentRequired()).toBe(true);
+  });
+
+  it('treats a malformed value as gated, like every other reader', () => {
+    setActiveAdultContent(false, { proven: true });
+    watchAdultContent(HOST);
+    act(() => listener().next(snap({ adultContent: 'false' })));
+    expect(adultContentRequired()).toBe(true);
   });
 });
 
@@ -111,65 +173,25 @@ describe('the gate re-renders when the Event turns adult mid-session', () => {
 });
 
 describe('AdultContentWatcher', () => {
-  it('asks once on mount — the launch-inside-the-trigger-window case', async () => {
+  it('opens the listener on mount', async () => {
     setActiveAdultContent(false, { proven: true });
-    mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: true }));
     render(<AdultContentWatcher />);
-    await waitFor(() => expect(adultContentRequired()).toBe(true));
+    await waitFor(() => expect(mocks.onSnapshot).toHaveBeenCalledTimes(1));
   });
 
-  it('re-asks when the tab becomes visible and when the network returns', async () => {
+  it('gates the open tab when the routing document is stamped under it', async () => {
     setActiveAdultContent(false, { proven: true });
-    mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: false }));
     render(<AdultContentWatcher />);
-    await waitFor(() => expect(mocks.getDocFromServer).toHaveBeenCalledTimes(1));
-    act(() => void document.dispatchEvent(new Event('visibilitychange')));
-    await waitFor(() => expect(mocks.getDocFromServer).toHaveBeenCalledTimes(2));
-    act(() => void window.dispatchEvent(new Event('online')));
-    await waitFor(() => expect(mocks.getDocFromServer).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mocks.onSnapshot).toHaveBeenCalled());
+    act(() => listener().next(snap({ adultContent: true })));
+    expect(adultContentRequired()).toBe(true);
   });
 
-  it('polls on the interval as a backstop', async () => {
-    vi.useFakeTimers();
-    try {
-      setActiveAdultContent(false, { proven: true });
-      mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: false }));
-      render(<AdultContentWatcher />);
-      const onMount = mocks.getDocFromServer.mock.calls.length;
-      await act(async () => void vi.advanceTimersByTime(ADULT_CONTENT_POLL_MS + 1));
-      expect(mocks.getDocFromServer.mock.calls.length).toBeGreaterThan(onMount);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // Monotone: `true` from a live read is terminal, so the watcher tears its own
-  // timer down rather than paying for a read per interval forever.
-  it('stops polling once the posture has latched adult', async () => {
-    vi.useFakeTimers();
-    try {
-      setActiveAdultContent(true, { proven: true });
-      render(<AdultContentWatcher />);
-      await act(async () => void vi.advanceTimersByTime(ADULT_CONTENT_POLL_MS * 3));
-      expect(mocks.getDocFromServer).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('clears its timer and listeners on unmount', async () => {
-    vi.useFakeTimers();
-    try {
-      setActiveAdultContent(false, { proven: true });
-      mocks.getDocFromServer.mockResolvedValue(snap({ adultContent: false }));
-      const { unmount } = render(<AdultContentWatcher />);
-      unmount();
-      const after = mocks.getDocFromServer.mock.calls.length;
-      await act(async () => void vi.advanceTimersByTime(ADULT_CONTENT_POLL_MS * 2));
-      act(() => void window.dispatchEvent(new Event('online')));
-      expect(mocks.getDocFromServer.mock.calls.length).toBe(after);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('detaches on unmount', async () => {
+    setActiveAdultContent(false, { proven: true });
+    const { unmount } = render(<AdultContentWatcher />);
+    await waitFor(() => expect(mocks.onSnapshot).toHaveBeenCalled());
+    unmount();
+    expect(unsubscribe).toHaveBeenCalled();
   });
 });

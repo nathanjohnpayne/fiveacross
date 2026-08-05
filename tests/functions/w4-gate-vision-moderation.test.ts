@@ -179,7 +179,7 @@ describe('moderateProof export gating (#126)', () => {
   // manifest is the only way to keep them from drifting apart.
   it('enables retries on both adult-content derivation triggers', async () => {
     const mod = await importIndex();
-    for (const name of ['deriveAdultContentOnItem', 'deriveAdultContentOnEvent']) {
+    for (const name of ['deriveAdultContentOnItem', 'deriveAdultContentOnEvent', 'reconcileHostnameOnWrite']) {
       expect(mod[name].__endpoint.eventTrigger.retry, name).toBe(true);
       // …and both still pin the Admin identity: they read a collection no client
       // may `list` and write one no client may write at all.
