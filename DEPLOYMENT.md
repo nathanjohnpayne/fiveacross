@@ -618,7 +618,9 @@ Reset the floor to `1970-01-01T00:00:00.000Z` and deploy once the incident is ov
 
 ## Post-Deployment Verification
 
-A synthetic check asserts the deployed app **actually mounts and renders its root**, not merely that Firebase Hosting returns `200` for the shell (issue #142). The 2026-07-09 outage (#141) was invisible to a 200-only check: the HTML shell and `<title>` loaded (`200 OK`) and only the client JS crashed on init (`auth/invalid-api-key`), leaving a blank page. The synthetic loads the live site in headless Chromium and fails unless the `GAY CRUISE BINGO` root heading renders and no Firebase init error or uncaught exception appears on load. It is load-and-assert only — it never signs in or writes, so it creates no Auth/Firestore/Storage side effects.
+A synthetic check asserts the deployed app **actually mounts and renders its root**, not merely that Firebase Hosting returns `200` for the shell (issue #142). The 2026-07-09 outage (#141) was invisible to a 200-only check: the HTML shell and `<title>` loaded (`200 OK`) and only the client JS crashed on init (`auth/invalid-api-key`), leaving a blank page. The synthetic loads the live site in headless Chromium and fails unless the signed-out sign-in gate renders and no Firebase init error or uncaught exception appears on load. It is load-and-assert only — it never signs in or writes, so it creates no Auth/Firestore/Storage side effects.
+
+The mount signal is `data-testid="signin-gate"` on the gate root (`src/components/SignIn.tsx`), deliberately **not** the wordmark above it. It was that wordmark until 2026-08-05, when the `gcb` string `GAY CRUISE BINGO` was hardcoded into the spec: a Vacay-Edition host correctly renders `VACAY BINGO` (#543, ADR 0009), so the assertion could never match there and every healthy Bodega Bay deploy failed the post-deploy gate and was reported as a broken release needing rollback. Uptime must not depend on marketing copy — `src/editions.test.ts` and `src/components/signin-edition-brand.test.tsx` guard the copy itself. The spec also still accepts the gate's 18+ checkbox, so an origin whose last deploy predates the testid does not read as an outage; that fallback can go once every live host has redeployed.
 
 It runs in two complementary places, both automatic:
 
@@ -632,7 +634,9 @@ npm run test:synthetic
 SYNTHETIC_URL=https://gaycruisebingo.com/ npm run test:synthetic
 ```
 
-For a deeper manual spot-check after a significant release, still open the live URL in an incognito window, exercise a core flow, and scan DevTools → Console. If the synthetic fails, roll back per [Rollback Procedure](#rollback-procedure).
+For a deeper manual spot-check after a significant release, still open the live URL in an incognito window, exercise a core flow, and scan DevTools → Console.
+
+If the synthetic fails, **confirm the outage before rolling back**: open the URL in a browser. A blank page or an endless spinner is a real outage — roll back per [Rollback Procedure](#rollback-procedure). A sign-in gate that renders fine means the probe failed, not the release; rolling back would replace a working build with an older one for no reason. The failure line tells the two apart — `Firebase init error(s) detected` and `uncaught exception(s) during load` are always real, while a browser-launch error, navigation timeout, or DNS/TLS failure is the probe or the network — a network that SNI-blocks the apex (Virgin Voyages' shipboard Wi-Fi does) fails the synthetic with a TLS reset while the site is up for everyone else.
 
 ## CI/CD Integration
 

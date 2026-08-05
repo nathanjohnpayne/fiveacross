@@ -334,6 +334,13 @@ fi
 # ---------------------------------------------------------------------------
 # Case 7 (#142): a failing synthetic fails the deploy (non-zero) and prints
 # the rollback guidance. NPM_STUB_EXIT=1 makes the stubbed synthetic fail.
+#
+# It must ALSO tell the operator to confirm the outage before rolling back. A
+# synthetic failure is not proof the release is broken — the probe itself can
+# fail (2026-08-05: the mount assertion hardcoded the `gcb` wordmark, so a
+# healthy Vacay-Edition deploy failed it and this banner told the operator to
+# roll back a good release two days before the event). The rollback path stays,
+# the unconditional instruction to take it does not.
 # ---------------------------------------------------------------------------
 REPO7="$WORKDIR/case7-synthetic-fail"
 init_fixture_repo "$REPO7"
@@ -360,8 +367,14 @@ elif ! grep -q 'synthetic FAILED' "$ERR7"; then
 elif ! grep -q 'Rollback' "$ERR7"; then
   fail "synthetic-fail: deploy.sh failure diagnostic did not point at the rollback. stderr was:"
   cat "$ERR7" >&2
+elif ! grep -q 'CONFIRM BEFORE ROLLING BACK' "$ERR7"; then
+  fail "synthetic-fail: deploy.sh failure diagnostic told the operator to roll back without first confirming the outage. stderr was:"
+  cat "$ERR7" >&2
+elif ! grep -q 'Do NOT roll' "$ERR7"; then
+  fail "synthetic-fail: deploy.sh failure diagnostic did not name the probe-failure case (a healthy release must not be rolled back). stderr was:"
+  cat "$ERR7" >&2
 else
-  pass "synthetic-fail: a failing synthetic fails the deploy and points at the rollback."
+  pass "synthetic-fail: a failing synthetic fails the deploy, points at the rollback, and makes the operator confirm the outage first."
 fi
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,15 @@ export default function SignIn() {
   };
 
   return (
-    <div className="signin">
+    // `data-testid` is the production synthetic's mount signal (#142,
+    // tests/synthetic/app-mounts.spec.ts) — the one handle on this gate that is
+    // NOT Edition copy. The synthetic used to wait for the `GAY CRUISE BINGO`
+    // heading, which can never match on a Vacay host, so every Bodega deploy
+    // failed the post-deploy check and told the operator to roll back a healthy
+    // release. Keep this attribute: `signin-edition-brand.test.tsx` fails if it
+    // goes, because the wordmark above is now free to change per Edition and
+    // must never be load-bearing for uptime again.
+    <div className="signin" data-testid="signin-gate">
       <h1>{brand.wordmark}</h1>
       <p className="muted">
         {reprompt
