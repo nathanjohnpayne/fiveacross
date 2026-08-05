@@ -44,4 +44,18 @@ describe('SignIn — the gate wears the resolved Edition', () => {
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('VACAY BINGO');
     expect(screen.queryByText(/at sea/i)).toBeNull();
   });
+
+  // The uptime synthetic (#142, tests/synthetic/app-mounts.spec.ts) waits for
+  // this gate to prove the deployed app mounted. It used to wait for the
+  // `GAY CRUISE BINGO` heading — which the test above makes per-Edition, so on a
+  // Vacay host it could never match and every healthy Bodega deploy was reported
+  // as a failed one, complete with rollback instructions. The mount signal is
+  // now `data-testid="signin-gate"`, and the point of it is to be the one handle
+  // on this screen that brand copy cannot move. Deleting or renaming it silently
+  // re-arms that false outage on the next deploy, so it is asserted here.
+  it('keeps the Edition-free mount signal the uptime synthetic waits for', () => {
+    setActiveEdition('vacay');
+    const { container } = render(<SignIn />);
+    expect(container.querySelector('[data-testid="signin-gate"]')).not.toBeNull();
+  });
 });

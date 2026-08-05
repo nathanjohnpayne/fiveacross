@@ -82,7 +82,7 @@ jobs:
             --color B60205 --description "Synthetic uptime check failure" --force
           existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --label "$ISSUE_LABEL" --json number --jq '.[0].number // empty')"
-          body="$(printf 'The synthetic uptime check failed — the deployed app did not mount cleanly at %s (blank page, a Firebase init error such as auth/invalid-api-key, or an uncaught exception on load).\n\nRun: %s\n\nIf this is a real outage, roll back per DEPLOYMENT.md § Rollback Procedure. This issue auto-closes when a later run passes.' "$SYNTHETIC_URL" "$RUN_URL")"
+          body="$(printf 'The synthetic uptime check failed at %s (blank page, a Firebase init error such as auth/invalid-api-key, or an uncaught exception on load).\n\nRun: %s\n\n**Confirm before rolling back.** Open %s: if the sign-in gate renders, the PROBE failed and the release is healthy — do not roll back, fix the probe. If the page is blank or spins forever, it is a real outage: roll back per DEPLOYMENT.md § Rollback Procedure. This issue auto-closes when a later run passes.' "$SYNTHETIC_URL" "$RUN_URL" "$SYNTHETIC_URL")"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing. $body"
           else
