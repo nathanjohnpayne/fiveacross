@@ -1,6 +1,6 @@
 # Five Across
 
-A live, phone-first social bingo platform (PWA) for a group sharing one occasion — a trip, a wedding, a conference, a festival. Sign in, get a randomized card of things that might happen there, and mark them off as they do, with a shared Feed, a leaderboard, per-Day Themes, PWA install, and printed cards as the offline fallback.
+A live, phone-first social bingo platform (PWA) for a group sharing one occasion — a trip, a wedding, a conference, a festival. Sign in, get a randomized card of things that might happen there, and mark them off as they do, with a shared Feed, a leaderboard, per-Day Themes, PWA install, and Marks that keep working offline and sync on reconnect. Printed cards are the Gay Cruise Bingo Edition's own fallback, not a platform feature — each Edition states its own offline story.
 
 The platform wears an **Edition** per class of occasion and runs one **Event** per occasion, addressed by its own hostname. See [`BRAND.md`](BRAND.md) for the Brand / Edition / Namespace model and [`CONTEXT.md`](CONTEXT.md) for the domain language.
 
