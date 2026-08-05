@@ -17,6 +17,7 @@
 // at the owner's request; ConsentNotice.tsx discloses that session replay is used.
 import posthog, { type PostHogConfig, type CaptureResult } from 'posthog-js';
 import { probeTimeoutSignal } from './canonical-redirect';
+import { resolvedCanonicalHost } from './canonicalHost';
 
 /** Init options — exported so the capture policy is unit-testable. */
 export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
@@ -151,18 +152,47 @@ export function stripUrlSecrets(value: unknown): unknown {
   }
 }
 
-const URL_PROP_KEYS = [
-  '$current_url',
-  '$pathname',
-  '$referrer',
-  '$initial_current_url',
-  '$initial_referrer',
-];
+/**
+ * Replace the origin of an origin+path string with the resolved canonical
+ * hostname (#556, Codex round-2 P2: "PostHog's sanitized $current_url still
+ * comes from window.location"). Layered ON TOP of `stripUrlSecrets`, never
+ * folded into it, so `stripUrlSecrets` stays the pure "strip query/hash"
+ * primitive its own tests pin. A no-op when no canonical host has been
+ * resolved (a single-Event build has no separate Alias concept — its own
+ * origin already IS canonical, matching `canonicalOrigin()`'s own fallback)
+ * or when the value has no origin to replace (a relative path, already
+ * host-free).
+ */
+function canonicalizeOrigin(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const host = resolvedCanonicalHost();
+  if (!host) return value;
+  try {
+    const u = new URL(value);
+    return `https://${host}${u.pathname}`;
+  } catch {
+    return value; // relative — no origin to swap
+  }
+}
 
-/** Reduce any URL-bearing keys in a property bag to path-only, in place. */
+// Split in two (#556, Codex round-2 P2 follow-through): `$current_url` /
+// `$pathname` / `$initial_current_url` are always THIS site's own URL, so
+// canonicalizing their origin is correct. `$referrer` / `$initial_referrer`
+// are frequently a genuinely EXTERNAL origin (google.com, a shared link on
+// another platform) — canonicalizing those would silently overwrite real
+// referrer data with our own hostname, corrupting it rather than protecting
+// it. Referrer fields get query/hash stripped only, never an origin swap.
+const SELF_URL_PROP_KEYS = ['$current_url', '$pathname', '$initial_current_url'];
+const REFERRER_PROP_KEYS = ['$referrer', '$initial_referrer'];
+
+/** Reduce any URL-bearing keys in a property bag to path-only, in place —
+ *  the site's-own-URL keys also get their origin canonicalized (#556). */
 function scrubUrlBag(bag: Record<string, unknown> | undefined): void {
   if (!bag) return;
-  for (const key of URL_PROP_KEYS) {
+  for (const key of SELF_URL_PROP_KEYS) {
+    if (bag[key] != null) bag[key] = canonicalizeOrigin(stripUrlSecrets(bag[key]));
+  }
+  for (const key of REFERRER_PROP_KEYS) {
     if (bag[key] != null) bag[key] = stripUrlSecrets(bag[key]);
   }
 }
@@ -192,15 +222,16 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
     if (!ev || typeof ev !== 'object') continue;
     const { type, data } = ev as { type?: unknown; data?: Record<string, unknown> };
     if (!data || typeof data !== 'object') continue;
-    // Meta event (type 4): data.href
+    // Meta event (type 4): data.href — always THIS page's own URL, so the
+    // origin canonicalization (#556) applies here too, same as $current_url.
     if (type === 4 && typeof data.href === 'string') {
-      data.href = stripUrlSecrets(data.href) as string;
+      data.href = canonicalizeOrigin(stripUrlSecrets(data.href)) as string;
     }
     // Custom event (type 5): data.payload.href
     if (type === 5) {
       const payload = (data as { payload?: Record<string, unknown> }).payload;
       if (payload && typeof payload.href === 'string') {
-        payload.href = stripUrlSecrets(payload.href) as string;
+        payload.href = canonicalizeOrigin(stripUrlSecrets(payload.href)) as string;
       }
     }
   }
@@ -214,9 +245,24 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
  * `$initial_current_url` / `$initial_referrer` on the first pageview and would
  * otherwise persist the full entry URL (Codex P1 on #195) — AND the rrweb Meta
  * (type 4) / Custom-event (type 5) hrefs inside `$snapshot` replay data (#197).
+ *
+ * ALSO merges in `registeredDims` — the brand/edition/Event/Slug/Day
+ * dimensions (#556) — into every outgoing event's `properties` (Phase 4b P1
+ * on PR #584). This is the mechanism that actually GUARANTEES every event
+ * carries them, independent of exactly when `posthog.register()` applied
+ * relative to `posthog.init()`'s own synchronous work: `before_send` is the
+ * single point every captured event — autocaptured or explicit, the very
+ * first `\$pageview` included — passes through right before it leaves the
+ * SDK, so reading the already-populated module state here removes any
+ * dependency on internal SDK ordering `phRegister`'s queue-and-replay alone
+ * could not close. Existing event properties win on key collision (a
+ * call-specific value is more specific than a session-wide default).
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
+  if (Object.keys(registeredDims).length > 0) {
+    event.properties = { ...registeredDims, ...event.properties };
+  }
   scrubUrlBag(event.properties);
   scrubUrlBag(event.$set);
   scrubUrlBag(event.$set_once);
@@ -266,6 +312,20 @@ export async function initPostHog(): Promise<void> {
     ready = false;
     return;
   }
+  // Replay dimensions registered while init was still probing (#556), BEFORE
+  // the identify below — `posthog.identify()` itself emits an `$identify` /
+  // `$set` capture the moment it transitions the anonymous user (Codex P2 on
+  // #556), so registering first means THAT capture carries brand/edition/
+  // Event context too, not just the ones queued after it.
+  if (pendingRegister !== null) {
+    const props = pendingRegister;
+    pendingRegister = null;
+    try {
+      posthog.register(props);
+    } catch {
+      /* no-op */
+    }
+  }
   // Replay an identity that arrived while init was still probing (Codex P2 on
   // #342): Firebase restores a cached signed-in user fast on reload, and a
   // phIdentify() landing in the probe window used to no-op via the `ready`
@@ -276,7 +336,7 @@ export async function initPostHog(): Promise<void> {
     pendingIdentifyUid = null;
     phIdentify(uid);
   }
-  // Replay queued captures AFTER the identify above, so an `app_crash` from the
+  // Replay queued captures AFTER both of the above, so an `app_crash` from the
   // probe window is attributed to the signed-in player rather than orphaned
   // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
   // — they are from a PRIOR load (the crash that triggered a recovery reload),
@@ -426,12 +486,55 @@ export function phIdentify(uid: string): void {
   }
 }
 
+// Dimensions registered before init settled (#556) — merged (not replaced)
+// as calls arrive, so a call BEFORE `ready` (brand/edition/Event at startup)
+// and one AFTER (day_index once the Event doc has loaded) both survive to
+// the single replay in `initPostHog`. `null` means "nothing queued yet",
+// distinct from `{}` (a call that queued zero keys — never happens today,
+// kept distinct anyway so a future no-op call cannot look like "unset").
+let pendingRegister: Record<string, unknown> | null = null;
+
+// The full MERGED set of super-properties registered so far this load
+// (#556, Codex P2) — distinct from `pendingRegister` above, which is only
+// the not-yet-applied portion. Kept so `phReset` can reapply it: PostHog's
+// `reset()` clears its persisted `register()` state along with the
+// identity, and without a copy here a second Player signing in on the same
+// tab (no full page reload) would send every subsequent capture with no
+// brand/edition/Event/Day context at all, silently, until something called
+// `phRegister` again.
+let registeredDims: Record<string, unknown> = {};
+
+/**
+ * Register PostHog super-properties: attached to every capture from THIS
+ * point forward, including autocaptured pageviews and events already queued
+ * by `phCapture`'s own pre-init buffer — the GA4-side equivalent is
+ * `setDefaultEventParameters` (src/analytics.ts's `registerAnalyticsDimensions`
+ * / `registerDayIndexDimension`, #556). Queues-and-merges before init settles,
+ * mirroring `phIdentify`'s replay so brand/edition/Event context is never
+ * dropped on the startup race.
+ */
+export function phRegister(props: Record<string, unknown>): void {
+  registeredDims = { ...registeredDims, ...props };
+  if (!ready) {
+    pendingRegister = { ...(pendingRegister ?? {}), ...props };
+    return;
+  }
+  try {
+    posthog.register(props);
+  } catch {
+    /* no-op */
+  }
+}
+
 /** Clear the identity association on sign-out. */
 export function phReset(): void {
   pendingIdentifyUid = null;
   if (!ready) return;
   try {
     posthog.reset();
+    // Reapply the dimensions `reset()` just cleared (#556, Codex P2) — see
+    // `registeredDims`'s own doc above for why this must not be skipped.
+    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
   } catch {
     /* no-op */
   }

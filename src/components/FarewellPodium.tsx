@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 import { buildPodium, type Podium } from '../data/finale';
 import { track } from '../analytics';
+import { canonicalOrigin } from '../canonicalHost';
 import {
   renderFarewellShareCard,
   shareCardBlob,
@@ -199,7 +200,9 @@ export default function FarewellPodium({
         filename: 'gay-cruise-bingo-final-standings.png',
         title: `${SHARE_CARD_APP_NAME}—Final standings`,
         text: 'Final standings from Gay Cruise Bingo 🏆',
-        url: window.location.origin,
+        // Canonical hostname (#556), not the raw origin — see Leaderboard's
+        // shareLeaderboard for the rationale.
+        url: canonicalOrigin(),
       });
     } catch {
       // shareCardBlob never throws by design; belt-and-braces regardless.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { todaysDayTheme } from './autoTheme';
+import { todaysDayTheme, todaysDayIndex } from './autoTheme';
 import type { DayDef, EventDoc } from '../types';
 
 // Covers specs/d15-more-menu.md (#208) — the Theme row's "Auto: match the
@@ -107,5 +107,40 @@ describe('todaysDayTheme (specs/d15-more-menu.md § Theme — Auto)', () => {
       days: [day({ index: 0, unlockAt: Date.now() - 1000, theme: 'get-sporty' })],
     };
     expect(todaysDayTheme(event)).toBe('get-sporty');
+  });
+});
+
+describe('todaysDayIndex (#556 — the day_index analytics dimension)', () => {
+  // Shares `resolveTodaysDay` with `todaysDayTheme` above, which the full
+  // decision-table suite already covers exhaustively — these prove the
+  // `.index` projection agrees with the `.theme` one, not the resolution
+  // logic itself over again.
+  it('returns null with no days configured or no Event yet', () => {
+    expect(todaysDayIndex({ days: [] }, 1000)).toBeNull();
+    expect(todaysDayIndex(undefined, 1000)).toBeNull();
+    expect(todaysDayIndex(null, 1000)).toBeNull();
+  });
+
+  it('resolves the same Day as todaysDayTheme, projected onto its index', () => {
+    const event: Pick<EventDoc, 'days'> = {
+      days: [
+        day({ index: 0, unlockAt: 1000, theme: 'neon-playground' }),
+        day({ index: 1, unlockAt: 2000, theme: 'get-sporty' }),
+        day({ index: 2, unlockAt: 3000, theme: 'seriously-pink' }),
+      ],
+    };
+    // Pre-cruise: the first Day to unlock.
+    expect(todaysDayIndex(event, 500)).toBe(0);
+    // Mid-schedule: the last unlocked Day.
+    expect(todaysDayIndex(event, 2500)).toBe(1);
+    // Flips exactly at the next Day's unlock, same boundary as the theme.
+    expect(todaysDayIndex(event, 3000)).toBe(2);
+  });
+
+  it('defaults `now` to Date.now() when omitted', () => {
+    const event: Pick<EventDoc, 'days'> = {
+      days: [day({ index: 4, unlockAt: Date.now() - 1000, theme: 'get-sporty' })],
+    };
+    expect(todaysDayIndex(event)).toBe(4);
   });
 });

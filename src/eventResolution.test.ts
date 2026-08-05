@@ -136,6 +136,9 @@ describe('eventResolution — resolveEvent decision table', () => {
     });
     expect(r).toMatchObject({ kind: 'event', eventId: 'med-2026', source: 'env' });
     expect(fetchDoc).not.toHaveBeenCalled();
+    // No hostname document was read, so there is no Slug to report (#556) —
+    // callers fall back to `eventId` as the closest available identifier.
+    expect(r).toMatchObject({ slug: null });
   });
 
   it('a FRESH cache hit resolves with no network call', async () => {
@@ -144,6 +147,19 @@ describe('eventResolution — resolveEvent decision table', () => {
     const r = await resolveEvent({ hostname: HOST, fetchDoc, storage: s, now: at(T0) });
     expect(r).toMatchObject({ kind: 'event', eventId: 'bodega-bay-2026', source: 'cache' });
     expect(fetchDoc).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the Slug from a resolved hostname document (#556)', async () => {
+    const s = fakeStorage();
+    const r = await resolveEvent({ hostname: HOST, fetchDoc: async () => DOC, storage: s, now: at(T0) });
+    expect(r).toMatchObject({ kind: 'event', slug: 'bodega-bay' });
+  });
+
+  it('a legacy hostname document with no Slug field surfaces `null`, not undefined (#556)', async () => {
+    const s = fakeStorage();
+    const legacyDoc: HostnameDoc = { ...DOC, slug: undefined };
+    const r = await resolveEvent({ hostname: HOST, fetchDoc: async () => legacyDoc, storage: s, now: at(T0) });
+    expect(r).toMatchObject({ kind: 'event', slug: null });
   });
 
   it('a STALE cache hit revalidates over the network', async () => {

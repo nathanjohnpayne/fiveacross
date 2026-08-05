@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getDocFromServer: vi.fn(),
   applyResolvedEventId: vi.fn(),
   setCardCacheEventId: vi.fn(),
+  applyResolvedCanonicalHost: vi.fn(),
 }));
 
 vi.mock('firebase/firestore', () => ({
@@ -19,6 +20,7 @@ vi.mock('firebase/firestore', () => ({
 }));
 vi.mock('../firebase', () => ({ db: {}, applyResolvedEventId: mocks.applyResolvedEventId }));
 vi.mock('./cardCache', () => ({ setCardCacheEventId: mocks.setCardCacheEventId }));
+vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: mocks.applyResolvedCanonicalHost }));
 
 import { fetchHostnameDoc, bootstrapEventResolution } from './hostnames';
 import { activeEdition, setActiveEdition, DEFAULT_EDITION } from '../editions';
@@ -86,6 +88,9 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     // no single Edition to bake into index.html, so the tab keeps whatever the
     // bundle shipped with until this runs.
     expect(document.title).toBe('Vacay Bingo');
+    // #556: analytics and share metadata must report THIS host, never a
+    // raw window.location that could reflect a validated Alias.
+    expect(mocks.applyResolvedCanonicalHost).toHaveBeenCalledWith('bodega-bay.vacaybingo.com');
   });
 
   it('installs nothing when the hostname resolves to no Event', async () => {
@@ -94,6 +99,7 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     expect(r.kind).toBe('not-found');
     expect(mocks.applyResolvedEventId).not.toHaveBeenCalled();
     expect(activeEdition()).toBe(DEFAULT_EDITION);
+    expect(mocks.applyResolvedCanonicalHost).not.toHaveBeenCalled();
   });
 
   it('resolves when localStorage is unavailable — private mode, embedded webviews', async () => {
@@ -129,6 +135,10 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
       expect(r).toMatchObject({ kind: 'event', source: 'env' });
       expect(mocks.getDocFromServer).not.toHaveBeenCalled();
       expect(activeEdition()).toBe('vacay');
+      // No hostname document was read, so there is no separate canonical
+      // host to install — `canonicalOrigin()`'s own window.location
+      // fallback already IS canonical for a single-Event build.
+      expect(mocks.applyResolvedCanonicalHost).toHaveBeenCalledWith(null);
     } finally {
       vi.unstubAllEnvs();
     }

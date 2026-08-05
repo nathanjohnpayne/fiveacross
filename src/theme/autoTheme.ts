@@ -1,4 +1,4 @@
-import type { EventDoc, ThemeId } from '../types';
+import type { DayDef, EventDoc, ThemeId } from '../types';
 
 /**
  * Resolve "today's Day" from `EventDoc.days` for the More menu's Theme row
@@ -26,13 +26,19 @@ import type { EventDoc, ThemeId } from '../types';
  * without mounting a component or opening a subscription; `main.tsx` is the
  * one caller, handing the resolved id down to `ThemeProvider`.
  */
-export function todaysDayTheme(
+/**
+ * The DayDef itself, shared by `todaysDayTheme` (which reads `.theme`) and
+ * `todaysDayIndex` (#556, which reads `.index` for the `day_index` analytics
+ * dimension) — one decision table, two thin projections, so the two callers
+ * can never disagree about which Day is "today's".
+ */
+function resolveTodaysDay(
   event: Pick<EventDoc, 'days'> | null | undefined,
-  now: number = Date.now(),
-): ThemeId | null {
+  now: number,
+): DayDef | null {
   const days = event?.days;
   if (!days || days.length === 0) return null;
-  let current: ThemeId | null = null;
+  let current: DayDef | null = null;
   let currentUnlockAt = -Infinity;
   let currentIndex = Infinity;
   for (const day of days) {
@@ -41,7 +47,7 @@ export function todaysDayTheme(
       (day.unlockAt > currentUnlockAt ||
         (day.unlockAt === currentUnlockAt && day.index < currentIndex))
     ) {
-      current = day.theme;
+      current = day;
       currentUnlockAt = day.unlockAt;
       currentIndex = day.index;
     }
@@ -50,15 +56,36 @@ export function todaysDayTheme(
   // Pre-cruise: Days are configured but none has unlocked yet. Mirror
   // `defaultViewedIndex`'s Day-0 fallback — resolve the first Day to unlock
   // (order-independent, like the loop above) instead of the event default.
-  let first: ThemeId | null = null;
+  let first: DayDef | null = null;
   let firstUnlockAt = Infinity;
   let firstIndex = Infinity;
   for (const day of days) {
     if (day.unlockAt < firstUnlockAt || (day.unlockAt === firstUnlockAt && day.index < firstIndex)) {
-      first = day.theme;
+      first = day;
       firstUnlockAt = day.unlockAt;
       firstIndex = day.index;
     }
   }
   return first;
+}
+
+export function todaysDayTheme(
+  event: Pick<EventDoc, 'days'> | null | undefined,
+  now: number = Date.now(),
+): ThemeId | null {
+  return resolveTodaysDay(event, now)?.theme ?? null;
+}
+
+/**
+ * "Today's Day" index — the same resolution `todaysDayTheme` uses, projected
+ * onto `.index` instead of `.theme` (#556: the `day_index` analytics
+ * dimension `registerDayIndexDimension`, src/analytics.ts, registers from
+ * `main.tsx`'s `ThemedApp`). Pure and Firestore-free like the rest of this
+ * module.
+ */
+export function todaysDayIndex(
+  event: Pick<EventDoc, 'days'> | null | undefined,
+  now: number = Date.now(),
+): number | null {
+  return resolveTodaysDay(event, now)?.index ?? null;
 }

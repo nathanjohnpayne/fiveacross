@@ -3,7 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // posthog-js is mocked so no real SDK loads; VITE_POSTHOG_KEY is unset in the
 // base test env, so the statically-imported module stays in its disabled state.
 vi.mock('posthog-js', () => ({
-  default: { init: vi.fn(), capture: vi.fn(), identify: vi.fn(), reset: vi.fn() },
+  default: { init: vi.fn(), capture: vi.fn(), identify: vi.fn(), reset: vi.fn(), register: vi.fn() },
 }));
 
 import posthog from 'posthog-js';
@@ -19,11 +19,13 @@ import {
   posthogReady,
   phCapture,
   phIdentify,
+  phRegister,
   phReset,
   isLocalDevHost,
   stripUrlSecrets,
   sanitizeUrls,
 } from './posthog';
+import { applyResolvedCanonicalHost } from './canonicalHost';
 
 describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
   it('strips query and hash from absolute URLs, keeping origin + path', () => {
@@ -168,6 +170,135 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
   });
 });
 
+describe('canonicalizeOrigin — sanitizeUrls swaps in the canonical hostname (Codex round 2 on #556)', () => {
+  afterEach(() => applyResolvedCanonicalHost(null));
+
+  it('leaves the origin unchanged when no canonical host is resolved (matches today’s behavior exactly)', () => {
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $current_url: 'https://gcb.com/x?token=secret' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$current_url).toBe('https://gcb.com/x');
+  });
+
+  it('swaps $current_url / $pathname / $initial_current_url to the canonical origin once resolved', () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $current_url: 'https://bodega-bay.fiveacrossbingo.com/feed?token=secret' },
+      $set: { $initial_current_url: 'https://bodega-bay.fiveacrossbingo.com/enter?code=SECRET' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$current_url).toBe('https://bodega-bay.vacaybingo.com/feed');
+    expect(out?.$set?.$initial_current_url).toBe('https://bodega-bay.vacaybingo.com/enter');
+  });
+
+  it('never rewrites $referrer / $initial_referrer — a real external referrer is not our own origin', () => {
+    // The bug this guards: $referrer is frequently a genuinely EXTERNAL
+    // origin (a search engine, a shared link elsewhere). Canonicalizing it
+    // would silently overwrite real referrer data with our own hostname.
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $referrer: 'https://www.google.com/search?q=secret' },
+      $set_once: { $initial_referrer: 'https://twitter.com/x?ref=1' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$referrer).toBe('https://www.google.com/search'); // query stripped, origin kept
+    expect(out?.$set_once?.$initial_referrer).toBe('https://twitter.com/x');
+  });
+
+  it('canonicalizes the rrweb Meta (type 4) and Custom-event (type 5) hrefs in $snapshot data too', () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 's',
+      event: '$snapshot',
+      properties: {
+        $snapshot_data: [
+          { type: 4, data: { href: 'https://bodega-bay.fiveacrossbingo.com/leaderboard?invite=SECRET' } },
+          { type: 5, data: { payload: { href: 'https://bodega-bay.fiveacrossbingo.com/feed?t=1' } } },
+        ],
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const events = out?.properties.$snapshot_data as any[];
+    expect(events[0].data.href).toBe('https://bodega-bay.vacaybingo.com/leaderboard');
+    expect(events[1].data.payload.href).toBe('https://bodega-bay.vacaybingo.com/feed');
+  });
+
+  it('leaves a relative path unchanged — no origin to swap', () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $pathname: '/items?t=secret' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$pathname).toBe('/items');
+  });
+});
+
+describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-readiness ordering (Phase 4b P1 on PR #584)', () => {
+  // Each test resets modules and imports a fresh `./posthog` instance so
+  // `registeredDims` (module state) never leaks into the file's other
+  // describe blocks, which use the static top-level import.
+
+  it('merges dimensions into an event captured BEFORE the SDK is ready — the automatic first $pageview included', async () => {
+    // The regression this guards (Codex round-2 P2 + Phase 4b P1 on PR
+    // #584): a slow hostname-resolved build could let PostHog's own
+    // automatic initial $pageview fire before `posthog.register()` had a
+    // chance to apply to the real SDK — before_send is the one point every
+    // captured event passes through regardless, so merging `registeredDims`
+    // here closes the gap no queue-and-replay TIMING fix alone could.
+    vi.resetModules();
+    const mod = await import('./posthog');
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'bodega-bay-2026' });
+    // Simulate the automatic $pageview reaching before_send while the SDK
+    // is STILL not ready — posthog.register() has not actually run yet.
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { $current_url: 'https://gcb.com/x' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties).toMatchObject({
+      brand_id: 'five-across',
+      edition_id: 'gcb',
+      event_id: 'bodega-bay-2026',
+    });
+  });
+
+  it('does not clobber an explicit event property that collides with a dimension key', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    mod.phRegister({ day_index: 1 });
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: 'custom',
+      properties: { day_index: 9 }, // the event's OWN value is more specific — it wins
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.day_index).toBe(9);
+  });
+
+  it('is a no-op when nothing has been registered yet', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { $browser: 'Chrome' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties).toEqual({ $browser: 'Chrome' });
+  });
+});
+
 describe('isLocalDevHost (#194 — no capture from local dev)', () => {
   it('is true for localhost, loopback, and .local hosts', () => {
     for (const h of ['localhost', '127.0.0.1', '::1', '[::1]', 'gcb.local', 'my-mac.local']) {
@@ -208,10 +339,12 @@ describe('PostHog init guard', () => {
     expect(posthogReady()).toBe(false);
     phCapture('login', { method: 'google' });
     phIdentify('u1');
+    phRegister({ brand_id: 'five-across' });
     phReset();
     expect(posthog.init).not.toHaveBeenCalled();
     expect(posthog.capture).not.toHaveBeenCalled();
     expect(posthog.identify).not.toHaveBeenCalled();
+    expect(posthog.register).not.toHaveBeenCalled();
   });
 });
 
@@ -483,6 +616,123 @@ describe('PostHog init with a key', () => {
     // must not leak the stubbed fetch into later tests and cascade.
     vi.unstubAllGlobals();
     expect(ph.identify).not.toHaveBeenCalled();
+  });
+
+  it('forwards super-properties directly once ready (#556)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb' });
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across', edition_id: 'gcb' });
+  });
+
+  it('queues a registration that arrived during the init probe window and replays it once ready (#556)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ type: 'opaque' } as Response));
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog();
+    mod.phRegister({ brand_id: 'five-across' });
+    expect(ph.register).not.toHaveBeenCalled(); // not ready yet — queued, not lost
+    await initSettled;
+    vi.unstubAllGlobals();
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across' });
+  });
+
+  it('merges MULTIPLE pre-init registrations into a single replay (#556)', async () => {
+    // brand/edition/Event register at startup; day_index can register
+    // separately once the Event doc loads — both must survive to one replay.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ type: 'opaque' } as Response));
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog();
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb' });
+    mod.phRegister({ day_index: 3 });
+    await initSettled;
+    vi.unstubAllGlobals();
+    expect(ph.register).toHaveBeenCalledTimes(1);
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across', edition_id: 'gcb', day_index: 3 });
+  });
+
+  it('replays a registration BEFORE the queued capture, so a replayed capture carries the new dimensions (#556)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phRegister({ brand_id: 'five-across' });
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const captureOrder = (ph.capture as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(registerOrder).toBeLessThan(captureOrder);
+  });
+
+  it('replays a registration BEFORE the pending identify, so identify()s own capture is dimensioned too (Codex P2 on #556)', async () => {
+    // posthog.identify() itself emits an $identify/$set capture the moment
+    // it transitions the anonymous user — that capture must carry
+    // brand/edition/Event context too, not just events queued after it.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phRegister({ brand_id: 'five-across' });
+    mod.phIdentify('sailor-9');
+    await mod.initPostHog();
+
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(registerOrder).toBeLessThan(identifyOrder);
+  });
+
+  it('reapplies registered dimensions after posthog.reset() clears them (Codex P2 on #556)', async () => {
+    // reset() clears PostHog's persisted register() state along with the
+    // identity — without a reapply, a second Player signing in on the same
+    // tab (no full page reload) would send captures with no brand/edition/
+    // Event/Day context at all until something called phRegister again.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb' });
+    mod.phRegister({ day_index: 2 });
+    vi.mocked(ph.register).mockClear();
+
+    mod.phReset();
+    expect(ph.reset).toHaveBeenCalled();
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across', edition_id: 'gcb', day_index: 2 });
+  });
+
+  it('reset() is a no-op on dimensions when nothing was ever registered', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+
+    mod.phReset();
+    expect(ph.reset).toHaveBeenCalled();
+    expect(ph.register).not.toHaveBeenCalled();
   });
 });
 
