@@ -62,7 +62,7 @@ CF_ZONE_ID=<five-across-zone> SYNTHETIC_URL=https://<five-across-host>/ \
   scripts/deploy.sh -- fiveacross --only hosting
 ```
 
-What is documented: the deploy flow itself in app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md), and the build-time knobs a Five Across bundle needs — `VITE_EVENT_ID` (leave it **empty** so the build resolves its Event from the hostname) and `VITE_EDITION` — in app guide §8. What is **not** documented anywhere yet: the Five Across Cloudflare zone id, and the concrete current Bodega invocation. `CF_ZONE_ID` is only described generically as per-repo. Until [#541](https://github.com/nathanjohnpayne/gaycruisebingo/issues/541) lands that env durably, get those two values from whoever last deployed rather than inferring them — do not adapt the Gay Cruise Bingo command by hand.
+What is documented: the deploy flow itself in app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md), and the build-time knobs a Five Across bundle needs — `VITE_EVENT_ID` (leave it **empty** so the build resolves its Event from the hostname), `VITE_EDITION`, and — for Bodega-style hosts using the same-origin auth escape hatch — `VITE_FIREBASE_AUTH_DOMAIN` pinned to the serving host (the auth gate refuses to offer sign-in otherwise) — in app guide §8. What is **not** documented anywhere yet: the Five Across Cloudflare zone id, and the concrete current Bodega invocation. `CF_ZONE_ID` is only described generically as per-repo. Until [#541](https://github.com/nathanjohnpayne/gaycruisebingo/issues/541) lands that env durably, get those two values from whoever last deployed rather than inferring them — do not adapt the Gay Cruise Bingo command by hand.
 
 ## Documentation
 
