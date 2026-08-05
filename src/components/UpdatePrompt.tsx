@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { useClaimSheetOpen, useToastSlot } from '../hooks/useToastStack';
 import { buildBelowFloor, fetchBuildFloor } from '../buildFloor';
+import { dismissedBuild, isDismissedBuild, readWaitingBuildStamp, rememberDismissedBuild } from '../updateDismissal';
 
 /** How often a long-lived tab asks the browser to re-check `/sw.js` for a new
  *  deploy (`registration.update()`). 60s matches the poll cadence Nathan's other
@@ -26,8 +27,14 @@ const TOAST_ID = 'update';
  * `registerType: 'prompt'` (vite.config.ts) the new service worker installs and
  * waits instead of activating under the running page; `useRegisterSW` flips
  * `needRefresh` when that happens, and this banner offers Reload
- * (`updateServiceWorker(true)`) or Not now (session-only dismiss). Mounted at
- * `main.tsx` alongside `ConsentNotice`/`InstallPrompt` (#17).
+ * (`updateServiceWorker(true)`) or Not now (dismiss). Mounted at `main.tsx`
+ * alongside `ConsentNotice`/`InstallPrompt` (#17).
+ *
+ * #605: Not now suppresses the DECLINED BUILD, not the session. `needRefresh`
+ * is re-raised for the same waiting worker on every registration, so an
+ * in-memory dismissal re-prompted at every launch while the client stayed put;
+ * the decline is now persisted against the waiting worker's own build stamp
+ * (src/updateDismissal.ts) and a genuinely newer build prompts again.
  *
  * #219 (specs/d15-pwa-toasts.md): also checks `useClaimSheetOpen()` (reported
  * by Board.tsx via `setClaimSheetOpen`) so a proof capture in progress is
@@ -104,7 +111,49 @@ export default function UpdatePrompt() {
     // already known stale still triggers the force on its flip to true.
   }, [floorStale, needRefresh, updateServiceWorker]);
 
-  const wantsToShow = needRefresh && !claimSheetOpen && !floorStale && floorChecked;
+  // Per-build dismissal (#605). `needRefresh` reports a STATE — "a worker is
+  // waiting" — and workbox-window re-announces that same waiting worker on every
+  // registration, so the in-memory `setNeedRefresh(false)` below could only ever
+  // hide the toast until the next launch. The suppression therefore has to name
+  // the build the player declined; `src/updateDismissal.ts` explains how that
+  // identity is obtained and why null means "prompt anyway".
+  // The in-flight identity query, held as the PROMISE rather than its settled
+  // value: the banner is offered immediately when no decline is on record, so a
+  // player can tap "Not now" while the query is still out, and a click that read
+  // a not-yet-settled `null` would record nothing and re-ask at the next launch.
+  // Awaiting the same promise makes the decline race-free without a second
+  // round trip. Reset per waiting worker, so a decline can never name the
+  // previous one.
+  const stampQuery = useRef<Promise<string | null> | null>(null);
+  const [suppressed, setSuppressed] = useState(false);
+  // Whether the suppression answer is in. Gating the offer on it prevents a
+  // dismissed build from flashing up before the answer lands — but ONLY when a
+  // dismissal is actually on record, because otherwise no answer can suppress
+  // anything and waiting on a worker that may never reply (a pre-#605 waiting
+  // worker, which has no handler for the query) would delay the banner for
+  // nothing.
+  const [suppressionSettled, setSuppressionSettled] = useState(true);
+  useEffect(() => {
+    if (!needRefresh) return;
+    let cancelled = false;
+    setSuppressed(false);
+    setSuppressionSettled(dismissedBuild() === null);
+    const query = readWaitingBuildStamp();
+    stampQuery.current = query;
+    void query.then((stamp) => {
+      if (cancelled) return;
+      setSuppressed(isDismissedBuild(stamp));
+      setSuppressionSettled(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Re-runs on every flip to true, so a NEWER worker installing later in this
+    // same tab is re-identified rather than inheriting the previous verdict.
+  }, [needRefresh]);
+
+  const wantsToShow =
+    needRefresh && !claimSheetOpen && !floorStale && floorChecked && suppressionSettled && !suppressed;
   const { visible, stackIndex, visibleCount } = useToastSlot(TOAST_ID, 'urgent', wantsToShow);
 
   useEffect(() => {
@@ -137,7 +186,18 @@ export default function UpdatePrompt() {
       <button className="btn primary" onClick={() => void updateServiceWorker(true)}>
         Reload
       </button>
-      <button className="btn" onClick={() => setNeedRefresh(false)}>
+      <button
+        className="btn"
+        onClick={() => {
+          // Persist the decline against the build being declined, so it
+          // survives the launch that would otherwise re-ask (#605). An
+          // unidentifiable build records nothing — see updateDismissal.ts.
+          // The waiting worker is deliberately still left untouched: it is
+          // released by Reload, by every window closing, or by the floor lever.
+          void (stampQuery.current ?? readWaitingBuildStamp()).then(rememberDismissedBuild);
+          setNeedRefresh(false);
+        }}
+      >
         Not now
       </button>
     </div>

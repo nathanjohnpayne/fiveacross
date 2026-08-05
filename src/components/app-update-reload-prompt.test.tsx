@@ -4,10 +4,11 @@ import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import UpdatePrompt, { FLOOR_RECHECK_INTERVAL_MS } from './UpdatePrompt';
 import { __resetToastStackForTests, __resetClaimSheetOpenForTests, setClaimSheetOpen } from '../hooks/useToastStack';
+import { BUILD_STAMP_REPLY, DISMISSED_BUILD_KEY } from '../updateDismissal';
 
 // Covers specs/app-update-reload-prompt.md: the needRefresh-driven reload banner
 // (Reload activates the waiting service worker via updateServiceWorker(true),
-// Not now dismisses for the session), the periodic registration.update() check
+// Not now declines the waiting BUILD), the periodic registration.update() check
 // that lets a long-lived tab discover a new deploy (skipped while offline), and
 // the update-prompt-visible body class that reserves .app's bottom clearance
 // while the banner is up (mirroring InstallPrompt's mechanism, specs/w1-pwa.md).
@@ -50,6 +51,49 @@ function makeRegistration() {
   };
 }
 
+/** Minimal in-memory localStorage stand-in — same stub + rationale as
+ *  src/components/w1-pwa.test.tsx. The per-build decline (#605) lives here. */
+function createStorageStub(): Storage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  } as Storage;
+}
+
+/**
+ * Stubs `navigator.serviceWorker` with a waiting worker that names itself
+ * (#605). jsdom has no service workers, so this is a stand-in for the
+ * `GET_BUILD_STAMP` round trip, not proof that a real waiting worker is
+ * reachable — see the honesty note in `src/updateDismissal.test.ts`.
+ */
+function stubWaitingBuild(stamp: string, replyDelayMs = 0) {
+  vi.stubGlobal('navigator', {
+    ...window.navigator,
+    serviceWorker: {
+      getRegistration: async () => ({
+        waiting: {
+          postMessage: (_message: unknown, ports: MessagePort[]) =>
+            setTimeout(() => ports[0].postMessage({ type: BUILD_STAMP_REPLY, stamp }), replyDelayMs),
+        },
+      }),
+    },
+  });
+}
+
+/** Lets the floor read and the (MessagePort-delivered) stamp reply land. */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+}
+
 describe('UpdatePrompt', () => {
   beforeEach(() => {
     swState.initialNeedRefresh = false;
@@ -58,6 +102,9 @@ describe('UpdatePrompt', () => {
     // Shared module singletons (#219) — reset between tests.
     __resetToastStackForTests();
     __resetClaimSheetOpenForTests();
+    // The per-build decline (#605) is localStorage-backed; the runtime's own
+    // global is not usable under Vitest, so every test gets a fresh stand-in.
+    vi.stubGlobal('localStorage', createStorageStub());
     // Inert floor by default (#342): the banner holds until the first
     // /build-floor.json read settles, so every banner test needs a floor
     // response. Individual tests re-stub for stale-floor scenarios.
@@ -104,7 +151,7 @@ describe('UpdatePrompt', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/fresh build just docked/i);
   });
 
-  it('"Not now" dismisses the banner for the session without touching the waiting worker', async () => {
+  it('"Not now" hides the banner without touching the waiting worker', async () => {
     swState.initialNeedRefresh = true;
     const user = userEvent.setup();
     render(<UpdatePrompt />);
@@ -244,5 +291,96 @@ describe('UpdatePrompt', () => {
       await Promise.resolve();
     });
     expect(swState.updateServiceWorker).toHaveBeenCalledWith(true);
+  });
+
+  // --- Per-build dismissal (#605) -------------------------------------------
+  //
+  // WHAT THESE CANNOT PROVE, stated rather than implied (the #513/#517 lesson).
+  // A "relaunch" here is an unmount and a fresh mount with `needRefresh` true
+  // again — a faithful model of what the browser does, because workbox-window
+  // re-dispatches `waiting` for an already-waiting worker on every
+  // registration, but a MODEL nonetheless. jsdom runs no service worker, so
+  // nothing below proves the browser delivers `GET_BUILD_STAMP` to a worker in
+  // the `waiting` state; only a real browser can. What they do prove is the
+  // decision this component makes once an identity is (or is not) available.
+
+  it('"Not now" declines the WAITING BUILD, so the same build does not re-ask on the next launch (#605)', async () => {
+    swState.initialNeedRefresh = true;
+    stubWaitingBuild('2026-08-04T12:00:00.000Z');
+    const user = userEvent.setup();
+    const first = render(<UpdatePrompt />);
+    await user.click(await screen.findByRole('button', { name: /not now/i }));
+    expect(localStorage.getItem(DISMISSED_BUILD_KEY)).toBe('2026-08-04T12:00:00.000Z');
+    first.unmount();
+
+    // The relaunch: the same worker is still waiting, so needRefresh is true
+    // again from the first render — which is exactly why the old in-memory
+    // dismissal re-prompted every launch.
+    render(<UpdatePrompt />);
+    await settle();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(document.body.classList.contains(VISIBLE_CLASS)).toBe(false);
+  });
+
+  it('a genuinely NEWER waiting build prompts again after a decline (#605)', async () => {
+    swState.initialNeedRefresh = true;
+    stubWaitingBuild('2026-08-04T12:00:00.000Z');
+    const user = userEvent.setup();
+    const first = render(<UpdatePrompt />);
+    await user.click(await screen.findByRole('button', { name: /not now/i }));
+    first.unmount();
+
+    // Next deploy: a different worker is waiting, and the decline named the
+    // previous one — so the toast is back to marking a transition.
+    stubWaitingBuild('2026-08-05T09:00:00.000Z');
+    render(<UpdatePrompt />);
+    expect(await screen.findByRole('status')).toHaveTextContent(/fresh build just docked/i);
+  });
+
+  it('declining a build the waiting worker cannot name suppresses nothing — the pre-#605 transition (#605)', async () => {
+    // No serviceWorker stub at all: the query resolves null, exactly as it does
+    // against a worker built before the GET_BUILD_STAMP handler existed. Fail
+    // open — one more prompt is the honest outcome, not a silent forever-mute.
+    swState.initialNeedRefresh = true;
+    const user = userEvent.setup();
+    const first = render(<UpdatePrompt />);
+    await user.click(await screen.findByRole('button', { name: /not now/i }));
+    expect(localStorage.length).toBe(0);
+    first.unmount();
+
+    render(<UpdatePrompt />);
+    expect(await screen.findByRole('status')).toHaveTextContent(/fresh build just docked/i);
+  });
+
+  it('records the decline even when the player taps "Not now" before the build is identified (#605)', async () => {
+    // Nothing has been declined yet, so the banner is offered WITHOUT waiting
+    // on the identity query — which means the tap can beat the answer. The
+    // handler awaits the same in-flight query rather than reading a
+    // not-yet-settled value, so the decline still names the right build.
+    swState.initialNeedRefresh = true;
+    stubWaitingBuild('2026-08-04T12:00:00.000Z', 40);
+    const user = userEvent.setup();
+    render(<UpdatePrompt />);
+    await user.click(await screen.findByRole('button', { name: /not now/i }));
+    expect(localStorage.getItem(DISMISSED_BUILD_KEY)).toBeNull(); // the answer is still out
+    await waitFor(() => expect(localStorage.getItem(DISMISSED_BUILD_KEY)).toBe('2026-08-04T12:00:00.000Z'));
+  });
+
+  it('a DECLINED build is still force-activated when the floor condemns the running one (#605/#342)', async () => {
+    // The decline hides the offer; it must not disarm the emergency lever.
+    // `needRefresh` stays true underneath, so the waiting-SW latch still arms.
+    swState.initialNeedRefresh = true;
+    stubWaitingBuild('2026-08-04T12:00:00.000Z');
+    localStorage.setItem(DISMISSED_BUILD_KEY, '2026-08-04T12:00:00.000Z');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ floor: '2999-01-01T00:00:00.000Z' }),
+      } as unknown as Response),
+    );
+    render(<UpdatePrompt />);
+    await waitFor(() => expect(swState.updateServiceWorker).toHaveBeenCalledWith(true));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });
