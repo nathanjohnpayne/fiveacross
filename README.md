@@ -44,7 +44,7 @@ npm test                       # game-logic unit tests
 npm run typecheck              # tsc --noEmit, app + service worker
 ```
 
-Emulator-backed suites (`test:rules`, `test:offline`, `test:functions`) and Playwright e2e (`test:e2e`) gate every merge; see [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
+`app-ci` gates every merge: typecheck, unit and component tests, build, the functions notifier tests (`test:functions`), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
 
 Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (1Password-backed service-account impersonation; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards. **Pass the Firebase project explicitly** — `.firebaserc`'s default is `gaycruisebingo`, so a Five Across deploy that omits it ships to the wrong project:
 
