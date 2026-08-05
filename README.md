@@ -11,7 +11,9 @@ The platform wears an **Edition** per class of occasion and runs one **Event** p
 | Gay Cruise Bingo | `med-2026` — Atlantis, Trieste → Barcelona | `gaycruisebingo.com` · `gaycruisebingo.web.app` | Sailed and completed, July 15–24 2026 |
 | Vacay Bingo | `bodega-bay-2026` — Bodega Bay house trip | `bodega-bay.vacaybingo.com` (alias `bodega-bay.fiveacrossbingo.com` → 301) | Live; Event runs August 7–9 2026 |
 
-Two production Firebase projects back these — `gaycruisebingo` and `fiveacross` — a data-plane boundary between an adults-only cohort and a general-audience one, not a fork (ADR [0008](docs/adr/0008-five-across-second-firebase-project.md)). One repository, one source tree, one release process. Setup & runbook: [`docs/app/README.md`](docs/app/README.md).
+Two production Firebase projects back these — `gaycruisebingo` and `fiveacross` — giving the Editions separate Firebase resources, credentials and deploy targets. One repository, one source tree, one release process; this is not a fork.
+
+**It is also not cohort isolation yet.** ADR [0008](docs/adr/0008-five-across-second-firebase-project.md) is explicit that a separate project is not cohort admission: a person who can reach either public app can normally sign in to either Firebase project, and the current rules give path scoping rather than tenant isolation. Isolation stays deferred until authentication admission or membership-scoped rules are enforced — do not rely on the project split to keep one Event's audience out of the other's. Setup & runbook: [`docs/app/README.md`](docs/app/README.md).
 
 ## The game
 

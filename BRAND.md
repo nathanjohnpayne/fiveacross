@@ -24,7 +24,9 @@ The domain's ubiquitous language — Brand, Edition, Namespace, Slug, Event, Day
 
 The Edition is resolved **pre-auth** from `hostnames/{host}.edition` (ADR [0009](docs/adr/0009-event-resolved-from-hostname.md)), because the sign-in gate has to be branded and the Event document requires an authenticated read. A single-Event build may seed it from `VITE_EDITION`; a bundle serving many Events may not.
 
-**The one-identity rule:** after a player enters through an Edition's hostname, the experience shows that Edition and nothing else — wordmark, tagline, document title, PWA identity, crash panel, Themes, share cards and copy.
+**The one-identity rule:** after a player enters through an Edition's hostname, the experience shows that Edition and nothing else. It holds today for the wordmark, tagline, document title, PWA identity, crash panel and Themes.
+
+It does **not** hold yet for share surfaces or for the cruise vocabulary embedded in shared copy. `SHARE_CARD_APP_NAME` is still the constant `'Gay Cruise Bingo'` in `src/components/ShareCard.tsx`; the card footers, the celebration and leaderboard share text, and the generated filenames all still carry it, so a Vacay Bingo player sharing standings today leaks the old brand. That is a known gap, not a guarantee — [#607](https://github.com/nathanjohnpayne/gaycruisebingo/issues/607) threads the Edition through those callers, [#587](https://github.com/nathanjohnpayne/gaycruisebingo/issues/587) covers the unfurl metadata, and [#608](https://github.com/nathanjohnpayne/gaycruisebingo/issues/608) supplies the per-Edition wording. Treat the rule as the target contract and the list above as what it currently covers.
 
 ## Namespaces and domains
 
