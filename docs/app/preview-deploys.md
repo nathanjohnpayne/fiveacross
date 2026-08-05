@@ -123,13 +123,35 @@ Rewrites match in array order, so requests on the mirror host take this rule and
 
 The two alternatives the ticket floated were both worse. A **long-lived mirror branch** carrying its own `vercel.json` makes the backup host a permanent fork of `main` that has to be re-synced by hand — and a backup host quietly serving stale code is precisely the failure it exists to prevent, discovered at the worst possible moment. **Build-time templating** cannot work at all: Vercel reads `vercel.json` from the source before the build command runs, so a `vercel.json` written during the build is never read. (Generating `.vercel/output/config.json` via the Build Output API would work, but it means hand-rolling what the Vite framework preset does for free, on both projects.)
 
+### Current state
+
+| Step | Status |
+|---|---|
+| 1. Vercel project `fiveacross` | **Done** — created under `nathanjohnpaynes-projects`. |
+| 2. Minted production host | **Done and confirmed: `fiveacross.vercel.app`**, exactly as the two hard-coded constants require. |
+| 3. Production env vars | **Done** — nine `VITE_*` values, Production scope. |
+| 4. Ignored Build Step | **Not applicable yet** — no Git integration (see below). |
+| 5. Firebase authorized domains on `fiveacross` | **Outstanding** — needs a credential with Identity Toolkit access on `fiveacross`. |
+| 6. Google OAuth redirect URI | **Outstanding — console-only, human.** |
+
+Two things follow from how it was provisioned, and both need closing out:
+
+- **The project is not connected to GitHub.** The first production deployment was pushed straight from a local worktree (`vercel --prod`), so nothing rebuilds on a merge to `main`. This was deliberate — connecting Git before #622 merged would have meant pointing the production branch at a feature branch, which is the stale-mirror trap this design exists to avoid, just relocated into a project setting nobody would remember to undo. Connect Git **after** #622 merges, set the production branch to `main`, add step 4's Ignored Build Step, and redeploy.
+- **Until then the live mirror serves the `claude/vercel-mirror-585` build**, i.e. `main` plus #622. Functionally current, but frozen: it will not pick up anything merged after it.
+
+**Sign-in on the mirror does not work yet, and it does not fail gracefully.** Because `fiveacross.vercel.app` is in `FIRST_PARTY_AUTH_HOSTS`, `isAuthConfiguredForHost` returns true there, so the app mounts and renders a real Google sign-in button — it does *not* show the `auth-unconfigured` screen. Until steps 5 and 6 are done, tapping it fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. That window is inherent to any allowlist entry (the code half must land before the console half can reference it) and is harmless while the host is unadvertised. **Do not hand the mirror URL to anyone until step 6 is done.**
+
 ### Setup runbook
 
-**Not yet done.** Steps 1–4 are Vercel dashboard work under Nathan's account and step 6 is console-only; an agent must not attempt them. Step 5 has an API path. Until all of it is done, `fiveacross.vercel.app` does not resolve, and the `FIRST_PARTY_AUTH_HOSTS` entry that ships with this document is inert — it can only affect a browser sitting on that exact hostname, which does not exist yet.
+Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path but needs a credential with Identity Toolkit access on `fiveacross` — ordinary local ADC gets `PERMISSION_DENIED`.
 
 1. **Create the project.** Vercel dashboard → **Add New → Project** → import `nathanjohnpayne/gaycruisebingo` → **Project Name: `fiveacross`**. Framework preset **Vite**, build command `npm run build`, output `dist`, production branch `main`. (CLI equivalent: `vercel project add fiveacross`, then `vercel git connect` from a linked checkout — the dashboard flow is less fiddly and shows you step 2's answer immediately.)
 
-2. **Confirm the minted production host is exactly `fiveacross.vercel.app`.** This is the load-bearing check of the whole runbook. Vercel assigns `<project>.vercel.app` when that subdomain is free and falls back to `<project>-<scope>.vercel.app` when it is not; `fiveacross.vercel.app` was unclaimed when this was written, but the `.vercel.app` namespace is global and shared with every other Vercel user. If Vercel mints anything else, **stop**: `vercel.json`'s `has` condition and `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` both hard-code this literal string, and a mismatch means the mirror's auth helper proxies to the wrong Firebase project. Fix the two constants in a follow-up PR before doing steps 5 and 6. (You can also add the alias explicitly under **Settings → Domains** if the project minted a longer default but the short name is free.)
+   `vercel project add` creates the project with **no framework preset**, which defaults the output directory to `build` and fails the first deploy with *"No Output Directory named `build` found"* even though the Vite build succeeded. The CLI has no flag for this; either use the dashboard, or `PATCH https://api.vercel.com/v9/projects/<projectId>?teamId=<orgId>` with `{"framework":"vite","outputDirectory":"dist","buildCommand":"npm run build"}`.
+
+   `vercel link` also writes a `.env.local` holding a `VERCEL_OIDC_TOKEN` **and appends `.vercel` + `.env*` to `.gitignore`.** In this repo both are unwanted — `.gitignore` is tracked and already covers what it needs to. Revert the `.gitignore` edit and delete the generated `.env.local` before committing anything.
+
+2. **Confirm the minted production host is exactly `fiveacross.vercel.app`.** This is the load-bearing check of the whole runbook. ✅ *Confirmed on provisioning — `vercel project ls` and `vercel inspect` both report `https://fiveacross.vercel.app` as the production alias.* Vercel assigns `<project>.vercel.app` when that subdomain is free and falls back to `<project>-<scope>.vercel.app` when it is not; `fiveacross.vercel.app` was unclaimed when this was written, but the `.vercel.app` namespace is global and shared with every other Vercel user. If Vercel mints anything else, **stop**: `vercel.json`'s `has` condition and `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` both hard-code this literal string, and a mismatch means the mirror's auth helper proxies to the wrong Firebase project. Fix the two constants in a follow-up PR before doing steps 5 and 6. (You can also add the alias explicitly under **Settings → Domains** if the project minted a longer default but the short name is free.)
 
 3. **Set Production environment variables** (Settings → Environment Variables, **Production** scope only). Take the `VITE_FIREBASE_*` values from the `fiveacross` console (Project settings → General → Your apps → Web app), **not** from the gcb project:
 
@@ -184,14 +206,18 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 
 ### Verifying the mirror
 
-1. `https://fiveacross.vercel.app/` loads the Bodega Event — with **no** Vercel login wall (if you hit one, step 1 created a preview deployment, not a production one).
-2. The auth iframe request in the network panel goes to `https://fiveacross.vercel.app/__/auth/iframe`, not to `fiveacross.firebaseapp.com`. If it points at `firebaseapp.com`, the `FIRST_PARTY_AUTH_HOSTS` entry or the `has` condition does not match the minted host.
-3. Google sign-in completes in a fresh session (a private window, so no existing session masks a broken registration) and the board deals.
-4. The board is the same Event the primary Bodega host serves — same Event id, same Edition chrome, same theme.
+1. `https://fiveacross.vercel.app/` loads the Bodega Event — with **no** Vercel login wall (if you hit one, step 1 created a preview deployment, not a production one). ✅
+2. The `<title>`, iOS home-screen label and PWA manifest all read the Edition's name, and the bundle carries the `fiveacross` project id, the Bodega Event id, and a non-empty `apiKey`. An empty `apiKey` in the bundle means the env vars did not reach the build — though the Vite blank-key guard should have failed the build first. ✅
+3. `/__/auth/iframe` returns Firebase's helper shell rather than the SPA's `index.html` — compare the two response bodies, they must differ. If they are identical, the auth rewrite lost its priority over the catch-all. ✅
+4. The auth iframe request in the network panel goes to `https://fiveacross.vercel.app/__/auth/iframe`, not to `fiveacross.firebaseapp.com`. If it points at `firebaseapp.com`, the `FIRST_PARTY_AUTH_HOSTS` entry or the `has` condition does not match the minted host. ✅
+5. Google sign-in completes in a fresh session (a private window, so no existing session masks a broken registration) and the board deals. **Blocked on steps 5 and 6.**
+6. The board is the same Event the primary Bodega host serves — same Event id, same Edition chrome, same theme. **Check after sign-in works.**
+
+Note that steps 3–4 prove the rewrite fires and reaches Firebase Hosting, but they cannot prove *which* Firebase project it reached: Firebase serves a byte-identical helper shell from every project, so no black-box request distinguishes `fiveacross` from `gaycruisebingo` here. That the correct one is reached follows from the deployed `vercel.json`, and is confirmed for real only by step 5's sign-in.
 
 ### Operating it
 
-The mirror deploys **automatically on every push to `main`**; the primary Firebase Hosting deploy is manual (`scripts/deploy.sh`). So the mirror can be *ahead* of the primary, serving merged-but-not-yet-deployed code. That is usually harmless and occasionally not — before an event, deploy the primary first and treat the mirror as already current.
+Once Git is connected, the mirror deploys **automatically on every push to `main`**; the primary Firebase Hosting deploy is manual (`scripts/deploy.sh`). So the mirror can be *ahead* of the primary, serving merged-but-not-yet-deployed code. That is usually harmless and occasionally not — before an event, deploy the primary first and treat the mirror as already current.
 
 Add the mirror to the post-deploy check for Five Across: after any deploy that touches `src/**`, load `https://fiveacross.vercel.app/` once and confirm the app mounts, alongside the `SYNTHETIC_URL` check the primary host gets from `scripts/deploy.sh`. The mirror is not covered by that synthetic — it is a different deploy pipeline entirely.
 
