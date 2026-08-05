@@ -171,11 +171,13 @@ describe('moderateProof export gating (#126)', () => {
     expect(typeof on.notifyItemModeration).toBe('function');
   });
 
-  it('pins bug-report intake to the Firebase Admin runtime identity', async () => {
+  it('pins bug-report intake to the PROJECT-RELATIVE Firebase Admin runtime identity', async () => {
     const mod = await importIndex();
-    expect(mod.submitBugReport.__endpoint.serviceAccountEmail).toBe(
-      'firebase-adminsdk-fbsvc@gaycruisebingo.iam.gserviceaccount.com',
-    );
+    // Ends in `@` on purpose: firebase-functions v2 completes it with the
+    // DEPLOYING project's id, so the same code deploys to both production
+    // projects (ADR 0008). A full `...@gaycruisebingo.iam.gserviceaccount.com`
+    // email here would 403 (iam.serviceaccounts.actAs) on fiveacross deploys.
+    expect(mod.submitBugReport.__endpoint.serviceAccountEmail).toBe('firebase-adminsdk-fbsvc@');
   });
 });
 

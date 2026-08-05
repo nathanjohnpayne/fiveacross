@@ -29,7 +29,16 @@ const visionClient = new vision.ImageAnnotatorClient();
 // The Firestore/Storage-authorized runtime identity. The project's default Gen2
 // compute account deliberately has NO Firestore or Storage data-plane access, so
 // every Admin-SDK function that reads/writes those planes must pin this account.
-const ADMIN_SDK_SERVICE_ACCOUNT = 'firebase-adminsdk-fbsvc@gaycruisebingo.iam.gserviceaccount.com';
+//
+// PROJECT-RELATIVE ON PURPOSE — do not "complete" this to a full email. This
+// repo deploys TWO production Firebase projects (ADR 0008: gaycruisebingo and
+// fiveacross), and both strip the default compute SA of data-plane access, so
+// both rely on this pin. firebase-functions v2 documents that a `serviceAccount`
+// string ending in `@` is completed with the DEPLOYING project's id, and both
+// projects' Admin-SDK accounts share the `firebase-adminsdk-fbsvc@<project>`
+// name. Hardcoding one project's full email breaks the other's deploy with
+// 403 iam.serviceaccounts.actAs (the fiveacross Bodega deploy failure).
+const ADMIN_SDK_SERVICE_ACCOUNT = 'firebase-adminsdk-fbsvc@';
 
 /**
  * Private, authenticated bug intake; App Check enforcement follows #44's
