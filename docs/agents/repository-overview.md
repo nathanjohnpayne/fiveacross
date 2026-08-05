@@ -6,7 +6,7 @@ One Brand wears an **Edition** per class of occasion and runs one **Event** per 
 
 ## Stack
 
-Vite + React 18 + TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · PostHog and GA4 · Cloudflare DNS and edge redirects. Player stats stay client-authoritative and the leaderboard is a client-side sort ([ADR 0001](../adr/0001-honor-system-trust-model.md)); the Functions package carries only what needs a server — scheduled Day unlocks and finale computation, threshold hiding, proof thumbnails, moderation email, bug-report intake, and Cloud Vision moderation behind a deploy-time gate.
+Vite + React 19 + TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · PostHog and GA4 · Cloudflare DNS and edge redirects. Player stats stay client-authoritative and the leaderboard is a client-side sort ([ADR 0001](../adr/0001-honor-system-trust-model.md)); the Functions package carries only what needs a server — scheduled Day unlocks and finale computation, threshold hiding, proof thumbnails, moderation email, bug-report intake, and Cloud Vision moderation behind a deploy-time gate.
 
 ## Agent role
 

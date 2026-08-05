@@ -28,7 +28,7 @@ Two production Firebase projects back these — `gaycruisebingo` and `fiveacross
 
 ## Stack
 
-Vite · React 18 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · GA4 and PostHog · Cloudflare DNS and edge redirects.
+Vite · React 19 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · GA4 and PostHog · Cloudflare DNS and edge redirects.
 
 The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, proof thumbnails, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate and stays off until deliberately enabled. Player stats stay client-authoritative by design (ADR 0001).
 
@@ -46,15 +46,23 @@ npm test                       # game-logic unit tests
 npm run typecheck              # tsc --noEmit, app + service worker
 ```
 
-`app-ci` gates every merge: typecheck, unit and component tests, build, the functions notifier tests (`test:functions`), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
+`app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions` — scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, and server-authoritative auto-hide), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
 
-Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (1Password-backed service-account impersonation; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards. **Pass the Firebase project explicitly** — `.firebaserc`'s default is `gaycruisebingo`, so a Five Across deploy that omits it ships to the wrong project:
+Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (1Password-backed service-account impersonation; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards.
+
+**A multi-Edition deploy has three independent knobs, and the script defaults all three to Gay Cruise Bingo.** Getting one right does not get the others right:
+
+1. **The build env.** `scripts/deploy.sh` builds before it deploys, from the ambient Vite env (`.env.local` / exported `VITE_*`). Passing a different Firebase target does not change what got baked — a Gay Cruise Bingo shell can publish a `med-2026` bundle straight to the `fiveacross` project.
+2. **The Firebase target.** `.firebaserc`'s default is `gaycruisebingo`, so a Five Across deploy that omits the project ships to the wrong one (ADR [0008](docs/adr/0008-five-across-second-firebase-project.md) § Consequences).
+3. **The cache zone.** `CF_ZONE_ID` falls back to a hardcoded Gay Cruise Bingo zone, so an unset value purges the wrong zone and leaves the Edition you just deployed stale. Set it to that Edition's zone, or pass `--skip-cf-purge` when the canonical host is not Cloudflare-proxied.
 
 ```bash
-SYNTHETIC_URL=https://bodega-bay.vacaybingo.com/ scripts/deploy.sh -- fiveacross --only hosting
+# Five Across — with the Five Across .env.local in place, not Gay Cruise Bingo's
+CF_ZONE_ID=<five-across-zone> SYNTHETIC_URL=https://<five-across-host>/ \
+  scripts/deploy.sh -- fiveacross --only hosting
 ```
 
-See app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md).
+The per-Edition env files, zone ids and the current Bodega recipe live in the app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md) — use those rather than adapting the Gay Cruise Bingo command by hand.
 
 ## Documentation
 
