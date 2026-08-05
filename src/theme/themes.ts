@@ -167,10 +167,37 @@ export const THEMES: ThemeMeta[] = [
     description:
       'The last slow morning. Fog silver, chowder cream, coffee brown, and dusk coral through the window.',
   },
+  // --- Five Across themes (#617) --------------------------------------------
+  // Occasion-neutral in the fiveacross register (#608): no place, no water, no
+  // spatial metaphor — a conference hall, a wedding, and a birthday weekend all
+  // have to read naturally in every line here. The arc is the shape any
+  // gathering shares: doors open, the peak, the wind-down.
+  {
+    id: 'marquee',
+    label: 'Marquee',
+    emoji: '✨',
+    description:
+      'Lights up, doors open. Bulb-gold warmth and ticket red on deep black—big-night energy for any occasion.',
+  },
+  {
+    id: 'confetti-hour',
+    label: 'Confetti Hour',
+    emoji: '🎊',
+    description:
+      'The peak of the celebration. Pink, teal, and gold popping on midnight blue.',
+  },
+  {
+    id: 'afterglow',
+    label: 'Afterglow',
+    emoji: '🌙',
+    description:
+      'The slow, happy wind-down. Dusk violet, ember orange, and one warm last light.',
+  },
 ];
 
 const GCB: readonly string[] = [DEFAULT_EDITION];
 const VACAY: readonly string[] = ['vacay'];
+const FIVEACROSS: readonly string[] = ['fiveacross'];
 
 /**
  * Which Editions each Theme may be PICKED on.
@@ -212,6 +239,10 @@ const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
   'the-birds': VACAY,
   'side-quests': VACAY,
   'fog-froth-farewells': VACAY,
+  // Five Across (#617).
+  marquee: FIVEACROSS,
+  'confetti-hour': FIVEACROSS,
+  afterglow: FIVEACROSS,
 };
 
 /**
@@ -224,11 +255,14 @@ const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
  * must be Edition-correct — and only changed after sign-in (Codex on #577). It
  * also covers an Event doc that simply has no `defaultTheme`.
  *
- * Bodega's is its Day 1 Theme, so the gate matches the first card.
+ * Bodega's is its Day 1 Theme, so the gate matches the first card. Five
+ * Across's is Marquee — the doors-open Theme, so the gate reads as "an event
+ * is about to happen" whatever the occasion is (#617).
  */
 const EDITION_DEFAULT_THEME: Record<string, ThemeId> = {
   gcb: 'neon-playground',
   vacay: 'the-birds',
+  fiveacross: 'marquee',
 };
 
 export function defaultThemeForEdition(edition: string = activeEdition()): ThemeId {
