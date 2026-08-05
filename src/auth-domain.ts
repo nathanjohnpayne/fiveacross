@@ -38,6 +38,22 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // which would put a player-facing backup host behind a vercel.com login wall.
   // Console setup: docs/app/preview-deploys.md § The Five Across mirror.
   'fiveacross.vercel.app',
+  // The Vacay Bingo backup host (#625): the third and last of the brand family's
+  // mirrors, alongside `gaycruisebingo.vercel.app` and `fiveacross.vercel.app`.
+  //
+  // Vacay is an EDITION of the `fiveacross` Firebase project, not a project of
+  // its own (ADR 0008 splits the data plane by cohort, not by brand), so this
+  // host's registrations and its `/__/auth/*` proxy target are `fiveacross`'s —
+  // identical to the entry above despite the different brand. Two separate
+  // host-conditional rules in `vercel.json` rather than one `inc` list: `eq` is
+  // the matcher already proven in production here, and a single list failing
+  // would take out both mirrors at once.
+  //
+  // It SERVES the branded app in place and must never redirect to
+  // `vacaybingo.com` — a mirror that bounces to the canonical host is worthless
+  // in the one situation it exists for, which is the canonical host being
+  // unreachable (#625).
+  'vacaybingo.vercel.app',
 ]);
 
 /** Keep production OAuth helper storage on the same origin as the app. */
