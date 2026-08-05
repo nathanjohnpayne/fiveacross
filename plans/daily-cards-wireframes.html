@@ -90,9 +90,97 @@
   [data-theme='bodega-side-quests']{--bg:#0a141c;--panel:#102030;--ink:#eef5f5;--dim:#9db4bd;
     --primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;--cell:#102030;
     --border:rgba(46,127,168,.4);--on-gradient:#f5fbfb}
-  [data-theme='fog-froth-farewells']{--bg:#efece4;--panel:#faf7ef;--ink:#33302b;--dim:#8a857b;
-    --primary:#b0764f;--secondary:#a8b8b2;--accent:#d1826e;--cell:#faf7ef;
-    --border:rgba(51,48,43,.16);--on-gradient:#faf7ef}
+  /* lucide sizing—official lucide-static SVGs inlined below (self-contained, no CDN);
+     each svg's data-lucide attribute names the icon for lucide-react in the real build */
+  svg.lucide{width:15px;height:15px;vertical-align:-2px;stroke-width:2}
+  .tab svg.lucide{width:17px;height:17px;display:block;margin:0 auto 1px}
+  .mi svg.lucide{width:14px;height:14px}
+  .chev svg.lucide{width:13px;height:13px}
+  .statusbar svg.lucide{width:13px;height:13px;vertical-align:-1px}
+  .safaribar svg.lucide{width:17px;height:17px;vertical-align:-3px}
+  .segbtn svg.lucide,.btn svg.lucide{width:12px;height:12px;vertical-align:-1.5px}
+  .play svg.lucide{width:11px;height:11px;vertical-align:0}
+  .lockicon svg.lucide{width:24px;height:24px}
+  i[data-lucide]{display:inline-block;min-width:2px}
+</style>
+<style>
+  /* ---------- page chrome ---------- */
+  body{margin:0;padding:32px 24px 64px;background:#ececf0;color:#2a2a2e;
+    font:14px/1.45 "Helvetica Neue",Arial,sans-serif}
+  h1{font-size:22px;margin:0 0 4px}
+  h2{font-size:16px;margin:36px 0 12px;border-top:1px solid #c9c9d0;padding-top:20px}
+  .sub{color:#77777f;margin:0 0 24px;max-width:760px}
+  .frames{display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start}
+  .unit{width:393px}
+  .cap{margin:10px 4px 0;font-size:12.5px;color:#77777f}
+  .cap b{color:#2a2a2e;display:block;font-size:13.5px;margin-bottom:2px}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:50%;border:1px solid #0003;
+    vertical-align:-1px;margin-right:2px}
+
+  /* ---------- real theme tokens (copied from src/theme/themes.css) ---------- */
+  [data-theme='neon-playground']{--bg:#07060d;--panel:#0e0a1a;--ink:#f6ecff;--dim:#b9a9d6;
+    --primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;--cell:#120c22;
+    --border:rgba(0,230,255,.35);--on-gradient:#000}
+  [data-theme='get-sporty']{--bg:#0a0f0b;--panel:#0f1712;--ink:#f2fff4;--dim:#a9c8b3;
+    --primary:#39ff88;--secondary:#eaffef;--accent:#ffe600;--cell:#0f1712;
+    --border:rgba(57,255,136,.35);--on-gradient:#000}
+  [data-theme='duty-free']{--bg:#0a0e1a;--panel:#101827;--ink:#eef3ff;--dim:#a9b6d6;
+    --primary:#ff4d5e;--secondary:#3aa0ff;--accent:#ffd23f;--cell:#101827;
+    --border:rgba(58,160,255,.35);--on-gradient:#000}
+  [data-theme='glamiators']{--bg:#0c0a08;--panel:#16120c;--ink:#fff7e8;--dim:#cbb489;
+    --primary:#e8c86a;--secondary:#c9a24a;--accent:#fffefb;--cell:#16120c;
+    --border:rgba(232,200,106,.35);--on-gradient:#000}
+  [data-theme='summer-white']{--bg:#f6f1e7;--panel:#fffdf8;--ink:#20170f;--dim:#7a6a58;
+    --primary:#8f600d;--secondary:#8a5c12;--accent:#20170f;--cell:#fffdf8;
+    --border:rgba(32,23,15,.18);--on-gradient:#fff}
+  [data-theme='dog-tag']{--bg:#0c0e0a;--panel:#14170f;--ink:#eef2e6;--dim:#aeb69a;
+    --primary:#b5c15a;--secondary:#8f9b8a;--accent:#ffd23f;--cell:#14170f;
+    --border:rgba(181,193,90,.35);--on-gradient:#000}
+  [data-theme='revival-disco']{--bg:#120a14;--panel:#1b1020;--ink:#ffeede;--dim:#c9a7c0;
+    --primary:#ff7a1a;--secondary:#c04bff;--accent:#ffd23f;--cell:#1b1020;
+    --border:rgba(192,75,255,.35);--on-gradient:#000}
+  [data-theme='seriously-pink']{--bg:#1a0713;--panel:#260a1c;--ink:#ffe9f5;--dim:#e59bc4;
+    --primary:#ff4fb0;--secondary:#ff9ed8;--accent:#fff06a;--cell:#260a1c;
+    --border:rgba(255,79,176,.45);--on-gradient:#000}
+  /* proposed new tutorial themes (spec § Theme reference) */
+  [data-theme='welcome-aboard']{--bg:#051019;--panel:#0a1a28;--ink:#eaf6ff;--dim:#9fbcd0;
+    --primary:#33c6ff;--secondary:#ffbe5c;--accent:#ffd23f;--cell:#0a1a28;
+    --border:rgba(51,198,255,.35);--on-gradient:#000}
+  [data-theme='so-long-farewell']{--bg:#140b12;--panel:#1e1019;--ink:#fff0ea;--dim:#d0a8ab;
+    --primary:#ff8b6a;--secondary:#feb47b;--accent:#ffd23f;--cell:#1e1019;
+    --border:rgba(255,139,106,.35);--on-gradient:#000}
+  /* unified day themes (schedule correction 2026-07-17) */
+  [data-theme='uniforms-without-borders']{--bg:#0a0d12;--panel:#12171f;--ink:#eef4f7;--dim:#a9b8ac;
+    --primary:#b5c15a;--secondary:#3aa0ff;--accent:#ffd23f;--cell:#12171f;
+    --border:rgba(181,193,90,.35);--on-gradient:#000}
+  [data-theme='neon-pink-playground']{--bg:#14061a;--panel:#1e0a26;--ink:#ffeafa;--dim:#e0a3d0;
+    --primary:#ff4fb0;--secondary:#00e6ff;--accent:#fff06a;--cell:#1e0a26;
+    --border:rgba(255,79,176,.4);--on-gradient:#000}
+  [data-theme='sporty-splash']{--bg:#04121a;--panel:#0a1c26;--ink:#eafaff;--dim:#9cc4d4;
+    --primary:#33c6ff;--secondary:#39ff88;--accent:#ffe600;--cell:#0a1c26;
+    --border:rgba(51,198,255,.38);--on-gradient:#000}
+  [data-theme='under-the-stars']{--bg:#070a18;--panel:#0d1224;--ink:#f2f2ff;--dim:#a9aed6;
+    --primary:#ffd76a;--secondary:#8f7bff;--accent:#fffefb;--cell:#0d1224;
+    --border:rgba(255,215,106,.3);--on-gradient:#000}
+  [data-theme='atlantis-classics']{--bg:#0b0e10;--panel:#131a1c;--ink:#f6f1ea;--dim:#c0b3a2;
+    --primary:#e2814d;--secondary:#2ec5b6;--accent:#ffd23f;--cell:#131a1c;
+    --border:rgba(226,129,77,.35);--on-gradient:#000}
+
+  /* Vacay Bingo (Bodega Bay POC) day themes — fiveacrossbingo PRD § Theme direction.
+     Sonoma Coast, deliberately non-tropical: fog silver, sea-glass green, Pacific blue,
+     weathered red, postcard cream. Same Theme token contract as every other day theme. */
+  [data-theme='the-birds']{--bg:#0d1113;--panel:#151b1e;--ink:#f2efe6;--dim:#a8b3ac;
+    --primary:#7fb8a4;--secondary:#c94f3d;--accent:#efe8d5;--cell:#151b1e;
+    --border:rgba(127,184,164,.35);--on-gradient:#0d1113}
+  [data-theme='side-quests']{--bg:#0a141c;--panel:#102030;--ink:#eef5f5;--dim:#9db4bd;
+    --primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;--cell:#102030;
+    --border:rgba(46,127,168,.4);--on-gradient:#f5fbfb}
+  /* Kept in sync with src/theme/themes.css. The sketch values for --dim, --primary
+     and --accent failed WCAG AA against this light ground (3.11 / 3.53 / 2.75), so
+     the shipped tokens keep each hue and drop only luminance. */
+  [data-theme='fog-froth-farewells']{--bg:#efece4;--panel:#faf7ef;--ink:#33302b;--dim:#66625a;
+    --primary:#8a5533;--secondary:#4f6b63;--accent:#a8462f;--cell:#faf7ef;
+    --border:rgba(138,85,51,.3);--on-gradient:#faf7ef}
 
   /* Vacay brand chrome: the "VACAY BINGO by Five Across" lockup (one-identity rule) */
   .vlock{text-align:center;line-height:1.15;padding:6px 0 2px}
