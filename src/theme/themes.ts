@@ -147,7 +147,9 @@ export const THEMES: ThemeMeta[] = [
   {
     id: 'fog-froth-farewells',
     label: 'Fog, Froth & Farewells',
-    emoji: '☕',
+    // Fog, not coffee: the froth is the surf and the fog is what Bodega Bay is
+    // actually known for. A cup read as coffee-shop rather than coastline.
+    emoji: '🌫️',
     description:
       'The last slow morning. Fog silver, chowder cream, coffee brown, and dusk coral through the window.',
   },
