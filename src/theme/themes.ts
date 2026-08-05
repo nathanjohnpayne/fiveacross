@@ -129,4 +129,71 @@ export const THEMES: ThemeMeta[] = [
     description:
       'Three decades of dance music—big anthems, diva voices, and classic sounds that still sound amazing today.',
   },
+  // --- Bodega Bay Day themes (#555, Vacay edition) --------------------------
+  {
+    id: 'the-birds',
+    label: 'The Birds Have Entered the Group Chat',
+    emoji: '🐦',
+    description:
+      'Coastal suspense with the volume just slightly too high. Eggshell, ink black, sea green, and one restrained streak of warning red.',
+  },
+  {
+    id: 'side-quests',
+    label: 'Bodega Bay Side Quests',
+    emoji: '🌊',
+    description:
+      'Take the detour. Deep Pacific blue, seafoam, fog white, and a buoy-orange flash on the horizon.',
+  },
+  {
+    id: 'fog-froth-farewells',
+    label: 'Fog, Froth & Farewells',
+    emoji: '☕',
+    description:
+      'The last slow morning. Fog silver, chowder cream, coffee brown, and dusk coral through the window.',
+  },
 ];
+
+/**
+ * Which Editions a Theme belongs to. Absent from this map = available
+ * everywhere (the shared party Themes, which predate Editions).
+ *
+ * This exists so a Bodega Theme never turns up in the Gay Cruise Bingo picker,
+ * and vice versa — the one-identity rule: after a player enters through an
+ * Edition's hostname, the experience shows that Edition and nothing else.
+ */
+const THEME_EDITIONS: Partial<Record<ThemeId, readonly string[]>> = {
+  'the-birds': ['vacay'],
+  'side-quests': ['vacay'],
+  'fog-froth-farewells': ['vacay'],
+  // Gay Cruise Bingo's own tutorial Themes are cruise-specific content.
+  'welcome-aboard': ['gcb'],
+  'so-long-farewell': ['gcb'],
+};
+
+/**
+ * The Themes a player may PICK on this Edition.
+ *
+ * Deliberately NOT a filter over the exported `THEMES`, which stays the
+ * complete registry: four components (`Leaderboard`, `dayIdentity`,
+ * `DaySwitcher`, `Board`) look a Theme up BY ID to render its emoji and label,
+ * and narrowing the registry would silently turn those lookups into fallbacks.
+ * Registry and pickable list are different things; only the latter is scoped.
+ *
+ * An unknown or absent Edition falls back to `gcb`, NOT to "shared only".
+ * Edition is not resolved anywhere yet (that is #543's hostname lookup), so
+ * every current caller passes nothing — and a "shared only" default would
+ * silently drop `welcome-aboard` / `so-long-farewell` out of the Gay Cruise
+ * Bingo picker the moment this lands. Defaulting to the legacy Edition keeps
+ * today's production behaviour byte-identical and makes this change purely
+ * additive until a caller starts passing a real Edition.
+ */
+export const DEFAULT_EDITION = 'gcb';
+
+export function themesForEdition(edition?: string | null): ThemeMeta[] {
+  const ed = edition || DEFAULT_EDITION;
+  return THEMES.filter((t) => {
+    const editions = THEME_EDITIONS[t.id];
+    if (!editions) return true; // shared, pre-Edition Themes
+    return editions.includes(ed);
+  });
+}

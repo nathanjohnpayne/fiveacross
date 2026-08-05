@@ -258,3 +258,60 @@
   --shadow: rgba(226, 129, 77, 0.4);
   --on-gradient: #000;
 }
+
+/* --------------------------------------------------------------------------
+   Bodega Bay Day themes (#555). Dark-ground like every other Theme here: the
+   brief's palettes (eggshell, fog silver, chowder cream) read as INK and
+   ACCENT against an ink-black or coffee ground rather than as backgrounds, so
+   the eight TEXT_PAIRS clear 4.5:1 without re-tuning the shared component CSS.
+   Themes change the emotional framing only -- no navigation or mechanics.
+   -------------------------------------------------------------------------- */
+
+/* The Birds Have Entered the Group Chat -- Hitchcock coastal suspense.
+   Eggshell on ink black, sea green, restrained warning red. Original artwork
+   only: no film stills, poster art, logos, or implied affiliation. */
+[data-theme='the-birds'] {
+  --bg: #0b0f0e;
+  --panel: #151c19;
+  --ink: #f2efe6;
+  --dim: #a9b5ac;
+  --primary: #6fbf9f;
+  --secondary: #e07a6f;
+  --accent: #e8d9a0;
+  --cell: #151c19;
+  --border: rgba(111, 191, 159, 0.35);
+  --shadow: rgba(111, 191, 159, 0.4);
+  --on-gradient: #000;
+}
+
+/* Bodega Bay Side Quests -- adventurous Sonoma Coast.
+   Deep Pacific blue, seafoam, fog white, buoy orange. */
+[data-theme='side-quests'] {
+  --bg: #041826;
+  --panel: #082738;
+  --ink: #eef7fb;
+  --dim: #a3c3d4;
+  --primary: #74e0c8;
+  --secondary: #ff9d4d;
+  --accent: #ffd98a;
+  --cell: #082738;
+  --border: rgba(116, 224, 200, 0.35);
+  --shadow: rgba(116, 224, 200, 0.4);
+  --on-gradient: #000;
+}
+
+/* Fog, Froth & Farewells -- soft final-morning warmth.
+   Fog silver, chowder cream, coffee brown, dusk coral. */
+[data-theme='fog-froth-farewells'] {
+  --bg: #1b1512;
+  --panel: #27201a;
+  --ink: #f6efe2;
+  --dim: #c4b7a9;
+  --primary: #f2a48c;
+  --secondary: #d9c9b4;
+  --accent: #ffd9a8;
+  --cell: #27201a;
+  --border: rgba(242, 164, 140, 0.35);
+  --shadow: rgba(242, 164, 140, 0.4);
+  --on-gradient: #000;
+}

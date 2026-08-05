@@ -37,7 +37,14 @@ export type ThemeId =
   | 'neon-pink-playground'
   | 'sporty-splash'
   | 'under-the-stars'
-  | 'atlantis-classics';
+  | 'atlantis-classics'
+  // Bodega Bay Day themes (#555, Five Across / Vacay edition). Scoped OUT of
+  // the Gay Cruise Bingo switcher by `themesForEdition`, but they stay in the
+  // `THEMES` registry so id->emoji/label lookups and the contrast suites cover
+  // them like any other Theme.
+  | 'the-birds'
+  | 'side-quests'
+  | 'fog-froth-farewells';
 
 // One Day of the cruise (daily-cards-spec § "Data model"). Ordered inside
 // `EventDoc.days` (length 10 for the July sailing, but the model assumes no

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { THEMES } from './themes';
+import { THEMES, themesForEdition, DEFAULT_EDITION } from './themes';
 import { ThemeProvider, useTheme } from './ThemeContext';
 import { contrastRatio, hexToRgb, parseThemeBlocks } from './contrast';
 
@@ -409,6 +409,56 @@ describe('Theme metadata (specs/w1-themes.md)', () => {
           `Theme "${t.id}" description leaks a mark: "${t.description}"`,
         ).not.toMatch(pattern);
       }
+    }
+  });
+});
+
+// --- Edition scoping (#555) --------------------------------------------------
+//
+// `THEMES` is the complete REGISTRY and must stay complete: Leaderboard,
+// dayIdentity, DaySwitcher and Board all look a Theme up BY ID for its emoji
+// and label, so narrowing the registry would turn those into silent fallbacks.
+// Only the PICKER is scoped. These pin that split.
+
+describe('themesForEdition — pickable list is scoped, registry is not', () => {
+  const ids = (edition?: string | null) => themesForEdition(edition).map((t) => t.id);
+
+  it('defaults to the legacy Edition, so today\'s picker is unchanged', () => {
+    // Edition is not resolved anywhere yet (#543). If this default ever became
+    // "shared only", the cruise's own tutorial Themes would vanish from its
+    // switcher the moment this shipped — a silent production regression.
+    expect(DEFAULT_EDITION).toBe('gcb');
+    expect(ids()).toContain('welcome-aboard');
+    expect(ids()).toContain('so-long-farewell');
+  });
+
+  it('never offers a Bodega Theme on the Gay Cruise Bingo picker', () => {
+    for (const id of ['the-birds', 'side-quests', 'fog-froth-farewells']) {
+      expect(ids('gcb')).not.toContain(id);
+    }
+  });
+
+  it('offers exactly the Bodega Themes on the Vacay picker, and no cruise ones', () => {
+    const vacay = ids('vacay');
+    for (const id of ['the-birds', 'side-quests', 'fog-froth-farewells']) {
+      expect(vacay).toContain(id);
+    }
+    expect(vacay).not.toContain('welcome-aboard');
+    expect(vacay).not.toContain('so-long-farewell');
+  });
+
+  it('offers the shared party Themes on every Edition', () => {
+    // Themes that predate Editions carry no scope and must not be lost by it.
+    for (const edition of ['gcb', 'vacay']) {
+      expect(ids(edition)).toContain('neon-playground');
+    }
+  });
+
+  it('leaves the REGISTRY complete regardless of Edition', () => {
+    // The id->emoji lookups depend on this; a scoped registry breaks them.
+    const registry = THEMES.map((t) => t.id);
+    for (const id of ['the-birds', 'welcome-aboard', 'neon-playground']) {
+      expect(registry).toContain(id);
     }
   });
 });
