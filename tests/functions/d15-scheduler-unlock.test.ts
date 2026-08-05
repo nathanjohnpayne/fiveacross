@@ -401,7 +401,8 @@ describe('runScheduledUnlock — the finale beats through the write path (AC 3)'
     expect(podiums).toHaveLength(1);
     expect(podiums[0].dayIndex).toBe(9);
     expect(podiums[0].id).toBe('podium'); // deterministic id → renders in the Feed (#228)
-    // The farewell Day's own snapshot is stamped by the same 08:00 run.
+    // The farewell Day's own snapshot is stamped by the SAME run that froze
+    // standings — one sweep does every beat that is due (#552).
     expect(db.readEvent().days!.find((d) => d.index === 9)!.snapshotItemIds).toEqual([]);
   });
 
