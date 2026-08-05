@@ -89,14 +89,18 @@ export async function bootstrapEventResolution(
     // needs `signedIn()`, so the sign-in gate would otherwise render another
     // product's wordmark.
     //
-    // Guarded, because "no Edition in the resolution" is not the same as "the
-    // default Edition". The env short-circuit returns `edition: null` — it never
-    // reads a hostname document — so an unconditional call would reset a
-    // single-Event Vacay build (`VITE_EVENT_ID` + `VITE_EDITION=vacay`) straight
-    // back to `gcb` and undo the seed `editions.ts` just made from the very same
-    // env (Codex on #576). Only a lookup that actually named an Edition may
-    // overwrite the build's own.
-    if (resolution.edition) setActiveEdition(resolution.edition);
+    // Guarded on `null`, not truthiness, because the type separates two
+    // different absences. The env short-circuit returns `edition: null` — it
+    // never reads a hostname document — so calling the setter there would reset
+    // a single-Event Vacay build (`VITE_EVENT_ID` + `VITE_EDITION=vacay`)
+    // straight back to `gcb` and undo the seed `editions.ts` just made from the
+    // very same env (Codex on #576). A lookup that RAN, though, owns the
+    // pre-auth brand outright: a routing doc with a missing/blank edition comes
+    // back as `''`, and `setActiveEdition('')` resets to the default Edition —
+    // otherwise a stray `VITE_EDITION` baked into a hostname-resolved build
+    // would outrank the mapping it exists to defer to (Codex P3 round 6 on
+    // #576).
+    if (resolution.edition !== null) setActiveEdition(resolution.edition);
   }
   return resolution;
 }

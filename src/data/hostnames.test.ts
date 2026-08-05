@@ -114,12 +114,30 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     }
   });
 
-  it('does NOT reset the Edition when the resolution carries none', async () => {
-    // The env short-circuit returns `edition: null`; a single-Event Vacay build
-    // seeds its Edition from VITE_EDITION and must keep it (Codex on #576).
+  it('keeps the VITE_EDITION seed on the env short-circuit (edition: null)', async () => {
+    // A single-Event Vacay build (`VITE_EVENT_ID` + `VITE_EDITION=vacay`) never
+    // reads a hostname document, so its resolution carries `edition: null` and
+    // the seed editions.ts made from the env must survive (Codex on #576).
+    vi.stubEnv('VITE_EVENT_ID', 'med-2026');
+    try {
+      setActiveEdition('vacay');
+      const r = await bootstrapEventResolution('bodega-bay.vacaybingo.com');
+      expect(r).toMatchObject({ kind: 'event', source: 'env' });
+      expect(mocks.getDocFromServer).not.toHaveBeenCalled();
+      expect(activeEdition()).toBe('vacay');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('resets a blank lookup Edition to the default — the lookup owns the brand', async () => {
+    // The other absence: the lookup RAN and the routing doc names no edition
+    // (coerced to ''). A stray VITE_EDITION baked into a hostname-resolved
+    // build must not outrank the mapping, so `setActiveEdition('')` falls back
+    // to the default Edition (Codex P3 round 6 on #576).
     setActiveEdition('vacay');
     mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, edition: '' }));
     await bootstrapEventResolution('bodega-bay.vacaybingo.com');
-    expect(activeEdition()).toBe('vacay');
+    expect(activeEdition()).toBe(DEFAULT_EDITION);
   });
 });
