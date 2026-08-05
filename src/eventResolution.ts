@@ -20,6 +20,13 @@ export type Resolution =
       eventId: string;
       canonicalHost: string | null;
       edition: string | null;
+      /** The first hostname label identifying the Event (CONTEXT.md §
+       *  Slug), e.g. `bodega-bay` — an analytics dimension (#556), never an
+       *  authorization secret. `null` on the env short-circuit (no hostname
+       *  document was read) and when a legacy routing document predates the
+       *  field; callers fall back to `eventId` as the closest available
+       *  identifier. */
+      slug: string | null;
       /** Where the answer came from — surfaced for diagnostics, never for logic. */
       source: 'cache' | 'network' | 'env';
     }
@@ -146,6 +153,7 @@ const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => (
   eventId: doc.eventId,
   canonicalHost: doc.canonicalHost,
   edition: doc.edition,
+  slug: doc.slug ?? null,
   source,
 });
 
@@ -220,7 +228,7 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
 
   // 0. Single-Event build: answer immediately, never touch the network.
   if (envEventId) {
-    return { kind: 'event', eventId: envEventId, canonicalHost: null, edition: null, source: 'env' };
+    return { kind: 'event', eventId: envEventId, canonicalHost: null, edition: null, slug: null, source: 'env' };
   }
 
   const cached = readCache(storage, hostname, now());

@@ -276,6 +276,20 @@ export async function initPostHog(): Promise<void> {
     pendingIdentifyUid = null;
     phIdentify(uid);
   }
+  // Replay dimensions registered while init was still probing (#556), BEFORE
+  // any queued capture below — `posthog.register()`'s super-properties are
+  // attached to every FUTURE capture, so registering first means a replayed
+  // pre-init capture (e.g. an `app_crash`) still carries brand/edition/Event
+  // context instead of going out bare.
+  if (pendingRegister !== null) {
+    const props = pendingRegister;
+    pendingRegister = null;
+    try {
+      posthog.register(props);
+    } catch {
+      /* no-op */
+    }
+  }
   // Replay queued captures AFTER the identify above, so an `app_crash` from the
   // probe window is attributed to the signed-in player rather than orphaned
   // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
@@ -421,6 +435,35 @@ export function phIdentify(uid: string): void {
   }
   try {
     posthog.identify(uid);
+  } catch {
+    /* no-op */
+  }
+}
+
+// Dimensions registered before init settled (#556) — merged (not replaced)
+// as calls arrive, so a call BEFORE `ready` (brand/edition/Event at startup)
+// and one AFTER (day_index once the Event doc has loaded) both survive to
+// the single replay in `initPostHog`. `null` means "nothing queued yet",
+// distinct from `{}` (a call that queued zero keys — never happens today,
+// kept distinct anyway so a future no-op call cannot look like "unset").
+let pendingRegister: Record<string, unknown> | null = null;
+
+/**
+ * Register PostHog super-properties: attached to every capture from THIS
+ * point forward, including autocaptured pageviews and events already queued
+ * by `phCapture`'s own pre-init buffer — the GA4-side equivalent is
+ * `setDefaultEventParameters` (src/analytics.ts's `registerAnalyticsDimensions`
+ * / `registerDayIndexDimension`, #556). Queues-and-merges before init settles,
+ * mirroring `phIdentify`'s replay so brand/edition/Event context is never
+ * dropped on the startup race.
+ */
+export function phRegister(props: Record<string, unknown>): void {
+  if (!ready) {
+    pendingRegister = { ...(pendingRegister ?? {}), ...props };
+    return;
+  }
+  try {
+    posthog.register(props);
   } catch {
     /* no-op */
   }

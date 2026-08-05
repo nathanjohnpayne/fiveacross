@@ -3,10 +3,11 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { ThemeProvider } from './theme/ThemeContext';
-import { todaysDayTheme } from './theme/autoTheme';
+import { todaysDayTheme, todaysDayIndex } from './theme/autoTheme';
 import { defaultThemeForEdition } from './theme/themes';
 import { useEventDoc, useMyPlayer } from './hooks/useData';
 import { initPostHog, phIdentify, phReset, isLocalDevHost } from './posthog';
+import { registerAnalyticsDimensions, registerDayIndexDimension } from './analytics';
 import { isSyntheticProbe } from './synthetic-probe';
 import type { ThemeId } from './types';
 import App from './App';
@@ -82,6 +83,15 @@ function ThemedApp() {
   // (Firestore-backed `event`) and handed down precomputed so ThemeContext
   // itself stays Firestore-free, mirroring `defaultTheme` above.
   const autoThemeId = todaysDayTheme(event, now);
+  // The `day_index` analytics dimension (#556) — same Day-schedule
+  // resolution as `autoThemeId` above, projected onto the index instead of
+  // the theme. Registered (not threaded through every `track()` call) so
+  // events with no Day context of their own — `login`, `share_click` — still
+  // carry it, and re-registered whenever the resolved Day rolls over.
+  const dayIndexDimension = todaysDayIndex(event, now);
+  useEffect(() => {
+    if (!isSyntheticProbe()) registerDayIndexDimension(dayIndexDimension);
+  }, [dayIndexDimension]);
   // Tie PostHog events to the signed-in User by uid; clear on sign-out. (#96)
   // Kept here (not in AuthContext) so the analytics wiring stays out of the
   // protected src/auth/** path. Wait for auth to resolve (`!loading`) before
@@ -157,6 +167,15 @@ const appTree = (
  */
 void bootstrapEventResolution()
   .then((resolution) => {
+    // Register the brand/edition/Event analytics dimensions (#556) as soon as
+    // they are known, regardless of which branch below ends up rendering —
+    // even the not-found and auth-blocked screens below fire GA4's automatic
+    // events, so those screens should carry Event context too, same as
+    // ConsentNotice's disclosure obligation a few lines down. Skipped for the
+    // uptime synthetic (#142), matching `initPostHog`'s own guard above.
+    if (resolution.kind === 'event' && !isSyntheticProbe()) {
+      registerAnalyticsDimensions({ eventId: resolution.eventId, eventSlug: resolution.slug });
+    }
     // An Event can resolve on an origin the AUTH stack has never been
     // configured for — hostname resolution is exactly what made that possible
     // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there

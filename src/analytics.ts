@@ -1,7 +1,8 @@
-import { logEvent } from 'firebase/analytics';
+import { logEvent, setDefaultEventParameters } from 'firebase/analytics';
 import { analytics } from './firebase';
-import { phCapture } from './posthog';
+import { phCapture, phRegister } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
+import { activeEdition } from './editions';
 
 /**
  * GA4 event catalog — the single source of truth for every analytics event
@@ -83,4 +84,75 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
   // "the Player marked a Square on this device" (e.g. marks synced from
   // another device, then undone here first).
   if (name === 'mark_square' && params?.marked === true) markSquareOccurred();
+}
+
+/**
+ * Five Across's single Brand identity (CONTEXT.md § Brand: "One Brand
+ * exists"). A constant, not a lookup — unlike Edition and Event there is
+ * exactly one value, and it never varies per build or per hostname.
+ */
+export const BRAND_ID = 'five-across';
+
+/**
+ * Register the Event-identity dimensions every subsequent analytics event on
+ * BOTH sinks must carry (#556, part of #532): `brand_id`, `edition_id`,
+ * `event_id`, `event_slug`. Registered ONCE, at startup — the GA4-side
+ * `setDefaultEventParameters` and PostHog-side `phRegister` are each this
+ * module's existing "register, don't thread through every call site"
+ * mechanism, the same posture `track()` already takes toward per-event
+ * params. Call site: `main.tsx`, right after `bootstrapEventResolution`
+ * resolves a `kind: 'event'` Resolution (src/eventResolution.ts).
+ *
+ * `edition_id` reads `activeEdition()` (src/editions.ts) at call time rather
+ * than taking an argument: `bootstrapEventResolution` installs the resolved
+ * Edition via `setActiveEdition` before returning, so the accessor already
+ * reflects it (or the env-seeded default, for a single-Event build) by the
+ * time a caller can reach this function.
+ *
+ * `eventSlug` falls back to the Event id when the Slug is unknown — a
+ * single-Event build's Resolution never read a `hostnames/{host}` document
+ * (see `Resolution.slug`'s own doc in eventResolution.ts), so it has no
+ * separate Slug to report and the Event id is the closest identifier there is.
+ */
+export function registerAnalyticsDimensions(resolved: { eventId: string; eventSlug: string | null }): void {
+  const dims = {
+    brand_id: BRAND_ID,
+    edition_id: activeEdition(),
+    event_id: resolved.eventId,
+    event_slug: resolved.eventSlug ?? resolved.eventId,
+  };
+  try {
+    setDefaultEventParameters(dims);
+  } catch {
+    /* no-op */
+  }
+  phRegister(dims);
+}
+
+/**
+ * Register the `day_index` dimension (#556) — kept SEPARATE from
+ * `registerAnalyticsDimensions` because it is not known at startup. It comes
+ * from the signed-in Event doc's Day schedule (`todaysDayIndex`,
+ * src/theme/autoTheme.ts), resolved only once `useEventDoc` loads, and it
+ * CHANGES mid-session the moment a Day unlocks. `main.tsx`'s `ThemedApp`
+ * calls this from a `useEffect` keyed on the resolved index — the same
+ * schedule it already watches to recompute `todaysDayTheme` — rather than
+ * threading `dayIndex` through every `track()` call site (most of which,
+ * e.g. `login` or `share_click`, have no Day context of their own to pass).
+ *
+ * A `null` index (no Event doc yet, or no Days configured) is a deliberate
+ * no-op: there is nothing correct to register yet, and leaving the
+ * dimension unset is a better answer than guessing. A previously-registered
+ * value is not cleared by a later `null` — the same "sticks for the
+ * session" posture `registerAnalyticsDimensions`'s dimensions already have.
+ */
+export function registerDayIndexDimension(dayIndex: number | null): void {
+  if (dayIndex == null) return;
+  const dims = { day_index: dayIndex };
+  try {
+    setDefaultEventParameters(dims);
+  } catch {
+    /* no-op */
+  }
+  phRegister(dims);
 }

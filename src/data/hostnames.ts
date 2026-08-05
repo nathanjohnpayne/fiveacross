@@ -4,6 +4,7 @@ import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
+import { applyResolvedCanonicalHost } from '../canonicalHost';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
@@ -110,6 +111,13 @@ export async function bootstrapEventResolution(
     // thing that stops a Vacay Event from sitting in a tab labelled "Gay
     // Cruise Bingo".
     applyEditionDocumentIdentity();
+    // The canonical hostname (#556, CONTEXT.md § Canonical hostname) — the
+    // address analytics and share metadata must report even when the Player
+    // is presently on a validated Alias. `null` on the env short-circuit is
+    // correct as-is: a single-Event build has no separate Alias concept, so
+    // `canonicalOrigin()`'s own `window.location` fallback already IS
+    // canonical for that build.
+    applyResolvedCanonicalHost(resolution.canonicalHost);
   }
   return resolution;
 }

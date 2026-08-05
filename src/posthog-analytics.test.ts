@@ -3,7 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // posthog-js is mocked so no real SDK loads; VITE_POSTHOG_KEY is unset in the
 // base test env, so the statically-imported module stays in its disabled state.
 vi.mock('posthog-js', () => ({
-  default: { init: vi.fn(), capture: vi.fn(), identify: vi.fn(), reset: vi.fn() },
+  default: { init: vi.fn(), capture: vi.fn(), identify: vi.fn(), reset: vi.fn(), register: vi.fn() },
 }));
 
 import posthog from 'posthog-js';
@@ -19,6 +19,7 @@ import {
   posthogReady,
   phCapture,
   phIdentify,
+  phRegister,
   phReset,
   isLocalDevHost,
   stripUrlSecrets,
@@ -208,10 +209,12 @@ describe('PostHog init guard', () => {
     expect(posthogReady()).toBe(false);
     phCapture('login', { method: 'google' });
     phIdentify('u1');
+    phRegister({ brand_id: 'five-across' });
     phReset();
     expect(posthog.init).not.toHaveBeenCalled();
     expect(posthog.capture).not.toHaveBeenCalled();
     expect(posthog.identify).not.toHaveBeenCalled();
+    expect(posthog.register).not.toHaveBeenCalled();
   });
 });
 
@@ -483,6 +486,68 @@ describe('PostHog init with a key', () => {
     // must not leak the stubbed fetch into later tests and cascade.
     vi.unstubAllGlobals();
     expect(ph.identify).not.toHaveBeenCalled();
+  });
+
+  it('forwards super-properties directly once ready (#556)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb' });
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across', edition_id: 'gcb' });
+  });
+
+  it('queues a registration that arrived during the init probe window and replays it once ready (#556)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ type: 'opaque' } as Response));
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog();
+    mod.phRegister({ brand_id: 'five-across' });
+    expect(ph.register).not.toHaveBeenCalled(); // not ready yet — queued, not lost
+    await initSettled;
+    vi.unstubAllGlobals();
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across' });
+  });
+
+  it('merges MULTIPLE pre-init registrations into a single replay (#556)', async () => {
+    // brand/edition/Event register at startup; day_index can register
+    // separately once the Event doc loads — both must survive to one replay.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ type: 'opaque' } as Response));
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog();
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb' });
+    mod.phRegister({ day_index: 3 });
+    await initSettled;
+    vi.unstubAllGlobals();
+    expect(ph.register).toHaveBeenCalledTimes(1);
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across', edition_id: 'gcb', day_index: 3 });
+  });
+
+  it('replays a registration BEFORE the queued capture, so a replayed capture carries the new dimensions (#556)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phRegister({ brand_id: 'five-across' });
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const captureOrder = (ph.capture as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(registerOrder).toBeLessThan(captureOrder);
   });
 });
 
