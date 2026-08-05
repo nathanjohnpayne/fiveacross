@@ -11,7 +11,7 @@
 // Day's snapshot" once approved. `npm run test:e2e` DOES boot the Functions
 // emulator (scripts/test-e2e.sh: `--only auth,firestore,storage,functions`),
 // but the scheduler that stamps a Day's `snapshotItemIds`
-// (`functions/src/unlockDay.ts`'s `unlockDay`/`unlockDayFinaleLastCall`) is a
+// (`functions/src/unlockDay.ts`, driven by the hourly `unlockDay` trigger) is a
 // CRON trigger — unreachable inside a short-lived test run — and its one
 // on-demand escape hatch, the `unlockDayNow` callable (admin-gated,
 // `functions/src/index.ts`), has NO wired UI affordance anywhere in

@@ -274,13 +274,40 @@ async function runScheduledUnlockForActiveEvents(): Promise<void> {
   }
 }
 
+/**
+ * ONE hourly UTC trigger, replacing the two `Europe/Rome` ones (#552).
+ *
+ * The Rome pins were correct only for a Mediterranean sailing. In August they
+ * fire at 23:00 and 11:00 Pacific, so a Bodega Day due at 06:00 PT would not
+ * snapshot until 11:00 AM — a five-hour window with every card locked, on a
+ * trip where the whole point is that the card is waiting when people wake up.
+ * A per-timezone trigger per Event does not scale either: it would mean a
+ * deploy every time an Event is created somewhere new.
+ *
+ * Hourly UTC serves every timezone at once because unlock times are whole
+ * hours: 06:00 PT is exactly 13:00 UTC, 08:00 Rome exactly 06:00 UTC. Cron
+ * fires on the hour, so each Event's beat is picked up in the same minute it
+ * becomes due, wherever it is.
+ *
+ * SAFE TO RUN 24x A DAY because every beat is self-guarded, not schedule-timed
+ * (`runScheduledUnlock`, functions/src/unlockDay.ts):
+ *   - a Day snapshot writes only when `unlockAt` has passed AND
+ *     `snapshotItemIds` is still absent, re-checked inside a transaction, so a
+ *     second run is a no-op rather than a re-stamp;
+ *   - the freeze is a transactional `frozenAt` flip, so exactly one run wins;
+ *   - `last_call` and `podium` Moments dedupe on an existing-Moment check.
+ * The schedule was never what made these fire once — it only decided how soon
+ * they fired. Running hourly makes them prompt without making them repeat.
+ *
+ * This also retires the DST caveat in specs/d15-scheduler-unlock.md: with a
+ * fixed-offset UTC schedule there is no local-time shift to reason about, and
+ * the 12h last-call lead is derived from the Day schedule rather than a cron.
+ *
+ * The admin "unlock now" callable (`unlockDayNow`, below) is unchanged and
+ * remains the manual fallback for function lag or failure.
+ */
 export const unlockDay = onSchedule(
-  { schedule: '0 8 * * *', timeZone: 'Europe/Rome', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
-  () => runScheduledUnlockForActiveEvents(),
-);
-
-export const unlockDayFinaleLastCall = onSchedule(
-  { schedule: '0 20 * * *', timeZone: 'Europe/Rome', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  { schedule: '0 * * * *', timeZone: 'Etc/UTC', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   () => runScheduledUnlockForActiveEvents(),
 );
 
