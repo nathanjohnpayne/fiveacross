@@ -36,7 +36,14 @@
  * unit-testable without a Functions runtime and no live backend is touched
  * under test (mirrors `unlockDay.ts`).
  */
-import { buildDailyEmailModel, type EmailDay, type EmailEvent, type EmailPlayer } from './dailyEmailContent';
+import {
+  buildDailyEmailModel,
+  standingsThrough,
+  type EmailDay,
+  type EmailEvent,
+  type EmailPlayer,
+} from './dailyEmailContent';
+import { tutorialDayIndexes, type FinaleDayStat } from './finaleContent';
 import { renderDailyEmailHtml, renderDailyEmailText } from './dailyEmailTemplate';
 import {
   ensureEmailPrefs,
@@ -52,7 +59,6 @@ import type { sendEmail } from './email';
 // --- Minimal admin-SDK Firestore surface ----------------------------------------
 
 interface Snapshot {
-  readonly exists: boolean;
   readonly id: string;
   data(): Record<string, unknown> | undefined;
 }
@@ -60,13 +66,10 @@ interface Query {
   where(field: string, op: string, value: unknown): Query;
   get(): Promise<{ docs: Snapshot[] }>;
 }
-/** The minimal surface the daily email uses: doc reads, roster/hostname
- *  queries, and the opt-out doc writes (via `EmailPrefsFirestore`). */
+/** The minimal surface the daily email uses: the opt-out doc surface
+ *  (`EmailPrefsFirestore`, inherited whole — including its `create`) plus the
+ *  roster and hostname queries. */
 export interface DailyEmailFirestore extends EmailPrefsFirestore {
-  doc(path: string): {
-    get(): Promise<Snapshot>;
-    set(data: Record<string, unknown>, options?: { merge?: boolean }): Promise<unknown>;
-  };
   collection(path: string): Query;
 }
 
@@ -128,6 +131,39 @@ function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/**
+ * Normalize a `dayStats` map read off a Player doc, dropping every entry that
+ * is not a well-formed `{ bingoCount, squaresMarked, firstBingoAt }`.
+ *
+ * `players/{uid}` is SELF-WRITABLE by design (ADR 0001 — stats are
+ * client-authoritative), so `dayStats` is untrusted runtime shape, not a
+ * contract. A single row carrying `{ dayStats: { 0: null } }` — reachable by
+ * any participant, deliberately or by a client bug — would otherwise throw
+ * while building the model and take the WHOLE Event's send down with it (Codex
+ * #623 P2). This is the same defensive normalization `readFinaleRoster` applies
+ * in `unlockDay.ts`, and for the same reason.
+ */
+export function sanitizeEmailDayStats(value: unknown): Record<number, FinaleDayStat> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<number, FinaleDayStat> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const dayIndex = Number(key);
+    if (!Number.isInteger(dayIndex) || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const stat = raw as Record<string, unknown>;
+    if (typeof stat.bingoCount !== 'number' || !Number.isFinite(stat.bingoCount)) continue;
+    if (typeof stat.squaresMarked !== 'number' || !Number.isFinite(stat.squaresMarked)) continue;
+    out[dayIndex] = {
+      bingoCount: stat.bingoCount,
+      squaresMarked: stat.squaresMarked,
+      firstBingoAt:
+        typeof stat.firstBingoAt === 'number' && Number.isFinite(stat.firstBingoAt)
+          ? stat.firstBingoAt
+          : null,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** The Event's roster as `EmailPlayer[]`, ban-filtered. Mirrors
  *  `readFinaleRoster`/`visibleFinaleRoster` in `unlockDay.ts` — the standings a
  *  banned Player is hidden from must be the same standings the email prints. */
@@ -151,7 +187,7 @@ export async function readEmailRoster(
           typeof data.firstBingoAt === 'number' && Number.isFinite(data.firstBingoAt)
             ? data.firstBingoAt
             : null,
-        dayStats: data.dayStats as EmailPlayer['dayStats'],
+        dayStats: sanitizeEmailDayStats(data.dayStats),
       };
     })
     .filter((p) => p.uid !== '' && !bannedUids.includes(p.uid));
@@ -224,7 +260,26 @@ export interface DailyEmailDeps extends OptOutDeps {
   maxRecipients?: number;
 }
 
+
 const DEFAULT_PACING_MS = 550;
+
+/**
+ * The per-run recipient ceiling — deliberately far ABOVE what one run can
+ * actually deliver.
+ *
+ * A ROSTER LARGER THAN ONE RUN IS FINE, and that is the design rather than a
+ * gap. Paced sending means a big roster can outlast the function's 540s
+ * timeout: at the default 550ms spacing a run gets through roughly 900
+ * recipients before the platform kills it mid-loop. The next sweep — fifteen
+ * minutes later, still inside the six-hour due window — resumes exactly where
+ * this one stopped, because every recipient already mailed carries
+ * `lastSentDayIndex` and is skipped. Nobody is mailed twice and nobody is
+ * missed; the send simply spreads across a few sweeps.
+ *
+ * So this cap bounds a PATHOLOGICAL roster (a corrupted `players` collection),
+ * it does not size a batch. Lowering it to "what fits in one run" would
+ * silently cap large Events instead of letting them drain.
+ */
 const DEFAULT_MAX_RECIPIENTS = 2000;
 
 async function defaultGetEmailForUid(uid: string): Promise<string | null> {
@@ -285,6 +340,11 @@ export async function sendDailyEmailForEvent(
 
   const roster = await readEmailRoster(db, eventId, event.bannedUids ?? []);
   if (roster.length === 0) return { sent: 0, skipped: 0, failed: 0, reason: 'no-roster' };
+  // ONCE for the whole send, not once per recipient: the standings snapshot is
+  // identical for everyone (the rank line is a lookup into it), so recomputing
+  // it inside the loop would re-slice and re-sort the roster N times for the
+  // same answer — quadratic in roster size.
+  const ranked = standingsThrough(roster, day.index, tutorialDayIndexes(event.days ?? []));
 
   const result: DailySendResult = { sent: 0, skipped: 0, failed: 0 };
   let attempted = 0;
@@ -314,6 +374,7 @@ export async function sendDailyEmailForEvent(
         event,
         day,
         players: roster,
+        ranked,
         recipient: { uid: player.uid, displayName: player.displayName },
         edition,
         feedUrl,

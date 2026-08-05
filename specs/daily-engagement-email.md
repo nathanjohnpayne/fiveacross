@@ -17,7 +17,7 @@ Seven, in a fixed order, in both the HTML and the plain-text part. Editions chan
 
 1. **Preheader** — hidden body text clients show beside the subject. The Day plus one hook, ~85 characters, never a second sentence.
 2. **Theme header** — the Day's Theme emoji + label in display type over a two-token gradient band, with the context line (`Day N of M · weekday, date · Place`) and the Theme's five-swatch palette strip. This is the module that makes the email resemble the Day.
-3. **Standings snapshot** — the top three through YESTERDAY (today's card has only just unlocked), plus one personalized "You're #N" line. On the opening Day, or any Day nobody has played, it renders its empty state and sells the two open honors instead of showing a podium of ties.
+3. **Standings snapshot** — the top three through YESTERDAY (today's card has only just unlocked), plus one personalized "You're #N" line. On the opening Day, or any Day nobody has played, it renders its empty state and sells the two open honors instead of showing a podium of ties — in two variants, because "the cruise starts today" is true on Day 1 and plainly false on Day 4.
 4. **Participation nudge** — the greeting, the arrival line in the Edition's register, today's unlock time, and the Day's "Tonight:" line when it publishes one.
 5. **Photos + award** — the two content requirements ride together, the same module every Day, because norms are built by repetition.
 6. **Feed CTA** — one bulletproof button, "Open the Feed", deep-linking the Event's canonical host ([#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599)). The Feed, not the Card: the email's job is the social loop.
@@ -27,6 +27,18 @@ Seven, in a fixed order, in both the HTML and the plain-text part. Editions chan
 - **Given** the opening Day of a Vacay Event **then** the standings module renders its empty state naming the trip-wide honor, the subject tail is "your card is live", and the award line reads "most-loved photo of the trip". (Test: "renders the Bodega Day 1 empty state in the trip register".)
 - **Given** two recipients of the same send **then** the ONLY differences are the greeting and the "You're #N" line; every other field is identical. (Test: "personalizes exactly one line".)
 - **Given** an address that is not on the roster **then** no rank line is rendered rather than a rank nobody holds. (Test: "omits the rank line for an address that is not on the roster".)
+- **Given** a later Day on which nobody has played **then** the empty state says the honors are wide open rather than that the occasion starts today. (Test: "does not claim the occasion \"starts today\" on a LATER empty Day".)
+
+### Ranking parity
+
+Ranking is `compareFinalePlayers`, so the email, the podium and the in-app Leaderboard can never disagree about who is ahead. Two subtleties carry the same parity:
+
+**Tutorial Days count for score, not for the ⭐.** A bingo on the embark Day is real play and is summed into the standings, but the Event-wide First to BINGO honor deliberately excludes Tutorial Days ([ADR 0011](../docs/adr/0011-scoring-policy-stated-not-inferred.md), mirrored in `finaleContent.ts`) — and so does the `firstBingoAt` tie-break that rides on it. Without that exclusion an embark-Day winner would take the ⭐ in the email while the in-app Leaderboard gave it to someone else.
+
+**`dayStats` is untrusted runtime shape.** `players/{uid}` is self-writable by design ([ADR 0001](../docs/adr/0001-honor-system-trust-model.md) — stats are client-authoritative), so a row carrying `{ dayStats: { 0: null } }` is reachable by any participant. It is sanitized at the read boundary (`sanitizeEmailDayStats`, the same normalization `readFinaleRoster` applies) and skipped defensively inside `standingsThrough`, because one malformed row throwing would suppress the entire Event's send.
+
+- **Given** a Tutorial Day carrying the earliest bingo **then** its score counts and its timestamp does not, so the ⭐ goes to the earliest non-Tutorial bingo. (Tests: "excludes Tutorial Days from the ⭐ and its tie-break", "carries the Event's Tutorial Days through the model".)
+- **Given** a malformed `dayStats` row **then** the snapshot is built without it rather than throwing. (Tests: "survives a malformed dayStats row", "sanitizes dayStats at the read boundary".)
 
 ## Edition register
 
@@ -41,7 +53,11 @@ The app keeps a Theme's label and emoji in `src/theme/themes.ts` and its palette
 A mirror without a parity test is how mirrors drift, so the suite parses both app sources and asserts the table matches them id-for-id and hex-for-hex. It is intended to fail if a Theme is added, removed or re-palettised on either side alone.
 
 - **Given** the app Theme registry **then** the mirror covers exactly the same ids and carries each label, emoji and palette hex verbatim. (Tests under "Day-Theme token mirror".)
-- **Given** an unknown, absent or inherited Theme id **then** the tokens fall back to the Edition-default Theme rather than to grey. (Test: "falls back to the default Theme for an unknown id".)
+- **Given** an unknown, absent or inherited Theme id **then** the tokens fall back to that EDITION's default Theme — `the-birds` for Vacay, `marquee` for Five Across — rather than to grey, and rather than to Gay Cruise Bingo's default, which would put another product's visual identity on a degraded Day. (Tests: "falls back to the default Theme for an unknown id", "falls back to the EDITION default", "mirrors the app's per-Edition default Theme".)
+
+**Dates are calendar labels, not instants.** `DayDef.date` is already the Event's local calendar date, so `formatDayDate` renders it in UTC and takes no timezone argument at all. Pinning it to noon UTC and then re-rendering it in the Event's zone applies the offset twice — invisible inside ±12h, and wrong past it: in `Pacific/Kiritimati` (UTC+14) `2026-07-18` would print as Sunday, Jul 19. The unlock TIME is a real instant and is formatted in the Event's zone, falling back to UTC for a bogus IANA string.
+
+- **Given** an Event east of UTC+12 **then** the context line names the weekday on the Event's own calendar. (Test: "renders the Day date as the calendar label it already is".)
 
 ## Email-safe rendering
 
@@ -84,12 +100,17 @@ Non-negotiable, and applied before the send rather than filtered after it.
 
 **Unsubscribe** is the `emailUnsubscribe` HTTP endpoint. It is HTTP rather than a callable because RFC 8058 one-click unsubscribe is a bare POST issued by the mail client itself, with no Firebase SDK, no session and no callable envelope — and because the visible link is a URL a mail app opens in a browser. Every send carries both the visible link and the `List-Unsubscribe` / `List-Unsubscribe-Post` header pair that makes a client surface its own native control.
 
-**GET confirms; POST acts.** Corporate link scanners and client prefetchers issue GETs against every URL in a message, so a GET that unsubscribed would silently opt people out of mail they never opened. The GET renders a one-button form; the POST — which is also what one-click sends — performs the change. A wrong token and an unknown uid get the identical answer, so the endpoint cannot be used to enumerate participants.
+**GET confirms; POST acts.** Corporate link scanners and client prefetchers issue GETs against every URL in a message, so a GET that unsubscribed would silently opt people out of mail they never opened. The GET renders a one-button form; the POST — which is also what one-click sends — performs the change. A wrong token and an unknown uid get the identical answer, so the endpoint cannot be used to enumerate participants. The confirmation form and its links carry through every non-reserved parameter the request arrived with, so a deployment whose `EMAIL_UNSUBSCRIBE_URL` selects the endpoint with its own router parameter does not lose it on the POST.
+
+**A read failure is not an absence.** The preference doc is only ever created from a CONFIRMED absence, and only through an atomic `create`. Collapsing "cannot read" into "not there" would let a transient Firestore error mint a fresh opted-in document over a real opt-out and mail somebody who asked not to be mailed; `create` closes the remaining window, where a concurrent unsubscribe lands between the read and the write. A document that exists without a token gets one merged in, a write that names only the token, so an existing opt-out survives it.
 
 - **Given** a matching token **then** the opt-out is recorded and is reversible on the same token; **given** a wrong token, an unknown uid, or a failed read **then** the answer is the same `invalid` and the stored state is untouched. (Tests under "applyOptOut".)
 - **Given** a GET **then** the endpoint renders a confirmation form and changes nothing; **given** a POST **then** it applies the change. (Tests: "CONFIRMS on GET instead of acting", "ACTS on POST".)
 - **Given** a participant who has opted out **then** their email address is never even resolved. (Test: "suppresses an opted-out participant BEFORE looking their address up".)
 - **Given** a participant whose opt-out doc can be neither read nor minted **then** no email is sent — an email whose unsubscribe cannot be honored must not go out. (Tests: "returns null rather than a token-less pref when the backend is down", plus the `shouldSendTo(null)` case.)
+- **Given** a read that FAILS while writes would succeed **then** nothing is minted and the stored opt-out is untouched. (Tests: "reports a read FAILURE separately from an absence", "NEVER resurrects an opted-out participant".)
+- **Given** a document that lands between the read and the mint **then** `create` refuses and the stored document wins. (Test: "mints with create, so a doc that appears mid-flight wins over this run".)
+- **Given** a router parameter on the endpoint URL **then** it survives into the form action and the resubscribe link. (Test: "preserves a router parameter from the endpoint URL".)
 - **Given** any client, owner or Event admin included **then** every read and write of `emailPrefs` is denied. (Tests in `tests/rules/daily-engagement-email.test.ts`.)
 
 ## Deep links

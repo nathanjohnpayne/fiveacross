@@ -75,27 +75,51 @@ export const EMAIL_THEME_TOKENS: Record<string, EmailThemeTokens> = {
 };
 
 /**
- * The Theme a Day with an unknown / missing `theme` id falls back to.
+ * The Theme each Edition falls back to when a Day's `theme` is missing or
+ * unknown — a mirror of `EDITION_DEFAULT_THEME` in `src/theme/themes.ts`, held
+ * to it by the same parity test as the token table.
  *
- * Deliberately the app's own `:root` Theme rather than a neutral grey: an email
- * whose palette silently degrades to grey looks broken, while one that degrades
- * to the default Theme just looks like a different Day. It is also the only
- * value guaranteed to exist — `:root` and `[data-theme='neon-playground']`
- * share a block in `themes.css`.
+ * Deliberately the app's own per-Edition default rather than a neutral grey, or
+ * a single global fallback: an email whose palette degrades to grey looks
+ * broken, and one that degrades to `neon-playground` puts Gay Cruise Bingo's
+ * skin on a Vacay or Five Across Event — another product's visual identity on a
+ * degraded Day, which is exactly what the one-identity rule forbids (Codex #623
+ * P2). Degrading to the Edition's OWN default just looks like a different Day.
  */
+export const EDITION_FALLBACK_THEME: Record<string, string> = {
+  gcb: 'neon-playground',
+  vacay: 'the-birds',
+  fiveacross: 'marquee',
+};
+
+/** The last-resort Theme: the app's `:root` Theme, and the legacy Edition's
+ *  default. The only value guaranteed to exist — `:root` and
+ *  `[data-theme='neon-playground']` share a block in `themes.css`. */
 export const FALLBACK_EMAIL_THEME = 'neon-playground';
 
+/** The fallback Theme id for one Edition. An unknown Edition degrades to the
+ *  legacy one, the direction `setActiveEdition` degrades in the app. */
+export function fallbackThemeForEdition(edition: string | undefined | null): string {
+  if (edition && Object.prototype.hasOwnProperty.call(EDITION_FALLBACK_THEME, edition)) {
+    return EDITION_FALLBACK_THEME[edition];
+  }
+  return FALLBACK_EMAIL_THEME;
+}
+
 /**
- * Tokens for one `ThemeId`, falling back to the default Theme for an unknown or
- * absent id. An OWN-PROPERTY check rather than a bare index read: a plain object
- * inherits `Object.prototype`, so `EMAIL_THEME_TOKENS['constructor']` is truthy
- * and would sail past a `??` guard as a "Theme" (the #597 class of bug).
- * `hasOwnProperty.call` rather than `Object.hasOwn` because this package targets
- * ES2021.
+ * Tokens for one `ThemeId`, falling back to the EDITION's default Theme for an
+ * unknown or absent id. An OWN-PROPERTY check rather than a bare index read: a
+ * plain object inherits `Object.prototype`, so
+ * `EMAIL_THEME_TOKENS['constructor']` is truthy and would sail past a `??`
+ * guard as a "Theme" (the #597 class of bug). `hasOwnProperty.call` rather than
+ * `Object.hasOwn` because this package targets ES2021.
  */
-export function emailThemeTokens(themeId: string | undefined | null): EmailThemeTokens {
+export function emailThemeTokens(
+  themeId: string | undefined | null,
+  edition?: string | null,
+): EmailThemeTokens {
   if (themeId && Object.prototype.hasOwnProperty.call(EMAIL_THEME_TOKENS, themeId)) {
     return EMAIL_THEME_TOKENS[themeId];
   }
-  return EMAIL_THEME_TOKENS[FALLBACK_EMAIL_THEME];
+  return EMAIL_THEME_TOKENS[fallbackThemeForEdition(edition)] ?? EMAIL_THEME_TOKENS[FALLBACK_EMAIL_THEME];
 }

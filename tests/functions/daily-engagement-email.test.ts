@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { THEMES } from '../../src/theme/themes';
-import { EMAIL_THEME_TOKENS, emailThemeTokens } from '../../functions/src/dailyEmailTheme';
+import { THEMES, defaultThemeForEdition } from '../../src/theme/themes';
+import { EMAIL_THEME_TOKENS, emailThemeTokens, fallbackThemeForEdition } from '../../functions/src/dailyEmailTheme';
 import {
   buildDailyEmailModel,
   registerFor,
@@ -18,6 +18,7 @@ import {
   dailyEmailEnabled,
   dueDayForDailyEmail,
   resolveEventOrigin,
+  sanitizeEmailDayStats,
   sendDailyEmailForEvent,
   shouldSendTo,
   SEND_WINDOW_MS,
@@ -194,6 +195,23 @@ describe('Day-Theme token mirror (parity with the app)', () => {
     expect(emailThemeTokens('constructor').label).toBe('Neon Playground');
     expect(emailThemeTokens('toString').label).toBe('Neon Playground');
   });
+
+  it('falls back to the EDITION default, so a degraded Day never wears another product’s skin', () => {
+    // A Vacay Event whose Day lost its Theme must not open in Gay Cruise
+    // Bingo's Neon Playground — the one-identity rule (Codex #623 P2).
+    expect(emailThemeTokens('no-such-theme', 'vacay').label).toBe('The Birds Have Entered the Group Chat');
+    expect(emailThemeTokens(undefined, 'fiveacross').label).toBe('Marquee');
+    expect(emailThemeTokens('constructor', 'vacay').label).toBe('The Birds Have Entered the Group Chat');
+    expect(emailThemeTokens(undefined, 'no-such-edition').label).toBe('Neon Playground');
+  });
+
+  it('mirrors the app’s per-Edition default Theme', () => {
+    for (const edition of ['gcb', 'vacay', 'fiveacross']) {
+      expect(`${edition}=${fallbackThemeForEdition(edition)}`).toBe(
+        `${edition}=${defaultThemeForEdition(edition)}`,
+      );
+    }
+  });
 });
 
 // --- ② Standings ----------------------------------------------------------------
@@ -224,6 +242,107 @@ describe('standingsThrough', () => {
       firstBingoAt: 1,
     };
     expect(standingsThrough([legacy], 3)[0]).toMatchObject({ bingoCount: 9, squaresMarked: 90 });
+  });
+
+  it('excludes Tutorial Days from the ⭐ and its tie-break, while still counting their score', () => {
+    // ADR 0011 / `eventFirstBingoAt`: an embark-Day bingo is real score but must
+    // not take the Event-wide honor, or the email and the in-app Leaderboard
+    // name different people (Codex #623 P2).
+    const tutorialWinner: EmailPlayer = {
+      uid: 'early',
+      displayName: 'Early',
+      bingoCount: 1,
+      squaresMarked: 10,
+      firstBingoAt: 10,
+      dayStats: { 0: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 10 } },
+    };
+    const realWinner: EmailPlayer = {
+      uid: 'real',
+      displayName: 'Real',
+      bingoCount: 1,
+      squaresMarked: 10,
+      firstBingoAt: 900,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 900 } },
+    };
+    const players = [tutorialWinner, realWinner];
+    // With Day 0 flagged tutorial, the tutorial bingo still counts for score…
+    const withTutorial = standingsThrough(players, 2, new Set([0]));
+    expect(withTutorial.find((p) => p.uid === 'early')).toMatchObject({ bingoCount: 1, squaresMarked: 10 });
+    // …but carries no first-BINGO timestamp, so the ⭐ goes to the real winner.
+    expect(withTutorial.find((p) => p.uid === 'early')?.firstBingoAt).toBeNull();
+    expect(withTutorial.find((p) => p.uid === 'real')?.firstBingoAt).toBe(900);
+    // Without the exclusion the tutorial timestamp wins — the old behaviour.
+    expect(standingsThrough(players, 2).find((p) => p.uid === 'early')?.firstBingoAt).toBe(10);
+  });
+
+  it('carries the Event’s Tutorial Days through the model, so the rendered ⭐ agrees', () => {
+    // Ada leads the standings and got the earliest bingo of all — but only on
+    // the embark Day. Bo's is the earliest that counts.
+    const players: EmailPlayer[] = [
+      {
+        uid: 'ada',
+        displayName: 'Ada',
+        bingoCount: 2,
+        squaresMarked: 20,
+        firstBingoAt: 10,
+        dayStats: {
+          0: { bingoCount: 1, squaresMarked: 12, firstBingoAt: 10 },
+          1: { bingoCount: 1, squaresMarked: 8, firstBingoAt: null },
+        },
+      },
+      {
+        uid: 'bo',
+        displayName: 'Bo',
+        bingoCount: 2,
+        squaresMarked: 15,
+        firstBingoAt: 500,
+        dayStats: {
+          0: { bingoCount: 1, squaresMarked: 7, firstBingoAt: null },
+          1: { bingoCount: 1, squaresMarked: 8, firstBingoAt: 500 },
+        },
+      },
+    ];
+    const days: EmailDay[] = [
+      { index: 0, unlockAt: 1, tutorial: true },
+      { index: 1, unlockAt: 2 },
+      gcbDay4,
+    ];
+    const starOf = (event: EmailEvent) =>
+      build({ event, players, recipient: { uid: 'ada', displayName: 'Ada' } }).standings.rows.find(
+        (r) => r.starred,
+      )?.displayName;
+    // Ada still leads on score (the tutorial bingo counts) — but the ⭐ is Bo's.
+    expect(starOf({ ...gcbEvent, days })).toBe('Bo');
+    // Drop the tutorial flag and the honor follows the raw timestamp again,
+    // which is exactly the disagreement ADR 0011 forbids.
+    expect(starOf({ ...gcbEvent, days: days.map((d) => ({ ...d, tutorial: false })) })).toBe('Ada');
+  });
+
+  it('survives a malformed dayStats row rather than taking the whole send down', () => {
+    // `players/{uid}` is self-writable (ADR 0001), so this shape is reachable
+    // by any participant (Codex #623 P2).
+    const hostile = [
+      { uid: 'a', displayName: 'A', bingoCount: 0, squaresMarked: 0, firstBingoAt: null, dayStats: { 0: null } },
+      { uid: 'b', displayName: 'B', bingoCount: 0, squaresMarked: 0, firstBingoAt: null, dayStats: { 0: { bingoCount: 'lots' } } },
+      { uid: 'c', displayName: 'C', bingoCount: 0, squaresMarked: 0, firstBingoAt: null, dayStats: { junk: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1 } } },
+    ] as unknown as EmailPlayer[];
+    expect(() => standingsThrough(hostile, 3)).not.toThrow();
+    expect(standingsThrough(hostile, 3).map((p) => p.bingoCount)).toEqual([0, 0, 0]);
+  });
+
+  it('sanitizes dayStats at the read boundary, dropping every malformed entry', () => {
+    expect(sanitizeEmailDayStats({ 0: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 } })).toEqual({
+      0: { bingoCount: 1, squaresMarked: 2, firstBingoAt: 3 },
+    });
+    expect(sanitizeEmailDayStats({ 0: null })).toBeUndefined();
+    expect(sanitizeEmailDayStats({ 0: { bingoCount: 'x', squaresMarked: 1 } })).toBeUndefined();
+    expect(sanitizeEmailDayStats({ nope: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 1 } })).toBeUndefined();
+    expect(sanitizeEmailDayStats([1, 2])).toBeUndefined();
+    expect(sanitizeEmailDayStats('nope')).toBeUndefined();
+    // A partly-valid map keeps only its good entries.
+    expect(sanitizeEmailDayStats({ 0: null, 1: { bingoCount: 1, squaresMarked: 1 } })).toEqual({
+      1: { bingoCount: 1, squaresMarked: 1, firstBingoAt: null },
+    });
   });
 
   it('reports an all-zero board as the empty state, not a podium of ties', () => {
@@ -291,6 +410,25 @@ describe('buildDailyEmailModel', () => {
     });
   });
 
+  it('uses a precomputed standings slice when the sender passes one, and matches the computed answer', () => {
+    // The cost lever the sender pulls: the snapshot is identical for every
+    // recipient, so it is computed once per send rather than once per email.
+    const ranked = standingsThrough(roster, gcbDay4.index);
+    expect(build({ ranked })).toEqual(build());
+  });
+
+  it('does not claim the occasion "starts today" on a LATER empty Day', () => {
+    const dead = roster.map((p) => ({ ...p, dayStats: { 0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } } }));
+    const day1 = build({ players: dead, day: { ...gcbDay4, index: 0 }, event: { ...gcbEvent, days: [{ ...gcbDay4, index: 0 }] } });
+    expect(day1.standings.emptyLine).toContain('the cruise starts today');
+    // Day 4 with an empty board is a different fact — the honors are open, but
+    // the cruise plainly did not start today (Codex #623 P2).
+    const day4 = build({ players: dead });
+    expect(day4.standings.emptyLine).not.toContain('starts today');
+    expect(day4.standings.emptyLine).toContain('wide open');
+    expect(day4.standings.emptyLine).toContain('⭐ cruise-wide honor');
+  });
+
   it('omits the rank line for an address that is not on the roster', () => {
     expect(build({ recipient: { uid: 'ghost', displayName: 'Ghost' } }).standings.youLine).toBeNull();
   });
@@ -337,12 +475,21 @@ describe('buildDailyEmailModel', () => {
     expect(model.nudgeLine).toContain('A day at sea today');
   });
 
-  it('formats the date and unlock time in the EVENT timezone, and survives a bogus one', () => {
-    expect(formatDayDate('2026-07-18', 'Europe/Rome')).toBe('Saturday, Jul 18');
+  it('formats the unlock time in the EVENT timezone, and survives a bogus one', () => {
     expect(formatUnlockTime(DAY4_UNLOCK, 'Europe/Rome')).toBe('8:00 a.m.');
     expect(formatUnlockTime(DAY4_UNLOCK, 'Not/AZone')).toBe('6:00 a.m.'); // falls back to UTC
-    expect(formatDayDate(undefined, 'UTC')).toBe('');
-    expect(formatDayDate('not-a-date', 'UTC')).toBe('');
+  });
+
+  it('renders the Day date as the calendar label it already is, with no second offset applied', () => {
+    // `DayDef.date` is ALREADY the Event's local date. Re-applying a zone shifts
+    // it past ±12h: `Pacific/Kiritimati` is UTC+14, where noon UTC is the next
+    // day (Codex #623 P2). The weekday must be the one on the Event's calendar.
+    expect(formatDayDate('2026-07-18')).toBe('Saturday, Jul 18');
+    expect(formatDayDate(undefined)).toBe('');
+    expect(formatDayDate('not-a-date')).toBe('');
+    const farEast: EmailDay = { ...gcbDay4, date: '2026-07-18', unlockAt: Date.parse('2026-07-17T18:00:00Z') };
+    const model = build({ day: farEast, event: { ...gcbEvent, timezone: 'Pacific/Kiritimati' } });
+    expect(model.contextLine).toContain('Saturday, Jul 18');
   });
 });
 
@@ -535,6 +682,12 @@ function makeDb(seed: Docs): DailyEmailFirestore & { docs: Docs } {
     get: async () => snapshotOf(path),
     set: async (data: Record<string, unknown>, options?: { merge?: boolean }) => {
       docs[path] = options?.merge ? { ...(docs[path] ?? {}), ...data } : { ...data };
+      return undefined;
+    },
+    // Admin-SDK `create` semantics: refuses when the document already exists.
+    create: async (data: Record<string, unknown>) => {
+      if (docs[path] !== undefined) throw new Error('ALREADY_EXISTS');
+      docs[path] = { ...data };
       return undefined;
     },
   });

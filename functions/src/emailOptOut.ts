@@ -42,6 +42,10 @@ interface PrefsSnapshot {
 interface PrefsDocRef {
   get(): Promise<PrefsSnapshot>;
   set(data: Record<string, unknown>, options?: { merge?: boolean }): Promise<unknown>;
+  /** Admin-SDK `DocumentReference.create` — writes ONLY if the document does
+   *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing: it is
+   *  what makes minting a preference doc atomic (see `ensureEmailPrefs`). */
+  create(data: Record<string, unknown>): Promise<unknown>;
 }
 /** The minimal surface the opt-out store uses. */
 export interface EmailPrefsFirestore {
@@ -74,44 +78,87 @@ function defaultMintToken(): string {
   return randomBytes(32).toString('hex');
 }
 
-/** Read one participant's prefs, or `null` when none has been minted yet.
- *  Never throws — a read failure is reported as "unknown", and the caller
- *  decides (the sender skips; the endpoint refuses). */
+/**
+ * The outcome of reading one participant's prefs. THREE states, not two, and
+ * the distinction is the whole point: collapsing "the document is not there"
+ * into "I could not read it" is how a transient Firestore error silently
+ * RESUBSCRIBES someone who had opted out (Codex #623 P1) — the caller sees
+ * "absent", mints a fresh opted-in doc over the top, and the next sweep mails
+ * a person who asked not to be mailed. A consent record may only ever be
+ * created from a confirmed absence.
+ */
+export type EmailPrefsRead =
+  | { status: 'found'; prefs: EmailPrefs }
+  | { status: 'absent' }
+  | { status: 'error' };
+
+/** Read one participant's prefs, reporting absence and failure separately.
+ *  Never throws. A doc that exists with no usable token is still `found` — it
+ *  cannot authorize an unsubscribe, but it is NOT absent, and its `optedOut`
+ *  must be preserved. */
+export async function readEmailPrefsOutcome(
+  db: EmailPrefsFirestore,
+  eventId: string,
+  uid: string,
+): Promise<EmailPrefsRead> {
+  try {
+    const snap = await db.doc(emailPrefsPath(eventId, uid)).get();
+    if (!snap.exists) return { status: 'absent' };
+    const data = snap.data() ?? {};
+    return {
+      status: 'found',
+      prefs: {
+        optedOut: data.optedOut === true,
+        token: typeof data.token === 'string' ? data.token : '',
+        lastSentDayIndex:
+          typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
+            ? data.lastSentDayIndex
+            : undefined,
+      },
+    };
+  } catch (err) {
+    console.error('readEmailPrefs failed', eventId, uid, err);
+    return { status: 'error' };
+  }
+}
+
+/** The convenience shape: usable prefs, or `null` for absent, unreadable, or
+ *  token-less. Callers that must tell those apart use
+ *  `readEmailPrefsOutcome`. */
 export async function readEmailPrefs(
   db: EmailPrefsFirestore,
   eventId: string,
   uid: string,
 ): Promise<EmailPrefs | null> {
-  try {
-    const snap = await db.doc(emailPrefsPath(eventId, uid)).get();
-    if (!snap.exists) return null;
-    const data = snap.data() ?? {};
-    const token = typeof data.token === 'string' ? data.token : '';
-    if (!token) return null; // a doc with no token cannot authorize an unsubscribe
-    return {
-      optedOut: data.optedOut === true,
-      token,
-      lastSentDayIndex:
-        typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
-          ? data.lastSentDayIndex
-          : undefined,
-    };
-  } catch (err) {
-    console.error('readEmailPrefs failed', eventId, uid, err);
-    return null;
-  }
+  const read = await readEmailPrefsOutcome(db, eventId, uid);
+  return read.status === 'found' && read.prefs.token !== '' ? read.prefs : null;
 }
 
 /**
  * The participant's prefs, minting the doc (opted IN, with a fresh token) when
- * it does not exist yet. Opt-in-by-default is the correct default HERE and only
- * here: the Event-level admin toggle is what decides whether anyone is emailed
- * at all, and it ships OFF, so the consent decision is made once by the Event
- * admin rather than implied per participant by this function.
+ * — and ONLY when — it is confirmed absent. Opt-in-by-default is the correct
+ * default HERE and only here: the Event-level admin toggle decides whether
+ * anyone is emailed at all, and it ships OFF, so the consent decision is made
+ * once by the Event admin rather than implied per participant by this function.
  *
- * Returns `null` when the doc could neither be read nor written — the sender
- * treats that as "do not send", because an email whose unsubscribe link cannot
- * be honored must not go out.
+ * TWO GUARDS PROTECT AN EXISTING OPT-OUT (Codex #623 P1), because a mint that
+ * lands on a doc that already exists would write `optedOut: false` over
+ * somebody's opt-out even through a merge — merge is field-level, and this
+ * payload names the field:
+ *
+ *   1. A READ FAILURE is not an absence. `error` returns `null` (skip the
+ *      recipient entirely) rather than falling through to the mint.
+ *   2. The mint is `create`, not `set`. Even given a correct absent read, a
+ *      concurrent unsubscribe could land between the read and the write;
+ *      `create` rejects rather than overwriting, and the recovery is to re-read
+ *      and use whatever is actually there.
+ *
+ * A doc that exists but carries no token gets a token merged in — that write
+ * names only `token`/`updatedAt`, so an existing `optedOut: true` survives it.
+ *
+ * Returns `null` when the prefs could neither be read nor established — the
+ * sender treats that as "do not send", because an email whose unsubscribe link
+ * cannot be honored must not go out.
  */
 export async function ensureEmailPrefs(
   db: EmailPrefsFirestore,
@@ -119,16 +166,35 @@ export async function ensureEmailPrefs(
   uid: string,
   deps: OptOutDeps = {},
 ): Promise<EmailPrefs | null> {
-  const existing = await readEmailPrefs(db, eventId, uid);
-  if (existing) return existing;
-  const token = (deps.mintToken ?? defaultMintToken)();
+  const read = await readEmailPrefsOutcome(db, eventId, uid);
+  if (read.status === 'error') return null; // NOT an absence — never mint over it
+  const mint = deps.mintToken ?? defaultMintToken;
   const now = (deps.now ?? Date.now)();
+
+  if (read.status === 'found') {
+    if (read.prefs.token !== '') return read.prefs;
+    // Present but token-less: back-fill ONLY the token, preserving optedOut.
+    const token = mint();
+    try {
+      await db.doc(emailPrefsPath(eventId, uid)).set({ token, updatedAt: now }, { merge: true });
+      return { ...read.prefs, token };
+    } catch (err) {
+      console.error('ensureEmailPrefs: token back-fill failed', eventId, uid, err);
+      return null;
+    }
+  }
+
+  const token = mint();
   try {
     await db
       .doc(emailPrefsPath(eventId, uid))
-      .set({ optedOut: false, token, createdAt: now, updatedAt: now }, { merge: true });
+      .create({ optedOut: false, token, createdAt: now, updatedAt: now });
     return { optedOut: false, token };
   } catch (err) {
+    // Lost the race (ALREADY_EXISTS) or the write failed. Either way, believe
+    // the stored document over this one's intent: re-read and use it.
+    const after = await readEmailPrefs(db, eventId, uid);
+    if (after) return after;
     console.error('ensureEmailPrefs: mint failed', eventId, uid, err);
     return null;
   }
@@ -284,6 +350,33 @@ function readParam(query: Record<string, unknown>, key: string): string {
   return typeof raw === 'string' ? raw : '';
 }
 
+/** The reserved parameter names this endpoint owns. Everything else in the
+ *  incoming query belongs to whatever fronts it. */
+const RESERVED_PARAMS = ['e', 'u', 't', 'a'];
+
+/**
+ * The query string for a same-page link or form action, carrying this
+ * endpoint's own four parameters PLUS every other parameter the request
+ * arrived with.
+ *
+ * The pass-through is the point (Codex #623 P2). `EMAIL_UNSUBSCRIBE_URL` is
+ * configurable precisely so the endpoint can sit behind a rewrite or a router
+ * that selects it with its own parameter — `linkWith` explicitly supports a
+ * base URL that already has a query string. A form action of `?e=…&u=…&t=…&a=…`
+ * REPLACES the whole query, so that router parameter would survive the emailed
+ * GET and then vanish on the POST, sending the confirmation nowhere and leaving
+ * unsubscribe visibly broken on exactly the deployments that configured it.
+ */
+function samePageQuery(query: Record<string, unknown>, own: Record<string, string>): string {
+  const q = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (RESERVED_PARAMS.includes(key)) continue;
+    if (typeof value === 'string') q.append(key, value);
+  }
+  for (const [key, value] of Object.entries(own)) q.append(key, value);
+  return q.toString();
+}
+
 /**
  * Handle one unsubscribe request. Never throws — a failure renders a page that
  * tells the reader what to do next rather than a stack trace.
@@ -325,17 +418,18 @@ export async function handleUnsubscribeRequest(
     if (method !== 'POST') {
       // Confirmation page. It never reveals whether the token is valid — the
       // form posts and the POST answers — so a scanner learns nothing.
-      const q = new URLSearchParams({ e: eventId, u: uid, t: token, a: resubscribe ? 'resubscribe' : 'unsubscribe' });
+      const same = (action: string): string =>
+        escapeAttr(samePageQuery(req.query, { e: eventId, u: uid, t: token, a: action }));
       const verb = resubscribe ? 'Resume' : 'Stop';
       const body =
         `<p>${resubscribe ? 'Start receiving the daily email for this event again?' : 'Stop the daily email for this event?'}</p>` +
-        `<form method="POST" action="?${escapeAttr(q.toString())}">` +
+        `<form method="POST" action="?${same(resubscribe ? 'resubscribe' : 'unsubscribe')}">` +
         `<button type="submit" style="font:inherit;padding:.7em 1.4em;border:0;border-radius:6px;` +
         `background:#20232a;color:#fff;cursor:pointer;">${verb} these emails</button></form>` +
         (resubscribe
           ? ''
           : `<p style="margin-top:1.5rem;font-size:.9rem;color:#5a5f6a;">Changed your mind later? ` +
-            `<a href="?${escapeAttr(new URLSearchParams({ e: eventId, u: uid, t: token, a: 'resubscribe' }).toString())}">Turn them back on</a>.</p>`);
+            `<a href="?${same('resubscribe')}">Turn them back on</a>.</p>`);
       html(200, renderPage(resubscribe ? 'Daily email' : 'Unsubscribe', body));
       return;
     }

@@ -16,7 +16,7 @@
  * footer. The plain-text part mirrors the same order. Editions change the
  * WORDS; the Day changes the PALETTE; the order never moves.
  */
-import { compareFinalePlayers, type FinaleDayStat } from './finaleContent';
+import { compareFinalePlayers, tutorialDayIndexes, type FinaleDayStat } from './finaleContent';
 import { emailThemeTokens, type EmailThemeTokens } from './dailyEmailTheme';
 
 // --- Minimal domain shapes (local, package-decoupled) ---------------------------
@@ -160,29 +160,53 @@ export function registerFor(edition: string | null | undefined): EditionRegister
  * marks are all zero and a snapshot including them would be identical but
  * mislabelled.
  *
+ * TUTORIAL DAYS COUNT FOR SCORE BUT NOT FOR THE ⭐ (ADR 0011, and the parity
+ * `finaleContent.ts` already keeps with `src/game/logic.ts`). Bingos and squares
+ * from a Tutorial Day are real play and are summed; the Event-wide First to
+ * BINGO honor deliberately excludes them, and so does the `firstBingoAt`
+ * tie-break that rides on it — otherwise an embark-Day winner would take the
+ * ⭐ in the email while the in-app Leaderboard gave it to someone else, which
+ * is the exact contradiction ADR 0011 exists to prevent (Codex #623 P2).
+ *
  * A Player with no `dayStats` breakdown (a legacy roster predating Day Cards)
  * keeps their root aggregates — there is nothing to slice — matching
  * `podiumStandingRow`'s handling in `finaleContent.ts`. Ranking is
  * `compareFinalePlayers`, so the email, the podium and the in-app Leaderboard
  * can never disagree about who is ahead.
+ *
+ * Malformed `dayStats` entries are SKIPPED rather than trusted: `players/{uid}`
+ * is self-writable by design (ADR 0001), so a row like `{ dayStats: { 0: null } }`
+ * is reachable, and one such row throwing here would suppress the whole Event's
+ * send. The read boundary sanitizes too; this is the second line (Codex #623 P2).
  */
 export function standingsThrough(
   players: readonly EmailPlayer[],
   throughDayIndexExclusive: number,
+  tutorialDays: ReadonlySet<number> = new Set(),
 ): EmailPlayer[] {
   return players
     .map((p) => {
       const dayStats = p.dayStats;
-      if (!dayStats || Object.keys(dayStats).length === 0) return { ...p };
+      if (!dayStats || typeof dayStats !== 'object' || Object.keys(dayStats).length === 0) {
+        return { ...p };
+      }
       let bingoCount = 0;
       let squaresMarked = 0;
       let firstBingoAt: number | null = null;
       for (const [key, stat] of Object.entries(dayStats)) {
-        if (Number(key) >= throughDayIndexExclusive) continue;
-        bingoCount += stat.bingoCount;
-        squaresMarked += stat.squaresMarked;
-        if (stat.firstBingoAt != null && (firstBingoAt == null || stat.firstBingoAt < firstBingoAt)) {
-          firstBingoAt = stat.firstBingoAt;
+        const dayIndex = Number(key);
+        if (!Number.isInteger(dayIndex) || dayIndex >= throughDayIndexExclusive) continue;
+        if (!stat || typeof stat !== 'object') continue;
+        if (typeof stat.bingoCount === 'number' && Number.isFinite(stat.bingoCount)) {
+          bingoCount += stat.bingoCount;
+        }
+        if (typeof stat.squaresMarked === 'number' && Number.isFinite(stat.squaresMarked)) {
+          squaresMarked += stat.squaresMarked;
+        }
+        if (tutorialDays.has(dayIndex)) continue; // scores yes, ⭐ no
+        const at = stat.firstBingoAt;
+        if (typeof at === 'number' && Number.isFinite(at) && (firstBingoAt == null || at < firstBingoAt)) {
+          firstBingoAt = at;
         }
       }
       return { ...p, bingoCount, squaresMarked, firstBingoAt };
@@ -210,28 +234,30 @@ function firstBingoUid(ranked: readonly EmailPlayer[]): string | null {
 
 // --- Formatting helpers ---------------------------------------------------------
 
-/** "Saturday, Jul 18" from an ISO date, formatted in the Event's timezone.
- *  Returns `''` for a missing/unparseable date rather than "Invalid Date". */
-export function formatDayDate(isoDate: string | undefined, timeZone: string): string {
+/**
+ * "Saturday, Jul 18" from a Day's ISO date. Returns `''` for a missing or
+ * unparseable date rather than "Invalid Date".
+ *
+ * FORMATTED IN UTC, DELIBERATELY, and it takes no timezone argument so it
+ * cannot be "fixed" back. `DayDef.date` is ALREADY the Event's local calendar
+ * date — a plain wall-clock label, not an instant — so pinning it to noon UTC
+ * and then rendering it in the Event's zone applies the offset a second time.
+ * Inside ±12h that cancels out invisibly; past it, it does not: in
+ * `Pacific/Kiritimati` (UTC+14) noon UTC is 02:00 the NEXT day, so `2026-07-18`
+ * would print as Sunday, Jul 19 (Codex #623 P2). Noon rather than midnight is
+ * still the parse anchor, so the same label survives any future re-render at a
+ * modest offset.
+ */
+export function formatDayDate(isoDate: string | undefined): string {
   if (!isoDate) return '';
   const at = Date.parse(`${isoDate}T12:00:00Z`);
   if (Number.isNaN(at)) return '';
-  try {
-    return new Intl.DateTimeFormat('en-US', {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric',
-      timeZone,
-    }).format(new Date(at));
-  } catch {
-    // An Event carrying a bogus IANA zone must still get an email.
-    return new Intl.DateTimeFormat('en-US', {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric',
-      timeZone: 'UTC',
-    }).format(new Date(at));
-  }
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(at));
 }
 
 /** "8:00 a.m." — the Day's unlock in the Event's timezone. */
@@ -311,6 +337,16 @@ export interface BuildDailyEmailArgs {
   day: EmailDay;
   /** The full roster, already ban-filtered by the caller. */
   players: readonly EmailPlayer[];
+  /**
+   * `standingsThrough(players, day.index)`, precomputed. Optional and purely a
+   * cost lever: the snapshot is IDENTICAL for every recipient (the rank line is
+   * a lookup into it, not a per-recipient computation), so a send to a full
+   * roster would otherwise re-slice and re-sort the roster once per recipient —
+   * quadratic in roster size for no different answer. The sender computes it
+   * once and passes it here; a caller that omits it gets the same result, just
+   * recomputed.
+   */
+  ranked?: readonly EmailPlayer[];
   /** The recipient — their row drives the one personalized line. */
   recipient: { uid: string; displayName: string };
   edition: string | null | undefined;
@@ -331,7 +367,7 @@ export interface BuildDailyEmailArgs {
 export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel {
   const { event, day, players, recipient, feedUrl } = args;
   const register = registerFor(args.edition);
-  const theme = emailThemeTokens(day.theme);
+  const theme = emailThemeTokens(day.theme, args.edition);
   const timeZone = event.timezone || 'UTC';
   const days = Array.isArray(event.days) ? event.days : [];
   const dayNumber = day.index + 1;
@@ -341,12 +377,12 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // --- ② Theme header -----------------------------------------------------------
   const themeHeadline = `${theme.emoji} ${theme.label}`;
   const place = placeLabel(day);
-  const contextLine = [`Day ${dayNumber} of ${dayCount}`, formatDayDate(day.date, timeZone), place]
+  const contextLine = [`Day ${dayNumber} of ${dayCount}`, formatDayDate(day.date), place]
     .filter((part) => part !== '')
     .join(' · ');
 
   // --- ③ Standings snapshot -----------------------------------------------------
-  const ranked = standingsThrough(players, day.index);
+  const ranked = args.ranked ?? standingsThrough(players, day.index, tutorialDayIndexes(days));
   const played = hasPlay(ranked);
   const starUid = played ? firstBingoUid(ranked) : null;
   const rows: StandingsRow[] = played
@@ -359,9 +395,15 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
       }))
     : [];
   const standingsHeading = played ? `Standings · through Day ${dayNumber - 1}` : `Standings · Day ${dayNumber}`;
+  // Two empty states, not one. The OPENING Day has nothing to report because
+  // nothing has happened yet, and says so with anticipation. A LATER Day with
+  // an empty board is a different fact — the honors are still open, but "the
+  // cruise starts today" would be plainly false on Day 4 (Codex #623 P2).
   const emptyLine = played
     ? null
-    : `No standings yet—the ${register.occasion} starts today. First BINGO takes the ⭐ ${register.occasionWide} honor, and the first photo sets the bar.`;
+    : dayNumber === 1
+      ? `No standings yet—the ${register.occasion} starts today. First BINGO takes the ⭐ ${register.occasionWide} honor, and the first photo sets the bar.`
+      : `Still no standings—every honor is wide open. First BINGO takes the ⭐ ${register.occasionWide} honor, and the first photo sets the bar.`;
 
   // The personalized line. `youLine` stays null for an address that is not on
   // the roster; ranking an absent Player would print a rank nobody holds.

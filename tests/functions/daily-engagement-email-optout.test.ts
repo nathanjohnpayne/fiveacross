@@ -8,6 +8,7 @@ import {
   markDailyEmailSent,
   preferencesLink,
   readEmailPrefs,
+  readEmailPrefsOutcome,
   tokenMatches,
   unsubscribeLink,
   type EmailPrefsFirestore,
@@ -30,6 +31,12 @@ function makeDb(seed: Docs = {}): EmailPrefsFirestore & { docs: Docs } {
         docs[path] = options?.merge ? { ...(docs[path] ?? {}), ...data } : { ...data };
         return undefined;
       },
+      // Admin-SDK `create` semantics: refuses when the document already exists.
+      create: async (data: Record<string, unknown>) => {
+        if (docs[path] !== undefined) throw new Error('ALREADY_EXISTS');
+        docs[path] = { ...data };
+        return undefined;
+      },
     }),
   };
 }
@@ -44,8 +51,26 @@ const brokenDb = (): EmailPrefsFirestore => ({
     set: async () => {
       throw new Error('firestore unavailable');
     },
+    create: async () => {
+      throw new Error('firestore unavailable');
+    },
   }),
 });
+
+/** A store whose READ fails but whose writes succeed — the exact shape that
+ *  used to resurrect an opted-out participant (Codex #623 P1). */
+const readBrokenDb = (seed: Docs): EmailPrefsFirestore & { docs: Docs } => {
+  const inner = makeDb(seed);
+  return {
+    docs: inner.docs,
+    doc: (path: string) => ({
+      ...inner.doc(path),
+      get: async () => {
+        throw new Error('transient read failure');
+      },
+    }),
+  };
+};
 
 /** Minimal response recorder shaped like the Express response `onRequest` hands
  *  the endpoint. */
@@ -100,9 +125,64 @@ describe('the opt-out store', () => {
     expect(await readEmailPrefs(brokenDb(), 'e', 'u')).toBeNull();
   });
 
-  it('treats a doc with no token as absent — it could not authorize an unsubscribe', async () => {
+  it('treats a doc with no token as unusable — it could not authorize an unsubscribe', async () => {
     const db = makeDb({ [emailPrefsPath('e', 'u')]: { optedOut: true } });
     expect(await readEmailPrefs(db, 'e', 'u')).toBeNull();
+    // …but NOT as absent: the outcome reader still reports it as present, which
+    // is what stops the mint path from writing `optedOut: false` over it.
+    expect(await readEmailPrefsOutcome(db, 'e', 'u')).toEqual({
+      status: 'found',
+      prefs: { optedOut: true, token: '', lastSentDayIndex: undefined },
+    });
+  });
+
+  it('reports a read FAILURE separately from an absence (#623 P1)', async () => {
+    expect(await readEmailPrefsOutcome(brokenDb(), 'e', 'u')).toEqual({ status: 'error' });
+    expect(await readEmailPrefsOutcome(makeDb(), 'e', 'u')).toEqual({ status: 'absent' });
+  });
+
+  it('NEVER resurrects an opted-out participant when the read fails but the write would succeed', async () => {
+    // The #623 P1 defect: a transient read error looked like "no document",
+    // and the mint merged `optedOut: false` over a real opt-out.
+    const db = readBrokenDb({ [emailPrefsPath('e', 'u')]: { optedOut: true, token: 'theirs' } });
+    expect(await ensureEmailPrefs(db, 'e', 'u', { mintToken: () => 'fresh' })).toBeNull();
+    expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ optedOut: true, token: 'theirs' });
+  });
+
+  it('mints with create, so a doc that appears mid-flight wins over this run', async () => {
+    const db = makeDb();
+    // The race: the FIRST read sees nothing, then a concurrent unsubscribe
+    // lands the document, then this run's create refuses and it re-reads.
+    const realDoc = db.doc;
+    let firstRead = true;
+    const raced: EmailPrefsFirestore = {
+      doc: (path: string) => ({
+        ...realDoc(path),
+        get: async () => {
+          if (firstRead) {
+            firstRead = false;
+            db.docs[emailPrefsPath('e', 'u')] = { optedOut: true, token: 'winner' };
+            return { exists: false, data: () => undefined };
+          }
+          return realDoc(path).get();
+        },
+      }),
+    };
+    expect(await ensureEmailPrefs(raced, 'e', 'u', { mintToken: () => 'loser' })).toEqual({
+      optedOut: true,
+      token: 'winner',
+    });
+    expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ optedOut: true, token: 'winner' });
+  });
+
+  it('back-fills a token onto a doc that has none WITHOUT resetting its opt-out', async () => {
+    const db = makeDb({ [emailPrefsPath('e', 'u')]: { optedOut: true } });
+    expect(await ensureEmailPrefs(db, 'e', 'u', { mintToken: () => 'new-token', now: () => 3 })).toEqual({
+      optedOut: true,
+      token: 'new-token',
+      lastSentDayIndex: undefined,
+    });
+    expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ optedOut: true, token: 'new-token' });
   });
 
   it('reads a malformed lastSentDayIndex as absent rather than as a suppression', async () => {
@@ -265,6 +345,23 @@ describe('handleUnsubscribeRequest', () => {
       handleUnsubscribeRequest(brokenDb(), { method: 'POST', query: query() }, broken),
     ).resolves.toBeUndefined();
     expect(broken.code).toBe(404);
+  });
+
+  it('preserves a router parameter from the endpoint URL in the form action and links', async () => {
+    // `EMAIL_UNSUBSCRIBE_URL` may carry its own query (a rewrite or router
+    // selects the endpoint with it). A form action of `?e=…&u=…&t=…&a=…`
+    // replaces the whole query, so the emailed GET would work and the POST
+    // would go nowhere (Codex #623 P2).
+    const res = makeRes();
+    await handleUnsubscribeRequest(seeded(), { method: 'GET', query: { ...query(), fn: 'unsub' } }, res);
+    expect(res.body).toContain('action="?fn=unsub&amp;e=med-2026&amp;u=theo&amp;t=good&amp;a=unsubscribe"');
+    expect(res.body).toContain('fn=unsub&amp;e=med-2026&amp;u=theo&amp;t=good&amp;a=resubscribe');
+  });
+
+  it('does not duplicate its own parameters when passing extras through', async () => {
+    const res = makeRes();
+    await handleUnsubscribeRequest(seeded(), { method: 'GET', query: query({ a: 'unsubscribe' }) }, res);
+    expect((res.body.match(/a=unsubscribe/g) ?? []).length).toBe(1);
   });
 
   it('refuses a method it does not implement', async () => {
