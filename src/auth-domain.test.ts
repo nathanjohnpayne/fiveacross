@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAuthDomain } from './auth-domain';
+import { resolveAuthDomain, isAuthConfiguredForHost } from './auth-domain';
 
 describe('resolveAuthDomain', () => {
   it.each(['gaycruisebingo.com', 'gaycruisebingo.vercel.app', 'gaycruisebingo.firebaseapp.com'])(
@@ -28,5 +28,42 @@ describe('resolveAuthDomain', () => {
     'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app.evil.example',
   ])('does not treat %s as first-party — the match is exact, never a pattern', (hostname) => {
     expect(resolveAuthDomain('gaycruisebingo.vercel.app', hostname)).toBe('gaycruisebingo.vercel.app');
+  });
+});
+
+// #543 / ADR 0010: hostname resolution makes new origins mountable, so "the app
+// runs here" stopped implying "sign-in works here".
+describe('isAuthConfiguredForHost — can sign-in complete on this origin?', () => {
+  const CONFIGURED = 'gaycruisebingo.com';
+
+  it('is ready on a registered first-party host', () => {
+    expect(isAuthConfiguredForHost(CONFIGURED, 'gaycruisebingo.com')).toBe(true);
+    expect(isAuthConfiguredForHost(CONFIGURED, 'gaycruisebingo.vercel.app')).toBe(true);
+  });
+
+  it('is ready when the build pins authDomain to this very host', () => {
+    // ADR 0010's same-origin escape hatch: an exact Firebase Hosting custom
+    // domain. This is what a single-Edition Vacay build uses, so the check must
+    // not dark it.
+    expect(isAuthConfiguredForHost('bodega-bay.vacaybingo.com', 'bodega-bay.vacaybingo.com')).toBe(
+      true,
+    );
+  });
+
+  it('is NOT ready on an unconfigured wildcard host', () => {
+    // The regression: a hostname-resolved Event mounting a Google button that
+    // cannot return to this origin, on a host with no /__/auth/handler entry.
+    expect(isAuthConfiguredForHost('fiveacross.firebaseapp.com', 'bodega-bay.vacaybingo.com')).toBe(
+      false,
+    );
+    expect(isAuthConfiguredForHost(CONFIGURED, 'anything-else.example.com')).toBe(false);
+  });
+
+  it('agrees with resolveAuthDomain by construction', () => {
+    for (const host of ['gaycruisebingo.com', 'x.vacaybingo.com', 'gaycruisebingo.web.app']) {
+      expect(isAuthConfiguredForHost(CONFIGURED, host)).toBe(
+        resolveAuthDomain(CONFIGURED, host) === host,
+      );
+    }
   });
 });

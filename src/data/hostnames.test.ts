@@ -92,17 +92,34 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     expect(activeEdition()).toBe(DEFAULT_EDITION);
   });
 
-  it('resolves in an environment with NO localStorage at all', async () => {
-    // This suite runs in the node project, where `localStorage` is undefined —
-    // which makes it the free test for `safeLocalStorage`'s real case (private
-    // mode, embedded webviews). An unavailable cache must cost a round trip,
-    // never a boot. The cache-write path itself is covered against an injected
-    // fake in src/eventResolution.test.ts.
-    expect(typeof localStorage).toBe('undefined');
-    mocks.getDocFromServer.mockResolvedValue(snap(DOC));
-    await expect(bootstrapEventResolution('bodega-bay.vacaybingo.com')).resolves.toMatchObject({
-      kind: 'event',
-      source: 'network',
-    });
+  it('resolves when localStorage is unavailable — private mode, embedded webviews', async () => {
+    // FORCES the condition rather than asserting the ambient one. An earlier
+    // version asserted `typeof localStorage === 'undefined'`, which happens to
+    // hold here (this repo's jsdom project configures no `url`, so jsdom leaves
+    // localStorage unset) but is a property of the test config, not of the code
+    // under test — add a jsdom `url` and it breaks for an unrelated reason,
+    // testing nothing (Codex on #576). Deleting it makes the branch run
+    // deterministically whatever the environment does.
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', { value: undefined, configurable: true });
+    try {
+      mocks.getDocFromServer.mockResolvedValue(snap(DOC));
+      await expect(bootstrapEventResolution('bodega-bay.vacaybingo.com')).resolves.toMatchObject({
+        kind: 'event',
+        source: 'network',
+      });
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
+  it('does NOT reset the Edition when the resolution carries none', async () => {
+    // The env short-circuit returns `edition: null`; a single-Event Vacay build
+    // seeds its Edition from VITE_EDITION and must keep it (Codex on #576).
+    setActiveEdition('vacay');
+    mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, edition: '' }));
+    await bootstrapEventResolution('bodega-bay.vacaybingo.com');
+    expect(activeEdition()).toBe('vacay');
   });
 });

@@ -14,17 +14,26 @@ export default function EventNotFound({
   reason,
 }: {
   hostname: string;
-  reason: 'missing' | 'inactive' | 'unreachable';
+  reason: 'missing' | 'inactive' | 'unreachable' | 'auth-unconfigured';
 }) {
   const headline =
-    reason === 'inactive' ? 'This game has wrapped up' : "There's no game at this address";
+    reason === 'inactive'
+      ? 'This game has wrapped up'
+      : reason === 'auth-unconfigured'
+        ? 'This address is not open yet'
+        : "There's no game at this address";
 
   const detail =
     reason === 'inactive'
       ? 'The event at this address has finished or been archived. If you think it should still be running, check with whoever invited you.'
       : reason === 'unreachable'
         ? "We couldn't reach the server to look this address up. Check your connection and try again — if you were playing earlier, your card is still safe."
-        : 'Double-check the link you were sent. Addresses are case-insensitive but otherwise exact.';
+        : reason === 'auth-unconfigured'
+          ? // Deliberately not a sign-in screen: the button would open a Google
+            // flow that cannot return here (ADR 0010). Better to name the state
+            // than to let a player discover it halfway through signing in.
+            'The game is here, but sign-in has not been switched on for this address yet. Whoever set the event up needs to finish one step — this is not something you can fix from your phone.'
+          : 'Double-check the link you were sent. Addresses are case-insensitive but otherwise exact.';
 
   return (
     <main

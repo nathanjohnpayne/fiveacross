@@ -17,6 +17,7 @@ import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
 import { bootstrapEventResolution } from './data/hostnames';
+import { isAuthConfiguredForHost } from './auth-domain';
 import './theme/themes.css';
 import './index.css';
 
@@ -151,6 +152,23 @@ const appTree = (
  */
 void bootstrapEventResolution()
   .then((resolution) => {
+    // An Event can resolve on an origin the AUTH stack has never been
+    // configured for — hostname resolution is exactly what made that possible
+    // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
+    // would render a Google button that cannot return to this origin, so it is
+    // reported as a state rather than discovered mid-sign-in.
+    const authBlocked =
+      resolution.kind === 'event' &&
+      !isAuthConfiguredForHost(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname);
+    if (authBlocked) {
+      root.render(
+        <React.StrictMode>
+          <EventNotFound hostname={window.location.hostname} reason="auth-unconfigured" />
+          <ConsentNotice />
+        </React.StrictMode>,
+      );
+      return;
+    }
     root.render(
       resolution.kind === 'not-found' ? (
         <React.StrictMode>

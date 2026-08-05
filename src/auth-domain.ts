@@ -22,3 +22,34 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
 export function resolveAuthDomain(configuredAuthDomain: string, hostname: string): string {
   return FIRST_PARTY_AUTH_HOSTS.has(hostname) ? hostname : configuredAuthDomain;
 }
+
+/**
+ * Whether Google sign-in can actually COMPLETE on this origin (#543, ADR 0010).
+ *
+ * Hostname resolution is what makes this check necessary. Before it, one build
+ * served one hostname and "the app runs here" implied "sign-in works here". It
+ * no longer does. ADR 0010's central auth origin and handoff are not
+ * implemented, so an origin whose `authDomain` is some OTHER host falls to the
+ * cross-origin popup helper — which Safari's storage partitioning breaks on
+ * mobile, and which in any case needs a `https://<host>/__/auth/handler` entry
+ * on the Google OAuth web client that only a human can add in the console
+ * (Codex P1 on #576).
+ *
+ * Ready means the OAuth helper is same-origin, which happens two ways:
+ *
+ *  - the host is a registered first-party host (the allowlist above), or
+ *  - the build pins `authDomain` to this very host — ADR 0010's "same-origin
+ *    escape hatch", which works for any hostname registered as an exact
+ *    Firebase Hosting custom domain. A single-Edition build like Bodega uses
+ *    exactly this, so the check does not dark it.
+ *
+ * Both collapse to the same question, which is why this is one line:
+ * does `resolveAuthDomain` end up pointing at us?
+ *
+ * Anything else is an address the auth stack has never been configured for.
+ * Saying so beats rendering a Google button that dead-ends: a broken sign-in on
+ * a phone in a rental house is unrecoverable by the player and silent to us.
+ */
+export function isAuthConfiguredForHost(configuredAuthDomain: string, hostname: string): boolean {
+  return resolveAuthDomain(configuredAuthDomain, hostname) === hostname;
+}

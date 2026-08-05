@@ -85,9 +85,18 @@ export async function bootstrapEventResolution(
     // data it caches.
     setCardCacheEventId(resolution.eventId);
     // The Edition brands the PRE-AUTH shell (src/editions.ts). This is the only
-    // point at which it can be installed: `events/{eventId}` needs `signedIn()`,
-    // so the sign-in gate would otherwise render another product's wordmark.
-    setActiveEdition(resolution.edition);
+    // point at which a RESOLVED Edition can be installed: `events/{eventId}`
+    // needs `signedIn()`, so the sign-in gate would otherwise render another
+    // product's wordmark.
+    //
+    // Guarded, because "no Edition in the resolution" is not the same as "the
+    // default Edition". The env short-circuit returns `edition: null` — it never
+    // reads a hostname document — so an unconditional call would reset a
+    // single-Event Vacay build (`VITE_EVENT_ID` + `VITE_EDITION=vacay`) straight
+    // back to `gcb` and undo the seed `editions.ts` just made from the very same
+    // env (Codex on #576). Only a lookup that actually named an Edition may
+    // overwrite the build's own.
+    if (resolution.edition) setActiveEdition(resolution.edition);
   }
   return resolution;
 }
