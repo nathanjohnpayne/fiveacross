@@ -12,7 +12,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Edition**: A named personality the platform wears for a class of occasion — Vacay Bingo (travel), Gay Cruise Bingo (the original adults-only cruise edition). Supplies positioning, default prompt packs, default features, and visual treatment. An Edition is configuration, never a separate application. _Avoid_: Vertical, tenant, white-label
 
-**Namespace**: An apex domain whose wildcard subdomains address Events — `vacaybingo.com` and `fiveacrossbingo.com`. Every Event is reachable in the Five Across namespace; an Edition may own a second one. _Avoid_: Domain (ambiguous), zone
+**Namespace**: An apex domain whose wildcard subdomains address Events — `fiveacross.app` (canonical), plus `vacaybingo.com` and `fiveacrossbingo.com`, which stay live as serving hosts. Every Event is reachable in the Five Across namespace; an Edition may own a second one. _Avoid_: Domain (ambiguous), zone
 
 **Slug**: The first hostname label identifying an Event — `bodega-bay` in `bodega-bay.vacaybingo.com`. A lowercase DNS-safe friendly address, globally unique across Namespaces, and explicitly **not** an authorization secret: knowing a Slug grants nothing. _Avoid_: Code, join code, invite code (those are secrets; a Slug is not)
 
