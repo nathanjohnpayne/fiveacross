@@ -171,13 +171,21 @@ describe('moderateProof export gating (#126)', () => {
     expect(typeof on.notifyItemModeration).toBe('function');
   });
 
-  it('pins bug-report intake to the PROJECT-RELATIVE Firebase Admin runtime identity', async () => {
+  it('pins the Admin runtime identity to the DEPLOYING project (GCLOUD_PROJECT)', async () => {
+    // Expanded from GCLOUD_PROJECT (here 'gaycruisebingo-test', set above) so
+    // the same code deploys to both production projects (ADR 0008). A
+    // hardcoded `...@gaycruisebingo.iam.gserviceaccount.com` email would 403
+    // (iam.serviceaccounts.actAs) on fiveacross deploys — and the
+    // firebase-functions v2 trailing-`@` shorthand is NOT safe either:
+    // firebase-tools copies `endpoint.serviceAccount` verbatim into the Cloud
+    // Scheduler OIDC token for `unlockDay` (only the Cloud Functions config
+    // path expands the shorthand), so the pin must already be a full email.
+    const expected = 'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com';
     const mod = await importIndex();
-    // Ends in `@` on purpose: firebase-functions v2 completes it with the
-    // DEPLOYING project's id, so the same code deploys to both production
-    // projects (ADR 0008). A full `...@gaycruisebingo.iam.gserviceaccount.com`
-    // email here would 403 (iam.serviceaccounts.actAs) on fiveacross deploys.
-    expect(mod.submitBugReport.__endpoint.serviceAccountEmail).toBe('firebase-adminsdk-fbsvc@');
+    expect(mod.submitBugReport.__endpoint.serviceAccountEmail).toBe(expected);
+    // The scheduled function is the surface the raw shorthand would break.
+    expect(mod.unlockDay.__endpoint.serviceAccountEmail).toBe(expected);
+    expect(mod.unlockDayNow.__endpoint.serviceAccountEmail).toBe(expected);
   });
 });
 

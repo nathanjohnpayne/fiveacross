@@ -30,15 +30,29 @@ const visionClient = new vision.ImageAnnotatorClient();
 // compute account deliberately has NO Firestore or Storage data-plane access, so
 // every Admin-SDK function that reads/writes those planes must pin this account.
 //
-// PROJECT-RELATIVE ON PURPOSE — do not "complete" this to a full email. This
+// PROJECT-RELATIVE ON PURPOSE — do not hardcode one project's full email. This
 // repo deploys TWO production Firebase projects (ADR 0008: gaycruisebingo and
-// fiveacross), and both strip the default compute SA of data-plane access, so
-// both rely on this pin. firebase-functions v2 documents that a `serviceAccount`
-// string ending in `@` is completed with the DEPLOYING project's id, and both
+// fiveacross), both strip the default compute SA of data-plane access, and both
 // projects' Admin-SDK accounts share the `firebase-adminsdk-fbsvc@<project>`
-// name. Hardcoding one project's full email breaks the other's deploy with
-// 403 iam.serviceaccounts.actAs (the fiveacross Bodega deploy failure).
-const ADMIN_SDK_SERVICE_ACCOUNT = 'firebase-adminsdk-fbsvc@';
+// name — so the email must resolve to the DEPLOYING project. Hardcoding one
+// project's email breaks the other's deploy with 403
+// iam.serviceaccounts.actAs (the fiveacross Bodega deploy failure).
+//
+// Expanded EAGERLY from GCLOUD_PROJECT rather than using the firebase-functions
+// v2 `firebase-adminsdk-fbsvc@` shorthand: firebase-tools (15.25.1) expands the
+// trailing-`@` shorthand only on the Cloud Functions service-config path
+// (gcp/cloudfunctionsv2.js -> proto.formatServiceAccount); when it builds the
+// Cloud Scheduler OIDC token for `unlockDay` it copies `endpoint.serviceAccount`
+// VERBATIM (gcp/cloudscheduler.js jobFromEndpoint), so the raw shorthand would
+// reach Cloud Scheduler as an invalid email and fail the deploy at the
+// scheduler step. GCLOUD_PROJECT is always set where this value is consumed:
+// the CLI seals it into the deploy trigger-discovery subprocess
+// (loadFirebaseEnvs), the Gen2 runtime and the emulator both set it. The
+// shorthand fallback only covers non-deploy imports (e.g. unit tests that
+// don't stub the env), where the value never reaches IAM.
+const ADMIN_SDK_SERVICE_ACCOUNT = process.env.GCLOUD_PROJECT
+  ? `firebase-adminsdk-fbsvc@${process.env.GCLOUD_PROJECT}.iam.gserviceaccount.com`
+  : 'firebase-adminsdk-fbsvc@';
 
 /**
  * Private, authenticated bug intake; App Check enforcement follows #44's
