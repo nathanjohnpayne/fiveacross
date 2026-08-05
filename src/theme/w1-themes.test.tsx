@@ -440,8 +440,15 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     expect(ids()).toContain('so-long-farewell');
   });
 
-  it('never offers a Bodega Theme on the Gay Cruise Bingo picker', () => {
-    for (const id of ['the-birds', 'side-quests', 'fog-froth-farewells']) {
+  it('never offers a Bodega or Five Across Theme on the Gay Cruise Bingo picker', () => {
+    for (const id of [
+      'the-birds',
+      'side-quests',
+      'fog-froth-farewells',
+      'marquee',
+      'confetti-hour',
+      'afterglow',
+    ]) {
       expect(ids('gcb')).not.toContain(id);
     }
   });
@@ -453,7 +460,14 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     expect(ids('vacay')).toEqual(['the-birds', 'side-quests', 'fog-froth-farewells']);
   });
 
-  it('keeps every legacy party Theme out of Vacay by name', () => {
+  it('offers EXACTLY the Five Across Themes on the fiveacross picker', () => {
+    // The same regression #617 closes for the third Edition: before these rows
+    // existed, `known` computed false for 'fiveacross' and the picker fell back
+    // to the whole gcb scope — Dog Tag T-Dance on a conference's Theme picker.
+    expect(ids('fiveacross')).toEqual(['marquee', 'confetti-hour', 'afterglow']);
+  });
+
+  it.each(['vacay', 'fiveacross'])('keeps every legacy party Theme out of %s by name', (edition) => {
     for (const id of [
       'neon-playground',
       'get-sporty',
@@ -469,18 +483,21 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
       'under-the-stars',
       'atlantis-classics',
     ]) {
-      expect(ids('vacay')).not.toContain(id);
+      expect(ids(edition)).not.toContain(id);
     }
   });
 
   it('PARTITIONS the registry — every Theme is pickable on exactly one Edition', () => {
     // Stronger than the two lists above: a Theme added without an Edition can
-    // no longer slip through as "shared", and a Theme claimed by both Editions
+    // no longer slip through as "shared", and a Theme claimed by two Editions
     // has to be a deliberate, visible choice rather than an omission.
     const gcb = ids('gcb');
     const vacay = ids('vacay');
-    expect([...gcb, ...vacay].sort()).toEqual(THEMES.map((t) => t.id).sort());
+    const fiveacross = ids('fiveacross');
+    expect([...gcb, ...vacay, ...fiveacross].sort()).toEqual(THEMES.map((t) => t.id).sort());
     expect(gcb.filter((id) => vacay.includes(id))).toEqual([]);
+    expect(gcb.filter((id) => fiveacross.includes(id))).toEqual([]);
+    expect(vacay.filter((id) => fiveacross.includes(id))).toEqual([]);
   });
 
   it('falls back to the legacy Edition for an Edition nothing recognises', () => {
@@ -504,7 +521,7 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
   it('leaves the REGISTRY complete regardless of Edition', () => {
     // The id->emoji lookups depend on this; a scoped registry breaks them.
     const registry = THEMES.map((t) => t.id);
-    for (const id of ['the-birds', 'welcome-aboard', 'neon-playground']) {
+    for (const id of ['the-birds', 'welcome-aboard', 'neon-playground', 'marquee']) {
       expect(registry).toContain(id);
     }
   });
@@ -548,6 +565,14 @@ describe('defaultThemeForEdition — the pre-auth fallback', () => {
     expect(defaultThemeForEdition('vacay')).toBe('the-birds');
   });
 
+  it('gives Five Across its doors-open Theme, not the cruise default', () => {
+    // Explicit-argument form on purpose: `setActiveEdition('fiveacross')`
+    // resets to gcb until the Edition lands in `BRANDS` (#608 / PR #615), but
+    // the scoping tables key on the Edition id alone, so this row is correct
+    // and testable in either merge order (#617).
+    expect(defaultThemeForEdition('fiveacross')).toBe('marquee');
+  });
+
   it('falls back to the legacy default for an unknown Edition', () => {
     expect(defaultThemeForEdition('not-an-edition')).toBe('neon-playground');
   });
@@ -563,7 +588,7 @@ describe('defaultThemeForEdition — the pre-auth fallback', () => {
 
   it('every Edition default is PICKABLE on its own Edition', () => {
     // Otherwise the switcher would open with no chip active on a fresh device.
-    for (const edition of ['gcb', 'vacay']) {
+    for (const edition of ['gcb', 'vacay', 'fiveacross']) {
       const id = defaultThemeForEdition(edition);
       expect(themesForEdition(edition).map((t) => t.id)).toContain(id);
     }
