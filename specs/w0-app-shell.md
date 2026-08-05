@@ -14,7 +14,7 @@ Feature: a frozen, stable set of route mount points — Card / Feed / Ranks / Pr
 
 - Given a signed-in non-Admin Player, when the shell renders, then the bottom tab bar shows Card, Feed, Ranks, and Prompts, and hides Admin.
 - Given a signed-in Admin, when the shell renders, then the Admin tab also appears.
-- Given the auth bootstrap is still resolving, when the JavaScript app has mounted, then an animated, live-region loading indication explains that the cruise pass is being checked.
+- Given the auth bootstrap is still resolving, when the JavaScript app has mounted, then an animated, live-region loading indication explains that their pass is being checked.
 - Given the frozen route table, when an unrecognized path is visited, then it does not mount any of the five known tabs and defers to the `/` (Card) fallback.
 - Given `viewport-fit=cover` (already set in `index.html`) on a notched iOS device, when the shell renders, then the tab bar's own bottom padding includes `env(safe-area-inset-bottom)` so it clears the home indicator, and each tab's tap target is at least 44px tall for one-handed reachability.
 - `App.tsx:` the `joinAndDeal` effect's error-swallowing is unchanged (out of scope for this ticket; owned by `w1-auth-google`).

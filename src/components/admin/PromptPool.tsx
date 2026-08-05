@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { isReportHidden } from '../../hooks/useData';
 import { adminAddItem, adminUpdateItemText, hideItem, restoreItem, deleteItem } from '../../data/admin';
 import AsyncButton from './AsyncButton';
+import { useAdultContentFlipConfirm } from './AdultContentConfirm';
 import type { ItemDoc } from '../../types';
 
 /**
@@ -19,18 +20,25 @@ function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
   const [failed, setFailed] = useState(false);
   const spicyAllowed = pool === 'main';
   const effectiveSpicy = spicyAllowed && spicy;
-  const submit = async () => {
-    if (!adminUid || !text.trim() || busy) return;
+  // `adminAddItem` writes `status: 'active'` directly — an admin adding IS the
+  // approval — so an explicit add flips the Event 18+ with no review step in
+  // between (#610). Same confirm, same component, different reason.
+  const { guard, dialog } = useAdultContentFlipConfirm();
+  const write = async () => {
     setBusy(true);
     setFailed(false);
     try {
-      await adminAddItem(adminUid, text, effectiveSpicy, pool);
+      await adminAddItem(adminUid!, text, effectiveSpicy, pool);
       setText('');
     } catch {
       setFailed(true);
     } finally {
       setBusy(false);
     }
+  };
+  const submit = async () => {
+    if (!adminUid || !text.trim() || busy) return;
+    await guard(effectiveSpicy, 'add', write);
   };
   return (
     <div className="row admin-add-item">
@@ -75,6 +83,7 @@ function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
           Didn’t add — try again.
         </span>
       )}
+      {dialog}
     </div>
   );
 }

@@ -7,8 +7,11 @@ import {
   setVisionGate,
   setReportHideThreshold,
   setEasyMixRatio,
+  setForceAdult,
 } from '../../data/admin';
 import { themesForEditionIncluding } from '../../theme/themes';
+import { adultContentRequired } from '../../adultContent';
+import { useAdultContentFlipConfirm } from './AdultContentConfirm';
 import type { ClaimMode, EventDoc } from '../../types';
 
 // A −/+ stepper for `settings.reportHideThreshold` (#222), floored at 1 on
@@ -172,6 +175,13 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
   const threshold = event?.settings?.reportHideThreshold ?? 4;
   // Easy mix (specs/easy-mix.md): default 0.5 mirrors the deal-time call-site default.
   const easyMix = event?.settings?.easyMixRatio ?? 0.5;
+  // The 18+ override (#608) and its confirm (#610). `adultContentRequired()` is
+  // the RESOLVED posture — what players actually see — while `forceAdult` is
+  // only this Event's manual reason for it, so the row can honestly say when
+  // the Event is already 18+ from its pool and the switch would change nothing.
+  const forceAdult = event?.settings?.forceAdult === true;
+  const alreadyAdult = adultContentRequired();
+  const { guard, dialog } = useAdultContentFlipConfirm();
 
   return (
     <>
@@ -260,6 +270,31 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
         </div>
         <div className="row">
           <div className="grow">
+            <div className="name">Adults only</div>
+            <div className="sub">
+              {alreadyAdult
+                ? 'This Event is 18+. Turning this off removes the reason, not the posture.'
+                : 'Turn on for mature content the 🔞 tag does not catch — violence, drugs, self-harm.'}
+            </div>
+          </div>
+          <label>
+            <input
+              type="checkbox"
+              checked={forceAdult}
+              aria-label="Adults only"
+              onChange={(e) => {
+                // Read the value NOW, not inside the deferred write: the confirm
+                // parks the action, and this controlled checkbox has re-rendered
+                // from `forceAdult` by the time the admin taps through.
+                const next = e.target.checked;
+                void guard(next, 'force', () => setForceAdult(next));
+              }}
+            />{' '}
+            On
+          </label>
+        </div>
+        <div className="row">
+          <div className="grow">
             <div className="name">Auto-hide after reports</div>
             <div className="sub">Reports needed before a Prompt or Proof self-hides from players.</div>
           </div>
@@ -293,6 +328,7 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
           ))}
         </div>
       </div>
+      {dialog}
     </>
   );
 }

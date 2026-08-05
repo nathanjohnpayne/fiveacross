@@ -13,7 +13,7 @@ The wireframe HTML is a hand-drawn frame with placeholder data — it is **never
 
 Visual baselines only work if every run paints identical pixels:
 
-- The browser clock is frozen at `PARITY_NOW` (Fri 2026-07-17 14:00 CEST, mid-cruise on the fixture schedule) via Playwright's `page.clock.install`, so the date-driven header, chip weekdays, relative times ("bumped 1h ago"), and proof clock labels never drift.
+- The browser clock is frozen at `PARITY_NOW` (Fri 2026-07-17 14:00 CEST, mid-Event on the fixture schedule) via Playwright's `page.clock.install`, so the date-driven header, chip weekdays, relative times ("bumped 1h ago"), and proof clock labels never drift.
 - **Unlocked** Days carry real-past `unlockAt`s — `firestore.rules` gates the deal on `request.time`, the SERVER clock, which the page freeze cannot touch. No player-visible string renders those stamps. **Locked** Days carry absolute 08:00-CEST stamps so their "Unlocks 8:00 a.m. · …" copy is identical every run; their locked state is judged against the frozen PAGE clock, so they stay locked previews forever.
 - The signed-in player's board is re-written with the app's own `dealBoard` under a FIXED seed (the popup join mints a random uid, whose seed-derived deal would repaint every run), and their display name is pinned.
 - Residual volatile chrome (the autogen account identity in the More profile row, the build-hash version footer) is masked.

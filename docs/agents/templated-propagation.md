@@ -1,6 +1,6 @@
 # Templated propagation — Layer 5 substitution lib
 
-> **Consumer-repo note.** Gay Cruise Bingo is a mergepath *consumer*. This doc describes hub-side propagation tooling; the sync driver (`scripts/sync-to-downstream.sh`) and `.mergepath-sync.yml` are absent in this repo, so propagation is not run here. The rendering lib (`scripts/lib/template-substitution.sh`) is present as propagated tooling. Mirrored for reference.
+> **Consumer-repo note.** Five Across is a mergepath *consumer*. This doc describes hub-side propagation tooling; the sync driver (`scripts/sync-to-downstream.sh`) and `.mergepath-sync.yml` are absent in this repo, so propagation is not run here. The rendering lib (`scripts/lib/template-substitution.sh`) is present as propagated tooling. Mirrored for reference.
 
 Status: **lib + sync/audit integration + propagation-lane verification landed.** Templated propagation PRs are now lane-eligible alongside canonical/kit — the verifier re-renders against `mergepath@<sha>` with the consumer's facts and byte-compares against the PR's dest.
 

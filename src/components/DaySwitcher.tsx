@@ -1,6 +1,7 @@
 import type { DayDef } from '../types';
 import { THEMES } from '../theme/themes';
 import { TutorialTag, tutorialTagLabel } from './TutorialBanner';
+import { editionLexicon } from '../editions';
 
 /**
  * Day switcher strip (daily-cards-spec § "Day switcher"): a one-row,
@@ -60,6 +61,14 @@ function weekday(date: string): string {
 
 const GLYPH: Record<DayChipState, string> = { past: '✓', today: '', locked: '🔒' };
 
+/** The strip's accessible name (#608). Composed rather than overridden: the
+ *  skeleton "{Occasion} days" survives all three registers intact — Cruise
+ *  days / Trip days / Event days — which is exactly the case a token is for. */
+function dayTabsLabel(): string {
+  const { occasion } = editionLexicon();
+  return `${occasion.charAt(0).toUpperCase()}${occasion.slice(1)} days`;
+}
+
 export interface DaySwitcherProps {
   days: readonly DayDef[];
   /** The currently VIEWED Day's index — not necessarily `'today'`. */
@@ -79,7 +88,7 @@ export interface DaySwitcherProps {
 export default function DaySwitcher({ days, viewedIndex, onSelect, now = Date.now() }: DaySwitcherProps) {
   const states = dayStates(days, now);
   return (
-    <div className="day-switcher" role="tablist" aria-label="Cruise days">
+    <div className="day-switcher" role="tablist" aria-label={dayTabsLabel()}>
       {days.map((d, i) => {
         const state = states[i];
         const selected = i === viewedIndex;

@@ -5,14 +5,14 @@ status: accepted
 
 # Easy mix — blend embark-pool squares into main-day cards (`easy-mix`)
 
-Implements `plans/daily-cards-spec.md` § "Resolved decisions" #8 and `plans/easy-mix-ticket.md`. Cards to date have been too hard: every main-day card dealt all 24 non-free Squares from the main pool. From Day 4 onward a new event setting **`settings.easyMixRatio`** (0–1, default **0.5**) splits the 24 Squares into an **easy half** sampled from the **embark** pool (the tutorial's on-ship, campy, achievable items) and a **main half** dealt exactly as before, with the existing `spicyRatio` applying **within the main half only**. It is admin-tunable (a dial, not a deploy); the Day Snapshot now carries **both** pools so reshuffles inherit the mix for free; already-unlocked Days 1–3 are byte-for-byte untouched.
+Implements `plans/daily-cards-spec.md` § "Resolved decisions" #8 and `plans/easy-mix-ticket.md`. Cards to date have been too hard: every main-day card dealt all 24 non-free Squares from the main pool. From Day 4 onward a new event setting **`settings.easyMixRatio`** (0–1, default **0.5**) splits the 24 Squares into an **easy half** sampled from the **embark** pool (the tutorial's easy, campy, achievable items) and a **main half** dealt exactly as before, with the existing `spicyRatio` applying **within the main half only**. It is admin-tunable (a dial, not a deploy); the Day Snapshot now carries **both** pools so reshuffles inherit the mix for free; already-unlocked Days 1–3 are byte-for-byte untouched.
 
 Order of operations on a main-day deal: `easyMixRatio` splits 24 → easy/main counts (`0.5 → 12/12`, `0.25 → 6/18`, `0 → 0/24`); `spicyRatio` (~0.4) then applies within the main count (`12 → round(12·0.4) = 5` spicy / 7 tame). Guarded by `src/game/logic.test.ts` + `src/game/easy-mix.test.ts` (composition), `src/data/d15-dealing.test.ts` (the deal call site), and `tests/functions/easy-mix-snapshot.test.ts` (the snapshot + guarded re-snapshot).
 
 ## Glossary
 
-- **Easy half**: the `round(24 · easyMixRatio)` Squares of a main-day card dealt from the embark pool. Easy items may repeat across days — per-day tallies make re-marking "Get your favorite dessert" on Day 4 legitimate — so the cross-cruise no-repeat exclusion applies to the **main half only**.
-- **Main half**: the remaining `24 − easyCount` Squares, dealt by the unchanged stratified spicy/tame sample, honoring the cross-cruise no-repeat exclusion.
+- **Easy half**: the `round(24 · easyMixRatio)` Squares of a main-day card dealt from the embark pool. Easy items may repeat across days — per-day tallies make re-marking "Get your favorite dessert" on Day 4 legitimate — so the Event-wide no-repeat exclusion applies to the **main half only**.
+- **Main half**: the remaining `24 − easyCount` Squares, dealt by the unchanged stratified spicy/tame sample, honoring the Event-wide no-repeat exclusion.
 
 ## Contract
 

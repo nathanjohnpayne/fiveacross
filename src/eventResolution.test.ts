@@ -24,6 +24,7 @@ const DOC: HostnameDoc = {
   canonicalHost: HOST,
   edition: 'vacay',
   status: 'active',
+  adultContent: true,
   slug: 'bodega-bay',
   isCanonical: true,
 };

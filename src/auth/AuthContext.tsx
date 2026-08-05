@@ -18,6 +18,7 @@ import {
   readAdultAttestationFromServer,
 } from '../data/api';
 import { track } from '../analytics';
+import { adultContentRequired } from '../adultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
@@ -472,6 +473,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // stale-attempt discipline, and what makes reconnect recovery deterministic.
   const bootstrapUser = useCallback(async (u: User, attempt: number) => {
     if (!isOnline()) {
+      // NO AGE GATE ON THIS EVENT (#608) — there is nothing to prove offline, so
+      // there is nothing to hold for. The whole cache-first dance below exists to
+      // avoid rendering the Board without proof-of-18+; an Event whose pool holds
+      // no adult content never asked for that proof, so holding "Loading…" until
+      // reconnect would strand an offline Player on a spinner over a question
+      // nobody posed. Released BEFORE the IndexedDB read, which would only ever
+      // answer about a stamp this Event does not want.
+      if (!adultContentRequired()) {
+        if (profileAttemptRef.current !== attempt) return;
+        setLoading(false);
+        clearDealError();
+        return;
+      }
       // OFFLINE: settle the gate CACHE-FIRST and RELEASE the render only with
       // PROOF of 18+ (finding B). A cached stamp — or a same-session optimistic
       // attest (#112 Finding 3) — provisionally lifts the gate and paints the
@@ -813,9 +827,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // succeeded), so that User deals on reconnect. A returning boarded User re-runs
   // joinAndDeal on that flip but its board-exists early-return makes it a no-op;
   // the dealAttempt guard keeps any reconnect re-run from clobbering state.
+  //
+  // #608 SPLITS THE GATE FROM ITS SUBJECT. Every guarantee above is about
+  // proving an 18+ attestation before creating durable rows — which presupposes
+  // that this Event asks for one. When `hostnames/{host}.adultContent` is false
+  // no attestation is ever collected, so `attested` settles a permanent `false`
+  // and the deal would never fire at all. The equivalent "the bootstrap settled
+  // authoritatively" signal on that path is `profileReady`, which the ONLINE
+  // branch sets only after `ensureUserProfile` has actually run — so the
+  // write-safety property (never create board/player rows before the profile
+  // bootstrap settles, never offline) is preserved rather than dropped. The
+  // offline branch never sets it, and `online` gates besides.
+  const mayDeal = adultContentRequired() ? attested === true && attestedAuthoritative : profileReady;
   useEffect(() => {
-    if (user && attested === true && attestedAuthoritative && online) void runDeal(user);
-  }, [user, attested, attestedAuthoritative, online, runDeal]);
+    if (user && mayDeal && online) void runDeal(user);
+  }, [user, mayDeal, online, runDeal]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same
@@ -867,9 +893,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Retry the current User's path to a dealt Board, in place (no reload). The
   // manual retry must honor the SAME write-safety gate as the automatic deal
-  // effect (Codex #117 round 3, finding A): deal ONLY when online AND the
-  // attestation is AUTHORITATIVE (server-settled or same-session attest) AND
-  // `attested === true`. Otherwise — offline, or on a merely PROVISIONAL cached
+  // effect (Codex #117 round 3, finding A) — literally the same `mayDeal`
+  // expression, so the two can never drift: online AND the attestation
+  // AUTHORITATIVE (server-settled or same-session attest) and `attested === true`,
+  // or, on an Event that asks for no attestation at all (#608), the profile
+  // bootstrap settled. Otherwise — offline, or on a merely PROVISIONAL cached
   // attestation (e.g. an offline cold boot whose reconnect bootstrap threw before
   // an authoritative read) — re-run the bootstrap instead, never joinAndDeal. A
   // retry can therefore never create board/player rows offline or on un-proven
@@ -886,14 +914,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // cached Board and clear the stale error; else stay held/retryable), and
       // never awaits the transaction. It also never deals (offline gate).
       void bootstrapUser(user, (profileAttemptRef.current += 1));
-    } else if (attestedAuthoritative && attested === true) {
+    } else if (mayDeal) {
       // Online + authoritative → re-deal in place.
       void runDeal(user);
     } else {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user);
     }
-  }, [user, attestedAuthoritative, attested, runDeal, retryBootstrap, bootstrapUser]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the
@@ -967,7 +995,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then(async (result) => {
         if (!result) return;
         track('login', { method: 'google' });
-        await persistAttestation(result.user);
+        // Same posture gate as the popup path (#608): no checkbox was shown on a
+        // non-adult Event, so there is no attestation to complete.
+        if (adultContentRequired()) await persistAttestation(result.user);
       })
       .catch((err: unknown) => {
         if (appOwnedRedirect) trackSignInFailure(err);
@@ -1037,7 +1067,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // The 18+ checkbox gated this sign-in (SignIn.tsx), so signing in IS the
       // attestation — persist it now that we have a uid, so a first-time User is not
       // re-prompted for the box they just ticked (#23).
-      await attest();
+      //
+      // …UNLESS this Event never asked (#608). `attestedAdultAt` is a
+      // cross-Event record on the global `users/{uid}` document, and on an Event
+      // with no adult content SignIn renders no checkbox at all — so writing the
+      // stamp here would fabricate a self-attestation the Player never made, and
+      // carry it to every other Event they join. The gate is skipped, not
+      // silently satisfied.
+      if (adultContentRequired()) await attest();
     })();
 
     signInAttemptRef.current = attempt;
@@ -1058,8 +1095,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // SignIn gate App renders on `!user`. Gated on profileReady so a still-loading
   // bootstrap (attestation UNKNOWN) never flashes the prompt. `SignIn` reads
   // `user` from context to render its re-prompt mode.
-  const needsAttestation = user != null && profileReady && attested === false;
-  const canRenderEventContent = user != null && attested === true;
+  //
+  // …and gated FIRST on whether this Event asks at all (#608). This is the whole
+  // retroactive path the dynamic posture needs, and it needs no new surface: an
+  // Event that turns 18+ mid-flight (an admin approves the first explicit Prompt)
+  // flips `hostnames/{host}.adultContent`, the next resolution installs `true`,
+  // and this one condition re-gates every un-attested Player through the
+  // re-prompt that already exists.
+  const attestationRequired = adultContentRequired();
+  const needsAttestation = attestationRequired && user != null && profileReady && attested === false;
+  // Event content may render once the age gate is settled — or once it is
+  // established that this Event has no age gate and the profile bootstrap has
+  // landed. `profileReady` rather than a bare `user != null` keeps the durable
+  // card fallback from painting before the bootstrap it is meant to follow.
+  const canRenderEventContent =
+    user != null && (attestationRequired ? attested === true : profileReady);
 
   return (
     <AuthContext.Provider

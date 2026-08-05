@@ -1014,7 +1014,7 @@ export async function reshuffleBoard(params: {
     const player = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
     const used = typeof player?.reshufflesUsed === 'number' ? player.reshufflesUsed : 0;
     if (used >= RESHUFFLE_ALLOWANCE) {
-      throw new Error('reshuffleBoard: no cruise reshuffles left.');
+      throw new Error('reshuffleBoard: no reshuffles left.');
     }
 
     // No-repeat exclusion computed from KEPT cards only (the ticket's decision):

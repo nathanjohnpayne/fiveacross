@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Shuffle } from 'lucide-react';
+import { editionLexicon } from '../editions';
 
 /**
  * The one-time launch announcement for Reshuffle (#378,
@@ -56,7 +57,8 @@ const BEATS: Beat[] = [
     chipVariant: 'warn',
     copy: (
       <>
-        <b>Three for the whole cruise</b>—spend them wisely. A reshuffle never comes back.
+        <b>Three for the whole {editionLexicon().occasion}</b>—spend them wisely. A reshuffle never comes
+        back.
       </>
     ),
   },

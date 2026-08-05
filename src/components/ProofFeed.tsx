@@ -13,6 +13,7 @@ import { resolveProofMediaUrl } from '../data/proofMediaUrl';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
 import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../data/doubts';
 import { heartState, setHeart } from '../data/hearts';
+import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
 import type {
   BoardDoc,
@@ -486,7 +487,8 @@ function MomentCard({ moment, days, bannedUids, heart }: { moment: MomentDoc; da
             <div className="moment-podium">
               {podium.champion && (
                 <div className="moment-podium-row">
-                  🏆 Cruise champion: <b>{podium.champion.displayName}</b> — {podium.champion.bingoCount} bingo
+                  🏆 {editionBrand().championRole}: <b>{podium.champion.displayName}</b> —{}
+                  {podium.champion.bingoCount} bingo
                   {podium.champion.bingoCount === 1 ? '' : 's'} · {podium.champion.squaresMarked} squares
                 </div>
               )}

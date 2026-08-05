@@ -1,5 +1,6 @@
 import { toBlob } from 'html-to-image';
 import { completedLines } from '../game/logic';
+import { editionBrand, editionLexicon } from '../editions';
 import type { Cell } from '../types';
 
 /**
@@ -182,7 +183,7 @@ function buildBingoCardNode(data: BingoShareCardData): HTMLDivElement {
   }
   card.append(grid);
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
-  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} 🚢`));
+  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} ${editionLexicon().shareMark}`));
   return card;
 }
 
@@ -284,7 +285,7 @@ function buildLeaderboardCardNode(data: LeaderboardShareCardData): HTMLDivElemen
   }
 
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
-  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} 🚢`));
+  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} ${editionLexicon().shareMark}`));
   return card;
 }
 
@@ -333,7 +334,7 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   if (data.champion) {
     card.append(
       buildHonoree(
-        '🏆 Cruise champion',
+        `🏆 ${editionBrand().championRole}`,
         data.champion.displayName,
         `${data.champion.bingoCount} bingo${data.champion.bingoCount === 1 ? '' : 's'} · ${data.champion.squaresMarked} squares`,
       ),
@@ -356,7 +357,7 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   }
 
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
-  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} 🚢`));
+  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} ${editionLexicon().shareMark}`));
   return card;
 }
 

@@ -4,6 +4,7 @@ import { useRegisterSW } from 'virtual:pwa-register/react';
 import { useClaimSheetOpen, useToastSlot } from '../hooks/useToastStack';
 import { buildBelowFloor, fetchBuildFloor } from '../buildFloor';
 import { dismissedBuild, isDismissedBuild, readWaitingBuildStamp, rememberDismissedBuild } from '../updateDismissal';
+import { editionBrand } from '../editions';
 
 /** How often a long-lived tab asks the browser to re-check `/sw.js` for a new
  *  deploy (`registration.update()`). 60s matches the poll cadence Nathan's other
@@ -211,6 +212,11 @@ export default function UpdatePrompt() {
 
   if (!visible) return null;
 
+  // Both the lead-in mark and the title are whole-string Edition overrides
+  // (#608): "just docked" is a cruise verb and ⬆️ is not a swap for 🚢 so much
+  // as a decision to spend no camp at all on this Edition's toast.
+  const brand = editionBrand();
+
   return (
     <div
       className="update-prompt"
@@ -220,13 +226,13 @@ export default function UpdatePrompt() {
       {/* The wireframes' toast lead-in (#308) — emoji, per the spec's
           iconography rule ("toast lead-ins stay emoji"). */}
       <span className="toast-icon" aria-hidden="true">
-        🚢
+        {brand.updateToastMark}
       </span>
       {/* Wrapped so the shared row-flex toast shell stacks the two lines
           vertically instead of splitting them into columns (Codex P2 on
           #281) — same body-wrapper pattern as the install toast. */}
       <div className="install-prompt-body">
-        <p className="toast-title">A fresh build just docked</p>
+        <p className="toast-title">{brand.updateToastTitle}</p>
         <p>Your marks are safe&mdash;reload takes two seconds</p>
       </div>
       <button className="btn primary" onClick={() => void updateServiceWorker(true)}>

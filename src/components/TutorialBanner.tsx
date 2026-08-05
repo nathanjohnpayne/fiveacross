@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { DayDef } from '../types';
+import { editionBrand } from '../editions';
 
 /**
  * The embark/farewell tutorial banners (daily-cards-spec §§ "Embark
@@ -24,8 +25,9 @@ const EMBARK_BEATS: readonly string[] = [
   'The feed is the proof. Attach a pic, doubt a friend, watch the Moments roll in.',
 ];
 
-const EMBARK_CAPTION =
-  "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.";
+// Whole-string per Edition (#608), not a token: "all on the ship" has no
+// occasion-neutral skeleton — "all on the event" is not English.
+const embarkCaption = (): string => editionBrand().tutorialWarmupNote;
 
 const FAREWELL_COPY = 'Last one. Mark your goodbyes—then go book next year.';
 
@@ -62,7 +64,7 @@ function EmbarkBanner({ onDismiss }: { onDismiss: () => void }) {
           <li key={beat}>{beat}</li>
         ))}
       </ol>
-      <p className="tutorial-banner-caption">{EMBARK_CAPTION}</p>
+      <p className="tutorial-banner-caption">{embarkCaption()}</p>
     </div>
   );
 }
@@ -97,7 +99,7 @@ export function WalkthroughContent() {
           <li key={beat}>{beat}</li>
         ))}
       </ol>
-      <p className="tutorial-banner-caption">{EMBARK_CAPTION}</p>
+      <p className="tutorial-banner-caption">{embarkCaption()}</p>
     </div>
   );
 }

@@ -9,7 +9,7 @@ The Feed reveals its entries a page at a time and grows as the reader scrolls, i
 
 ## The bug this replaces (#441)
 
-`useFeed(max = 60)` sliced its merged stream to 60 and `ProofFeed` rendered exactly that, with nothing below the last card. Everything older was unreachable from the UI — no control, no scroll trigger — so on a ten-day cruise most of the trip's history went invisible within the first couple of days.
+`useFeed(max = 60)` sliced its merged stream to 60 and `ProofFeed` rendered exactly that, with nothing below the last card. Everything older was unreachable from the UI — no control, no scroll trigger — so on a ten-Day Event most of the Event's history went invisible within the first couple of days.
 
 ## The window is presentational, not a fetch boundary
 

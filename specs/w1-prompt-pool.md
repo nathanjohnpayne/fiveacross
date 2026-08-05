@@ -3,7 +3,7 @@ spec_id: w1-prompt-pool
 status: accepted
 ---
 
-# w1-prompt-pool — Prompt pool add/report: pre-sail framing + a Phase 0 client-side rate limit
+# w1-prompt-pool — Prompt pool add/report: before-the-Event framing + a Phase 0 client-side rate limit
 
 The Prompt pool is the community-editable set of things-that-might-happen a Board is dealt from. Per ADR 0003 a Board freezes the moment a Player joins, so a Prompt added afterward can never land on that Player's own card — it only ever joins the pool for a future deal (a late joiner, or a future Event). This ticket (#28) strengthens the add-a-Prompt copy to say that plainly, and adds a client-side rate-limit guard on add/report so the pool can't be spammed by a double-tap or an over-enthusiastic Player, in the same Phase-0-is-presentational-only posture ADR 0004 already takes for the reactive-moderation auto-hide. Neither change touches the `items` create-if-valid / report-only-increment contract #18 established, and the report stays increment-only — the threshold-based hide is #37.
 
@@ -12,9 +12,9 @@ The Prompt pool is the community-editable set of things-that-might-happen a Boar
 - `src/components/ItemPool.tsx` — the muted note under the add bar is rewritten to lead with the PRD's own words, "get your prompts in before we sail," and to say explicitly that a Prompt added after a Player's card is dealt joins the pool for a *future* card, not theirs. Two new pieces of local UI state, `addThrottled`/`reportThrottled`, disable the Add button / a Report button and show a `role="alert"` message while a client-side rate-limit window is open, and clear automatically once it passes (a real `setTimeout`, cleaned up on unmount).
 - `src/data/api.ts` — a small, self-contained rate-limit helper (`checkItemRateLimit` + the `ITEM_RATE_LIMIT_MS` constant it's judged against, plus the read-only `itemRateLimitRemainingMs` companion the UI timer is armed from — see "Throttle UX" below) is added next to `addItem`/`reportItem`. Neither `addItem` nor `reportItem` changed behavior; the guard lives one layer up, at their one real call site — see "Why the guard lives in the caller, not the write" below.
 
-## Pre-sail framing (ADR 0003)
+## Before-the-Event framing (ADR 0003)
 
-The note under the add bar now reads: "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours." followed by the live pool count ("N in the pool."). This replaces the old, softer "New prompts join the pool for future cards." — the old copy never told a Player *why* a mid-cruise add wouldn't show up on their own card, which is exactly the confusion ADR 0003 flags as the thing worth messaging up front. The live count is kept (renamed from "in play" to "in the pool") so the pool-density framing (~30–50 Prompts, seeded and maintained by `w1-event-seed` and admin pruning — out of scope here) stays visible without hard-coding the target range into player-facing copy that would go stale as the pool grows or shrinks.
+The note under the add bar now reads: "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours." followed by the live pool count ("N in the pool."). This replaces the old, softer "New prompts join the pool for future cards." — the old copy never told a Player *why* a mid-Event add wouldn't show up on their own card, which is exactly the confusion ADR 0003 flags as the thing worth messaging up front. The live count is kept (renamed from "in play" to "in the pool") so the pool-density framing (~30–50 Prompts, seeded and maintained by `w1-event-seed` and admin pruning — out of scope here) stays visible without hard-coding the target range into player-facing copy that would go stale as the pool grows or shrinks.
 
 ## Client-side rate limit (ADR 0004 posture, Phase 0)
 
@@ -32,7 +32,7 @@ While throttled, the relevant control (`Add`, or a `Report` button) is `disabled
 
 Every claim below maps to an assertion in `src/components/w1-prompt-pool.test.tsx` (layer: RTL-jsdom, `npm test`). `addItem`/`reportItem` are stubbed (no real Firestore write in this layer); `checkItemRateLimit`/`ITEM_RATE_LIMIT_MS` are the REAL implementation from `../data/api`, so the throttle assertions exercise the actual guard rather than a re-implementation of it in the test.
 
-- **Given** the Prompts tab **when** it renders **then** the note leads with "get your prompts in before we sail" and says a mid-cruise add "joins the pool for a future card, not yours," alongside the live pool count. (Test: "messages adding a prompt as pre-sail, and mid-cruise adds as joining a FUTURE card, not the frozen one".)
+- **Given** the Prompts tab **when** it renders **then** the note leads with "get your prompts in before we sail" and says a mid-Event add "joins the pool for a future card, not yours," alongside the live pool count. (Test: "messages adding a prompt as pre-sail, and mid-cruise adds as joining a FUTURE card, not the frozen one".)
 - **Given** a signed-in Player types a Prompt **when** they submit it **then** `addItem` is called with their uid and the raw (untrimmed-by-the-caller — `addItem` itself trims) text, and the input clears once the write resolves. (Test: "calls addItem with the trimmed text and clears the input on success".)
 - **Given** blank or whitespace-only input **when** the Player tries to add **then** the Add button stays disabled and `addItem` is never called. (Test: "does nothing for blank/whitespace-only text".)
 - **Given** a Player submits Add twice in rapid succession **when** the second submit lands inside the rate-limit window **then** `addItem` fires only once, a `role="alert"` throttle message appears, the Add button is disabled, a THIRD attempt still inside the window is also suppressed, and — once the window passes — a further Add succeeds and calls `addItem` again. (Test: "throttles a rapid second Add — addItem fires once, shows a message and disables Add, then recovers once the window passes".)
@@ -41,9 +41,9 @@ Every claim below maps to an assertion in `src/components/w1-prompt-pool.test.ts
 
 ## Acceptance criteria
 
-- Given the pre-sail window, when a Player adds a Prompt, then it persists to the pool (via `addItem`, called directly from the click handler with no intervening step) and the pre-sail framing is visible on the same screen — `src/components/w1-prompt-pool.test.tsx` (framing + add-clears-input). The PRD's "< 5s" add-a-Prompt metric is a UX budget, not something this unit-test layer measures in wall-clock time; the structural claim it backs is that no new step was inserted between the tap and the write.
+- Given the window before the Event opens, when a Player adds a Prompt, then it persists to the pool (via `addItem`, called directly from the click handler with no intervening step) and the framing is visible on the same screen — `src/components/w1-prompt-pool.test.tsx` (framing + add-clears-input). The PRD's "< 5s" add-a-Prompt metric is a UX budget, not something this unit-test layer measures in wall-clock time; the structural claim it backs is that no new step was inserted between the tap and the write.
 - Given a Player adds/reports rapidly, when they exceed the client rate-limit, then further add/report is throttled (disabled control + human message) until the window passes — `src/components/w1-prompt-pool.test.tsx` (the Add and Report throttle tests).
-- Pre-sail framing strengthened per ADR 0003 — framing test above.
+- Before-the-Event framing strengthened per ADR 0003 — framing test above.
 - Pool stays dense (~30–50): unaffected by this ticket: seeded and maintained by `specs/w1-event-seed.md` and admin pruning; this ticket only keeps the live count visible in the strengthened copy.
 - Report stays increment-only — `reportItem`'s body is unchanged; the threshold-based hide remains #37.
 

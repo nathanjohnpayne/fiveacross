@@ -50,7 +50,7 @@ Issue numbers are filled in after creation (see the slug → issue map at the bo
 | w1-event-seed | Reconcile the Event/pool seed script (`scripts/seed.mjs`): drop `blackoutEnabled`, admin roster, threshold, align `claimMode` | identity | foundation | 0 | 1 | S | 0003,0004 | w0-type-contract | Backlog |
 | w1-board-deal-join | Board render + deal/freeze-at-join (24 + Free Space; guard pool<24; NO re-deal) | play | play | 0 | 1 | L | 0003 | w0-app-shell, w0-type-contract, w0-firestore-rules | Backlog |
 | w1-board-mark-win | Mark a Square + BINGO/Blackout detection + celebration (offline-durable Marks) | play | play | 0 | 1 | L | 0001,0006 | w1-board-deal-join, w0-offline-persistence | Backlog |
-| w1-prompt-pool | Prompt pool: add / report / rate-limit + pre-cruise framing | play | prompts | 0 | 1 | M | 0003,0004 | w0-app-shell, w0-firestore-rules | Backlog |
+| w1-prompt-pool | Prompt pool: add / report / rate-limit + before-the-Event framing | play | prompts | 0 | 1 | M | 0003,0004 | w0-app-shell, w0-firestore-rules | Backlog |
 | w1-themes | 8 Atlantis Themes: switcher + persistence + WCAG contrast | play | themes | 0 | 1 | M | — | w0-app-shell | Backlog |
 | w1-pwa | PWA: manifest / SW / install prompt / iOS safe-area / Lighthouse ≥ 90 | play | pwa | 0 | 1 | M | 0006 | w0-app-shell | Backlog |
 | w2-tally | Per-Prompt **Tally**: every Mark publishes an attributed public record + tap-to-see-who | social | tally | 0 | 2 | L | 0001,0002 | w1-board-mark-win, w0-firestore-rules, w0-type-contract | Backlog |
@@ -71,7 +71,7 @@ Issue numbers are filled in after creation (see the slug → issue map at the bo
 | w4-infra-blaze-budget | Infra: Blaze upgrade + budget alert before enabling Phase 1 | backend | infra | 1 | 4 | S | — | — | Backlog |
 | p2-vision-proof | Cloud Vision (proof): re-enable the gated `moderateProof` SafeSearch scanner + thumbnails | phase2-hardening | proof | 2 | 4 | M | 0004 | w2-proof-capture, w4-infra-blaze-budget | Backlog |
 | p2-vision-moderation | Cloud Vision (moderation): auto-hide extreme/illegal Vision flags (extend shipped autohide) | phase2-hardening | moderation | 2 | 4 | M | 0004 | p2-vision-proof, w2-admin-console | Backlog |
-| p2-archive | Post-sailing archive: freeze the Event + durable Leaderboard / First-to-BINGO hall of fame | phase2-hardening | launch | 2 | 4 | M | 0001,0003 | w2-leaderboard, w2-feed-moments | Backlog |
+| p2-archive | Post-Event archive: freeze the Event + durable Leaderboard / First-to-BINGO hall of fame | phase2-hardening | launch | 2 | 4 | M | 0001,0003 | w2-leaderboard, w2-feed-moments | Backlog |
 | x-e2e-happy-path | E2E happy-path (join → mark → BINGO → leaderboard) + offline-mark test against the emulator | launch | launch | hardening | 3 | M | 0006 | w1-board-mark-win, w2-leaderboard, w0-test-harness | Backlog |
 | x-launch-checklist | Cross-device matrix + launch checklist + printed-PDF fallback | launch | launch | hardening | 4 | M | — | x-e2e-happy-path | Backlog |
 | x-multi-event-schema | Multi-event schema readiness (P2, design-only) | launch | schema | hardening | 4 | S | 0003 | — | Backlog |
@@ -109,7 +109,7 @@ Each expands into a full templated issue body (`scripts/gh-projects/examples/gay
 
 **w1-board-mark-win** — Client-authoritative Mark via `setMark` (`api.ts`, transactional; exists) + `hasBingo`/`isBlackout` + `Celebration.tsx`. Fix the false offline comment (`Board.tsx:65`). A **bare Mark posts nothing to the Feed** (ADR 0002). Add the offline test: mark offline → reload → still queued → syncs (ADR 0006 + PRD metric). Honor mode marks instantly. Files: `Board.tsx`, `Celebration.tsx`, `data/api.ts`.
 
-**w1-prompt-pool** — `ItemPool.tsx` (add + report exist; future-cards note at `:40-42`). Strengthen the pre-sail framing ("get your prompts in before we sail", ADR 0003); add a client rate-limit on add/report; keep the pool dense (~30–50). Files: `components/ItemPool.tsx`, `data/api.ts`.
+**w1-prompt-pool** — `ItemPool.tsx` (add + report exist; future-cards note at `:40-42`). Strengthen the before-the-Event framing ("get your prompts in before we sail", ADR 0003); add a client rate-limit on add/report; keep the pool dense (~30–50). Files: `components/ItemPool.tsx`, `data/api.ts`.
 
 **w1-themes** — 8 Atlantis Themes (Neon Playground default) already in `theme/themes.ts` + `themes.css` (8 `[data-theme]` blocks) + `ThemeSwitcher`/`ThemeContext` (localStorage `gcb.theme`). Verify WCAG AA contrast across all 8; switch < 5 s (PRD). No Atlantis marks (PRD non-goal). Files: `theme/*`, `components/ThemeSwitcher.tsx`.
 
@@ -117,7 +117,7 @@ Each expands into a full templated issue body (`scripts/gh-projects/examples/gay
 
 ### Wave 2 — Social core
 
-**w2-tally** *(core differentiator, embarkation-critical)* — Greenfield per ADR 0002. Every Mark (proofed or not) publishes an **attributed** entry to its Prompt's Tally (`tally/{itemId}` marker list with uid + displayName). The Square shows a count + tap-to-see-who list. No anonymity. Wire into `setMark` (extends the Wave-1 mark write set — sequenced after `w1-board-mark-win`). Files: `data/api.ts`, `data/paths.ts`, a Tally UI on the Square, `hooks/useData.ts`, `firestore.rules` (from `w0`). Test: a Mark writes a Tally entry (rules + unit).
+**w2-tally** *(core differentiator, launch-critical)* — Greenfield per ADR 0002. Every Mark (proofed or not) publishes an **attributed** entry to its Prompt's Tally (`tally/{itemId}` marker list with uid + displayName). The Square shows a count + tap-to-see-who list. No anonymity. Wire into `setMark` (extends the Wave-1 mark write set — sequenced after `w1-board-mark-win`). Files: `data/api.ts`, `data/paths.ts`, a Tally UI on the Square, `hooks/useData.ts`, `firestore.rules` (from `w0`). Test: a Mark writes a Tally entry (rules + unit).
 
 **w2-proof-capture** — Proof capture is largely scaffolded: `ProofSheet.tsx` (photo / audio via MediaRecorder / text), `attachProof` (`proofs.ts`, transactional), `downscaleImage` + `uploadProofMedia` (`storage.ts`) all exist. Complete/verify: a Proof posts to the Feed (ADR 0002); `proof_required` mode requires a Proof to Mark; offline — the Mark queues and media attaches on reconnect (ADR 0006). Files: `ProofSheet.tsx`, `data/proofs.ts`, `data/storage.ts`.
 
@@ -161,7 +161,7 @@ Epic [#131](https://github.com/nathanjohnpayne/gaycruisebingo/issues/131). The p
 
 **p2-vision-moderation** *(needs-phase-4, phase-2)* — The **consumer** half: promote an extreme/illegal `visionFlag` to a server-authoritative `status:'hidden'`. The shipped report-count auto-hide (`functions/src/autohide.ts`, #43) is *active-only* and deliberately leaves `flagged` docs alone, so today nothing auto-hides a Vision flag. Add the Vision-flag → hide path without regressing that invariant, and mark Vision-flagged items in the moderation queue (reason + restore). Files: `functions/src/autohide.ts` (or sibling), `firestore.rules`, `components/Admin.tsx`, `hooks/useData.ts`, `specs/cloud-vision-moderation.md`.
 
-**p2-archive** *(needs-phase-4 — touches `firestore.rules`)* — The PRD "remember the winners" end state: after the sailing, freeze the Event to read-only and persist the final Leaderboard + First-to-BINGO hall of fame. `EventDoc.status` already types `'archived'` (`src/types.ts:28`) but nothing sets or reacts to it. Files: `src/types.ts` (`archivedAt` + snapshot), `firestore.rules` (deny gameplay writes when archived; admin-only toggle), `components/Leaderboard.tsx`, `data/admin.ts`, `specs/post-sailing-archive.md`.
+**p2-archive** *(needs-phase-4 — touches `firestore.rules`)* — The PRD "remember the winners" end state: after the Event, freeze it to read-only and persist the final Leaderboard + First-to-BINGO hall of fame. `EventDoc.status` already types `'archived'` (`src/types.ts:28`) but nothing sets or reacts to it. Files: `src/types.ts` (`archivedAt` + snapshot), `firestore.rules` (deny gameplay writes when archived; admin-only toggle), `components/Leaderboard.tsx`, `data/admin.ts`, `specs/post-sailing-archive.md`.
 
 ### Cross-cutting / launch
 
@@ -169,7 +169,7 @@ Epic [#131](https://github.com/nathanjohnpayne/gaycruisebingo/issues/131). The p
 
 **x-launch-checklist** — iOS/Android device matrix, launch runbook, one-handed reachability check, and the printed 12-card PDF fallback documented (PRD fallback).
 
-**x-multi-event-schema** *(design-only)* — Document that the schema is already event-scoped (`events/{eventId}`), a second cruise = a new Event doc, and there is **no** room-browsing / join-code UI (PRD non-goal, ADR 0003). Spec only (`tested: false` + `reason:`), no code.
+**x-multi-event-schema** *(design-only)* — Document that the schema is already event-scoped (`events/{eventId}`), a second Event = a new Event doc, and there is **no** room-browsing / join-code UI (PRD non-goal, ADR 0003). Spec only (`tested: false` + `reason:`), no code.
 
 **x-decisions-needed** *(decision-needed)* — One issue collecting the genuine open operational/config decisions, each tagged with the ticket(s) it blocks: admin roster (2–4 uids incl. Nathan's seed uid) → `w1-event-seed`; confirm `reportHideThreshold` = 4 → `w2-admin-console`; Blaze budget $ → `w4-infra-blaze-budget`; reCAPTCHA Enterprise key + enforcement timing → `w4-app-check`; domain cutover timing → `w4-infra-domain`; GA4 consent copy/region → `w2-ga4-events`; keep `recomputeStats` as labeled repair? (default: remove) → `recon-recompute-stats`. Blocks **only** those tickets, not the whole backlog.
 

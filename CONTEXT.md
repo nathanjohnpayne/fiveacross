@@ -10,7 +10,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Brand**: Five Across — the platform identity that owns accounts, the game engine, the analytics ingest host, and the "For the story" promise. One Brand exists. _Avoid_: Product, company
 
-**Edition**: A named personality the platform wears for a class of occasion — Vacay Bingo (travel), Gay Cruise Bingo (the original adults-only cruise edition). Supplies positioning, default prompt packs, default features, and visual treatment. An Edition is configuration, never a separate application. _Avoid_: Vertical, tenant, white-label
+**Edition**: A named personality the platform wears for a class of occasion — Five Across (occasion-neutral), Vacay Bingo (travel), Gay Cruise Bingo (the original adults-only cruise edition). Supplies positioning, default prompt packs, default features, visual treatment, and a **Lexicon**. An Edition is configuration, never a separate application. _Avoid_: Vertical, tenant, white-label
 
 **Namespace**: An apex domain whose wildcard subdomains address Events — `fiveacross.app` (canonical), plus `vacaybingo.com` and `fiveacrossbingo.com`, which stay live as serving hosts. Every Event is reachable in the Five Across namespace; an Edition may own a second one. _Avoid_: Domain (ambiguous), zone
 
@@ -19,6 +19,10 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 **Canonical hostname**: The single address an Event is actually served from. It selects the Event's Edition identity — branding, PWA manifest, share metadata — and is the hostname analytics **report**, but not the host they **ingest to**: ingestion is Brand-level, so every Edition sends to the one Five Across host. _Avoid_: Primary domain, main URL
 
 **Alias**: A validated non-canonical hostname for an Event, which redirects to the Canonical hostname at the edge before the application starts. Exists so one Event never splits its sessions, installed PWAs, offline storage, or share links across two origins. _Avoid_: Mirror, vanity URL
+
+**Lexicon**: The vocabulary register an Edition's copy speaks — three of them today: **cruise** (Gay Cruise Bingo), **trip** (Vacay Bingo), **general** (Five Across). It supplies the occasion noun, the word for a Place, the audience, the reason signal drops, and the decorative mark on a share card. Distinct from the Edition's name: the register survives a find-and-replace of the brand untouched, which is exactly why it needs its own concept. _Avoid_: Copy pack, locale, i18n (this is register, not language)
+
+**Adult content**: Whether an Event shows the 18+ acknowledgement. A property of the Event's **content**, derived server-side from whether its pool holds explicit Prompts (OR'd with an Admin override), never of its Edition — a general-audience Edition with explicit Prompts is 18+ in general vocabulary, and a cruise Edition with a tame pool is not 18+ at all. Monotone once true, and fails closed when unknown. _Avoid_: Adult edition, NSFW mode (both imply the Edition decides)
 
 ### Event & pool
 

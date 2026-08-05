@@ -5,7 +5,7 @@ status: accepted
 
 # Two new Themes: welcome-aboard / so-long-farewell (`d15-two-themes`)
 
-Implements `plans/daily-cards-spec.md` § "Theme reference" and its "Proposed palettes for the two new themes" — the two tutorial-Day Themes (`welcome-aboard` for the embark Day, `so-long-farewell` for the disembark Day) as full `ThemeMeta` entries plus `[data-theme]` token blocks in `src/theme/themes.css`. `ThemeMeta.description` itself (the field, and the eight existing Themes' copy) was added by `d15-schema-contract` (#200/#204); this ticket only appends the two new entries and their CSS blocks.
+Implements `plans/daily-cards-spec.md` § "Theme reference" and its "Proposed palettes for the two new themes" — the two tutorial-Day Themes (`welcome-aboard` for the opening Day, `so-long-farewell` for the closing Day) as full `ThemeMeta` entries plus `[data-theme]` token blocks in `src/theme/themes.css`. `ThemeMeta.description` itself (the field, and the eight existing Themes' copy) was added by `d15-schema-contract` (#200/#204); this ticket only appends the two new entries and their CSS blocks.
 
 ## Contract
 

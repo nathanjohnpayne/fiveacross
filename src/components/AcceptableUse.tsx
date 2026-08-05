@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
+import { adultContentRequired } from '../adultContent';
+import { editionBrand } from '../editions';
 
 /** Elements the Tab-trap below will cycle between while the dialog is open. */
 const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
@@ -36,6 +38,12 @@ export default function AcceptableUse({
   attestedAdultAt?: number | null;
 }) {
   const { user } = useAuth();
+  // Two independent axes (#608): the REGISTER comes from the Edition (cruise /
+  // trip / general), the 18+ CLAIM from the Event's own content. A `fiveacross`
+  // Event with explicit Prompts is 18+ in general vocabulary; a `gcb` Event with
+  // a tame pool is not 18+ at all. Neither derives the other.
+  const brand = editionBrand();
+  const adult = adultContentRequired();
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -100,9 +108,11 @@ export default function AcceptableUse({
         <ShieldAlert className="guidelines-icon" aria-hidden="true" focusable="false" />
         {variant === 'row' ? (
           <span className="more-row-text">
-            <span className="more-row-title">18+ advisory &amp; acceptable use</span>
+            <span className="more-row-title">
+              {adult ? '18+ advisory & acceptable use' : 'Community guidelines'}
+            </span>
             <span className="more-row-sub">
-              {attested ? `${attested} · honor system, be kind` : 'Honor system, be kind'}
+              {adult && attested ? `${attested} · honor system, be kind` : 'Honor system, be kind'}
             </span>
           </span>
         ) : (
@@ -124,15 +134,27 @@ export default function AcceptableUse({
               Community guidelines
             </div>
 
-            <p>
-              <b>This is an 18+ space</b> for one sailing&rsquo;s friend group. By playing you confirm
-              you are 18 or over. It stays behind sign-in—there are no public pages.
-            </p>
+            {/* The 18+ CLAIM is dropped entirely when the Event's pool carries no
+                adult content (#608) — not softened, dropped. A claim nobody was
+                asked to make has no business on the page, and the rest of this
+                sheet (be kind, no harassment, how to report) stands on its own
+                as community guidance. The Edition still supplies the register. */}
+            {adult ? (
+              <p>
+                <b>This is an 18+ space</b> for {brand.guidelinesScope}. By playing you confirm
+                you are 18 or over. It stays behind sign-in—there are no public pages.
+              </p>
+            ) : (
+              <p>
+                <b>This is a shared space</b> for {brand.guidelinesScope}. It stays behind
+                sign-in—there are no public pages.
+              </p>
+            )}
             <p className="muted">Keep it fun and keep it kind:</p>
             <ul>
               <li>Mark honestly—the Feed is the group&rsquo;s shared memory, not a leaderboard to game.</li>
               <li>Proofs and callouts are playful. No harassment, no outing anyone, nothing non-consensual.</li>
-              <li>No illegal content and nothing you would not want the whole boat to see.</li>
+              <li>No illegal content and nothing you would not want {brand.lexicon.crowd} to see.</li>
             </ul>
             <p>
               <b>How to report a Prompt or Proof:</b> tap <b>Report</b> on any Prompt in the pool or any

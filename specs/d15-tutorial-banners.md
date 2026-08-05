@@ -3,22 +3,22 @@ spec_id: d15-tutorial-banners
 status: accepted
 ---
 
-# Embark/farewell tutorial banners + "Warm-up" tag (`d15-tutorial-banners`)
+# Opening/closing tutorial banners + "Warm-up" tag (`d15-tutorial-banners`)
 
-Implements `plans/daily-cards-spec.md` § "Embark (tutorial) view" and § "Farewell view" (the banners only — the farewell view's podium banner is #217's content, this ticket owns only the goodbye banner beneath it), plus the "Warm-up" tag mentioned in both sections and in § "Tutorial days" under Scoring. Depends on `d15-day-switcher` (#205, the Day-scoped board view this ticket's banners mount inside), `d15-two-themes` (#206, the `welcome-aboard` / `so-long-farewell` Themes the tutorial views retint to), and `d15-tutorial-seed` (#207, `DayDef.tutorial` and the `pool: 'embark' | 'farewell'` this ticket branches on). Guarded by `src/components/TutorialBanner.test.tsx` and `src/components/DaySwitcher.test.tsx` / `src/components/Board.test.tsx` (RTL jsdom).
+Implements `plans/daily-cards-spec.md` § "Embark (tutorial) view" and § "Farewell view" (the banners only — the closing view's podium banner is #217's content, this ticket owns only the goodbye banner beneath it), plus the "Warm-up" tag mentioned in both sections and in § "Tutorial days" under Scoring. Depends on `d15-day-switcher` (#205, the Day-scoped board view this ticket's banners mount inside), `d15-two-themes` (#206, the `welcome-aboard` / `so-long-farewell` Themes the tutorial views retint to), and `d15-tutorial-seed` (#207, `DayDef.tutorial` and the `pool: 'embark' | 'farewell'` this ticket branches on). Guarded by `src/components/TutorialBanner.test.tsx` and `src/components/DaySwitcher.test.tsx` / `src/components/Board.test.tsx` (RTL jsdom).
 
 ## Contract
 
-- `src/components/TutorialBanner.tsx` (new) — default export `TutorialBanner({ day }: { day: DayDef })`: renders nothing when `!day.tutorial`; renders the embark banner when `day.pool === 'embark'`; renders the farewell banner when `day.pool === 'farewell'`. Branches on `day.pool` rather than `day.index` so the banner tracks the seeded itinerary data instead of assuming the tutorial Days sit at fixed positions. Also exports `WarmUpTag`, a small shared "Warm-up" pill used at both mount points below.
-  - **Embark banner**: the three-beat "How this works" copy, verbatim from the spec, plus the warm-up caption underneath. Dismissible — tapping anywhere on the banner (or pressing Enter/Space while it's focused, `role="button"`) hides it for the rest of that mount. Dismissal is plain component state, not persisted (localStorage or otherwise): the spec explicitly does not require it to survive beyond the session the way the first-open coach overlay's dismissal does, since it's replayable from More → How to play (#208).
-  - **Farewell banner**: the goodbye copy, verbatim. No dismiss affordance and no interactive role — `role="note"`, plain markup.
-- `src/components/Board.tsx` (modified) — mounts `<TutorialBanner day={viewedDay} />` above the grid inside `.board-area`, and a `.board-header` div carrying `<WarmUpTag />` above it, both gated on `viewedDay?.tutorial`. The locked-Day preview (`LockedDayPreview`) also renders `<WarmUpTag />` next to its day-locked title when `day.tutorial`, since the farewell Day can still be in its locked state before its standard 08:00 unlock.
+- `src/components/TutorialBanner.tsx` (new) — default export `TutorialBanner({ day }: { day: DayDef })`: renders nothing when `!day.tutorial`; renders the opening banner when `day.pool === 'embark'`; renders the closing banner when `day.pool === 'farewell'`. Branches on `day.pool` rather than `day.index` so the banner tracks the seeded itinerary data instead of assuming the tutorial Days sit at fixed positions. Also exports `WarmUpTag`, a small shared "Warm-up" pill used at both mount points below.
+  - **Opening banner**: the three-beat "How this works" copy, verbatim from the spec, plus the warm-up caption underneath. Dismissible — tapping anywhere on the banner (or pressing Enter/Space while it's focused, `role="button"`) hides it for the rest of that mount. Dismissal is plain component state, not persisted (localStorage or otherwise): the spec explicitly does not require it to survive beyond the session the way the first-open coach overlay's dismissal does, since it's replayable from More → How to play (#208).
+  - **Closing banner**: the goodbye copy, verbatim. No dismiss affordance and no interactive role — `role="note"`, plain markup.
+- `src/components/Board.tsx` (modified) — mounts `<TutorialBanner day={viewedDay} />` above the grid inside `.board-area`, and a `.board-header` div carrying `<WarmUpTag />` above it, both gated on `viewedDay?.tutorial`. The locked-Day preview (`LockedDayPreview`) also renders `<WarmUpTag />` next to its day-locked title when `day.tutorial`, since the closing Day can still be in its locked state before its standard 08:00 unlock.
 - `src/components/DaySwitcher.tsx` (modified) — renders `<WarmUpTag />` on a Day chip when `d.tutorial`, alongside the existing weekday/port/theme/glyph markup.
 - `src/index.css` (modified) — `.warm-up-tag`, `.board-header`, and `.tutorial-banner*` styling, theme-token-driven (`var(--ink)`, `var(--primary)`, `var(--cell)`, `var(--dim)`) so the banner and tag retint with the viewed Day like the rest of `.board-area`.
 
 ## Resolved defaults (no open decisions)
 
-- **Embark vs. farewell dispatch**: `day.pool` (`'embark'` | `'farewell'`), not `day.index` — both tutorial Days are flagged `tutorial: true`, so a second signal is needed to pick the banner; `pool` is the existing field that already distinguishes them one-to-one.
+- **Opening vs. closing dispatch**: `day.pool` (`'embark'` | `'farewell'`), not `day.index` — both tutorial Days are flagged `tutorial: true`, so a second signal is needed to pick the banner; `pool` is the existing field that already distinguishes them one-to-one.
 - **Dismissal persistence**: session-only, plain `useState` — no localStorage key. The ticket body is explicit that this banner's dismissal need not persist "beyond the session the way the coach overlay's does."
 - **Board-header slot**: since #212 (the daily-honor pin) has not landed yet, this ticket establishes the `.board-header` slot's DOM position — a single row above `.bingo-head`, rendered only when the viewed Day is a tutorial Day. #212 will mount its own pin in the same position for the eight main Days; the two are mutually exclusive on `DayDef.tutorial`, so they cannot collide independently of each other.
 
@@ -27,15 +27,15 @@ Implements `plans/daily-cards-spec.md` § "Embark (tutorial) view" and § "Farew
 - **Given** a Player views the Welcome Aboard Day for the first time in a session **When** the card renders **Then** the three-beat banner and warm-up caption show above the grid, and tapping the banner dismisses it for that session.
 - **Given** a Player views the So Long, Farewell Day **When** the card renders **Then** the non-dismissible goodbye banner shows beneath wherever the podium banner mounts.
 - **Given** either tutorial Day **When** its chip or board header renders **Then** it shows a "Warm-up" tag instead of a daily-honor pin.
-- Embark banner copy matches the spec verbatim (three beats + caption).
-- Farewell banner copy matches the spec verbatim.
+- Opening banner copy matches the spec verbatim (three beats + caption).
+- Closing banner copy matches the spec verbatim.
 - Neither banner renders on any of the eight main Days.
-- The embark banner is dismissible per session; the farewell banner is not.
+- The opening banner is dismissible per session; the closing banner is not.
 
 ## Test coverage
 
-`src/components/TutorialBanner.test.tsx` (RTL jsdom): the embark banner renders all three beats + the warm-up caption on the Welcome Aboard Day and dismisses on tap; the farewell banner renders the goodbye copy on the So Long, Farewell Day with no dismiss affordance; neither banner renders on a non-tutorial Day; `WarmUpTag` renders the "Warm-up" label.
+`src/components/TutorialBanner.test.tsx` (RTL jsdom): the opening banner renders all three beats + the warm-up caption on the Welcome Aboard Day and dismisses on tap; the closing banner renders the goodbye copy on the So Long, Farewell Day with no dismiss affordance; neither banner renders on a non-tutorial Day; `WarmUpTag` renders the "Warm-up" label.
 
 `src/components/DaySwitcher.test.tsx`: the "Warm-up" tag renders on exactly the two tutorial Day chips (index 0 and the last index) and never on the eight main Days.
 
-`src/components/Board.test.tsx`: an unlocked, dealt Welcome Aboard Day mounts both the embark banner and the "Warm-up" `.board-header` tag; an unlocked main Day mounts neither.
+`src/components/Board.test.tsx`: an unlocked, dealt Welcome Aboard Day mounts both the opening banner and the "Warm-up" `.board-header` tag; an unlocked main Day mounts neither.

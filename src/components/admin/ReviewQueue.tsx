@@ -20,6 +20,8 @@ import { deleteProof } from '../../data/proofs';
 import AsyncButton from './AsyncButton';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
+import { editionBrand } from '../../editions';
+import { useAdultContentFlipConfirm } from './AdultContentConfirm';
 
 // One report row, tagged so the render can branch to the per-kind affordances
 // (Proof vs Prompt writes) while a single list orders across both kinds.
@@ -217,10 +219,15 @@ function ApprovalQueueRow({
   item: it,
   adminUid,
   onToggleSpicy,
+  onApprove,
 }: {
   item: ItemDoc;
   adminUid: string;
   onToggleSpicy: (id: string, spicy: boolean) => void;
+  /** Routed through the queue's flip confirm (#610) rather than calling
+   *  `approveItem` directly: approving the FIRST explicit Prompt is what turns
+   *  the whole Event 18+ (#608), and the row cannot know it is the first. */
+  onApprove: (item: ItemDoc) => Promise<unknown>;
 }) {
   return (
     <div className="row">
@@ -238,7 +245,7 @@ function ApprovalQueueRow({
         />{' '}
         🔞 Spicy
       </label>
-      <AsyncButton className="btn primary" onAction={() => approveItem(it.id, adminUid)}>
+      <AsyncButton className="btn primary" onAction={() => onApprove(it)}>
         Approve
       </AsyncButton>
       <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectItem(it.id, adminUid)}>
@@ -277,11 +284,25 @@ export default function ReviewQueue({
   const admins = event?.admins ?? [];
   const claimsVisible = event?.claimMode === 'admin_confirmed';
   const total = reports.length + pendingItems.length + (claimsVisible ? claims.length : 0);
+  // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
+  // paths go through it, and the bulk one is the easy miss: a batch containing
+  // one explicit Prompt flips the Event just as surely as approving that Prompt
+  // alone. Cancelling applies NONE of the batch — a partial apply would flip the
+  // Event anyway and leave the admin unsure which half landed.
+  const { guard, dialog } = useAdultContentFlipConfirm();
+  const explicitPending = pendingItems.filter((it) => it.spicy);
+  const approveOne = (it: ItemDoc) =>
+    guard(it.spicy, 'approve', () => approveItem(it.id, adminUid));
+  const approveAll = () =>
+    guard(explicitPending.length > 0, 'bulk-approve', () => bulkApproveItems(pendingItems, adminUid), {
+      explicitCount: explicitPending.length,
+      totalCount: pendingItems.length,
+    });
 
   if (!total) {
     return (
       <p className="muted" style={{ fontSize: 13 }}>
-        All clear. Go enjoy the boat.
+        {editionBrand().reviewQueueAllClear}
       </p>
     );
   }
@@ -331,13 +352,19 @@ export default function ReviewQueue({
           </p>
         )}
         {!!pendingItems.length && (
-          <AsyncButton onAction={() => bulkApproveItems(pendingItems, adminUid)}>
+          <AsyncButton onAction={approveAll}>
             Approve all
           </AsyncButton>
         )}
         <div className="list">
           {pendingItems.map((it) => (
-            <ApprovalQueueRow key={it.id} item={it} adminUid={adminUid} onToggleSpicy={setItemSpicy} />
+            <ApprovalQueueRow
+              key={it.id}
+              item={it}
+              adminUid={adminUid}
+              onToggleSpicy={setItemSpicy}
+              onApprove={approveOne}
+            />
           ))}
         </div>
       </div>
@@ -366,6 +393,7 @@ export default function ReviewQueue({
           </div>
         </div>
       )}
+      {dialog}
     </>
   );
 }

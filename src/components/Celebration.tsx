@@ -9,10 +9,15 @@ import {
   type ConfettiPiece,
 } from '../game/motion';
 import { renderBingoShareCard, shareCardBlob, SHARE_CARD_APP_NAME } from './ShareCard';
+import { editionBrand, editionLexicon } from '../editions';
 import type { Cell } from '../types';
 
+// Whole-string per Edition (#608), and the clearest case for the override
+// layer in the whole ticket: tokenising this produces "I got BINGO on the high
+// event". Each Edition writes its own brag, mark included.
 function celebrationCopy(kind: 'bingo' | 'blackout'): string {
-  return kind === 'blackout' ? 'BLACKOUT. I win the boat. 🚢' : 'I got BINGO on the high seas 🚢';
+  const brand = editionBrand();
+  return kind === 'blackout' ? brand.blackoutShareText : brand.bingoShareText;
 }
 
 /** The confetti gate (specs/motion-polish.md): decoration only, so a reduced-
@@ -162,7 +167,7 @@ export default function Celebration({
     try {
       await shareCardBlob({
         blob,
-        filename: `gay-cruise-bingo-${kind}.png`,
+        filename: `${editionLexicon().fileSlug}-${kind}.png`,
         title: SHARE_CARD_APP_NAME,
         text,
         url,

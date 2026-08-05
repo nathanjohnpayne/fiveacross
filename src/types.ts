@@ -124,6 +124,17 @@ export interface EventDoc {
     // existed has no key to read, and `dealBoard`'s own default (0.4) applies
     // when it is absent.
     spicyRatio?: number;
+    /**
+     * Admin override on the Event's 18+ posture (#608): an INPUT the server-side
+     * derivation ORs in, never the derived flag itself (that lives on
+     * `hostnames/{host}.adultContent`, which no client may write).
+     *
+     * Exists because `spicy` tracks SEXUAL explicitness specifically, so an
+     * Event whose only mature content is non-sexual — violence, drugs,
+     * self-harm — would derive `false` and show no gate. Optional: absent means
+     * "derive from the pool alone", which is every Event that predates #608.
+     */
+    forceAdult?: boolean;
     // Easy mix (daily-cards-spec § "Resolved decisions" #8, specs/easy-mix.md): the
     // share of a main-day Board's 24 non-free Squares dealt from the EASY (embark)
     // pool instead of the main pool, 0..1. Read defensively (`typeof === 'number'`) at
@@ -159,6 +170,19 @@ export interface HostnameDoc {
   edition: string;
   /** `active` is the ONLY value that serves an Event. Never defaulted. */
   status: 'active' | 'disabled' | 'archived';
+  /**
+   * Whether this Event's pool holds adult content, and therefore whether the
+   * app shows the 18+ acknowledgement (#608). Server-derived — never written by
+   * a client — from `settings.forceAdult || (any active spicy Prompt in a
+   * dealable pool)`; see `functions/src/adultContent.ts`.
+   *
+   * REQUIRED in the type but ALWAYS defaulted on read: both the network seam and
+   * the cache reader coerce anything that is not a literal `false` to `true`
+   * (`coerceAdultContent`), because under-gating is the harmful direction. That
+   * is what makes every hostname document written before #608 correct with no
+   * backfill.
+   */
+  adultContent: boolean;
   slug?: string;
   isCanonical?: boolean;
 }

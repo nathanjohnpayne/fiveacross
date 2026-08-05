@@ -3,7 +3,7 @@ spec_id: d15-dealing
 status: accepted
 ---
 
-# Per-Day dealing from the Day Snapshot: no-repeat-across-cruise + stratification + snapshot-gated (`d15-dealing`)
+# Per-Day dealing from the Day Snapshot: no-repeat-across-Event + stratification + snapshot-gated (`d15-dealing`)
 
 Implements `plans/daily-cards-spec.md` § "Unlock mechanics" and § "Data model" (a `BoardDoc` per Day). Before Phase 1.5 the app dealt exactly one Board per Player for the whole Event, once, at join. This ticket makes dealing per-Day: each Day gets its own Day Card, dealt lazily the first time a Player opens the Day at or after its `unlockAt`, drawn only from that Day's frozen Day Snapshot — never a live query against the pool. A Player's deal excludes Prompts already on their earlier Day Cards until the main pool is exhausted (~3⅓ Days), then the exclusion resets. Guarded by `src/game/logic.test.ts` (sampling), `src/data/d15-dealing.test.ts` (the deal gate), and `tests/rules/d15-dealing.test.ts` (the day-scoped write gate).
 
@@ -24,6 +24,6 @@ Implements `plans/daily-cards-spec.md` § "Unlock mechanics" and § "Data model"
 - Given a Day with `unlockAt` in the future, when a Player opens it, then no Board is dealt and the locked state renders (`dayDealState` → `locked`; rules test denies the write).
 - Given a Day whose `unlockAt` has passed but whose `snapshotItemIds` is not yet stamped, when a Player opens it, then the client shows the "waking up" wait state and does not deal from a live query (`dayDealState` → `waking`; `dealDayCard` no-ops).
 - Given a Player whose earlier Day Cards already used some of the still-available main-pool Prompts, when their next Day Card is dealt, then none of those Prompts repeat, until the pool is exhausted and the exclusion resets (`dealBoard` `excludeIds`).
-- Given a tutorial Day (embark/farewell) seeded all-tame, when its Day Card is dealt, then the deal succeeds with no stratification starvation (`stratify: false`).
+- Given a tutorial Day (easy/closing pool) seeded all-tame, when its Day Card is dealt, then the deal succeeds with no stratification starvation (`stratify: false`).
 - A Day Card write path never reads the live `items` collection for its pool — only `snapshotItemIds`.
 - Re-opening an already-dealt Day Card is a no-op (no re-deal).

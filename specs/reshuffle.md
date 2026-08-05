@@ -3,17 +3,17 @@ spec_id: reshuffle
 status: accepted
 ---
 
-# Reshuffle a hard Day Card: pristine-only, 3 per cruise, rules-bound counter (`reshuffle`)
+# Reshuffle a hard Day Card: pristine-only, 3 per Event, rules-bound counter (`reshuffle`)
 
 Implements [`plans/reshuffle-ticket.md`](../plans/reshuffle-ticket.md) and `plans/daily-cards-spec.md` § "Reshuffle" (#378), against the wireframes' [`#frame-reshuffle`](../plans/daily-cards-wireframes.html) (day-bar chip + confirm sheet) and `#frame-launch-intro` (one-time announcement). Depends on the day-scoped Board path (#204) and per-Day dealing (`d15-dealing`). Guarded by `src/game/reshuffle.test.ts` (the pristine predicate + seed), `src/data/reshuffle.test.ts` (the deal source, exclusion, and batch shape), `src/components/reshuffle-chip.test.tsx` (the chip-visibility matrix), `src/components/reshuffle-sheet.test.tsx` + `src/components/reshuffle-intro.test.tsx` (RTL), `tests/rules/reshuffle.test.ts` (the write gate), and `tests/e2e/reshuffle.spec.ts` (parity screens).
 
 ## Glossary
 
-**Reshuffle** — trading a pristine Day Card for a fresh deal; 3 per cruise (CONTEXT.md). *Avoid:* re-deal (that's pool recovery), mulligan.
+**Reshuffle** — trading a pristine Day Card for a fresh deal; 3 per Event (CONTEXT.md). *Avoid:* re-deal (that's pool recovery), mulligan.
 
 **Pristine** — a Day Card with zero PLAYER-marked Squares. The free centre is always marked and never counts. A `status: 'pending'` Square (an admin_confirmed-mode Claim awaiting resolution) **is** a Mark for this purpose and makes the card non-pristine, even though `countMarked` discounts it for scoring.
 
-**Allowance** — the cruise-wide budget of 3, held on `PlayerDoc.reshufflesUsed`. Non-refundable and monotonic.
+**Allowance** — the Event-wide budget of 3, held on `PlayerDoc.reshufflesUsed`. Non-refundable and monotonic.
 
 ## Contract
 
@@ -21,11 +21,11 @@ Implements [`plans/reshuffle-ticket.md`](../plans/reshuffle-ticket.md) and `plan
 
 **The new card is an ordinary card.** It draws from the SAME frozen `snapshotItemIds` Day Snapshot (never a live `status: 'active'` query), with the same stratification rules as the first deal — `stratify` off for all-tame tutorial pools, the Event's `spicyRatio` on main Days.
 
-**Discarded prompts return to the eligible pool.** The cross-cruise no-repeat exclusion is computed from KEPT cards only: every OTHER Day Card the Player holds is excluded, the discarded one is not.
+**Discarded prompts return to the eligible pool.** The Event-wide no-repeat exclusion is computed from KEPT cards only: every OTHER Day Card the Player holds is excluded, the discarded one is not.
 
 **The chip renders only when every gate holds** (`src/components/Board.tsx`): card pristine, counter known and under the allowance, Day unlocked, card is the caller's own, and online. It reappears if the Player unmarks everything. It never renders on a locked-Day preview — `DayBar`'s chip prop is optional and `LockedDayPreview` passes none.
 
-**Online-only, enforced by `runTransaction` — not by the chip's `online` gate and not by awaiting a batch.** A `writeBatch` still QUEUES offline and applies optimistically to the local cache while its commit promise pends forever, so a Player whose connection dropped after the `online` check would see the replacement card, mark it, and have it rolled back on drain. `navigator.onLine` cannot close that window either — it reports the link, not reachability, and captive ship wifi reads as online. `runTransaction` requires a server round trip and REJECTS offline rather than buffering, so a reshuffle either lands atomically against fresh server state or changes nothing.
+**Online-only, enforced by `runTransaction` — not by the chip's `online` gate and not by awaiting a batch.** A `writeBatch` still QUEUES offline and applies optimistically to the local cache while its commit promise pends forever, so a Player whose connection dropped after the `online` check would see the replacement card, mark it, and have it rolled back on drain. `navigator.onLine` cannot close that window either — it reports the link, not reachability, and a captive portal on an unreliable network reads as online. `runTransaction` requires a server round trip and REJECTS offline rather than buffering, so a reshuffle either lands atomically against fresh server state or changes nothing.
 
 **The Board rule binds the pair** (`firestore.rules`): a write that does not carry an existing Board's `seed` through unchanged — a differing value, or the key being **dropped or added** — is a Reshuffle, and is permitted only for the owner, only on an unlocked canonical Day, only when the EXISTING Board is pristine, only when `getAfter(players/{uid}).reshufflesUsed == get(...).reshufflesUsed + 1` and `<= 3`, and only when the batch also CREATES that spend's marker (next paragraph). A seed-preserving write (a Mark, a merge of `cells`) and a create (the first deal) are unaffected.
 
@@ -45,7 +45,7 @@ Implements [`plans/reshuffle-ticket.md`](../plans/reshuffle-ticket.md) and `plan
 
 ## Decisions
 
-**Why monotonic rather than "deny counter writes outside the pairing"** (the ticket's original wording). That check is not expressible. It would have to live on `players/{uid}`, which is cruise-wide and carries no `dayIndex`, so it cannot know which Day's Board to inspect. The only day-agnostic formulation — unroll all 10 Days, asking whether any Board's seed changed — costs 3 access calls per Day (`exists` + `get` + `getAfter`) against Firestore's ceiling of 20 for a batched write. Measured against the emulator: it short-circuits cheaply on a Day-0 reshuffle and **denies a legitimate Day-5 or Day-9 one**, i.e. it would have passed CI and then silently broken mid-cruise.
+**Why monotonic rather than "deny counter writes outside the pairing"** (the ticket's original wording). That check is not expressible. It would have to live on `players/{uid}`, which is Event-wide and carries no `dayIndex`, so it cannot know which Day's Board to inspect. The only day-agnostic formulation — unroll all 10 Days, asking whether any Board's seed changed — costs 3 access calls per Day (`exists` + `get` + `getAfter`) against Firestore's ceiling of 20 for a batched write. Measured against the emulator: it short-circuits cheaply on a Day-0 reshuffle and **denies a legitimate Day-5 or Day-9 one**, i.e. it would have passed CI and then silently broken mid-Event.
 
 Monotonic is equivalent for the property that matters. Every Board reshuffle still requires a paired +1 (Board-side), so the cap of 3 holds exactly; monotonicity closes the only real exploit — resetting the counter to 0 for unlimited reshuffles. Recorded on #378.
 

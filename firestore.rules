@@ -449,6 +449,21 @@ service cloud.firestore {
     //   there is no create/update/delete arm — not even for admins, who have no
     //   per-Event authority over a global namespace.
     //
+    //   `adultContent` (#608) rides on exactly these properties and adds no arm.
+    //   It is the Event's 18+ posture, derived server-side from its pool
+    //   (`functions/src/adultContent.ts`) and published here because the
+    //   sign-in gate that must reflect it is pre-auth, so it cannot read
+    //   `events/{eventId}/items/{id}` any more than it can read the Event's
+    //   name. It is world-READABLE for the same reason as `edition`: the gate
+    //   the field produces announces it anyway. It stays client-UNWRITABLE for a
+    //   stronger reason than the routing fields — a client that could clear it
+    //   could un-gate an adults-only Event for everyone — which is why the
+    //   admin's escape hatch is `events/{eventId}.settings.forceAdult`, an
+    //   INPUT the function ORs in, rather than a direct write to the derived
+    //   flag. Clients that read a missing or malformed value gate the Event
+    //   (`coerceAdultContent`), so this rule needs no validation arm: there is
+    //   no write to validate, and the read direction fails closed.
+    //
     // An unknown host simply does not exist: `get` succeeds against a missing
     // document and returns `exists() == false`, so the client renders an
     // Event-not-found state rather than tripping a permission error it would
@@ -506,9 +521,24 @@ service cloud.firestore {
       // expressible here — the #108 writer supplies real uids and the disjoint +
       // list + cap checks bound the abuse surface. Delete is split out so it never
       // has to satisfy the settings/bannedUids shape checks.
+      //
+      // `settings.forceAdult` (#608) is the ADMIN OVERRIDE on the Event's 18+
+      // posture: `hostnames/{host}.adultContent` is derived server-side as
+      // `forceAdult || (any active spicy Prompt in a dealable pool)`, because
+      // `spicy` tracks sexual explicitness specifically and an Event whose only
+      // mature content is non-sexual would otherwise show no gate. It stays on
+      // the already-admin-writable Event doc — no new write path is opened, and
+      // in particular NOT one into `hostnames`, which no client may write. When
+      // the write carries `settings` and names the field it must be a BOOLEAN, so
+      // a truthy string cannot smuggle the posture on (the function's own read is
+      // a strict `=== true` besides). Optional: the field's absence means "derive
+      // from the pool alone", which is the majority case and every Event today.
       allow create, update: if isAdmin(eventId)
         && (!('settings' in request.resource.data)
             || request.resource.data.settings.reportHideThreshold is number)
+        && (!('settings' in request.resource.data)
+            || !('forceAdult' in request.resource.data.settings)
+            || request.resource.data.settings.forceAdult is bool)
         && (!('bannedUids' in request.resource.data)
             || (request.resource.data.bannedUids is list
                 && request.resource.data.bannedUids.size() <= 1000

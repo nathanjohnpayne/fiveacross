@@ -4,6 +4,7 @@ import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
+import { coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
@@ -52,6 +53,12 @@ export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | 
     canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
     edition: typeof d.edition === 'string' ? d.edition : '',
     status: d.status as HostnameDoc['status'],
+    // The 18+ posture (#608). Validated field-by-field like everything else
+    // here, but it does NOT join the two null-returning guards above: a missing
+    // or malformed `adultContent` is not a malformed routing record, it is an
+    // Event that predates the field. Coercing it to `true` gates the Event;
+    // rejecting the whole document would take the Event off the air.
+    adultContent: coerceAdultContent(d.adultContent),
     slug: typeof d.slug === 'string' ? d.slug : undefined,
     isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
   };
@@ -103,6 +110,13 @@ export async function bootstrapEventResolution(
     // would outrank the mapping it exists to defer to (Codex P3 round 6 on
     // #576).
     if (resolution.edition !== null) setActiveEdition(resolution.edition);
+    // The 18+ posture (#608). UNCONDITIONAL, unlike the Edition setter above,
+    // because the two absences are not the same absence: `edition: null` means
+    // "a build-time seed already installed one, don't clobber it", whereas
+    // `adultContent` has no build-time seed — the env short-circuit reports the
+    // fail-closed default, so installing it there is a no-op that writes the
+    // value the accessor would have answered anyway.
+    setActiveAdultContent(resolution.adultContent);
     // …and the browser chrome around it (#586). Unconditional, unlike the
     // setter above: the guard there protects the ENV-SEEDED Edition from being
     // reset by a lookup that never ran, whereas this only reads whatever

@@ -21,6 +21,52 @@
 // them inside a function is fine: the config only ever calls `editionBrand`
 // with an explicit Edition id.
 
+/**
+ * The three vocabulary registers (#608).
+ *
+ * An Edition is not only a name — it is a *dialect*. "Cruise schedule", "at
+ * sea", "the whole boat" and 🚢 survive a find-and-replace of the brand name
+ * untouched, so a mechanical brand sweep leaves a Bodega weekend talking about
+ * ports and a conference talking about sailings. This table is the vocabulary
+ * those sentences interpolate.
+ *
+ * TOKENS ONLY. Every field here is a fragment that drops into a sentence whose
+ * SKELETON survives the swap — "Three for the whole {occasion}", "works offline
+ * {offlineWhy}". Copy whose skeleton does NOT survive ("I got BINGO on the high
+ * seas" tokenises to "I got BINGO on the high event") is a whole-string
+ * override on `EditionBrand` instead, exactly as `tagline` and `offlineNote`
+ * already are. Reviewers should reject a token swap that reads like a template:
+ * a sentence that only parses in one register belongs in the override layer.
+ */
+export interface EditionLexicon {
+  /** The occasion itself, lowercase, mid-sentence: "the whole {occasion}". */
+  occasion: string;
+  /** Scope adjective: "⭐ marks the {occasionWide} First to BINGO". */
+  occasionWide: string;
+  /** One location on the schedule, lowercase singular. */
+  place: string;
+  /** The same, Title Case plural — it opens a list ("{placePlural}, parties, …"). */
+  placePlural: string;
+  /** The people, as an audience: "nothing you would not want {crowd} to see".
+   *
+   *  Carries its own determiner ("the whole boat", not "boat"). #608's sketch of
+   *  this interface annotated it "the boat" | "the group" | "everyone", but the
+   *  signed-off wording table renders "…the whole boat to see" / "…the whole
+   *  group to see" / "…everyone here to see" — three different determiners, so
+   *  the skeleton cannot own one. The rendered sentences are the artifact that
+   *  was signed off; the field holds whatever makes them come out verbatim. */
+  crowd: string;
+  /** WHY signal drops here: "works offline {offlineWhy}". Not decoration — see
+   *  the note on `offlineNote` below; the general Edition has the STRONGEST
+   *  offline story of the three, not the weakest. */
+  offlineWhy: string;
+  /** The camp mark on a share surface. Functional emoji (✓ 🔒 🏆 …) are
+   *  Edition-invariant; this is the decorative budget, which is not. */
+  shareMark: string;
+  /** Download filename stem for a rasterised share card. */
+  fileSlug: string;
+}
+
 export interface EditionBrand {
   /** The wordmark on the signed-out gate. */
   wordmark: string;
@@ -57,6 +103,50 @@ export interface EditionBrand {
   appShortName: string;
   /** One line beside the install prompt (manifest `description`). */
   appDescription: string;
+
+  /** The vocabulary this Edition's interpolated copy speaks (#608). */
+  lexicon: EditionLexicon;
+
+  // --- Whole-string overrides (#608) -----------------------------------------
+  //
+  // The second layer. Each of these is a sentence whose SKELETON does not
+  // survive tokenisation, so it is written out per Edition rather than composed
+  // — the celebration brag, the tutorial caption, the schedule row. Adding one
+  // here rather than a token to `EditionLexicon` is the deliberate choice every
+  // time the composed form would read like a template.
+  //
+  // Every `gcb` value below is VERBATIM the string that shipped before #608:
+  // `gcb` is the fallback Edition, so a diff in its rendered copy is a bug, not
+  // a rewrite (`edition-lexicon.test.ts` pins it).
+
+  /** App.tsx's pre-auth loading label. */
+  passCheckLabel: string;
+  /** More → Play: the schedule row's title, and its panel heading. */
+  scheduleTitle: string;
+  /** …and its subtitle: what the schedule contains. */
+  scheduleSub: string;
+  /** More → Play: the "How to play" row's subtitle. */
+  walkthroughReplaySub: string;
+  /** ItemPool: why a Prompt added late lands in a future card's pool. */
+  promptDeadlineNote: string;
+  /** TutorialBanner: the warm-up Day's caption. */
+  tutorialWarmupNote: string;
+  /** The overall winner's role label, rendered after 🏆. */
+  championRole: string;
+  /** The final-standings podium's accessible name. */
+  podiumLabel: string;
+  /** The admin review queue's empty state. */
+  reviewQueueAllClear: string;
+  /** Celebration → Share: the brag text for a line and for a full card. */
+  bingoShareText: string;
+  blackoutShareText: string;
+  /** UpdatePrompt: the new-build toast's lead-in emoji and its title. */
+  updateToastMark: string;
+  updateToastTitle: string;
+  /** AcceptableUse: whose friend group this space is for. A fragment, because
+   *  the sentence around it changes with the 18+ posture (#608 § Dynamic 18+),
+   *  which is an Event property rather than an Edition one. */
+  guidelinesScope: string;
 }
 
 export const DEFAULT_EDITION = 'gcb';
@@ -74,6 +164,31 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Gay Cruise Bingo',
     appShortName: 'Gay Bingo',
     appDescription: 'Live multiplayer bingo for the high seas.',
+    lexicon: {
+      occasion: 'cruise',
+      occasionWide: 'cruise-wide',
+      place: 'port',
+      placePlural: 'Ports',
+      crowd: 'the whole boat',
+      offlineWhy: 'at sea',
+      shareMark: '🚢',
+      fileSlug: 'gay-cruise-bingo',
+    },
+    passCheckLabel: 'Checking your cruise pass…',
+    scheduleTitle: 'Cruise schedule',
+    scheduleSub: 'Ports, parties, unlock times',
+    walkthroughReplaySub: 'Replay the Welcome Aboard walkthrough',
+    promptDeadlineNote:
+      "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.",
+    championRole: 'Cruise champion',
+    podiumLabel: 'Cruise podium',
+    reviewQueueAllClear: 'All clear. Go enjoy the boat.',
+    bingoShareText: 'I got BINGO on the high seas 🚢',
+    blackoutShareText: 'BLACKOUT. I win the boat. 🚢',
+    updateToastMark: '🚢',
+    updateToastTitle: 'A fresh build just docked',
+    guidelinesScope: 'one sailing’s friend group',
   },
   vacay: {
     wordmark: 'VACAY BINGO',
@@ -89,6 +204,74 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Vacay Bingo',
     appShortName: 'Vacay Bingo',
     appDescription: 'Live multiplayer bingo for the trip.',
+    lexicon: {
+      occasion: 'trip',
+      occasionWide: 'trip-wide',
+      place: 'stop',
+      placePlural: 'Stops',
+      crowd: 'the whole group',
+      offlineWhy: 'wherever you land',
+      shareMark: '🗺️',
+      fileSlug: 'vacay-bingo',
+    },
+    passCheckLabel: 'Checking your trip pass…',
+    scheduleTitle: 'Trip schedule',
+    scheduleSub: 'Stops, parties, unlock times',
+    walkthroughReplaySub: 'Replay the welcome walkthrough',
+    promptDeadlineNote:
+      "Get your prompts in before we set off—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares, close to home. The real chaos starts tomorrow at 8.",
+    championRole: 'Trip champion',
+    podiumLabel: 'Trip podium',
+    reviewQueueAllClear: 'All clear. Go enjoy the trip.',
+    bingoShareText: 'I got BINGO on this trip 🗺️',
+    blackoutShareText: 'BLACKOUT. I win the trip. 🗺️',
+    updateToastMark: '🗺️',
+    updateToastTitle: 'A fresh build just landed',
+    guidelinesScope: 'one trip’s friend group',
+  },
+  // Five Across (#599, fiveacross.app) — the OCCASION-NEUTRAL register. Minimal
+  // camp, no water, no spatial metaphor: a conference hall, a wedding, a
+  // birthday weekend all have to read naturally in it. Its offline story is the
+  // STRONGEST of the three, not the weakest (#608): a few hundred phones on one
+  // cell, behind concrete and structural steel, drops signal more reliably than
+  // a ship does — congestion and physical barriers, which the player experiences
+  // identically as "no bars".
+  fiveacross: {
+    wordmark: 'FIVE ACROSS',
+    tagline: 'Sign in, get your card, mark it if you see it.',
+    offlineNote: 'Packed room, no bars? Your card keeps working offline — marks sync when you reconnect.',
+    // Title case for the tab and the home-screen label, as above. "Five Across"
+    // is 11 characters, so it survives Android's short_name truncation whole.
+    documentTitle: 'Five Across',
+    appName: 'Five Across',
+    appShortName: 'Five Across',
+    appDescription: 'Live multiplayer bingo for your group.',
+    lexicon: {
+      occasion: 'event',
+      occasionWide: 'event-wide',
+      place: 'place',
+      placePlural: 'Places',
+      crowd: 'everyone here',
+      offlineWhy: 'in a packed venue',
+      shareMark: '✳️',
+      fileSlug: 'five-across',
+    },
+    passCheckLabel: 'Checking your pass…',
+    scheduleTitle: 'Schedule',
+    scheduleSub: 'Places, events, unlock times',
+    walkthroughReplaySub: 'Replay the welcome walkthrough',
+    promptDeadlineNote:
+      "Get your prompts in before the first card is dealt—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares to warm up. The real chaos starts tomorrow at 8.",
+    championRole: 'Champion',
+    podiumLabel: 'Final podium',
+    reviewQueueAllClear: 'All clear. Go enjoy yourself.',
+    bingoShareText: 'I got BINGO. ✳️',
+    blackoutShareText: 'BLACKOUT. I win. ✳️',
+    updateToastMark: '⬆️',
+    updateToastTitle: 'A new version is ready',
+    guidelinesScope: 'one event’s friend group',
   },
 };
 
@@ -125,11 +308,30 @@ export function activeEdition(): string {
   return (currentEdition ??= seedEdition());
 }
 
+/**
+ * Is `edition` a real row in `BRANDS` — an OWN property, not an inherited one?
+ *
+ * `BRANDS` is an object literal, so it inherits `Object.prototype`, and a plain
+ * `BRANDS[edition]` therefore answers for `constructor`, `toString`,
+ * `valueOf`, `hasOwnProperty` and friends (#597). Every one of those is TRUTHY
+ * and none of them is an `EditionBrand`, so the two lookups below would install
+ * a function as the resolved Edition and hand `undefined` to every copy site —
+ * a blank wordmark and a blank tagline on the sign-in gate — instead of falling
+ * back to `gcb`. `hostnames/{host}.edition` is operator-authored data, so the
+ * value reaching here is not under this module's control.
+ *
+ * `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: this program
+ * targets ES2021, where `Object.hasOwn` is not in `lib`.
+ */
+function isKnownEdition(edition: string | null | undefined): boolean {
+  return typeof edition === 'string' && Object.prototype.hasOwnProperty.call(BRANDS, edition);
+}
+
 /** Install the resolved Edition. A falsy or unknown value resets to the legacy
  *  Edition: an unrecognised Edition should degrade to the shipped experience,
  *  never to an unbranded screen. */
 export function setActiveEdition(edition: string | null | undefined): void {
-  currentEdition = edition && BRANDS[edition] ? edition : DEFAULT_EDITION;
+  currentEdition = isKnownEdition(edition) ? edition! : DEFAULT_EDITION;
 }
 
 /** Brand copy for the active Edition (or an explicit one, for tests).
@@ -138,7 +340,13 @@ export function setActiveEdition(edition: string | null | undefined): void {
  *  the default argument resolves through `activeEdition()`, which reads
  *  `import.meta.env` and therefore only works in the app. */
 export function editionBrand(edition: string = activeEdition()): EditionBrand {
-  return BRANDS[edition] ?? BRANDS[DEFAULT_EDITION];
+  return isKnownEdition(edition) ? BRANDS[edition]! : BRANDS[DEFAULT_EDITION]!;
+}
+
+/** The active Edition's vocabulary (#608) — the token layer. Whole-string
+ *  overrides come off `editionBrand()` instead; see `EditionLexicon`. */
+export function editionLexicon(edition: string = activeEdition()): EditionLexicon {
+  return editionBrand(edition).lexicon;
 }
 
 /**
@@ -184,9 +392,18 @@ export function buildTimeEdition(
   return envEdition || DEFAULT_EDITION;
 }
 
+/** The brand fields that are plain strings — i.e. the ones a static HTML
+ *  placeholder could carry. `EditionBrand` gained a nested `lexicon` in #608, so
+ *  a bare `keyof EditionBrand` would let a token be pointed at an OBJECT and
+ *  stringify it into the tab title as `[object Object]`. Narrowing here makes
+ *  that a compile error at the table below rather than a shipped defect. */
+type EditionBrandTextField = {
+  [K in keyof EditionBrand]: EditionBrand[K] extends string ? K : never;
+}[keyof EditionBrand];
+
 /** The `index.html` placeholders, and the field each one carries. Adding a row
  *  here is the whole cost of branding a new static tag. */
-const HTML_IDENTITY_TOKENS: Record<string, keyof EditionBrand> = {
+const HTML_IDENTITY_TOKENS: Record<string, EditionBrandTextField> = {
   '%EDITION_DOCUMENT_TITLE%': 'documentTitle',
   '%EDITION_APP_NAME%': 'appName',
 };

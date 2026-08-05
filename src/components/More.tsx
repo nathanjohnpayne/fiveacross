@@ -20,6 +20,7 @@ import BugReport from './BugReport';
 import AcceptableUse from './AcceptableUse';
 import CoachOverlay from './CoachOverlay';
 import { WalkthroughContent } from './TutorialBanner';
+import { editionBrand } from '../editions';
 
 /**
  * The More tab (#208, daily-cards-spec § "More menu"): profile, theme, text
@@ -68,6 +69,11 @@ export default function More() {
   const closePanel = () => setPanel(null);
 
   const showInstallRow = !standalone && (!!deferred || showIOSHint);
+  // Edition vocabulary for the four rows that name the occasion (#608). Read
+  // once per render rather than at module scope: the resolved Edition is
+  // installed by the pre-mount resolver, and a module-level capture would
+  // freeze whatever was true before it ran.
+  const brand = editionBrand();
 
   if (unknownSubpath) return <Navigate to={FALLBACK_PATH} replace />;
 
@@ -105,8 +111,8 @@ export default function More() {
         <div className="more-rows">
           <MoreRow
             icon={CalendarDays}
-            title="Cruise schedule"
-            sub="Ports, parties, unlock times"
+            title={brand.scheduleTitle}
+            sub={brand.scheduleSub}
             onClick={() => setPanel('schedule')}
           />
           <MoreRow
@@ -118,7 +124,7 @@ export default function More() {
           <MoreRow
             icon={GraduationCap}
             title="How to play"
-            sub="Replay the Welcome Aboard walkthrough"
+            sub={brand.walkthroughReplaySub}
             onClick={() => setPanel('howToPlay')}
           />
           {showInstallRow && (
@@ -128,7 +134,7 @@ export default function More() {
                 <span className="more-row-title">Install the app</span>
                 <span className="more-row-sub">
                   {deferred
-                    ? 'Full screen, works offline at sea.'
+                    ? `Full screen, works offline ${brand.lexicon.offlineWhy}.`
                     : 'Add to Home Screen: tap Share, then "Add to Home Screen."'}
                 </span>
               </span>
@@ -187,7 +193,7 @@ export default function More() {
       </p>
 
       {panel === 'schedule' && (
-        <MorePanel title="Cruise schedule" onClose={closePanel}>
+        <MorePanel title={brand.scheduleTitle} onClose={closePanel}>
           <ScheduleList event={event} />
         </MorePanel>
       )}
@@ -269,7 +275,7 @@ function TextSizeSwitcher() {
 const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 /**
- * A More sub-panel (Cruise schedule / Suggest a square / How to play / Admin):
+ * A More sub-panel (the schedule / Suggest a square / How to play / Admin):
  * reuses the app's existing sheet chrome (`.sheet-backdrop`/`.sheet`) so it
  * reads as the same kind of surface as every other modal in the app. Moves
  * focus to the title on open and restores it to nothing in particular on
@@ -336,7 +342,7 @@ function MorePanel({ title, onClose, children }: { title: string; onClose: () =>
 }
 
 /**
- * The read-only Cruise schedule (issue #208 § Play): the ten Days — port,
+ * The read-only schedule (issue #208 § Play): the ten Days — place,
  * party, unlock time. Editing the schedule is #221's Admin console job, not
  * this row's. Formats each Day's unlock time in the Event's own IANA
  * `timezone` (falls back to the browser's local zone while the Event doc is

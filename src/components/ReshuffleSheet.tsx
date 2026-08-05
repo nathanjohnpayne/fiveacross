@@ -92,7 +92,7 @@ export default function ReshuffleSheet({
           back.
         </div>
         <p className="reshuffle-note">
-          {left} of {RESHUFFLE_ALLOWANCE} cruise reshuffles left · available only before you've
+          {left} of {RESHUFFLE_ALLOWANCE} reshuffles left · available only before you've
           marked a square
         </p>
         {error && <p className="reshuffle-error">{error}</p>}

@@ -12,6 +12,12 @@ import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import { shouldNotify, notifyAdminsOfModeration, type ModeratedDoc } from './notify';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
+import {
+  applyEventAdultContent,
+  applyItemAdultContent,
+  type AdultEventDoc,
+  type AdultItemDoc,
+} from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
 import {
   manualUnlockNow,
@@ -272,6 +278,34 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
       event.data?.before.data()?.settings?.reportHideThreshold,
       event.data?.after.data()?.settings?.reportHideThreshold,
     ),
+);
+
+/**
+ * The Event's 18+ posture, derived server-side (#608). The decision predicates
+ * and the idempotent stamp live in `adultContent.ts` so they are unit-testable
+ * without a Functions runtime; these are the thin trigger seams, mirroring the
+ * auto-hide pair above.
+ *
+ * WHY A FUNCTION AT ALL. The 18+ acknowledgement is on the sign-in gate —
+ * pre-auth — and `events/{eventId}/items/{id}` requires `signedIn()`, so the one
+ * client that must know whether the pool holds explicit Prompts is the one
+ * client that can never read it. The derivation publishes the answer onto the
+ * world-readable routing documents the resolver already fetches before mount.
+ *
+ * Both pin `ADMIN_SDK_SERVICE_ACCOUNT`: they read `hostnames` (a collection no
+ * client may `list`) and write it (a collection no client may write at all), and
+ * the project's default Gen2 compute identity has no Firestore data-plane
+ * access, so an unpinned run would fail its first read. Neither writes anything
+ * under `events/`, so neither can re-fire itself or the other.
+ */
+export const deriveAdultContentOnItem = onDocumentWritten(
+  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (event) => applyItemAdultContent(event.params.eventId, event.data?.after.data() as AdultItemDoc | undefined),
+);
+
+export const deriveAdultContentOnEvent = onDocumentWritten(
+  { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (event) => applyEventAdultContent(event.params.eventId, event.data?.after.data() as AdultEventDoc | undefined),
 );
 
 /**

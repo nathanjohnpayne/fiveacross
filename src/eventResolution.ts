@@ -1,4 +1,5 @@
 import type { HostnameDoc } from './types';
+import { ADULT_CONTENT_DEFAULT, coerceAdultContent } from './adultContent';
 
 // Startup Event resolution from the request hostname (ADR 0009, #543).
 //
@@ -27,6 +28,11 @@ export type Resolution =
        *  field; callers fall back to `eventId` as the closest available
        *  identifier. */
       slug: string | null;
+      /** Whether this Event shows the 18+ acknowledgement (#608). Unlike
+       *  `edition`, this is never `null`: there is no "unknown" posture a gate
+       *  could render, so the env short-circuit — which reads no hostname
+       *  document at all — reports the fail-closed default rather than deferring. */
+      adultContent: boolean;
       /** Where the answer came from — surfaced for diagnostics, never for logic. */
       source: 'cache' | 'network' | 'env';
     }
@@ -112,6 +118,14 @@ export function readCache(
         canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
         edition: typeof d.edition === 'string' ? d.edition : '',
         status: d.status,
+        // Coerced, not version-gated. Adding a field to the cached shape would
+        // normally argue for a CACHE_VERSION bump, but a bump invalidates every
+        // stored mapping — and the entries this would evict are exactly the ones
+        // an offline cold boot depends on (step 3 below), so it would trade a
+        // correct fail-closed default for a not-found screen. `undefined` here
+        // reads as `true`, which IS the safe direction, so an entry written
+        // before #608 is already correct.
+        adultContent: coerceAdultContent(d.adultContent),
         slug: typeof d.slug === 'string' ? d.slug : undefined,
         isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
       },
@@ -153,6 +167,7 @@ const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => (
   eventId: doc.eventId,
   canonicalHost: doc.canonicalHost,
   edition: doc.edition,
+  adultContent: doc.adultContent,
   slug: doc.slug ?? null,
   source,
 });
@@ -228,7 +243,20 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
 
   // 0. Single-Event build: answer immediately, never touch the network.
   if (envEventId) {
-    return { kind: 'event', eventId: envEventId, canonicalHost: null, edition: null, slug: null, source: 'env' };
+    // `adultContent` is the fail-closed default here, NOT `null` like `edition`
+    // (#608). The Edition splits because a single-Event build BAKES its own via
+    // `VITE_EDITION`, so deferring to the seed is right; the 18+ posture has no
+    // build-time seed to defer to, and the legacy Gay Cruise Bingo build this
+    // path serves is 18+ anyway — so the default reproduces today's gate exactly.
+    return {
+      kind: 'event',
+      eventId: envEventId,
+      canonicalHost: null,
+      edition: null,
+      adultContent: ADULT_CONTENT_DEFAULT,
+      slug: null,
+      source: 'env',
+    };
   }
 
   const cached = readCache(storage, hostname, now());

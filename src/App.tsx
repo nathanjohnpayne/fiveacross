@@ -14,6 +14,7 @@ import { BugReportProvider } from './components/BugReport';
 import PullToRefresh from './components/PullToRefresh';
 import { TABS, FALLBACK_PATH, type TabId } from './components/tabs';
 import LoadingState from './components/LoadingState';
+import { editionBrand } from './editions';
 
 export default function App() {
   const { user, loading, dealError, dealErrorReason, dealing, retryDeal, canRenderEventContent } = useAuth();
@@ -24,7 +25,9 @@ export default function App() {
   const location = useLocation();
   const section = location.pathname.split('/')[1] || 'card';
 
-  if (loading) return <LoadingState label="Checking your cruise pass…" />;
+  // The one pre-auth label the Edition owns (#608): this renders before the
+  // Event doc exists, so the resolved Edition is the only vocabulary available.
+  if (loading) return <LoadingState label={editionBrand().passCheckLabel} />;
   if (!user) return <SignIn />;
 
   // Frozen route -> page-component mapping, one entry per stable mount

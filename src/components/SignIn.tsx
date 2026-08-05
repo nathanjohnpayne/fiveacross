@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import { adultContentRequired } from '../adultContent';
 import { editionBrand } from '../editions';
 
 // The wordmark, the signed-out line and the offline note come from the resolved
@@ -20,9 +21,20 @@ import { editionBrand } from '../editions';
 //     self-attestation before the Board.
 // Either way the checkbox now drives a PERSISTED write, not just ephemeral local
 // state — an honor-system self-statement, never identity verification (ADR 0001).
+//
+// …and the checkbox itself is now CONDITIONAL (#608). The 18+ posture follows
+// the Event's content, not its Edition: `hostnames/{host}.adultContent` is
+// server-derived from whether the pool holds explicit Prompts, resolved pre-auth
+// alongside the Edition, and fails closed to `true`. An Event with a tame pool
+// shows no acknowledgement and no age claim, and its Continue button is enabled
+// on load — asking a wedding party to confirm they are 18 is not a harmless
+// extra tap, it mislabels the product. The re-prompt entry point cannot be
+// reached at all in that posture (AuthProvider's `needsAttestation` gates on the
+// same flag), so this component only ever renders `reprompt` with the box shown.
 export default function SignIn() {
   const { user, signIn, signInReady, attest } = useAuth();
   const reprompt = user != null;
+  const adult = adultContentRequired();
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const brand = editionBrand();
@@ -49,18 +61,29 @@ export default function SignIn() {
     <div className="signin" data-testid="signin-gate">
       <h1>{brand.wordmark}</h1>
       <p className="muted">
-        {reprompt
+        {/* The re-prompt line makes an age claim of its own, so it is gated on
+            the posture too — belt and braces. AuthProvider already refuses to
+            mount the re-prompt on a non-adult Event, but a screen whose whole
+            job is the 18+ acknowledgement should not be one caller's discipline
+            away from asserting it on an Event that never asked. */}
+        {reprompt && adult
           ? 'One quick thing before you get your card: confirm you’re 18 or older.'
           : brand.tagline}
       </p>
-      <label className="ack">
-        <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-        <span>
-          I'm 18 or older and I know exactly what I'm getting into. Keep it legal, no minors, and
-          don't post people who didn't consent.
-        </span>
-      </label>
-      <button className="btn primary block" disabled={!ack || busy || (!reprompt && !signInReady)} onClick={go}>
+      {adult && (
+        <label className="ack">
+          <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+          <span>
+            I'm 18 or older and I know exactly what I'm getting into. Keep it legal, no minors, and
+            don't post people who didn't consent.
+          </span>
+        </label>
+      )}
+      <button
+        className="btn primary block"
+        disabled={(adult && !ack) || busy || (!reprompt && !signInReady)}
+        onClick={go}
+      >
         {busy
           ? reprompt
             ? 'Saving…'

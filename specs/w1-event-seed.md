@@ -5,7 +5,7 @@ status: accepted
 
 # Event/pool seed script (`scripts/seed.mjs`)
 
-`scripts/seed.mjs` is the run-once Admin script that establishes `events/{id}` and the dense pre-cruise Prompt pool. This spec pins the Phase-0 reconciliation of the seeded payload to the accepted ADRs: the ADR 0001 Claim Mode rename, the ADR 0003 pool-density requirement, and the ADR 0004 dead-config removal, plus the `ADMIN_UID` roster flow pending decision #15. The seed payload is exported as import-safe constants — seeding runs only when the script is the entry module, so importing it needs neither Firebase credentials nor the dev-only `firebase-admin` install — and every claim below maps to an assertion in `src/test/w1-event-seed.test.ts` (layer: unit).
+`scripts/seed.mjs` is the run-once Admin script that establishes `events/{id}` and the dense Prompt pool the Event opens with. This spec pins the Phase-0 reconciliation of the seeded payload to the accepted ADRs: the ADR 0001 Claim Mode rename, the ADR 0003 pool-density requirement, and the ADR 0004 dead-config removal, plus the `ADMIN_UID` roster flow pending decision #15. The seed payload is exported as import-safe constants — seeding runs only when the script is the entry module, so importing it needs neither Firebase credentials nor the dev-only `firebase-admin` install — and every claim below maps to an assertion in `src/test/w1-event-seed.test.ts` (layer: unit).
 
 ## Seeded settings match ADR 0004
 
@@ -32,7 +32,7 @@ Admin is the only privileged role, and `events/{id}.admins` is the roster the ap
 
 ## Prompt pool density (ADR 0003)
 
-The seed establishes the pre-cruise Prompt pool: `dealBoard` requires ≥ 24 active Prompts. `seed-and-composition` (#129) superseded the original ~30–50 "dense" band with a canonical 80-entry pool (24 spicy / 56 tame, each entry now a `{ text, spicy }` pair rather than a bare string) — a deliberate, larger-than-planned pool accepted for that ticket, not a regression of the density intent (still comfortably above the 24-Prompt floor). Prompt doc ids are content hashes of `text` alone, so duplicate texts would collapse into one doc and silently shrink the pool — seeded texts must be unique. See `seed-and-composition.md` for the full pool-shape and Board-composition contract.
+The seed establishes the Prompt pool before the Event opens: `dealBoard` requires ≥ 24 active Prompts. `seed-and-composition` (#129) superseded the original ~30–50 "dense" band with a canonical 80-entry pool (24 spicy / 56 tame, each entry now a `{ text, spicy }` pair rather than a bare string) — a deliberate, larger-than-planned pool accepted for that ticket, not a regression of the density intent (still comfortably above the 24-Prompt floor). Prompt doc ids are content hashes of `text` alone, so duplicate texts would collapse into one doc and silently shrink the pool — seeded texts must be unique. See `seed-and-composition.md` for the full pool-shape and Board-composition contract.
 
 - **Given** the seeded pool **when** counted **then** it has at least 24 entries. (Test: "seeds at least 24 prompts so dealBoard always has a full sample".)
 - **Given** the seeded pool **when** counted **then** it is the canonical 80-entry pool. (Test: "seeds the canonical 80-entry pool (w1-seed-and-composition)".)
