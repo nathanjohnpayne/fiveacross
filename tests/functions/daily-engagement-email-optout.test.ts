@@ -21,29 +21,79 @@ import {
 
 type Docs = Record<string, Record<string, unknown>>;
 
-function makeDb(seed: Docs = {}): EmailPrefsFirestore & { docs: Docs } {
+/**
+ * A deliberately faithful mini-transaction: it records the version of every
+ * document READ, buffers writes, and on commit re-runs the whole function if
+ * any of those versions moved. A fake that just applied the writes would let
+ * the concurrency test below pass against the very bug it exists to catch.
+ */
+function makeDb(seed: Docs = {}): EmailPrefsFirestore & { docs: Docs; onTxRead?: (path: string) => void } {
   const docs: Docs = { ...seed };
-  return {
+  const versions: Record<string, number> = {};
+  const bump = (path: string) => {
+    versions[path] = (versions[path] ?? 0) + 1;
+  };
+  const self = {
     docs,
+    /** Test hook: fires inside a transaction's read, the window a competing
+     *  writer would land in. */
+    onTxRead: undefined as ((path: string) => void) | undefined,
+    runTransaction: async <T,>(fn: (tx: never) => Promise<T>): Promise<T> => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const readVersions: Record<string, number> = {};
+        const writes: Array<[string, Record<string, unknown>, boolean]> = [];
+        const tx = {
+          get: async (ref: { path: string }) => {
+            // Snapshot version AND data first, then let a competing writer in.
+            // The transaction therefore reads genuinely STALE data and is
+            // forced through the retry, which is the behaviour under test — a
+            // fake that read after the write would pass without ever retrying.
+            readVersions[ref.path] = versions[ref.path] ?? 0;
+            const at = docs[ref.path] === undefined ? undefined : { ...docs[ref.path] };
+            self.onTxRead?.(ref.path);
+            return { exists: at !== undefined, data: () => at };
+          },
+          set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
+            writes.push([ref.path, data, options?.merge === true]);
+          },
+        };
+        const result = await fn(tx as never);
+        const stale = Object.entries(readVersions).some(([path, v]) => (versions[path] ?? 0) !== v);
+        if (stale) continue; // contention — discard the buffered writes and retry
+        for (const [path, data, merge] of writes) {
+          docs[path] = merge ? { ...(docs[path] ?? {}), ...data } : { ...data };
+          bump(path);
+        }
+        return result;
+      }
+      throw new Error('transaction retries exhausted');
+    },
     doc: (path: string) => ({
+      path,
       get: async () => ({ exists: docs[path] !== undefined, data: () => docs[path] }),
       set: async (data: Record<string, unknown>, options?: { merge?: boolean }) => {
         docs[path] = options?.merge ? { ...(docs[path] ?? {}), ...data } : { ...data };
+        bump(path);
         return undefined;
       },
       // Admin-SDK `create` semantics: refuses when the document already exists.
       create: async (data: Record<string, unknown>) => {
         if (docs[path] !== undefined) throw new Error('ALREADY_EXISTS');
         docs[path] = { ...data };
+        bump(path);
         return undefined;
       },
     }),
   };
+  return self;
 }
 
 /** A Firestore stand-in whose every operation fails — the degraded-backend case
  *  that must never produce an email with a dead unsubscribe link. */
 const brokenDb = (): EmailPrefsFirestore => ({
+  runTransaction: async () => {
+    throw new Error('firestore unavailable');
+  },
   doc: () => ({
     get: async () => {
       throw new Error('firestore unavailable');
@@ -63,6 +113,7 @@ const readBrokenDb = (seed: Docs): EmailPrefsFirestore & { docs: Docs } => {
   const inner = makeDb(seed);
   return {
     docs: inner.docs,
+    runTransaction: inner.runTransaction,
     doc: (path: string) => ({
       ...inner.doc(path),
       get: async () => {
@@ -156,6 +207,7 @@ describe('the opt-out store', () => {
     const realDoc = db.doc;
     let firstRead = true;
     const raced: EmailPrefsFirestore = {
+      runTransaction: db.runTransaction,
       doc: (path: string) => ({
         ...realDoc(path),
         get: async () => {
@@ -173,6 +225,33 @@ describe('the opt-out store', () => {
       token: 'winner',
     });
     expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ optedOut: true, token: 'winner' });
+  });
+
+  it('returns the PERSISTED token when a concurrent sweep back-fills first', async () => {
+    // Phase 4b P2: an unconditional merge let two sweeps each write their own
+    // token and each return their own. The loser then mailed a
+    // `List-Unsubscribe` link carrying a token the endpoint rejects — an
+    // unsubscribe that looks fine and silently does not work.
+    const db = makeDb({ [emailPrefsPath('e', 'u')]: { optedOut: false } });
+    let raced = false;
+    db.onTxRead = (path) => {
+      if (raced) return;
+      raced = true; // the competing sweep commits inside our read window
+      db.doc(path).set({ token: 'winner', updatedAt: 1 }, { merge: true });
+    };
+    const prefs = await ensureEmailPrefs(db, 'e', 'u', { mintToken: () => 'loser', now: () => 2 });
+    expect(raced).toBe(true); // the competing write really did land mid-read
+    expect(prefs?.token).toBe('winner');
+    // …and the store agrees, so the emailed link and the endpoint match.
+    expect(db.docs[emailPrefsPath('e', 'u')].token).toBe('winner');
+    expect(await readEmailPrefs(db, 'e', 'u')).toMatchObject({ token: 'winner' });
+  });
+
+  it('back-fills exactly one token when nothing else is writing', async () => {
+    const db = makeDb({ [emailPrefsPath('e', 'u')]: { optedOut: false } });
+    const prefs = await ensureEmailPrefs(db, 'e', 'u', { mintToken: () => 'mine', now: () => 4 });
+    expect(prefs?.token).toBe('mine');
+    expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ optedOut: false, token: 'mine', updatedAt: 4 });
   });
 
   it('back-fills a token onto a doc that has none WITHOUT resetting its opt-out', async () => {
@@ -232,6 +311,17 @@ describe('applyOptOut', () => {
     const db = makeDb({ [emailPrefsPath('e', 'u')]: { token: 'good', optedOut: true } });
     expect(await applyOptOut(db, 'e', 'u', 'good', false)).toBe('updated');
     expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ optedOut: false });
+  });
+
+  it('answers "error", not "invalid", when the read FAILS — a 500 is retryable, a 404 is not', async () => {
+    // Phase 4b P1: the convenience reader collapses missing and unreadable into
+    // null, so a transient backend blip used to answer a permanent 404 and an
+    // RFC 8058 one-click client would never retry.
+    expect(await applyOptOut(brokenDb(), 'e', 'u', 'anything', true)).toBe('error');
+  });
+
+  it('still answers "invalid" for a CONFIRMED absence, so the two stay distinguishable', async () => {
+    expect(await applyOptOut(makeDb(), 'e', 'u', 'anything', true)).toBe('invalid');
   });
 
   it('answers the same "invalid" for a wrong token and for a uid that has no doc', async () => {
@@ -338,13 +428,14 @@ describe('handleUnsubscribeRequest', () => {
     expect(incomplete.code).toBe(400);
 
     // A degraded backend resolves rather than rejecting — the endpoint never
-    // throws out of the call — and answers the same "invalid" a bad token gets,
-    // because a read failure cannot be distinguished from one.
+    // throws out of the call — and answers a RETRYABLE 500 rather than the
+    // permanent 404 a confirmed bad token gets (Phase 4b P1).
     const broken = makeRes();
     await expect(
       handleUnsubscribeRequest(brokenDb(), { method: 'POST', query: query() }, broken),
     ).resolves.toBeUndefined();
-    expect(broken.code).toBe(404);
+    expect(broken.code).toBe(500);
+    expect(broken.body).toContain('try that link again');
   });
 
   it('preserves a router parameter from the endpoint URL in the form action and links', async () => {

@@ -47,9 +47,18 @@ interface PrefsDocRef {
    *  what makes minting a preference doc atomic (see `ensureEmailPrefs`). */
   create(data: Record<string, unknown>): Promise<unknown>;
 }
+/** The minimal transaction surface the token back-fill needs. Mirrors the
+ *  admin-SDK `Transaction`: reads inside it are serialized against concurrent
+ *  writers, and the whole function re-runs on contention. */
+interface PrefsTransaction {
+  get(ref: PrefsDocRef): Promise<PrefsSnapshot>;
+  set(ref: PrefsDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+}
+
 /** The minimal surface the opt-out store uses. */
 export interface EmailPrefsFirestore {
   doc(path: string): PrefsDocRef;
+  runTransaction<T>(updateFunction: (tx: PrefsTransaction) => Promise<T>): Promise<T>;
 }
 
 /** The stored per-user preference doc. */
@@ -174,10 +183,39 @@ export async function ensureEmailPrefs(
   if (read.status === 'found') {
     if (read.prefs.token !== '') return read.prefs;
     // Present but token-less: back-fill ONLY the token, preserving optedOut.
-    const token = mint();
+    //
+    // TRANSACTIONAL, and the returned token is the PERSISTED one, not the one
+    // this call happened to mint (Phase 4b P2). An unconditional merge lets two
+    // concurrent sweeps each write their own token and each return their own:
+    // the loser's write is overwritten, so it mails a `List-Unsubscribe` link
+    // carrying a token the endpoint will reject — an unsubscribe that looks
+    // fine and silently does not work, which is the one failure mode this
+    // feature cannot have. Inside the transaction the read is serialized
+    // against the competing writer, so the loser re-runs, sees the winner's
+    // token, and mails THAT.
     try {
-      await db.doc(emailPrefsPath(eventId, uid)).set({ token, updatedAt: now }, { merge: true });
-      return { ...read.prefs, token };
+      return await db.runTransaction(async (tx) => {
+        const ref = db.doc(emailPrefsPath(eventId, uid));
+        const snap = await tx.get(ref);
+        const data = snap.exists ? (snap.data() ?? {}) : {};
+        const stored = typeof data.token === 'string' ? data.token : '';
+        const optedOut = data.optedOut === true;
+        const lastSentDayIndex =
+          typeof data.lastSentDayIndex === 'number' && Number.isFinite(data.lastSentDayIndex)
+            ? data.lastSentDayIndex
+            : undefined;
+        if (stored !== '') return { optedOut, token: stored, lastSentDayIndex };
+        const token = mint();
+        // Name `optedOut` ONLY when the document has vanished under us (it must
+        // exist for the merge to mean anything). On an existing doc the write
+        // touches the token alone, so a stored opt-out cannot be reset here.
+        tx.set(
+          ref,
+          snap.exists ? { token, updatedAt: now } : { optedOut: false, token, createdAt: now, updatedAt: now },
+          { merge: true },
+        );
+        return { optedOut, token, lastSentDayIndex };
+      });
     } catch (err) {
       console.error('ensureEmailPrefs: token back-fill failed', eventId, uid, err);
       return null;
@@ -233,9 +271,17 @@ export type OptOutResult = 'updated' | 'invalid' | 'error';
 
 /**
  * Apply an unsubscribe (or a re-subscribe) after verifying the capability
- * token. Returns `'invalid'` for a bad/absent token — deliberately the SAME
- * answer for "no such doc" and "wrong token", so the endpoint cannot be used to
- * enumerate which uids are participants.
+ * token.
+ *
+ * `'invalid'` is reserved for a CONFIRMED refusal — no such document, or a
+ * token that does not match — and is deliberately the same answer for both, so
+ * the endpoint cannot be used to enumerate which uids are participants. A read
+ * that FAILED is `'error'` instead (Phase 4b P1): the convenience reader
+ * collapses "missing" and "unreadable" into `null`, and answering a transient
+ * backend failure with a permanent 404 tells an RFC 8058 one-click client the
+ * unsubscribe is gone rather than that it should retry — so a blip would drop
+ * the request on the floor and the reader would keep getting mail. A 500 is
+ * retryable; a 404 is not.
  */
 export async function applyOptOut(
   db: EmailPrefsFirestore,
@@ -245,8 +291,10 @@ export async function applyOptOut(
   optedOut: boolean,
   deps: OptOutDeps = {},
 ): Promise<OptOutResult> {
-  const prefs = await readEmailPrefs(db, eventId, uid);
-  if (!prefs || !tokenMatches(prefs.token, suppliedToken)) return 'invalid';
+  const read = await readEmailPrefsOutcome(db, eventId, uid);
+  if (read.status === 'error') return 'error';
+  if (read.status === 'absent') return 'invalid';
+  if (!tokenMatches(read.prefs.token, suppliedToken)) return 'invalid';
   try {
     await db
       .doc(emailPrefsPath(eventId, uid))

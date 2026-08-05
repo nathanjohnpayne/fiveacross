@@ -679,6 +679,7 @@ function makeDb(seed: Docs): DailyEmailFirestore & { docs: Docs } {
     data: () => docs[path],
   });
   const docRef = (path: string) => ({
+    path,
     get: async () => snapshotOf(path),
     set: async (data: Record<string, unknown>, options?: { merge?: boolean }) => {
       docs[path] = options?.merge ? { ...(docs[path] ?? {}), ...data } : { ...data };
@@ -700,7 +701,14 @@ function makeDb(seed: Docs): DailyEmailFirestore & { docs: Docs } {
         .filter((s) => filters.every(([field, value]) => (s.data() ?? {})[field] === value)),
     }),
   });
-  return { doc: docRef, collection: (path: string) => query(path, []), docs };
+  const runTransaction = async <T,>(fn: (tx: never) => Promise<T>): Promise<T> =>
+    fn({
+      get: async (ref: { path: string }) => snapshotOf(ref.path),
+      set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
+        docs[ref.path] = options?.merge ? { ...(docs[ref.path] ?? {}), ...data } : { ...data };
+      },
+    } as never);
+  return { doc: docRef, collection: (path: string) => query(path, []), runTransaction, docs };
 }
 
 const seedEvent = (settings: Record<string, unknown> = { dailyEmailEnabled: true }): Docs => ({
