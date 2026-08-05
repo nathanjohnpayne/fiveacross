@@ -50,6 +50,15 @@ const visionClient = new vision.ImageAnnotatorClient();
 // the Admin SDK account keeps the `firebase-adminsdk-fbsvc` id, which holds for
 // both current projects; a project whose id differs would need the account read
 // from disk at discovery, the way visionGate.ts reads its flag.
+//
+// The value must already be a FULL email here — firebase-functions v2's
+// trailing-`@` shorthand (`firebase-adminsdk-fbsvc@`) is not safe: firebase-tools
+// (verified against 15.25.1) expands the shorthand only on the Cloud Functions
+// service-config path (gcp/cloudfunctionsv2.js → proto.formatServiceAccount),
+// while gcp/cloudscheduler.js `jobFromEndpoint` copies `endpoint.serviceAccount`
+// VERBATIM into the Cloud Scheduler OIDC token for `unlockDay`, so the raw
+// shorthand would reach Cloud Scheduler as an invalid email and fail the deploy
+// at the scheduler step (found on the sibling fix PR #590, closed for this one).
 const ADMIN_SDK_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${resolveProjectId() ?? 'gaycruisebingo'}.iam.gserviceaccount.com`;
 
 /**
