@@ -261,6 +261,10 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
  * `snapshotItemIds` for snapshots, `frozenAt` for the freeze, an existing
  * `last_call` Moment for last-call), so a run on any other day, or a retry, is a
  * no-op. Firestore-triggered functions stay us-central1 (the global default).
+ *
+ * SCHEDULE (#552): ONE quarter-hourly UTC trigger drives every beat. An earlier
+ * design ran TWO daily Europe/Rome triggers with split 08:00/20:00
+ * responsibilities; that is gone. See `unlockDay` below for why.
  */
 async function runScheduledUnlockForActiveEvents(): Promise<void> {
   const adminDb = db as unknown as AdminFirestore;
@@ -284,12 +288,18 @@ async function runScheduledUnlockForActiveEvents(): Promise<void> {
  * A per-timezone trigger per Event does not scale either: it would mean a
  * deploy every time an Event is created somewhere new.
  *
- * Hourly UTC serves every timezone at once because unlock times are whole
- * hours: 06:00 PT is exactly 13:00 UTC, 08:00 Rome exactly 06:00 UTC. Cron
- * fires on the hour, so each Event's beat is picked up in the same minute it
- * becomes due, wherever it is.
+ * QUARTER-HOURLY, not hourly. An earlier revision used `0 * * * *` on the
+ * reasoning that "unlock times are whole hours". That is only true in
+ * whole-hour-offset zones. `unlockAt` is an absolute instant derived from the
+ * Event's LOCAL schedule, so a 06:00 unlock in `Asia/Kolkata` (UTC+5:30) is
+ * 00:30 UTC and `Pacific/Chatham` (UTC+12:45) lands on :45 — an hourly cron
+ * would leave those Days locked for up to 59 minutes, which is the very
+ * failure this trigger exists to remove, just relocated to other timezones.
+ * Every real IANA offset is a multiple of 15 minutes, so a 15-minute cadence
+ * covers all of them. (Written in prose deliberately: the cron literal contains
+ * the block-comment terminator, so it belongs in the code below, not here.)
  *
- * SAFE TO RUN 24x A DAY because every beat is self-guarded, not schedule-timed
+ * SAFE TO RUN 96x A DAY because every beat is self-guarded, not schedule-timed
  * (`runScheduledUnlock`, functions/src/unlockDay.ts):
  *   - a Day snapshot writes only when `unlockAt` has passed AND
  *     `snapshotItemIds` is still absent, re-checked inside a transaction, so a
@@ -297,17 +307,31 @@ async function runScheduledUnlockForActiveEvents(): Promise<void> {
  *   - the freeze is a transactional `frozenAt` flip, so exactly one run wins;
  *   - `last_call` and `podium` Moments dedupe on an existing-Moment check.
  * The schedule was never what made these fire once — it only decided how soon
- * they fired. Running hourly makes them prompt without making them repeat.
+ * they fired. Running every 15 minutes makes them prompt without repeating.
  *
  * This also retires the DST caveat in specs/d15-scheduler-unlock.md: with a
  * fixed-offset UTC schedule there is no local-time shift to reason about, and
  * the 12h last-call lead is derived from the Day schedule rather than a cron.
  *
+ * DEPLOY NOTE. This revision REMOVES the `unlockDayFinaleLastCall` export, so
+ * the deploy carrying it must delete an already-deployed function. The
+ * canonical path runs `firebase deploy --non-interactive`, which REFUSES that
+ * delete rather than prompting — so the first such deploy fails unless it is
+ * given `--force` (firebase's `--force` = "delete Cloud Functions missing from
+ * the current deploy"). `op-firebase-deploy` forwards extra args, so:
+ *
+ *     op-firebase-deploy <project> --only functions --force
+ *
+ * ONE-TIME, and deliberately not baked into the shared deploy script: a
+ * standing `--force` would silently delete any function accidentally omitted
+ * from any future deploy. Note this is a DIFFERENT flag from
+ * `scripts/deploy.sh --force`, which only bypasses the branch/freshness guards.
+ *
  * The admin "unlock now" callable (`unlockDayNow`, below) is unchanged and
  * remains the manual fallback for function lag or failure.
  */
 export const unlockDay = onSchedule(
-  { schedule: '0 * * * *', timeZone: 'Etc/UTC', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  { schedule: '*/15 * * * *', timeZone: 'Etc/UTC', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   () => runScheduledUnlockForActiveEvents(),
 );
 
