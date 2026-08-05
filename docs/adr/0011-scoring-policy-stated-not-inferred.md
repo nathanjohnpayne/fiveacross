@@ -1,6 +1,9 @@
 ---
 status: accepted
+implemented: false
 ---
+
+> **Decision accepted; code not yet migrated.** Nothing described below exists in the tree at the time of writing: there is no `DayDef.scoring` or `EventDoc.standingsFreezeAt`, `ceremonialDayIndexSet` and the client freeze derivation still infer from `pool === 'farewell'`, and the functions mirror still excludes the easy and closing pools from First to BINGO. The divergence in the Consequences section is therefore **live**, not fixed. This ADR records the decision and the defect it exposed so the implementation lands against a written intent; the code and its parity test are tracked separately.
 
 # A Day's Scoring Policy is stated, not inferred from its Pool — and the Standings Freeze is an Event setting
 
@@ -10,6 +13,9 @@ status: accepted
 
 ## Consequences
 
-- `ceremonialDayIndexSet` keys off `scoring`, and the client freeze derivation off `standingsFreezeAt`, in both the app and the functions package. **A future reader who finds `pool === 'farewell'` in a scoring path is looking at a regression, not the design.**
-- Auditing this exposed a live divergence: the client excluded only `tutorial` Days from First to BINGO, while `functions/src/finaleContent.ts` also excluded the easy and closing **pools**. Invisible on Gay Cruise Bingo, where those Days are also `tutorial: true` — but on any Event where they aren't, the card and the Feed would print contradictory podiums. The functions side is aligned to the client, and a **parity test feeds one fixture schedule to both implementations and asserts identical output**. The two packages stay decoupled by design; the test is what stops them drifting again.
-- Most-Loved Photo freezes against `standingsFreezeAt` under the same rule and carries the same parity test.
+Once implemented:
+
+- `ceremonialDayIndexSet` will key off `scoring`, and the client freeze derivation off `standingsFreezeAt`, in both the app and the functions package. **After that lands, a reader who finds `pool === 'farewell'` in a scoring path is looking at a regression, not the design** — until then it is simply the current code.
+- Most-Loved Photo will freeze against `standingsFreezeAt` under the same rule and carry the same parity test.
+
+**The divergence this audit exposed is live today.** The client excludes only `tutorial` Days from First to BINGO (`src/game/logic.ts`), while `functions/src/finaleContent.ts` also excludes the easy and closing **pools**. Invisible on Gay Cruise Bingo, where those Days are also `tutorial: true` — but on any Event where they aren't, the card and the Feed print contradictory podiums, crediting different players. The fix aligns the functions side to the client and adds a **parity test feeding one fixture schedule to both implementations, asserting identical output**. The two packages stay decoupled by design; the test is what stops them drifting again.

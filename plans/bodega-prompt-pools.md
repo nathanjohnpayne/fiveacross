@@ -182,7 +182,15 @@ This group is early to rise and early to bed, so the card is waiting before anyo
 
 `EventDoc.standingsFreezeAt` = Sunday Aug 9, 11:00 `America/Los_Angeles` (check-out).
 
-**Friday must use the `0` sentinel, not 16:00.** The snapshot filter only admits Prompts whose `approvedAt`/`createdAt` is at or before `unlockAt`. Seeding the pool after 4pm Friday with `unlockAt: 16:00` would stamp Friday an **empty snapshot** and there is no un-stamp. A non-positive `unlockAt` is the documented already-open sentinel and skips the timestamp cutoff entirely.
+**Friday uses the `0` sentinel, and its snapshot should be pre-stamped at seed time.**
+
+The sentinel is required for the Day to read as open on arrival: the snapshot filter only admits Prompts whose `approvedAt`/`createdAt` is at or before `unlockAt`, so seeding the pool after 4pm Friday against a 16:00 unlock would stamp Friday an **empty snapshot**, and `snapshotItemIds == null` is the only unstamped state — there is no un-stamp short of `resnapshotDayIfNoBoards`, which works only while zero cards exist.
+
+But the sentinel has a cost: a non-positive `unlockAt` disables the timestamp cutoff entirely (fail-open, #289), so Friday's card is whatever is active in the easy pool **at the moment the scheduler happens to run**. On a competitive Day that is avoidable nondeterminism. Pre-stamping `snapshotItemIds` during the seed removes it: the content is fixed by the seed rather than by scheduler timing, and no cutoff semantics are needed at all.
+
+Scope of the exposure, for the record: player submissions only ever enter the **main** pool, and `snapshotPoolsFor` gives a non-main Day only its own pool — a main Day freezes main + easy, everything else freezes just itself. So a late community Prompt can never reach Friday's card regardless. What the sentinel actually exposes is an admin-added easy-pool Prompt landing between event open and the stamp. Narrow, but pre-stamping closes it for free.
+
+Pre-stamping also means Friday's card is frozen from seed time, so run the seed with its final pool — this is the Day where Kim's edits have the earliest deadline.
 
 **The Sunday window is five hours** — 06:00 unlock to the 11:00 check-out freeze. The earlier start bought two hours back, which materially changes Sunday from "a card nobody finishes" to a real if brisk final morning. Still packing-heavy, so the closing pool stays deliberately achievable from a kitchen; if you want the drive home to count, push `standingsFreezeAt` to early afternoon instead.
 

@@ -13,7 +13,7 @@ Per the ticket's **needs-phase-4** posture (ADR 0001 / `specs/recon-recompute-st
 
 - `src/game/logic.ts` — pure aggregation helpers (framework-free, the correctness-critical core):
   - `sumDayStats(dayStats)` — sums `bingoCount`/`squaresMarked` across EVERY Day Card, tutorial Days included (the embark card is real pre-freeze play).
-  - `cruiseFirstBingoAt(dayStats, isTutorialDay)` — the earliest `firstBingoAt` across MAIN-GAME Days only; tutorial Days are excluded even when numerically earliest.
+  - `eventFirstBingoAt(dayStats, isTutorialDay)` — the earliest `firstBingoAt` across MAIN-GAME Days only; tutorial Days are excluded even when numerically earliest.
   - `aggregatePlayerStats(dayStats, isTutorialDay)` — the cruise-wide root shape `{ bingoCount, squaresMarked, firstBingoAt }` derived from a Player's `dayStats`.
   - `foldDayStat(...)` — the Mark write-path composition: folds `computeMark`'s per-Board result into `dayStats[dayIndex]` and re-derives the summed root, carrying `computeMark`'s `firstBingoAt` OMIT (the #75 unknown-state preserve) through to the `{ merge: true }` write.
   - `tutorialDayIndexSet(days)`, `perDayHonors(players)`, `effectiveCruiseFirstBingoAt(player, isTutorialDay)`, `cruiseFirstBingoUid(players, isTutorialDay)` — the read-surface derivations for the Leaderboard pin and honors strip, with a legacy fallback to the root `firstBingoAt` for a roster that predates Day Cards (no `dayStats`).
@@ -34,6 +34,6 @@ Per the ticket's **needs-phase-4** posture (ADR 0001 / `specs/recon-recompute-st
 
 ## Test coverage
 
-- `src/game/d15-scoring-aggregates.test.ts` (Vitest unit, pure) — `sumDayStats`, `cruiseFirstBingoAt`/`aggregatePlayerStats` tutorial-exclusion, `foldDayStat` (fold + #75 omit preserve), `perDayHonors`, `cruiseFirstBingoUid`/`effectiveCruiseFirstBingoAt` legacy fallback, and the tie-break over aggregated totals.
+- `src/game/d15-scoring-aggregates.test.ts` (Vitest unit, pure) — `sumDayStats`, `eventFirstBingoAt`/`aggregatePlayerStats` tutorial-exclusion, `foldDayStat` (fold + #75 omit preserve), `perDayHonors`, `cruiseFirstBingoUid`/`effectiveCruiseFirstBingoAt` legacy fallback, and the tie-break over aggregated totals.
 - `src/data/d15-scoring-aggregates.test.ts` (Vitest unit) — `computeMark` → `foldDayStat` writes `dayStats[dayIndex]` and leaves siblings untouched; `setMark`'s player write carries the folded `dayStats` + summed root; `dayMeta.ts` `pinDayFirstBingo` cache-pre-check and payload shape; `moments.ts` `broadcastBlackout`'s optional `dayIndex` cache-pre-check and payload shape.
 - `src/components/d15-scoring-aggregates.test.tsx` (RTL/jsdom) — the honors strip renders each Day's pinned Player; the cruise "1st BINGO" pin never lands on an embark/farewell-only first-bingo.

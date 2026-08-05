@@ -173,11 +173,15 @@ feedback_policy:
 # toward branch protection's conversation-resolution gate, so an advisory bot
 # could block a merge outright.
 #
-# `.coderabbit.yml` sets `reviews.auto_review.enabled: false` alongside this.
-# Both are needed: this key stops the AGENT waiting on CodeRabbit, while the
-# other stops CodeRabbit reviewing at all — without it the App would keep
-# posting threads that hold the conversation-resolution gate even though no
-# one is waiting for them.
+# `.coderabbit.yml` is DELETED alongside this key, not left present with the
+# auto-review flag flipped. `scripts/ci/check_coderabbit_config` fails a
+# present file that sets `reviews.auto_review.enabled: false` (verified: exit
+# 1), and its own remediation text is "set `coderabbit.enabled: false` in
+# .github/review-policy.yml AND delete .coderabbit.yml" — the private-repo
+# bootstrap path from #248. Deleting also stops the App posting review threads,
+# which matters independently: an unresolved thread holds branch protection's
+# conversation-resolution gate, so an advisory bot nobody waits for could still
+# block a merge.
 #
 # Review path after this change: `@codex review` (Phase 4a) on every PR, with
 # the automated Phase 4b cross-agent leg where the classifier calls for it.
