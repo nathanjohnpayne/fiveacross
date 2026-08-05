@@ -84,10 +84,11 @@ export async function bootstrapEventResolution(
     // and the offline card cache silently keys on a different Event than the
     // data it caches.
     setCardCacheEventId(resolution.eventId);
-    // The Edition brands the PRE-AUTH shell (src/editions.ts). This is the only
-    // point at which a RESOLVED Edition can be installed: `events/{eventId}`
-    // needs `signedIn()`, so the sign-in gate would otherwise render another
-    // product's wordmark.
+    // The Edition brands the PRE-AUTH shell (src/editions.ts) AND scopes every
+    // Theme picker plus the Edition default Theme (src/theme/themes.ts reads
+    // the same state — #580). This is the only point at which a RESOLVED
+    // Edition can be installed: `events/{eventId}` needs `signedIn()`, so the
+    // sign-in gate would otherwise render another product's wordmark.
     //
     // Guarded on `null`, not truthiness, because the type separates two
     // different absences. The env short-circuit returns `edition: null` — it

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DEFAULT_EDITION, activeEdition, setActiveEdition, editionBrand } from './editions';
+import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 
 // Covers the pre-auth Edition brand (#543, ADR 0009 § Consequences). The whole
 // point of this module is that the sign-in gate can be branded BEFORE there is
@@ -53,5 +54,36 @@ describe('editions — the pre-auth brand', () => {
       const all = `${brand.wordmark} ${brand.tagline} ${brand.offlineNote}`;
       expect(all).not.toMatch(/cruise|sailing|at sea|aboard/i);
     }
+  });
+});
+
+// #580: Edition identity is ONE piece of state. Before this, editions.ts and
+// theme/themes.ts each held their own `currentEdition`, so the resolver's
+// single setActiveEdition call rebranded the sign-in shell while every Theme
+// picker kept serving the build-time Edition (split-brain). This is the
+// assertion from the issue: one call moves BOTH surfaces.
+describe('editions × themes — one setActiveEdition call drives both (#580)', () => {
+  it('changes the brand AND the theme pick list together', () => {
+    setActiveEdition('vacay');
+    expect(editionBrand().wordmark).toBe('VACAY BINGO');
+    expect(themesForEdition().map((t) => t.id)).toEqual([
+      'the-birds',
+      'side-quests',
+      'fog-froth-farewells',
+    ]);
+    expect(defaultThemeForEdition()).toBe('the-birds');
+
+    setActiveEdition(DEFAULT_EDITION);
+    expect(editionBrand().wordmark).toBe('GAY CRUISE BINGO');
+    expect(themesForEdition().map((t) => t.id)).toContain('neon-playground');
+    expect(defaultThemeForEdition()).toBe('neon-playground');
+  });
+
+  it('themes.ts re-exports ARE the editions.ts state, not a second copy', async () => {
+    const themed = await import('./theme/themes');
+    setActiveEdition('vacay');
+    expect(themed.activeEdition()).toBe('vacay');
+    themed.setActiveEdition(DEFAULT_EDITION);
+    expect(activeEdition()).toBe(DEFAULT_EDITION);
   });
 });

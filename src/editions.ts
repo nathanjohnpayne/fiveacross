@@ -38,13 +38,18 @@ const BRANDS: Record<string, EditionBrand> = {
 };
 
 /**
- * The resolved Edition for this session.
+ * The resolved Edition for this session — the ONLY copy of it (#580).
  *
  * Seeded from `VITE_EDITION` so a single-Edition build is correct with no
  * network resolution at all, then overwritten by `bootstrapEventResolution`
  * with whatever `hostnames/{host}` said. Read through the accessors below, never
  * captured at import time — a module-level constant would freeze whatever was
  * true before resolution ran.
+ *
+ * `src/theme/themes.ts` reads and re-exports THIS state for Theme scoping
+ * (`themesForEdition`, `defaultThemeForEdition`). It briefly held a twin
+ * `currentEdition` of its own, which made the resolver rebrand the sign-in
+ * shell while the pickers kept the build-time Edition — one setter, one state.
  */
 let currentEdition: string = import.meta.env.VITE_EDITION || DEFAULT_EDITION;
 
