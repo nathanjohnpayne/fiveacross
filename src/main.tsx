@@ -7,7 +7,7 @@ import { todaysDayTheme, todaysDayIndex } from './theme/autoTheme';
 import { defaultThemeForEdition } from './theme/themes';
 import { useEventDoc, useMyPlayer } from './hooks/useData';
 import { initPostHog, phIdentify, phReset, isLocalDevHost } from './posthog';
-import { registerAnalyticsDimensions, registerDayIndexDimension } from './analytics';
+import { registerAnalyticsDimensions, registerDayIndexDimension, emitInitialPageView } from './analytics';
 import { isSyntheticProbe } from './synthetic-probe';
 import type { ThemeId } from './types';
 import App from './App';
@@ -199,6 +199,10 @@ void bootstrapEventResolution()
     // `startPostHogAfterResolution`'s own doc for why this ordering is
     // load-bearing, not incidental.
     startPostHogAfterResolution();
+    // The ONE explicit GA4 page_view (#611, Phase 4b P1) — see
+    // `emitInitialPageView`'s own doc for why Event resolution having
+    // already settled here is half of the ordering guarantee it needs.
+    void emitInitialPageView();
     // An Event can resolve on an origin the AUTH stack has never been
     // configured for — hostname resolution is exactly what made that possible
     // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
@@ -246,6 +250,7 @@ void bootstrapEventResolution()
     // screen renders below (same disclosure obligation as the other
     // branches).
     startPostHogAfterResolution();
+    void emitInitialPageView();
     if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
       root.render(appTree);
       return;

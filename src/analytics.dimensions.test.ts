@@ -10,7 +10,7 @@ const { setDefaultEventParameters, phRegister, logEvent } = vi.hoisted(() => ({
   logEvent: vi.fn(),
 }));
 
-vi.mock('./firebase', () => ({ analytics: null }));
+vi.mock('./firebase', () => ({ analytics: null, analyticsReady: Promise.resolve(null) }));
 vi.mock('firebase/analytics', () => ({ logEvent, setDefaultEventParameters }));
 vi.mock('./posthog', () => ({ phCapture: vi.fn(), phRegister }));
 vi.mock('./editions', () => ({ activeEdition: () => 'gcb' }));
@@ -173,5 +173,51 @@ describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1
       surface: 'leaderboard',
       page_location: 'https://bodega-bay.vacaybingo.com/leaderboard',
     });
+  });
+});
+
+describe('emitInitialPageView (#611, retro Phase 4b P1 — replaces the automatic GA4 page_view firebase.ts now disables)', () => {
+  afterEach(() => {
+    vi.doUnmock('./firebase');
+    vi.doUnmock('./canonicalHost');
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('does nothing when analyticsReady resolves to null (unsupported, no measurement id, or the synthetic probe)', async () => {
+    vi.doMock('./firebase', () => ({ analytics: null, analyticsReady: Promise.resolve(null) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { emitInitialPageView } = await import('./analytics');
+    await emitInitialPageView();
+    expect(logEvent).not.toHaveBeenCalled();
+  });
+
+  it('fires exactly ONE explicit page_view once analytics becomes ready, with no canonical host to override', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { emitInitialPageView } = await import('./analytics');
+    await emitInitialPageView();
+    expect(logEvent).toHaveBeenCalledTimes(1);
+    expect(logEvent).toHaveBeenCalledWith({}, 'page_view', undefined);
+  });
+
+  it('fires the page_view with the canonicalized CURRENT page_location when a canonical host is resolved', async () => {
+    window.history.replaceState({}, '', '/leaderboard');
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => 'bodega-bay.vacaybingo.com' }));
+    const { emitInitialPageView } = await import('./analytics');
+    await emitInitialPageView();
+    expect(logEvent).toHaveBeenCalledWith({}, 'page_view', {
+      page_location: 'https://bodega-bay.vacaybingo.com/leaderboard',
+    });
+  });
+
+  it('never throws into product code even if logEvent itself throws', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    logEvent.mockImplementationOnce(() => {
+      throw new Error('ga4 unavailable');
+    });
+    const { emitInitialPageView } = await import('./analytics');
+    await expect(emitInitialPageView()).resolves.toBeUndefined();
   });
 });

@@ -1,5 +1,5 @@
 import { logEvent, setDefaultEventParameters } from 'firebase/analytics';
-import { analytics } from './firebase';
+import { analytics, analyticsReady } from './firebase';
 import { phCapture, phRegister } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
 import { activeEdition } from './editions';
@@ -8,8 +8,9 @@ import { resolvedCanonicalHost } from './canonicalHost';
 /**
  * GA4 event catalog — the single source of truth for every analytics event
  * this app fires (the PRD's "GA4 events" list plus the Doubt-flow
- * `demand_proof` event). `track()` below is the only call into Firebase's
- * `logEvent`; nothing else should import `firebase/analytics` directly.
+ * `demand_proof` event). `track()` and `emitInitialPageView()` below are the
+ * only calls into Firebase's `logEvent`; nothing else should import
+ * `firebase/analytics` directly.
  * Call sites: `login` + `login_failed` (auth/AuthContext.tsx), `join_event` (App.tsx),
  * `add_item` + `report_item` (components/ItemPool.tsx, ProofFeed.tsx),
  * `mark_square` + `bingo` + `blackout` (components/Board.tsx),
@@ -198,4 +199,37 @@ export function registerAnalyticsDimensions(resolved: { eventId: string; eventSl
 export function registerDayIndexDimension(dayIndex: number | null): void {
   if (dayIndex == null) return;
   registerBothSinks({ day_index: dayIndex });
+}
+
+/**
+ * Fire the ONE explicit GA4 `page_view` that replaces the automatic one
+ * `firebase.ts` now disables via `send_page_view: false` (#611, retro Phase
+ * 4b P1 on PR #584 — this reverses the #556 round-2 rebuttal). The automatic
+ * event fired deterministically BEFORE any pending `setDefaultEventParameters`
+ * could apply (confirmed via `@firebase/analytics`'s own `_initializeAnalytics`
+ * source in that rebuttal), so no ordering fix on this app's side could ever
+ * have closed the gap — disabling the automatic event sidesteps that argument
+ * entirely rather than trying to win a race against it.
+ *
+ * Call site: `main.tsx`, from `bootstrapEventResolution().then()`/`.catch()`,
+ * the SAME point `registerAnalyticsDimensions` and
+ * `startPostHogAfterResolution` already run from — Event resolution has
+ * therefore already settled (or definitively failed) by the time this runs.
+ * Internally awaits `analyticsReady` (`src/firebase.ts`) so it never races
+ * `analytics` still being `null` — together these two waits are the "BOTH
+ * analytics readiness AND Event resolution" ordering the fix requires. By
+ * the time both have settled, dimension registration (when applicable) has
+ * already run too, so this event carries the same registered dimensions
+ * every other GA4 event does via gtag's persisted `set` state — no need to
+ * pass them explicitly, only the same fresh `page_location` `track()` computes.
+ */
+export async function emitInitialPageView(): Promise<void> {
+  const instance = await analyticsReady;
+  if (!instance) return;
+  try {
+    const pageLocation = currentPageLocation();
+    logEvent(instance, 'page_view', pageLocation ? { page_location: pageLocation } : undefined);
+  } catch {
+    /* no-op */
+  }
 }
