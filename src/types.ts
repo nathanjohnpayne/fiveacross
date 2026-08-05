@@ -44,7 +44,15 @@ export type ThemeId =
   // them like any other Theme.
   | 'the-birds'
   | 'side-quests'
-  | 'fog-froth-farewells';
+  | 'fog-froth-farewells'
+  // Five Across Themes (#617). Occasion-neutral by design — the fiveacross
+  // register serves a conference hall, a wedding, or a birthday weekend
+  // equally, so nothing here names a place or an occasion. Scoped to the
+  // fiveacross Edition by `themesForEdition`, in the registry for the same
+  // reason as the Bodega trio above.
+  | 'marquee'
+  | 'confetti-hour'
+  | 'afterglow';
 
 // One Day of the cruise (daily-cards-spec § "Data model"). Ordered inside
 // `EventDoc.days` (length 10 for the July sailing, but the model assumes no
