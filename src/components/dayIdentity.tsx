@@ -1,3 +1,4 @@
+import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
 import type { EventDoc } from '../types';
 import { defaultViewedIndex } from './DaySwitcher';
@@ -24,8 +25,14 @@ import { defaultViewedIndex } from './DaySwitcher';
  *   during      → "🇭🇷 Split"    / "🏋️ Get Sporty" (today's unlocked Day)
  *   post-cruise → "Barcelona"   / "👋 Until next year"
  *
- * Pure and Firestore-free like `theme/autoTheme.ts`, so the states are
- * unit-testable across clocks without mounting Nav.
+ * The pre-event VERB is Edition brand copy, not Event data (#602): "Sails" on
+ * the cruise Edition, "Starts" on a house event — `EditionBrand.preEventVerb`.
+ * Retiring the rest of the nautical vocabulary is epic #535's job.
+ *
+ * Firestore-free like `theme/autoTheme.ts`, so the states are unit-testable
+ * across clocks without mounting Nav. Clock-pure, Edition-scoped: the one
+ * non-argument input is the resolved Edition (via `editionBrand()`), which
+ * tests drive with `setActiveEdition` exactly as the sign-in gate's do.
  */
 export interface DayIdentity {
   port: string;
@@ -102,9 +109,9 @@ export function headerDayIdentity(
   const last = ordered[ordered.length - 1];
   const today = isoDateInTz(now, event?.timezone || 'Europe/Rome');
   if (today < first.date) {
-    const sails = shortDate(first.date);
+    const start = shortDate(first.date);
     return {
-      port: sails ? `Sails ${sails}` : `${first.portEmoji} ${first.port}`.trim(),
+      port: start ? `${editionBrand().preEventVerb} ${start}` : `${first.portEmoji} ${first.port}`.trim(),
       theme: themeLine(first.theme),
     };
   }

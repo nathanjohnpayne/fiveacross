@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { DayIdentityLines, headerDayIdentity, isoDateInTz } from './dayIdentity';
 import { DAYS } from '../data/seed';
+import { DEFAULT_EDITION, setActiveEdition } from '../editions';
 
 // Covers #259 (daily-cards-spec § "Header"): the two stacked header lines
 // always show TODAY's port and theme, with the spec's pre-cruise and
@@ -10,6 +11,8 @@ import { DAYS } from '../data/seed';
 
 const EVENT = { days: DAYS, timezone: 'Europe/Rome' };
 
+afterEach(() => setActiveEdition(DEFAULT_EDITION));
+
 // The sailing is entirely CEST (UTC+2): local wall-clock = UTC + 2h.
 const cest = (y: number, m: number, d: number, h = 12, min = 0) => Date.UTC(y, m - 1, d, h - 2, min);
 
@@ -17,6 +20,17 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
   it('pre-cruise reads "Sails Jul 15" / the embark theme line', () => {
     expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
       port: 'Sails Jul 15',
+      theme: '🛳️ Welcome Aboard',
+    });
+  });
+
+  it('the pre-event verb is Edition brand copy: "Starts" on Vacay, not "Sails" (#602)', () => {
+    // The regression: a house event's header counted down with nautical copy.
+    // "Sails" is `EditionBrand.preEventVerb` on the cruise Edition only; the
+    // date and theme resolution are Edition-independent.
+    setActiveEdition('vacay');
+    expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
+      port: 'Starts Jul 15',
       theme: '🛳️ Welcome Aboard',
     });
   });

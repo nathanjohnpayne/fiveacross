@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import { wordmarkSegments } from '../editions';
 import { useEventDoc } from '../hooks/useData';
 import { DayIdentityLines, headerDayIdentity } from './dayIdentity';
 import TabBar from './TabBar';
@@ -36,11 +37,18 @@ export default function Nav() {
   }, []);
   const identity = headerDayIdentity(event, now);
 
+  // The wordmark is the ACTIVE Edition's, from the same brand table the sign-in
+  // gate reads (#602, src/editions.ts). Hardcoding it here was correct while
+  // one build served one hostname; post-resolver it put another product's name
+  // over every Bodega guest's board.
+  const { lead, bold } = wordmarkSegments();
+
   return (
     <>
       <div className="nav">
         <div className="brand">
-          GAY CRUISE <b>BINGO</b>
+          {lead}
+          {bold && <b>{bold}</b>}
         </div>
         <DayIdentityLines identity={identity} />
       </div>

@@ -24,6 +24,17 @@
 export interface EditionBrand {
   /** The wordmark on the signed-out gate. */
   wordmark: string;
+  /** The trailing segment of `wordmark` the app header renders in `<b>` —
+   *  "GAY CRUISE **BINGO**" (#602). Must be a suffix of `wordmark`;
+   *  `wordmarkSegments` degrades to an unbolded wordmark when it is not, so a
+   *  mismatch is a weight defect, never wrong words. */
+  wordmarkBold: string;
+  /** The verb before the start date on the header's pre-event identity line —
+   *  "Sails Jul 15" on the cruise, "Starts Aug 7" on a house event (#602).
+   *  Post-auth copy, but Edition (not Event) identity, so it lives with the
+   *  rest of the brand strings. The full nautical-vocabulary retirement is
+   *  epic #535's job; this is the one word that reaches the header. */
+  preEventVerb: string;
   /** One line under it: what this is and when. Signed-out state only. */
   tagline: string;
   /** The offline reassurance at the foot of the gate. Edition-specific because
@@ -53,6 +64,8 @@ export const DEFAULT_EDITION = 'gcb';
 const BRANDS: Record<string, EditionBrand> = {
   gcb: {
     wordmark: 'GAY CRUISE BINGO',
+    wordmarkBold: 'BINGO',
+    preEventVerb: 'Sails',
     tagline: 'Trieste → Barcelona · July 2026. Sign in, get your card, mark it if you see it.',
     offlineNote: 'Lost signal at sea? The printed cards and PDF still work.',
     // Verbatim the strings index.html and the manifest hardcoded before #586,
@@ -64,6 +77,8 @@ const BRANDS: Record<string, EditionBrand> = {
   },
   vacay: {
     wordmark: 'VACAY BINGO',
+    wordmarkBold: 'BINGO',
+    preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',
     offlineNote: 'Patchy signal? Your card keeps working offline — marks sync when you reconnect.',
     // Title case, not the caps wordmark: these render as a browser tab and a
@@ -124,6 +139,25 @@ export function setActiveEdition(edition: string | null | undefined): void {
  *  `import.meta.env` and therefore only works in the app. */
 export function editionBrand(edition: string = activeEdition()): EditionBrand {
   return BRANDS[edition] ?? BRANDS[DEFAULT_EDITION];
+}
+
+/**
+ * The header wordmark split for display (#602): everything before the bold
+ * suffix, and the suffix itself — `Nav.tsx` renders `lead<b>bold</b>`. Derived
+ * from `wordmark` rather than stored as two fields so the gate's wordmark and
+ * the header's can never drift apart. When `wordmarkBold` is not actually a
+ * suffix of `wordmark`, the whole wordmark comes back as `lead` with an empty
+ * `bold`: the failure mode is a missing font weight, never missing or
+ * duplicated words.
+ */
+export function wordmarkSegments(brand: EditionBrand = editionBrand()): {
+  lead: string;
+  bold: string;
+} {
+  const { wordmark, wordmarkBold } = brand;
+  return wordmarkBold && wordmark.endsWith(wordmarkBold)
+    ? { lead: wordmark.slice(0, wordmark.length - wordmarkBold.length), bold: wordmarkBold }
+    : { lead: wordmark, bold: '' };
 }
 
 /**
