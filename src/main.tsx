@@ -12,9 +12,13 @@ import type { ThemeId } from './types';
 import App from './App';
 import ConsentNotice from './components/ConsentNotice';
 import ErrorBoundary from './components/ErrorBoundary';
+import EventNotFound from './components/EventNotFound';
 import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
+import { bootstrapEventResolution } from './data/hostnames';
+import { shouldMountOnBootstrapFailure } from './eventResolution';
+import { isSignInReachableOnHost } from './auth-domain';
 import './theme/themes.css';
 import './index.css';
 
@@ -98,7 +102,9 @@ function ThemedApp() {
   );
 }
 
-createRoot(rootEl).render(
+const root = createRoot(rootEl);
+
+const appTree = (
   <React.StrictMode>
     {/* Mounted outside the auth-gated tree (stable, non-frozen mount point —
         see #17) so the 18+ analytics disclosure shows even on the signed-out
@@ -125,5 +131,83 @@ createRoot(rootEl).render(
         </BrowserRouter>
       </AuthProvider>
     </ErrorBoundary>
-  </React.StrictMode>,
+  </React.StrictMode>
 );
+
+/**
+ * Resolve which Event this hostname serves BEFORE mounting (#543, ADR 0009).
+ *
+ * Gating the mount is the point: every Firestore path derives from `EVENT_ID`,
+ * so mounting first and resolving later would start listeners against the wrong
+ * Event and then swap it underneath them. On a single-Event build this
+ * short-circuits to the env value without any network read, so the legacy
+ * deployment pays nothing for this.
+ *
+ * The `.catch` is a hard blank-screen guard, not defensive habit.
+ * `bootstrapEventResolution` is written never to throw and never to hang — the
+ * fetch is timeout-raced and every branch returns a value — but this is the one
+ * code path where an unexpected throw would render NOTHING at all, which is the
+ * 2026-07-24 incident exactly. What it renders instead splits on the build
+ * mode (`shouldMountOnBootstrapFailure`, Phase 4b P1 on #576): an env-pinned
+ * build mounts, because its baked `EVENT_ID` is the correct Event and a blank
+ * page on a phone in a rental house is not recoverable; a hostname-resolved
+ * build fails CLOSED to the "unreachable" screen, because its pre-resolution
+ * `EVENT_ID` is the legacy fallback and mounting would serve the legacy Event
+ * on an arbitrary hostname with the auth-reachability gate skipped.
+ */
+void bootstrapEventResolution()
+  .then((resolution) => {
+    // An Event can resolve on an origin the AUTH stack has never been
+    // configured for — hostname resolution is exactly what made that possible
+    // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
+    // would render a Google button that cannot return to this origin, so it is
+    // reported as a state rather than discovered mid-sign-in. "Reachable" is
+    // deliberately wider than "configured": `gaycruisebingo.web.app` mounts so
+    // AuthProvider's documented handoff to `firebaseapp.com` can run
+    // (src/auth-domain.ts, Codex P1 round 5 on #576).
+    const authBlocked =
+      resolution.kind === 'event' &&
+      !isSignInReachableOnHost(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname);
+    if (authBlocked) {
+      root.render(
+        <React.StrictMode>
+          <EventNotFound hostname={window.location.hostname} reason="auth-unconfigured" />
+          <ConsentNotice />
+        </React.StrictMode>,
+      );
+      return;
+    }
+    root.render(
+      resolution.kind === 'not-found' ? (
+        <React.StrictMode>
+          <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
+          {/* The 18+ analytics disclosure has to survive this branch too. GA4
+              loads on `firebase.ts` import and `initPostHog()` ran at module
+              scope above, so collection has ALREADY started by the time we
+              decide NOT to mount the app — and this is exactly the branch a
+              first-time visitor to an unknown wildcard host lands on (Codex on
+              #576). Safe to put beside the deliberately dependency-free
+              not-found screen: `ConsentNotice` imports `useState` and nothing
+              else — no auth, no Firestore, no router, no theme — so it cannot
+              become a new way for the fallback itself to fail. */}
+          <ConsentNotice />
+        </React.StrictMode>
+      ) : (
+        appTree
+      ),
+    );
+  })
+  .catch(() => {
+    if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
+      root.render(appTree);
+      return;
+    }
+    root.render(
+      <React.StrictMode>
+        <EventNotFound hostname={window.location.hostname} reason="unreachable" />
+        {/* Same disclosure obligation as the not-found branch above: analytics
+            started at module scope before this decision was made. */}
+        <ConsentNotice />
+      </React.StrictMode>,
+    );
+  });

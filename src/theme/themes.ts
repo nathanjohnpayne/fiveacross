@@ -1,4 +1,14 @@
 import type { ThemeId } from '../types';
+import { activeEdition, DEFAULT_EDITION } from '../editions';
+
+// Edition IDENTITY lives in src/editions.ts, and only there (#580). This module
+// used to keep its own `currentEdition` twin, seeded from the same env var but
+// installed separately — so `bootstrapEventResolution`'s single
+// `setActiveEdition` call rebranded the sign-in shell while every Theme picker
+// kept serving the build-time Edition (split-brain). The re-exports below exist
+// for this module's established import surface (w1-themes tests, future theme
+// callers); they are aliases of the editions.ts state, never a second copy.
+export { activeEdition, setActiveEdition, DEFAULT_EDITION } from '../editions';
 
 export interface ThemeMeta {
   id: ThemeId;
@@ -159,9 +169,6 @@ export const THEMES: ThemeMeta[] = [
   },
 ];
 
-/** The Edition every Theme belonged to before Editions existed. */
-export const DEFAULT_EDITION = 'gcb';
-
 const GCB: readonly string[] = [DEFAULT_EDITION];
 const VACAY: readonly string[] = ['vacay'];
 
@@ -208,27 +215,6 @@ const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
 };
 
 /**
- * The Edition this session is serving.
- *
- * Seeded from `VITE_EDITION` so a single-Edition build is correct with no
- * runtime resolution at all, and settable so #543's hostname lookup can install
- * the resolved Edition once it knows it. Read through `activeEdition()` rather
- * than captured at import time — a module-level constant would freeze whatever
- * was true before resolution ran.
- */
-let currentEdition: string = import.meta.env.VITE_EDITION || DEFAULT_EDITION;
-
-export function activeEdition(): string {
-  return currentEdition;
-}
-
-/** Install the resolved Edition. Falsy resets to the legacy Edition rather than
- *  emptying the picker, which is the safer failure. */
-export function setActiveEdition(edition: string | null | undefined): void {
-  currentEdition = edition || DEFAULT_EDITION;
-}
-
-/**
  * The Theme an Edition wears when nothing more specific has resolved.
  *
  * Last resort in the chain player pick → Event `defaultTheme` → **here**. It
@@ -245,7 +231,7 @@ const EDITION_DEFAULT_THEME: Record<string, ThemeId> = {
   vacay: 'the-birds',
 };
 
-export function defaultThemeForEdition(edition: string = currentEdition): ThemeId {
+export function defaultThemeForEdition(edition: string = activeEdition()): ThemeId {
   return EDITION_DEFAULT_THEME[edition] ?? EDITION_DEFAULT_THEME[DEFAULT_EDITION]!;
 }
 
@@ -269,7 +255,7 @@ export function defaultThemeForEdition(edition: string = currentEdition): ThemeI
  * experience, not to a picker with nothing in it.
  */
 export function themesForEdition(edition?: string | null): ThemeMeta[] {
-  const ed = edition || currentEdition;
+  const ed = edition || activeEdition();
   const known = THEMES.some((t) => THEME_EDITIONS[t.id].includes(ed));
   const scope = known ? ed : DEFAULT_EDITION;
   return THEMES.filter((t) => THEME_EDITIONS[t.id].includes(scope));
