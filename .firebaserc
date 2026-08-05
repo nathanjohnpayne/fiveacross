@@ -1,7 +1,5 @@
 {
   "projects": {
-    "default": "gaycruisebingo",
-    "gaycruisebingo": "gaycruisebingo",
-    "fiveacross": "fiveacross"
+    "default": "gaycruisebingo"
   }
 }
