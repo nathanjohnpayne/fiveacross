@@ -1,0 +1,115 @@
+# .coderabbit.yml — CodeRabbit configuration
+# See https://docs.coderabbit.ai/configuration
+
+language: en-US
+
+tone_instructions: >-
+  Focus on bugs, security issues, and correctness over style nitpicks.
+  Flag any hardcoded credentials, exposed API keys, or secrets.
+  Keep comments actionable and concise.
+
+reviews:
+  auto_review:
+    # DISABLED 2026-08-04 per operator request, together with
+    # `coderabbit.enabled: false` in .github/review-policy.yml. Both are
+    # required: the policy key stops the agent WAITING for CodeRabbit, and this
+    # key stops CodeRabbit REVIEWING. Without this one the App keeps posting
+    # review threads, and an unresolved thread holds branch protection's
+    # conversation-resolution gate — so an advisory bot nobody is waiting on
+    # would still block merges. The merge gate is Codex (Phase 4a) plus the
+    # automated Phase 4b leg; CodeRabbit never carried it.
+    enabled: false
+    drafts: false
+    # base_branches EXTENDS the auto-review set; it does NOT replace the
+    # default branch — CodeRabbit always auto-reviews PRs targeting the
+    # repo's detected primary branch (main/master/dev) regardless of this
+    # list (docs: configuration/auto-review, "base_branches", default []).
+    # Listing `main` here is therefore redundant-but-explicit and harmless.
+    # The load-bearing case: a PR opened against a NON-default base (a
+    # stacked PR onto a feature branch, or a sync PR onto a release line)
+    # is NOT auto-reviewed unless its base is added here (regex accepted,
+    # e.g. "release/.*"). We keep the list to `main` deliberately: the
+    # template's own PRs all target main, and a never-propagated config
+    # (.coderabbit.yml is NOT in .mergepath-sync.yml) means each consumer
+    # owns its own base set. See docs/agents/coderabbit-audit.md § base_branches.
+    base_branches:
+      - main
+    # auto_incremental_review: re-review on every push (CodeRabbit default
+    # is true; pinned explicitly so the fix-up-loop posture is legible and
+    # a future default flip can't silently change it). This is what lets a
+    # reviewer-identity fix-commit loop get a fresh CodeRabbit pass per push.
+    auto_incremental_review: true
+    # auto_pause_after_reviewed_commits — DELIBERATE, not the inherited
+    # default of 5 (#490). After this many reviewed commits CodeRabbit
+    # auto-pauses incremental review and posts a "Reviews paused" NOTE; it
+    # does NOT auto-resume. Our agent loop pushes many fix-up commits per PR
+    # (internal review → CodeRabbit rounds → Codex P0/P1 rounds), so a long
+    # PR routinely crosses 5 and silently stops being reviewed mid-flight —
+    # exactly the #485 failure. Raising the threshold to 15 keeps a normal
+    # multi-round PR under the cap while still bounding runaway commit floods.
+    # The runtime safety net for PRs that still cross it is
+    # scripts/coderabbit-wait.sh, which detects the pause marker and posts
+    # `@coderabbitai resume` (bounded by coderabbit.max_resume_retries in
+    # .github/review-policy.yml) rather than timing out. See
+    # docs/agents/coderabbit-audit.md § auto_pause_after_reviewed_commits.
+    auto_pause_after_reviewed_commits: 15
+
+  # profile: chill (the default) suppresses 🧹 Nitpick comments entirely
+  # — per CodeRabbit's docs, the Nitpick category is "only in Assertive
+  # mode". The 2026-05-13 sweep (#234) surfaced 56 unresolved nit threads
+  # across 9 repos, none of which represented substantive findings; the
+  # validation pass (#236) classified most as ALREADY-FIXED or
+  # cosmetic. Switching to chill keeps substantive findings (Potential
+  # issue / ⚠️ / Refactor / Security) while removing the per-thread
+  # nit ceremony. See #237 for the full rationale and links to the
+  # supporting audit data. Override per-repo by setting
+  # profile: assertive locally if a repo wants the polish pass.
+  profile: chill
+  request_changes_workflow: false
+
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  high_level_summary_in_walkthrough: true
+  collapse_walkthrough: true
+  poem: false
+
+  related_issues: true
+  related_prs: true
+  assess_linked_issues: true
+  estimate_code_review_effort: true
+
+  path_instructions:
+    - path: "scripts/**"
+      instructions: >-
+        Review shell scripts for safety: unquoted variables, missing error
+        handling (set -euo pipefail), command injection risks, and
+        cross-platform portability issues.
+    - path: "docs/**"
+      instructions: >-
+        Check documentation for accuracy against the actual scripts and
+        configuration it describes. Flag stale references.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  # learnings.scope governs where CodeRabbit's accumulated review-preference
+  # "learnings" are stored and applied. Allowed values (docs: reference/
+  # configuration#knowledge-base): local (this repo only), global (shared
+  # across the whole org/owner), auto (= local for PUBLIC repos, global for
+  # PRIVATE repos).
+  #
+  # We keep `auto` deliberately. As of 2026-07-06 the ENTIRE fleet is
+  # PUBLIC (matchline, overridebroadway, and tadlockpsychiatry were
+  # private earlier and have since been made public), so `auto` resolves
+  # to `local` everywhere — this template repo and every consumer alike.
+  # No consumer shares learnings org-wide; each repo's learnings stay
+  # local to that repo. (.coderabbit.yml is NOT propagated —
+  # .mergepath-sync.yml — so each consumer ships its own copy, but the
+  # resolution is the same `local` for all now the fleet is uniformly
+  # public.) If cross-repo convention sharing is ever wanted again across
+  # the public fleet, it would take an explicit `scope: global` override —
+  # `auto` will not grant `global` to a public repo. See
+  # docs/agents/coderabbit-audit.md § learnings.scope.
+  learnings:
+    scope: auto

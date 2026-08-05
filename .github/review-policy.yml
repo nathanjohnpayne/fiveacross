@@ -186,14 +186,20 @@ feedback_policy:
 # Review path after this change: `@codex review` (Phase 4a) on every PR, with
 # the automated Phase 4b cross-agent leg where the classifier calls for it.
 #
-# ⚠️ REQUIRED OUT-OF-BAND STEP: disable or uninstall the CodeRabbit GitHub App
-# for this repo. Deleting `.coderabbit.yml` does NOT stop the App — CodeRabbit
-# documents `reviews.auto_review.enabled` as defaulting to TRUE for eligible
-# PRs, so an absent config means "review everything", not "review nothing".
-# Until the App is disabled it will keep auto-reviewing and leaving threads
-# that hold the conversation-resolution gate, while agents skip Phase 2.5 and
-# nobody is watching for them — the worst of both states. The two keys here
-# make the AGENT stop waiting; only the App-level change makes CodeRabbit stop.
+# The repo-level opt-out is `.coderabbit.yml`'s `reviews.auto_review.enabled:
+# false` — CodeRabbit's documented way to disable auto-review for a repository
+# (docs.coderabbit.ai/configuration/auto-review). DELETING the file does not
+# achieve this: `auto_review.enabled` defaults to TRUE, so an absent config
+# means "review everything", not "review nothing". The file is therefore kept
+# with the flag off, paired with `coderabbit.enabled: false` here so the agent
+# also stops waiting on Phase 2.5.
+#
+# `scripts/ci/check_coderabbit_config` originally failed that pairing: its
+# safety-posture floor rejects a present file with the flag off, because a lone
+# flip "silently turns CodeRabbit off". That reasoning does not apply to a
+# PAIRED opt-out, which is explicit in review-policy.yml — the same argument the
+# gate already accepts for the file-absent case (#248). The gate now treats the
+# paired form as valid; see .sync-overrides.yml for the propagation exception.
 coderabbit:
   enabled: false
 
@@ -466,7 +472,7 @@ codex:
   # Maximum number of `@codex review` rounds before escalating as runaway.
   # The 3rd round trips the guard. Normal termination is either approval,
   # disagreement (repeat-after-rebuttal), or timeout → Phase 4b fallback.
-  max_review_rounds: 2
+  max_review_rounds: 5
 
   # Poll timeout per round, in seconds, for `codex-review-request.sh`.
   # If Codex has not posted a review within this window, treat as timeout
@@ -728,7 +734,7 @@ phase_4b_automation:
   # Declarative cap for callers that loop this one-review-round helper after
   # CHANGES_REQUESTED. The reference orchestrator performs one adapter pass per
   # invocation and does not persist round state.
-  max_review_rounds: 2
+  max_review_rounds: 5
 
   # Fail closed: an ambiguous / non-schema-conformant adapter verdict must
   # NEVER become an APPROVED. The orchestrator falls back to the manual
