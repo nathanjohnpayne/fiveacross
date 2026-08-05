@@ -413,6 +413,52 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Public hostname -> Event lookup (ADR 0009, specs/hostnames-lookup.md).
+    //
+    // One document per public address, keyed by the FULL hostname:
+    //   { eventId, canonicalHost, edition, status, slug, isCanonical }
+    //
+    // This is the ONE deliberately world-readable collection in a schema whose
+    // whole posture is membership isolation, so the reasoning matters:
+    //
+    //   WHY UNAUTHENTICATED. The Event must resolve BEFORE there is a signed-in
+    //   user. The sign-in screen itself needs the Event's name and Edition to
+    //   render correctly, and `events/{eventId}` requires signedIn() — it
+    //   arrives far too late. A reader that cannot resolve its own hostname
+    //   cannot render anything but a blank shell.
+    //
+    //   WHY THAT IS SAFE. A Slug is an address, not a secret (CONTEXT.md).
+    //   Knowing one grants nothing: every read of Event data still passes the
+    //   membership gate. What leaks here is that an Event exists at a hostname
+    //   the reader already typed — plus its Edition, which the branding on the
+    //   page announces anyway.
+    //
+    //   WHY get BUT NOT list. `get` resolves an address the caller already
+    //   knows. `list` would enumerate every Event on the platform, turning a
+    //   set of unguessable addresses into a directory — the difference between
+    //   "this hostname resolves" and "here is every trip anyone is running".
+    //   Firestore treats these as separate operations precisely so this
+    //   distinction is expressible; splitting them is the whole safety
+    //   property of this rule, not a stylistic choice. Do not collapse the two
+    //   into `allow read` — that silently grants `list`.
+    //
+    //   WHY NO CLIENT WRITES AT ALL. The mapping is authoritative routing
+    //   state. A client that could write it could point an existing hostname
+    //   at an Event it should not see, or squat an address before its Event is
+    //   created. Only the Admin SDK populates this collection (the seed), so
+    //   there is no create/update/delete arm — not even for admins, who have no
+    //   per-Event authority over a global namespace.
+    //
+    // An unknown host simply does not exist: `get` succeeds against a missing
+    // document and returns `exists() == false`, so the client renders an
+    // Event-not-found state rather than tripping a permission error it would
+    // have to distinguish from a network failure.
+    match /hostnames/{host} {
+      allow get: if true;
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+
     // Global user profiles.
     match /users/{uid} {
       allow read: if signedIn();
