@@ -7,6 +7,7 @@ import {
   isServable,
   readCache,
   resolveEvent,
+  shouldMountOnBootstrapFailure,
   writeCache,
   type StorageLike,
 } from './eventResolution';
@@ -235,5 +236,21 @@ describe('eventResolution — resolveEvent decision table', () => {
       now: at(T0),
     });
     expect(r).toMatchObject({ kind: 'event', source: 'network' });
+  });
+});
+
+// Phase 4b P1 on #576: the bootstrap .catch must not fail OPEN on a
+// hostname-resolved build. Its pre-resolution EVENT_ID is the legacy fallback,
+// so mounting on an unexpected exception would serve the legacy Event on an
+// arbitrary hostname — with the auth-reachability gate skipped too.
+describe('shouldMountOnBootstrapFailure — the .catch build-mode split', () => {
+  it('mounts an env-pinned build: the baked Event IS the correct one', () => {
+    expect(shouldMountOnBootstrapFailure('med-2026')).toBe(true);
+  });
+
+  it('fails CLOSED on a hostname-resolved build: unavailable screen, no app mount', () => {
+    expect(shouldMountOnBootstrapFailure(null)).toBe(false);
+    expect(shouldMountOnBootstrapFailure('')).toBe(false);
+    expect(shouldMountOnBootstrapFailure(undefined)).toBe(false);
   });
 });

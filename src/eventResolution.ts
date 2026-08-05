@@ -192,6 +192,26 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  * Always terminates in something renderable. `not-found` is a state the app
  * draws, never an exception it has to catch.
  */
+/**
+ * What main.tsx renders when the bootstrap PROMISE ITSELF rejects — the branch
+ * `resolveEvent`'s never-throw contract says cannot happen, guarded anyway
+ * because it is the one path that would otherwise render nothing at all.
+ *
+ * The answer splits on the build mode, and the split is the point (Phase 4b P1
+ * on #576). An env-pinned build (`envEventId` present) mounts: `EVENT_ID`
+ * already holds the baked id, which IS the correct Event for that build, so a
+ * blank screen would be strictly worse. A hostname-resolved build must fail
+ * CLOSED instead: its pre-resolution `EVENT_ID` is the legacy fallback
+ * (`med-2026`), so mounting on an unexpected exception would serve the legacy
+ * Event — listeners, card deals, writes and all — on an arbitrary hostname,
+ * and would also skip the auth-reachability gate that only runs on the
+ * resolved path. An "unreachable" screen is recoverable by reload; a player
+ * silently joined to the wrong Event is not.
+ */
+export function shouldMountOnBootstrapFailure(envEventId: string | null | undefined): boolean {
+  return Boolean(envEventId);
+}
+
 export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   const { hostname, fetchDoc, storage = null, envEventId = null } = opts;
   const timeoutMs = opts.timeoutMs ?? 3000;

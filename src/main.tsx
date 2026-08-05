@@ -17,6 +17,7 @@ import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
 import { bootstrapEventResolution } from './data/hostnames';
+import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { isSignInReachableOnHost } from './auth-domain';
 import './theme/themes.css';
 import './index.css';
@@ -146,9 +147,13 @@ const appTree = (
  * `bootstrapEventResolution` is written never to throw and never to hang — the
  * fetch is timeout-raced and every branch returns a value — but this is the one
  * code path where an unexpected throw would render NOTHING at all, which is the
- * 2026-07-24 incident exactly. If resolution somehow explodes we still mount
- * with whatever `EVENT_ID` already holds: a possibly-wrong Event is recoverable,
- * a blank page on a phone in a rental house is not.
+ * 2026-07-24 incident exactly. What it renders instead splits on the build
+ * mode (`shouldMountOnBootstrapFailure`, Phase 4b P1 on #576): an env-pinned
+ * build mounts, because its baked `EVENT_ID` is the correct Event and a blank
+ * page on a phone in a rental house is not recoverable; a hostname-resolved
+ * build fails CLOSED to the "unreachable" screen, because its pre-resolution
+ * `EVENT_ID` is the legacy fallback and mounting would serve the legacy Event
+ * on an arbitrary hostname with the auth-reachability gate skipped.
  */
 void bootstrapEventResolution()
   .then((resolution) => {
@@ -193,5 +198,16 @@ void bootstrapEventResolution()
     );
   })
   .catch(() => {
-    root.render(appTree);
+    if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
+      root.render(appTree);
+      return;
+    }
+    root.render(
+      <React.StrictMode>
+        <EventNotFound hostname={window.location.hostname} reason="unreachable" />
+        {/* Same disclosure obligation as the not-found branch above: analytics
+            started at module scope before this decision was made. */}
+        <ConsentNotice />
+      </React.StrictMode>,
+    );
   });
