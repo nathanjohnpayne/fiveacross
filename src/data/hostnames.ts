@@ -1,8 +1,9 @@
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDocFromServer } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
 import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
+import { setActiveEdition } from '../editions';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
@@ -11,13 +12,26 @@ import { setCardCacheEventId } from './cardCache';
 const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
 
 /**
- * Fetch `hostnames/{host}`.
+ * Fetch `hostnames/{host}` FROM THE SERVER.
  *
  * A single `get`, never a query — the rule grants `get` and denies `list`
  * precisely so an address can be resolved without the collection becoming a
  * directory of every Event (specs/hostnames-lookup.md). Runs UNAUTHENTICATED:
  * this happens before sign-in, which is the whole reason the collection is
  * world-readable.
+ *
+ * `getDocFromServer`, not `getDoc`, and that distinction is load-bearing. A
+ * plain `getDoc` may answer from Firestore's OWN cache, so offline or on a
+ * captive network a stale mapping would come back looking like a successful
+ * revalidation — and `resolveEvent` would restamp `localStorage` for another
+ * full TTL. The 12-hour bound on archived/repointed hostnames would then renew
+ * itself indefinitely, which is the unbounded cache that bound exists to
+ * prevent (Codex on #576). Refusing to answer from cache is stronger than
+ * inspecting `snap.metadata.fromCache` after the fact: this call THROWS when
+ * the server is unreachable, and `resolveEvent` routes a throwing fetch to its
+ * stale-cache fallback, which serves the old mapping WITHOUT restamping it.
+ * Offline players see no change; offline simply stops counting as proof that a
+ * mapping is still good.
  *
  * Returns null for a missing document AND for a malformed one. A routing record
  * with no explicit, recognised `status` is NOT treated as active: defaulting it
@@ -27,7 +41,7 @@ const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
  * which the resolver renders as not-found rather than as a failed read.
  */
 export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
-  const snap = await getDoc(doc(db, 'hostnames', hostname.toLowerCase()));
+  const snap = await getDocFromServer(doc(db, 'hostnames', hostname.toLowerCase()));
   if (!snap.exists()) return null;
   const d = snap.data() as Partial<HostnameDoc>;
   if (typeof d.eventId !== 'string' || !d.eventId) return null;
@@ -70,6 +84,10 @@ export async function bootstrapEventResolution(
     // and the offline card cache silently keys on a different Event than the
     // data it caches.
     setCardCacheEventId(resolution.eventId);
+    // The Edition brands the PRE-AUTH shell (src/editions.ts). This is the only
+    // point at which it can be installed: `events/{eventId}` needs `signedIn()`,
+    // so the sign-in gate would otherwise render another product's wordmark.
+    setActiveEdition(resolution.edition);
   }
   return resolution;
 }

@@ -10,6 +10,14 @@
 # Used by check_spec_test_alignment when the default filename search
 # wouldn't find the test.
 spec_test_map:
+  # event-resolution's coverage is module-named (the decision table, the
+  # Firestore seam, the Edition brand table, and the gate that renders it), so
+  # none of the four share the spec basename — map them all explicitly.
+  event-resolution:
+    - src/eventResolution.test.ts
+    - src/data/hostnames.test.ts
+    - src/editions.test.ts
+    - src/components/signin-edition-brand.test.tsx
   # cells-map's pure boundary lives in src/game/cells.test.ts (module-named,
   # not spec-basename-named); the offline no-clobber proof matches by name.
   cells-map:

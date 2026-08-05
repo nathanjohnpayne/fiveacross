@@ -1,6 +1,16 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import { editionBrand } from '../editions';
 
+// The wordmark, the signed-out line and the offline note come from the resolved
+// EDITION (#543, src/editions.ts), not from constants. They cannot come from the
+// Event doc: `events/{eventId}` requires `signedIn()`, so the only Edition signal
+// that exists on the screen whose job is to get you signed in is the one
+// `hostnames/{host}` supplied before mount. Hardcoding them was correct while one
+// build served one hostname; once the resolver ships, a Bodega guest would have
+// opened the app to another product's name and a cruise that is not happening
+// (Codex on #576).
+//
 // One 18+ acknowledgement, two entry points (#23):
 //   • signed OUT → the sign-in gate App renders on `!user`: the checkbox gates
 //     Google sign-in, which PERSISTS the attestation after the popup
@@ -15,6 +25,7 @@ export default function SignIn() {
   const reprompt = user != null;
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
+  const brand = editionBrand();
 
   const go = async () => {
     setBusy(true);
@@ -28,11 +39,11 @@ export default function SignIn() {
 
   return (
     <div className="signin">
-      <h1>GAY CRUISE BINGO</h1>
+      <h1>{brand.wordmark}</h1>
       <p className="muted">
         {reprompt
           ? 'One quick thing before you get your card: confirm you’re 18 or older.'
-          : 'Trieste → Barcelona · July 2026. Sign in, get your card, mark it if you see it.'}
+          : brand.tagline}
       </p>
       <label className="ack">
         <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
@@ -50,9 +61,7 @@ export default function SignIn() {
             ? 'Enter the event'
             : 'Continue with Google'}
       </button>
-      <p className="muted" style={{ fontSize: 11 }}>
-        Lost signal at sea? The printed cards and PDF still work.
-      </p>
+      <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
     </div>
   );
 }
@@ -79,16 +88,18 @@ export function DealError({
   // stays the manual fallback for the cases the shell watcher deliberately does
   // not cover (e.g. a first server snapshot that is already healthy is a baseline,
   // not a trigger — see specs/w1-deal-auto-retry.md).
+  const brand = editionBrand();
   return (
     <div className="signin" role="alert">
-      <h1>GAY CRUISE BINGO</h1>
+      {/* Same Edition brand as the gate above (#543): this panel reuses the
+          `.signin` shell, so a hardcoded wordmark here would put the wrong
+          product name on a retry screen a Bodega player can actually reach. */}
+      <h1>{brand.wordmark}</h1>
       <p className="muted">{message}</p>
       <button className="btn primary block" disabled={retrying} onClick={onRetry}>
         {retrying ? 'Dealing…' : 'Retry'}
       </button>
-      <p className="muted" style={{ fontSize: 11 }}>
-        Lost signal at sea? The printed cards and PDF still work.
-      </p>
+      <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
     </div>
   );
 }

@@ -1,0 +1,50 @@
+---
+spec_id: event-resolution
+status: accepted
+---
+
+# Resolving the Event from the hostname at startup (`event-resolution`)
+
+Implements the consuming half of [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md); `specs/hostnames-lookup.md` owns the collection and its rules. A multi-Event build decides which Event it is serving from `window.location.hostname` **before first paint**, because every Firestore path derives from `EVENT_ID` — mounting first and resolving later would start listeners against the wrong Event and then swap it underneath them.
+
+## Glossary
+
+**Resolution** — the answer to "which Event is this address?", always one of `{ kind: 'event', … }` or `{ kind: 'not-found', hostname, reason }`. Never an exception: not-found is a state the app draws. *Avoid:* lookup result, route match.
+
+**Edition brand** — the wordmark, one-line description and offline note the signed-out gate shows (`src/editions.ts`). Keyed by the Edition the hostname resolved to. *Avoid:* theme (that is a look, not an identity).
+
+## Contract
+
+- `src/eventResolution.ts` holds the whole decision table as a pure function with injected `fetchDoc`, `storage`, `now` and `delay`, so every branch is testable without a network, a browser or an emulator. `src/data/hostnames.ts` is the only part that touches Firestore.
+- **Order of resolution**, and why each step precedes the next:
+  1. **`VITE_EVENT_ID` present ⇒ answer immediately, no network.** Its presence means the bundle serves exactly one Event, so consulting the lookup and discarding the answer would be incoherent — and since resolution gates first paint, it would cost that build a round trip, or the full timeout on captive Wi-Fi.
+  2. **Fresh cache hit ⇒ resolve with no network.** This is what makes offline cold boot work (ADR 0006) and keeps first paint off the network's critical path.
+  3. **Miss or stale ⇒ one server read, hard-bounded by `timeoutMs`.** An unbounded pre-paint read is the blank-screen failure class this repo has shipped three fixes for, so the race is load-bearing rather than defensive.
+  4. **Revalidation failed ⇒ serve a stale-but-active entry** rather than a not-found. An expired mapping beats a dead app when the network is simply gone.
+- **The read must reach the server.** `getDocFromServer`, never `getDoc`: the latter may answer from Firestore's own cache, so an offline client would read a stale mapping, treat it as successful revalidation, and restamp the entry for another full TTL — a bound that renews itself is not a bound. The call throws when the server is unreachable, which is precisely how step 4 is entered, and step 4 does **not** restamp.
+- **`status` must be explicit.** Only `'active'` is servable. A missing or unrecognised `status` is not treated as active on either the network or the cache path: defaulting it would let a half-written routing document publish an Event before the record opts in.
+- **Cache shape.** `localStorage`, keyed by hostname (not Slug — two hostnames can resolve to one Event, and a shared key would let an alias serve the canonical's cached Edition on the wrong origin). Envelope carries a schema version and `fetchedAt`; a version mismatch, corrupt JSON or a shape-drifted document all read as a MISS, never as coerced data. TTL is 12 hours. A mapping that is removed or goes inactive has its entry **dropped**, not expired. Storage that throws on access (private mode, embedded webviews) degrades to "no cache", never to a failed boot.
+- **`src/main.tsx` awaits resolution before mounting.** On `not-found` it renders `EventNotFound` — which is deliberately dependency-free (no auth, no Firestore, no router, no theme), since it renders when we have decided the app is not safe to mount. The `.catch` around the bootstrap is a hard blank-screen guard: resolution is written never to throw, but this is the one path where an unexpected throw would render nothing at all.
+- **The analytics disclosure survives the not-found branch.** `ConsentNotice` renders beside `EventNotFound`. GA4 loads on `firebase.ts` import and PostHog initialises at module scope, both before resolution, so collection has already begun for a visitor who never reaches the app — and an unknown wildcard host is exactly where a first-time visitor lands.
+- **The resolved Edition brands the pre-auth shell.** `bootstrapEventResolution` installs it via `setActiveEdition`, and `SignIn` (both the gate and the `DealError` retry panel, which reuse one shell) reads `editionBrand()`. An unknown or absent Edition falls back to the legacy `gcb` brand — degrading to the shipped experience, never to a blank wordmark.
+- **`cardCache` is told the Event id separately.** It keeps its own copy on purpose, to stay out of the Firebase import graph; missing this call would silently key the offline card cache to a different Event than the data it caches.
+
+## Acceptance criteria
+
+- **Given** a build with `VITE_EVENT_ID`, **when** it starts, **then** it resolves to that Event and performs no lookup at all.
+- **Given** a fresh cached mapping, **when** the app starts, **then** it resolves from cache with no network read.
+- **Given** a stale cached mapping and a reachable server, **when** the app starts, **then** it revalidates and follows the current mapping.
+- **Given** a stale cached mapping and an unreachable server, **when** the app starts, **then** the stale mapping still serves and is **not** restamped.
+- **Given** a hostname whose mapping was removed or set inactive, **when** the app starts, **then** it renders not-found and the cached entry is dropped.
+- **Given** a routing document with no explicit `active` status, **when** it is read from either the network or the cache, **then** it is not servable.
+- **Given** a hostname lookup, **when** the seam reads it, **then** the read is a server read and never satisfiable from Firestore's cache.
+- **Given** a hung lookup, **when** `timeoutMs` elapses, **then** resolution completes as not-found (or stale cache) rather than blocking paint.
+- **Given** a resolved Edition, **when** the signed-out gate renders, **then** its wordmark, description and offline note are that Edition's — and no other Edition's itinerary or copy appears.
+- **Given** a not-found hostname, **when** that state renders, **then** the 18+ analytics disclosure renders with it.
+
+## Test coverage
+
+- `src/eventResolution.test.ts` — the decision table and the cache envelope against injected storage/clock/fetch: cache key, round-trip, TTL boundary, version drift, corrupt JSON, throwing storage, explicit-status rule, and every ordering branch above including the hung-fetch timeout (without the race the test would never settle).
+- `src/data/hostnames.test.ts` — the Firestore seam: `getDocFromServer` is called and `getDoc` is not, hostname lowercasing, malformed documents reading as null, a server failure propagating as a throw, and `bootstrapEventResolution` installing the Event id, the card-cache id and the Edition together.
+- `src/editions.test.ts` — the brand table: legacy default, Vacay override, fallback for unknown/absent, no empty strings, and no cruise vocabulary in a non-cruise Edition.
+- `src/components/signin-edition-brand.test.tsx` — that the gate and the `DealError` panel actually read the brand rather than holding their own strings.

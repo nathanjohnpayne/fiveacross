@@ -153,7 +153,19 @@ void bootstrapEventResolution()
   .then((resolution) => {
     root.render(
       resolution.kind === 'not-found' ? (
-        <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
+        <React.StrictMode>
+          <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
+          {/* The 18+ analytics disclosure has to survive this branch too. GA4
+              loads on `firebase.ts` import and `initPostHog()` ran at module
+              scope above, so collection has ALREADY started by the time we
+              decide NOT to mount the app — and this is exactly the branch a
+              first-time visitor to an unknown wildcard host lands on (Codex on
+              #576). Safe to put beside the deliberately dependency-free
+              not-found screen: `ConsentNotice` imports `useState` and nothing
+              else — no auth, no Firestore, no router, no theme — so it cannot
+              become a new way for the fallback itself to fail. */}
+          <ConsentNotice />
+        </React.StrictMode>
       ) : (
         appTree
       ),
