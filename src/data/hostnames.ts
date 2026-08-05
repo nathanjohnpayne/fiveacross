@@ -3,7 +3,7 @@ import { db, applyResolvedEventId } from '../firebase';
 import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
-import { setActiveEdition } from '../editions';
+import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
@@ -102,6 +102,14 @@ export async function bootstrapEventResolution(
     // would outrank the mapping it exists to defer to (Codex P3 round 6 on
     // #576).
     if (resolution.edition !== null) setActiveEdition(resolution.edition);
+    // …and the browser chrome around it (#586). Unconditional, unlike the
+    // setter above: the guard there protects the ENV-SEEDED Edition from being
+    // reset by a lookup that never ran, whereas this only reads whatever
+    // Edition is now active. On the env short-circuit it rewrites the string
+    // index.html was already built with; on a resolved build it is the only
+    // thing that stops a Vacay Event from sitting in a tab labelled "Gay
+    // Cruise Bingo".
+    applyEditionDocumentIdentity();
   }
   return resolution;
 }

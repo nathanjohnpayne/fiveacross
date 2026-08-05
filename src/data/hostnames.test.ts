@@ -82,6 +82,10 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     expect(mocks.setCardCacheEventId).toHaveBeenCalledWith('bodega-bay-2026');
     // Without this the sign-in gate renders the other Edition's wordmark.
     expect(activeEdition()).toBe('vacay');
+    // …and the browser chrome around it (#586). A hostname-resolved build has
+    // no single Edition to bake into index.html, so the tab keeps whatever the
+    // bundle shipped with until this runs.
+    expect(document.title).toBe('Vacay Bingo');
   });
 
   it('installs nothing when the hostname resolves to no Event', async () => {
