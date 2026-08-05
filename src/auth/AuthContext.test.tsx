@@ -5,6 +5,7 @@ import {
   AuthProvider,
   DEAL_TIMEOUT_MS,
   PENDING_REDIRECT_ATTESTATION_KEY,
+  SIGNIN_ADULT_ACK_KEY,
   WEB_APP_AUTH_SETTLE_TIMEOUT_MS,
   useAuth,
 } from './AuthContext';
@@ -95,8 +96,28 @@ const mount = () =>
   );
 const signInUser = () => act(async () => void (await emitAuth(FAKE_USER)));
 
+// This project's jsdom is configured with no `url`, so jsdom leaves
+// `localStorage` UNSET — sessionStorage exists, localStorage does not (the same
+// quirk `src/data/hostnames.test.ts` documents). The redirect acknowledgement
+// record lives in localStorage precisely because it must survive the
+// partitioning that drops sessionStorage (#346), so the suite supplies the
+// browser API the environment omits rather than asserting around its absence.
+if (typeof localStorage === 'undefined') {
+  const store = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, String(v)),
+      removeItem: (k: string) => void store.delete(k),
+      clear: () => store.clear(),
+    },
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   emitAuth = () => {};
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
     emitAuth = cb;
@@ -502,6 +523,10 @@ describe('AuthContext deal-error hardening', () => {
 
   it('persists the checked 18+ acknowledgement after returning from mobile redirect sign-in', async () => {
     sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+    // What the redirect START writes when the box was shown and ticked (#608,
+    // Phase 4b round 4). The return path reads THIS, never the posture as it
+    // stands on return.
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
     mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
     mount();
@@ -509,6 +534,44 @@ describe('AuthContext deal-error hardening', () => {
     await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER));
     expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
     expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
+    // Consumed exactly once, so a later mount cannot re-attest off a stale record.
+    expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBeNull();
+  });
+
+  // THE ROUND-4 P1. An Event that turns adult while the player is away at Google
+  // must not have their return silently stamp a durable, cross-Event
+  // `attestedAdultAt` for a checkbox that was never on screen — which would also
+  // walk them straight through the gate it had just raised.
+  it('does NOT attest on a redirect return when no acknowledgement was collected', async () => {
+    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+    // No ack record: the gate showed no checkbox when this redirect started.
+    mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+    mount();
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    // The sign-in itself still completes — only the fabricated attestation is
+    // withheld, and the post-auth re-prompt collects it properly.
+    expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' });
+  });
+
+  it('ignores an EXPIRED acknowledgement record', async () => {
+    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+    // An abandoned redirect from days ago must not authorize this sign-in.
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
+    mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+    mount();
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
   it('emits nothing for a null redirect result on an ordinary mount (#346)', async () => {
@@ -528,6 +591,12 @@ describe('AuthContext deal-error hardening', () => {
   it('completes a redirect return whose app marker was lost: login and attestation still land (#346)', async () => {
     // No sessionStorage marker — Safari dropped it across the provider
     // round-trip — but Firebase still hands back the completed redirect.
+    //
+    // The acknowledgement record is in localStorage precisely so it SURVIVES
+    // that drop (Phase 4b round 4): #346's guarantee is kept intact rather than
+    // traded away for the fix above. Same partitioning that loses the marker
+    // leaves this — which is also how Firebase restores the session at all.
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
     mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
     mount();

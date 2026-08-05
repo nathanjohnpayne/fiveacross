@@ -8,6 +8,7 @@ import {
   setActiveAdultContent,
 } from './adultContent';
 import { readCache, resolveEvent, writeCache, type StorageLike } from './eventResolution';
+import { isExplicitWithheld } from './data/moderation';
 import type { HostnameDoc } from './types';
 
 // Covers the dynamic 18+ posture's RESOLUTION half (#608): the coercion, the
@@ -221,5 +222,53 @@ describe('the network and cache paths agree about the same bytes', () => {
     if (resolution.kind !== 'event') return;
     expect(resolution.adultContent).toBe(true);
     expect(resolution.edition).toBeNull();
+  });
+});
+
+// THE PUBLISH RACE (Phase 4b round 4).
+//
+// An admin approving the first explicit Prompt performs ONE write —
+// `status: 'active'` — and the 18+ posture is published by a Cloud Function
+// reacting to it. Two writes with an invocation between them, so for a moment
+// the Prompt is live and the posture is not: every Player's `status == 'active'`
+// listener delivers the explicit text while `hostnames/{host}.adultContent`
+// still says `false`. No amount of listener promptness closes that — it is an
+// ordering problem, not a latency one — and the client cannot make the two
+// writes atomic, because no client may write `hostnames` at all.
+//
+// So the invariant is enforced where it has to hold: an explicit Prompt is not
+// rendered or dealt into a session that has not raised the gate.
+describe('explicit content is withheld from an ungated session', () => {
+  it('withholds a spicy Prompt while the posture is ungated', () => {
+    expect(isExplicitWithheld(true, false)).toBe(true);
+  });
+
+  it('shows it the moment the gate goes up', () => {
+    // The window resolves itself: the stamp lands, the posture raises, the gate
+    // appears and the Prompt becomes visible in the same motion.
+    expect(isExplicitWithheld(true, true)).toBe(false);
+  });
+
+  it('never withholds a tame Prompt, on either posture', () => {
+    for (const adult of [true, false]) {
+      expect(isExplicitWithheld(false, adult), String(adult)).toBe(false);
+      expect(isExplicitWithheld(undefined, adult), String(adult)).toBe(false);
+    }
+  });
+
+  // `spicy` is coerced to a strict boolean everywhere else in the deal path
+  // (CodeRabbit, PR #135) because a legacy doc may omit it or carry a truthy
+  // non-boolean. Withholding on a truthy non-boolean would hide tame Prompts
+  // from every ungated Event, so this predicate matches that discipline.
+  it('treats a malformed spicy value as tame, matching the deal path', () => {
+    expect(isExplicitWithheld('true' as unknown as boolean, false)).toBe(false);
+    expect(isExplicitWithheld(1 as unknown as boolean, false)).toBe(false);
+  });
+
+  it('costs nothing in the steady state', () => {
+    // A gated Event withholds nothing; a genuinely tame Event has nothing spicy
+    // to withhold. The predicate only ever bites inside the race window.
+    expect(isExplicitWithheld(true, true)).toBe(false);
+    expect(isExplicitWithheld(false, false)).toBe(false);
   });
 });

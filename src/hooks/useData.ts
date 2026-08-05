@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { collectionGroup, onSnapshot, query, where, type DocumentReference, type Query } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
-import { isReportHidden, isBanned, isSystemAuthor } from '../data/moderation';
+import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor } from '../data/moderation';
+import { useAdultContent } from './useAdultContent';
 import { beginDayBoardSeedWatch, recordDayBoardSeedSnapshot } from '../data/board-freshness';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
@@ -183,6 +184,7 @@ export function useItems(enabled = true) {
   // just the query) so the effect re-subscribes if `enabled` flips back to
   // true — mirrors useEventDoc's pre-auth gate above.
   const { threshold, bannedUids } = useEventModeration();
+  const adultRequired = useAdultContent();
   // Scoped `where('status','==','active')` so every matched doc satisfies the item
   // read rule (#43 F4): non-admins may read only active Prompts, so an unconstrained
   // collection listen would now be DENIED — the SAME pattern the proof feed uses
@@ -201,12 +203,17 @@ export function useItems(enabled = true) {
   // can still reach and restore/unban a threshold-hidden or banned Prompt. The
   // `status === 'active'` re-check is redundant with the query but harmless (guards
   // a stale cache row). Presentational only — the doc is untouched.
+  // The third presentational hide (Phase 4b round 4): an explicit Prompt is
+  // withheld while this session has not raised the 18+ gate, which closes the
+  // window between an admin's approval write and the Cloud Function that
+  // publishes the posture. See `isExplicitWithheld`.
   const items = data
     .filter(
       (i) =>
         i.status === 'active' &&
         (i.pool ?? 'main') === 'main' &&
         !isReportHidden(i.reportCount, threshold) &&
+        !isExplicitWithheld(i.spicy, adultRequired) &&
         !isBanned(i.createdBy, bannedUids),
     )
     .sort((a, b) => a.createdAt - b.createdAt);

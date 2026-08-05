@@ -78,3 +78,35 @@ export const SYSTEM_AUTHOR_UIDS: readonly string[] = ['seed'];
 export function isSystemAuthor(uid: string | null | undefined): boolean {
   return !!uid && SYSTEM_AUTHOR_UIDS.includes(uid);
 }
+
+/**
+ * Should this Prompt be withheld because the session is not gated for it?
+ *
+ * THE PUBLISH RACE (Phase 4b round 4). An admin approving the first explicit
+ * Prompt performs ONE write — `status: 'active'` — and the 18+ posture is
+ * published by a Cloud Function reacting to it. Those are two writes with a
+ * function invocation between them, so for a moment the Prompt is live and the
+ * posture is not: every Player's `status == 'active'` listener delivers the
+ * explicit text while `hostnames/{host}.adultContent` still says `false`. No
+ * amount of listener promptness closes that — it is an ordering problem, not a
+ * latency one, and the client cannot make the two writes atomic because no
+ * client may write `hostnames` at all.
+ *
+ * So the invariant is enforced where it actually has to hold: an explicit Prompt
+ * is not RENDERED or DEALT into a session that has not raised the gate. The
+ * window then resolves itself — the stamp lands, the posture raises, the gate
+ * goes up, and the Prompt becomes visible in the same motion.
+ *
+ * This is the same layer the 18+ acknowledgement itself lives at. The gate is an
+ * honor-system self-statement, not access control (ADR 0001), and the rules
+ * deliberately do not hide `spicy` Prompts from signed-in readers — so a
+ * client-side withhold is the right and only mechanism, exactly like the ADR
+ * 0004 Phase 0 community auto-hide next door.
+ *
+ * Costs nothing in the steady state: on a gated Event `adultRequired` is `true`
+ * and this is always false, and on a genuinely tame Event there are no spicy
+ * Prompts to withhold.
+ */
+export function isExplicitWithheld(spicy: boolean | undefined, adultRequired: boolean): boolean {
+  return spicy === true && !adultRequired;
+}

@@ -125,6 +125,49 @@ function consumePendingRedirectAttestation(): boolean {
   }
 }
 
+/**
+ * Whether the 18+ acknowledgement was actually COLLECTED when a redirect
+ * sign-in began (Phase 4b round 4).
+ *
+ * Separate from the marker above, in a different store, because the two answer
+ * different questions and have different durability needs. The marker scopes
+ * FAILURE reporting and may be lost — #346 exists precisely because Safari drops
+ * sessionStorage across the provider round-trip, and that path still has to
+ * complete. This record decides whether a durable, cross-Event
+ * `attestedAdultAt` may be written, so losing it must not silently fabricate
+ * one, and it must survive the round trip that loses the marker.
+ *
+ * `localStorage`, therefore: it survives the same partitioning that drops
+ * sessionStorage — which is how Firebase restores the session at all — so #346's
+ * guarantee (login AND attestation both land on a marker-less return) is kept
+ * intact rather than traded away.
+ *
+ * TTL-bounded so an abandoned redirect cannot authorize an unrelated sign-in
+ * days later. Anything unparseable, expired, or absent reads as NOT collected,
+ * which costs one re-prompt — the direction this whole feature fails in.
+ */
+export const SIGNIN_ADULT_ACK_KEY = 'gcb.signin.adultAck';
+const SIGNIN_ADULT_ACK_TTL_MS = 10 * 60 * 1000;
+
+function markCollectedAcknowledgement(): void {
+  try {
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+  } catch {
+    // Private mode / disabled storage: the re-prompt collects it instead.
+  }
+}
+
+function consumeCollectedAcknowledgement(now: number = Date.now()): boolean {
+  try {
+    const raw = localStorage.getItem(SIGNIN_ADULT_ACK_KEY);
+    localStorage.removeItem(SIGNIN_ADULT_ACK_KEY);
+    const at = Number(raw);
+    return Number.isFinite(at) && at > 0 && now - at <= SIGNIN_ADULT_ACK_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
 // Read the marker WITHOUT consuming it. Evaluated during the first render —
 // before any effect can subscribe to auth or arm the settle timer — so the
 // pending-redirect-return guard (#357) is in place before either could fire;
@@ -1026,14 +1069,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
     const appOwnedRedirect = consumePendingRedirectAttestation();
+    // Read from its OWN store, and unconditionally — the marker above may have
+    // been lost (#346) while this record survives, which is the whole reason
+    // they are separate.
+    const acknowledged = consumeCollectedAcknowledgement();
 
     void getRedirectResult(auth)
       .then(async (result) => {
         if (!result) return;
         track('login', { method: 'google' });
-        // Same posture gate as the popup path (#608): no checkbox was shown on a
-        // non-adult Event, so there is no attestation to complete.
-        if (adultContentRequired()) await persistAttestation(result.user);
+        // Persist ONLY an acknowledgement that was actually collected (Phase 4b
+        // round 4). The posture is read when the redirect STARTS, not when it
+        // returns: an Event that turns adult while the player is away at Google
+        // would otherwise have this branch stamp a durable, cross-Event
+        // `attestedAdultAt` for a checkbox that was never on screen — and walk
+        // them straight through the gate it had just raised. When the
+        // acknowledgement was not collected, doing nothing is exactly right:
+        // `needsAttestation` settles true against the newly raised posture and
+        // the existing re-prompt collects it properly.
+        if (acknowledged) await persistAttestation(result.user);
       })
       .catch((err: unknown) => {
         if (appOwnedRedirect) trackSignInFailure(err);
@@ -1051,6 +1105,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback((): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
+
+    // Captured BEFORE any auth transaction starts, and threaded through both
+    // paths (Phase 4b round 4). `SignIn` disables its button unless the Event is
+    // non-adult OR the box is checked, so a `true` here means the checkbox was
+    // shown AND ticked at the moment the player committed. Re-reading the posture
+    // after the popup or redirect settles answers a different question — "is this
+    // Event adult NOW" — and the two diverge exactly when it matters.
+    const acknowledged = adultContentRequired();
 
     const attempt = (async () => {
       if (onFallbackAuthOrigin) {
@@ -1074,6 +1136,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // shouldRedirectSignIn; the popup path below still serves desktop browser
         // tabs and installed iOS PWAs.
         markPendingRedirectAttestation();
+        // Recorded only when the box was actually shown and ticked; the return
+        // path reads THIS, never the posture as it stands on return.
+        if (acknowledged) markCollectedAcknowledgement();
         try {
           await signInWithRedirect(auth, googleProvider);
         } catch (err) {
@@ -1104,13 +1169,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // attestation — persist it now that we have a uid, so a first-time User is not
       // re-prompted for the box they just ticked (#23).
       //
-      // …UNLESS this Event never asked (#608). `attestedAdultAt` is a
-      // cross-Event record on the global `users/{uid}` document, and on an Event
-      // with no adult content SignIn renders no checkbox at all — so writing the
-      // stamp here would fabricate a self-attestation the Player never made, and
-      // carry it to every other Event they join. The gate is skipped, not
-      // silently satisfied.
-      if (adultContentRequired()) await attest();
+      // …UNLESS no acknowledgement was collected (#608, tightened by Phase 4b
+      // round 4). `attestedAdultAt` is a cross-Event record on the global
+      // `users/{uid}` document, and on an Event with no adult content SignIn
+      // renders no checkbox at all — so writing the stamp would fabricate a
+      // self-attestation the Player never made and carry it to every other Event
+      // they join. `acknowledged` is captured at the START of this attempt, not
+      // re-read here: a popup can stay open while an admin approves the first
+      // explicit Prompt, and the posture that governs what the player agreed to
+      // is the one that was on their screen.
+      if (acknowledged) await attest();
     })();
 
     signInAttemptRef.current = attempt;
