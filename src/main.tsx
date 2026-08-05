@@ -174,7 +174,11 @@ void bootstrapEventResolution()
     // ConsentNotice's disclosure obligation a few lines down. Skipped for the
     // uptime synthetic (#142), matching `initPostHog`'s own guard above.
     if (resolution.kind === 'event' && !isSyntheticProbe()) {
-      registerAnalyticsDimensions({ eventId: resolution.eventId, eventSlug: resolution.slug });
+      registerAnalyticsDimensions({
+        eventId: resolution.eventId,
+        eventSlug: resolution.slug,
+        canonicalHost: resolution.canonicalHost,
+      });
     }
     // An Event can resolve on an origin the AUTH stack has never been
     // configured for — hostname resolution is exactly what made that possible

@@ -17,6 +17,7 @@
 // at the owner's request; ConsentNotice.tsx discloses that session replay is used.
 import posthog, { type PostHogConfig, type CaptureResult } from 'posthog-js';
 import { probeTimeoutSignal } from './canonical-redirect';
+import { resolvedCanonicalHost } from './canonicalHost';
 
 /** Init options — exported so the capture policy is unit-testable. */
 export const POSTHOG_INIT_OPTIONS: Partial<PostHogConfig> = {
@@ -151,18 +152,47 @@ export function stripUrlSecrets(value: unknown): unknown {
   }
 }
 
-const URL_PROP_KEYS = [
-  '$current_url',
-  '$pathname',
-  '$referrer',
-  '$initial_current_url',
-  '$initial_referrer',
-];
+/**
+ * Replace the origin of an origin+path string with the resolved canonical
+ * hostname (#556, Codex round-2 P2: "PostHog's sanitized $current_url still
+ * comes from window.location"). Layered ON TOP of `stripUrlSecrets`, never
+ * folded into it, so `stripUrlSecrets` stays the pure "strip query/hash"
+ * primitive its own tests pin. A no-op when no canonical host has been
+ * resolved (a single-Event build has no separate Alias concept — its own
+ * origin already IS canonical, matching `canonicalOrigin()`'s own fallback)
+ * or when the value has no origin to replace (a relative path, already
+ * host-free).
+ */
+function canonicalizeOrigin(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const host = resolvedCanonicalHost();
+  if (!host) return value;
+  try {
+    const u = new URL(value);
+    return `https://${host}${u.pathname}`;
+  } catch {
+    return value; // relative — no origin to swap
+  }
+}
 
-/** Reduce any URL-bearing keys in a property bag to path-only, in place. */
+// Split in two (#556, Codex round-2 P2 follow-through): `$current_url` /
+// `$pathname` / `$initial_current_url` are always THIS site's own URL, so
+// canonicalizing their origin is correct. `$referrer` / `$initial_referrer`
+// are frequently a genuinely EXTERNAL origin (google.com, a shared link on
+// another platform) — canonicalizing those would silently overwrite real
+// referrer data with our own hostname, corrupting it rather than protecting
+// it. Referrer fields get query/hash stripped only, never an origin swap.
+const SELF_URL_PROP_KEYS = ['$current_url', '$pathname', '$initial_current_url'];
+const REFERRER_PROP_KEYS = ['$referrer', '$initial_referrer'];
+
+/** Reduce any URL-bearing keys in a property bag to path-only, in place —
+ *  the site's-own-URL keys also get their origin canonicalized (#556). */
 function scrubUrlBag(bag: Record<string, unknown> | undefined): void {
   if (!bag) return;
-  for (const key of URL_PROP_KEYS) {
+  for (const key of SELF_URL_PROP_KEYS) {
+    if (bag[key] != null) bag[key] = canonicalizeOrigin(stripUrlSecrets(bag[key]));
+  }
+  for (const key of REFERRER_PROP_KEYS) {
     if (bag[key] != null) bag[key] = stripUrlSecrets(bag[key]);
   }
 }
@@ -192,15 +222,16 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
     if (!ev || typeof ev !== 'object') continue;
     const { type, data } = ev as { type?: unknown; data?: Record<string, unknown> };
     if (!data || typeof data !== 'object') continue;
-    // Meta event (type 4): data.href
+    // Meta event (type 4): data.href — always THIS page's own URL, so the
+    // origin canonicalization (#556) applies here too, same as $current_url.
     if (type === 4 && typeof data.href === 'string') {
-      data.href = stripUrlSecrets(data.href) as string;
+      data.href = canonicalizeOrigin(stripUrlSecrets(data.href)) as string;
     }
     // Custom event (type 5): data.payload.href
     if (type === 5) {
       const payload = (data as { payload?: Record<string, unknown> }).payload;
       if (payload && typeof payload.href === 'string') {
-        payload.href = stripUrlSecrets(payload.href) as string;
+        payload.href = canonicalizeOrigin(stripUrlSecrets(payload.href)) as string;
       }
     }
   }

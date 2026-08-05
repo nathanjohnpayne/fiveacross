@@ -26,6 +26,18 @@ export function applyResolvedCanonicalHost(host: string | null): void {
   canonicalHost = host;
 }
 
+/**
+ * The RAW resolved canonical hostname, `null` when none has been resolved
+ * (#556, Codex round-2 P2) — distinct from `canonicalOrigin()`, which always
+ * returns something via its `window.location` fallback. Callers that need to
+ * know whether an actual Alias-vs-canonical distinction exists for THIS
+ * build (posthog.ts's URL-origin canonicalization; a single-Event build has
+ * none, and must stay a no-op there) read this instead.
+ */
+export function resolvedCanonicalHost(): string | null {
+  return canonicalHost;
+}
+
 /** The origin analytics and share metadata must report (#556): the resolved
  *  canonical hostname when known, else the page's own origin — which is the
  *  correct answer for a single-Event build and the safe fallback before

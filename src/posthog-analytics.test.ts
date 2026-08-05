@@ -25,6 +25,7 @@ import {
   stripUrlSecrets,
   sanitizeUrls,
 } from './posthog';
+import { applyResolvedCanonicalHost } from './canonicalHost';
 
 describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
   it('strips query and hash from absolute URLs, keeping origin + path', () => {
@@ -166,6 +167,79 @@ describe('URL hygiene — sanitizeUrls / stripUrlSecrets (#195)', () => {
 
   it('is wired as the before_send hook in the init options', () => {
     expect(POSTHOG_INIT_OPTIONS.before_send).toBe(sanitizeUrls);
+  });
+});
+
+describe('canonicalizeOrigin — sanitizeUrls swaps in the canonical hostname (Codex round 2 on #556)', () => {
+  afterEach(() => applyResolvedCanonicalHost(null));
+
+  it('leaves the origin unchanged when no canonical host is resolved (matches today’s behavior exactly)', () => {
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $current_url: 'https://gcb.com/x?token=secret' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$current_url).toBe('https://gcb.com/x');
+  });
+
+  it('swaps $current_url / $pathname / $initial_current_url to the canonical origin once resolved', () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $current_url: 'https://bodega-bay.fiveacrossbingo.com/feed?token=secret' },
+      $set: { $initial_current_url: 'https://bodega-bay.fiveacrossbingo.com/enter?code=SECRET' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$current_url).toBe('https://bodega-bay.vacaybingo.com/feed');
+    expect(out?.$set?.$initial_current_url).toBe('https://bodega-bay.vacaybingo.com/enter');
+  });
+
+  it('never rewrites $referrer / $initial_referrer — a real external referrer is not our own origin', () => {
+    // The bug this guards: $referrer is frequently a genuinely EXTERNAL
+    // origin (a search engine, a shared link elsewhere). Canonicalizing it
+    // would silently overwrite real referrer data with our own hostname.
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $referrer: 'https://www.google.com/search?q=secret' },
+      $set_once: { $initial_referrer: 'https://twitter.com/x?ref=1' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$referrer).toBe('https://www.google.com/search'); // query stripped, origin kept
+    expect(out?.$set_once?.$initial_referrer).toBe('https://twitter.com/x');
+  });
+
+  it('canonicalizes the rrweb Meta (type 4) and Custom-event (type 5) hrefs in $snapshot data too', () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 's',
+      event: '$snapshot',
+      properties: {
+        $snapshot_data: [
+          { type: 4, data: { href: 'https://bodega-bay.fiveacrossbingo.com/leaderboard?invite=SECRET' } },
+          { type: 5, data: { payload: { href: 'https://bodega-bay.fiveacrossbingo.com/feed?t=1' } } },
+        ],
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const events = out?.properties.$snapshot_data as any[];
+    expect(events[0].data.href).toBe('https://bodega-bay.vacaybingo.com/leaderboard');
+    expect(events[1].data.payload.href).toBe('https://bodega-bay.vacaybingo.com/feed');
+  });
+
+  it('leaves a relative path unchanged — no origin to swap', () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const out = sanitizeUrls({
+      uuid: 'u',
+      event: '$pageview',
+      properties: { $pathname: '/items?t=secret' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    expect(out?.properties.$pathname).toBe('/items');
   });
 });
 

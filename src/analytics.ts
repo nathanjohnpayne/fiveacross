@@ -140,14 +140,38 @@ function registerBothSinks(props: Record<string, unknown>): void {
  * single-Event build's Resolution never read a `hostnames/{host}` document
  * (see `Resolution.slug`'s own doc in eventResolution.ts), so it has no
  * separate Slug to report and the Event id is the closest identifier there is.
+ *
+ * `canonicalHost`, when resolved, ALSO overrides GA4's `page_location`
+ * default (#556, Codex round-2 P2) — the automatic and explicit
+ * `page_location` field otherwise mirrors `window.location.href`, which
+ * could carry a validated Alias's hostname before its edge redirect. `null`
+ * (a single-Event build, with no separate Alias concept — see
+ * `Resolution.canonicalHost`'s own doc) is a no-op: `window.location` is
+ * already the only address that build has. GA4-only, deliberately NOT
+ * folded into `registerBothSinks` — PostHog's equivalent (`$current_url`) is
+ * fixed in posthog.ts's `before_send` hook instead, because an automatically
+ * captured event's OWN properties would not reliably honor a `register()`'d
+ * override the way GA4's page-scoped `set` does.
  */
-export function registerAnalyticsDimensions(resolved: { eventId: string; eventSlug: string | null }): void {
+export function registerAnalyticsDimensions(resolved: {
+  eventId: string;
+  eventSlug: string | null;
+  canonicalHost: string | null;
+}): void {
   registerBothSinks({
     brand_id: BRAND_ID,
     edition_id: activeEdition(),
     event_id: resolved.eventId,
     event_slug: resolved.eventSlug ?? resolved.eventId,
   });
+  if (resolved.canonicalHost) {
+    ga4Dims = { ...ga4Dims, page_location: `https://${resolved.canonicalHost}${window.location.pathname}` };
+    try {
+      setDefaultEventParameters(ga4Dims);
+    } catch {
+      /* no-op */
+    }
+  }
 }
 
 /**

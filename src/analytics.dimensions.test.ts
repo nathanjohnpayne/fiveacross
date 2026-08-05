@@ -34,7 +34,7 @@ describe('BRAND_ID (#556)', () => {
 describe('registerAnalyticsDimensions (#556)', () => {
   it('registers brand_id/edition_id/event_id/event_slug on BOTH sinks', async () => {
     const { registerAnalyticsDimensions } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay' });
+    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay', canonicalHost: null });
     const expected = {
       brand_id: 'five-across',
       edition_id: 'gcb',
@@ -49,7 +49,7 @@ describe('registerAnalyticsDimensions (#556)', () => {
     // A single-Event build's Resolution never reads a hostnames/{host}
     // document, so it has no separate Slug — see Resolution.slug's own doc.
     const { registerAnalyticsDimensions } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });
+    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null, canonicalHost: null });
     expect(phRegister).toHaveBeenCalledWith(expect.objectContaining({ event_slug: 'med-2026' }));
   });
 
@@ -58,8 +58,39 @@ describe('registerAnalyticsDimensions (#556)', () => {
     setDefaultEventParameters.mockImplementationOnce(() => {
       throw new Error('ga4 unavailable');
     });
-    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });
+    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null, canonicalHost: null });
     expect(phRegister).toHaveBeenCalled();
+  });
+
+  it('does not override page_location when no canonical host is resolved (single-Event build)', async () => {
+    const { registerAnalyticsDimensions } = await import('./analytics');
+    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null, canonicalHost: null });
+    expect(setDefaultEventParameters).toHaveBeenCalledTimes(1);
+    expect(setDefaultEventParameters).toHaveBeenLastCalledWith(expect.not.objectContaining({ page_location: expect.anything() }));
+  });
+
+  it('overrides GA4 page_location to the canonical origin when a canonical host is resolved (Codex round 2 on #556)', async () => {
+    // GA4's automatic + explicit page_location otherwise mirrors
+    // window.location.href, which could carry a validated Alias's hostname
+    // before its edge redirect.
+    const { registerAnalyticsDimensions } = await import('./analytics');
+    registerAnalyticsDimensions({
+      eventId: 'bodega-bay-2026',
+      eventSlug: 'bodega-bay',
+      canonicalHost: 'bodega-bay.vacaybingo.com',
+    });
+    expect(setDefaultEventParameters).toHaveBeenLastCalledWith({
+      brand_id: 'five-across',
+      edition_id: 'gcb',
+      event_id: 'bodega-bay-2026',
+      event_slug: 'bodega-bay',
+      page_location: `https://bodega-bay.vacaybingo.com${window.location.pathname}`,
+    });
+    // GA4-only — PostHog's equivalent is fixed in posthog.ts's before_send
+    // hook instead, so phRegister must NOT receive page_location.
+    expect(phRegister).toHaveBeenCalledWith(
+      expect.not.objectContaining({ page_location: expect.anything() }),
+    );
   });
 });
 
@@ -92,7 +123,7 @@ describe('registerDayIndexDimension (#556)', () => {
     // used to silently drop brand/edition/Event — the first GA4 events after
     // init would carry `day_index` alone.
     const { registerAnalyticsDimensions, registerDayIndexDimension } = await import('./analytics');
-    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay' });
+    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay', canonicalHost: null });
     registerDayIndexDimension(2);
     expect(setDefaultEventParameters).toHaveBeenLastCalledWith({
       brand_id: 'five-across',
