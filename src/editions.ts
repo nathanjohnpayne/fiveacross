@@ -239,6 +239,15 @@ const BRANDS: Record<string, EditionBrand> = {
   // identically as "no bars".
   fiveacross: {
     wordmark: 'FIVE ACROSS',
+    // "FIVE **ACROSS**" — the second word, matching how the other two Editions
+    // bold their own last word (#602). The wordmark IS the mechanic here, so the
+    // emphasis lands on the thing you are trying to get.
+    wordmarkBold: 'ACROSS',
+    // The general register's pre-event verb (#602 × #608). "Sails" is cruise
+    // vocabulary and "Starts" is the trip Edition's; a conference, a wedding and
+    // a birthday weekend all read naturally as "Opens Aug 7" — the doors-open
+    // framing its default Theme (✨ Marquee, #617) already speaks.
+    preEventVerb: 'Opens',
     tagline: 'Sign in, get your card, mark it if you see it.',
     offlineNote: 'Packed room, no bars? Your card keeps working offline — marks sync when you reconnect.',
     // Title case for the tab and the home-screen label, as above. "Five Across"
