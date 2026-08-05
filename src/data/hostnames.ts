@@ -1,11 +1,14 @@
 import { doc, getDoc } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
-import { resolveEvent, type HostnameDoc, type Resolution } from '../eventResolution';
+import { resolveEvent, type Resolution } from '../eventResolution';
+import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
 // module is the only part that touches the network.
+
+const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
 
 /**
  * Fetch `hostnames/{host}`.
@@ -16,19 +19,24 @@ import { setCardCacheEventId } from './cardCache';
  * this happens before sign-in, which is the whole reason the collection is
  * world-readable.
  *
- * A missing document resolves to `null` rather than throwing, so "no Event at
- * this address" stays distinguishable from "the read failed".
+ * Returns null for a missing document AND for a malformed one. A routing record
+ * with no explicit, recognised `status` is NOT treated as active: defaulting it
+ * would let a partially-written document publish an Event before the record
+ * opts in, and would make this path disagree with the cache reader, which
+ * rejects the same shape (Codex on #576). Null means "no usable mapping here",
+ * which the resolver renders as not-found rather than as a failed read.
  */
 export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
   const snap = await getDoc(doc(db, 'hostnames', hostname.toLowerCase()));
   if (!snap.exists()) return null;
   const d = snap.data() as Partial<HostnameDoc>;
   if (typeof d.eventId !== 'string' || !d.eventId) return null;
+  if (typeof d.status !== 'string' || !VALID_STATUS.has(d.status)) return null;
   return {
     eventId: d.eventId,
     canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
     edition: typeof d.edition === 'string' ? d.edition : '',
-    status: typeof d.status === 'string' ? d.status : 'active',
+    status: d.status as HostnameDoc['status'],
     slug: typeof d.slug === 'string' ? d.slug : undefined,
     isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
   };
@@ -51,9 +59,8 @@ export async function bootstrapEventResolution(
     hostname,
     fetchDoc: fetchHostnameDoc,
     storage,
-    // PRESENCE marks a single-Event build. A multi-Event bundle ships without
-    // it, so an unknown host there is not-found rather than silently serving
-    // whichever Event happened to be baked in.
+    // PRESENCE marks a single-Event build, and short-circuits the lookup
+    // entirely — see resolveEvent step 0.
     envEventId: import.meta.env.VITE_EVENT_ID || null,
   });
   if (resolution.kind === 'event') {

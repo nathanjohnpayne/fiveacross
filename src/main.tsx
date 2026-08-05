@@ -12,9 +12,11 @@ import type { ThemeId } from './types';
 import App from './App';
 import ConsentNotice from './components/ConsentNotice';
 import ErrorBoundary from './components/ErrorBoundary';
+import EventNotFound from './components/EventNotFound';
 import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
+import { bootstrapEventResolution } from './data/hostnames';
 import './theme/themes.css';
 import './index.css';
 
@@ -98,7 +100,9 @@ function ThemedApp() {
   );
 }
 
-createRoot(rootEl).render(
+const root = createRoot(rootEl);
+
+const appTree = (
   <React.StrictMode>
     {/* Mounted outside the auth-gated tree (stable, non-frozen mount point —
         see #17) so the 18+ analytics disclosure shows even on the signed-out
@@ -125,5 +129,36 @@ createRoot(rootEl).render(
         </BrowserRouter>
       </AuthProvider>
     </ErrorBoundary>
-  </React.StrictMode>,
+  </React.StrictMode>
 );
+
+/**
+ * Resolve which Event this hostname serves BEFORE mounting (#543, ADR 0009).
+ *
+ * Gating the mount is the point: every Firestore path derives from `EVENT_ID`,
+ * so mounting first and resolving later would start listeners against the wrong
+ * Event and then swap it underneath them. On a single-Event build this
+ * short-circuits to the env value without any network read, so the legacy
+ * deployment pays nothing for this.
+ *
+ * The `.catch` is a hard blank-screen guard, not defensive habit.
+ * `bootstrapEventResolution` is written never to throw and never to hang — the
+ * fetch is timeout-raced and every branch returns a value — but this is the one
+ * code path where an unexpected throw would render NOTHING at all, which is the
+ * 2026-07-24 incident exactly. If resolution somehow explodes we still mount
+ * with whatever `EVENT_ID` already holds: a possibly-wrong Event is recoverable,
+ * a blank page on a phone in a rental house is not.
+ */
+void bootstrapEventResolution()
+  .then((resolution) => {
+    root.render(
+      resolution.kind === 'not-found' ? (
+        <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
+      ) : (
+        appTree
+      ),
+    );
+  })
+  .catch(() => {
+    root.render(appTree);
+  });

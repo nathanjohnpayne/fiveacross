@@ -1,3 +1,5 @@
+import type { HostnameDoc } from './types';
+
 // Startup Event resolution from the request hostname (ADR 0009, #543).
 //
 // Runs BEFORE authentication and BEFORE first paint, which is the whole
@@ -10,15 +12,7 @@
 // `window` — so the whole decision table is unit-testable without a network,
 // a browser, or an emulator.
 
-/** The shape of a `hostnames/{host}` document (specs/hostnames-lookup.md). */
-export interface HostnameDoc {
-  eventId: string;
-  canonicalHost: string;
-  edition: string;
-  status: string;
-  slug?: string;
-  isCanonical?: boolean;
-}
+export type { HostnameDoc };
 
 export type Resolution =
   | {
@@ -36,18 +30,60 @@ export type Resolution =
 export interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 export const CACHE_PREFIX = 'fa:hostname:';
+
+/** Bumped when the cached shape changes. An entry written by an older version
+ *  reads as a MISS rather than being coerced — the same discipline
+ *  `cardCache.ts` uses for its snapshot version. */
+export const CACHE_VERSION = 1;
+
+/** How long a cached mapping may serve an Event without revalidation.
+ *
+ *  A hostname's Event assignment IS durable, which is why a cache is safe at
+ *  all — but "durable" is not "permanent". If a host is archived or repointed,
+ *  an unbounded cache would keep booting the old Event on that browser forever
+ *  (Codex on #576). Twelve hours bounds that to well under a day while still
+ *  covering a whole event-day of offline use. */
+export const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+
+interface CacheEnvelope {
+  v: number;
+  fetchedAt: number;
+  doc: HostnameDoc;
+}
 
 /** Cache key is the HOSTNAME, not the slug: two hostnames can resolve to one
  *  Event, and a shared key would let an alias serve the canonical's cached
  *  edition (or vice versa) on the wrong origin. */
 export const cacheKey = (hostname: string): string => `${CACHE_PREFIX}${hostname.toLowerCase()}`;
 
-/** Read a cached resolution. Tolerates absent, corrupt, and shape-drifted
- *  entries by returning null — a bad cache must never be worse than no cache. */
-export function readCache(storage: StorageLike | null, hostname: string): HostnameDoc | null {
+/** A hostname document is only usable when it says so explicitly.
+ *
+ *  Never infer `active` from a missing field: a partially-written routing
+ *  document would then publish an Event before the record opts in, and the
+ *  network and cache paths would disagree about identical data (Codex on #576). */
+export function isServable(doc: Pick<HostnameDoc, 'status'> | null | undefined): boolean {
+  return doc?.status === 'active';
+}
+
+export interface CacheRead {
+  doc: HostnameDoc;
+  fetchedAt: number;
+  stale: boolean;
+}
+
+/** Read a cached mapping. Tolerates absent, corrupt, version-drifted and
+ *  shape-drifted entries by returning null — a bad cache must never be worse
+ *  than no cache. A STALE entry is returned (flagged), not discarded: it is
+ *  still the right thing to render when the network is unreachable. */
+export function readCache(
+  storage: StorageLike | null,
+  hostname: string,
+  now: number = Date.now(),
+): CacheRead | null {
   if (!storage) return null;
   let raw: string | null;
   try {
@@ -57,34 +93,53 @@ export function readCache(storage: StorageLike | null, hostname: string): Hostna
   }
   if (!raw) return null;
   try {
-    const v = JSON.parse(raw) as Partial<HostnameDoc>;
-    if (typeof v?.eventId !== 'string' || !v.eventId) return null;
-    if (typeof v?.status !== 'string') return null;
+    const env = JSON.parse(raw) as Partial<CacheEnvelope>;
+    if (env?.v !== CACHE_VERSION) return null;
+    if (typeof env.fetchedAt !== 'number') return null;
+    const d = env.doc as Partial<HostnameDoc> | undefined;
+    if (typeof d?.eventId !== 'string' || !d.eventId) return null;
+    if (d.status !== 'active' && d.status !== 'disabled' && d.status !== 'archived') return null;
     return {
-      eventId: v.eventId,
-      canonicalHost: typeof v.canonicalHost === 'string' ? v.canonicalHost : hostname,
-      edition: typeof v.edition === 'string' ? v.edition : '',
-      status: v.status,
-      slug: typeof v.slug === 'string' ? v.slug : undefined,
-      isCanonical: typeof v.isCanonical === 'boolean' ? v.isCanonical : undefined,
+      doc: {
+        eventId: d.eventId,
+        canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
+        edition: typeof d.edition === 'string' ? d.edition : '',
+        status: d.status,
+        slug: typeof d.slug === 'string' ? d.slug : undefined,
+        isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
+      },
+      fetchedAt: env.fetchedAt,
+      stale: now - env.fetchedAt > CACHE_TTL_MS,
     };
   } catch {
     return null;
   }
 }
 
-/** Persist a resolution. Never throws: a full or disabled quota costs a cache
- *  entry, not a boot. */
-export function writeCache(storage: StorageLike | null, hostname: string, doc: HostnameDoc): void {
+/** Persist a mapping with its fetch stamp. Never throws: a full or disabled
+ *  quota costs a cache entry, not a boot. */
+export function writeCache(
+  storage: StorageLike | null,
+  hostname: string,
+  doc: HostnameDoc,
+  now: number = Date.now(),
+): void {
   if (!storage) return;
+  const env: CacheEnvelope = { v: CACHE_VERSION, fetchedAt: now, doc };
   try {
-    storage.setItem(cacheKey(hostname), JSON.stringify(doc));
+    storage.setItem(cacheKey(hostname), JSON.stringify(env));
   } catch {
     /* quota or private mode — cache is an optimisation, not a requirement */
   }
 }
 
-const isActive = (doc: HostnameDoc): boolean => doc.status === 'active';
+function dropCache(storage: StorageLike | null, hostname: string): void {
+  try {
+    storage?.removeItem?.(cacheKey(hostname));
+  } catch {
+    /* best effort */
+  }
+}
 
 const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => ({
   kind: 'event',
@@ -105,6 +160,8 @@ export interface ResolveOptions {
   timeoutMs?: number;
   /** Injected for tests; defaults to a real timer. */
   delay?: (ms: number) => Promise<void>;
+  /** Injected for tests. */
+  now?: () => number;
 }
 
 const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -114,22 +171,23 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  *
  * ORDER, and why:
  *
- *  1. **Cache first, and it wins outright.** A cache hit returns with no
- *     network at all, which is what makes an offline cold boot work (ADR 0006,
- *     specs/x-offline-cold-boot.md) and what keeps first paint off the
- *     network's critical path. A hostname's Event assignment is durable, so a
- *     stale-but-valid entry is the right trade against a blank screen.
- *  2. **Network, hard-bounded.** No cache means one `get`, raced against
- *     `timeoutMs`. This repo has shipped three separate blank-screen fixes; an
- *     unbounded pre-paint read is exactly that failure class, so the race is
- *     load-bearing rather than defensive.
- *  3. **Env fallback, only for a single-Event build.** `VITE_EVENT_ID`'s
+ *  0. **A single-Event build never looks up at all.** `VITE_EVENT_ID`'s
  *     PRESENCE is the signal that this bundle serves exactly one Event — the
- *     Gay Cruise Bingo build, whose hostname has no `hostnames/` document at
- *     all. A multi-Event build ships WITHOUT it, so an unknown host there
- *     correctly resolves to not-found instead of silently serving some
- *     arbitrary Event. That distinction is the only thing separating "legacy
- *     build, no lookup needed" from "unknown address, show not-found".
+ *     Gay Cruise Bingo build, whose hostname has no `hostnames/` document. It
+ *     would be incoherent to consult the lookup and then discard the answer,
+ *     and since resolution now blocks first paint, racing a Firestore read it
+ *     cannot use would cost that build a round trip — or, on captive Wi-Fi, the
+ *     full timeout — while already knowing the answer (Codex on #576).
+ *  1. **Fresh cache wins outright.** A hit inside the TTL returns with no
+ *     network at all, which is what makes offline cold boot work (ADR 0006)
+ *     and keeps first paint off the network's critical path.
+ *  2. **Network, hard-bounded.** A miss, or a STALE hit, does one `get` raced
+ *     against `timeoutMs`. This repo has shipped three blank-screen fixes; an
+ *     unbounded pre-paint read is that failure class, so the race is
+ *     load-bearing rather than defensive.
+ *  3. **Stale cache is the offline fallback.** If revalidation fails and a
+ *     stale entry exists, serve it rather than a not-found — an expired mapping
+ *     beats a dead app when the network is simply gone.
  *
  * Always terminates in something renderable. `not-found` is a state the app
  * draws, never an exception it has to catch.
@@ -138,9 +196,15 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   const { hostname, fetchDoc, storage = null, envEventId = null } = opts;
   const timeoutMs = opts.timeoutMs ?? 3000;
   const delay = opts.delay ?? defaultDelay;
+  const now = opts.now ?? Date.now;
 
-  const cached = readCache(storage, hostname);
-  if (cached && isActive(cached)) return asEvent(cached, 'cache');
+  // 0. Single-Event build: answer immediately, never touch the network.
+  if (envEventId) {
+    return { kind: 'event', eventId: envEventId, canonicalHost: null, edition: null, source: 'env' };
+  }
+
+  const cached = readCache(storage, hostname, now());
+  if (cached && !cached.stale && isServable(cached.doc)) return asEvent(cached.doc, 'cache');
 
   const TIMED_OUT = Symbol('timeout');
   let doc: HostnameDoc | null;
@@ -149,35 +213,38 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
       fetchDoc(hostname),
       delay(timeoutMs).then(() => TIMED_OUT as unknown as HostnameDoc | null),
     ]);
-    if ((raced as unknown) === TIMED_OUT) {
-      return envFallback(envEventId, hostname, 'unreachable');
-    }
+    if ((raced as unknown) === TIMED_OUT) return staleOrNotFound(cached, hostname, 'unreachable');
     doc = raced;
   } catch {
-    // Offline, denied, or transport failure. A cached-but-inactive entry is not
-    // a rescue: it already told us this Event should not be served.
-    return envFallback(envEventId, hostname, 'unreachable');
+    return staleOrNotFound(cached, hostname, 'unreachable');
   }
 
-  if (!doc) return envFallback(envEventId, hostname, 'missing');
+  if (!doc) {
+    // The mapping is gone. A cached entry for it is now wrong, not merely old.
+    dropCache(storage, hostname);
+    return { kind: 'not-found', hostname, reason: 'missing' };
+  }
 
-  if (!isActive(doc)) {
-    // Disabled or archived. Deliberately NOT cached: caching it would keep the
-    // Event dark for the cache's lifetime after someone re-activates it.
+  if (!isServable(doc)) {
+    // Disabled or archived. Drop any cached copy so this browser stops serving
+    // the Event, and do not cache the inactive state either — caching it would
+    // keep the Event dark for the cache's lifetime after someone re-activates.
+    dropCache(storage, hostname);
     return { kind: 'not-found', hostname, reason: 'inactive' };
   }
 
-  writeCache(storage, hostname, doc);
+  writeCache(storage, hostname, doc, now());
   return asEvent(doc, 'network');
 }
 
-function envFallback(
-  envEventId: string | null,
+/** Revalidation failed. A stale-but-active cached mapping is still the best
+ *  answer available — an expired entry beats a dead app when the network is
+ *  simply unreachable. */
+function staleOrNotFound(
+  cached: CacheRead | null,
   hostname: string,
   reason: 'missing' | 'unreachable',
 ): Resolution {
-  if (envEventId) {
-    return { kind: 'event', eventId: envEventId, canonicalHost: null, edition: null, source: 'env' };
-  }
+  if (cached && isServable(cached.doc)) return asEvent(cached.doc, 'cache');
   return { kind: 'not-found', hostname, reason };
 }

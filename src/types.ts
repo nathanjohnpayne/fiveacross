@@ -135,6 +135,26 @@ export interface EventDoc {
   };
 }
 
+/**
+ * A `hostnames/{host}` document — the public, pre-auth hostname → Event lookup
+ * (ADR 0009, specs/hostnames-lookup.md). One document per public address, keyed
+ * by full hostname, so an Event's canonical address and each of its aliases are
+ * separate documents pointing at the same Event.
+ *
+ * Lives here rather than beside the resolver because it is a Firestore document
+ * contract consumed by the resolver, the Firestore seam and the seed — three
+ * places that must not be free to disagree about what `status` means.
+ */
+export interface HostnameDoc {
+  eventId: string;
+  canonicalHost: string;
+  edition: string;
+  /** `active` is the ONLY value that serves an Event. Never defaulted. */
+  status: 'active' | 'disabled' | 'archived';
+  slug?: string;
+  isCanonical?: boolean;
+}
+
 export interface ItemDoc {
   id: string;
   text: string;

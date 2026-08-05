@@ -17,6 +17,15 @@ A world-readable collection in an app whose intended posture is membership isola
 - **Worker injects the Event ID into the served HTML** — rejected: it makes the Worker an authority rather than a router, and the app can no longer boot on the direct-to-Hosting fallback path.
 - **Slug-keyed rather than hostname-keyed** — rejected: the client would have to duplicate the Worker's namespace rules to know whether it is on a valid alias.
 
+## Implementation status
+
+Implemented as of #542 (rules) and #543 (resolver). `firestore.rules` carries the `get`-yes / `list`-no grant with writes denied; `src/eventResolution.ts` holds the pure decision table, `src/data/hostnames.ts` the Firestore seam, and `src/main.tsx` awaits resolution before mounting so listeners never start against the wrong Event.
+
+Two refinements the review surfaced, both worth stating because the naive version of each is tempting:
+
+- **A single-Event build never consults the lookup at all.** `VITE_EVENT_ID`'s presence means the bundle serves exactly one Event, so reading the mapping and discarding the answer would be incoherent — and since resolution gates first paint, it would cost the legacy build a round trip it cannot use, or the full timeout on captive Wi-Fi.
+- **The cache is bounded, not permanent.** A hostname's Event assignment is durable, which is why caching is safe at all, but an unbounded cache would keep a browser booting an *archived* Event forever. Entries carry a schema version and a fetch stamp, expire after 12 hours, and are dropped outright when the mapping is removed or goes inactive. A stale entry still serves when revalidation fails — offline beats dead — but never survives a mapping that has actually gone away.
+
 ## Consequences
 
 - Rules will be `allow get: if true; allow list: if false` — resolvable, never enumerable.
