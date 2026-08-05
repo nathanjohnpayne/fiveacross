@@ -143,7 +143,10 @@ describe('the stamp: every routing document for the Event', () => {
         },
       }),
     };
-    await expect(raiseAdultContentForEvent(failing, 'e1')).rejects.toThrow(/a.example.com/);
+    // The message must name the hostname that is still un-gated — that is the
+    // only actionable thing in a retry log. Dots escaped: an unescaped `.` in a
+    // hostname pattern matches more hosts than intended (CodeQL).
+    await expect(raiseAdultContentForEvent(failing, 'e1')).rejects.toThrow(/a\.example\.com/);
     // …and the good alias was still stamped on the way through.
     expect(stamped['hostnames/b.example.com']).toEqual({ adultContent: true });
   });
