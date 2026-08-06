@@ -76,10 +76,22 @@ describe('<DaySwitcher />', () => {
     expect(chips[0].textContent).toContain('✓');
     expect(chips[3].textContent).not.toContain('✓');
     expect(chips[3].textContent).not.toContain('🔒');
-    // #293: the state glyph PREFIXES the pill content — "✓ Wed 🇭🇷 ⚽" /
-    // "🔒 Fri 🇭🇷 ⚽" — rather than trailing it.
+    // #293: the state glyph PREFIXES the pill content — "✓ Wed 🇭🇷" /
+    // "🔒 Fri 🇭🇷" — rather than trailing it.
     expect(chips[0].textContent?.startsWith('✓')).toBe(true);
     expect(chips[9].textContent?.startsWith('🔒')).toBe(true);
+  });
+
+  it('uses a per-Day port emoji instead of stacking the Theme emoji, with the Theme as fallback', () => {
+    const days = makeDays(2);
+    days[1]!.portEmoji = '';
+    render(<DaySwitcher days={days} viewedIndex={0} onSelect={vi.fn()} now={0} />);
+    const chips = screen.getAllByRole('tab');
+
+    expect(chips[0]!.querySelector('.day-chip-port')?.textContent).toBe('🇭🇷');
+    expect(chips[0]!.querySelector('.day-chip-theme')).toBeNull();
+    expect(chips[1]!.querySelector('.day-chip-port')?.textContent).toBe('');
+    expect(chips[1]!.querySelector('.day-chip-theme')?.textContent).toBe('🏋️');
   });
 
   it('tapping a locked chip only reports its index — it never marks or deals anything', () => {

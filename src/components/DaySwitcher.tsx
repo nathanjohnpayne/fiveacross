@@ -113,9 +113,14 @@ export default function DaySwitcher({ days, viewedIndex, onSelect, now = Date.no
             <span className="day-chip-port" aria-hidden="true">
               {d.portEmoji}
             </span>
-            <span className="day-chip-theme" aria-hidden="true">
-              {themeEmoji(d.theme)}
-            </span>
+            {/* An explicit per-Day emoji REPLACES the Theme's, it doesn't
+                stack with it — a Day wears one emoji. Every Day without a
+                portEmoji keeps showing its Theme's, unchanged. */}
+            {!d.portEmoji && (
+              <span className="day-chip-theme" aria-hidden="true">
+                {themeEmoji(d.theme)}
+              </span>
+            )}
             {/* "Warm-up"/"Goodbye" in place of a daily-honor pin
                 (daily-cards-spec § "Embark (tutorial) view") — the two
                 tutorial Days only; #212 owns the honor pin the eight main
