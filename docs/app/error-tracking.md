@@ -21,7 +21,7 @@ If exceptions ever look silently missing during a wide-blast incident, check the
 
 Read and write the values with the project-scoped PostHog MCP server:
 
-```
+```text
 call error-tracking-settings-get
 call error-tracking-settings-update {"project_rate_limit_value":1000,"project_rate_limit_bucket_size_minutes":60,"per_issue_rate_limit_value":250,"per_issue_rate_limit_bucket_size_minutes":60}
 ```
