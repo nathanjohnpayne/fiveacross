@@ -225,8 +225,11 @@ export function seedItemMutations(existingDocs, now = Date.now(), pool, fallback
 // events/{id}/items still held the pre-#135 32). `verifySeedPool` compares the
 // live SEED-OWNED docs against the canonical `pool` and reports the drift so a
 // post-deploy check (or `node scripts/seed.mjs --verify`) fails loudly instead of
-// the mismatch going unnoticed. Player-submitted docs (createdBy !== 'seed') are
-// ignored — they are not part of the canonical pool and must never count as drift.
+// the mismatch going unnoticed. A payload may additionally name one legacy
+// content-id per current prompt when a documented in-place production text edit
+// preserved frozen snapshot identity; a fresh canonical id remains valid too.
+// Player-submitted docs (createdBy !== 'seed') are ignored — they are not part
+// of the canonical pool and must never count as drift.
 export function verifySeedPool(
   existingDocs,
   // REQUIRED: the target Event's full canonical pool (its ALL_ITEMS — main +
@@ -240,42 +243,67 @@ export function verifySeedPool(
   // to 4 — the value every Event seeds today (`settings.reportHideThreshold`,
   // ADR 0004); pass the target Event's own value when they diverge.
   reportHideThreshold = 4,
+  // Optional per-prompt legacy ids, in the same order as `pool`. This is a
+  // verification allowance only: `seedItemMutations` always writes the current
+  // text-derived id for a new Event or an explicitly-safe reseed.
+  verifyItemIds = undefined,
 ) {
   if (!Array.isArray(pool)) {
     throw new Error(
       'verifySeedPool requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
     );
   }
-  const expected = new Map(
-    pool.map(({ text, spicy, pool: itemPool }) => [
-      seedItemDocId(text),
+  if (verifyItemIds !== undefined) {
+    if (
+      !Array.isArray(verifyItemIds) ||
+      verifyItemIds.length !== pool.length ||
+      verifyItemIds.some((id) => typeof id !== 'string' || !id) ||
+      new Set(verifyItemIds).size !== verifyItemIds.length
+    ) {
+      throw new Error(
+        'verifySeedPool verifyItemIds must be a unique, one-to-one list matching the target event pool.',
+      );
+    }
+  }
+  const expected = pool.map(({ text, spicy, pool: itemPool }, index) => ({
+    canonicalId: seedItemDocId(text),
+    // The current content hash always remains valid, so a fresh seed and the
+    // documented in-place production identity both verify cleanly. A Set
+    // handles the ordinary case where the two ids happen to be the same.
+    acceptedIds: [
+      ...new Set([seedItemDocId(text), ...(verifyItemIds ? [verifyItemIds[index]] : [])]),
+    ],
       // An untagged entry (the main 80-entry pool in ITEMS) defaults to 'main',
       // mirroring the stamp in `seedItemMutations`; a tagged entry (embark/
       // farewell) keeps its own tag — a live seed doc missing `pool` or
       // drifted to another pool is itself drift this check surfaces.
-      { text, spicy, isFreeSpace: false, status: 'active', pool: itemPool ?? 'main' },
-    ]),
-  );
+    text,
+    spicy,
+    isFreeSpace: false,
+    status: 'active',
+    pool: itemPool ?? 'main',
+  }));
   const seedDocs = existingDocs.filter((doc) => doc.createdBy === 'seed');
   const seedById = new Map(seedDocs.map((doc) => [doc.id, doc]));
 
   // Canonical prompts absent from the live seed pool (a new/renamed prompt that
   // was never seeded — the #135 symptom for every new-text entry).
   const missing = [];
-  // Present at the canonical id but a stored field drifted from the canonical
-  // record. The doc id is a content hash of `text`, so a matching id normally
-  // implies matching text — but a malformed or hand-edited doc can carry the
-  // canonical id with a different stored `text`, and the whole point of this
-  // check is to catch a live pool that has silently diverged, so compare the
-  // stored fields exactly (Codex P2, PR #139) rather than trusting the id.
+  // Present at either accepted id but a stored field drifted from the canonical
+  // record. The doc id is normally a content hash of `text`, so a matching id
+  // normally implies matching text — but a malformed or hand-edited doc can
+  // carry an accepted id with different stored text, and the whole point of
+  // this check is to catch live drift, so compare stored fields exactly (Codex
+  // P2, PR #139) rather than trusting identity alone.
   // `spicy` is compared strictly, not by truthiness: firestore.rules require
   // `spicy is bool`, so a live value of `"true"`, `1`, `undefined`, or a missing
   // field (all of which `Boolean(...)` would silently coerce to the "right"
   // answer) is itself drift the check must surface (Codex P2, PR #139).
   const mismatched = [];
-  for (const [id, expectedDoc] of expected) {
-    const { text } = expectedDoc;
-    const live = seedById.get(id);
+  const matchedIds = new Set();
+  for (const expectedDoc of expected) {
+    const { canonicalId: id, text } = expectedDoc;
+    const live = expectedDoc.acceptedIds.map((acceptedId) => seedById.get(acceptedId)).find(Boolean);
     if (!live) {
       missing.push({ id, text });
     } else if (
@@ -288,8 +316,9 @@ export function verifySeedPool(
         reportHideThreshold > 0 &&
         live.reportCount >= reportHideThreshold)
     ) {
+      matchedIds.add(live.id);
       mismatched.push({
-        id,
+        id: live.id,
         text,
         expectedSpicy: expectedDoc.spicy,
         actualSpicy: live.spicy,
@@ -309,17 +338,19 @@ export function verifySeedPool(
           ? { reportHideThreshold, actualReportCount: live.reportCount }
           : {}),
       });
+    } else {
+      matchedIds.add(live.id);
     }
   }
   // Seed-owned docs the canonical pool no longer contains (an old prompt that a
   // reseed should have deleted — the #135 symptom for every retired entry).
   const stale = seedDocs
-    .filter((doc) => !expected.has(doc.id))
+    .filter((doc) => !matchedIds.has(doc.id))
     .map((doc) => ({ id: doc.id, text: doc.text }));
 
   return {
     ok: missing.length === 0 && mismatched.length === 0 && stale.length === 0,
-    expected: expected.size,
+    expected: expected.length,
     seedOwned: seedDocs.length,
     playerOwned: existingDocs.length - seedDocs.length,
     missing,
@@ -554,6 +585,7 @@ async function seed() {
     })),
     ALL_ITEMS,
     EVENT_SEED.settings.reportHideThreshold,
+    seedEvent.VERIFY_ITEM_IDS,
   );
   if (!report.ok) {
     console.error(formatDriftReport(report, EVENT_ID));
@@ -634,6 +666,7 @@ async function verify() {
     })),
     seedEvent.ALL_ITEMS,
     seedEvent.EVENT_SEED.settings.reportHideThreshold,
+    seedEvent.VERIFY_ITEM_IDS,
   );
   if (report.ok) {
     console.log(

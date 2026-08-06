@@ -51,3 +51,4 @@ export const ITEMS: SeedPrompt[];
 export const EASY_ITEMS: SeedPrompt[];
 export const CLOSING_ITEMS: SeedPrompt[];
 export const ALL_ITEMS: SeedPrompt[];
+export const VERIFY_ITEM_IDS: readonly string[];

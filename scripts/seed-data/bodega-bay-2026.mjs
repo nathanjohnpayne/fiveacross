@@ -12,13 +12,14 @@
 // 40 exploratory / 40 final-day, every entry tame (general-audience Event,
 // spicyRatio 0).
 //
-// KNOWN LIVE-DATA QUIRKS:
+// KNOWN LIVE-DATA QUIRK:
 //   - "Post of a picture of you and somebody else in your jammies" carries
 //     the draft's typo verbatim.
 //   - the live docs' ids still hash the PRE-edit texts (in-place edit), so
-//     `--verify` against the live pool reports id-level drift until a dedicated
-//     maintenance path reconciles it. Do not reseed the live Event casually:
-//     once a Day has a frozen snapshot, this script deliberately refuses a
+//     `VERIFY_ITEM_IDS` below records the live identities. `--verify` accepts
+//     that one documented identity generation while still comparing every
+//     display/behaviour field. Do not reseed the live Event casually: once a
+//     Day has a frozen snapshot, this script deliberately refuses a
 //     `SEED_DAYS=1` overwrite rather than risking existing cards.
 //
 // PERSISTED pool literals are the LEGACY values ('embark' for the easy pool,
@@ -124,10 +125,10 @@ export const ITEMS = [
   { text: `Ask somebody about their dream job`, spicy: false },
 ];
 
-// Closing pool — final day (40 rows, 38 unique texts; see the header's
-// duplicate quirk): the wrap-up card, which unlocks at the 11:00 check-out
-// freeze alongside the podium. Deliberately achievable from a kitchen or a
-// passenger seat. Stored under the LEGACY 'farewell' pool value.
+// Closing pool — final day (40 unique texts): the wrap-up card, which unlocks
+// at the 11:00 check-out freeze alongside the podium. Deliberately achievable
+// from a kitchen or a passenger seat. Stored under the LEGACY 'farewell' pool
+// value.
 export const CLOSING_ITEMS = [
   { text: `One last sunrise or foggy-morning photo`, spicy: false, pool: 'farewell' },
   { text: `Photograph the most chipper person this morning`, spicy: false, pool: 'farewell' },
@@ -298,3 +299,47 @@ export const EVENT_SEED = {
 };
 
 export const ALL_ITEMS = [...ITEMS, ...EASY_ITEMS, ...CLOSING_ITEMS];
+
+// The LIVE Bodega docs were originally created from the pre-edit payload at
+// 8a6005f, then their text was updated in place by the 2026-08-05 data pass.
+// Their ids therefore remain the old content hashes, and Day 0's frozen
+// snapshot correctly refers to those same ids. This list is ordered exactly as
+// ALL_ITEMS (main, easy, closing), not source-file declaration order. It is a
+// VERIFY allowance only: a fresh seed still writes current content-hash ids,
+// and RESEED remains blocked by the snapshot safety interlock.
+export const VERIFY_ITEM_IDS = Object.freeze([
+  'seed-41222260710632cd7a9e', 'seed-850270af982ae417768b', 'seed-5e7607f7ad1b467dbe2f', 'seed-3981705764a317e80da4',
+  'seed-9861ec1d9774d0c39d0a', 'seed-97ead41b5451a707104e', 'seed-6fa24283c7c1b6249264', 'seed-3b38830506cd5299368e',
+  'seed-f5f2da8269800cf45c6f', 'seed-15f8ae6d43754271fbb0', 'seed-9aeda2fac15c16e3d97a', 'seed-534fa274e115d66a590b',
+  'seed-4b3eabb683d3cabd2368', 'seed-8eaaff0f2578d54bb0c2', 'seed-e933e25dc9b7c513e61a', 'seed-0fe9ed74caf8f78b1abf',
+  'seed-7ecf79940ee121f9bec0', 'seed-a277997c8d568f625c7a', 'seed-554933a62dd3cabffc29', 'seed-a1793e186116b3b20838',
+  'seed-9b402cd3d1caa20ab745', 'seed-44057747dfc5f57fbf83', 'seed-03e8433dcb7f417f4479', 'seed-d21d209500e6c256a132',
+  'seed-7f65aa727f5337bf05e6', 'seed-aa804b62bd4d158720d0', 'seed-ddd11457fe75f0bc96ee', 'seed-99535c5baf96cc326d26',
+  'seed-c99e9b43b1afb1fc6ee7', 'seed-bd2b925445988f053b17', 'seed-934ec551c3c8ce4ef0ac', 'seed-79219ac8df9899b7ef63',
+  'seed-14e42eb27863ee770e36', 'seed-9f970a432d3d82e7e33a', 'seed-709fd0b6c5ec32a7c291', 'seed-e496ab341744376adbeb',
+  'seed-32f3c85f0009ee5e4e46', 'seed-f58ae48b2cec57a989ef', 'seed-e17881a285dfba087893', 'seed-c7bd49e3addda7e008ff',
+  'seed-de1beb6d60339adfef81', 'seed-ea1296b89ef2717d98cd', 'seed-0dc10bad39200c6960a1', 'seed-7e453c7aa08a96d49112',
+  'seed-758b0416b22240ad80f2', 'seed-9d3d4072c737617d9c6f', 'seed-4fe7cbe93c4cab8fff38', 'seed-9b4405edfa10c8e1b760',
+  'seed-84eaacb99c2f4aa7fda9', 'seed-642416d8acc491194967', 'seed-635f80655d7d4c72c889', 'seed-644c4e66d052dda0199c',
+  'seed-45fa4e6a7458c1296220', 'seed-79fdbff19a59c82df14d', 'seed-7db7f11fa3d7e4dc86ab', 'seed-091e287dabd2fc483e0e',
+  'seed-109bb595fd4c83a89e5b', 'seed-8a977e49ada0396964d8', 'seed-8734026d66eed5a4dd8f', 'seed-e2cfcbc63cf6b2843a92',
+  'seed-4c24e5095a96d9814b65', 'seed-63ccd2cd0baff24f7f4e', 'seed-d68ecde402a5142b0e1b', 'seed-58bc8f47c4b99b7e18d8',
+  'seed-30d71a5f2f163db64602', 'seed-8ac0fe3885e885fdd41a', 'seed-96859cc51dd8ce56020f', 'seed-46d7bd7bb411c89514fd',
+  'seed-c8cbc01bfb3fe566053c', 'seed-f21db6b2bd26d697d7d5', 'seed-74492f635fe3c4b3dceb', 'seed-4182ec0ea10cbc7c4062',
+  'seed-a17e76d48d04f4ee0ce6', 'seed-4e8f724aec263100f6fd', 'seed-6be8d8c32e430ba22fb2', 'seed-d1247d21850c4cf83f6d',
+  'seed-7c2c581921b1ac0638dd', 'seed-ac4531c5ae998e4e9396', 'seed-39c400fad0cf357fa2db', 'seed-262934d2c272c3f70468',
+  'seed-6470e4ca8f2291c7d59c', 'seed-40acc9ebedc6d4acf021', 'seed-c01cd2fc3e0ea39edc02', 'seed-6847ad8409bf64d82917',
+  'seed-ee79ae4c3be8bf79b248', 'seed-8b6707b47c56eeb09527', 'seed-2850841abb4318841671', 'seed-a455383a17e819a776b9',
+  'seed-beca940a52f411540992', 'seed-f8da050e237ea944a883', 'seed-21163967ec056501bbf3', 'seed-8efe1a608817fa7f6a41',
+  'seed-52c4e49a69010970414c', 'seed-6a59a0b17b908c6f6092', 'seed-59e34af61cd031c099d8', 'seed-92c5fa8b5ffb5539278e',
+  'seed-75cf395ce2127bedf3ed', 'seed-84cde2bcfdd1074f4e28', 'seed-e62938de822eac8bff45', 'seed-6bd509827c6f65d46a25',
+  'seed-61793f6885ba37aba3ac', 'seed-d8812d5c8f6a6f9dc3f0', 'seed-a3446506cda43420e878', 'seed-f04fdff3aec8956e5ef2',
+  'seed-147c6b66125b292baebe', 'seed-d9d146dc229a95103675', 'seed-da0ae836697b3fb216fb', 'seed-1142de1f12020289989c',
+  'seed-89a1c0241535f7559af0', 'seed-8b4ce506c40b56f782ab', 'seed-cef46ede0bc6f5337313', 'seed-21e23827cf72adf48c81',
+  'seed-cae5b9c013826480ace9', 'seed-2877ac7e92cecb4b9027', 'seed-a5521c6fe89955773068', 'seed-e62be71f0b1abd773f13',
+  'seed-b1bf627bbb0e2e56ee73', 'seed-1f0adc12cd38bf0911eb', 'seed-effc0d18d86d9a79a4d1', 'seed-de6bfe98ca1aa0eb17cc',
+]);
+
+if (VERIFY_ITEM_IDS.length !== ALL_ITEMS.length || new Set(VERIFY_ITEM_IDS).size !== VERIFY_ITEM_IDS.length) {
+  throw new Error('bodega-bay-2026 VERIFY_ITEM_IDS must be a unique, one-to-one list matching ALL_ITEMS.');
+}

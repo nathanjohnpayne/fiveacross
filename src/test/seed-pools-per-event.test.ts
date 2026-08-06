@@ -3,6 +3,7 @@ import { SEED_EVENTS, PROJECT_DEFAULT_EVENT, resolveSeedEvent } from '../../scri
 import * as med2026 from '../../scripts/seed-data/med-2026.mjs';
 import * as bodegaBay2026 from '../../scripts/seed-data/bodega-bay-2026.mjs';
 import { seedItemDocId } from '../../scripts/seed-data/item-id.mjs';
+import { verifySeedPool } from '../../scripts/seed.mjs';
 
 // Per-Event seed modules (#563): each Event pins ITS OWN pool counts and
 // uniqueness, so the drift verifier (`node scripts/seed.mjs --verify`) keeps a
@@ -104,6 +105,43 @@ describe('bodega-bay-2026 — pool pins', () => {
     for (const pool of [bodegaBay2026.EASY_ITEMS, bodegaBay2026.ITEMS, bodegaBay2026.CLOSING_ITEMS]) {
       expect(new Set(pool.map((i) => i.text)).size).toBe(pool.length);
     }
+  });
+
+  it('verifies the live in-place-edited pool against its recorded legacy ids', () => {
+    // #644 Phase 4b P1: the 2026-08-05 text correction deliberately kept the
+    // old ids so Day 0's frozen snapshot and existing cards remain valid. The
+    // verifier must accept ONLY this recorded identity generation—not a
+    // fabricated arbitrary id—and still enforce every canonical field.
+    expect(bodegaBay2026.VERIFY_ITEM_IDS).toHaveLength(bodegaBay2026.ALL_ITEMS.length);
+    expect(new Set(bodegaBay2026.VERIFY_ITEM_IDS).size).toBe(bodegaBay2026.ALL_ITEMS.length);
+    const live = bodegaBay2026.ALL_ITEMS.map((item, index) => ({
+      id: bodegaBay2026.VERIFY_ITEM_IDS[index]!,
+      text: item.text,
+      spicy: item.spicy,
+      pool: item.pool ?? 'main',
+      createdBy: 'seed',
+      isFreeSpace: false,
+      status: 'active',
+      reportCount: 0,
+    }));
+    expect(
+      verifySeedPool(
+        live,
+        bodegaBay2026.ALL_ITEMS,
+        bodegaBay2026.EVENT_SEED.settings.reportHideThreshold,
+        bodegaBay2026.VERIFY_ITEM_IDS,
+      ),
+    ).toMatchObject({ ok: true, missing: [], mismatched: [], stale: [] });
+
+    live[0] = { ...live[0]!, text: 'Not Bodega canonical text' };
+    expect(
+      verifySeedPool(
+        live,
+        bodegaBay2026.ALL_ITEMS,
+        bodegaBay2026.EVENT_SEED.settings.reportHideThreshold,
+        bodegaBay2026.VERIFY_ITEM_IDS,
+      ),
+    ).toMatchObject({ ok: false, mismatched: [{ text: bodegaBay2026.ALL_ITEMS[0]!.text }] });
   });
 
   it('never carries the 🔞 glyph in display text', () => {

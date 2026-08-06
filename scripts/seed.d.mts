@@ -52,6 +52,9 @@ export type SeedEventModule = {
   EASY_ITEMS: SeedPrompt[];
   CLOSING_ITEMS: SeedPrompt[];
   ALL_ITEMS: SeedPrompt[];
+  /** Optional historic identities the live Event deliberately retained after
+   *  an in-place text edit; must align one-to-one with ALL_ITEMS. */
+  VERIFY_ITEM_IDS?: readonly string[];
 };
 
 export function adminRoster(raw?: string): string[];
@@ -95,5 +98,6 @@ export function verifySeedPool(
   existingDocs: SeedDoc[],
   pool: SeedPrompt[],
   reportHideThreshold?: number,
+  verifyItemIds?: readonly string[],
 ): SeedPoolReport;
 export function formatDriftReport(report: SeedPoolReport, eventId: string): string;
