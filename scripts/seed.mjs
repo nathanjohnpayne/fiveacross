@@ -6,6 +6,12 @@
 //   3. Find each Admin's Google UID: sign into the app once, then Firebase console > Authentication > Users.
 //   4. ADMIN_UID=<uid>[,<uid>,...] GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/seed.mjs
 //
+// Per-Event targeting (#563): the seed payload comes from
+// scripts/seed-data/<event-id>.mjs, selected by VITE_EVENT_ID or (when unset)
+// by the resolved project's default Event — gaycruisebingo → med-2026,
+// fiveacross → bodega-bay-2026. `npm run verify:seed` /
+// `npm run verify:seed:fiveacross` pin project + Event per target.
+//
 // Admin roster: Admin is the only privileged role, and `events/{id}.admins` is the
 // roster the app trusts. ADMIN_UID takes a comma-separated list of uids; the target
 // roster is 2–4 Admins including Nathan's seed uid (the concrete co-admin uids are
@@ -21,171 +27,23 @@
 // reseed leaves a live schedule untouched. Pass SEED_DAYS=1 to explicitly
 // overwrite `days` on an existing Event (a deliberate itinerary migration).
 //
-import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { PROJECT_DEFAULT_EVENT, resolveSeedEvent } from './seed-data/index.mjs';
+import { seedItemDocId } from './seed-data/item-id.mjs';
 
 // ---------------------------------------------------------------------------
-// Seed payload — importable with no side effects (Firebase is only touched when
-// the script is executed directly, below). `src/test/w1-event-seed.test.ts`
-// asserts this shape per specs/w1-event-seed.md.
+// Per-Event seed payloads (#563) live in scripts/seed-data/<event-id>.mjs —
+// importable with no side effects (Firebase is only touched when this script
+// is executed directly, below). The helpers here (roster parsing, the event
+// write payload, item mutations, the drift verifier) are Event-agnostic and
+// take the target Event's payload as input, so the drift check works for every
+// project rather than comparing one baked pool. `src/test/w1-event-seed.test.ts`
+// asserts their behavior per specs/w1-event-seed.md.
 // ---------------------------------------------------------------------------
 
-export const EVENT_SEED = {
-  name: 'Atlantis Med—Trieste to Barcelona',
-  sailStart: '2026-07-15',
-  sailEnd: '2026-07-24',
-  status: 'active',
-  defaultTheme: 'neon-playground',
-  claimMode: 'honor', // 'honor' | 'proof_required' | 'admin_confirmed'
-  // NOTE: `bannedUids` (#113) is deliberately NOT seeded. This payload is written
-  // with { merge: true } and the seed is documented as safe to re-run (to add
-  // admins / refresh prompts), so writing bannedUids here would clobber a live ban
-  // list back to [] on every reseed once #108 starts populating it — silent data
-  // loss (unbanning everyone) on a routine op. A brand-new event never carries the
-  // field and reads as [] via eventConverter's missing-field default (converters.ts),
-  // and a reseed leaves the existing bannedUids untouched because this merge write
-  // never mentions it. The follow-up (#108) fills it via banUser/unbanUser
-  // (arrayUnion/arrayRemove) on the admin-writable event doc, never users/{uid}.
-  // reportHideThreshold is load-bearing (ADR 0004 reactive moderation: auto-hide
-  // at 4 distinct reports; value pending final confirmation via #15).
-  // spicyRatio is the target share of spicy (🔞) Prompts among a Board's 24
-  // non-free Squares for `dealBoard`'s stratified sampling (w1-seed-and-composition);
-  // 0.4 matches `dealBoard`'s own default, kept explicit here so the seeded Event
-  // doc is self-describing rather than relying on the app-side fallback. ADR 0004
-  // removed the event's other Phase-0 flag as dead config (type-side removal:
-  // w0-type-contract), so no other key is seeded here.
-  settings: { reportHideThreshold: 4, spicyRatio: 0.4 },
-  // Single event timezone (daily-cards-spec § "Itinerary and schedule") — every
-  // port on the July sailing is CEST, so no ship-clock drift handling is needed.
-  timezone: 'Europe/Rome',
-  // The ten-Day mapping that drives the whole feature's unlock/theme/pool
-  // machinery (daily-cards-spec § "Itinerary and schedule" + "Free space per
-  // day"), the SAME content as `DAYS` in `src/data/seed.ts`; kept as a separate
-  // literal here for the same no-cross-module-import reason as ITEMS below.
-  // `src/data/seed-and-composition.test.ts` asserts the two stay in sync.
-  days: [
-    {
-      index: 0,
-      date: '2026-07-15',
-      port: 'Trieste',
-      portEmoji: '🇮🇹',
-      theme: 'welcome-aboard',
-      // Paraphrased from the guide's "Atlantis Welcome Party" for the markless-
-      // copy non-goal (mirrors src/data/seed.ts + THEMES).
-      tonight: ['⛵ Sail-Away Party', '🎉 Welcome Party'],
-      pool: 'embark',
-      tutorial: true,
-      // 0 = "live from event open", and the scheduler fails OPEN on a
-      // non-positive cutoff (#289) — a positive historical constant would
-      // re-starve any FRESH seed run after it (seeded items carry
-      // `createdAt: Date.now()`; Codex P1). Mirrors src/data/seed.ts.
-      unlockAt: 0,
-      freeText: 'You made it aboard',
-    },
-    {
-      index: 1,
-      date: '2026-07-16',
-      port: 'Split',
-      portEmoji: '🇭🇷',
-      theme: 'uniforms-without-borders',
-      tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-16T08:00:00+02:00'),
-    },
-    {
-      index: 2,
-      date: '2026-07-17',
-      port: 'Sea Day',
-      portEmoji: '🌊',
-      theme: 'neon-pink-playground',
-      tonight: ['💖 Seriously Pink T-Dance', '🌈 Neon Playground'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-17T08:00:00+02:00'),
-    },
-    {
-      index: 3,
-      date: '2026-07-18',
-      port: 'Valletta',
-      portEmoji: '🇲🇹',
-      theme: 'sporty-splash',
-      tonight: ['💦 Splash T-Dance', '🏋️ Get Sporty'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-18T08:00:00+02:00'),
-    },
-    {
-      index: 4,
-      date: '2026-07-19',
-      port: 'Palermo (Sicily)',
-      portEmoji: '🇮🇹',
-      theme: 'under-the-stars',
-      tonight: ['🎭 AirOtic', '🌌 Under the Stars'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-19T08:00:00+02:00'),
-    },
-    {
-      index: 5,
-      date: '2026-07-20',
-      port: 'Naples (Pompeii)',
-      portEmoji: '🇮🇹',
-      theme: 'glamiators',
-      tonight: ['🎤 Solea Pfeiffer', '🏛️ Glamiators'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-20T08:00:00+02:00'),
-    },
-    {
-      index: 6,
-      date: '2026-07-21',
-      port: 'Rome (Civitavecchia)',
-      portEmoji: '🇮🇹',
-      theme: 'atlantis-classics',
-      // "Dance Classics" paraphrases the guide's "Atlantis Classics".
-      tonight: ['🎭 Persephone', '🏺 Dance Classics'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-21T08:00:00+02:00'),
-    },
-    {
-      index: 7,
-      date: '2026-07-22',
-      port: 'Villefranche (Nice)',
-      portEmoji: '🇫🇷',
-      theme: 'summer-white',
-      tonight: ['🎤 HAYLA', '🤍 Summer White Party'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-22T08:00:00+02:00'),
-    },
-    {
-      index: 8,
-      date: '2026-07-23',
-      port: 'Marseille',
-      portEmoji: '🇫🇷',
-      theme: 'revival-disco',
-      tonight: ['🪩 Revival! Classic Disco T-Dance', '🎉 Last Dance'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-23T08:00:00+02:00'),
-    },
-    {
-      index: 9,
-      date: '2026-07-24',
-      port: 'Barcelona',
-      portEmoji: '🇪🇸',
-      theme: 'so-long-farewell',
-      // Editorial line — disembark morning publishes no guide events.
-      tonight: ['🧳 Disembark in Barcelona', '👋 Until next year'],
-      pool: 'farewell',
-      tutorial: true,
-      unlockAt: Date.parse('2026-07-24T08:00:00+02:00'),
-      freeText: 'We had the best damn time',
-    },
-  ],
-};
+// Re-exported so existing importers (tests, tests/e2e/support) keep one
+// canonical source for the content-hash doc id.
+export { seedItemDocId };
 
 // Parse the ADMIN_UID env var (comma-separated uids) into the events/{id}.admins roster.
 export function adminRoster(raw = '') {
@@ -215,192 +73,36 @@ export function adminRoster(raw = '') {
 // edit (Codex P2, PR #229). `seed()` below decides `includeDays` by checking
 // whether the Event doc already exists (or via the explicit `SEED_DAYS=1`
 // migration override), not this function.
-export function eventWritePayload(admins, deleteBlackoutEnabled, includeDays = true) {
+//
+// `eventSeed` is the target Event's EVENT_SEED (a scripts/seed-data module) —
+// per-Event since #563, so this helper writes whichever Event it is given
+// rather than one baked payload.
+export function eventWritePayload(eventSeed, admins, deleteBlackoutEnabled, includeDays = true) {
   // Destructure `days` out rather than spreading it in conditionally: setting a
   // key to `undefined` would still send `days: undefined` to the Admin SDK
   // (which throws unless `ignoreUndefinedProperties` is set) instead of simply
   // omitting the field from the merge write.
-  const { days, ...seedWithoutDays } = EVENT_SEED;
+  const { days, ...seedWithoutDays } = eventSeed;
   return {
-    ...(includeDays ? EVENT_SEED : seedWithoutDays),
+    ...(includeDays ? eventSeed : seedWithoutDays),
     settings: {
-      ...EVENT_SEED.settings,
+      ...eventSeed.settings,
       blackoutEnabled: deleteBlackoutEnabled,
     },
     ...(admins.length ? { admins } : {}),
   };
 }
 
-// Canonical 80-entry Prompt pool (24 spicy / 56 tame — w1-seed-and-composition),
-// the SAME content as `SEED_ITEMS` in `src/data/seed.ts`; kept as a separate
-// literal here (rather than imported) so this plain-JS script has no
-// cross-module import into the TS app source. `src/data/seed-and-composition.test.ts`
-// asserts the two stay in sync.
-export const ITEMS = [
-  { text: `Threesome`, spicy: true },
-  { text: `Foursome`, spicy: true },
-  { text: `Fivesome`, spicy: true },
-  { text: `Get propositioned by septuagenarians`, spicy: true },
-  { text: `Suite orgy`, spicy: true },
-  { text: `Domestic violence`, spicy: false },
-  { text: `Dance-floor blowjob`, spicy: true },
-  { text: `Get locked in a bathroom`, spicy: false },
-  { text: `Lost passport`, spicy: false },
-  { text: `Make OnlyFans content on a boat`, spicy: true },
-  { text: `Make LinkedIn content on a boat`, spicy: false },
-  { text: `Selfie with Bianca Del Rio`, spicy: false },
-  { text: `Selfie with HAYLA`, spicy: false },
-  { text: `Three loads in one day`, spicy: true },
-  { text: `Bang a Dutch person`, spicy: true },
-  { text: `Bang an Aussie`, spicy: true },
-  { text: `Sex with four gays from four continents`, spicy: true },
-  { text: `Passaround-party Norwegian`, spicy: true },
-  // entry 19 = Free Space (FREE_TEXT) — not a pool Prompt
-  { text: `Poppers spill`, spicy: true },
-  { text: `30-year age gap`, spicy: true },
-  { text: `Dance-floor k-hole`, spicy: false },
-  { text: `Cafeteria k-hole`, spicy: false },
-  { text: `Make out with a woman`, spicy: true },
-  { text: `Three-way kiss`, spicy: true },
-  { text: `Cause an international incident`, spicy: false },
-  { text: `Wear a sissy skirt`, spicy: true },
-  { text: `Loudly announce an early night`, spicy: false },
-  { text: `Karaoke "Fergalicious"`, spicy: false },
-  { text: `Eat carbs`, spicy: false },
-  { text: `Become Dick Deck famous`, spicy: true },
-  { text: `Post a butthole pic to Telegram`, spicy: true },
-  { text: `Use a condom`, spicy: true },
-  { text: `Mirror-hall selfie`, spicy: false },
-  { text: `Snort powder off a cock`, spicy: true },
-  { text: `Hear Madonna's "Danceteria" on the dance floor`, spicy: false },
-  { text: `Get read by Bianca Del Rio`, spicy: false },
-  { text: `Get bred by Bianca Del Rio`, spicy: true },
-  { text: `Drink three dirty martinis`, spicy: false },
-  { text: `Matching Speedos`, spicy: false },
-  { text: `Sunset selfie`, spicy: false },
-  { text: `Lost bracelet`, spicy: false },
-  { text: `Dramatic outfit change before dinner`, spicy: false },
-  { text: `Feathers, mesh, or sequins before noon`, spicy: false },
-  { text: `"I'm just having one drink"`, spicy: false },
-  { text: `Pool-chair territory dispute`, spicy: false },
-  { text: `Overpacked toiletries`, spicy: false },
-  { text: `Cruise boyfriend`, spicy: false },
-  { text: `Cruise-boyfriend breakup`, spicy: false },
-  { text: `Accidental matching outfits`, spicy: false },
-  { text: `Elevator outfit compliment`, spicy: false },
-  { text: `New best friend from another city`, spicy: false },
-  { text: `Late-night pizza`, spicy: false },
-  { text: `Breakfast in sunglasses`, spicy: false },
-  { text: `Nap through the main event`, spicy: false },
-  { text: `Poolside caftan moment`, spicy: false },
-  { text: `Too many group chats`, spicy: false },
-  { text: `"I need electrolytes"`, spicy: false },
-  { text: `Emergency fan deployment`, spicy: false },
-  { text: `Cabaret hands during karaoke`, spicy: false },
-  { text: `Join a new friend group`, spicy: false },
-  { text: `Themed-party costume escalation`, spicy: false },
-  { text: `Get lost on the ship`, spicy: false },
-  { text: `Ship-photographer ambush`, spicy: false },
-  { text: `"This is my vacation personality"`, spicy: false },
-  { text: `Unexpected Broadway sing-along`, spicy: false },
-  { text: `Become ship-famous`, spicy: false },
-  { text: `Matching tank tops`, spicy: false },
-  { text: `Reappear at Dick Deck two hours after "going to bed"`, spicy: false },
-  { text: `Suspiciously perfect tan`, spicy: false },
-  { text: `"I'm never drinking again"`, spicy: false },
-  { text: `"I need a vacation from my vacation"`, spicy: false },
-  { text: `Caftan gets sincere applause`, spicy: false },
-  { text: `Garment steamer packed`, spicy: false },
-  { text: `Group-dinner reservation drama`, spicy: false },
-  { text: `Bathroom-mirror selfie`, spicy: false },
-  { text: `Book next year's cruise before this one ends`, spicy: false },
-  { text: `"I'm going to be homophobic for a week after this cruise"`, spicy: false },
-  { text: `Dance to the "Total Eclipse of the Heart" remix`, spicy: false },
-  { text: `Fuck a drag queen out of drag`, spicy: true },
-  { text: `Fuck a drag queen IN drag`, spicy: true },
-];
-
-// The two curated tutorial pools (daily-cards-spec § "Tutorial item lists"), the
-// SAME content as `EASY_ITEMS`/`CLOSING_ITEMS` in `src/data/seed.ts`; kept as
-// separate literals here for the same no-cross-module-import reason as ITEMS
-// above. `src/data/seed-and-composition.test.ts` asserts they stay in sync.
-export const EASY_ITEMS = [
-  { text: `Get your favorite dessert`, spicy: false, pool: 'embark' },
-  { text: `Find your muster station`, spicy: false, pool: 'embark' },
-  { text: `Get lost finding your cabin`, spicy: false, pool: 'embark' },
-  { text: `Ride an elevator the wrong way`, spicy: false, pool: 'embark' },
-  { text: `Locate the late-night pizza`, spicy: false, pool: 'embark' },
-  { text: `First soft-serve of the cruise`, spicy: false, pool: 'embark' },
-  { text: `Toast at the sailaway party`, spicy: false, pool: 'embark' },
-  { text: `Wave goodbye to land`, spicy: false, pool: 'embark' },
-  { text: `Hear the ship's horn`, spicy: false, pool: 'embark' },
-  { text: `Meet someone from another country`, spicy: false, pool: 'embark' },
-  { text: `Learn a crew member's name`, spicy: false, pool: 'embark' },
-  { text: `Befriend a bartender`, spicy: false, pool: 'embark' },
-  { text: `Compliment a stranger's outfit`, spicy: false, pool: 'embark' },
-  { text: `Ask "where are you from?" three times`, spicy: false, pool: 'embark' },
-  { text: `Exchange Instagrams with a new friend`, spicy: false, pool: 'embark' },
-  { text: `Spot matching Speedos`, spicy: false, pool: 'embark' },
-  { text: `Unpack a truly unhinged outfit`, spicy: false, pool: 'embark' },
-  { text: `Plan tomorrow's party look`, spicy: false, pool: 'embark' },
-  { text: `Test the bed (nap counts)`, spicy: false, pool: 'embark' },
-  { text: `Stateroom mirror selfie`, spicy: false, pool: 'embark' },
-  { text: `Balcony or porthole photo`, spicy: false, pool: 'embark' },
-  { text: `Order a frozen drink with zero shame`, spicy: false, pool: 'embark' },
-  { text: `Sunscreen a stranger's back (or volunteer yours)`, spicy: false, pool: 'embark' },
-  { text: `Scope out the gym you'll never use`, spicy: false, pool: 'embark' },
-  { text: `Find the theater`, spicy: false, pool: 'embark' },
-  { text: `Locate the Dick Deck (reconnaissance only)`, spicy: false, pool: 'embark' },
-  { text: `Sign up for something you'll never attend`, spicy: false, pool: 'embark' },
-  { text: `Overhear someone already complaining`, spicy: false, pool: 'embark' },
-];
-
-export const CLOSING_ITEMS = [
-  { text: `One last sunrise or sunset photo`, spicy: false, pool: 'farewell' },
-  { text: `Say goodbye to your cruise boyfriend`, spicy: false, pool: 'farewell' },
-  { text: `Exchange numbers with your new best friend`, spicy: false, pool: 'farewell' },
-  { text: `Promise to visit someone in their city`, spicy: false, pool: 'farewell' },
-  { text: `Say "see you next year"—and mean it`, spicy: false, pool: 'farewell' },
-  { text: `Book next year's cruise (or swear you will)`, spicy: false, pool: 'farewell' },
-  { text: `Final soft-serve`, spicy: false, pool: 'farewell' },
-  { text: `Thank your cabin steward by name`, spicy: false, pool: 'farewell' },
-  { text: `Thank the bartender who carried you`, spicy: false, pool: 'farewell' },
-  { text: `One last lap around the ship`, spicy: false, pool: 'farewell' },
-  { text: `Last dance to one more song`, spicy: false, pool: 'farewell' },
-  { text: `Group photo with your chosen family`, spicy: false, pool: 'farewell' },
-  { text: `Cry (or valiantly almost cry)`, spicy: false, pool: 'farewell' },
-  { text: `Find glitter somewhere impossible`, spicy: false, pool: 'farewell' },
-  { text: `Suitcase no longer closes`, spicy: false, pool: 'farewell' },
-  { text: `Wear your softest airport look`, spicy: false, pool: 'farewell' },
-  { text: `Breakfast in sunglasses, one last time`, spicy: false, pool: 'farewell' },
-  { text: `Swap favorite memories of the week`, spicy: false, pool: 'farewell' },
-  { text: `"I'm never drinking again" (sincere)`, spicy: false, pool: 'farewell' },
-  { text: `Post the photo dump`, spicy: false, pool: 'farewell' },
-  { text: `Screenshot the group chat's new name`, spicy: false, pool: 'farewell' },
-  { text: `Set a reunion date`, spicy: false, pool: 'farewell' },
-  { text: `Give away your leftover sunscreen`, spicy: false, pool: 'farewell' },
-  { text: `Realize you never used the gym`, spicy: false, pool: 'farewell' },
-  { text: `Hum the song of the week`, spicy: false, pool: 'farewell' },
-  { text: `Take home a (legal) souvenir`, spicy: false, pool: 'farewell' },
-  { text: `Five-star shoutout for your favorite crew member`, spicy: false, pool: 'farewell' },
-  { text: `Stand at the back of the ship and feel things`, spicy: false, pool: 'farewell' },
-];
-
-// Deterministic doc id (content hash of the text only) so re-running the seed
-// upserts the same prompt docs instead of creating duplicates (boards sample
-// distinct ids, so dupes would surface the same prompt on multiple squares).
-export function seedItemDocId(text) {
-  return `seed-${createHash('sha1').update(text).digest('hex').slice(0, 20)}`;
-}
-
-// All three seeded pools combined — the main 80-entry pool (untagged, so it
-// defaults to 'main' below) plus the two curated tutorial pools (already
-// tagged). Curated pools are seeded `status: 'active'` directly (no
-// pending-approval gate — that gate is `main`-only, per daily-cards-spec §
-// "Item pools and the approval flow").
-export const ALL_ITEMS = [...ITEMS, ...EASY_ITEMS, ...CLOSING_ITEMS];
-
-export function seedItemMutations(existingDocs, now = Date.now(), pool = ALL_ITEMS) {
+// `pool` is REQUIRED (the target Event's ALL_ITEMS): with per-Event seed data
+// (#563) there is no one global pool a default could safely point at, and a
+// caller that omitted it would silently seed nothing or the wrong Event's
+// prompts — so it fails loudly instead.
+export function seedItemMutations(existingDocs, now = Date.now(), pool) {
+  if (!Array.isArray(pool)) {
+    throw new Error(
+      'seedItemMutations requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
+    );
+  }
   return {
     deleteIds: existingDocs.filter((doc) => doc.createdBy === 'seed').map((doc) => doc.id),
     writes: pool.map(({ text, spicy, pool: itemPool }) => ({
@@ -434,15 +136,23 @@ export function seedItemMutations(existingDocs, now = Date.now(), pool = ALL_ITE
 // ignored — they are not part of the canonical pool and must never count as drift.
 export function verifySeedPool(
   existingDocs,
-  // Defaults to ALL_ITEMS (main + embark + farewell), not the main-only ITEMS:
-  // both real call sites (seed()/verify() below) already pass ALL_ITEMS
-  // explicitly, and a caller that relies on the documented/default contract
-  // (an ad-hoc smoke check, a test that omits the argument) must not silently
-  // report OK while every embark/farewell seed doc is missing or stale
-  // (Codex P2, PR #229).
-  pool = ALL_ITEMS,
-  reportHideThreshold = EVENT_SEED.settings.reportHideThreshold,
+  // REQUIRED: the target Event's full canonical pool (its ALL_ITEMS — main +
+  // both curated pools). Per-Event since #563, so there is no global default a
+  // partial pool could silently hide behind: a caller that omits the argument
+  // (an ad-hoc smoke check, a test) must fail loudly rather than report OK
+  // against the wrong Event's canon — the same failure class Codex P2 (PR
+  // #229) flagged when the old default was the main-only ITEMS.
+  pool,
+  // The auto-hide visibility threshold to check reportCount against. Defaults
+  // to 4 — the value every Event seeds today (`settings.reportHideThreshold`,
+  // ADR 0004); pass the target Event's own value when they diverge.
+  reportHideThreshold = 4,
 ) {
+  if (!Array.isArray(pool)) {
+    throw new Error(
+      'verifySeedPool requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
+    );
+  }
   const expected = new Map(
     pool.map(({ text, spicy, pool: itemPool }) => [
       seedItemDocId(text),
@@ -557,8 +267,6 @@ export async function initFirestore() {
     throw err;
   }
 
-  const EVENT_ID = process.env.VITE_EVENT_ID || 'med-2026';
-
   // Pin the target Firebase project so a bare `node scripts/seed.mjs [--verify]`
   // (npm run seed / verify:seed) can never silently read or write the wrong
   // project (Codex P2, PR #139): prefer the standard env vars, else fall back to
@@ -576,6 +284,15 @@ export async function initFirestore() {
     }
   }
 
+  // Resolve the target Event: an explicit VITE_EVENT_ID wins; otherwise the
+  // resolved project's default Event (#563) so `verify:seed` /
+  // `verify:seed:fiveacross` each compare their own project's live pool
+  // against that Event's canon. `resolveSeedEvent` fails loudly on an Event id
+  // this repo has no seed data for.
+  const EVENT_ID =
+    process.env.VITE_EVENT_ID || PROJECT_DEFAULT_EVENT[projectId] || 'med-2026';
+  const seedEvent = resolveSeedEvent(EVENT_ID);
+
   const keyUrl = new URL('../serviceAccountKey.json', import.meta.url);
   initializeApp({
     ...(existsSync(keyUrl)
@@ -583,11 +300,14 @@ export async function initFirestore() {
       : { credential: applicationDefault() }),
     ...(projectId ? { projectId } : {}),
   });
-  return { db: getFirestore(), EVENT_ID, FieldValue, projectId };
+  // `projectId` rides along for scripts/provision-bodega-preview.mjs (#649),
+  // which pins its writes to the fiveacross project.
+  return { db: getFirestore(), EVENT_ID, seedEvent, FieldValue, projectId };
 }
 
 async function seed() {
-  const { db, EVENT_ID, FieldValue } = await initFirestore();
+  const { db, EVENT_ID, seedEvent, FieldValue } = await initFirestore();
+  const { EVENT_SEED, ALL_ITEMS } = seedEvent;
   const admins = adminRoster(process.env.ADMIN_UID);
 
   const eventRef = db.doc(`events/${EVENT_ID}`);
@@ -606,7 +326,7 @@ async function seed() {
   const existingDays = existingEventSnap.data()?.days;
   const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
   const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
-  await eventRef.set(eventWritePayload(admins, FieldValue.delete(), includeDays), {
+  await eventRef.set(eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), includeDays), {
     merge: true,
   });
 
@@ -631,6 +351,7 @@ async function seed() {
       createdBy: doc.data().createdBy,
     })),
     Date.now(),
+    ALL_ITEMS,
   );
   const batch = db.batch();
   for (const id of deleteIds) batch.delete(col.doc(id));
@@ -638,7 +359,7 @@ async function seed() {
   await batch.commit();
 
   // Self-check: read the collection back and confirm the live seed pool now
-  // matches the canonical ALL_ITEMS (main + embark + farewell). A green seed
+  // matches the canonical ALL_ITEMS (main + both curated pools). A green seed
   // run that leaves drift (partial batch, wrong project, stale doc a scoped
   // delete missed) should fail loudly right here, not weeks later when a
   // player notices the old prompts.
@@ -654,6 +375,7 @@ async function seed() {
       pool: doc.data().pool,
     })),
     ALL_ITEMS,
+    EVENT_SEED.settings.reportHideThreshold,
   );
   if (!report.ok) {
     console.error(formatDriftReport(report, EVENT_ID));
@@ -696,12 +418,13 @@ export function formatDriftReport(report, eventId) {
   // #139). ADMIN_UID is only for the separate act of *granting* admin.
   //
   // Echo the SAME target the drift was found against, not a hardcoded default
-  // (Codex P2, PR #139): carry the resolved project and — when it is not the
-  // `med-2026` default — the `VITE_EVENT_ID`, so a copy-pasted reconcile command
-  // reseeds the event that actually drifted rather than a different one.
+  // (Codex P2, PR #139): carry the resolved project and the explicit
+  // `VITE_EVENT_ID` (always, now that Events are per-project — #563), so a
+  // copy-pasted reconcile command reseeds the event that actually drifted
+  // rather than a different one.
   const project =
     process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'gaycruisebingo';
-  const eventEnv = eventId && eventId !== 'med-2026' ? `VITE_EVENT_ID=${eventId} ` : '';
+  const eventEnv = eventId ? `VITE_EVENT_ID=${eventId} ` : '';
   lines.push(
     `  → reconcile (prompts only): ADMIN_UID= ${eventEnv}GOOGLE_CLOUD_PROJECT=${project} node scripts/seed.mjs`,
   );
@@ -710,10 +433,10 @@ export function formatDriftReport(report, eventId) {
 
 // Read-only drift check (`node scripts/seed.mjs --verify`). Never writes — safe
 // to run as a post-deploy smoke test. Exits 0 when the live seed pool matches
-// the canonical ALL_ITEMS (main + embark + farewell), 1 (with an actionable
-// report) when it drifts.
+// the target Event's canonical ALL_ITEMS (main + both curated pools), 1 (with
+// an actionable report) when it drifts.
 async function verify() {
-  const { db, EVENT_ID } = await initFirestore();
+  const { db, EVENT_ID, seedEvent } = await initFirestore();
   const snap = await db.collection(`events/${EVENT_ID}/items`).get();
   const report = verifySeedPool(
     snap.docs.map((doc) => ({
@@ -726,7 +449,8 @@ async function verify() {
       reportCount: doc.data().reportCount,
       pool: doc.data().pool,
     })),
-    ALL_ITEMS,
+    seedEvent.ALL_ITEMS,
+    seedEvent.EVENT_SEED.settings.reportHideThreshold,
   );
   if (report.ok) {
     console.log(

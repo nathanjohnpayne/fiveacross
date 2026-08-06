@@ -12,12 +12,13 @@ import { doc, deleteField, getDoc, writeBatch } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { STORAGE_PORT } from './env';
-// @ts-expect-error — scripts/seed.mjs is a plain-JS node script with no type
-// declarations (tsconfig sets no allowJs, and only includes src/ besides).
+// scripts/seed.mjs is a plain-JS node script (typed via scripts/seed.d.mts).
 // It is side-effect-free to import: seeding only runs when the script is the
 // entry module (see its own `import.meta.url === ...` guard). Mirrors the
 // same import src/test/w1-event-seed.test.ts already uses against Vitest.
-import { EVENT_SEED, ITEMS, adminRoster, eventWritePayload, seedItemDocId } from '../../../scripts/seed.mjs';
+// The GCB Event payload itself is per-Event seed data (#563).
+import { adminRoster, eventWritePayload, seedItemDocId } from '../../../scripts/seed.mjs';
+import { EVENT_SEED, ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
 import { EVENT_ID, FIRESTORE_HOST, FIRESTORE_PORT, PROJECT_ID } from './env';
 import { cellsFromData } from '../../../src/game/cells';
 
@@ -89,7 +90,7 @@ export async function seedEmulatorEvent(
       // No ADMIN_UID roster: this ticket asserts the zero-admin-action path, so
       // the seed intentionally leaves `admins` empty (eventWritePayload omits
       // the key entirely — see scripts/seed.mjs).
-      batch.set(eventRef, eventWritePayload(adminRoster(''), deleteField()), {
+      batch.set(eventRef, eventWritePayload(EVENT_SEED, adminRoster(''), deleteField()), {
         merge: true,
       });
       const now = Date.now();

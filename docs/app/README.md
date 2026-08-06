@@ -85,10 +85,11 @@ This creates `events/med-2026` (honor claim-mode, `neon-playground` default them
 > **⚠️ The prompt pool lives in Firestore, not in the deployed JS bundle**—the app renders `events/{id}/items`, which only this seed writes. Changing the pool in `src/data/seed.ts` / `scripts/seed.mjs` and deploying the app does **not** reach players: you must re-run the seed against the live project. A frontend change (e.g. the 🔞-toggle) ships with `npm run deploy:hosting`; a **pool** change additionally requires a reseed. This is exactly how the #129 87-prompt update reached players' cards late—the code merged and the bundle deployed, but the reseed was skipped. Whenever `ITEMS` changes, reseed, then confirm with the drift check:
 >
 > ```bash
-> npm run verify:seed    # production-pinned, read-only; exit 1 on drift
+> npm run verify:seed              # gaycruisebingo / med-2026 — read-only; exit 1 on drift
+> npm run verify:seed:fiveacross   # fiveacross / bodega-bay-2026 — read-only; exit 1 on drift
 > ```
 >
-> Run `verify:seed` as the last step of any deploy that touched the pool (and any time you suspect players are on a stale pool). It reads the live `events/{id}/items`, compares the seed-owned docs to the canonical `ITEMS`, and fails loudly—listing what is missing / stale—instead of the drift going unnoticed. The root install includes `firebase-admin`; the remaining prerequisite is a credential (ADC or the SA key). The npm command pins production, while direct `node scripts/seed.mjs --verify` calls may select another project/event with `GOOGLE_CLOUD_PROJECT` and `VITE_EVENT_ID`.
+> Run the target's `verify:seed*` as the last step of any deploy that touched its pool (and any time you suspect players are on a stale pool). It reads the live `events/{id}/items`, compares the seed-owned docs to that Event's canonical pools, and fails loudly—listing what is missing / stale—instead of the drift going unnoticed. The root install includes `firebase-admin`; the remaining prerequisite is a credential (ADC or the SA key). Seed payloads are per-Event modules in `scripts/seed-data/` (#563), selected by `VITE_EVENT_ID` or the resolved project's default (`gaycruisebingo` → `med-2026`, `fiveacross` → `bodega-bay-2026`); the npm commands pin project + Event per target, while direct `node scripts/seed.mjs --verify` calls may select a target with `GOOGLE_CLOUD_PROJECT` and `VITE_EVENT_ID`.
 
 ## 5. Deploy
 

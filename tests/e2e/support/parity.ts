@@ -15,7 +15,8 @@ import type { RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { seedEmulatorEvent } from './seed';
 import { EVENT_ID } from './env';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
-import { ITEMS, EASY_ITEMS, CLOSING_ITEMS, seedItemDocId } from '../../../scripts/seed.mjs';
+import { seedItemDocId } from '../../../scripts/seed.mjs';
+import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
 
 const HOUR = 3_600_000;
 

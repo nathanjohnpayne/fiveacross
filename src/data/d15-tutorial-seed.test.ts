@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { DAYS, EASY_ITEMS, CLOSING_ITEMS, SEED_ITEMS } from './seed';
-import { EVENT_SEED, EASY_ITEMS as SCRIPT_EASY_ITEMS, CLOSING_ITEMS as SCRIPT_CLOSING_ITEMS } from '../../scripts/seed.mjs';
+import { EVENT_SEED, EASY_ITEMS as SCRIPT_EASY_ITEMS, CLOSING_ITEMS as SCRIPT_CLOSING_ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 // Covers specs/d15-tutorial-seed.md (#207): the two curated tutorial pools
 // (embark/farewell, 28 entries each) and the ten-Day `EventDoc.timezone`/`days[]`
@@ -45,7 +45,7 @@ describe('EASY_ITEMS / CLOSING_ITEMS — no cross-pool or main-pool duplicates',
   });
 });
 
-describe('scripts/seed.mjs — tutorial pool literals stay in sync with src/data/seed.ts', () => {
+describe('scripts/seed-data/med-2026.mjs — tutorial pool literals stay in sync with src/data/seed.ts', () => {
   it('exports the same 28-entry EASY_ITEMS as src/data/seed.ts', () => {
     expect(SCRIPT_EASY_ITEMS.length).toBe(28);
     expect(SCRIPT_EASY_ITEMS).toEqual(EASY_ITEMS);
@@ -116,7 +116,7 @@ describe('DAYS — the ten-Day itinerary mapping', () => {
   });
 });
 
-describe('scripts/seed.mjs — EVENT_SEED carries the Phase 1.5 timezone + days[]', () => {
+describe('scripts/seed-data/med-2026.mjs — EVENT_SEED carries the Phase 1.5 timezone + days[]', () => {
   it('seeds timezone: Europe/Rome', () => {
     expect(EVENT_SEED.timezone).toBe('Europe/Rome');
   });

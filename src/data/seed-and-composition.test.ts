@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { FREE_TEXT, SEED_ITEMS } from './seed';
 import { dealBoard, CENTER, type DealItem } from '../game/logic';
-import { EVENT_SEED, ITEMS as SCRIPT_ITEMS } from '../../scripts/seed.mjs';
+import { EVENT_SEED, ITEMS as SCRIPT_ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 // Covers specs/seed-and-composition.md (#129, refreshed #187): the 80-entry pool
 // replacement (24 spicy / 56 tame) and the stratified spicy/tame Board composition rule.
@@ -151,7 +151,7 @@ describe('dealBoard — clamps a malformed spicyRatio instead of corrupting the 
   });
 });
 
-describe('scripts/seed.mjs — replace semantics (no Firestore/emulator; plain import assertions)', () => {
+describe('scripts/seed-data/med-2026.mjs — replace semantics (no Firestore/emulator; plain import assertions)', () => {
   it('exports the same 80-entry { text, spicy } pool as src/data/seed.ts SEED_ITEMS', () => {
     expect(SCRIPT_ITEMS.length).toBe(80);
     expect(SCRIPT_ITEMS).toEqual(SEED_ITEMS);

@@ -35,7 +35,8 @@ import { joinViaSharedLink, signedInUid } from './support/join';
 import { EVENT_ID } from './support/env';
 import { dealBoard, type DealItem } from '../../src/game/logic';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
-import { ITEMS, seedItemDocId } from '../../scripts/seed.mjs';
+import { seedItemDocId } from '../../scripts/seed.mjs';
+import { ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 let testEnv: RulesTestEnvironment;
 

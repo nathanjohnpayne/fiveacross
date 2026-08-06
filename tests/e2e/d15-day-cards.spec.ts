@@ -15,7 +15,8 @@ import { waitForBoardServerConfirmed, claimCellByText } from './support/board';
 import { dismissCoach } from './support/daily';
 import { EVENT_ID } from './support/env';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
-import { ITEMS, seedItemDocId } from '../../scripts/seed.mjs';
+import { seedItemDocId } from '../../scripts/seed.mjs';
+import { ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 let testEnv: RulesTestEnvironment;
 const HOUR = 3_600_000;
