@@ -1,6 +1,6 @@
 import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
-import { resolveEvent, type Resolution } from '../eventResolution';
+import { isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
@@ -46,8 +46,16 @@ const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
 export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
   const snap = await getDocFromServer(doc(db, 'hostnames', hostname.toLowerCase()));
   if (!snap.exists()) return null;
-  const d = snap.data() as Partial<HostnameDoc>;
-  if (typeof d.eventId !== 'string' || !d.eventId) return null;
+  return coerceHostnameDoc(snap.data() as Partial<HostnameDoc>, hostname);
+}
+
+/** The one reading of a raw `hostnames/{host}` payload into the contract shape
+ *  — extracted from `fetchHostnameDoc` (verbatim semantics) so the live
+ *  watcher below can validate its snapshots identically before caching them.
+ *  Two seams reading the same document must not disagree about what a usable
+ *  mapping is. */
+function coerceHostnameDoc(d: Partial<HostnameDoc> | undefined, hostname: string): HostnameDoc | null {
+  if (typeof d?.eventId !== 'string' || !d.eventId) return null;
   if (typeof d.status !== 'string' || !VALID_STATUS.has(d.status)) return null;
   return {
     eventId: d.eventId,
@@ -140,12 +148,25 @@ export async function bootstrapEventResolution(
     // Alias concept, so the analytics consumers' own `window.location`
     // fallback already IS canonical for that build.
     applyResolvedCanonicalHost(resolution.canonicalHost);
-    // The sign-in postcard's preview slice (#647). `?? null` covers both
-    // absences the same way — a document with no slice and the env
-    // short-circuit that read no document — because they render identically:
-    // no card. Installed unconditionally so a re-bootstrap can not leak a
-    // previous hostname's preview onto another Event's gate.
-    applyResolvedEventPreview(resolution.preview ?? null);
+    // The sign-in postcard's preview slice (#647). Installed unconditionally
+    // so a re-bootstrap can not leak a previous hostname's preview onto
+    // another Event's gate.
+    //
+    // The ENV SHORT-CIRCUIT reads no routing document AT ALL, which is where
+    // the shipped card first failed in production: the deployed Bodega build
+    // is env-pinned, so `resolution.preview` is always absent there even with
+    // the slice seeded. Two channels close that gap without touching the
+    // resolution posture (the short-circuit stays zero-network): at boot, the
+    // cached envelope `watchAdultContent` wrote on an earlier visit paints the
+    // card immediately (stale is fine — display copy, corrected by the live
+    // snapshot moments later); and the watcher itself installs the live slice
+    // when its first snapshot lands (see watchAdultContent below), a beat
+    // after first paint on a first-ever visit. Never blocks mount.
+    let preview = resolution.preview ?? null;
+    if (!preview && resolution.source === 'env') {
+      preview = readCache(storage, hostname)?.doc.preview ?? null;
+    }
+    applyResolvedEventPreview(preview);
   }
   return resolution;
 }
@@ -227,17 +248,52 @@ export function watchAdultContent(hostname: string = window.location.hostname): 
       // Server-backed snapshots prove; cached ones may only ever RAISE.
       const proven = snap.metadata.fromCache === false;
       if (!snap.exists()) {
-        // No routing document: no channel through which an ungated posture
-        // could ever be withdrawn, so it is not one we can hold.
+        // No routing document: no card to draw (localhost, a single-Event
+        // origin that never got a mapping), and no channel through which an
+        // ungated posture could ever be withdrawn, so it is not one we can
+        // hold. The preview is only CLEARED on a proven miss — Firestore's
+        // initial cache-served snapshot can report a document it simply has
+        // no local copy of, and blanking an already-painted card on that
+        // non-evidence would flicker it for every guest.
+        if (proven) applyResolvedEventPreview(null);
         setActiveAdultContent(true, { proven: false });
         return;
       }
-      const adult = coerceAdultContent(snap.data()?.adultContent);
+      const data = snap.data() as Partial<HostnameDoc> | undefined;
+      // The sign-in postcard's preview slice rides THIS listener too (#647
+      // follow-up): an env-pinned build's resolution never reads the routing
+      // document, so this shared snapshot — already streaming for the 18+
+      // posture — is the only live channel through which its gate can learn
+      // the Event's name. The store deduplicates by value, so re-delivery is
+      // free. Provenance mirrors the posture's asymmetry in miniature: any
+      // snapshot may SUPPLY a card (stale display copy beats no card, and a
+      // server-backed delivery follows to correct it), but only a proven one
+      // may CLEAR an already-installed card — an older cache-served copy of
+      // the document is not evidence the slice was removed. NOTE the
+      // proven-adult detach below closes the channel once the posture latches;
+      // by then the same terminal snapshot has already carried its preview.
+      const previewSlice = coerceEventPreview(data?.preview) ?? null;
+      if (previewSlice || proven) applyResolvedEventPreview(previewSlice);
+      // …and a PROVEN, servable mapping is cached whole, so the NEXT boot of
+      // an env-pinned build paints the card at bootstrap instead of a beat
+      // after mount (bootstrapEventResolution's env branch reads it back).
+      // Same validation as the resolver's own network path — never cache a
+      // shape `readCache` would reject, never resurrect an inactive mapping —
+      // and only from server-backed snapshots, mirroring the resolver's rule
+      // that Firestore's own cache is not evidence (Codex on #576).
+      if (proven) {
+        const mapping = coerceHostnameDoc(data, hostname);
+        if (mapping && isServable(mapping)) writeCache(safeLocalStorage(), hostname, mapping);
+      }
+      const adult = coerceAdultContent(data?.adultContent);
       if (!adult && !proven) return; // a cached `false` proves nothing
       setActiveAdultContent(adult, { proven });
       // Monotone: a proven `true` is terminal, so stop listening.
       if (adult && proven) detach();
     },
+    // Transport/permission failure: gate (a failure proves nothing about the
+    // posture) but leave the preview as-is — display copy already on screen
+    // does not become wrong because a listener dropped.
     () => setActiveAdultContent(true, { proven: false }),
   );
   if (settled) unsubscribe();

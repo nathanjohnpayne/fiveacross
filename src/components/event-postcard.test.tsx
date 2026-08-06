@@ -51,6 +51,21 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('appears when the slice arrives AFTER mount — the env-pinned live channel', () => {
+    // The production defect: an env-pinned build's resolution installs no
+    // preview, so on a first-ever visit the slice lands from the live
+    // hostnames listener a beat after first paint. The store is reactive
+    // (useSyncExternalStore), so the card must materialize on delivery — not
+    // wait for an unrelated render.
+    const { container } = render(<EventPostcard />);
+    expect(container.firstChild).toBeNull();
+    act(() => applyResolvedEventPreview(PREVIEW));
+    expect(screen.getByText('Weekend in Bodega Bay')).toBeTruthy();
+    // …and a proven removal takes it back down.
+    act(() => applyResolvedEventPreview(null));
+    expect(container.firstChild).toBeNull();
+  });
+
   it('renders the achievable subset when optional fragments are absent', () => {
     applyResolvedEventPreview({ eventName: 'Weekend in Bodega Bay' });
     const { container } = render(<EventPostcard />);
