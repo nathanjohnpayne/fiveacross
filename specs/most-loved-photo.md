@@ -1,0 +1,72 @@
+---
+spec_id: most-loved-photo
+status: accepted
+---
+
+# Most-Loved Photo: the frozen finale award (`most-loved-photo`)
+
+At the Standings Freeze the scheduler computes and persists, exactly once, the visible, moderation-eligible photo Proof holding the most eligible Hearts—the Most-Loved Photo (#534/#560). Server-computed and persisted, never derived live: the final standings and the finale share composition (#561) render the recorded award, and the frozen result never recomputes. Guarded by `tests/functions/most-loved.test.ts` (the beat), `tests/functions/most-loved-parity.test.ts` (client/functions mirror parity), `src/data/mostLoved.test.ts` (client derivations + analytics payload), and `tests/rules/most-loved-photo.test.ts` (the rules posture).
+
+## Glossary
+
+**Award**—the frozen `EventDoc.mostLovedPhoto` record. Appreciation for a moment, never player rank: it touches no stats, no leaderboard, no win logic (ADR 0001 untouched, the feed-hearts posture).
+
+**Winner**—one co-winner entry inside the award. Ties share the honour: ALL co-winners persist, ordered `proofCreatedAt` ascending then `proofId` ascending, so `winners[0]` is the earliest-posted (the share hero, per the epic-comment amendment).
+
+**No-award record**—the award with `winners: []`, persisted when no eligible Heart exists at the freeze. Explicit on purpose; see § Idempotence.
+
+## The persisted artefact
+
+`events/{eventId}.mostLovedPhoto`—a sibling of `frozenAt`, NOT a Moment and NOT a new collection. The award is Event-level frozen state exactly like the freeze stamp; the client already holds the Event doc everywhere the finale needs it (Board's `useEventDoc` flows into `FarewellPodium` as a prop per the no-second-listener rule); Moments carry report/heart surfaces an award must not have; a new collection would need new read rules. The payload is a few hundred bytes against the 1 MiB doc limit.
+
+The shape is the shared contract in `src/domainTypes.d.ts` (`MostLovedPhotoAward` / `MostLovedPhotoWinner`), consumed by both compiler roots via the declaration-only import (the daily-engagement-email precedent): `winners` (all co-winners, each carrying `proofId`, `uid`, `displayName`, `promptText`, `dayIndex`, `proofCreatedAt`—the winning ProofDoc's own denormalized fields at the freeze, no roster join), `heartCount` (the frozen eligible count shared by all winners, 0 when `winners` is empty), `frozenAt` (the freeze cutoff computed against, equal to the `EventDoc.frozenAt` value), and `computedAt` (the scheduler run clock, diagnostics only). `eventConverter` passes the field through untouched—absence is meaningful and gets no default.
+
+**No media URL is persisted, deliberately.** The winners carry no `mediaURL`/`thumbURL`/`storagePath`. The client must consult the live Proof doc anyway to honor the hidden-after-freeze display fallback, and the live doc carries the media; persisting a URL would create exactly one failure mode—rendering an image moderation has since hidden. `proofCreatedAt` is the display join key (the incarnation stamp).
+
+## The compute trigger: a third finale beat
+
+The award computes in a new sibling best-effort beat inside `runFinaleBeats` (`functions/src/unlockDay.ts`), keyed to the same `atFreeze` transition that stamps `frozenAt`—it piggybacks on the proven `frozenAt` machinery rather than introducing `standingsFreezeAt` consumption (see § Deviations #1). `finaleActions` returns `computeMostLoved: atFreeze && !mostLovedComputed`, where `mostLovedComputed` is the presence of `event.mostLovedPhoto`. The decision is decoupled from the freeze flip on purpose (the same Codex #228 reasoning as `postPodium`): a run that froze but failed the award write retries the award on its own guard until it lands. The beat sits after the freeze and podium blocks so a single run stamps `frozenAt` and the award in the same sweep, and each block's independent try/catch means either survives the other's failure.
+
+`computeMostLovedAward` performs plain, non-transactional collection reads of `events/{eventId}/proofs` and `events/{eventId}/hearts`, maps them defensively onto plain shapes, and delegates to the pure `buildMostLovedPhotoAward` in `functions/src/finaleContent.ts`. `persistMostLovedAward` is a transactional write-once, byte-for-byte the `freezeStandings` pattern: the transaction re-reads the event and writes only if `mostLovedPhoto` is still absent.
+
+**The cutoff is the SCHEDULED freeze instant** (`times.farewellUnlockAt`), never the run clock (the Codex #228 rule `freezeStandings` follows): hearts with `createdAt > cutoff` are excluded, so a beat that fires late—or a delayed recovery run hours later—computes the same result the freeze defines, and post-freeze hearting (the Heart button is unchanged everywhere) cannot move the award regardless of scheduler timing. Residual, accepted: a heart deleted between the cutoff and the compute run is unrecoverable and simply doesn't count—once persisted, the guard makes the result immune to all further drift.
+
+## Idempotence and the explicit no-award record
+
+The transaction's absent-field guard means only the run that flips `mostLovedPhoto` from unset writes; every retry, quarter-hourly re-tick, concurrent double-invocation, or manual run no-ops. This holds for the no-award case too BECAUSE that case persists `winners: []`: if no-award were represented by field absence, the guard could not distinguish "not yet computed" from "computed, none", every subsequent tick would recompute, and a heart landing after the freeze could mint a late award—violating "the frozen result NEVER recomputes". The explicit empty record freezes the no-award outcome with the same write-once semantics.
+
+## Eligibility
+
+The verbatim rules (decided 2026-08-04) map onto the data model as follows; each clause is a named predicate the parity test pins on both implementations:
+
+| Verbatim rule | Data-model mapping |
+|---|---|
+| visible, moderation-eligible photo Proof | `type === 'photo'` AND the Feed's exact filter (`useProofFeed`): `status === 'active'`, NOT report-hidden (fail-open threshold, `isReportHidden`), owner not banned (`isBanned`) |
+| hidden, deleted, retracted excluded | hidden = the status/report filters; deleted = doc removal, absent from the read set by construction; retracted has no Proof state (see § Deviations #2) |
+| a Heart counts for a Proof | `targetKind === 'proof'`, `targetId` match, incarnation match (`targetCreatedAt === proof.createdAt`, the `heartState` rule), `createdAt <= cutoff` |
+| own Heart on own Proof does NOT count | `heart.uid !== proof.uid`—new logic existing nowhere else; `heartState` deliberately counts self-hearts for display and that stays unchanged |
+| banned Players' Hearts do NOT count | `!isBanned(heart.uid, bannedUids)` UNCONDITIONALLY: `heartState`'s own-content exception (a banned viewer still sees their own heart) is display-only and does NOT apply to the award |
+| the count | unique eligible heart uids per proof (the deterministic slot id already guarantees one doc per pair; the Set makes the pure function total) |
+| winner / tie | every eligible proof at the maximum count when the maximum is at least 1, ALL persisted, ordered `proofCreatedAt` asc then `proofId` asc |
+| no eligible Hearts means no award | the explicit `{ winners: [], heartCount: 0 }` record |
+| the frozen result never recomputes; hidden later stays recorded | the transaction guard prevents recomputation; display fallback is render-time (`mostLovedDisplayWinners`) |
+
+## Client mirror, display gate, and parity
+
+`src/data/mostLoved.ts` (pure, Firestore-free, React-free) exports `proofFeedVisible` (the Feed's three-predicate filter as one named function; `useProofFeed` itself is NOT refactored—it is a hot pre-freeze file), `buildMostLovedPhotoAward` (the mirror, same semantics as the functions builder), `mostLovedDisplayWinners` (the render-time gate: persisted winners joined against live, already-Feed-filtered proofs by `proofId` AND `proofCreatedAt` AND `type === 'photo'`; a winner with no surviving live proof is dropped from display while the award record is untouched, and the finale falls back to photo highlights), and `mostLovedFrozenEventPayload` (§ Analytics). `tests/functions/most-loved-parity.test.ts` feeds one fixture set to BOTH builders and asserts deep-equal output plus pinned literals—the #551 finale-parity pattern, per ADR 0011's pre-commitment that a mirror ships with its parity test.
+
+## Rules posture
+
+**No rules edit.** The field inherits `frozenAt`'s exact posture: the whole `events/{eventId}` doc is `read: if signedIn()` and `create, update: if isAdmin(eventId)`, so non-admin clients can never write the award, every signed-in Player can read it (which is what the finale needs), and the scheduler's Admin SDK write bypasses rules. This is the documented precedent—`tests/rules/d15-finale.test.ts` pins "frozenAt is admin/Function-writable only" with no dedicated clause, and `tests/rules/most-loved-photo.test.ts` is its clone for this field. A stricter admin-cannot-touch guard was considered and rejected: it edits a live-event rules file for no attacker the current model recognizes (admins are trusted; `frozenAt` has identical exposure).
+
+## Analytics
+
+`most_loved_photo_frozen` is registered in `GA4_EVENTS` (`src/analytics.ts`) and fired CLIENT-SIDE on first observation of the persisted award (once per device per event via a localStorage guard, the #561 call site in `FarewellPodium`)—functions emit no PostHog/GA4 events today and building a first-ever server capture path days before a live freeze is unjustified risk (§ Deviations #5). Params come from `mostLovedFrozenEventPayload`: `winnersCount`, `heartCount`, `tie`, `award`, `proofId` (winners[0] or null), `dayIndex`—ids and counts only, never `mediaURL`/`thumbURL`/`storagePath`/display names, unit-tested to contain no media keys. The no-award record fires too (`award: false` is signal).
+
+## Deviations, vocabulary mappings, and flags
+
+1. **ADR 0011 letter deferred:** the award freezes against the `frozenAt` transition (`times.farewellUnlockAt`), not a consumed `standingsFreezeAt`—no runtime consumer of that field exists (only seed data and a seed test), and for Bodega the seed pins the two instants equal (`standingsFreezeAt == days[3].unlockAt`). When the standingsFreezeAt migration lands, freeze and award move together by construction because both read the same boundary. The parity test ADR 0011 demands DOES ship.
+2. **"Retracted Proofs" cannot be excluded as specified**—no retracted state exists on Proofs (retraction is a Moments concept); deletion is doc removal. Mapped to: status filter + report threshold + ban + doc absence.
+3. **"PRD § Community contribution and connection" does not exist in the repo**—the substance is carried by the verbatim eligibility decisions and the epic body.
+4. **"Subject to the Event's media-sharing policy" (#561): no such EventDoc field exists.** Not invented here; winners render under the Feed's visibility rules. Flagged for a follow-up ticket.
+5. **Analytics fires client-side on observation, not server-side at the freeze instant**—the acceptance criterion ("fires without private media in the payload") is met by the payload builder.
