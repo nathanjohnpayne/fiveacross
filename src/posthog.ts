@@ -159,9 +159,8 @@ export function stripUrlSecrets(value: unknown): unknown {
  * folded into it, so `stripUrlSecrets` stays the pure "strip query/hash"
  * primitive its own tests pin. A no-op when no canonical host has been
  * resolved (a single-Event build has no separate Alias concept — its own
- * origin already IS canonical, matching `canonicalOrigin()`'s own fallback)
- * or when the value has no origin to replace (a relative path, already
- * host-free).
+ * origin already IS canonical) or when the value has no origin to replace
+ * (a relative path, already host-free).
  */
 function canonicalizeOrigin(value: unknown): unknown {
   if (typeof value !== 'string') return value;

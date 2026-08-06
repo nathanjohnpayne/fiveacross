@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import type { DayDef, DayMetaDoc, EventDoc, PlayerDoc } from '../types';
 import { buildPodium, type Podium } from '../data/finale';
 import { track } from '../analytics';
-import { canonicalOrigin } from '../canonicalHost';
+import { shareOrigin } from '../canonicalHost';
 import {
   renderFarewellShareCard,
   shareCardBlob,
@@ -205,9 +205,9 @@ export default function FarewellPodium({
         filename: `${editionLexicon().fileSlug}-final-standings.png`,
         title: `${shareCardAppName()}—Final standings`,
         text: `Final standings from ${editionBrand().appName} 🏆`,
-        // Canonical hostname (#556), not the raw origin — see Leaderboard's
-        // shareLeaderboard for the rationale.
-        url: canonicalOrigin(),
+        // Entry-point origin (#607), never the analytics-canonical host —
+        // see Leaderboard's shareLeaderboard for the rationale.
+        url: shareOrigin(),
       });
     } catch {
       // shareCardBlob never throws by design; belt-and-braces regardless.

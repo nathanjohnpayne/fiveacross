@@ -86,6 +86,9 @@ import {
   shareCardAppName,
   type LeaderboardShareRow,
 } from './ShareCard';
+// Real module, never mocked here: the #607 entry-origin tests below install a
+// resolved analytics-canonical host and prove the share `url` ignores it.
+import { applyResolvedCanonicalHost } from '../canonicalHost';
 
 // Same shape/rationale as w2-feed-moments.test.tsx's dealtWith: a dealt board
 // with the free center (index 12) always on, plus whichever indices are
@@ -137,6 +140,9 @@ afterEach(() => {
   Reflect.deleteProperty(window.navigator, 'share');
   Reflect.deleteProperty(window.navigator, 'canShare');
   Reflect.deleteProperty(window.navigator, 'clipboard');
+  // Module state, not a mock — clear any #607 test's resolved canonical
+  // host so it never leaks into an unrelated assertion.
+  applyResolvedCanonicalHost(null);
 });
 
 // ---------------------------------------------------------------------------
@@ -1157,6 +1163,27 @@ describe('Celebration — image share + fallback', () => {
     expect(track).toHaveBeenCalledTimes(1);
   });
 
+  // #607 (amended multi-domain policy #599): the shared link carries the
+  // ENTRY-POINT origin even when an analytics-canonical host is resolved for
+  // this Event. Every serving host stays live and branded, so a link
+  // rewritten to the canonical host would unfurl and land recipients under
+  // another Edition's brand. Before #607 this url came from canonicalOrigin()
+  // and this exact setup shared https://bodega-bay.vacaybingo.com.
+  it('shares the entry-point origin, never the resolved analytics-canonical host (#607)', async () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<Celebration kind="bingo" cells={cells} playerName="Deck Daddy" onClose={vi.fn()} />);
+    await user.click(await readyShareButton());
+
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.url).toBe(window.location.origin);
+    expect(shareArg.url).not.toBe('https://bodega-bay.vacaybingo.com');
+  });
+
   it('fires share_click exactly once, and still falls back to a text/URL share, when the on-device render itself fails', async () => {
     // The mount-time pre-render consumes this rejection (the cached promise
     // resolves null); the tap then degrades to the text/URL leg.
@@ -1443,6 +1470,25 @@ describe('Leaderboard — share affordance', () => {
 
     await waitFor(() => expect(track).toHaveBeenCalledWith('share_click', { surface: 'leaderboard' }));
   });
+
+  // #607: entry-point origin, never the analytics-canonical host — same
+  // rationale as the Celebration test of the same name. No `canShare`, so
+  // the chain takes the text/URL leg: the files leg deliberately omits
+  // `url`, and this test is about which origin the shared LINK carries.
+  it('shares the entry-point origin, never the resolved analytics-canonical host (#607)', async () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<Leaderboard />, { wrapper: MemoryRouter });
+    await user.click(screen.getByRole('button', { name: 'Share leaderboard' }));
+
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.url).toBe(window.location.origin);
+    expect(shareArg.url).not.toBe('https://bodega-bay.vacaybingo.com');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1503,6 +1549,25 @@ describe('FarewellPodium — share affordance', () => {
 
     await waitFor(() => expect(track).toHaveBeenCalledWith('share_click', { surface: 'farewell' }));
     expect(track).toHaveBeenCalledTimes(1);
+  });
+
+  // #607: entry-point origin, never the analytics-canonical host — same
+  // rationale as the Celebration test of the same name. No `canShare`, so
+  // the chain takes the text/URL leg: the files leg deliberately omits
+  // `url`, and this test is about which origin the shared LINK carries.
+  it('shares the entry-point origin, never the resolved analytics-canonical host (#607)', async () => {
+    applyResolvedCanonicalHost('bodega-bay.vacaybingo.com');
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.url).toBe(window.location.origin);
+    expect(shareArg.url).not.toBe('https://bodega-bay.vacaybingo.com');
   });
 
   it('warms the render on hover and the tap reuses it — exactly one rasterization', async () => {
