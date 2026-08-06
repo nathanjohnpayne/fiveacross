@@ -138,16 +138,52 @@ export function orphanedSnapshotDays(days, deleteIds, writeIds) {
     .map((d) => d.index);
 }
 
+/**
+ * A seed-script schedule overwrite may only happen before any Day Snapshot
+ * exists. A snapshot is the source of truth for already-dealt cards; replacing
+ * `days[]` would silently erase its frozen ids (or substitute a module's
+ * different ids). The script deliberately fails closed instead of trying to
+ * re-stamp a live Day: that operation requires a dedicated transactional
+ * maintenance path which proves that no board exists.
+ */
+export function stampedDayIndexes(days) {
+  return (Array.isArray(days) ? days : [])
+    .filter((day) => Array.isArray(day?.snapshotItemIds))
+    .map((day) => day.index);
+}
+
+/**
+ * Pick the timestamp for a replacement seed Prompt. Keeping the original
+ * seed-entry time makes an ID-changing maintenance reseed safe for a future
+ * scheduler stamp of an already-due, but not-yet-snapshotted, Day: its cutoff
+ * still admits the replacement ids. A brand-new pool falls back to the first
+ * already-due positive unlock (or the run time when every Day is future).
+ */
+export function seedEntryTimestamp(existingDocs, days, now = Date.now()) {
+  const knownSeedTimes = existingDocs
+    .filter((doc) => doc.createdBy === 'seed' && typeof doc.createdAt === 'number')
+    .map((doc) => doc.createdAt);
+  const dueCutoffs = (Array.isArray(days) ? days : [])
+    .map((day) => day?.unlockAt)
+    .filter((unlockAt) => typeof unlockAt === 'number' && unlockAt > 0 && unlockAt <= now);
+  return Math.min(now, ...knownSeedTimes, ...dueCutoffs);
+}
+
 // `pool` is REQUIRED (the target Event's ALL_ITEMS): with per-Event seed data
 // (#563) there is no one global pool a default could safely point at, and a
 // caller that omitted it would silently seed nothing or the wrong Event's
 // prompts — so it fails loudly instead.
-export function seedItemMutations(existingDocs, now = Date.now(), pool) {
+export function seedItemMutations(existingDocs, now = Date.now(), pool, fallbackCreatedAt = now) {
   if (!Array.isArray(pool)) {
     throw new Error(
       'seedItemMutations requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
     );
   }
+  const existingSeedCreatedAt = new Map(
+    existingDocs
+      .filter((doc) => doc.createdBy === 'seed' && typeof doc.createdAt === 'number')
+      .map((doc) => [doc.id, doc.createdAt]),
+  );
   return {
     deleteIds: existingDocs.filter((doc) => doc.createdBy === 'seed').map((doc) => doc.id),
     writes: pool.map(({ text, spicy, pool: itemPool }) => ({
@@ -155,7 +191,11 @@ export function seedItemMutations(existingDocs, now = Date.now(), pool) {
       data: {
         text,
         createdBy: 'seed',
-        createdAt: now,
+        // Keep the matching doc's original entry time; an ID-changing prompt
+        // takes the oldest safe seed time supplied by `seedEntryTimestamp`.
+        // Otherwise a delayed scheduler would exclude the replacement from a
+        // past Day's cutoff and permanently stamp an empty card.
+        createdAt: existingSeedCreatedAt.get(seedItemDocId(text)) ?? fallbackCreatedAt,
         isFreeSpace: false,
         status: 'active',
         reportCount: 0,
@@ -415,7 +455,14 @@ async function seed() {
   const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
   const guard = reseedGuard(seedOwnedCount, process.env.RESEED);
   if (!guard.allowed) {
-    await eventRef.set(eventPayload, { merge: true });
+    // A refused items replace must also refuse a requested Day rewrite. In
+    // particular, Bodega's canonical Day 0 snapshot ids are not necessarily
+    // the ids in its live, in-place-edited pool; writing them by themselves
+    // would strand the existing card pool. The safe no-op still permits the
+    // metadata-only admin-roster/config merge.
+    await eventRef.set(eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), false), {
+      merge: true,
+    });
     console.log(`Event doc written (merge). Prompts SKIPPED: ${guard.reason}`);
     console.log(
       admins.length
@@ -424,14 +471,28 @@ async function seed() {
     );
     process.exit(0);
   }
+  const existingDocs = existing.docs.map((doc) => ({
+    id: doc.id,
+    createdBy: doc.data().createdBy,
+    createdAt: doc.data().createdAt,
+  }));
+  const runAt = Date.now();
   const { deleteIds, writes } = seedItemMutations(
-    existing.docs.map((doc) => ({
-      id: doc.id,
-      createdBy: doc.data().createdBy,
-    })),
-    Date.now(),
+    existingDocs,
+    runAt,
     ALL_ITEMS,
+    seedEntryTimestamp(existingDocs, existingDays, runAt),
   );
+  if (includeDays) {
+    const stampedDays = stampedDayIndexes(existingDays);
+    if (stampedDays.length) {
+      console.error(
+        `✗ events/${EVENT_ID}: refusing SEED_DAYS=1 because Day ${stampedDays.join(', ')} already has a frozen snapshot. ` +
+          'A schedule rewrite may only happen before snapshots exist; use a dedicated transactional maintenance path that proves zero boards before any re-stamp. Nothing was written.',
+      );
+      process.exit(1);
+    }
+  }
   // Snapshot-integrity interlock (Codex P1, PR #644 round 2): if this replace
   // deletes ids a stamped Day snapshot still references WITHOUT rewriting
   // `days[]` (SEED_DAYS=1), that Day would deal from documents that no longer

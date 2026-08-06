@@ -146,7 +146,7 @@ The wrap-up card, which unlocks at the 11:00 check-out freeze alongside the podi
 25. Group photo where everyone is genuinely ready to go
 26. Name the weekend's MVP moment
 27. Photograph the last shoes by the door
-28. Share your favorite photo of the weekend
+28. Share the photo that tells the story of the weekend
 29. Prove that we followed the house rules
 30. Take one last photo in the hot tub
 31. Photograph the road out
@@ -154,7 +154,7 @@ The wrap-up card, which unlocks at the 11:00 check-out freeze alongside the podi
 33. Take a picture of the front door on your way out
 34. Sing the song “Closing Time” at the top of your lungs
 35. Take a picture of your snack/drink/meal you got on the way home
-36. Share your favorite quote of the weekend
+36. Share the quote you’ll still be repeating next week
 37. Photograph the sky on the way home
 38. Name one thing your partner missed about you this weekend
 39. Photograph the very last bird

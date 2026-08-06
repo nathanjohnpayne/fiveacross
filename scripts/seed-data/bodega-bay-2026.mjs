@@ -12,19 +12,14 @@
 // 40 exploratory / 40 final-day, every entry tame (general-audience Event,
 // spicyRatio 0).
 //
-// KNOWN LIVE-DATA QUIRKS (kept deliberately, pending Nathan's call):
-//   - the closing pool contains two duplicated texts ("Share your favorite
-//     quote of the weekend", "Share your favorite photo of the weekend") — 40
-//     rows, 38 unique. Doc ids are content hashes, so a reseed from this
-//     module would COLLAPSE them into 38 docs (the live pool holds 40 docs
-//     only because the texts were edited in place onto pre-edit ids);
+// KNOWN LIVE-DATA QUIRKS:
 //   - "Post of a picture of you and somebody else in your jammies" carries
 //     the draft's typo verbatim.
 //   - the live docs' ids still hash the PRE-edit texts (in-place edit), so
-//     `--verify` against the live pool reports id-level drift until a real
-//     reconcile reseed (which must ALSO re-stamp Day 0's pre-stamped
-//     `snapshotItemIds` — pass SEED_DAYS=1 — or Friday's card would reference
-//     deleted docs). Do not run that reseed casually against the LIVE event.
+//     `--verify` against the live pool reports id-level drift until a dedicated
+//     maintenance path reconciles it. Do not reseed the live Event casually:
+//     once a Day has a frozen snapshot, this script deliberately refuses a
+//     `SEED_DAYS=1` overwrite rather than risking existing cards.
 //
 // PERSISTED pool literals are the LEGACY values ('embark' for the easy pool,
 // 'farewell' for the closing pool) — deliberately, while the #565 pool-value
@@ -161,8 +156,7 @@ export const CLOSING_ITEMS = [
   { text: `Group photo where everyone is genuinely ready to go`, spicy: false, pool: 'farewell' },
   { text: `Name the weekend's MVP moment`, spicy: false, pool: 'farewell' },
   { text: `Photograph the last shoes by the door`, spicy: false, pool: 'farewell' },
-  // DUPLICATE (live data quirk — see header): same text as an earlier entry.
-  { text: `Share your favorite photo of the weekend`, spicy: false, pool: 'farewell' },
+  { text: `Share the photo that tells the story of the weekend`, spicy: false, pool: 'farewell' },
   { text: `Prove that we followed the house rules`, spicy: false, pool: 'farewell' },
   { text: `Take one last photo in the hot tub`, spicy: false, pool: 'farewell' },
   { text: `Photograph the road out`, spicy: false, pool: 'farewell' },
@@ -170,8 +164,7 @@ export const CLOSING_ITEMS = [
   { text: `Take a picture of the front door on your way out`, spicy: false, pool: 'farewell' },
   { text: `Sing the song “Closing Time” at the top of your lungs`, spicy: false, pool: 'farewell' },
   { text: `Take a picture of your snack/drink/meal you got on the way home`, spicy: false, pool: 'farewell' },
-  // DUPLICATE (live data quirk — see header): same text as an earlier entry.
-  { text: `Share your favorite quote of the weekend`, spicy: false, pool: 'farewell' },
+  { text: `Share the quote you’ll still be repeating next week`, spicy: false, pool: 'farewell' },
   { text: `Photograph the sky on the way home`, spicy: false, pool: 'farewell' },
   { text: `Name one thing your partner missed about you this weekend`, spicy: false, pool: 'farewell' },
   { text: `Photograph the very last bird`, spicy: false, pool: 'farewell' },

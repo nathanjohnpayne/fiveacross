@@ -71,10 +71,17 @@ export function orphanedSnapshotDays(
   deleteIds: readonly string[],
   writeIds: readonly string[],
 ): number[];
+export function stampedDayIndexes(days: unknown): number[];
+export function seedEntryTimestamp(
+  existingDocs: Array<{ id: string; createdBy: string; createdAt?: number }>,
+  days: unknown,
+  now?: number,
+): number;
 export function seedItemMutations(
-  existingDocs: Array<{ id: string; createdBy: string }>,
+  existingDocs: Array<{ id: string; createdBy: string; createdAt?: number }>,
   now: number,
   pool: SeedPrompt[],
+  fallbackCreatedAt?: number,
 ): {
   deleteIds: string[];
   writes: Array<{ id: string; data: Record<string, unknown> }>;

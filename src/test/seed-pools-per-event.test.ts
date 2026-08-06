@@ -45,18 +45,13 @@ describe('seed-data registry — Event selection (#563)', () => {
         ...mod.EASY_ITEMS,
         ...mod.CLOSING_ITEMS,
       ]);
-      // ALL_ITEMS should be duplicate-free across the three pools — the doc id
+      // ALL_ITEMS must be duplicate-free across the three pools — the doc id
       // is a content hash of `text`, so a duplicate collapses into ONE doc and
-      // silently shrinks the seeded pool. The Bodega closing pool's two known
-      // live-data duplicates (below) are the sole, deliberate exception.
-      const KNOWN_DUPS =
-        eventId === 'bodega-bay-2026'
-          ? ['Share your favorite photo of the weekend', 'Share your favorite quote of the weekend']
-          : [];
+      // silently shrinks the seeded pool.
       const counts = new Map<string, number>();
       for (const i of mod.ALL_ITEMS) counts.set(i.text, (counts.get(i.text) ?? 0) + 1);
       const dups = [...counts.entries()].filter(([, n]) => n > 1).map(([t]) => t).sort();
-      expect(dups, eventId).toEqual(KNOWN_DUPS);
+      expect(dups, eventId).toEqual([]);
       // Deal floor: every pool a Day deals a whole card from must clear
       // MIN_POOL (24, src/game/logic.ts).
       expect(mod.ITEMS.length, eventId).toBeGreaterThanOrEqual(24);
@@ -83,15 +78,9 @@ describe('bodega-bay-2026 — pool pins', () => {
     expect(bodegaBay2026.EVENT_SEED.settings.spicyRatio).toBe(0);
   });
 
-  it('mirrors the two known live-data quirks verbatim (pending Nathan\'s call — see the module header)', () => {
-    // The 2026-08-05 in-place edit left two duplicated closing texts and one
-    // typo; the module mirrors the live text EXACTLY for now, so a silent
-    // "fix" here would desync it from the live pool. Change these pins only
-    // together with the live data.
+  it('keeps the one intentional source-text quirk documented in the module header', () => {
     const closingTexts = bodegaBay2026.CLOSING_ITEMS.map((i) => i.text);
-    expect(closingTexts.filter((t) => t === 'Share your favorite quote of the weekend')).toHaveLength(2);
-    expect(closingTexts.filter((t) => t === 'Share your favorite photo of the weekend')).toHaveLength(2);
-    expect(new Set(closingTexts).size).toBe(38); // 40 rows, 38 unique
+    expect(new Set(closingTexts).size).toBe(40);
     expect(
       bodegaBay2026.EASY_ITEMS.some((i) => i.text === 'Post of a picture of you and somebody else in your jammies'),
     ).toBe(true);
@@ -111,8 +100,8 @@ describe('bodega-bay-2026 — pool pins', () => {
     expect(bodegaBay2026.ITEMS.every((i) => i.pool === undefined)).toBe(true); // defaults to 'main'
   });
 
-  it('has no duplicate text within the easy or main pools (closing carries the two known dups)', () => {
-    for (const pool of [bodegaBay2026.EASY_ITEMS, bodegaBay2026.ITEMS]) {
+  it('has no duplicate text within any pool', () => {
+    for (const pool of [bodegaBay2026.EASY_ITEMS, bodegaBay2026.ITEMS, bodegaBay2026.CLOSING_ITEMS]) {
       expect(new Set(pool.map((i) => i.text)).size).toBe(pool.length);
     }
   });

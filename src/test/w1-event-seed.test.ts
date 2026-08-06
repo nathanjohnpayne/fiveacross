@@ -1,7 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { adminRoster, eventWritePayload, formatDriftReport, orphanedSnapshotDays, reseedGuard, seedItemDocId, verifySeedPool } from '../../scripts/seed.mjs';
+import {
+  adminRoster,
+  eventWritePayload,
+  formatDriftReport,
+  orphanedSnapshotDays,
+  reseedGuard,
+  seedEntryTimestamp,
+  seedItemDocId,
+  seedItemMutations,
+  stampedDayIndexes,
+  verifySeedPool,
+} from '../../scripts/seed.mjs';
 import { EVENT_SEED, ITEMS, ALL_ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 type SeedItem = { text: string; spicy: boolean };
@@ -163,6 +174,43 @@ describe('w1-event-seed: orphanedSnapshotDays — a replace may not strand a sta
   it('handles a missing/malformed days array as nothing to orphan', () => {
     expect(orphanedSnapshotDays(undefined, ['a'], [])).toEqual([]);
     expect(orphanedSnapshotDays('bogus', ['a'], [])).toEqual([]);
+  });
+});
+
+describe('w1-event-seed: reseed snapshot and timestamp interlocks (Codex P1, PR #644 round 4)', () => {
+  it('identifies every existing frozen Day before a script-level days[] overwrite', () => {
+    expect(
+      stampedDayIndexes([
+        { index: 0, snapshotItemIds: ['a'] },
+        { index: 1 },
+        { index: 2, snapshotItemIds: [] },
+      ]),
+    ).toEqual([0, 2]);
+    expect(stampedDayIndexes(undefined)).toEqual([]);
+  });
+
+  it('preserves a matching seed prompt timestamp and backdates replacement ids to a safe entry time', () => {
+    const existing = [
+      { id: seedItemDocId('Survives'), createdBy: 'seed', createdAt: 100 },
+      { id: 'renamed-away', createdBy: 'seed', createdAt: 120 },
+    ];
+    expect(seedEntryTimestamp(existing, [{ unlockAt: 200 }], 1_000)).toBe(100);
+    const { writes } = seedItemMutations(
+      existing,
+      1_000,
+      [
+        { text: 'Survives', spicy: false },
+        { text: 'New text', spicy: false },
+      ],
+      100,
+    );
+    expect(writes.map((write) => write.data.createdAt)).toEqual([100, 100]);
+  });
+
+  it('uses an already-due unlock for a brand-new delayed seed so the scheduler does not stamp an empty pool', () => {
+    expect(seedEntryTimestamp([], [{ unlockAt: 0 }, { unlockAt: 200 }, { unlockAt: 2_000 }], 1_000)).toBe(
+      200,
+    );
   });
 });
 
