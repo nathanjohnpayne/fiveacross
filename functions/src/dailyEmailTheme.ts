@@ -66,7 +66,7 @@ export const EMAIL_THEME_TOKENS: Record<string, EmailThemeTokens> = {
   'sporty-splash': { label: 'Sporty Splash', emoji: '💦', bg: '#04121a', panel: '#0a1c26', ink: '#eafaff', dim: '#9cc4d4', primary: '#33c6ff', secondary: '#39ff88', accent: '#ffe600' },
   'under-the-stars': { label: 'Under the Stars', emoji: '🌌', bg: '#070a18', panel: '#0d1224', ink: '#f2f2ff', dim: '#a9aed6', primary: '#ffd76a', secondary: '#8f7bff', accent: '#fffefb' },
   'atlantis-classics': { label: 'Dance Classics', emoji: '🏺', bg: '#0b0e10', panel: '#131a1c', ink: '#f6f1ea', dim: '#c0b3a2', primary: '#e2814d', secondary: '#2ec5b6', accent: '#ffd23f' },
-  'the-birds': { label: 'The Birds Have Entered the Group Chat', emoji: '🐦', bg: '#0b0f0e', panel: '#151c19', ink: '#f2efe6', dim: '#a9b5ac', primary: '#6fbf9f', secondary: '#e07a6f', accent: '#e8d9a0' },
+  'the-birds': { label: 'The Birds Have Entered the Chat', emoji: '🐦', bg: '#0b0f0e', panel: '#151c19', ink: '#f2efe6', dim: '#a9b5ac', primary: '#6fbf9f', secondary: '#e07a6f', accent: '#e8d9a0' },
   'side-quests': { label: 'Bodega Bay Side Quests', emoji: '🌊', bg: '#041826', panel: '#082738', ink: '#eef7fb', dim: '#a3c3d4', primary: '#74e0c8', secondary: '#ff9d4d', accent: '#ffd98a' },
   'fog-froth-farewells': { label: 'Fog, Froth & Farewells', emoji: '🌫️', bg: '#efece4', panel: '#faf7ef', ink: '#33302b', dim: '#66625a', primary: '#8a5533', secondary: '#4f6b63', accent: '#a8462f' },
   marquee: { label: 'Marquee', emoji: '✨', bg: '#120d08', panel: '#1d1610', ink: '#f7f0e1', dim: '#b5a88e', primary: '#e8b64c', secondary: '#e2695a', accent: '#ffd98a' },

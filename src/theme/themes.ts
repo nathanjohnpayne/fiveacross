@@ -146,7 +146,7 @@ export const THEMES: ThemeMeta[] = [
   // --- Bodega Bay Day themes (#555, Vacay edition) --------------------------
   {
     id: 'the-birds',
-    label: 'The Birds Have Entered the Group Chat',
+    label: 'The Birds Have Entered the Chat',
     emoji: '🐦',
     description:
       'Coastal suspense with the volume just slightly too high. Eggshell, ink black, sea green, and one restrained streak of warning red.',

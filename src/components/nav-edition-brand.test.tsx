@@ -43,7 +43,7 @@ describe('Nav — the header wears the resolved Edition (#602)', () => {
     const brand = renderBrand();
     // Byte-identical to the pre-#602 hardcoded header: "GAY CRUISE " plain,
     // "BINGO" inside <b>.
-    expect(brand.textContent).toBe('GAY CRUISE BINGO');
+    expect(brand.querySelector('.brand-wordmark')?.textContent).toBe('GAY CRUISE BINGO');
     expect(brand.querySelector('b')?.textContent).toBe('BINGO');
   });
 
@@ -52,8 +52,27 @@ describe('Nav — the header wears the resolved Edition (#602)', () => {
     const brand = renderBrand();
     // The regression: a signed-in Bodega guest played the whole event under a
     // header naming another product and a cruise that is not happening.
-    expect(brand.textContent).toBe('VACAY BINGO');
+    expect(brand.querySelector('.brand-wordmark')?.textContent).toBe('VACAY BINGO');
     expect(brand.textContent).not.toMatch(/cruise/i);
     expect(brand.querySelector('b')?.textContent).toBe('BINGO');
+  });
+});
+
+// The endorsement micro-line under the wordmark (daily-cards-wireframes §
+// in-app header lockup): the wireframes give it ONLY to Vacay — GCB predates
+// the platform, and Five Across IS the platform. The header must follow the
+// brand table's `wordmarkByline`, not hardcode either the line or the set of
+// Editions that carry it.
+describe('Nav — the platform endorsement byline', () => {
+  it('draws BY FIVE ACROSS under the Vacay wordmark', () => {
+    setActiveEdition('vacay');
+    const brand = renderBrand();
+    expect(brand.querySelector('.brand-byline')?.textContent).toBe('BY FIVE ACROSS');
+  });
+
+  it.each(['gcb', 'fiveacross'])('draws no byline for %s', (edition) => {
+    setActiveEdition(edition);
+    const brand = renderBrand();
+    expect(brand.querySelector('.brand-byline')).toBeNull();
   });
 });

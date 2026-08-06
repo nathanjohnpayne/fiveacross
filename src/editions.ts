@@ -72,6 +72,10 @@ const BRANDS: Record<string, EditionBrand> = {
   vacay: {
     wordmark: 'VACAY BINGO',
     wordmarkBold: 'BINGO',
+    // The platform endorsement line the wireframes draw under every in-app
+    // Vacay wordmark (plans/daily-cards-wireframes.html, .hdr lockup). Only
+    // vacay carries it: gcb predates the platform, fiveacross IS the platform.
+    wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',
     offlineNote: 'Patchy signal? Your card keeps working offline — marks sync when you reconnect.',
@@ -286,7 +290,11 @@ export function buildTimeEdition(
  *  stringify it into the tab title as `[object Object]`. Narrowing here makes
  *  that a compile error at the table below rather than a shipped defect. */
 type EditionBrandTextField = {
-  [K in keyof EditionBrand]: EditionBrand[K] extends string ? K : never;
+  // `-?` keeps OPTIONAL fields (`wordmarkByline`) out of the union the same
+  // way objects are kept out: `string | undefined` fails `extends string`, so
+  // the field maps to `never` — and the modifier stops the optionality from
+  // smuggling `undefined` itself into the resulting key union.
+  [K in keyof EditionBrand]-?: EditionBrand[K] extends string ? K : never;
 }[keyof EditionBrand];
 
 /** The `index.html` placeholders, and the field each one carries. Adding a row

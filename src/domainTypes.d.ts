@@ -35,6 +35,12 @@ export interface EditionLexicon {
 export interface EditionBrand {
   wordmark: string;
   wordmarkBold: string;
+  /** The endorsement micro-line under the header wordmark ("BY FIVE ACROSS",
+   *  daily-cards-wireframes § in-app header lockup). Optional because the
+   *  wireframes give it ONLY to Editions endorsed by the platform: Vacay
+   *  carries it, Gay Cruise Bingo predates the platform and carries none, and
+   *  Five Across IS the platform so an endorsement of itself would be noise. */
+  wordmarkByline?: string;
   preEventVerb: string;
   tagline: string;
   offlineNote: string;

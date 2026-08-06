@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { wordmarkSegments } from '../editions';
+import { editionBrand, wordmarkSegments } from '../editions';
 import { useEventDoc } from '../hooks/useData';
 import { DayIdentityLines, headerDayIdentity } from './dayIdentity';
 import TabBar from './TabBar';
@@ -41,14 +41,24 @@ export default function Nav() {
   // gate reads (#602, src/editions.ts). Hardcoding it here was correct while
   // one build served one hostname; post-resolver it put another product's name
   // over every Bodega guest's board.
+  //
+  // The wireframes' header lockup (daily-cards-wireframes § .hdr) draws the
+  // wordmark on ONE line — `.brand-wordmark` enforces that with nowrap, so a
+  // long Day identity can never squeeze "VACAY BINGO" into a two-line stack —
+  // with the Edition's endorsement micro-line ("BY FIVE ACROSS") underneath
+  // when the brand table carries one. Only vacay does; see `wordmarkByline`.
   const { lead, bold } = wordmarkSegments();
+  const { wordmarkByline } = editionBrand();
 
   return (
     <>
       <div className="nav">
         <div className="brand">
-          {lead}
-          {bold && <b>{bold}</b>}
+          <span className="brand-wordmark">
+            {lead}
+            {bold && <b>{bold}</b>}
+          </span>
+          {wordmarkByline && <span className="brand-byline">{wordmarkByline}</span>}
         </div>
         <DayIdentityLines identity={identity} />
       </div>
