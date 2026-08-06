@@ -94,3 +94,63 @@ export function shortSailRange(sailStart: string, sailEnd: string): string {
   if (a.y === b.y && a.m === b.m) return `${SHORT_MONTHS[a.m - 1]} ${a.d}\u2013${b.d}`;
   return `${SHORT_MONTHS[a.m - 1]} ${a.d} \u2013 ${SHORT_MONTHS[b.m - 1]} ${b.d}`;
 }
+
+/** One run of `segmentEmojiRuns` output: a maximal stretch of consecutive
+ *  grapheme clusters that are either all emoji or all non-emoji. */
+export interface EmojiRun {
+  text: string;
+  emoji: boolean;
+}
+
+/**
+ * Grapheme clusters that need emoji-run isolation (#603). A cluster counts
+ * when it contains an Extended_Pictographic code point (the emoji set proper,
+ * incl. ZWJ-sequence members), a Regional Indicator (flag pairs), or a keycap
+ * combiner. Over-matching a text-presentation pictograph is harmless — the
+ * wrapper span renders identically on-page — while under-matching leaves a
+ * glyph in a shared text run where html-to-image's raster pass can
+ * mis-measure it.
+ */
+const EMOJI_CLUSTER = /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20E3]/u;
+
+/**
+ * Split `text` into maximal emoji / non-emoji runs (#603).
+ *
+ * Why: html-to-image rasterizes through an SVG `<foreignObject>`, and that
+ * pass can shape an emoji differently from the live document (observed in
+ * desktop Chrome: the re-measured run wraps or the glyph paints displaced,
+ * overlapping neighbouring characters — the "Day 4 🌊alletta" defect). Text
+ * that may carry emoji therefore renders each emoji run in its own
+ * `display: inline-block` element (`.emoji-run`): the raster clone freezes
+ * that box at its live size, so however the raster pass shapes the glyph it
+ * stays inside its own box and cannot displace the surrounding text.
+ *
+ * Grapheme segmentation (Intl.Segmenter) keeps flags and ZWJ sequences whole;
+ * consecutive emoji clusters merge into one run so a flag never splits across
+ * elements. In an environment without Intl.Segmenter the text is returned as
+ * a single non-emoji run — the pre-#603 behavior, never a crash.
+ */
+/** The slice of Intl.Segmenter this module uses. Local because the project's
+ *  `lib: ES2021` predates the built-in typings (they land in ES2022); every
+ *  supported runtime (browsers, Node 22, jsdom) ships the real API and the
+ *  code degrades to a single run when it is absent. */
+type GraphemeSegmenter = new (
+  locale?: string,
+  options?: { granularity: 'grapheme' },
+) => { segment(input: string): Iterable<{ segment: string }> };
+
+export function segmentEmojiRuns(text: string): EmojiRun[] {
+  if (!text) return [];
+  const Segmenter = (Intl as { Segmenter?: GraphemeSegmenter }).Segmenter;
+  if (typeof Segmenter !== 'function' || !EMOJI_CLUSTER.test(text)) {
+    return [{ text, emoji: false }];
+  }
+  const runs: EmojiRun[] = [];
+  for (const { segment } of new Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
+    const emoji = EMOJI_CLUSTER.test(segment);
+    const last = runs[runs.length - 1];
+    if (last && last.emoji === emoji) last.text += segment;
+    else runs.push({ text: segment, emoji });
+  }
+  return runs;
+}

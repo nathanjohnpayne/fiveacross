@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatSailRange, eventTitle } from './format';
+import { formatSailRange, eventTitle, segmentEmojiRuns } from './format';
 
 describe('formatSailRange', () => {
   it('collapses a shared month and year to a day range with an en dash', () => {
@@ -65,5 +65,71 @@ describe('eventTitle', () => {
     expect(eventTitle('Atlantis Med—Trieste to Barcelona', '', '')).toBe(
       'Atlantis Med—Trieste to Barcelona',
     );
+  });
+});
+
+describe('segmentEmojiRuns', () => {
+  it('returns a single non-emoji run for plain text', () => {
+    expect(segmentEmojiRuns('Day 10 · Barcelona')).toEqual([
+      { text: 'Day 10 · Barcelona', emoji: false },
+    ]);
+  });
+
+  it('returns [] for the empty string', () => {
+    expect(segmentEmojiRuns('')).toEqual([]);
+  });
+
+  it('splits a trailing port emoji into its own run', () => {
+    expect(segmentEmojiRuns('Day 4 · Valletta 🌊')).toEqual([
+      { text: 'Day 4 · Valletta ', emoji: false },
+      { text: '🌊', emoji: true },
+    ]);
+  });
+
+  it('keeps a regional-indicator flag pair as ONE emoji run', () => {
+    expect(segmentEmojiRuns('Day 2 · Split 🇭🇷')).toEqual([
+      { text: 'Day 2 · Split ', emoji: false },
+      { text: '🇭🇷', emoji: true },
+    ]);
+  });
+
+  it('keeps a ZWJ sequence whole', () => {
+    expect(segmentEmojiRuns('crew 👨‍👨‍👦 aboard')).toEqual([
+      { text: 'crew ', emoji: false },
+      { text: '👨‍👨‍👦', emoji: true },
+      { text: ' aboard', emoji: false },
+    ]);
+  });
+
+  it('handles a leading emoji (Leaderboard day chip shape)', () => {
+    expect(segmentEmojiRuns('🚢 D1')).toEqual([
+      { text: '🚢', emoji: true },
+      { text: ' D1', emoji: false },
+    ]);
+  });
+
+  it('merges adjacent emoji clusters into one run so flags never split', () => {
+    expect(segmentEmojiRuns('🇭🇷🇮🇹 twin ports')).toEqual([
+      { text: '🇭🇷🇮🇹', emoji: true },
+      { text: ' twin ports', emoji: false },
+    ]);
+  });
+
+  it('flags a VS16 pictograph and a keycap sequence as emoji runs', () => {
+    expect(segmentEmojiRuns('map 🗺️ pin')).toEqual([
+      { text: 'map ', emoji: false },
+      { text: '🗺️', emoji: true },
+      { text: ' pin', emoji: false },
+    ]);
+    expect(segmentEmojiRuns('cabin 3️⃣')).toEqual([
+      { text: 'cabin ', emoji: false },
+      { text: '3️⃣', emoji: true },
+    ]);
+  });
+
+  it('does not flag plain digits or ASCII as emoji', () => {
+    expect(segmentEmojiRuns('16 bingos · 124 squares')).toEqual([
+      { text: '16 bingos · 124 squares', emoji: false },
+    ]);
   });
 });

@@ -1,6 +1,7 @@
 import { toBlob } from 'html-to-image';
 import { completedLines } from '../game/logic';
 import { editionBrand, editionLexicon } from '../editions';
+import { segmentEmojiRuns } from '../format';
 import type { Cell } from '../types';
 
 /**
@@ -55,8 +56,35 @@ function el<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
+  if (text !== undefined) appendEmojiIsolatedText(node, text);
   return node;
+}
+
+/**
+ * Append `text` with every emoji run isolated in its own inline-block span
+ * (#603). html-to-image's SVG `<foreignObject>` raster pass can shape an
+ * emoji differently from the live document (observed in desktop Chrome: the
+ * champion role line and the footer wrapped in the raster and painted over
+ * their neighbours — the shipped defect was the farewell card's honors rows
+ * rendering "Day 4 🌊alletta"). An `.emoji-run` box (src/index.css) gets its
+ * computed width inlined into the raster clone, so however the raster pass
+ * shapes the glyph it stays inside a box of the live advance width and the
+ * surrounding text keeps its layout. Applied to EVERY text the card renders —
+ * labels, names, stat lines, the footer — because emoji can arrive in any of
+ * them (Day-Theme emoji in labels, emoji in display names). The on-page
+ * mirror of this treatment for captured surfaces is components/EmojiText.tsx.
+ */
+function appendEmojiIsolatedText(node: HTMLElement, text: string): void {
+  for (const run of segmentEmojiRuns(text)) {
+    if (run.emoji) {
+      const atom = document.createElement('span');
+      atom.className = 'emoji-run';
+      atom.textContent = run.text;
+      node.append(atom);
+    } else {
+      node.append(document.createTextNode(run.text));
+    }
+  }
 }
 
 /** Mounts `node` off-screen (real layout, so html-to-image can measure it — never `display:none`, which would size it to 0x0) and returns its teardown. */
@@ -381,6 +409,25 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
 /** The farewell podium as a Share Card (issue #449) — same pipeline, third card kind. */
 export async function renderFarewellShareCard(data: FarewellShareCardData): Promise<Blob> {
   return rasterize(buildFarewellCardNode(data));
+}
+
+// e2e-only seam (#603): tests/e2e/emoji-raster.spec.ts builds the REAL
+// farewell card in a real Chrome, rasterizes it through the real pipeline,
+// and measures the raster's text geometry against the live DOM — the defect
+// (emoji mis-shaped in html-to-image's SVG pass, wrapping/overpainting
+// neighbours) only manifests in a real browser render, so no jsdom test can
+// pin it. Gated on MODE === 'e2e' exactly like src/firebase.ts's emulator
+// branch: the production build (MODE 'production') dead-code-eliminates it.
+if (import.meta.env.MODE === 'e2e') {
+  (window as unknown as Record<string, unknown>).__shareCardE2E = {
+    buildFarewellCardNode,
+    // The real rasterization seam (offscreen mount + fitCellText + toBlob at
+    // PIXEL_RATIO), exposed separately so the spec can neutralize the card's
+    // themed background on the built node first — the ink measurement needs
+    // transparent ground, and background/border-color changes don't move
+    // text geometry.
+    rasterize,
+  };
 }
 
 // ---------------------------------------------------------------------------

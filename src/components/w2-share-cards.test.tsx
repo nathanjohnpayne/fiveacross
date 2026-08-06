@@ -732,6 +732,34 @@ describe('ShareCard — renderFarewellShareCard', () => {
     expect(node.querySelector('.share-card-stat')?.textContent).toBe('Final standings · 10 days');
   });
 
+  it('isolates every emoji run in its own inline-block .emoji-run span (#603)', async () => {
+    await renderFarewellShareCard({
+      ...data,
+      contextLine: 'Gay Cruise Bingo · Day 10 · Barcelona',
+    });
+    const node = toBlobNode();
+
+    // Honor-day label: the port emoji is atomized (html-to-image's raster
+    // pass mis-shapes an emoji inside a shared text run — the "Day 4
+    // 🌊alletta" defect), while the visible text stays byte-identical.
+    const day = node.querySelectorAll('.share-card-honor-day')[1];
+    const atoms = day.querySelectorAll('span.emoji-run');
+    expect(atoms).toHaveLength(1);
+    expect(atoms[0].textContent).toBe('🇭🇷');
+    expect(day.textContent).toBe('Day 2 · Split 🇭🇷');
+
+    // The champion role line (🏆 …) and the footer's Edition share mark run
+    // through the same seam — every card text does, via el().
+    expect(node.querySelector('.share-card-honoree-role span.emoji-run')?.textContent).toBe('🏆');
+    expect(node.querySelector('.share-card-footer span.emoji-run')).not.toBeNull();
+
+    // A no-emoji text renders as a bare text node — no wrapper spam.
+    expect(node.querySelector('.share-card-event span.emoji-run')).toBeNull();
+    expect(node.querySelector('.share-card-event')?.textContent).toBe(
+      'Gay Cruise Bingo · Day 10 · Barcelona',
+    );
+  });
+
   it('renders a singular bingo stat without the plural s', async () => {
     await renderFarewellShareCard({
       ...data,

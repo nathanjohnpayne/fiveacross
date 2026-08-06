@@ -97,6 +97,16 @@ a {
 .muted {
   color: var(--dim);
 }
+/* Raster-safe emoji atom (#603): an emoji run isolated in its own
+   inline-block box so html-to-image's SVG-foreignObject pass (Share Cards +
+   bug-report captures) cannot mis-measure the glyph inside a shared text run
+   and paint it over neighbouring characters. The raster clone inlines this
+   box's computed width, freezing the emoji's advance at its live value; the
+   on-page rendering is unchanged (same baseline, same advance). Emitted by
+   components/EmojiText.tsx and ShareCard.tsx's DOM builder. */
+.emoji-run {
+  display: inline-block;
+}
 .loading-state {
   min-height: 70vh;
   display: grid;
