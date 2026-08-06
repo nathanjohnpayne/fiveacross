@@ -1099,6 +1099,36 @@ describe('PostHog init with a key', () => {
     expect(beforeSend?.({ uuid: 'open', event: 'mark_square', properties: {} })?.event).toBe('mark_square');
   });
 
+  it('reopens the $identify handshake when the SAME uid retries after identify throws (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+    }) as never);
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState(null);
+    await initSettled;
+    vi.mocked(ph.identify)
+      .mockImplementationOnce(() => {
+        throw new Error('identify failed');
+      })
+      .mockImplementationOnce(() => {
+        const candidate = beforeSend?.({ uuid: 'identify', event: '$identify', properties: {} });
+        expect(candidate?.event).toBe('$identify');
+      });
+
+    mod.phSetAuthState('account-B');
+    expect(beforeSend?.({ uuid: 'blocked', event: 'mark_square', properties: {} })).toBeNull();
+    mod.phSetAuthState('account-B');
+
+    expect(ph.identify).toHaveBeenCalledTimes(2);
+    expect(beforeSend?.({ uuid: 'open', event: 'mark_square', properties: {} })?.event).toBe('mark_square');
+  });
+
   it('closes the gate and stops queued replay when its A→B reset throws (#613)', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');

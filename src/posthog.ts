@@ -476,6 +476,7 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
           if (!applyReset()) break;
           openIdentityGate();
         }
+        openIdentityGate();
         if (!applyIdentify(op.uid)) {
           closeIdentityGate();
           break;
@@ -776,6 +777,10 @@ export function phIdentify(uid: string): boolean {
     if (!applyReset()) return false;
     openIdentityGate();
   }
+  // identify() emits the `$identify` stitching handshake synchronously. This
+  // must also open on a SAME-uid retry after a prior identify exception, not
+  // only on the reset-following A→B path above.
+  openIdentityGate();
   if (applyIdentify(uid)) return true;
   closeIdentityGate();
   return false;
