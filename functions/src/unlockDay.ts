@@ -314,8 +314,7 @@ export interface UnlockDeps {
   now?: () => number;
 }
 
-async function queryActiveItems(db: AdminFirestore, eventId: string): Promise<SnapshotItem[]> {
-  const snap = await db.collection(`events/${eventId}/items`).where('status', '==', 'active').get();
+function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
   return snap.docs.map((d) => {
     const data = d.data() ?? {};
     return {
@@ -328,6 +327,12 @@ async function queryActiveItems(db: AdminFirestore, eventId: string): Promise<Sn
       approvedAt: data.approvedAt as number | undefined,
     };
   });
+}
+
+async function queryActiveItems(db: AdminFirestore, eventId: string): Promise<SnapshotItem[]> {
+  return snapshotItemsFrom(
+    await db.collection(`events/${eventId}/items`).where('status', '==', 'active').get(),
+  );
 }
 
 async function hasMoment(db: AdminFirestore, eventId: string, kind: FinaleMomentKind): Promise<boolean> {
@@ -441,11 +446,12 @@ async function readDayHonors(
 /**
  * Idempotently stamp one Day's `snapshotItemIds`. Reads the event, locates the
  * Day by its `index`, and — if the Day is due (`unlockAt` passed) and unstamped —
- * queries the Day's active pool items, then writes the snapshot inside a
- * transaction that RE-CONFIRMS the Day is still unstamped and still due (a
- * concurrent run or the manual path may have won the race). Returns what it did.
- * The item query runs before the transaction (mirrors `autohide.ts`); the
- * transactional re-read is the idempotency guard, not the query.
+ * queries the Day's active pool items inside the same transaction that writes
+ * the snapshot. That query is part of the transaction's read set, so a seed
+ * replacement racing a scheduled unlock makes Firestore retry rather than
+ * stamping ids from the pre-reseed pool. The transaction also re-confirms the
+ * Day is still unstamped and due (a concurrent run or manual path may have
+ * won the race). Returns what it did.
  */
 export async function stampDaySnapshot(
   db: AdminFirestore,
@@ -463,20 +469,6 @@ export async function stampDaySnapshot(
   if (day.unlockAt > now) return 'not-due';
   if (day.snapshotItemIds != null) return 'already-stamped';
 
-  const items = await queryActiveItems(db, eventId);
-  // Filter the frozen pool by the SAME predicates the live deal path applies, AS OF
-  // this Day's unlock moment — so a delayed/manual run can never freeze in content
-  // the live pool hides, nor items approved after the Day opened (Codex #228).
-  const snapshotItemIds = activeSnapshotIds(items, {
-    pool: day.pool,
-    // A main day freezes BOTH pools (main + embark) so the easy mix rides the one
-    // snapshot (specs/easy-mix.md); tutorial days freeze only their own pool.
-    pools: snapshotPoolsFor(day.pool),
-    cutoff: day.unlockAt,
-    reportHideThreshold: pre.settings?.reportHideThreshold,
-    bannedUids: pre.bannedUids,
-  });
-
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
@@ -486,6 +478,24 @@ export async function stampDaySnapshot(
     if (i < 0) return 'no-day';
     if (arr[i].unlockAt > now) return 'not-due';
     if (arr[i].snapshotItemIds != null) return 'already-stamped'; // re-confirm: never overwrite an existing snapshot
+    // Read the active pool THROUGH this transaction. A concurrent seed batch
+    // that changes any selected item makes the transaction retry, so the
+    // frozen ids and the committed pool always describe one Firestore state.
+    const items = snapshotItemsFrom(
+      await tx.get(db.collection(`events/${eventId}/items`).where('status', '==', 'active')),
+    );
+    // Filter the frozen pool by the SAME predicates the live deal path applies, AS OF
+    // this Day's unlock moment — so a delayed/manual run can never freeze in content
+    // the live pool hides, nor items approved after the Day opened (Codex #228).
+    const snapshotItemIds = activeSnapshotIds(items, {
+      pool: arr[i].pool,
+      // A main day freezes BOTH pools (main + embark) so the easy mix rides the one
+      // snapshot (specs/easy-mix.md); tutorial days freeze only their own pool.
+      pools: snapshotPoolsFor(arr[i].pool),
+      cutoff: arr[i].unlockAt,
+      reportHideThreshold: ev.settings?.reportHideThreshold,
+      bannedUids: ev.bannedUids,
+    });
     arr[i] = {
       ...arr[i],
       snapshotItemIds,

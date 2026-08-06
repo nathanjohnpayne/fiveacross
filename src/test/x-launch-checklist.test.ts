@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { EVENT_SEED } from '../../scripts/seed.mjs';
+import { EVENT_SEED } from '../../scripts/seed-data/med-2026.mjs';
 import { TABS } from '../components/tabs';
 
 // Asserts specs/x-launch-checklist.md: the launch runbook is a manual,

@@ -6,6 +6,12 @@
 //   3. Find each Admin's Google UID: sign into the app once, then Firebase console > Authentication > Users.
 //   4. ADMIN_UID=<uid>[,<uid>,...] GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/seed.mjs
 //
+// Per-Event targeting (#563): the seed payload comes from
+// scripts/seed-data/<event-id>.mjs, selected by VITE_EVENT_ID or (when unset)
+// by the resolved project's default Event — gaycruisebingo → med-2026,
+// fiveacross → bodega-bay-2026. `npm run verify:seed` /
+// `npm run verify:seed:fiveacross` pin project + Event per target.
+//
 // Admin roster: Admin is the only privileged role, and `events/{id}.admins` is the
 // roster the app trusts. ADMIN_UID takes a comma-separated list of uids; the target
 // roster is 2–4 Admins including Nathan's seed uid (the concrete co-admin uids are
@@ -21,171 +27,23 @@
 // reseed leaves a live schedule untouched. Pass SEED_DAYS=1 to explicitly
 // overwrite `days` on an existing Event (a deliberate itinerary migration).
 //
-import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { PROJECT_DEFAULT_EVENT, resolveSeedEvent } from './seed-data/index.mjs';
+import { seedItemDocId } from './seed-data/item-id.mjs';
 
 // ---------------------------------------------------------------------------
-// Seed payload — importable with no side effects (Firebase is only touched when
-// the script is executed directly, below). `src/test/w1-event-seed.test.ts`
-// asserts this shape per specs/w1-event-seed.md.
+// Per-Event seed payloads (#563) live in scripts/seed-data/<event-id>.mjs —
+// importable with no side effects (Firebase is only touched when this script
+// is executed directly, below). The helpers here (roster parsing, the event
+// write payload, item mutations, the drift verifier) are Event-agnostic and
+// take the target Event's payload as input, so the drift check works for every
+// project rather than comparing one baked pool. `src/test/w1-event-seed.test.ts`
+// asserts their behavior per specs/w1-event-seed.md.
 // ---------------------------------------------------------------------------
 
-export const EVENT_SEED = {
-  name: 'Atlantis Med—Trieste to Barcelona',
-  sailStart: '2026-07-15',
-  sailEnd: '2026-07-24',
-  status: 'active',
-  defaultTheme: 'neon-playground',
-  claimMode: 'honor', // 'honor' | 'proof_required' | 'admin_confirmed'
-  // NOTE: `bannedUids` (#113) is deliberately NOT seeded. This payload is written
-  // with { merge: true } and the seed is documented as safe to re-run (to add
-  // admins / refresh prompts), so writing bannedUids here would clobber a live ban
-  // list back to [] on every reseed once #108 starts populating it — silent data
-  // loss (unbanning everyone) on a routine op. A brand-new event never carries the
-  // field and reads as [] via eventConverter's missing-field default (converters.ts),
-  // and a reseed leaves the existing bannedUids untouched because this merge write
-  // never mentions it. The follow-up (#108) fills it via banUser/unbanUser
-  // (arrayUnion/arrayRemove) on the admin-writable event doc, never users/{uid}.
-  // reportHideThreshold is load-bearing (ADR 0004 reactive moderation: auto-hide
-  // at 4 distinct reports; value pending final confirmation via #15).
-  // spicyRatio is the target share of spicy (🔞) Prompts among a Board's 24
-  // non-free Squares for `dealBoard`'s stratified sampling (w1-seed-and-composition);
-  // 0.4 matches `dealBoard`'s own default, kept explicit here so the seeded Event
-  // doc is self-describing rather than relying on the app-side fallback. ADR 0004
-  // removed the event's other Phase-0 flag as dead config (type-side removal:
-  // w0-type-contract), so no other key is seeded here.
-  settings: { reportHideThreshold: 4, spicyRatio: 0.4 },
-  // Single event timezone (daily-cards-spec § "Itinerary and schedule") — every
-  // port on the July sailing is CEST, so no ship-clock drift handling is needed.
-  timezone: 'Europe/Rome',
-  // The ten-Day mapping that drives the whole feature's unlock/theme/pool
-  // machinery (daily-cards-spec § "Itinerary and schedule" + "Free space per
-  // day"), the SAME content as `DAYS` in `src/data/seed.ts`; kept as a separate
-  // literal here for the same no-cross-module-import reason as ITEMS below.
-  // `src/data/seed-and-composition.test.ts` asserts the two stay in sync.
-  days: [
-    {
-      index: 0,
-      date: '2026-07-15',
-      port: 'Trieste',
-      portEmoji: '🇮🇹',
-      theme: 'welcome-aboard',
-      // Paraphrased from the guide's "Atlantis Welcome Party" for the markless-
-      // copy non-goal (mirrors src/data/seed.ts + THEMES).
-      tonight: ['⛵ Sail-Away Party', '🎉 Welcome Party'],
-      pool: 'embark',
-      tutorial: true,
-      // 0 = "live from event open", and the scheduler fails OPEN on a
-      // non-positive cutoff (#289) — a positive historical constant would
-      // re-starve any FRESH seed run after it (seeded items carry
-      // `createdAt: Date.now()`; Codex P1). Mirrors src/data/seed.ts.
-      unlockAt: 0,
-      freeText: 'You made it aboard',
-    },
-    {
-      index: 1,
-      date: '2026-07-16',
-      port: 'Split',
-      portEmoji: '🇭🇷',
-      theme: 'uniforms-without-borders',
-      tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-16T08:00:00+02:00'),
-    },
-    {
-      index: 2,
-      date: '2026-07-17',
-      port: 'Sea Day',
-      portEmoji: '🌊',
-      theme: 'neon-pink-playground',
-      tonight: ['💖 Seriously Pink T-Dance', '🌈 Neon Playground'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-17T08:00:00+02:00'),
-    },
-    {
-      index: 3,
-      date: '2026-07-18',
-      port: 'Valletta',
-      portEmoji: '🇲🇹',
-      theme: 'sporty-splash',
-      tonight: ['💦 Splash T-Dance', '🏋️ Get Sporty'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-18T08:00:00+02:00'),
-    },
-    {
-      index: 4,
-      date: '2026-07-19',
-      port: 'Palermo (Sicily)',
-      portEmoji: '🇮🇹',
-      theme: 'under-the-stars',
-      tonight: ['🎭 AirOtic', '🌌 Under the Stars'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-19T08:00:00+02:00'),
-    },
-    {
-      index: 5,
-      date: '2026-07-20',
-      port: 'Naples (Pompeii)',
-      portEmoji: '🇮🇹',
-      theme: 'glamiators',
-      tonight: ['🎤 Solea Pfeiffer', '🏛️ Glamiators'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-20T08:00:00+02:00'),
-    },
-    {
-      index: 6,
-      date: '2026-07-21',
-      port: 'Rome (Civitavecchia)',
-      portEmoji: '🇮🇹',
-      theme: 'atlantis-classics',
-      // "Dance Classics" paraphrases the guide's "Atlantis Classics".
-      tonight: ['🎭 Persephone', '🏺 Dance Classics'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-21T08:00:00+02:00'),
-    },
-    {
-      index: 7,
-      date: '2026-07-22',
-      port: 'Villefranche (Nice)',
-      portEmoji: '🇫🇷',
-      theme: 'summer-white',
-      tonight: ['🎤 HAYLA', '🤍 Summer White Party'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-22T08:00:00+02:00'),
-    },
-    {
-      index: 8,
-      date: '2026-07-23',
-      port: 'Marseille',
-      portEmoji: '🇫🇷',
-      theme: 'revival-disco',
-      tonight: ['🪩 Revival! Classic Disco T-Dance', '🎉 Last Dance'],
-      pool: 'main',
-      tutorial: false,
-      unlockAt: Date.parse('2026-07-23T08:00:00+02:00'),
-    },
-    {
-      index: 9,
-      date: '2026-07-24',
-      port: 'Barcelona',
-      portEmoji: '🇪🇸',
-      theme: 'so-long-farewell',
-      // Editorial line — disembark morning publishes no guide events.
-      tonight: ['🧳 Disembark in Barcelona', '👋 Until next year'],
-      pool: 'farewell',
-      tutorial: true,
-      unlockAt: Date.parse('2026-07-24T08:00:00+02:00'),
-      freeText: 'We had the best damn time',
-    },
-  ],
-};
+// Re-exported so existing importers (tests, tests/e2e/support) keep one
+// canonical source for the content-hash doc id.
+export { seedItemDocId };
 
 // Parse the ADMIN_UID env var (comma-separated uids) into the events/{id}.admins roster.
 export function adminRoster(raw = '') {
@@ -215,192 +73,145 @@ export function adminRoster(raw = '') {
 // edit (Codex P2, PR #229). `seed()` below decides `includeDays` by checking
 // whether the Event doc already exists (or via the explicit `SEED_DAYS=1`
 // migration override), not this function.
-export function eventWritePayload(admins, deleteBlackoutEnabled, includeDays = true) {
+//
+// `eventSeed` is the target Event's EVENT_SEED (a scripts/seed-data module) —
+// per-Event since #563, so this helper writes whichever Event it is given
+// rather than one baked payload.
+export function eventWritePayload(eventSeed, admins, deleteBlackoutEnabled, includeDays = true) {
   // Destructure `days` out rather than spreading it in conditionally: setting a
   // key to `undefined` would still send `days: undefined` to the Admin SDK
   // (which throws unless `ignoreUndefinedProperties` is set) instead of simply
   // omitting the field from the merge write.
-  const { days, ...seedWithoutDays } = EVENT_SEED;
+  const { days, ...seedWithoutDays } = eventSeed;
   return {
-    ...(includeDays ? EVENT_SEED : seedWithoutDays),
+    ...(includeDays ? eventSeed : seedWithoutDays),
     settings: {
-      ...EVENT_SEED.settings,
+      ...eventSeed.settings,
       blackoutEnabled: deleteBlackoutEnabled,
     },
     ...(admins.length ? { admins } : {}),
   };
 }
 
-// Canonical 80-entry Prompt pool (24 spicy / 56 tame — w1-seed-and-composition),
-// the SAME content as `SEED_ITEMS` in `src/data/seed.ts`; kept as a separate
-// literal here (rather than imported) so this plain-JS script has no
-// cross-module import into the TS app source. `src/data/seed-and-composition.test.ts`
-// asserts the two stay in sync.
-export const ITEMS = [
-  { text: `Threesome`, spicy: true },
-  { text: `Foursome`, spicy: true },
-  { text: `Fivesome`, spicy: true },
-  { text: `Get propositioned by septuagenarians`, spicy: true },
-  { text: `Suite orgy`, spicy: true },
-  { text: `Domestic violence`, spicy: false },
-  { text: `Dance-floor blowjob`, spicy: true },
-  { text: `Get locked in a bathroom`, spicy: false },
-  { text: `Lost passport`, spicy: false },
-  { text: `Make OnlyFans content on a boat`, spicy: true },
-  { text: `Make LinkedIn content on a boat`, spicy: false },
-  { text: `Selfie with Bianca Del Rio`, spicy: false },
-  { text: `Selfie with HAYLA`, spicy: false },
-  { text: `Three loads in one day`, spicy: true },
-  { text: `Bang a Dutch person`, spicy: true },
-  { text: `Bang an Aussie`, spicy: true },
-  { text: `Sex with four gays from four continents`, spicy: true },
-  { text: `Passaround-party Norwegian`, spicy: true },
-  // entry 19 = Free Space (FREE_TEXT) — not a pool Prompt
-  { text: `Poppers spill`, spicy: true },
-  { text: `30-year age gap`, spicy: true },
-  { text: `Dance-floor k-hole`, spicy: false },
-  { text: `Cafeteria k-hole`, spicy: false },
-  { text: `Make out with a woman`, spicy: true },
-  { text: `Three-way kiss`, spicy: true },
-  { text: `Cause an international incident`, spicy: false },
-  { text: `Wear a sissy skirt`, spicy: true },
-  { text: `Loudly announce an early night`, spicy: false },
-  { text: `Karaoke "Fergalicious"`, spicy: false },
-  { text: `Eat carbs`, spicy: false },
-  { text: `Become Dick Deck famous`, spicy: true },
-  { text: `Post a butthole pic to Telegram`, spicy: true },
-  { text: `Use a condom`, spicy: true },
-  { text: `Mirror-hall selfie`, spicy: false },
-  { text: `Snort powder off a cock`, spicy: true },
-  { text: `Hear Madonna's "Danceteria" on the dance floor`, spicy: false },
-  { text: `Get read by Bianca Del Rio`, spicy: false },
-  { text: `Get bred by Bianca Del Rio`, spicy: true },
-  { text: `Drink three dirty martinis`, spicy: false },
-  { text: `Matching Speedos`, spicy: false },
-  { text: `Sunset selfie`, spicy: false },
-  { text: `Lost bracelet`, spicy: false },
-  { text: `Dramatic outfit change before dinner`, spicy: false },
-  { text: `Feathers, mesh, or sequins before noon`, spicy: false },
-  { text: `"I'm just having one drink"`, spicy: false },
-  { text: `Pool-chair territory dispute`, spicy: false },
-  { text: `Overpacked toiletries`, spicy: false },
-  { text: `Cruise boyfriend`, spicy: false },
-  { text: `Cruise-boyfriend breakup`, spicy: false },
-  { text: `Accidental matching outfits`, spicy: false },
-  { text: `Elevator outfit compliment`, spicy: false },
-  { text: `New best friend from another city`, spicy: false },
-  { text: `Late-night pizza`, spicy: false },
-  { text: `Breakfast in sunglasses`, spicy: false },
-  { text: `Nap through the main event`, spicy: false },
-  { text: `Poolside caftan moment`, spicy: false },
-  { text: `Too many group chats`, spicy: false },
-  { text: `"I need electrolytes"`, spicy: false },
-  { text: `Emergency fan deployment`, spicy: false },
-  { text: `Cabaret hands during karaoke`, spicy: false },
-  { text: `Join a new friend group`, spicy: false },
-  { text: `Themed-party costume escalation`, spicy: false },
-  { text: `Get lost on the ship`, spicy: false },
-  { text: `Ship-photographer ambush`, spicy: false },
-  { text: `"This is my vacation personality"`, spicy: false },
-  { text: `Unexpected Broadway sing-along`, spicy: false },
-  { text: `Become ship-famous`, spicy: false },
-  { text: `Matching tank tops`, spicy: false },
-  { text: `Reappear at Dick Deck two hours after "going to bed"`, spicy: false },
-  { text: `Suspiciously perfect tan`, spicy: false },
-  { text: `"I'm never drinking again"`, spicy: false },
-  { text: `"I need a vacation from my vacation"`, spicy: false },
-  { text: `Caftan gets sincere applause`, spicy: false },
-  { text: `Garment steamer packed`, spicy: false },
-  { text: `Group-dinner reservation drama`, spicy: false },
-  { text: `Bathroom-mirror selfie`, spicy: false },
-  { text: `Book next year's cruise before this one ends`, spicy: false },
-  { text: `"I'm going to be homophobic for a week after this cruise"`, spicy: false },
-  { text: `Dance to the "Total Eclipse of the Heart" remix`, spicy: false },
-  { text: `Fuck a drag queen out of drag`, spicy: true },
-  { text: `Fuck a drag queen IN drag`, spicy: true },
-];
-
-// The two curated tutorial pools (daily-cards-spec § "Tutorial item lists"), the
-// SAME content as `EASY_ITEMS`/`CLOSING_ITEMS` in `src/data/seed.ts`; kept as
-// separate literals here for the same no-cross-module-import reason as ITEMS
-// above. `src/data/seed-and-composition.test.ts` asserts they stay in sync.
-export const EASY_ITEMS = [
-  { text: `Get your favorite dessert`, spicy: false, pool: 'embark' },
-  { text: `Find your muster station`, spicy: false, pool: 'embark' },
-  { text: `Get lost finding your cabin`, spicy: false, pool: 'embark' },
-  { text: `Ride an elevator the wrong way`, spicy: false, pool: 'embark' },
-  { text: `Locate the late-night pizza`, spicy: false, pool: 'embark' },
-  { text: `First soft-serve of the cruise`, spicy: false, pool: 'embark' },
-  { text: `Toast at the sailaway party`, spicy: false, pool: 'embark' },
-  { text: `Wave goodbye to land`, spicy: false, pool: 'embark' },
-  { text: `Hear the ship's horn`, spicy: false, pool: 'embark' },
-  { text: `Meet someone from another country`, spicy: false, pool: 'embark' },
-  { text: `Learn a crew member's name`, spicy: false, pool: 'embark' },
-  { text: `Befriend a bartender`, spicy: false, pool: 'embark' },
-  { text: `Compliment a stranger's outfit`, spicy: false, pool: 'embark' },
-  { text: `Ask "where are you from?" three times`, spicy: false, pool: 'embark' },
-  { text: `Exchange Instagrams with a new friend`, spicy: false, pool: 'embark' },
-  { text: `Spot matching Speedos`, spicy: false, pool: 'embark' },
-  { text: `Unpack a truly unhinged outfit`, spicy: false, pool: 'embark' },
-  { text: `Plan tomorrow's party look`, spicy: false, pool: 'embark' },
-  { text: `Test the bed (nap counts)`, spicy: false, pool: 'embark' },
-  { text: `Stateroom mirror selfie`, spicy: false, pool: 'embark' },
-  { text: `Balcony or porthole photo`, spicy: false, pool: 'embark' },
-  { text: `Order a frozen drink with zero shame`, spicy: false, pool: 'embark' },
-  { text: `Sunscreen a stranger's back (or volunteer yours)`, spicy: false, pool: 'embark' },
-  { text: `Scope out the gym you'll never use`, spicy: false, pool: 'embark' },
-  { text: `Find the theater`, spicy: false, pool: 'embark' },
-  { text: `Locate the Dick Deck (reconnaissance only)`, spicy: false, pool: 'embark' },
-  { text: `Sign up for something you'll never attend`, spicy: false, pool: 'embark' },
-  { text: `Overhear someone already complaining`, spicy: false, pool: 'embark' },
-];
-
-export const CLOSING_ITEMS = [
-  { text: `One last sunrise or sunset photo`, spicy: false, pool: 'farewell' },
-  { text: `Say goodbye to your cruise boyfriend`, spicy: false, pool: 'farewell' },
-  { text: `Exchange numbers with your new best friend`, spicy: false, pool: 'farewell' },
-  { text: `Promise to visit someone in their city`, spicy: false, pool: 'farewell' },
-  { text: `Say "see you next year"—and mean it`, spicy: false, pool: 'farewell' },
-  { text: `Book next year's cruise (or swear you will)`, spicy: false, pool: 'farewell' },
-  { text: `Final soft-serve`, spicy: false, pool: 'farewell' },
-  { text: `Thank your cabin steward by name`, spicy: false, pool: 'farewell' },
-  { text: `Thank the bartender who carried you`, spicy: false, pool: 'farewell' },
-  { text: `One last lap around the ship`, spicy: false, pool: 'farewell' },
-  { text: `Last dance to one more song`, spicy: false, pool: 'farewell' },
-  { text: `Group photo with your chosen family`, spicy: false, pool: 'farewell' },
-  { text: `Cry (or valiantly almost cry)`, spicy: false, pool: 'farewell' },
-  { text: `Find glitter somewhere impossible`, spicy: false, pool: 'farewell' },
-  { text: `Suitcase no longer closes`, spicy: false, pool: 'farewell' },
-  { text: `Wear your softest airport look`, spicy: false, pool: 'farewell' },
-  { text: `Breakfast in sunglasses, one last time`, spicy: false, pool: 'farewell' },
-  { text: `Swap favorite memories of the week`, spicy: false, pool: 'farewell' },
-  { text: `"I'm never drinking again" (sincere)`, spicy: false, pool: 'farewell' },
-  { text: `Post the photo dump`, spicy: false, pool: 'farewell' },
-  { text: `Screenshot the group chat's new name`, spicy: false, pool: 'farewell' },
-  { text: `Set a reunion date`, spicy: false, pool: 'farewell' },
-  { text: `Give away your leftover sunscreen`, spicy: false, pool: 'farewell' },
-  { text: `Realize you never used the gym`, spicy: false, pool: 'farewell' },
-  { text: `Hum the song of the week`, spicy: false, pool: 'farewell' },
-  { text: `Take home a (legal) souvenir`, spicy: false, pool: 'farewell' },
-  { text: `Five-star shoutout for your favorite crew member`, spicy: false, pool: 'farewell' },
-  { text: `Stand at the back of the ship and feel things`, spicy: false, pool: 'farewell' },
-];
-
-// Deterministic doc id (content hash of the text only) so re-running the seed
-// upserts the same prompt docs instead of creating duplicates (boards sample
-// distinct ids, so dupes would surface the same prompt on multiple squares).
-export function seedItemDocId(text) {
-  return `seed-${createHash('sha1').update(text).digest('hex').slice(0, 20)}`;
+/**
+ * Whether a seed run may touch the ITEMS of an Event that ALREADY holds
+ * seed-owned prompts. Seeding is replace-semantics (never an append — a rerun
+ * can NEVER duplicate prompts), but a replace still rewrites every seed-owned
+ * doc at the current content-hash ids: against a live Event whose docs have
+ * been edited in place (the 2026-08-05 Bodega text pass), that would change
+ * doc ids out from under the Day snapshots that reference them. So a rerun
+ * against an already-seeded Event leaves the pool UNTOUCHED (a loud no-op)
+ * unless RESEED=1 explicitly opts into the replace — a fresh Event (zero
+ * seed-owned docs) always seeds.
+ */
+export function reseedGuard(seedOwnedCount, reseedEnv) {
+  if (seedOwnedCount === 0 || reseedEnv === '1') return { allowed: true };
+  return {
+    allowed: false,
+    reason:
+      `this event already holds ${seedOwnedCount} seed-owned prompts. ` +
+      'A reseed REPLACES the seed-owned pool at current content-hash ids (never appends), which can ' +
+      'orphan pre-stamped Day snapshots on a live Event. Re-run with RESEED=1 to replace deliberately.',
+  };
 }
 
-// All three seeded pools combined — the main 80-entry pool (untagged, so it
-// defaults to 'main' below) plus the two curated tutorial pools (already
-// tagged). Curated pools are seeded `status: 'active'` directly (no
-// pending-approval gate — that gate is `main`-only, per daily-cards-spec §
-// "Item pools and the approval flow").
-export const ALL_ITEMS = [...ITEMS, ...EASY_ITEMS, ...CLOSING_ITEMS];
+/**
+ * Decide whether a seed run may replace its pool, perform only its harmless
+ * Event metadata merge, or must fail. A requested schedule write can never be
+ * silently downgraded to the metadata-only path: its canonical snapshots and
+ * the live prompt identities are one unit of state.
+ */
+export function reseedPlan(seedOwnedCount, reseedEnv, includeDays) {
+  const guard = reseedGuard(seedOwnedCount, reseedEnv);
+  if (guard.allowed) return { action: 'replace' };
+  if (includeDays) {
+    return {
+      action: 'refuse',
+      reason:
+        `${guard.reason} ` +
+        'SEED_DAYS=1 cannot rewrite the schedule while this run is refusing the matching prompt replacement.',
+    };
+  }
+  return { action: 'metadata-only', reason: guard.reason };
+}
 
-export function seedItemMutations(existingDocs, now = Date.now(), pool = ALL_ITEMS) {
+/**
+ * The Day indexes whose stamped `snapshotItemIds` would be ORPHANED by an item
+ * replace that is not also rewriting `days[]` (Codex P1, PR #644 round 2): a
+ * snapshot id that is being deleted (`deleteIds`) and NOT re-written at the
+ * same id (`writeIds`) would reference a document that no longer exists, and
+ * every deal for that Day would come up short. Ids outside `deleteIds`
+ * (player-submitted or already-gone docs) are not this replace's doing and are
+ * ignored. `seed()` refuses a RESEED=1 items replace while any such Day exists
+ * unless SEED_DAYS=1 is ALSO set — the days rewrite is what re-stamps the
+ * module's canonical snapshot ids.
+ */
+export function orphanedSnapshotDays(days, deleteIds, writeIds) {
+  const deletes = new Set(deleteIds);
+  const writes = new Set(writeIds);
+  return (Array.isArray(days) ? days : [])
+    .filter(
+      (d) =>
+        Array.isArray(d?.snapshotItemIds) &&
+        d.snapshotItemIds.some((id) => deletes.has(id) && !writes.has(id)),
+    )
+    .map((d) => d.index);
+}
+
+/**
+ * A seed-script schedule overwrite may only happen before any Day Snapshot
+ * exists. A snapshot is the source of truth for already-dealt cards; replacing
+ * `days[]` would silently erase its frozen ids (or substitute a module's
+ * different ids). The script deliberately fails closed instead of trying to
+ * re-stamp a live Day: that operation requires a dedicated transactional
+ * maintenance path which proves that no board exists.
+ */
+export function stampedDayIndexes(days) {
+  return (Array.isArray(days) ? days : [])
+    .filter((day) => Array.isArray(day?.snapshotItemIds))
+    .map((day) => day.index);
+}
+
+/**
+ * Pick the timestamp for a replacement seed Prompt. Keeping the original
+ * seed-entry time makes an ID-changing maintenance reseed safe for a future
+ * scheduler stamp of an already-due, but not-yet-snapshotted, Day: its cutoff
+ * still admits the replacement ids. A brand-new pool falls back to the first
+ * already-due positive unlock (or the run time when every Day is future).
+ */
+export function seedEntryTimestamp(existingDocs, days, now = Date.now()) {
+  const knownSeedTimes = existingDocs
+    .filter((doc) => doc.createdBy === 'seed' && typeof doc.createdAt === 'number')
+    .map((doc) => doc.createdAt);
+  const dueCutoffs = (Array.isArray(days) ? days : [])
+    .map((day) => day?.unlockAt)
+    .filter((unlockAt) => typeof unlockAt === 'number' && unlockAt > 0 && unlockAt <= now);
+  return Math.min(now, ...knownSeedTimes, ...dueCutoffs);
+}
+
+/** The timestamp and the Event payload must describe the same schedule. On a
+ * fresh Event the existing document has no `days` yet, so use the schedule we
+ * are about to atomically install; on a routine reseed preserve the live
+ * schedule that the item pool will continue serving. */
+export function effectiveSeedSchedule(existingDays, seedDays, includeDays) {
+  return includeDays ? seedDays : existingDays;
+}
+
+// `pool` is REQUIRED (the target Event's ALL_ITEMS): with per-Event seed data
+// (#563) there is no one global pool a default could safely point at, and a
+// caller that omitted it would silently seed nothing or the wrong Event's
+// prompts — so it fails loudly instead.
+export function seedItemMutations(existingDocs, now = Date.now(), pool, fallbackCreatedAt = now) {
+  if (!Array.isArray(pool)) {
+    throw new Error(
+      'seedItemMutations requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
+    );
+  }
+  const existingSeedCreatedAt = new Map(
+    existingDocs
+      .filter((doc) => doc.createdBy === 'seed' && typeof doc.createdAt === 'number')
+      .map((doc) => [doc.id, doc.createdAt]),
+  );
   return {
     deleteIds: existingDocs.filter((doc) => doc.createdBy === 'seed').map((doc) => doc.id),
     writes: pool.map(({ text, spicy, pool: itemPool }) => ({
@@ -408,7 +219,16 @@ export function seedItemMutations(existingDocs, now = Date.now(), pool = ALL_ITE
       data: {
         text,
         createdBy: 'seed',
-        createdAt: now,
+        // Keep a matching doc's original entry time only when it is already
+        // safe for every due, unstamped Day. A delayed earlier seed may have
+        // written a prompt after one of those Day cutoffs; preserving that late
+        // timestamp would still leave the prompt out of a permanent snapshot.
+        // `fallbackCreatedAt` is the oldest known safe time, so clamp rather
+        // than merely using it for replacement ids.
+        createdAt: Math.min(
+          existingSeedCreatedAt.get(seedItemDocId(text)) ?? fallbackCreatedAt,
+          fallbackCreatedAt,
+        ),
         isFreeSpace: false,
         status: 'active',
         reportCount: 0,
@@ -430,49 +250,100 @@ export function seedItemMutations(existingDocs, now = Date.now(), pool = ALL_ITE
 // events/{id}/items still held the pre-#135 32). `verifySeedPool` compares the
 // live SEED-OWNED docs against the canonical `pool` and reports the drift so a
 // post-deploy check (or `node scripts/seed.mjs --verify`) fails loudly instead of
-// the mismatch going unnoticed. Player-submitted docs (createdBy !== 'seed') are
-// ignored — they are not part of the canonical pool and must never count as drift.
+// the mismatch going unnoticed. A payload may additionally name one legacy
+// content-id per current prompt when a documented in-place production text edit
+// preserved frozen snapshot identity; a fresh canonical id remains valid too.
+// Player-submitted docs (createdBy !== 'seed') are ignored — they are not part
+// of the canonical pool and must never count as drift.
 export function verifySeedPool(
   existingDocs,
-  // Defaults to ALL_ITEMS (main + embark + farewell), not the main-only ITEMS:
-  // both real call sites (seed()/verify() below) already pass ALL_ITEMS
-  // explicitly, and a caller that relies on the documented/default contract
-  // (an ad-hoc smoke check, a test that omits the argument) must not silently
-  // report OK while every embark/farewell seed doc is missing or stale
-  // (Codex P2, PR #229).
-  pool = ALL_ITEMS,
-  reportHideThreshold = EVENT_SEED.settings.reportHideThreshold,
+  // REQUIRED: the target Event's full canonical pool (its ALL_ITEMS — main +
+  // both curated pools). Per-Event since #563, so there is no global default a
+  // partial pool could silently hide behind: a caller that omits the argument
+  // (an ad-hoc smoke check, a test) must fail loudly rather than report OK
+  // against the wrong Event's canon — the same failure class Codex P2 (PR
+  // #229) flagged when the old default was the main-only ITEMS.
+  pool,
+  // The auto-hide visibility threshold to check reportCount against. Defaults
+  // to 4 — the value every Event seeds today (`settings.reportHideThreshold`,
+  // ADR 0004); pass the target Event's own value when they diverge.
+  reportHideThreshold = 4,
+  // Optional per-prompt legacy ids, in the same order as `pool`. This is a
+  // verification allowance only: `seedItemMutations` always writes the current
+  // text-derived id for a new Event or an explicitly-safe reseed.
+  verifyItemIds = undefined,
+  // The live Event's frozen Day snapshots. A pool can be internally consistent
+  // yet still be unusable if a snapshot points at an id that no longer exists.
+  // The runtime verifier reads this directly from events/{id}; the optional
+  // argument keeps this pure helper usable for item-only callers and tests.
+  days = undefined,
 ) {
-  const expected = new Map(
-    pool.map(({ text, spicy, pool: itemPool }) => [
-      seedItemDocId(text),
+  if (!Array.isArray(pool)) {
+    throw new Error(
+      'verifySeedPool requires the target event pool (its ALL_ITEMS) — per-Event since #563; there is no global default.',
+    );
+  }
+  if (verifyItemIds !== undefined) {
+    if (
+      !Array.isArray(verifyItemIds) ||
+      verifyItemIds.length !== pool.length ||
+      verifyItemIds.some((id) => typeof id !== 'string' || !id) ||
+      new Set(verifyItemIds).size !== verifyItemIds.length
+    ) {
+      throw new Error(
+        'verifySeedPool verifyItemIds must be a unique, one-to-one list matching the target event pool.',
+      );
+    }
+  }
+  const expected = pool.map(({ text, spicy, pool: itemPool }, index) => ({
+    index,
+    canonicalId: seedItemDocId(text),
+    // The current content hash always remains valid, so a fresh seed and the
+    // documented in-place production identity both verify cleanly. A Set
+    // handles the ordinary case where the two ids happen to be the same.
+    acceptedIds: [
+      ...new Set([seedItemDocId(text), ...(verifyItemIds ? [verifyItemIds[index]] : [])]),
+    ],
       // An untagged entry (the main 80-entry pool in ITEMS) defaults to 'main',
       // mirroring the stamp in `seedItemMutations`; a tagged entry (embark/
       // farewell) keeps its own tag — a live seed doc missing `pool` or
       // drifted to another pool is itself drift this check surfaces.
-      { text, spicy, isFreeSpace: false, status: 'active', pool: itemPool ?? 'main' },
-    ]),
-  );
+    text,
+    spicy,
+    isFreeSpace: false,
+    status: 'active',
+    pool: itemPool ?? 'main',
+  }));
   const seedDocs = existingDocs.filter((doc) => doc.createdBy === 'seed');
   const seedById = new Map(seedDocs.map((doc) => [doc.id, doc]));
 
   // Canonical prompts absent from the live seed pool (a new/renamed prompt that
   // was never seeded — the #135 symptom for every new-text entry).
   const missing = [];
-  // Present at the canonical id but a stored field drifted from the canonical
-  // record. The doc id is a content hash of `text`, so a matching id normally
-  // implies matching text — but a malformed or hand-edited doc can carry the
-  // canonical id with a different stored `text`, and the whole point of this
-  // check is to catch a live pool that has silently diverged, so compare the
-  // stored fields exactly (Codex P2, PR #139) rather than trusting the id.
+  // Present at either accepted id but a stored field drifted from the canonical
+  // record. The doc id is normally a content hash of `text`, so a matching id
+  // normally implies matching text — but a malformed or hand-edited doc can
+  // carry an accepted id with different stored text, and the whole point of
+  // this check is to catch live drift, so compare stored fields exactly (Codex
+  // P2, PR #139) rather than trusting identity alone.
   // `spicy` is compared strictly, not by truthiness: firestore.rules require
   // `spicy is bool`, so a live value of `"true"`, `1`, `undefined`, or a missing
   // field (all of which `Boolean(...)` would silently coerce to the "right"
   // answer) is itself drift the check must surface (Codex P2, PR #139).
   const mismatched = [];
-  for (const [id, expectedDoc] of expected) {
-    const { text } = expectedDoc;
-    const live = seedById.get(id);
+  const matchedIds = new Set();
+  // A documented legacy identity is an Event-wide generation, not a
+  // per-prompt escape hatch. Accepting canonical and legacy ids independently
+  // would let one rewritten prompt move to its canonical hash while the rest
+  // remain legacy, even though frozen snapshots still name the complete legacy
+  // generation. Entries whose two ids are equal are neutral: unchanged text
+  // belongs to both generations and cannot distinguish them.
+  const legacyIdentity = verifyItemIds
+    ? { canonical: [], legacy: [] }
+    : undefined;
+  for (const expectedDoc of expected) {
+    const { canonicalId: id, text } = expectedDoc;
+    const live = expectedDoc.acceptedIds.map((acceptedId) => seedById.get(acceptedId)).find(Boolean);
     if (!live) {
       missing.push({ id, text });
     } else if (
@@ -485,8 +356,9 @@ export function verifySeedPool(
         reportHideThreshold > 0 &&
         live.reportCount >= reportHideThreshold)
     ) {
+      matchedIds.add(live.id);
       mismatched.push({
-        id,
+        id: live.id,
         text,
         expectedSpicy: expectedDoc.spicy,
         actualSpicy: live.spicy,
@@ -506,22 +378,48 @@ export function verifySeedPool(
           ? { reportHideThreshold, actualReportCount: live.reportCount }
           : {}),
       });
+    } else {
+      matchedIds.add(live.id);
+    }
+    if (live && legacyIdentity && expectedDoc.canonicalId !== verifyItemIds[expectedDoc.index]) {
+      if (live.id === expectedDoc.canonicalId) legacyIdentity.canonical.push(expectedDoc.canonicalId);
+      else legacyIdentity.legacy.push(verifyItemIds[expectedDoc.index]);
     }
   }
   // Seed-owned docs the canonical pool no longer contains (an old prompt that a
   // reseed should have deleted — the #135 symptom for every retired entry).
   const stale = seedDocs
-    .filter((doc) => !expected.has(doc.id))
+    .filter((doc) => !matchedIds.has(doc.id))
     .map((doc) => ({ id: doc.id, text: doc.text }));
 
+  const mixedIdentity =
+    legacyIdentity && legacyIdentity.canonical.length > 0 && legacyIdentity.legacy.length > 0
+      ? legacyIdentity
+      : undefined;
+  const liveIds = new Set(existingDocs.map((doc) => doc.id));
+  const orphanedSnapshotIds = (Array.isArray(days) ? days : []).flatMap((day, position) => {
+    if (!Array.isArray(day?.snapshotItemIds)) return [];
+    const dayIndex = typeof day.index === 'number' ? day.index : position;
+    return day.snapshotItemIds
+      .filter((id) => typeof id !== 'string' || !liveIds.has(id))
+      .map((id) => ({ dayIndex, id: typeof id === 'string' ? id : JSON.stringify(id) ?? String(id) }));
+  });
+
   return {
-    ok: missing.length === 0 && mismatched.length === 0 && stale.length === 0,
-    expected: expected.size,
+    ok:
+      missing.length === 0 &&
+      mismatched.length === 0 &&
+      stale.length === 0 &&
+      !mixedIdentity &&
+      orphanedSnapshotIds.length === 0,
+    expected: expected.length,
     seedOwned: seedDocs.length,
     playerOwned: existingDocs.length - seedDocs.length,
     missing,
     mismatched,
     stale,
+    mixedIdentity,
+    orphanedSnapshotIds,
   };
 }
 
@@ -557,8 +455,6 @@ export async function initFirestore() {
     throw err;
   }
 
-  const EVENT_ID = process.env.VITE_EVENT_ID || 'med-2026';
-
   // Pin the target Firebase project so a bare `node scripts/seed.mjs [--verify]`
   // (npm run seed / verify:seed) can never silently read or write the wrong
   // project (Codex P2, PR #139): prefer the standard env vars, else fall back to
@@ -576,6 +472,26 @@ export async function initFirestore() {
     }
   }
 
+  // Resolve the target Event: an explicit VITE_EVENT_ID wins; otherwise the
+  // resolved project's default Event (#563) so `verify:seed` /
+  // `verify:seed:fiveacross` each compare their own project's live pool
+  // against that Event's canon. A project with NO registered default is an
+  // ERROR, never a fallback (Codex P1, PR #644 round 3): silently selecting
+  // med-2026 would seed the Med Event into an unknown project, or verify a
+  // project against the wrong canon. `resolveSeedEvent` fails loudly on an
+  // Event id this repo has no seed data for.
+  const EVENT_ID = process.env.VITE_EVENT_ID || PROJECT_DEFAULT_EVENT[projectId];
+  if (!EVENT_ID) {
+    console.error(
+      `✗ no VITE_EVENT_ID set and project '${projectId || '(unresolved)'}' has no registered default Event ` +
+        `(known: ${Object.entries(PROJECT_DEFAULT_EVENT)
+          .map(([p, e]) => `${p} → ${e}`)
+          .join(', ')}). Set VITE_EVENT_ID explicitly.`,
+    );
+    process.exit(1);
+  }
+  const seedEvent = resolveSeedEvent(EVENT_ID);
+
   const keyUrl = new URL('../serviceAccountKey.json', import.meta.url);
   initializeApp({
     ...(existsSync(keyUrl)
@@ -583,11 +499,14 @@ export async function initFirestore() {
       : { credential: applicationDefault() }),
     ...(projectId ? { projectId } : {}),
   });
-  return { db: getFirestore(), EVENT_ID, FieldValue, projectId };
+  // `projectId` rides along for scripts/provision-bodega-preview.mjs (#649),
+  // which pins its writes to the fiveacross project.
+  return { db: getFirestore(), EVENT_ID, seedEvent, FieldValue, projectId };
 }
 
 async function seed() {
-  const { db, EVENT_ID, FieldValue } = await initFirestore();
+  const { db, EVENT_ID, seedEvent, FieldValue } = await initFirestore();
+  const { EVENT_SEED, ALL_ITEMS } = seedEvent;
   const admins = adminRoster(process.env.ADMIN_UID);
 
   const eventRef = db.doc(`events/${EVENT_ID}`);
@@ -602,48 +521,122 @@ async function seed() {
   // without a schedule (e.g. med-2026 pre-dating this migration): the
   // existence check alone left `days` permanently missing until an operator
   // knew to pass SEED_DAYS=1 (Codex P1, PR #229).
-  const existingEventSnap = await eventRef.get();
-  const existingDays = existingEventSnap.data()?.days;
-  const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
-  const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
-  await eventRef.set(eventWritePayload(admins, FieldValue.delete(), includeDays), {
-    merge: true,
-  });
-
   const col = eventRef.collection('items');
 
   // Replace semantics, not append (w1-seed-and-composition): every SEED-OWNED
   // item doc is deleted and the current ITEMS are (re)written in ONE atomic
-  // batch (Codex P2, PR #135) — not a delete batch committed separately from
-  // the write batch, which would leave events/{id}/items with no seed prompts
-  // (and joinAndDeal short of MIN_POOL) if the process died or the write
-  // batch failed between the two commits. A doc whose id is unchanged across
-  // reseeds (same text) gets a delete followed by a set within the same
-  // batch; Firestore applies per-document batch ops in order, so the set is
-  // what lands. The delete pass is scoped to `createdBy === 'seed'`
+  // transaction (Codex P2, PR #135) — not a delete operation committed
+  // separately from the writes, which would leave events/{id}/items with no
+  // seed prompts (and joinAndDeal short of MIN_POOL) if the process died
+  // between commits. A doc whose id is unchanged across reseeds (same text)
+  // gets a delete followed by a set within the transaction, so the set is what
+  // lands. The delete pass is scoped to `createdBy === 'seed'`
   // (CodeRabbit Major, PR #135) — addItem writes live Player-submitted
   // prompts into this SAME collection with their own uid as createdBy, so an
   // unscoped delete-everything would erase user content on every reseed.
-  const existing = await col.get();
-  const { deleteIds, writes } = seedItemMutations(
-    existing.docs.map((doc) => ({
-      id: doc.id,
-      createdBy: doc.data().createdBy,
-    })),
-    Date.now(),
-  );
-  const batch = db.batch();
-  for (const id of deleteIds) batch.delete(col.doc(id));
-  for (const { id, data } of writes) batch.set(col.doc(id), data, { merge: true });
-  await batch.commit();
+  // A seed is a single Firestore transaction, rather than a preflight read
+  // followed by a batch. That makes the Day snapshot interlocks a true
+  // precondition: if the scheduler stamps a Day or another seed changes the
+  // pool after either read, Firestore retries the whole callback against the
+  // current Event and collection before it can replace anything.
+  const runAt = Date.now();
+  const refusal = (message) => Object.assign(new Error(message), { code: 'seed-safety-refusal' });
+  let result;
+  try {
+    result = await db.runTransaction(async (transaction) => {
+      const [existingEventSnap, existing] = await Promise.all([
+        transaction.get(eventRef),
+        transaction.get(col),
+      ]);
+      const existingDays = existingEventSnap.data()?.days;
+      const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
+      const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
+      const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
+      const plan = reseedPlan(seedOwnedCount, process.env.RESEED, includeDays);
+      if (plan.action === 'refuse') throw refusal(`✗ events/${EVENT_ID}: ${plan.reason} Nothing was written.`);
+      if (plan.action === 'metadata-only') {
+        // A refused items replace and an unrequested schedule write can still
+        // safely merge Event metadata such as an admin roster.
+        transaction.set(eventRef, eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), false), {
+          merge: true,
+        });
+        return { skipped: true, reason: plan.reason };
+      }
+
+      const existingDocs = existing.docs.map((doc) => ({
+        id: doc.id,
+        createdBy: doc.data().createdBy,
+        createdAt: doc.data().createdAt,
+      }));
+      const { deleteIds, writes } = seedItemMutations(
+        existingDocs,
+        runAt,
+        ALL_ITEMS,
+        seedEntryTimestamp(
+          existingDocs,
+          effectiveSeedSchedule(existingDays, EVENT_SEED.days, includeDays),
+          runAt,
+        ),
+      );
+      if (includeDays) {
+        const stampedDays = stampedDayIndexes(existingDays);
+        if (stampedDays.length) {
+          throw refusal(
+            `✗ events/${EVENT_ID}: refusing SEED_DAYS=1 because Day ${stampedDays.join(', ')} already has a frozen snapshot. ` +
+              'A schedule rewrite may only happen before snapshots exist; use a dedicated transactional maintenance path that proves zero boards before any re-stamp. Nothing was written.',
+          );
+        }
+      }
+      // Snapshot-integrity interlock: if this replace deletes ids a stamped Day
+      // snapshot still references WITHOUT rewriting `days[]`, that Day would
+      // deal from documents that no longer exist. This is evaluated inside the
+      // transaction so a scheduler stamp that races us causes a retry, not an
+      // orphaned snapshot.
+      if (!includeDays) {
+        const orphaned = orphanedSnapshotDays(existingDays, deleteIds, writes.map((w) => w.id));
+        if (orphaned.length) {
+          throw refusal(
+            `✗ events/${EVENT_ID}: replacing the seed-owned pool would orphan the stamped snapshot on Day ${orphaned.join(', ')} ` +
+              '(snapshotItemIds reference ids this replace deletes without rewriting). ' +
+              'Do not re-run with SEED_DAYS=1: schedule overwrites are also refused after a snapshot. ' +
+              'Use a dedicated transactional maintenance path that proves zero dealt boards before any re-stamp. Nothing was written.',
+          );
+        }
+      }
+      transaction.set(
+        eventRef,
+        eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), includeDays),
+        { merge: true },
+      );
+      for (const id of deleteIds) transaction.delete(col.doc(id));
+      for (const { id, data } of writes) transaction.set(col.doc(id), data, { merge: true });
+      return { skipped: false };
+    });
+  } catch (error) {
+    if (error?.code === 'seed-safety-refusal') {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
+  if (result.skipped) {
+    console.log(`Event doc written (merge). Prompts SKIPPED: ${result.reason}`);
+    console.log(
+      admins.length
+        ? `Admins: set (${admins.length})`
+        : 'No ADMIN_UID set — set the roster (comma-separated uids) and re-run to grant admin.',
+    );
+    process.exit(0);
+  }
 
   // Self-check: read the collection back and confirm the live seed pool now
-  // matches the canonical ALL_ITEMS (main + embark + farewell). A green seed
-  // run that leaves drift (partial batch, wrong project, stale doc a scoped
+  // matches the canonical ALL_ITEMS (main + both curated pools). A green seed
+  // run that leaves drift (failed transaction, wrong project, stale doc a scoped
   // delete missed) should fail loudly right here, not weeks later when a
   // player notices the old prompts.
+  const [itemsSnap, eventSnap] = await Promise.all([col.get(), eventRef.get()]);
   const report = verifySeedPool(
-    (await col.get()).docs.map((doc) => ({
+    itemsSnap.docs.map((doc) => ({
       id: doc.id,
       text: doc.data().text,
       createdBy: doc.data().createdBy,
@@ -654,6 +647,9 @@ async function seed() {
       pool: doc.data().pool,
     })),
     ALL_ITEMS,
+    EVENT_SEED.settings.reportHideThreshold,
+    seedEvent.VERIFY_ITEM_IDS,
+    eventSnap.data()?.days,
   );
   if (!report.ok) {
     console.error(formatDriftReport(report, EVENT_ID));
@@ -690,31 +686,54 @@ export function formatDriftReport(report, eventId) {
     lines.push(`  stale in live (${report.stale.length}): ${preview(report.stale)}`);
   if (report.mismatched.length)
     lines.push(`  field drift (${report.mismatched.length}): ${preview(report.mismatched)}`);
+  if (report.mixedIdentity)
+    lines.push(
+      `  mixed identity generation: ${report.mixedIdentity.canonical.length} canonical-only / ` +
+        `${report.mixedIdentity.legacy.length} legacy-only rewritten prompt ids`,
+    );
+  if (report.orphanedSnapshotIds.length)
+    lines.push(
+      `  frozen snapshot ids missing from live (${report.orphanedSnapshotIds.length}): ` +
+        report.orphanedSnapshotIds
+          .slice(0, 5)
+          .map(({ dayIndex, id }) => `Day ${dayIndex} → ${JSON.stringify(id)}`)
+          .join(', ') +
+        (report.orphanedSnapshotIds.length > 5 ? ', …' : ''),
+    );
   // Reconcile with a bare reseed — NO ADMIN_UID. The seed's event write merges,
   // and omitting ADMIN_UID leaves `events/{id}.admins` untouched (a reseed to
   // refresh prompts must never overwrite the live admin roster, Codex P2 PR
   // #139). ADMIN_UID is only for the separate act of *granting* admin.
   //
   // Echo the SAME target the drift was found against, not a hardcoded default
-  // (Codex P2, PR #139): carry the resolved project and — when it is not the
-  // `med-2026` default — the `VITE_EVENT_ID`, so a copy-pasted reconcile command
-  // reseeds the event that actually drifted rather than a different one.
+  // (Codex P2, PR #139): carry the resolved project and the explicit
+  // `VITE_EVENT_ID` (always, now that Events are per-project — #563), so a
+  // copy-pasted reconcile command reseeds the event that actually drifted
+  // rather than a different one.
   const project =
     process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'gaycruisebingo';
-  const eventEnv = eventId && eventId !== 'med-2026' ? `VITE_EVENT_ID=${eventId} ` : '';
+  const eventEnv = eventId ? `VITE_EVENT_ID=${eventId} ` : '';
   lines.push(
-    `  → reconcile (prompts only): ADMIN_UID= ${eventEnv}GOOGLE_CLOUD_PROJECT=${project} node scripts/seed.mjs`,
+    `  → reconcile (prompts only, replaces the seed-owned pool): ADMIN_UID= RESEED=1 ${eventEnv}GOOGLE_CLOUD_PROJECT=${project} node scripts/seed.mjs`,
+    // A replace that changes doc ids would orphan any Day's pre-stamped
+    // snapshotItemIds; seed() refuses that combination outright and names the
+    // affected Days (Codex P1, PR #644 round 2), so the caution rides the
+    // command it applies to.
+    '    (if a Day carries a pre-stamped snapshot, do not run this command: use a dedicated transactional maintenance path that proves zero dealt boards)',
   );
   return lines.join('\n');
 }
 
 // Read-only drift check (`node scripts/seed.mjs --verify`). Never writes — safe
 // to run as a post-deploy smoke test. Exits 0 when the live seed pool matches
-// the canonical ALL_ITEMS (main + embark + farewell), 1 (with an actionable
-// report) when it drifts.
+// the target Event's canonical ALL_ITEMS (main + both curated pools), 1 (with
+// an actionable report) when it drifts.
 async function verify() {
-  const { db, EVENT_ID } = await initFirestore();
-  const snap = await db.collection(`events/${EVENT_ID}/items`).get();
+  const { db, EVENT_ID, seedEvent } = await initFirestore();
+  const [snap, eventSnap] = await Promise.all([
+    db.collection(`events/${EVENT_ID}/items`).get(),
+    db.doc(`events/${EVENT_ID}`).get(),
+  ]);
   const report = verifySeedPool(
     snap.docs.map((doc) => ({
       id: doc.id,
@@ -726,7 +745,10 @@ async function verify() {
       reportCount: doc.data().reportCount,
       pool: doc.data().pool,
     })),
-    ALL_ITEMS,
+    seedEvent.ALL_ITEMS,
+    seedEvent.EVENT_SEED.settings.reportHideThreshold,
+    seedEvent.VERIFY_ITEM_IDS,
+    eventSnap.data()?.days,
   );
   if (report.ok) {
     console.log(

@@ -33,7 +33,7 @@
 // firebase-admin, so scripts/migrate-schedule-2026-07-17.test.mjs can import and
 // assert `planScheduleMigration` / `diffDay` without any credential or install.
 import { pathToFileURL } from 'node:url';
-import { EVENT_SEED } from './seed.mjs';
+import { EVENT_SEED } from './seed-data/med-2026.mjs';
 
 // The four Day fields this migration is permitted to change. The corrected Day
 // written back is the LIVE Day with ONLY these fields overwritten from the

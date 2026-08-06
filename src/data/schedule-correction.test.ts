@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { DayDef } from '../types';
 import { DAYS } from './seed';
-import { EVENT_SEED } from '../../scripts/seed.mjs';
+import { EVENT_SEED } from '../../scripts/seed-data/med-2026.mjs';
 import { ALLOWED_FIELDS, IMMUTABLE_FIELDS, diffDay, correctDay, planScheduleMigration } from '../../scripts/migrate-schedule-2026-07-17.mjs';
 
 type LiveDay = Omit<DayDef, 'tonight'> & { tonight?: string[] };
@@ -53,7 +53,7 @@ describe('schedule correction — corrected day → theme/port/tonight mapping (
     }
   });
 
-  it('stays in sync with scripts/seed.mjs EVENT_SEED.days (tonight included)', () => {
+  it('stays in sync with scripts/seed-data/med-2026.mjs EVENT_SEED.days (tonight included)', () => {
     const scriptDays = EVENT_SEED.days as Array<Pick<DayDef, 'tonight'>>;
     expect(scriptDays.map((d) => d.tonight)).toEqual(DAYS.map((d) => d.tonight));
   });

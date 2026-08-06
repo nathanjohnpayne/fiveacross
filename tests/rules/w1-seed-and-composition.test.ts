@@ -11,16 +11,17 @@ import {
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
-// @ts-expect-error — scripts/seed.mjs is a plain-JS node script with no type
-// declarations. The exported payload helpers are import-safe and side-effect-free.
+// scripts/seed.mjs is a plain-JS node script (typed via scripts/seed.d.mts).
+// The exported payload helpers are import-safe and side-effect-free; the GCB
+// Event payload itself is per-Event seed data (#563).
 import {
-  ALL_ITEMS,
   adminRoster,
   eventWritePayload,
   seedItemDocId,
   seedItemMutations,
   verifySeedPool,
 } from '../../scripts/seed.mjs';
+import { ALL_ITEMS, EVENT_SEED } from '../../scripts/seed-data/med-2026.mjs';
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
 const EVENT = 'seed-composition';
@@ -37,9 +38,10 @@ async function applySeed(db: Firestore) {
       createdBy: snap.data().createdBy,
     })),
     1_776_000_000_000,
+    ALL_ITEMS,
   );
   const batch = writeBatch(db);
-  batch.set(eventRef, eventWritePayload(adminRoster(''), deleteField()), {
+  batch.set(eventRef, eventWritePayload(EVENT_SEED, adminRoster(''), deleteField()), {
     merge: true,
   });
   for (const id of deleteIds) batch.delete(doc(itemsRef, id));
