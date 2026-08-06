@@ -10,4 +10,4 @@ Gay Cruise Bingo is a party game for one friend group on one cruise, with **no m
 
 - Self-writable `boards/{uid}` and `players/{uid}` in the Firestore rules are **intentional**, not a hole to close. A reviewer who "fixes" them by locking stat writes has misread the design.
 - The three Claim Modes are a **friction/vibe hierarchy, not a trust hierarchy.** `verified` is renamed **Admin-confirmed** (a dispute/ceremony tool) so the word "verified" stops implying an integrity guarantee we don't make. (Code still persists the value `verified`; reconcile if/when we align code to the ubiquitous language.)
-- Any Phase 1 server-side stat recompute is for **consistency/repair, not integrity** — it reads the same Player-written Board, so it cannot make marks trustworthy. Do not build it, or justify it, as an anti-cheat measure.
+- Any Phase 1 server-side stat recompute is for **consistency/repair, not integrity**—it reads the same Player-written Board, so it cannot make marks trustworthy. Do not build it, or justify it, as an anti-cheat measure.

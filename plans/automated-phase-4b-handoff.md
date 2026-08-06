@@ -135,7 +135,7 @@ flowchart TD
 
 Direction is not cosmetic. It selects the adapter, the credential, the sandbox/permission model, the prompt shape, and how a verdict is derived—because the two CLIs expose review very differently (§ 9). It also keeps the cross-agent guarantee: the reviewer identity differs from the author, so the posted `APPROVED` is a genuine cross-agent signal and does **not** trip the no-self-approve rule (`REVIEW_POLICY.md` § No-self-approve scoping) or the `gh-pr-guard.sh` block on same-agent over-threshold approvals.
 
-## 7. Direction A — Claude → Codex (`codex exec`)
+## 7. Direction A—Claude → Codex (`codex exec`)
 
 The authoring agent is Claude; the external reviewer is `nathanpayne-codex`, driven by the Codex CLI in non-interactive mode.
 
@@ -193,7 +193,7 @@ GH_AS_REVIEWER_IDENTITY=nathanpayne-codex \
     --method POST --input review-payload.json
 ```
 
-## 8. Direction B — Codex → Claude (`claude -p`)
+## 8. Direction B—Codex → Claude (`claude -p`)
 
 The authoring agent is Codex; the external reviewer is `nathanpayne-claude`, driven by Claude Code in print/headless mode.
 
@@ -296,7 +296,7 @@ This maps onto existing doctrine: runaway rounds and repeat-after-rebuttal route
 
 There are two independent authentication planes, and conflating them is the main footgun:
 
-1. **Reasoning plane (LLM provider).** The reviewer CLI authenticates to OpenAI or Anthropic to think, on the operator's **individual subscription plan** — Codex via `codex login` (ChatGPT account, `~/.codex/auth.json` with `auth_mode=chatgpt`); Claude via its subscription login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`, or the OS keychain, with `claude auth status --json` reporting `apiProvider=firstParty` and either `authMethod=claude.ai` plus a `subscriptionType`, or `authMethod=oauth_token` for the headless subscription-token path). **Plan-only billing is enforced, not assumed:** the adapters reject persisted API-key auth modes and launch the reviewer CLI under an allowlisted environment, so neither a configured API-key login nor a stray env key can silently divert a handoff review to metered API billing. If the CLI is not plan-logged-in, the read-only call fails and the orchestrator falls back to the manual handoff (fail-closed) — it never bills the API.
+1. **Reasoning plane (LLM provider).** The reviewer CLI authenticates to OpenAI or Anthropic to think, on the operator's **individual subscription plan**—Codex via `codex login` (ChatGPT account, `~/.codex/auth.json` with `auth_mode=chatgpt`); Claude via its subscription login (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`, or the OS keychain, with `claude auth status --json` reporting `apiProvider=firstParty` and either `authMethod=claude.ai` plus a `subscriptionType`, or `authMethod=oauth_token` for the headless subscription-token path). **Plan-only billing is enforced, not assumed:** the adapters reject persisted API-key auth modes and launch the reviewer CLI under an allowlisted environment, so neither a configured API-key login nor a stray env key can silently divert a handoff review to metered API billing. If the CLI is not plan-logged-in, the read-only call fails and the orchestrator falls back to the manual handoff (fail-closed)—it never bills the API.
 2. **Attribution plane (GitHub).** The review must be posted as `nathanpayne-codex` / `nathanpayne-claude` using the reviewer PAT through `scripts/gh-as-reviewer.sh`, which verifies the effective token identity before the write (`REVIEW_POLICY.md` § PAT lookup table; Operation-to-Identity Matrix). GitHub tokens stay in the parent orchestrator process only; the reviewer CLI child process receives only a minimal allowlist (`PATH`, `HOME`, locale/tmp basics, and `CODEX_HOME` or `CLAUDE_CODE_OAUTH_TOKEN` when needed), so prompt-injected diffs cannot use the reasoning CLI to read GitHub tokens, deploy/cloud credentials, or SSH-agent state from the parent session. Before the final GitHub write, the orchestrator sets `GH_AS_REVIEWER_IDENTITY` and clears a stale `OP_PREFLIGHT_REVIEWER_PAT` from the authoring agent session so `gh-as-reviewer.sh` resolves and verifies the selected external reviewer rather than the current agent.
 
 Because the sandboxed/plan-mode CLI runs read-only, it **cannot** post the GitHub review itself; the orchestrator does, on the reasoning plane's behalf. This is a feature, not a limitation: it guarantees the posted review carries verified reviewer-identity attribution rather than whatever ambient token the CLI happened to hold.
@@ -372,12 +372,12 @@ The reference implementation ships this exact block (disabled) in `.github/revie
 
 Every automated Phase 4b approval now carries its own rigor / cost / time / quality story so an operator never reconstructs it after the fact (as had to happen on #580). The reconciled source of truth is [`plans/issue-602-phase-4b-accounting-SPEC.md`](issue-602-phase-4b-accounting-SPEC.md); this section is the design summary.
 
-- **Where it lives.** `scripts/phase-4b/accounting.sh` (sourced by the orchestrator; pure functions over JSON, unit-testable offline via `tests/test_phase_4b_accounting.sh` / `scripts/ci/check_phase_4b_accounting`) renders a `## Phase 4b Approval Accounting` block that the orchestrator appends to the **body of the automated `APPROVED` review** — the same HEAD-pinned pull-review POST as today, no separate comment. The block embeds a machine-readable `<!-- p4b-accounting:v1 ... -->` record validated by `scripts/phase-4b/accounting.schema.json`.
+- **Where it lives.** `scripts/phase-4b/accounting.sh` (sourced by the orchestrator; pure functions over JSON, unit-testable offline via `tests/test_phase_4b_accounting.sh` / `scripts/ci/check_phase_4b_accounting`) renders a `## Phase 4b Approval Accounting` block that the orchestrator appends to the **body of the automated `APPROVED` review**—the same HEAD-pinned pull-review POST as today, no separate comment. The block embeds a machine-readable `<!-- p4b-accounting:v1 ... -->` record validated by `scripts/phase-4b/accounting.schema.json`.
 - **Loop-centric.** Each orchestrator invocation appends one loop record to a per-PR loop log (`.mergepath/phase-4b-loops/…`, gitignored runtime state), including CHANGES_REQUESTED rounds and fail-closed fallbacks (recorded as positive safety evidence: reason + duration), so the final approval renders the whole changes-requested-then-fixed history, the findings lifecycle (first/last loop, disposition, fix-commit/issue links), and a rigor proof-of-work table whose rows are green only when the backing signal was captured (else `n/a — reason`).
 - **Advisory to safety, fail-closed for integrity.** Report-generation failure ⇒ the orchestrator posts its existing plain-summary approval (exit codes unchanged); accounting can never block or fabricate an approval. Conversely the builder/renderer refuse (fail closed) any record whose loop history would pair a posted `APPROVED` with a required-tier (P0/P1 by default) finding, tokens are never estimated (`unavailable` with source/reason), and running totals degrade to `unavailable` rather than guessing.
 - **Cost model.** Billed marginal cost is `$0.00` (plan-only auth); the block additionally reports wall-clock, CLI-exposed tokens (the additive nullable `usage` fields in `verdict.schema.json` carry cache/reasoning/cost when the CLI envelope exposes them), plan-capacity throttle events, a **notional** metered-API equivalent priced from the versioned `scripts/phase-4b/prices.json` (`price_table_version` stamped into every record; missing price ⇒ `n/a`, record still posts), and the cited human-shuttle-avoided range from REVIEW_POLICY.md § Phase 4b Triggers.
-- **Running totals.** Aggregated at post time from prior `p4b-accounting:v1` records — an injected GitHub-derived record file (`P4B_ACCT_PRIOR_RECORDS_JSONL`, produced by piping prior review bodies through `p4b_acct_extract_records`) wins; the append-only `.mergepath/phase-4b-ledger.jsonl` cache is the fallback; neither ⇒ the section says `unavailable` with the reason. The totals source is always named in the block footer.
-- **Toggles.** `phase_4b_automation.accounting.enabled` (default `true` under the disabled-by-default parent) plus opt-in `accounting.{codex,claude}_price_key` mappings for the notional figure — the adapters do not capture exact model IDs yet, so pricing is never inferred.
+- **Running totals.** Aggregated at post time from prior `p4b-accounting:v1` records—an injected GitHub-derived record file (`P4B_ACCT_PRIOR_RECORDS_JSONL`, produced by piping prior review bodies through `p4b_acct_extract_records`) wins; the append-only `.mergepath/phase-4b-ledger.jsonl` cache is the fallback; neither ⇒ the section says `unavailable` with the reason. The totals source is always named in the block footer.
+- **Toggles.** `phase_4b_automation.accounting.enabled` (default `true` under the disabled-by-default parent) plus opt-in `accounting.{codex,claude}_price_key` mappings for the notional figure—the adapters do not capture exact model IDs yet, so pricing is never inferred.
 
 ## 18. Open questions
 
@@ -385,8 +385,8 @@ Every automated Phase 4b approval now carries its own rigor / cost / time / qual
 - **Codex output schema fidelity.** Does `--output-schema` constrain `codex exec` tightly enough to trust the mapped state, or should the Codex direction also gate on a confirmation pass?
 - **Outer loop persistence.** If a follow-up wants fully automatic re-run loops, persist and enforce `max_review_rounds` outside the one-pass helper so runaway review cycles still escalate cleanly.
 - **Cursor reviewer.** Worth a third adapter now, or defer until the interface stabilizes?
-- **Latency budget — initial default.** Headless reviewer CLI execution is bounded at 900 seconds by default (`P4B_ADAPTER_TIMEOUT_SECONDS` / `P4B_REVIEW_CLI_TIMEOUT_SECONDS`) before manual fallback. Tune this after observing live wall-clock behavior across several 4b reviews.
-- **Billing model — resolved.** Reviewer CLIs run on the operator's individual subscription plans, never the pay-per-token API. Enforced in the adapters by rejecting persisted API-key auth modes (`auth_mode != chatgpt` for Codex; Claude auth status must be `apiProvider=firstParty` with `authMethod=claude.ai` plus a subscription type, or `authMethod=oauth_token`) and by launching the child CLI under an allowlisted environment that excludes API-key env vars and ambient credentials. Both paths are covered by `tests/test_phase_4b_automation.sh`. A configurable API-billing mode — for a CI or org runner that has no plan login — is a deferred follow-up, not part of this reference.
+- **Latency budget—initial default.** Headless reviewer CLI execution is bounded at 900 seconds by default (`P4B_ADAPTER_TIMEOUT_SECONDS` / `P4B_REVIEW_CLI_TIMEOUT_SECONDS`) before manual fallback. Tune this after observing live wall-clock behavior across several 4b reviews.
+- **Billing model—resolved.** Reviewer CLIs run on the operator's individual subscription plans, never the pay-per-token API. Enforced in the adapters by rejecting persisted API-key auth modes (`auth_mode != chatgpt` for Codex; Claude auth status must be `apiProvider=firstParty` with `authMethod=claude.ai` plus a subscription type, or `authMethod=oauth_token`) and by launching the child CLI under an allowlisted environment that excludes API-key env vars and ambient credentials. Both paths are covered by `tests/test_phase_4b_automation.sh`. A configurable API-billing mode—for a CI or org runner that has no plan login—is a deferred follow-up, not part of this reference.
 
 ## 19. References
 
@@ -400,19 +400,19 @@ Every automated Phase 4b approval now carries its own rigor / cost / time / qual
 
 **Codex CLI**
 
-- Overview — https://developers.openai.com/codex/cli
-- Non-interactive mode (`codex exec`, auth, JSON) — https://developers.openai.com/codex/noninteractive
-- CLI command-line options (flags) — https://developers.openai.com/codex/cli/reference
-- CLI features (local code review) — https://developers.openai.com/codex/cli/features
-- Codex SDK — https://developers.openai.com/codex/sdk
-- GitHub Action (`openai/codex-action@v1`, deferred CI option) — https://developers.openai.com/codex/github-action
+- Overview—https://developers.openai.com/codex/cli
+- Non-interactive mode (`codex exec`, auth, JSON)—https://developers.openai.com/codex/noninteractive
+- CLI command-line options (flags)—https://developers.openai.com/codex/cli/reference
+- CLI features (local code review)—https://developers.openai.com/codex/cli/features
+- Codex SDK—https://developers.openai.com/codex/sdk
+- GitHub Action (`openai/codex-action@v1`, deferred CI option)—https://developers.openai.com/codex/github-action
 
 **Claude Code CLI**
 
-- CLI reference — https://code.claude.com/docs/en/cli-reference
-- Headless / print mode — https://code.claude.com/docs/en/headless
-- Commands reference (`/review` for a GitHub PR, `/code-review` for a local diff) — https://code.claude.com/docs/en/commands
-- Permission modes — https://code.claude.com/docs/en/permission-modes
-- Settings (allowed tools) — https://code.claude.com/docs/en/settings
-- Authentication (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`) — https://code.claude.com/docs/en/authentication
-- GitHub Actions (deferred CI option) — https://code.claude.com/docs/en/github-actions
+- CLI reference—https://code.claude.com/docs/en/cli-reference
+- Headless / print mode—https://code.claude.com/docs/en/headless
+- Commands reference (`/review` for a GitHub PR, `/code-review` for a local diff)—https://code.claude.com/docs/en/commands
+- Permission modes—https://code.claude.com/docs/en/permission-modes
+- Settings (allowed tools)—https://code.claude.com/docs/en/settings
+- Authentication (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`)—https://code.claude.com/docs/en/authentication
+- GitHub Actions (deferred CI option)—https://code.claude.com/docs/en/github-actions

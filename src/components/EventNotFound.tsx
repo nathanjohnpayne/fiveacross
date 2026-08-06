@@ -27,12 +27,12 @@ export default function EventNotFound({
     reason === 'inactive'
       ? 'The event at this address has finished or been archived. If you think it should still be running, check with whoever invited you.'
       : reason === 'unreachable'
-        ? "We couldn't reach the server to look this address up. Check your connection and try again — if you were playing earlier, your card is still safe."
+        ? "We couldn't reach the server to look this address up. Check your connection and try again—if you were playing earlier, your card is still safe."
         : reason === 'auth-unconfigured'
           ? // Deliberately not a sign-in screen: the button would open a Google
             // flow that cannot return here (ADR 0010). Better to name the state
             // than to let a player discover it halfway through signing in.
-            'The game is here, but sign-in has not been switched on for this address yet. Whoever set the event up needs to finish one step — this is not something you can fix from your phone.'
+            'The game is here, but sign-in has not been switched on for this address yet. Whoever set the event up needs to finish one step—this is not something you can fix from your phone.'
           : 'Double-check the link you were sent. Addresses are case-insensitive but otherwise exact.';
 
   // #585: on a `*.vercel.app` host this screen has a different audience. Every
@@ -53,7 +53,7 @@ export default function EventNotFound({
   // to start anyway.
   const previewHint =
     reason === 'auth-unconfigured' && hostname.endsWith('.vercel.app')
-      ? 'Developer note: per-deployment preview hosts can never sign in — Firebase and Google both match hostnames exactly, and neither accepts a wildcard. Push the branch with `git push --force origin HEAD:preview` and reopen it on the stable alias, gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app (docs/app/preview-deploys.md).'
+      ? 'Developer note: per-deployment preview hosts can never sign in—Firebase and Google both match hostnames exactly, and neither accepts a wildcard. Push the branch with `git push --force origin HEAD:preview` and reopen it on the stable alias, gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app (docs/app/preview-deploys.md).'
       : null;
 
   return (

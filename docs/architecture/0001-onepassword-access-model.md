@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — ratified by the repository owner (nathanjohnpayne) on 2026-05-21 via [#357](https://github.com/nathanjohnpayne/mergepath/issues/357), adopted on merge of [#369](https://github.com/nathanjohnpayne/mergepath/pull/369).
+Accepted—ratified by the repository owner (nathanjohnpayne) on 2026-05-21 via [#357](https://github.com/nathanjohnpayne/mergepath/issues/357), adopted on merge of [#369](https://github.com/nathanjohnpayne/mergepath/pull/369).
 
 This ADR consolidates the ratified sub-decisions from [#355](https://github.com/nathanjohnpayne/mergepath/issues/355) and [#356](https://github.com/nathanjohnpayne/mergepath/issues/356). Every lane below is implemented and cross-agent reviewed: op-preflight token mode (#353 / #365), the CI service-account proof workflow (#354 / #368), reviewer-ref support with identity + negative-scope verification (#372), and the `human-hold` merge freeze (#367 / #370).
 

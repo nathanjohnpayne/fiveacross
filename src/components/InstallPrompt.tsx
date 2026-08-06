@@ -105,7 +105,7 @@ export default function InstallPrompt() {
       <button
         type="button"
         className="iconbtn install-prompt-dismiss"
-        aria-label="Dismiss — reopen anytime from More"
+        aria-label="Dismiss—reopen anytime from More"
         title="Dismiss"
         onClick={dismiss}
       >

@@ -9,7 +9,7 @@ status: accepted
 
 ## Claim Mode is a friction/vibe knob, not a trust level (ADR 0001)
 
-The three Claim Modes are a friction/vibe hierarchy, never a trust hierarchy. The mode formerly named `verified` is renamed `admin_confirmed` so the word "verified" stops implying an integrity guarantee the honor-system model does not make. `admin_confirmed` starts a Mark pending until an Admin resolves its Claim — a dispute/ceremony tool, not anti-cheat.
+The three Claim Modes are a friction/vibe hierarchy, never a trust hierarchy. The mode formerly named `verified` is renamed `admin_confirmed` so the word "verified" stops implying an integrity guarantee the honor-system model does not make. `admin_confirmed` starts a Mark pending until an Admin resolves its Claim—a dispute/ceremony tool, not anti-cheat.
 
 - The `ClaimMode` union is `'honor' | 'proof_required' | 'admin_confirmed'`; no source or comment names the mode "verified". (Enforced by `npm run typecheck` across the type and all seven call sites: `Board.tsx`, `ProofSheet.tsx`, `Admin.tsx`, `data/api.ts`, `data/proofs.ts`, `data/admin.ts`, `game/logic.test.ts`.)
 
@@ -19,15 +19,15 @@ Events seeded or written before the rename persist the pre-rename Claim Mode val
 
 - **Given** a raw persisted value of `'verified'` **when** passed through `migrateClaimMode` **then** it resolves to `admin_confirmed`. (Test: "coerces a pre-rename persisted value to admin_confirmed".)
 - **Given** a current Claim Mode **when** migrated **then** it passes through unchanged. (Test: "passes current Claim Modes through unchanged".)
-- **Given** any input — legacy, current, unknown, or missing — **when** migrated **then** the result is never the legacy value, and unknown/missing inputs default to `honor`. (Test: "never resolves to the legacy value and defaults unknown/missing to honor".)
+- **Given** any input—legacy, current, unknown, or missing—**when** migrated **then** the result is never the legacy value, and unknown/missing inputs default to `honor`. (Test: "never resolves to the legacy value and defaults unknown/missing to honor".)
 - **Given** a persisted Event carrying the legacy `claimMode` **when** read through `eventConverter` **then** `claimMode` is `admin_confirmed` and every other field is preserved. (Tests: "reads a persisted Event with the legacy claimMode as admin_confirmed", "preserves every other field while migrating claimMode".)
-- **Given** a migrated Event **when** re-serialized through `eventConverter.toFirestore` **then** `claimMode` is still `admin_confirmed` — no write re-introduces the legacy value. (Test: "re-serializing a migrated Event never re-introduces the legacy value".)
+- **Given** a migrated Event **when** re-serialized through `eventConverter.toFirestore` **then** `claimMode` is still `admin_confirmed`—no write re-introduces the legacy value. (Test: "re-serializing a migrated Event never re-introduces the legacy value".)
 
 ## Dead config removed (ADR 0004)
 
 `EventDoc.settings.blackoutEnabled` was dead config and is removed from the type; `reportHideThreshold` stays (it is load-bearing for reactive moderation).
 
-- No TypeScript source references `blackoutEnabled`. (Enforced by `npm run typecheck`; the `baseEvent` fixture in the unit test constructs `settings` without it, so a re-introduction fails to compile. `scripts/seed.mjs` still seeds it and is out of scope here — handled by `w1-event-seed`.)
+- No TypeScript source references `blackoutEnabled`. (Enforced by `npm run typecheck`; the `baseEvent` fixture in the unit test constructs `settings` without it, so a re-introduction fails to compile. `scripts/seed.mjs` still seeds it and is out of scope here—handled by `w1-event-seed`.)
 
 ## Greenfield social types added (ADR 0002)
 

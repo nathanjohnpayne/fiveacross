@@ -48,7 +48,7 @@ function bodyFor(pending: PendingFlip, occasion: string): ReactNode {
     return (
       <>
         Turning this on means every player is asked to confirm they’re 18 or older before they can
-        keep playing — including the ones already playing right now.
+        keep playing—including the ones already playing right now.
       </>
     );
   }
@@ -57,7 +57,7 @@ function bodyFor(pending: PendingFlip, occasion: string): ReactNode {
       <>
         {pending.explicitCount} of the {pending.totalCount} prompts you’re approving{' '}
         {pending.explicitCount === 1 ? 'is' : 'are'} explicit. Approving means every player is asked
-        to confirm they’re 18 or older before they can keep playing — including the ones already
+        to confirm they’re 18 or older before they can keep playing—including the ones already
         playing right now.
       </>
     );
@@ -66,7 +66,7 @@ function bodyFor(pending: PendingFlip, occasion: string): ReactNode {
   return (
     <>
       This is the first explicit prompt in this {occasion}. {action} it means every player is asked to
-      confirm they’re 18 or older before they can keep playing — including the ones already playing
+      confirm they’re 18 or older before they can keep playing—including the ones already playing
       right now.
     </>
   );

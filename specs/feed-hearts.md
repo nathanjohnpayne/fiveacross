@@ -9,9 +9,9 @@ A Player hearts posts in the Feed—many posts, each post only once—with a Luc
 
 ## Glossary
 
-**Heart** — one Player's like on a Feed post. A reaction, never evidence and never score: hearts touch no stats, no leaderboard, no win logic (ADR 0001 untouched). *Avoid:* like (the UI verb is heart), favorite, reaction (reserved—a future multi-emoji system would be a different thing).
+**Heart**—one Player's like on a Feed post. A reaction, never evidence and never score: hearts touch no stats, no leaderboard, no win logic (ADR 0001 untouched). *Avoid:* like (the UI verb is heart), favorite, reaction (reserved—a future multi-emoji system would be a different thing).
 
-**Post** — a Proof or a Moment card in the Feed. Tally Cards are derived aggregates keyed by (Prompt, Day), not documents, and take no hearts.
+**Post**—a Proof or a Moment card in the Feed. Tally Cards are derived aggregates keyed by (Prompt, Day), not documents, and take no hearts.
 
 ## Data model
 

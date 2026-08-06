@@ -17,7 +17,7 @@ export default function AsyncButton({
   className = 'btn',
   title,
   ariaLabel,
-  failureLabel = 'Failed — try again.',
+  failureLabel = 'Failed—try again.',
 }: {
   onAction: () => Promise<unknown> | unknown;
   children: ReactNode;

@@ -80,7 +80,7 @@ function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
       </button>
       {failed && (
         <span className="pill pill-error" role="alert">
-          Didn’t add — try again.
+          Didn’t add—try again.
         </span>
       )}
       {dialog}
@@ -167,7 +167,7 @@ function AdminItemRow({
           </button>
           {saveState === 'error' && (
             <span className="pill pill-error" role="alert">
-              Didn’t save — try again.
+              Didn’t save—try again.
             </span>
           )}
           <button className="iconbtn" title="Cancel" onClick={() => setEditing(false)}>
@@ -175,7 +175,7 @@ function AdminItemRow({
           </button>
         </>
       ) : textLocked ? (
-        <span className="iconbtn" title="On an unlocked day's dealt snapshot — text is frozen" aria-label="Text frozen">
+        <span className="iconbtn" title="On an unlocked day's dealt snapshot—text is frozen" aria-label="Text frozen">
           🔒
         </span>
       ) : (

@@ -78,7 +78,7 @@ const BRANDS: Record<string, EditionBrand> = {
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',
-    offlineNote: 'Patchy signal? Your card keeps working offline — marks sync when you reconnect.',
+    offlineNote: 'Patchy signal? Your card keeps working offline—marks sync when you reconnect.',
     // Title case, not the caps wordmark: these render as a browser tab and a
     // home-screen label, not as the gate's display type. "Vacay Bingo" is 11
     // characters, so it survives Android's short_name truncation whole and
@@ -132,7 +132,7 @@ const BRANDS: Record<string, EditionBrand> = {
     // framing its default Theme (✨ Marquee, #617) already speaks.
     preEventVerb: 'Opens',
     tagline: 'Sign in, get your card, mark it if you see it.',
-    offlineNote: 'Packed room, no bars? Your card keeps working offline — marks sync when you reconnect.',
+    offlineNote: 'Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.',
     // Title case for the tab and the home-screen label, as above. "Five Across"
     // is 11 characters, so it survives Android's short_name truncation whole.
     documentTitle: 'Five Across',

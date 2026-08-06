@@ -73,7 +73,7 @@ test.describe('tab bar + More menu', () => {
 
     // 2. Theme — Auto is the leading, active-by-default chip.
     const themeGroup = page.locator('.themes[aria-label="Theme"]');
-    const autoChip = themeGroup.getByRole('button', { name: /Auto — match the day/ });
+    const autoChip = themeGroup.getByRole('button', { name: /Auto—match the day/ });
     await expect(autoChip).toBeVisible();
     await expect(autoChip).toHaveClass(/active/);
     // Picking a concrete theme overrides Auto; App's <html data-theme> follows it.

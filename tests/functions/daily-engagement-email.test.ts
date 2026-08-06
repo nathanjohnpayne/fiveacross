@@ -518,7 +518,7 @@ describe('buildDailyEmailModel', () => {
     expect(model.nudgeLine).toContain('The group lands in Bodega Bay today');
     expect(model.nudgeLine).toContain('8:00 a.m.'); // 15:00Z is 08:00 Pacific
     expect(model.awardLead).toBe('most-loved photo of the trip');
-    expect(model.subject).toBe('Day 1 · The Birds Have Entered the Chat 🐦 — your card is live');
+    expect(model.subject).toBe('Day 1 · The Birds Have Entered the Chat 🐦—your card is live');
   });
 
   it('drops the Place from the context line and the morning line when a Day names none', () => {
