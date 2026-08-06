@@ -972,6 +972,30 @@ describe('PostHog init with a key', () => {
     expect(ph.identify).toHaveBeenCalledWith('sailor-9');
   });
 
+  it('admits the startup $identify handshake after restored-user checks succeed (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockReturnValue(undefined); // anonymous SDK identity
+    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+    }) as never);
+    const admitted: string[] = [];
+    vi.mocked(ph.identify).mockImplementationOnce(() => {
+      const candidate = beforeSend?.({ uuid: 'identify', event: '$identify', properties: {} });
+      if (candidate) admitted.push(candidate.event);
+    });
+    const mod = await import('./posthog');
+
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('sailor-9');
+    await initSettled;
+
+    expect(admitted).toEqual(['$identify']);
+  });
+
   it('resets before identifying when Firebase resolves a DIFFERENT persisted User (#613)', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
@@ -1042,6 +1066,66 @@ describe('PostHog init with a key', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('fails closed and retries the SAME ready-path A→B transition when reset first throws (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
+    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+    }) as never);
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('account-A');
+    await initSettled;
+    vi.mocked(ph.identify).mockClear();
+    vi.mocked(ph.reset).mockImplementationOnce(() => {
+      throw new Error('reset failed');
+    });
+
+    mod.phSetAuthState('account-B');
+    expect(ph.identify).not.toHaveBeenCalled();
+    expect(beforeSend?.({ uuid: 'blocked', event: 'mark_square', properties: {} })).toBeNull();
+
+    // The failed state was not recorded as observed, so the same Firebase
+    // value retries and reopens capture only after reset + identify succeed.
+    vi.mocked(ph.reset).mockReset();
+    mod.phSetAuthState('account-B');
+    expect(ph.identify).toHaveBeenCalledWith('account-B');
+    expect(beforeSend?.({ uuid: 'open', event: 'mark_square', properties: {} })?.event).toBe('mark_square');
+  });
+
+  it('closes the gate and stops queued replay when its A→B reset throws (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    let releaseProbe!: (response: Response) => void;
+    const probe = new Promise<Response>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(probe));
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('account-A');
+    await Promise.resolve(); // let init enter the proxy probes
+    mod.phSetAuthState('account-B');
+    mod.phCapture('new_user_action', { n: 1 });
+    vi.mocked(ph.reset).mockImplementationOnce(() => {
+      throw new Error('reset failed');
+    });
+    releaseProbe({ type: 'opaque' } as Response);
+    await initSettled;
+    vi.unstubAllGlobals();
+
+    expect(vi.mocked(ph.identify).mock.calls.map(([uid]) => uid)).toEqual(['account-A']);
+    expect(ph.capture).not.toHaveBeenCalledWith('new_user_action', { n: 1 });
+    expect(mod.sanitizeUrls({ uuid: 'blocked', event: 'new_user_action', properties: {} })).toBeNull();
   });
 
   it('forwards super-properties directly once ready (#556)', async () => {

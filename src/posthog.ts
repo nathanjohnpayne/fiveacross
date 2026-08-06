@@ -464,14 +464,22 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
       // A reset supersedes the incremental replay: `applyReset` re-registers
       // the FULL merged `registeredDims`, which already contains everything
       // `pendingRegister` held (`phRegister` merges into both).
-      if (applyReset()) {
-        pendingRegister = null;
-      }
+      closeIdentityGate();
+      if (!applyReset()) break;
+      pendingRegister = null;
+      openIdentityGate();
     } else {
       replayRegister();
       if (op.type === 'identify') {
-        if (identifiedUid !== null && identifiedUid !== op.uid && !applyReset()) continue;
-        applyIdentify(op.uid);
+        if (identifiedUid !== null && identifiedUid !== op.uid) {
+          closeIdentityGate();
+          if (!applyReset()) break;
+          openIdentityGate();
+        }
+        if (!applyIdentify(op.uid)) {
+          closeIdentityGate();
+          break;
+        }
       }
       else phCapture(op.name, op.params, op.options);
     }
@@ -700,11 +708,30 @@ function restoredUserUid(): RestoredUserUid {
  * out state or a DIFFERENT persisted User needs reset().
  */
 function applyInitialAuthState(uid: string | null): boolean {
-  if (uid === null) return applyReset();
+  if (uid === null) {
+    if (!applyReset()) return false;
+    openIdentityGate();
+    return true;
+  }
   const restored = restoredUserUid();
   if (!restored.known) return false;
   if (restored.uid !== null && restored.uid !== uid && !applyReset()) return false;
-  return applyIdentify(uid);
+  // Reset/restored-user preconditions are now proven. Open the narrow send
+  // path BEFORE identify(): posthog-js emits the `$identify` merge handshake
+  // synchronously inside identify(), and dropping it would mutate local state
+  // without ever stitching the anonymous history server-side.
+  openIdentityGate();
+  if (applyIdentify(uid)) return true;
+  closeIdentityGate();
+  return false;
+}
+
+function closeIdentityGate(): void {
+  if (identityGateRequired) identityGateReady = false;
+}
+
+function openIdentityGate(): void {
+  if (identityGateRequired) identityGateReady = true;
 }
 
 /**
@@ -724,28 +751,34 @@ function lastQueuedIdentityOp(): Exclude<PendingOp, { type: 'capture' }> | undef
 }
 
 /** Tie subsequent events to the signed-in User by uid (no PII properties). */
-export function phIdentify(uid: string): void {
+export function phIdentify(uid: string): boolean {
   if (!ready) {
     const last = lastQueuedIdentityOp();
     if (last?.type === 'identify') {
       // Identical uid: nothing new to say — the queue's identity state is
       // already this account (#613 round 2: ONLY identical uids coalesce).
-      if (last.uid === uid) return;
+      if (last.uid === uid) return true;
       // A→B with NO intervening sign-out: insert the reset the transition
       // implies (#613, Phase 4b round-2 P1). Replaying identify(B) directly
       // after identify(A) — or over A's identity as loaded by
       // `posthog.init()` — would merge the two accounts.
       pendingOps.push({ type: 'reset' }, { type: 'identify', uid });
-      return;
+      return true;
     }
     pendingOps.push({ type: 'identify', uid });
-    return;
+    return true;
   }
   // Same A→B protection on the ready path (#613, Phase 4b round-2 P1): an
   // in-session uid change without a sign-out resets first, so B's events
   // never merge onto A's identity.
-  if (identifiedUid !== null && identifiedUid !== uid) applyReset();
-  applyIdentify(uid);
+  if (identifiedUid !== null && identifiedUid !== uid) {
+    closeIdentityGate();
+    if (!applyReset()) return false;
+    openIdentityGate();
+  }
+  if (applyIdentify(uid)) return true;
+  closeIdentityGate();
+  return false;
 }
 
 /**
@@ -755,20 +788,20 @@ export function phIdentify(uid: string): void {
  */
 export function phSetAuthState(uid: string | null): void {
   const previous = lastObservedAuthUid;
-  if (previous === uid) return;
-  lastObservedAuthUid = uid;
+  if (previous === uid && (!identityGateRequired || identityGateReady)) return;
   if (initialAuthUid === undefined && !ready) {
     initialAuthUid = uid;
+    lastObservedAuthUid = uid;
     resolveInitialAuth?.();
     resolveInitialAuth = null;
     return;
   }
   if (uid === null) {
-    phReset();
+    if (phReset()) lastObservedAuthUid = uid;
     return;
   }
-  if (previous !== undefined && previous !== null && previous !== uid) phReset();
-  phIdentify(uid);
+  if (previous !== undefined && previous !== null && previous !== uid && !phReset()) return;
+  if (phIdentify(uid)) lastObservedAuthUid = uid;
 }
 
 // Dimensions registered before init settled (#556) — merged (not replaced)
@@ -812,7 +845,7 @@ export function phRegister(props: Record<string, unknown>): void {
 }
 
 /** Clear the identity association on sign-out. */
-export function phReset(): void {
+export function phReset(): boolean {
   if (!ready) {
     // Queued IN ORDER, never dropped (#611 → #613, Phase 4b P1) — see
     // `pendingOps`'s own doc above: a silently dropped reset leaks a stale
@@ -825,7 +858,10 @@ export function phReset(): void {
     if (lastQueuedIdentityOp()?.type !== 'reset') {
       pendingOps.push({ type: 'reset' });
     }
-    return;
+    return true;
   }
-  applyReset();
+  closeIdentityGate();
+  if (!applyReset()) return false;
+  openIdentityGate();
+  return true;
 }
