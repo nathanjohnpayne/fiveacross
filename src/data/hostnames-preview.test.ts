@@ -30,7 +30,7 @@ import {
   applyResolvedEventPreview,
   type EventPreview,
 } from '../eventPreview';
-import { resetAdultContentForTests } from '../adultContent';
+import { resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 import { DEFAULT_EDITION, setActiveEdition } from '../editions';
 
 const HOST = 'bodega-bay.vacaybingo.com';
@@ -100,6 +100,19 @@ afterEach(() => {
 });
 
 describe('watchAdultContent — the live preview channel (the env-pinned production case)', () => {
+  it('opens its preview channel even after a proven adult posture has latched', () => {
+    // A prior server read can leave the gate settled before this watcher mounts.
+    // That must not suppress the only live postcard channel for an env-pinned
+    // first visit.
+    setActiveAdultContent(true, { proven: true });
+
+    watchAdultContent(HOST, 'bodega-bay-2026');
+    listener().next(snap({ ...DOC, adultContent: true }));
+
+    expect(activeEventPreview()).toEqual(PREVIEW);
+    expect(readCache(localStorage, HOST)?.doc.preview).toEqual(PREVIEW);
+  });
+
   it('installs the slice when the shared snapshot delivers it', () => {
     watchAdultContent(HOST);
     expect(activeEventPreview()).toBeNull();

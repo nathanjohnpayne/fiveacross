@@ -28,9 +28,10 @@ import { setActiveAdultContent } from '../adultContent';
  * The mount / visibility / online triggers the poll needed are GONE with it, not
  * kept as belt-and-braces: a Firestore listener already re-delivers on
  * reconnect and after a backgrounded tab wakes, so they would be three extra
- * moving parts firing redundant reads. Bounded the same way as before — the flag
- * is monotone, so `watchAdultContent` detaches the listener the moment a
- * server-backed snapshot says `true`.
+ * moving parts firing redundant reads. The adult posture is monotone, but the
+ * listener stays mounted after it latches because the same document is the
+ * env-pinned sign-in postcard's only live preview channel; the posture store
+ * itself refuses every later attempt to lower a proven adult state.
  *
  * Renders nothing. Mounted beside the other shell-level watchers in
  * `AuthProvider` — and, unlike those, NOT gated on a signed-in user: the posture

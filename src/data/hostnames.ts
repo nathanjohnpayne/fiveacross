@@ -4,7 +4,7 @@ import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolu
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
-import { adultContentSettledAdult, coerceAdultContent, setActiveAdultContent } from '../adultContent';
+import { coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
 import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
 
@@ -216,9 +216,11 @@ function safeLocalStorage(): Storage | null {
  * before the acknowledgement that gates it. A listener makes the gate arrive on
  * the same round trip as the content.
  *
- * Only the posture. This deliberately does NOT re-resolve the Event, re-stamp
- * the mapping cache, or touch the Edition: routing is durable and re-deciding it
- * mid-session is the churn `resolveEvent`'s 12-hour TTL exists to avoid.
+ * This never re-resolves the Event or touches the Edition: routing is durable
+ * and re-deciding it mid-session is the churn `resolveEvent`'s 12-hour TTL
+ * exists to avoid. The narrow companion is the preview slice: an env-pinned
+ * build cannot obtain it during routing resolution, so this same exact-document
+ * subscription validates, installs, and caches that display-only data.
  *
  * PROVEN vs provisional, which is what licenses UN-gating. A snapshot served
  * from Firestore's local cache is not evidence about the posture NOW, so it may
@@ -242,25 +244,20 @@ function safeLocalStorage(): Storage | null {
  * channel. A missing document therefore gates, which is the honest answer: an
  * opt-out with no channel to withdraw it is not one this design can offer.
  *
+ * The adult posture itself is terminal once a server snapshot raises it, but
+ * this subscription is not: it also carries the sign-in postcard's only live
+ * preview channel for env-pinned builds. Keeping the document listener alive
+ * after the posture latches lets an adult Event's first visit populate and
+ * later correct its preview. `setActiveAdultContent` owns the monotone latch,
+ * so those later snapshots can never lower a proven adult gate.
+ *
  * Returns an unsubscribe. Never throws.
  */
 export function watchAdultContent(
   hostname: string = window.location.hostname,
   resolvedEventId: string | null = bootstrappedEventId,
 ): () => void {
-  // The flag is monotone, so a proven `true` is terminal: no later snapshot could
-  // change the answer. Never open the listener at all.
-  if (adultContentSettledAdult()) return () => {};
-  // `settled` rather than calling the unsubscribe directly: a snapshot can be
-  // delivered before `onSnapshot` has returned its unsubscribe, so the terminal
-  // case has to be recorded and acted on once the handle exists.
-  let settled = false;
-  let unsubscribe: (() => void) | null = null;
-  const detach = () => {
-    settled = true;
-    unsubscribe?.();
-  };
-  unsubscribe = onSnapshot(
+  const unsubscribe = onSnapshot(
     doc(db, 'hostnames', hostname.toLowerCase()),
     (snap) => {
       // Server-backed snapshots prove; cached ones may only ever RAISE.
@@ -298,8 +295,9 @@ export function watchAdultContent(
       // delivery follows to correct it), but only a proven one may CLEAR an
       // already-installed card — an older cache-served copy of the document,
       // valid or not, is not evidence about the slice NOW. NOTE the
-      // proven-adult detach below closes the channel once the posture latches;
-      // by then the same terminal snapshot has already carried its preview.
+      // the listener remains alive after the posture latches because it is also
+      // the preview's update channel; the adult-content store itself refuses to
+      // lower a proven adult state.
       const mapping = coerceHostnameDoc(data, hostname);
       const servable = mapping !== null && isServable(mapping);
       // The watcher is a display/update channel, never an Event switch. It must
@@ -332,14 +330,11 @@ export function watchAdultContent(
       const adult = coerceAdultContent(data?.adultContent);
       if (!adult && !proven) return; // a cached `false` proves nothing
       setActiveAdultContent(adult, { proven });
-      // Monotone: a proven `true` is terminal, so stop listening.
-      if (adult && proven) detach();
     },
     // Transport/permission failure: gate (a failure proves nothing about the
     // posture) but leave the preview as-is — display copy already on screen
     // does not become wrong because a listener dropped.
     () => setActiveAdultContent(true, { proven: false }),
   );
-  if (settled) unsubscribe();
-  return detach;
+  return unsubscribe;
 }

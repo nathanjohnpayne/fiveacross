@@ -87,17 +87,17 @@ describe('watchAdultContent — a document listener, not a poll', () => {
     expect(adultContentSettledAdult()).toBe(true);
   });
 
-  it('detaches once the answer can no longer change', () => {
+  it('keeps the listener after the adult posture latches so the postcard can still update', () => {
     setActiveAdultContent(false, { proven: true });
     watchAdultContent(HOST);
     act(() => listener().next(snap({ adultContent: true })));
-    expect(unsubscribe).toHaveBeenCalled();
+    expect(unsubscribe).not.toHaveBeenCalled();
   });
 
-  it('never opens a listener at all once the posture has latched', () => {
+  it('opens a listener after the posture has latched, for the live preview channel', () => {
     setActiveAdultContent(true, { proven: true });
     watchAdultContent(HOST);
-    expect(mocks.onSnapshot).not.toHaveBeenCalled();
+    expect(mocks.onSnapshot).toHaveBeenCalledTimes(1);
   });
 
   it('lowers a PROVISIONAL gate once a server snapshot says otherwise', () => {
