@@ -9,7 +9,7 @@ import {
 import { getStorage, connectStorageEmulator } from 'firebase/storage';
 import { getFunctions, connectFunctionsEmulator } from 'firebase/functions';
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
-import { getAnalytics, isSupported, type Analytics } from 'firebase/analytics';
+import { initializeAnalytics, isSupported, type Analytics } from 'firebase/analytics';
 import { isSyntheticProbe } from './synthetic-probe';
 import { resolveAuthDomain } from './auth-domain';
 
@@ -103,11 +103,35 @@ export function applyResolvedEventId(id: string): void {
 // Analytics only loads in supported (browser, https) contexts with a measurement
 // id — and never for the uptime synthetic (#142), whose load-only probe must not
 // emit a GA4 page_view into real product metrics.
+//
+// `config: { send_page_view: false }` disables gtag's AUTOMATIC config-time
+// `page_view` (#611, retro Phase 4b P1 on PR #584 — this reverses the #556
+// round-2 rebuttal, at the reviewer's insistence with a concrete path: Nathan
+// is the tiebreaker on record for that reversal). The automatic event used to
+// fire, unconditionally and undimensioned, as part of `_initializeAnalytics`'s
+// own synchronous `gtagCore('config', ...)` call — deterministically BEFORE
+// any pending `setDefaultEventParameters` could apply, which is exactly why
+// the round-2 rebuttal called it unfixable from the app side. Disabling it
+// removes the automatic event entirely, and `emitInitialPageView`
+// (src/analytics.ts) fires the equivalent EXPLICIT `page_view` once BOTH
+// `analyticsReady` below AND Event resolution have settled (main.tsx), so it
+// always carries the registered dimensions.
 export let analytics: Analytics | null = null;
-isSupported()
+
+/**
+ * Resolves once GA4's own support/config check has settled — `analytics`
+ * itself (`null` when unsupported, no measurement id, or the synthetic
+ * probe) by then. `emitInitialPageView` awaits this so the explicit
+ * `page_view` it fires never races `analytics` still being null.
+ */
+export const analyticsReady: Promise<Analytics | null> = isSupported()
   .then((ok) => {
-    if (ok && firebaseConfig.measurementId && !isSyntheticProbe()) analytics = getAnalytics(app);
+    if (ok && firebaseConfig.measurementId && !isSyntheticProbe()) {
+      analytics = initializeAnalytics(app, { config: { send_page_view: false } });
+    }
+    return analytics;
   })
   .catch(() => {
     /* analytics unavailable; ignore */
+    return null;
   });

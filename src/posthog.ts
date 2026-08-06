@@ -238,6 +238,34 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
 }
 
 /**
+ * The dimension keys #556 registers (`src/analytics.ts`'s
+ * `registerAnalyticsDimensions` / `registerDayIndexDimension`) —
+ * system-controlled: nothing legitimate ever sets these explicitly on an
+ * event's own properties, so they always come from the CURRENT
+ * `registeredDims`, never inherited from whatever the event itself carried
+ * in (#611, retro Phase 4b P1 on PR #584). This INVERTS the general "event
+ * wins" posture an ordinary per-call property would otherwise get: PostHog
+ * PERSISTS `register()`'d super-properties to localStorage ACROSS SESSIONS
+ * (and tabs), so the SDK's own automatic first capture inside
+ * `posthog.init()` can embed the PRIOR session's
+ * `event_id`/`edition_id`/`event_slug`/`day_index` directly into its
+ * `properties` bag before `before_send` ever runs — exactly the shape
+ * "event wins" was meant to defer to (a more-specific per-call value), and
+ * exactly the shape that must NOT win here (a stale, cross-session leftover
+ * masquerading as one). A key ABSENT from `registeredDims` (most commonly
+ * `day_index` before the Event doc has loaded) is DELETED from the outgoing
+ * event rather than left as whatever was inherited — an unknown dimension
+ * must report as unknown, never as a stale guess.
+ */
+const CONTROLLED_DIMENSION_KEYS: readonly string[] = [
+  'brand_id',
+  'edition_id',
+  'event_id',
+  'event_slug',
+  'day_index',
+];
+
+/**
  * `before_send` hook: reduce URL-bearing fields to path-only so query-string /
  * hash credentials (e.g. Firebase auth-handler OAuth params) are never stored,
  * even though replay content is otherwise unmasked. Covers the event `properties`
@@ -246,22 +274,43 @@ function scrubSnapshotUrls(snapshotData: unknown): void {
  * otherwise persist the full entry URL (Codex P1 on #195) — AND the rrweb Meta
  * (type 4) / Custom-event (type 5) hrefs inside `$snapshot` replay data (#197).
  *
- * ALSO merges in `registeredDims` — the brand/edition/Event/Slug/Day
- * dimensions (#556) — into every outgoing event's `properties` (Phase 4b P1
- * on PR #584). This is the mechanism that actually GUARANTEES every event
- * carries them, independent of exactly when `posthog.register()` applied
- * relative to `posthog.init()`'s own synchronous work: `before_send` is the
- * single point every captured event — autocaptured or explicit, the very
- * first `\$pageview` included — passes through right before it leaves the
- * SDK, so reading the already-populated module state here removes any
- * dependency on internal SDK ordering `phRegister`'s queue-and-replay alone
- * could not close. Existing event properties win on key collision (a
- * call-specific value is more specific than a session-wide default).
+ * ALSO applies `registeredDims` — the brand/edition/Event/Slug/Day dimensions
+ * (#556) — to every outgoing event's `properties` (Phase 4b P1 on PR #584).
+ * This is the mechanism that actually GUARANTEES every event carries them,
+ * independent of exactly when `posthog.register()` applied relative to
+ * `posthog.init()`'s own synchronous work: `before_send` is the single point
+ * every captured event — autocaptured or explicit, the very first
+ * `\$pageview` included — passes through right before it leaves the SDK, so
+ * reading the already-populated module state here removes any dependency on
+ * internal SDK ordering `phRegister`'s queue-and-replay alone could not
+ * close. The five `CONTROLLED_DIMENSION_KEYS` always win from
+ * `registeredDims` (see that constant's own doc for why — #611); any OTHER
+ * registered default (none exist today) keeps the general "event wins" merge.
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
-  if (Object.keys(registeredDims).length > 0) {
-    event.properties = { ...registeredDims, ...event.properties };
+  // The production entrypoint waits for Firebase's authoritative auth state
+  // before letting the SDK send anything. If that startup identity cannot be
+  // established, fail closed: posthog.init() may already have scheduled its
+  // first pageview, but before_send is the final common gate for that event,
+  // autocapture, explicit captures, and replay snapshots alike.
+  if (identityGateRequired && !identityGateReady) return null;
+  const incoming = event.properties;
+  const hasStaleControlledKey = incoming != null && CONTROLLED_DIMENSION_KEYS.some((k) => k in incoming);
+  if (Object.keys(registeredDims).length > 0 || hasStaleControlledKey) {
+    const properties: Record<string, unknown> = { ...incoming };
+    // Non-controlled dimensions (none exist today, kept for forward
+    // compatibility) defer to whatever the event itself already set.
+    for (const [key, value] of Object.entries(registeredDims)) {
+      if (!CONTROLLED_DIMENSION_KEYS.includes(key) && !(key in properties)) properties[key] = value;
+    }
+    // The controlled keys always come from CURRENT registeredDims (#611) —
+    // present here, override; absent here, delete rather than inherit.
+    for (const key of CONTROLLED_DIMENSION_KEYS) {
+      if (key in registeredDims) properties[key] = registeredDims[key];
+      else delete properties[key];
+    }
+    event.properties = properties;
   }
   scrubUrlBag(event.properties);
   scrubUrlBag(event.$set);
@@ -271,6 +320,22 @@ export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null 
 }
 
 let ready = false;
+let initInFlight: Promise<void> | null = null;
+let identityGateRequired = false;
+let identityGateReady = false;
+
+export type InitPostHogOptions = { waitForAuth?: boolean };
+
+// The first resolved Firebase auth state is a startup BASELINE, not an
+// ordinary point-in-time queue operation. It must apply before every capture
+// that accumulated while auth was loading (including a recovery-reload crash),
+// while later auth transitions remain in pendingOps' strict FIFO.
+let initialAuthUid: string | null | undefined;
+let lastObservedAuthUid: string | null | undefined;
+let resolveInitialAuth: (() => void) | null = null;
+const initialAuthReady = new Promise<void>((resolve) => {
+  resolveInitialAuth = resolve;
+});
 
 // Moved to its own dependency-free module (src/local-host.ts) so the pre-mount
 // auth gate can share it without importing posthog-js; re-exported here for the
@@ -282,10 +347,25 @@ export { isLocalDevHost } from './local-host';
  * the GA4 guard in firebase.ts, so dev/test/CI without env vars stay silent. The
  * `phc_` project key is client-safe (public) by design.
  */
-export async function initPostHog(): Promise<void> {
-  if (ready) return;
+export function initPostHog(options: InitPostHogOptions = {}): Promise<void> {
+  if (ready) return Promise.resolve();
+  if (initInFlight) return initInFlight;
+  const attempt = initializePostHog(options);
+  initInFlight = attempt;
+  const clearAttempt = (): void => {
+    if (initInFlight === attempt) initInFlight = null;
+  };
+  void attempt.then(clearAttempt, clearAttempt);
+  return attempt;
+}
+
+async function initializePostHog(options: InitPostHogOptions): Promise<void> {
   const key = import.meta.env.VITE_POSTHOG_KEY as string | undefined;
   if (!key) return;
+  if (options.waitForAuth) {
+    identityGateRequired = true;
+    if (initialAuthUid === undefined) await initialAuthReady;
+  }
   const envHost = import.meta.env.VITE_POSTHOG_HOST as string | undefined;
   // Walk the ingest chain unless an env override forces a host genuinely
   // outside it (#342/#344): a blocked proxy (shipboard SNI filter) silently
@@ -307,17 +387,52 @@ export async function initPostHog(): Promise<void> {
   }
   try {
     posthog.init(key, { api_host, ...POSTHOG_INIT_OPTIONS });
-    ready = true;
   } catch {
     ready = false;
     return;
   }
-  // Replay dimensions registered while init was still probing (#556), BEFORE
-  // the identify below — `posthog.identify()` itself emits an `$identify` /
-  // `$set` capture the moment it transitions the anonymous user (Codex P2 on
-  // #556), so registering first means THAT capture carries brand/edition/
-  // Event context too, not just the ones queued after it.
-  if (pendingRegister !== null) {
+  if (options.waitForAuth) {
+    // `initialAuthUid` cannot still be undefined after initialAuthReady, but
+    // fail closed if that invariant is ever broken rather than capture under
+    // whatever User the SDK restored from local persistence.
+    if (initialAuthUid === undefined || !applyInitialAuthState(initialAuthUid)) {
+      ready = false;
+      return;
+    }
+    identityGateReady = true;
+  }
+  ready = true;
+  // Replay EVERYTHING that arrived while init was still probing — captures
+  // and identity operations — as ONE queue, in ARRIVAL ORDER (#613, Phase 4b
+  // round-2 P1; round 1 replayed the identity FIFO first and all captures
+  // after, which re-attributed a capture queued between two identity
+  // transitions to the LATER identity: identify(A), capture(oldUserAction),
+  // reset, identify(B) recorded oldUserAction as B's). Identity ordering
+  // within the queue is equally load-bearing (#613 round-1 P1):
+  // `posthog.init()` loads whatever identity PostHog PERSISTED from a prior
+  // session, so a fast sign-out → sign-in must reach the SDK as
+  // reset-THEN-identify — replaying the identify alone would merge the NEW
+  // account's uid onto the PRIOR user's persisted distinct_id (cross-user
+  // attribution), and a silently dropped reset was exactly the #611
+  // stale-identity leak. Dimension registration replays before the first
+  // identify OR capture so the `$identify` capture the SDK emits — and every
+  // replayed capture — carries brand/edition/Event context (Codex P2 on
+  // #556); `applyReset` re-registers the full merged set itself, because
+  // `posthog.reset()` clears register() state (see `registeredDims`).
+  //
+  // Ordering vs the SDK's own automatic first `$pageview` (#613, Phase 4b
+  // P1): posthog-js does NOT capture it inside `init()` — the loaded step of
+  // init (`kn()` in the 1.409.5 dist) SCHEDULES it one macrotask later via
+  // `setTimeout(..., 1)`, and the capture computes `distinct_id` at capture
+  // time. Production init itself waits for Firebase's first resolved auth
+  // state, then applies that baseline SYNCHRONOUSLY after `posthog.init()`
+  // returns (no awaits in between). The baseline therefore lands before the
+  // SDK timer even with a direct-host override, without resetting a returning
+  // User whose persisted PostHog uid already matches Firebase.
+  const ops = pendingOps;
+  pendingOps = [];
+  const replayRegister = (): void => {
+    if (pendingRegister === null) return;
     const props = pendingRegister;
     pendingRegister = null;
     try {
@@ -325,34 +440,52 @@ export async function initPostHog(): Promise<void> {
     } catch {
       /* no-op */
     }
-  }
-  // Replay an identity that arrived while init was still probing (Codex P2 on
-  // #342): Firebase restores a cached signed-in user fast on reload, and a
-  // phIdentify() landing in the probe window used to no-op via the `ready`
-  // gate — leaving the whole session anonymous in analytics. Apply the last
-  // one now that the SDK is live.
-  if (pendingIdentifyUid !== null) {
-    const uid = pendingIdentifyUid;
-    pendingIdentifyUid = null;
-    phIdentify(uid);
-  }
-  // Replay queued captures AFTER both of the above, so an `app_crash` from the
-  // probe window is attributed to the signed-in player rather than orphaned
-  // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
-  // — they are from a PRIOR load (the crash that triggered a recovery reload),
-  // so they are both older and the ones that matter most.
+  };
+  // PRIOR-load persisted captures are older than this load's queue, but the
+  // production auth baseline above still applies FIRST. Identity ops are not
+  // persisted, so the SDK's restored identity is not reliable evidence of who
+  // owned a capture that survived a recovery reload (a signed-out reset may
+  // have died with the page). Fresh Firebase auth is authoritative and keeps
+  // those captures from leaking to a stale prior User. Replayed only once
+  // their deletion is confirmed (Phase 4b P2 on #513): if the store would
+  // not let them go, replaying means re-sending them on every future load
+  // with no way to stop; dropping them is the lesser harm, on this module's
+  // standing rule that losing a telemetry event beats corrupting the data.
+  // In-memory entries are unaffected — they die with this page either way,
+  // so they can never double-send.
   const carriedNow = carried();
-  // Replay the PERSISTED entries only once their deletion is confirmed (Phase
-  // 4b P2 on #513). If the store would not let them go, replaying means
-  // re-sending them on every future load with no way to stop; dropping them is
-  // the lesser harm, on this module's standing rule that losing a telemetry
-  // event beats corrupting the data. In-memory entries are unaffected — they
-  // die with this page either way, so they can never double-send.
   const drained = clearPersistedCaptures();
-  const queued = [...(drained ? carriedNow : []), ...pendingCaptures];
   carriedCaptures = [];
-  pendingCaptures = [];
-  for (const c of queued) phCapture(c.name, c.params, c.options);
+  if (drained) {
+    for (const c of carriedNow) phCapture(c.name, c.params, c.options);
+  }
+  for (const op of ops) {
+    if (op.type === 'reset') {
+      // A reset supersedes the incremental replay: `applyReset` re-registers
+      // the FULL merged `registeredDims`, which already contains everything
+      // `pendingRegister` held (`phRegister` merges into both).
+      closeIdentityGate();
+      if (!applyReset()) break;
+      pendingRegister = null;
+      openIdentityGate();
+    } else {
+      replayRegister();
+      if (op.type === 'identify') {
+        if (identifiedUid !== null && identifiedUid !== op.uid) {
+          closeIdentityGate();
+          if (!applyReset()) break;
+          openIdentityGate();
+        }
+        openIdentityGate();
+        if (!applyIdentify(op.uid)) {
+          closeIdentityGate();
+          break;
+        }
+      }
+      else phCapture(op.name, op.params, op.options);
+    }
+  }
+  replayRegister();
 }
 
 export const posthogReady = (): boolean => ready;
@@ -372,16 +505,19 @@ export type CaptureOptions = { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_
  */
 export function phCapture(name: string, params?: Record<string, unknown>, options?: CaptureOptions): void {
   if (!ready) {
-    // Queue instead of dropping (Phase 4b P2 on #513). `initPostHog` is
-    // fire-and-forget and awaits ~1.5s of ingest-host probes, while main.tsx
-    // renders synchronously right after — so a STARTUP crash, the exact case
-    // `app_crash` exists to report, reliably lands in this window and used to
-    // vanish through the `ready` gate before any transport option could help.
-    // Same replay pattern as `pendingIdentifyUid` below. Bounded: a crash loop
-    // must not grow this without limit, and the earliest events are the ones
+    // Queue instead of dropping (Phase 4b P2 on #513) — into the SAME ordered
+    // queue as the identity ops (#613, Phase 4b round-2 P1), so replay keeps
+    // each capture attributed to the identity state that held when it was
+    // queued. `initPostHog` is fire-and-forget and awaits ~1.5s of
+    // ingest-host probes, while main.tsx renders synchronously right after —
+    // so a STARTUP crash, the exact case `app_crash` exists to report,
+    // reliably lands in this window and used to vanish through the `ready`
+    // gate before any transport option could help. Bounded (captures only —
+    // identity ops are bounded by their own coalescing): a crash loop must
+    // not grow this without limit, and the earliest events are the ones
     // worth keeping, so it drops newest-over-oldest once full.
-    if (carried().length + pendingCaptures.length < MAX_PENDING_CAPTURES) {
-      pendingCaptures.push({ name, params, options });
+    if (carried().length + queuedCaptures().length < MAX_PENDING_CAPTURES) {
+      pendingOps.push({ type: 'capture', name, params, options });
       // Also persist, because the queue's most important customer immediately
       // reloads the page (Codex P2 on #513): `componentDidCatch` starts
       // `resetShell()` right after queueing, and its same-origin probe can
@@ -403,10 +539,41 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
   }
 }
 
-/** Captures that arrived before init settled, replayed by `initPostHog`. */
+/** A capture queued before init settled — also the persisted-blob entry shape
+ *  (see `carried`), which is why it has no `type` discriminant of its own. */
 type PendingCapture = { name: string; params?: Record<string, unknown>; options?: CaptureOptions };
 const MAX_PENDING_CAPTURES = 20;
-let pendingCaptures: PendingCapture[] = [];
+
+/**
+ * EVERYTHING that arrived while the SDK was not ready — captures AND identity
+ * operations (sign-out resets / sign-in identifies) — as ONE ordered queue,
+ * replayed FIFO by `initPostHog` (#613, Phase 4b round-2 P1; unifies round
+ * 1's separate identity FIFO with the #513 capture queue). One queue is what
+ * makes attribution order-true: with separate queues, the sequence
+ * identify(A), capture(oldUserAction), reset, identify(B) replayed both
+ * identity transitions FIRST and then recorded oldUserAction as B's. Order
+ * is equally load-bearing within the identity ops (#613 round-1 P1):
+ * `posthog.init()` loads the PRIOR session's persisted identity, so a fast
+ * sign-out → account-switch must reach the SDK as reset-then-identify —
+ * replaying the identify alone would merge the new uid onto the previous
+ * account's persisted distinct_id. Coalescing is minimal and identity-aware
+ * (see `phIdentify`/`phReset`): only an identify repeating the queue's
+ * current identity uid, or a reset directly repeating a reset, is dropped;
+ * an A→B uid change enqueues the reset the transition implies. Identity ops
+ * are never persisted across loads — a new load re-derives identity from
+ * Firebase — so only the capture entries mirror to sessionStorage
+ * (`persistPendingCaptures`).
+ */
+type PendingOp = { type: 'reset' } | { type: 'identify'; uid: string } | ({ type: 'capture' } & PendingCapture);
+let pendingOps: PendingOp[] = [];
+
+/** The capture entries of `pendingOps`, in order — this load's queued
+ *  captures, in the persistable (type-less) shape. */
+function queuedCaptures(): PendingCapture[] {
+  return pendingOps
+    .filter((op): op is { type: 'capture' } & PendingCapture => op.type === 'capture')
+    .map(({ name, params, options }) => ({ name, params, options }));
+}
 
 /** Survives the recovery reload; drained by `initPostHog`. Session-scoped, so a
  *  queue that never drains dies with the tab rather than following the player. */
@@ -415,12 +582,15 @@ const PENDING_CAPTURES_KEY = 'gcb:ph-pending-captures';
 /**
  * Entries queued by a PRIOR load, read from storage exactly once (Codex P2 on
  * #513). Keeping them in their own array is what makes each event have exactly
- * ONE representation: `pendingCaptures` is strictly this load's queue, this is
- * strictly the previous load's, and the persisted blob is simply the two
- * concatenated. Merging both into one array and also persisting it — the
- * previous shape — double-counted every event whenever init settled without a
- * navigation, since the in-memory copy and its own persisted mirror were both
- * replayed. `null` means "not read yet"; `[]` means "read, nothing there".
+ * ONE representation: `pendingOps`'s capture entries are strictly this load's
+ * queue, this is strictly the previous load's, and the persisted blob is
+ * simply the two concatenated. Merging both into one array and also persisting
+ * it — the previous shape — double-counted every event whenever init settled
+ * without a navigation, since the in-memory copy and its own persisted mirror
+ * were both replayed. `null` means "not read yet"; `[]` means "read, nothing
+ * there". The first read always happens BEFORE this load persists anything
+ * (the `phCapture` bound check calls `carried()` before the first persist), so
+ * the cached value never includes this load's own entries.
  */
 let carriedCaptures: PendingCapture[] | null = null;
 
@@ -440,11 +610,14 @@ function carried(): PendingCapture[] {
   return carriedCaptures;
 }
 
-/** Mirrors the whole queue — prior load's entries included, so a second load
- *  that queues its own pre-init event cannot overwrite the first one's. */
+/** Mirrors every queued CAPTURE — prior load's entries included, so a second
+ *  load that queues its own pre-init event cannot overwrite the first one's.
+ *  Identity ops are deliberately NOT persisted: a new load re-derives its
+ *  identity from Firebase auth state, so replaying a stale reset/identify
+ *  from a dead load could only fight the fresh one. */
 function persistPendingCaptures(): void {
   try {
-    const all = [...carried(), ...pendingCaptures].slice(0, MAX_PENDING_CAPTURES);
+    const all = [...carried(), ...queuedCaptures()].slice(0, MAX_PENDING_CAPTURES);
     sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(all));
   } catch {
     /* quota/policy/absent — the in-memory queue still covers the no-reload case */
@@ -468,22 +641,172 @@ function clearPersistedCaptures(): boolean {
   }
 }
 
-// The most recent identify that arrived before init settled (#342) — replayed
-// by initPostHog once the SDK is live, cleared by phReset so a sign-out during
-// the probe window never resurrects the identity afterwards.
-let pendingIdentifyUid: string | null = null;
+/**
+ * The uid most recently applied to the LIVE SDK via `identify()`, `null`
+ * after a reset (or before any identify). Lets the ready path detect an
+ * A→B uid change with no intervening sign-out (#613, Phase 4b round-2 P1):
+ * Firebase can deliver one signed-in user directly after another without a
+ * signed-out render between them, and identifying B while the SDK still
+ * holds A's identity would MERGE the two accounts. Updated only inside
+ * `applyIdentify`/`applyReset`, so replayed queue ops and direct ready-path
+ * calls stay consistent.
+ */
+let identifiedUid: string | null = null;
 
-/** Tie subsequent events to the signed-in User by uid (no PII properties). */
-export function phIdentify(uid: string): void {
-  if (!ready) {
-    pendingIdentifyUid = uid;
-    return;
-  }
+/** The ready-path identify — shared by `phIdentify` and the queue replay. */
+function applyIdentify(uid: string): boolean {
   try {
     posthog.identify(uid);
+    identifiedUid = uid;
+    return true;
+  } catch {
+    /* no-op */
+    return false;
+  }
+}
+
+/**
+ * The ready-path reset — shared by `phReset` and the queue replay. Reapplies
+ * the dimensions `reset()` just cleared (#556, Codex P2) — see
+ * `registeredDims`'s own doc below for why this must not be skipped.
+ */
+function applyReset(): boolean {
+  try {
+    posthog.reset();
+    identifiedUid = null;
+  } catch {
+    /* no-op */
+    return false;
+  }
+  // Identity reset succeeded, so report success even if this best-effort
+  // dimension re-register fails. before_send still supplies the controlled
+  // dimensions, and treating a register failure as a reset failure would
+  // cause a second reset that needlessly rotates the new anonymous session.
+  try {
+    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
   } catch {
     /* no-op */
   }
+  return true;
+}
+
+type RestoredUserUid = { known: true; uid: string | null } | { known: false };
+
+/** Read the SDK identity that init restored without guessing from distinct_id. */
+function restoredUserUid(): RestoredUserUid {
+  try {
+    const value = posthog.get_property('$user_id');
+    return { known: true, uid: typeof value === 'string' && value.length > 0 ? value : null };
+  } catch {
+    return { known: false };
+  }
+}
+
+/**
+ * Apply Firebase's authoritative first auth state before this load captures.
+ * A matching returning User is identified in place (preserving PostHog's
+ * session/replay); an anonymous visitor is stitched normally; only a signed-
+ * out state or a DIFFERENT persisted User needs reset().
+ */
+function applyInitialAuthState(uid: string | null): boolean {
+  if (uid === null) {
+    if (!applyReset()) return false;
+    openIdentityGate();
+    return true;
+  }
+  const restored = restoredUserUid();
+  if (!restored.known) return false;
+  if (restored.uid !== null && restored.uid !== uid && !applyReset()) return false;
+  // Reset/restored-user preconditions are now proven. Open the narrow send
+  // path BEFORE identify(): posthog-js emits the `$identify` merge handshake
+  // synchronously inside identify(), and dropping it would mutate local state
+  // without ever stitching the anonymous history server-side.
+  openIdentityGate();
+  if (applyIdentify(uid)) return true;
+  closeIdentityGate();
+  return false;
+}
+
+function closeIdentityGate(): void {
+  if (identityGateRequired) identityGateReady = false;
+}
+
+function openIdentityGate(): void {
+  if (identityGateRequired) identityGateReady = true;
+}
+
+/**
+ * The most recent IDENTITY op (reset/identify) in the pending queue, looking
+ * past any captures queued after it — the identity state a newly queued op
+ * would follow. Scanning past captures matters (#613, Phase 4b round-2 P1):
+ * with [identify(A), capture] in the queue, a phIdentify(B) must still see
+ * A as the current queued identity and insert the reset the A→B transition
+ * implies; checking only the literal last element would miss it.
+ */
+function lastQueuedIdentityOp(): Exclude<PendingOp, { type: 'capture' }> | undefined {
+  for (let i = pendingOps.length - 1; i >= 0; i--) {
+    const op = pendingOps[i];
+    if (op.type !== 'capture') return op;
+  }
+  return undefined;
+}
+
+/** Tie subsequent events to the signed-in User by uid (no PII properties). */
+export function phIdentify(uid: string): boolean {
+  if (!ready) {
+    const last = lastQueuedIdentityOp();
+    if (last?.type === 'identify') {
+      // Identical uid: nothing new to say — the queue's identity state is
+      // already this account (#613 round 2: ONLY identical uids coalesce).
+      if (last.uid === uid) return true;
+      // A→B with NO intervening sign-out: insert the reset the transition
+      // implies (#613, Phase 4b round-2 P1). Replaying identify(B) directly
+      // after identify(A) — or over A's identity as loaded by
+      // `posthog.init()` — would merge the two accounts.
+      pendingOps.push({ type: 'reset' }, { type: 'identify', uid });
+      return true;
+    }
+    pendingOps.push({ type: 'identify', uid });
+    return true;
+  }
+  // Same A→B protection on the ready path (#613, Phase 4b round-2 P1): an
+  // in-session uid change without a sign-out resets first, so B's events
+  // never merge onto A's identity.
+  if (identifiedUid !== null && identifiedUid !== uid) {
+    closeIdentityGate();
+    if (!applyReset()) return false;
+    openIdentityGate();
+  }
+  // identify() emits the `$identify` stitching handshake synchronously. This
+  // must also open on a SAME-uid retry after a prior identify exception, not
+  // only on the reset-following A→B path above.
+  openIdentityGate();
+  if (applyIdentify(uid)) return true;
+  closeIdentityGate();
+  return false;
+}
+
+/**
+ * Feed the resolved Firebase auth state into PostHog. The first observation is
+ * the startup baseline awaited by production init; later observations become
+ * ordinary FIFO identity transitions. Repeated StrictMode effects coalesce.
+ */
+export function phSetAuthState(uid: string | null): void {
+  const previous = lastObservedAuthUid;
+  if (previous === uid && (!identityGateRequired || identityGateReady)) return;
+  if (initialAuthUid === undefined && !ready) {
+    initialAuthUid = uid;
+    lastObservedAuthUid = uid;
+    resolveInitialAuth?.();
+    resolveInitialAuth = null;
+    return;
+  }
+  if (uid === null) {
+    if (phReset()) lastObservedAuthUid = uid;
+    return;
+  }
+  if (previous !== undefined && previous !== null && previous !== uid && !phReset()) return;
+  if (phIdentify(uid)) lastObservedAuthUid = uid;
 }
 
 // Dimensions registered before init settled (#556) — merged (not replaced)
@@ -527,15 +850,23 @@ export function phRegister(props: Record<string, unknown>): void {
 }
 
 /** Clear the identity association on sign-out. */
-export function phReset(): void {
-  pendingIdentifyUid = null;
-  if (!ready) return;
-  try {
-    posthog.reset();
-    // Reapply the dimensions `reset()` just cleared (#556, Codex P2) — see
-    // `registeredDims`'s own doc above for why this must not be skipped.
-    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
-  } catch {
-    /* no-op */
+export function phReset(): boolean {
+  if (!ready) {
+    // Queued IN ORDER, never dropped (#611 → #613, Phase 4b P1) — see
+    // `pendingOps`'s own doc above: a silently dropped reset leaks a stale
+    // persisted identity into the whole signed-out session, and a reset
+    // discarded by a LATER identify merges the new account onto the prior
+    // user's persisted distinct_id. Only a reset that would directly repeat
+    // the queue's current identity state (last identity op already a reset)
+    // coalesces away — captures queued between two resets keep their
+    // position and attribute the same either way (post-reset anonymous).
+    if (lastQueuedIdentityOp()?.type !== 'reset') {
+      pendingOps.push({ type: 'reset' });
+    }
+    return true;
   }
+  closeIdentityGate();
+  if (!applyReset()) return false;
+  openIdentityGate();
+  return true;
 }

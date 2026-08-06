@@ -3,10 +3,17 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // posthog-js is mocked so no real SDK loads; VITE_POSTHOG_KEY is unset in the
 // base test env, so the statically-imported module stays in its disabled state.
 vi.mock('posthog-js', () => ({
-  default: { init: vi.fn(), capture: vi.fn(), identify: vi.fn(), reset: vi.fn(), register: vi.fn() },
+  default: {
+    init: vi.fn(),
+    capture: vi.fn(),
+    identify: vi.fn(),
+    reset: vi.fn(),
+    register: vi.fn(),
+    get_property: vi.fn(),
+  },
 }));
 
-import posthog from 'posthog-js';
+import posthog, { type CaptureResult } from 'posthog-js';
 import {
   POSTHOG_INIT_OPTIONS,
   POSTHOG_PROXY_HOST,
@@ -273,17 +280,67 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
     });
   });
 
-  it('does not clobber an explicit event property that collides with a dimension key', async () => {
+  it('OVERRIDES a controlled dimension key even when the event itself already set it (#611 — inverts the round-2 "event wins" posture)', async () => {
+    // The controlled dimension keys (brand_id/edition_id/event_id/
+    // event_slug/day_index) are system-controlled — nothing legitimate sets
+    // them explicitly, and PostHog persists register()'d super-properties
+    // across SESSIONS, so a value already sitting on `properties` is more
+    // likely a stale cross-session leftover than a genuine per-call
+    // override. The current registeredDims value always wins for these
+    // five keys specifically (see CONTROLLED_DIMENSION_KEYS's own doc).
     vi.resetModules();
     const mod = await import('./posthog');
     mod.phRegister({ day_index: 1 });
     const out = mod.sanitizeUrls({
       uuid: 'p',
       event: 'custom',
-      properties: { day_index: 9 }, // the event's OWN value is more specific — it wins
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
-    expect(out?.properties.day_index).toBe(9);
+      properties: { day_index: 9 },
+    } satisfies CaptureResult);
+    expect(out?.properties.day_index).toBe(1);
+  });
+
+  it('still lets an event property win for a NON-controlled default (general merge posture preserved)', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    mod.phRegister({ some_future_default: 'registered' });
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: 'custom',
+      properties: { some_future_default: 'from-the-event' },
+    } satisfies CaptureResult);
+    expect(out?.properties.some_future_default).toBe('from-the-event');
+  });
+
+  it('DELETES a stale controlled dimension inherited from a PRIOR session\'s persisted super-property (#611 regression)', () => {
+    // The exact bug: PostHog persists register()'d super-properties to
+    // localStorage across sessions/tabs, so the SDK's own automatic capture
+    // can embed the PREVIOUS session's event_id/edition_id into
+    // event.properties BEFORE before_send ever runs — even before THIS
+    // session's phRegister has been called at all (registeredDims is
+    // genuinely empty here, unlike the tests above).
+    const out = sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { event_id: 'stale-prior-session-event', edition_id: 'gcb', $browser: 'Chrome' },
+    } satisfies CaptureResult);
+    expect(out?.properties.event_id).toBeUndefined();
+    expect(out?.properties.edition_id).toBeUndefined();
+    expect(out?.properties.$browser).toBe('Chrome'); // non-controlled properties untouched
+  });
+
+  it('deletes day_index specifically when it is unavailable this session but was set in a prior one', async () => {
+    vi.resetModules();
+    const mod = await import('./posthog');
+    // brand/edition/event registered (pre-auth), but the Event doc — and so
+    // day_index — has not loaded yet THIS session.
+    mod.phRegister({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'med-2026' });
+    const out = mod.sanitizeUrls({
+      uuid: 'p',
+      event: '$pageview',
+      properties: { day_index: 7 }, // leftover from a prior session/tab
+    } satisfies CaptureResult);
+    expect(out?.properties.day_index).toBeUndefined();
+    expect(out?.properties).toMatchObject({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'med-2026' });
   });
 
   it('is a no-op when nothing has been registered yet', async () => {
@@ -293,8 +350,7 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
       uuid: 'p',
       event: '$pageview',
       properties: { $browser: 'Chrome' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+    } satisfies CaptureResult);
     expect(out?.properties).toEqual({ $browser: 'Chrome' });
   });
 });
@@ -358,6 +414,7 @@ describe('PostHog init with a key', () => {
     vi.unstubAllGlobals();
     vi.resetModules();
     vi.clearAllMocks();
+    vi.mocked(posthog.get_property).mockReset();
   });
 
   it('initializes with the full-capture options + host when a key is present', async () => {
@@ -601,7 +658,12 @@ describe('PostHog init with a key', () => {
     expect(ph.identify).toHaveBeenCalledWith('sailor-9');
   });
 
-  it('a sign-out during the probe window clears the pending identity — never resurrected after init (#342)', async () => {
+  it('a sign-out during the probe window replays AFTER the identify it followed — the session ends anonymous, in order (#342 → #613)', async () => {
+    // Previously the queued reset simply DELETED the pending identify
+    // (last-write-wins slots). The FIFO queue (#613, Phase 4b P1) replays
+    // both, in arrival order: the identify stitches the probe-window events
+    // to the user who really was signed in, and the reset that FOLLOWED it
+    // still lands last, so the identity is never resurrected past sign-out.
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', '');
@@ -615,7 +677,485 @@ describe('PostHog init with a key', () => {
     // Unstub BEFORE asserting (CodeRabbit on #342): an assertion failure here
     // must not leak the stubbed fetch into later tests and cascade.
     vi.unstubAllGlobals();
+    expect(ph.identify).toHaveBeenCalledWith('sailor-9');
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(identifyOrder).toBeLessThan(resetOrder);
+  });
+
+  it('a reset requested while SIGNED OUT during the probe window is applied on the real SDK once init settles (#611, retro Phase 4b P1)', async () => {
+    // The bug: previously phReset() while `!ready` just cleared
+    // pendingIdentifyUid and returned — nothing told initPostHog to actually
+    // call posthog.reset() once the SDK came up, so `posthog.init()` loaded
+    // whatever identity PostHog had PERSISTED from a PRIOR session and every
+    // capture in this signed-out session kept attributing to it.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ type: 'opaque' } as Response));
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog();
+    mod.phReset(); // the signed-out ThemedApp effect fires before the probe settles
+    expect(ph.reset).not.toHaveBeenCalled(); // not ready yet — queued, not lost
+    await initSettled;
+    vi.unstubAllGlobals();
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('the queued reset is applied BEFORE any queued capture, so nothing attributes to a stale persisted identity (#611)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phReset();
+    mod.phCapture('app_crash', { message: 'boom' });
+    await mod.initPostHog();
+
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const captureOrder = (ph.capture as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(captureOrder);
+  });
+
+  it('the queued reset is applied BEFORE the queued dimension registration, so this session\'s dims are not wiped by it (#611)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phReset();
+    mod.phRegister({ brand_id: 'five-across' });
+    await mod.initPostHog();
+
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across' });
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(registerOrder);
+  });
+
+  it('a fast sign-out → sign-in during the probe window replays reset THEN identify — never identify alone (#613, Phase 4b P1)', async () => {
+    // The cross-user attribution hazard: posthog.init() loads the PREVIOUS
+    // account's persisted distinct_id. The earlier last-write-wins slots let
+    // the later queued identify DISCARD the queued reset, so the new uid was
+    // identified straight onto the prior user's persisted identity — merging
+    // the two accounts. The FIFO queue preserves the reset and executes
+    // reset-then-identify for this sequence.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phReset(); // the account switch starts: previous user signs out
+    mod.phIdentify('sailor-9'); // the NEW account signs in before init ever settled
+    await mod.initPostHog();
+
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    expect(ph.identify).toHaveBeenCalledWith('sailor-9');
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(identifyOrder);
+  });
+
+  it('replays a reset-then-identify with the dimension registration BETWEEN them, so the $identify is dimensioned and the dims survive the reset (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phRegister({ brand_id: 'five-across' });
+    mod.phReset();
+    mod.phIdentify('sailor-9');
+    await mod.initPostHog();
+
+    // The reset's own re-register carries the FULL merged set, and it must
+    // land after the reset (or the reset would wipe it) and before the
+    // identify (or the $identify capture would be undimensioned).
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across' });
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(registerOrder);
+    expect(registerOrder).toBeLessThan(identifyOrder);
+  });
+
+  it('coalesces repeated identifies ONLY for the identical uid (#613 round 2)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('sailor-1');
+    mod.phIdentify('sailor-1'); // same account re-announced — nothing new
+    await mod.initPostHog();
+
+    expect(ph.identify).toHaveBeenCalledTimes(1);
+    expect(ph.identify).toHaveBeenCalledWith('sailor-1');
+    expect(ph.reset).not.toHaveBeenCalled();
+  });
+
+  it('a queued uid CHANGE with no intervening sign-out inserts the reset the transition implies (#613, Phase 4b round-2 P1)', async () => {
+    // Firebase can deliver identify(A) then identify(B) without a signed-out
+    // render between them. Coalescing them to identify(B) alone would
+    // identify B directly against whatever identity posthog.init() loaded —
+    // possibly A's persisted distinct_id — merging the two accounts.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('account-A');
+    mod.phIdentify('account-B'); // A→B, no phReset in between
+    await mod.initPostHog();
+
+    const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
+    expect(identifyCalls).toEqual(['account-A', 'account-B']);
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrders = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder;
+    expect(identifyOrders[0]).toBeLessThan(resetOrder); // A first
+    expect(resetOrder).toBeLessThan(identifyOrders[1]); // transition reset before B
+  });
+
+  it('detects a queued uid change even when captures were queued after the first identify (#613 round 2)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('account-A');
+    mod.phCapture('mark_square', { index: 3 }); // the queue's tail is now a capture, not the identify
+    mod.phIdentify('account-B');
+    await mod.initPostHog();
+
+    expect(ph.reset).toHaveBeenCalledTimes(1); // the A→B reset
+    const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
+    expect(identifyCalls).toEqual(['account-A', 'account-B']);
+  });
+
+  it('an in-session uid change on the READY path resets before identifying the new account (#613, Phase 4b round-2 P1)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+    vi.mocked(ph.reset).mockClear();
+
+    mod.phIdentify('account-A');
+    expect(ph.reset).not.toHaveBeenCalled();
+    mod.phIdentify('account-A'); // same uid — no reset churn
+    expect(ph.reset).not.toHaveBeenCalled();
+    mod.phIdentify('account-B'); // A→B live, no sign-out delivered
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrders = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder;
+    expect(resetOrder).toBeLessThan(identifyOrders[identifyOrders.length - 1]);
+    expect(ph.identify).toHaveBeenLastCalledWith('account-B');
+  });
+
+  it('replays captures IN ARRIVAL ORDER with the identity ops, never re-attributed to a later identity (#613, Phase 4b round-2 P1)', async () => {
+    // The round-1 shape replayed the whole identity FIFO first and all
+    // captures after, so identify(A), capture(oldUserAction), reset,
+    // identify(B) recorded oldUserAction as B's.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('account-A');
+    mod.phCapture('old_user_action', { n: 1 });
+    mod.phReset();
+    mod.phIdentify('account-B');
+    await mod.initPostHog();
+
+    const order = (name: 'identify' | 'reset' | 'capture', call = 0): number =>
+      (ph[name] as unknown as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder[call];
+    expect(order('identify', 0)).toBeLessThan(order('capture', 0)); // A identified first
+    expect(order('capture', 0)).toBeLessThan(order('reset', 0)); // the capture lands while A is current
+    expect(order('reset', 0)).toBeLessThan(order('identify', 1)); // then transition reset, then B
+    expect(ph.capture).toHaveBeenCalledWith('old_user_action', { n: 1 });
+    const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
+    expect(identifyCalls).toEqual(['account-A', 'account-B']);
+  });
+
+  it("waits for Firebase auth, then resets before the SDK's DEFERRED init-time $pageview when signed out (#613, Phase 4b P1)", async () => {
+    // posthog-js does NOT capture the automatic initial $pageview inside
+    // init(): the loaded step of init schedules it one macrotask later via
+    // setTimeout(..., 1) (verified in the installed 1.409.5 dist), and the
+    // capture computes distinct_id at CAPTURE time. This test mirrors that
+    // scheduling in the init mock and pins our side of the contract: the
+    // authoritative Firebase auth state is applied SYNCHRONOUSLY after
+    // posthog.init() returns — no awaits in between — so it always lands
+    // before the deferred capture task runs. Starting the SDK itself waits
+    // for that state, closing the direct-host main.tsx ordering race.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    vi.useFakeTimers();
+    try {
+      const ph = (await import('posthog-js')).default;
+      const order: string[] = [];
+      vi.mocked(ph.init).mockImplementationOnce(((): void => {
+        setTimeout(() => order.push('sdk-initial-pageview'), 1);
+      }) as never);
+      vi.mocked(ph.reset).mockImplementationOnce(((): void => {
+        order.push('reset');
+      }) as never);
+      const mod = await import('./posthog');
+      const initSettled = mod.initPostHog({ waitForAuth: true });
+      await Promise.resolve();
+      expect(ph.init).not.toHaveBeenCalled();
+      mod.phSetAuthState(null);
+      await initSettled;
+      vi.runAllTimers();
+      expect(order).toEqual(['reset', 'sdk-initial-pageview']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces repeated production init calls while both are waiting for auth (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    const first = mod.initPostHog({ waitForAuth: true });
+    const second = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState(null);
+    await Promise.all([first, second]);
+
+    expect(ph.init).toHaveBeenCalledTimes(1);
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the PostHog session when Firebase restores the SAME signed-in User (#613, Phase 4b round-3 P2)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'sailor-9' : undefined));
+    const mod = await import('./posthog');
+
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('sailor-9');
+    await initSettled;
+
+    expect(ph.reset).not.toHaveBeenCalled();
+    expect(ph.identify).toHaveBeenCalledWith('sailor-9');
+  });
+
+  it('admits the startup $identify handshake after restored-user checks succeed (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockReturnValue(undefined); // anonymous SDK identity
+    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+    }) as never);
+    const admitted: string[] = [];
+    vi.mocked(ph.identify).mockImplementationOnce(() => {
+      const candidate = beforeSend?.({ uuid: 'identify', event: '$identify', properties: {} });
+      if (candidate) admitted.push(candidate.event);
+    });
+    const mod = await import('./posthog');
+
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('sailor-9');
+    await initSettled;
+
+    expect(admitted).toEqual(['$identify']);
+  });
+
+  it('resets before identifying when Firebase resolves a DIFFERENT persisted User (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
+    const mod = await import('./posthog');
+
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('account-B');
+    await initSettled;
+
+    const resetOrder = vi.mocked(ph.reset).mock.invocationCallOrder[0];
+    const identifyOrder = vi.mocked(ph.identify).mock.invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(identifyOrder);
+    expect(ph.identify).toHaveBeenCalledWith('account-B');
+  });
+
+  it('applies fresh signed-out auth BEFORE a capture carried across a recovery reload (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    (await import('./posthog')).phCapture('app_crash', { message: 'signed-out crash' });
+
+    vi.resetModules();
+    const ph = (await import('posthog-js')).default;
+    vi.clearAllMocks();
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState(null);
+    await initSettled;
+
+    const resetOrder = vi.mocked(ph.reset).mock.invocationCallOrder[0];
+    const captureOrder = vi.mocked(ph.capture).mock.invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(captureOrder);
+    expect(ph.capture).toHaveBeenCalledWith('app_crash', { message: 'signed-out crash' });
+  });
+
+  it('fails closed when the required startup reset throws, dropping the deferred pageview (#613)', async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const sent: string[] = [];
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      setTimeout(() => {
+        const beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+        const candidate = beforeSend?.({
+          uuid: 'initial',
+          event: '$pageview',
+          properties: {},
+        } satisfies CaptureResult);
+        if (candidate) sent.push(candidate.event);
+      }, 1);
+    }) as never);
+    vi.mocked(ph.reset).mockImplementationOnce(() => {
+      throw new Error('reset failed');
+    });
+    const mod = await import('./posthog');
+    try {
+      const initSettled = mod.initPostHog({ waitForAuth: true });
+      mod.phSetAuthState(null);
+      await initSettled;
+      vi.runAllTimers();
+      expect(mod.posthogReady()).toBe(false);
+      expect(sent).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed and retries the SAME ready-path A→B transition when reset first throws (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
+    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+    }) as never);
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('account-A');
+    await initSettled;
+    vi.mocked(ph.identify).mockClear();
+    vi.mocked(ph.reset).mockImplementationOnce(() => {
+      throw new Error('reset failed');
+    });
+
+    mod.phSetAuthState('account-B');
     expect(ph.identify).not.toHaveBeenCalled();
+    expect(beforeSend?.({ uuid: 'blocked', event: 'mark_square', properties: {} })).toBeNull();
+
+    // The failed state was not recorded as observed, so the same Firebase
+    // value retries and reopens capture only after reset + identify succeed.
+    vi.mocked(ph.reset).mockReset();
+    mod.phSetAuthState('account-B');
+    expect(ph.identify).toHaveBeenCalledWith('account-B');
+    expect(beforeSend?.({ uuid: 'open', event: 'mark_square', properties: {} })?.event).toBe('mark_square');
+  });
+
+  it('reopens the $identify handshake when the SAME uid retries after identify throws (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
+      beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
+    }) as never);
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState(null);
+    await initSettled;
+    vi.mocked(ph.identify)
+      .mockImplementationOnce(() => {
+        throw new Error('identify failed');
+      })
+      .mockImplementationOnce(() => {
+        const candidate = beforeSend?.({ uuid: 'identify', event: '$identify', properties: {} });
+        expect(candidate?.event).toBe('$identify');
+      });
+
+    mod.phSetAuthState('account-B');
+    expect(beforeSend?.({ uuid: 'blocked', event: 'mark_square', properties: {} })).toBeNull();
+    mod.phSetAuthState('account-B');
+
+    expect(ph.identify).toHaveBeenCalledTimes(2);
+    expect(beforeSend?.({ uuid: 'open', event: 'mark_square', properties: {} })?.event).toBe('mark_square');
+  });
+
+  it('closes the gate and stops queued replay when its A→B reset throws (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    let releaseProbe!: (response: Response) => void;
+    const probe = new Promise<Response>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(probe));
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('account-A');
+    await Promise.resolve(); // let init enter the proxy probes
+    mod.phSetAuthState('account-B');
+    mod.phCapture('new_user_action', { n: 1 });
+    vi.mocked(ph.reset).mockImplementationOnce(() => {
+      throw new Error('reset failed');
+    });
+    releaseProbe({ type: 'opaque' } as Response);
+    await initSettled;
+    vi.unstubAllGlobals();
+
+    expect(vi.mocked(ph.identify).mock.calls.map(([uid]) => uid)).toEqual(['account-A']);
+    expect(ph.capture).not.toHaveBeenCalledWith('new_user_action', { n: 1 });
+    expect(mod.sanitizeUrls({ uuid: 'blocked', event: 'new_user_action', properties: {} })).toBeNull();
   });
 
   it('forwards super-properties directly once ready (#556)', async () => {

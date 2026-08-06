@@ -4,7 +4,7 @@
 
 Live, multiplayer bingo PWA. React (Vite) + TypeScript + Firebase. Ships the MVP the PRD scoped for before the Event opens: Google sign-in, a randomized card from a community-editable prompt pool, honor-system marking, BINGO/blackout detection, a leaderboard, all eight party themes, PWA install, GA4, and a static share image. The printed PDFs are the offline fallback.
 
-Phase 1 backend features land as live updates during the Event without reworking this — see [`phase-1-deploy.md`](phase-1-deploy.md). The private bug-report intake and manual LLM export workflow are documented in [`bug-reports.md`](bug-reports.md).
+Phase 1 backend features land as live updates during the Event without reworking this — see [`phase-1-deploy.md`](phase-1-deploy.md). The private bug-report intake and manual LLM export workflow are documented in [`bug-reports.md`](bug-reports.md). PostHog error-tracking rate limits and the alerts that file GitHub issues for new exceptions are documented in [`error-tracking.md`](error-tracking.md).
 
 > **Live:** Hosting, Firestore and Storage rules, and selected Cloud Functions are deployed at **https://gaycruisebingo.web.app**. The event `events/med-2026` is seeded (honor mode, `neon-playground` theme, 80 prompts), and `gaycruisebingo.com` is registered with Hosting. See [`phase-1-deploy.md`](phase-1-deploy.md) for gated backend features and [`bug-reports.md`](bug-reports.md) for private report intake. Sections 1–6 below are the runbook to reproduce or re-run any of this.
 
