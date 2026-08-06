@@ -181,7 +181,7 @@ describe('finaleActions — the computeMostLoved beat decision (#560)', () => {
     ).toBe(false);
   });
 
-  it('is DECOUPLED from the freeze flip: a run that froze but failed the award write retries it (#228 posture)', () => {
+  it('is COUPLED to the freeze flip: an already-frozen Event never reconstructs an award from later moderation state', () => {
     const d = finaleActions(t, t.farewellUnlockAt + 60_000, {
       frozenAt: t.farewellUnlockAt,
       lastCallPosted: true,
@@ -189,7 +189,7 @@ describe('finaleActions — the computeMostLoved beat decision (#560)', () => {
       mostLovedComputed: false,
     });
     expect(d.freeze).toBe(false); // already frozen — never re-freeze
-    expect(d.computeMostLoved).toBe(true); // but the award beat is still owed
+    expect(d.computeMostLoved).toBe(false); // historical eligibility was not snapshotted
   });
 });
 
@@ -326,7 +326,7 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     expect(award.heartCount).toBe(1);
   });
 
-  it('(g) a compute failure is isolated — freeze and podium still land — and the award retries on its own guard', async () => {
+  it('(g) an award-snapshot read failure keeps the freeze coupled to the award, while the podium still lands', async () => {
     const db = makeDb({
       eventId: 'e1',
       event: { days: mainDays() },
@@ -342,16 +342,39 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     } as typeof db;
 
     await runFinaleBeats(failing, 'e1', { now: () => D10_UNLOCK });
-    expect(db.readEvent().frozenAt).toBe(D10_UNLOCK); // freeze survived the compute failure
+    // The atomic freeze cannot leave a retry to rebuild the award from later
+    // proof visibility, moderation settings, or ban-roster state.
+    expect(db.readEvent().frozenAt).toBeUndefined();
     expect(db.moments().filter((m) => m.kind === 'podium')).toHaveLength(1); // podium too
     expect(db.readEvent().mostLovedPhoto).toBeUndefined();
 
-    // The next healthy tick retries the award on its own guard (frozen already).
+    // The next healthy tick retries the complete freeze snapshot.
     const retryClock = D10_UNLOCK + 15 * 60_000;
     await runFinaleBeats(db, 'e1', { now: () => retryClock });
     const award = db.readEvent().mostLovedPhoto!;
     expect(award.winners.map((w) => w.proofId)).toEqual(['p1']);
+    expect(db.readEvent().frozenAt).toBe(D10_UNLOCK);
     expect(award.frozenAt).toBe(D10_UNLOCK); // still the scheduled cutoff, not the retry clock
     expect(award.computedAt).toBe(retryClock);
+  });
+
+  it('(h) the persisted award survives later proof-moderation and ban-roster changes', async () => {
+    const db = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays(), settings: { reportHideThreshold: 5 } },
+      proofs: [proof('p1')],
+      hearts: [heart('fan-1', 'p1', D9_UNLOCK + 1000)],
+    });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK });
+    const first = JSON.parse(JSON.stringify(db.readEvent().mostLovedPhoto)) as MostLovedPhotoAward;
+
+    // These are the mutable values that used to alter a delayed award retry.
+    db.proofs[0].status = 'hidden';
+    db.hearts[0].uid = 'banned-fan';
+    (db.readEvent().settings as { reportHideThreshold?: number }).reportHideThreshold = 1;
+    db.readEvent().bannedUids = ['owner-p1', 'banned-fan'];
+
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 15 * 60_000 });
+    expect(db.readEvent().mostLovedPhoto).toEqual(first);
   });
 });

@@ -69,7 +69,6 @@ import {
 import { normalizePool } from './poolVocab';
 // Declaration-only shared contract (the daily-engagement-email precedent) —
 // the persisted award shape both compiler roots agree on.
-import type { MostLovedPhotoAward } from '../../src/domainTypes';
 
 export type FinaleMomentKind = 'last_call' | 'podium';
 
@@ -277,11 +276,12 @@ export interface FinaleDecision {
  *     froze but its podium write failed transiently, the freeze guard now blocks
  *     re-freezing, but the podium retry stays open until the Moment actually lands.
  *     Concurrent double-posts collapse onto the one deterministic-id doc.
- *   - `computeMostLoved` (#560): `now` has reached the farewell unlock and no
- *     `mostLovedPhoto` award is persisted yet. Decoupled from the freeze flip for
- *     the same Codex #228 reason as `postPodium`: a run that froze but failed the
- *     award write retries the award on its own guard until it lands (including
- *     the explicit `winners: []` no-award record, which counts as computed).
+ *   - `computeMostLoved` (#560): `now` has reached the farewell unlock, the Event
+ *     is not yet frozen, and no `mostLovedPhoto` award is persisted yet. It is
+ *     deliberately coupled to the freeze transaction: that transaction reads the
+ *     moderation state and the Proof/Heart collections, then writes both frozen
+ *     fields together. A retry therefore cannot rebuild an award from a later ban
+ *     roster, report threshold, or Proof visibility state.
  */
 export function finaleActions(
   times: FinaleTimes,
@@ -298,7 +298,7 @@ export function finaleActions(
     postLastCall: now >= times.lastCallAt && now < times.farewellUnlockAt && !state.lastCallPosted,
     freeze: atFreeze && state.frozenAt == null,
     postPodium: atFreeze && !state.podiumPosted,
-    computeMostLoved: atFreeze && !state.mostLovedComputed,
+    computeMostLoved: atFreeze && state.frozenAt == null && !state.mostLovedComputed,
   };
 }
 
@@ -609,57 +609,48 @@ function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[
 }
 
 /**
- * Read the event's proofs + hearts and build the frozen Most-Loved Photo award
- * (#560). Plain, NON-transactional collection reads on purpose — the result is
- * then persisted through `persistMostLovedAward`'s write-once transaction, so a
- * concurrent run computing from marginally different reads still collapses onto
- * whichever award landed first. `cutoff` is the SCHEDULED freeze instant
- * (`times.farewellUnlockAt`), never the run clock (the Codex #228 rule
- * `freezeStandings` follows): a delayed recovery run computes the same result
- * the freeze defines, and post-freeze hearting cannot move the award. Residual,
- * accepted: a heart deleted between the cutoff and a delayed compute run is
- * unrecoverable and simply doesn't count.
+ * Atomically freeze standings and persist the Most-Loved Photo award (#560).
+ *
+ * The Event's ban roster/report threshold, every eligible Proof's visibility,
+ * and every Heart's server creation time are read inside the same transaction
+ * that stamps `frozenAt` and `mostLovedPhoto`. That coupling is essential: a
+ * retry after an award-read/write failure must not rebuild an ostensibly frozen
+ * award from mutable moderation state. If any read fails, neither frozen field
+ * is written and the next tick retries the whole snapshot together. The podium
+ * remains its own best-effort beat.
+ *
+ * `cutoff` is the SCHEDULED freeze instant (`times.farewellUnlockAt`), never the
+ * run clock: post-cutoff Hearts remain excluded even if this transaction starts
+ * late. The atomic transaction also collapses concurrent scheduler/manual runs
+ * onto the first successful freeze.
  */
-async function computeMostLovedAward(
+async function freezeStandingsAndPersistMostLovedAward(
   db: AdminFirestore,
   eventId: string,
-  event: EventLike,
   cutoff: number,
   now: number,
-): Promise<MostLovedPhotoAward> {
-  const [proofsSnap, heartsSnap] = await Promise.all([
-    db.collection(`events/${eventId}/proofs`).get(),
-    db.collection(`events/${eventId}/hearts`).get(),
-  ]);
-  return buildMostLovedPhotoAward(mostLovedProofsFrom(proofsSnap), mostLovedHeartsFrom(heartsSnap), {
-    bannedUids: event.bannedUids ?? [],
-    reportHideThreshold: event.settings?.reportHideThreshold,
-    cutoff,
-    computedAt: now,
-  });
-}
-
-/**
- * Transactionally persist the award iff `mostLovedPhoto` is not already set —
- * byte-for-byte the `freezeStandings` pattern. Exactly-once: only the run that
- * flips the field from unset writes, so every retry, re-tick, concurrent
- * double-invocation, or manual `unlockDayNow` run no-ops. This holds for the
- * no-award case too, BECAUSE that case persists the explicit `winners: []`
- * record: if no-award were represented by field absence this guard could not
- * distinguish "not yet computed" from "computed, none", every subsequent tick
- * would recompute, and a post-freeze heart could mint a late award — violating
- * "the frozen result NEVER recomputes".
- */
-async function persistMostLovedAward(
-  db: AdminFirestore,
-  eventId: string,
-  award: MostLovedPhotoAward,
 ): Promise<boolean> {
   const eventRef = db.doc(`events/${eventId}`);
+  const proofsRef = db.collection(`events/${eventId}/proofs`);
+  const heartsRef = db.collection(`events/${eventId}/hearts`);
   return db.runTransaction(async (tx) => {
-    const ev = (await tx.get(eventRef)).data() as EventLike | undefined;
-    if (!ev || ev.mostLovedPhoto != null) return false; // exactly-once
-    tx.update(eventRef, { mostLovedPhoto: award as unknown as Record<string, unknown> });
+    const eventSnap = await tx.get(eventRef);
+    const event = eventSnap.data() as EventLike | undefined;
+    if (!event || event.frozenAt != null || event.mostLovedPhoto != null) return false;
+
+    // Firestore requires all transaction reads before its write. Reading every
+    // award input through `tx` gives the Event update a single, retry-safe view.
+    const [proofsSnap, heartsSnap] = await Promise.all([tx.get(proofsRef), tx.get(heartsRef)]);
+    const award = buildMostLovedPhotoAward(mostLovedProofsFrom(proofsSnap), mostLovedHeartsFrom(heartsSnap), {
+      bannedUids: event.bannedUids ?? [],
+      reportHideThreshold: event.settings?.reportHideThreshold,
+      cutoff,
+      computedAt: now,
+    });
+    tx.update(eventRef, {
+      frozenAt: cutoff,
+      mostLovedPhoto: award as unknown as Record<string, unknown>,
+    });
     return true;
   });
 }
@@ -718,14 +709,20 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       console.error('runFinaleBeats: last_call post failed', eventId, err);
     }
   }
-  // Freeze and podium are INDEPENDENT best-effort beats (Codex #228): freezing stamps
-  // the scheduled 08:00 cutoff exactly-once, while the podium retries on its own guard
-  // until the Moment lands — so a run that froze but failed to post the podium does not
-  // strand the finale. Both are idempotent (the frozenAt flip; the deterministic-id
-  // podium doc), so a re-run or a race is safe.
+  // Freeze and podium are INDEPENDENT best-effort beats (Codex #228): the podium
+  // retries on its own guard, while the freeze transaction atomically captures the
+  // Most-Loved eligibility state when that award is still owed. Both are idempotent,
+  // so a re-run or a race is safe.
   if (freeze) {
     try {
-      await freezeStandings(db, eventId, times.farewellUnlockAt);
+      if (computeMostLoved) {
+        await freezeStandingsAndPersistMostLovedAward(db, eventId, times.farewellUnlockAt, now);
+      } else {
+        // Defensive compatibility for an Event that already has a persisted
+        // award but lacks the historical freeze stamp. The normal new-event path
+        // always takes the atomic branch above.
+        await freezeStandings(db, eventId, times.farewellUnlockAt);
+      }
     } catch (err) {
       console.error('runFinaleBeats: freeze failed', eventId, err);
     }
@@ -749,20 +746,6 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       await postFinaleMoment(db, eventId, 'podium', times.podiumDayIndex, now, extra);
     } catch (err) {
       console.error('runFinaleBeats: podium post failed', eventId, err);
-    }
-  }
-  // The Most-Loved Photo award (#534/#560) — the third finale beat, keyed to the
-  // SAME atFreeze transition so a single run stamps `frozenAt` and the award in
-  // one sweep ("computed once at standingsFreezeAt ALONGSIDE frozenAt"), yet an
-  // independent best-effort block so either surviving the other's failure. Sits
-  // AFTER the freeze/podium blocks; its own transactional guard
-  // (`persistMostLovedAward`) makes retries and races exactly-once.
-  if (computeMostLoved) {
-    try {
-      const award = await computeMostLovedAward(db, eventId, event, times.farewellUnlockAt, now);
-      await persistMostLovedAward(db, eventId, award);
-    } catch (err) {
-      console.error('runFinaleBeats: most-loved compute failed', eventId, err);
     }
   }
 }
