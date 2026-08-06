@@ -27,7 +27,8 @@ import { emailThemeTokens, type EmailThemeTokens } from './dailyEmailTheme';
  *  types still come directly from the shared contract. This boundary reads RAW
  *  Firestore Day objects (no client converter), so it also models the
  *  pre-#566 persisted field names — `port`/`portEmoji` — which `placeLabel`
- *  and the arrival line fall back to when the neutral names are absent. */
+ *  and the arrival line use when present. The live Bodega wrap-up's
+ *  operator-corrected emoji remains on `portEmoji` during the transition. */
 export type EmailDay = Pick<DayDef, 'index' | 'unlockAt'> &
   Partial<Pick<DayDef, 'date' | 'place' | 'placeEmoji' | 'theme' | 'tonight' | 'tutorial'>> & {
     /** Legacy persisted name for `place` (pre-#566 Event docs). */
@@ -312,12 +313,13 @@ export function formatUnlockTime(unlockAt: number, timeZone: string): string {
   return out.replace(/\s*AM$/, ' a.m.').replace(/\s*PM$/, ' p.m.');
 }
 
-/** "🇲🇹 Valletta", "Valletta", or `''` when the Day names no Place. Reads the
- *  neutral field names first, the pre-#566 persisted names as fallback. */
+/** "🇲🇹 Valletta", "Valletta", or `''` when the Day names no Place. The
+ *  neutral place label wins; legacy `portEmoji` takes precedence while both
+ *  fields are dual-written, preserving a live operator correction. */
 function placeLabel(day: EmailDay): string {
   const place = (day.place ?? day.port ?? '').trim();
   if (!place) return '';
-  const emoji = (day.placeEmoji ?? day.portEmoji ?? '').trim();
+  const emoji = (day.portEmoji ?? day.placeEmoji ?? '').trim();
   return emoji ? `${emoji} ${place}` : place;
 }
 

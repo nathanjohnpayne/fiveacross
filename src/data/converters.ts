@@ -66,8 +66,11 @@ export function migratePool(raw: unknown): 'main' | 'easy' | 'closing' {
  * Resolve a persisted Day to the current field contract (#566/#565). Event
  * docs seeded before the neutral-vocabulary rename persist `port`/`portEmoji`
  * where the contract now reads `place`/`placeEmoji`, and the legacy pool
- * values `migratePool` coerces; normalize them on read — new names win when
- * both are present — so existing docs keep working with no data migration.
+ * values `migratePool` coerces; normalize them on read. `place` wins when
+ * both labels exist, while the legacy `portEmoji` wins when both emoji fields
+ * disagree: the live Bodega wrap-up carries an operator-corrected 👋 only on
+ * that legacy field, so blindly preferring the copied neutral value would
+ * regress the live Day identity during this no-data-migration transition.
  * Writes only ever emit the new field names (the admin schedule editors
  * re-read the RAW stored `days` inside their transactions, so a theme/tonight
  * edit preserves whatever names/values the live doc holds). Mirrors
@@ -80,7 +83,7 @@ export function migrateDayFields(raw: unknown): DayDef {
     ...rest,
     place: typeof day.place === 'string' ? day.place : typeof port === 'string' ? port : '',
     placeEmoji:
-      typeof day.placeEmoji === 'string' ? day.placeEmoji : typeof portEmoji === 'string' ? portEmoji : '',
+      typeof portEmoji === 'string' ? portEmoji : typeof day.placeEmoji === 'string' ? day.placeEmoji : '',
     pool: migratePool(day.pool),
   } as DayDef;
 }

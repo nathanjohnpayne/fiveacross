@@ -535,6 +535,12 @@ describe('buildDailyEmailModel', () => {
     expect(model.nudgeLine).toContain('The boat docks in Valletta today');
   });
 
+  it('preserves a live legacy emoji when a dual-written Day disagrees during the rename', () => {
+    const dualWritten = { ...gcbDay4, placeEmoji: '🌫️', portEmoji: '👋' };
+    const model = build({ day: dualWritten });
+    expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18 · 👋 Valletta');
+  });
+
   it('formats the unlock time in the EVENT timezone, and survives a bogus one', () => {
     expect(formatUnlockTime(DAY4_UNLOCK, 'Europe/Rome')).toBe('8:00 a.m.');
     expect(formatUnlockTime(DAY4_UNLOCK, 'Not/AZone')).toBe('6:00 a.m.'); // falls back to UTC

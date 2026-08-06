@@ -158,10 +158,10 @@ describe('eventConverter (migration applied on read)', () => {
 });
 
 describe('migrateDayFields (#566 legacy Day field read-migration)', () => {
-  it('prefers the neutral names when a Day carries both shapes', () => {
+  it('preserves the legacy emoji when a dual-written Day carries the live correction', () => {
     const day = migrateDayFields({ place: 'Bodega Bay', placeEmoji: '🐦', port: 'Split', portEmoji: '🇭🇷' });
     expect(day.place).toBe('Bodega Bay');
-    expect(day.placeEmoji).toBe('🐦');
+    expect(day.placeEmoji).toBe('🇭🇷');
   });
 
   it('passes a neutral-named Day through, coercing the legacy pool value (#565)', () => {
