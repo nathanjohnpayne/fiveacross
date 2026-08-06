@@ -62,6 +62,10 @@ export function eventWritePayload(
   includeDays?: boolean,
 ): Record<string, unknown>;
 export function seedItemDocId(text: string): string;
+export function reseedGuard(
+  seedOwnedCount: number,
+  reseedEnv: string | undefined,
+): { allowed: boolean; reason?: string };
 export function seedItemMutations(
   existingDocs: Array<{ id: string; createdBy: string }>,
   now: number,

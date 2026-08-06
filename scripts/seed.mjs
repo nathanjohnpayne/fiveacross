@@ -93,6 +93,28 @@ export function eventWritePayload(eventSeed, admins, deleteBlackoutEnabled, incl
   };
 }
 
+/**
+ * Whether a seed run may touch the ITEMS of an Event that ALREADY holds
+ * seed-owned prompts. Seeding is replace-semantics (never an append — a rerun
+ * can NEVER duplicate prompts), but a replace still rewrites every seed-owned
+ * doc at the current content-hash ids: against a live Event whose docs have
+ * been edited in place (the 2026-08-05 Bodega text pass), that would change
+ * doc ids out from under the Day snapshots that reference them. So a rerun
+ * against an already-seeded Event leaves the pool UNTOUCHED (a loud no-op)
+ * unless RESEED=1 explicitly opts into the replace — a fresh Event (zero
+ * seed-owned docs) always seeds.
+ */
+export function reseedGuard(seedOwnedCount, reseedEnv) {
+  if (seedOwnedCount === 0 || reseedEnv === '1') return { allowed: true };
+  return {
+    allowed: false,
+    reason:
+      `this event already holds ${seedOwnedCount} seed-owned prompts. ` +
+      'A reseed REPLACES the seed-owned pool at current content-hash ids (never appends), which can ' +
+      'orphan pre-stamped Day snapshots on a live Event. Re-run with RESEED=1 to replace deliberately.',
+  };
+}
+
 // `pool` is REQUIRED (the target Event's ALL_ITEMS): with per-Event seed data
 // (#563) there is no one global pool a default could safely point at, and a
 // caller that omitted it would silently seed nothing or the wrong Event's
@@ -345,6 +367,24 @@ async function seed() {
   // prompts into this SAME collection with their own uid as createdBy, so an
   // unscoped delete-everything would erase user content on every reseed.
   const existing = await col.get();
+  // Never double-seed a live Event: replace semantics can't append, but even a
+  // replace is refused against an already-seeded Event unless RESEED=1 — see
+  // `reseedGuard`. The refusal is a LOUD NO-OP on the items step (exit 0)
+  // rather than a hard error: the event write above is itself a merge (that is
+  // how an admin grant re-run works, and it never clobbers), so a rerun
+  // without RESEED=1 grants rosters / refreshes event config while leaving the
+  // live pool byte-for-byte untouched.
+  const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
+  const guard = reseedGuard(seedOwnedCount, process.env.RESEED);
+  if (!guard.allowed) {
+    console.log(`Event doc written (merge). Prompts SKIPPED: ${guard.reason}`);
+    console.log(
+      admins.length
+        ? `Admins: set (${admins.length})`
+        : 'No ADMIN_UID set — set the roster (comma-separated uids) and re-run to grant admin.',
+    );
+    process.exit(0);
+  }
   const { deleteIds, writes } = seedItemMutations(
     existing.docs.map((doc) => ({
       id: doc.id,
@@ -426,7 +466,7 @@ export function formatDriftReport(report, eventId) {
     process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'gaycruisebingo';
   const eventEnv = eventId ? `VITE_EVENT_ID=${eventId} ` : '';
   lines.push(
-    `  → reconcile (prompts only): ADMIN_UID= ${eventEnv}GOOGLE_CLOUD_PROJECT=${project} node scripts/seed.mjs`,
+    `  → reconcile (prompts only, replaces the seed-owned pool): ADMIN_UID= RESEED=1 ${eventEnv}GOOGLE_CLOUD_PROJECT=${project} node scripts/seed.mjs`,
   );
   return lines.join('\n');
 }

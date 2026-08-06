@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { adminRoster, eventWritePayload, formatDriftReport, seedItemDocId, verifySeedPool } from '../../scripts/seed.mjs';
+import { adminRoster, eventWritePayload, formatDriftReport, reseedGuard, seedItemDocId, verifySeedPool } from '../../scripts/seed.mjs';
 import { EVENT_SEED, ITEMS, ALL_ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 type SeedItem = { text: string; spicy: boolean };
@@ -112,6 +112,29 @@ describe('w1-event-seed: ADMIN_UID roster flow (#15)', () => {
 
   it('omits admins entirely when the roster is empty, so a merge re-run never wipes it', () => {
     expect(eventWritePayload(EVENT_SEED, [])).not.toHaveProperty('admins');
+  });
+});
+
+describe('w1-event-seed: reseedGuard — a rerun can never double-seed or casually rewrite a live pool', () => {
+  it('always allows seeding a FRESH event (zero seed-owned docs)', () => {
+    expect(reseedGuard(0, undefined)).toEqual({ allowed: true });
+    expect(reseedGuard(0, '1')).toEqual({ allowed: true });
+  });
+
+  it('hard-refuses a rerun against an already-seeded event without RESEED=1', () => {
+    // Replace semantics can never APPEND (no duplicates), but a replace still
+    // rewrites every seed-owned doc at current content-hash ids — which would
+    // orphan a live Event's pre-stamped Day snapshots (the in-place-edited
+    // Bodega pool). Refusal is the default; the reason names the opt-in.
+    const verdict = reseedGuard(120, undefined);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toContain('RESEED=1');
+    expect(reseedGuard(1, '0').allowed).toBe(false);
+    expect(reseedGuard(1, 'yes').allowed).toBe(false);
+  });
+
+  it('allows a deliberate replace with RESEED=1', () => {
+    expect(reseedGuard(120, '1')).toEqual({ allowed: true });
   });
 });
 
@@ -318,7 +341,7 @@ describe('w1-event-seed: verifySeedPool drift check (#129 reopened)', () => {
     try {
       const report = verifySeedPool([], ALL_ITEMS);
       expect(formatDriftReport(report, 'future-cruise')).toContain(
-        'ADMIN_UID= VITE_EVENT_ID=future-cruise GOOGLE_CLOUD_PROJECT=staging-bingo node scripts/seed.mjs',
+        'ADMIN_UID= RESEED=1 VITE_EVENT_ID=future-cruise GOOGLE_CLOUD_PROJECT=staging-bingo node scripts/seed.mjs',
       );
     } finally {
       if (previousProject === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
