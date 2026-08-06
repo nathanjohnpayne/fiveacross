@@ -158,6 +158,8 @@ describe('editions — the share block (#587, artwork #609)', () => {
       expect(url.hostname, edition).toMatch(/\.web\.app$/);
       const file = url.pathname.replace(/^\//, '');
       expect(file, edition).toMatch(/^og-[a-z]+\.png$/);
+      // `npm test` runs Vitest from the repository root (package.json); the
+      // src-only include pattern narrows discovery but does not change cwd.
       expect(existsSync(resolve(process.cwd(), 'public', file)), `${edition} → ${file}`).toBe(true);
     }
   });
