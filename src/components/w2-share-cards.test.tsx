@@ -1942,6 +1942,35 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     expect(createObjectURL).not.toHaveBeenCalled();
   });
 
+  it('a throwing createObjectURL falls back to the photo-less composition, not a dropped card (#660)', async () => {
+    // Minting the object URL is the one media step that sat OUTSIDE the render
+    // try/catch, so a throw escaped to the warmed promise's `.catch(() => null)`
+    // and resolved the whole card to null — no rasterization, no PNG for the
+    // share sheet. That is strictly worse than the failed-fetch case directly
+    // above, which has always degraded correctly. Both now land on the same
+    // photo-less card.
+    createObjectURL.mockImplementation(() => {
+      throw new Error('object URL unavailable');
+    });
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    // The card still rasterized (the pre-fix bug skipped this entirely).
+    const node = latestToBlobNode();
+    expect(node.querySelector('.share-card-ml-hero')).toBeNull();
+    expect(node.querySelectorAll('.share-card-honoree').length).toBeGreaterThan(0);
+    // A real PNG reached the share sheet rather than the text/URL-only leg.
+    expect(shareMock.mock.calls[0][0].files?.length).toBe(1);
+    // Nothing to revoke when the URL was never minted.
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
   it('with the first winner hidden, the hero is the earliest STILL-VISIBLE winner and the credit still names the recorded co-winner', async () => {
     H.proofs = [liveProof('w2', 'bea', 2000)];
     const shareMock = vi.fn().mockResolvedValue(undefined);

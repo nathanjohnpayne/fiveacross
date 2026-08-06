@@ -13,6 +13,8 @@ export type DayDiff = {
   allowed: Partial<Record<'theme' | 'place' | 'placeEmoji' | 'tonight', { from: unknown; to: unknown }>>;
   forbidden: string[];
   misalignedFields: string[];
+  /** Pre-#566 keys present on the LIVE Day; non-empty refuses the write (#652). */
+  legacyFields: string[];
 };
 
 export type MigrationPlan = {
@@ -21,11 +23,14 @@ export type MigrationPlan = {
   forbidden: DayDiff[];
   misaligned: boolean;
   lengthMismatch: boolean;
+  /** Days carrying legacy fields — non-empty is an abort condition (#652). */
+  legacyShaped: DayDiff[];
   changed: boolean;
 };
 
 export const ALLOWED_FIELDS: ReadonlyArray<'theme' | 'place' | 'placeEmoji' | 'tonight'>;
 export const IMMUTABLE_FIELDS: ReadonlyArray<keyof MigrationDay>;
+export const LEGACY_FIELDS: ReadonlyArray<'port' | 'portEmoji'>;
 export const TARGET_DAYS: DayDef[];
 export function correctDay(liveDay: MigrationDay, targetDay: DayDef): MigrationDay;
 export function diffDay(liveDay: MigrationDay, targetDay: DayDef): DayDiff;

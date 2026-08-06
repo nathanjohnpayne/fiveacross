@@ -489,7 +489,20 @@ function FarewellPodiumInner({
       if (hero && heroMeta) {
         const media = await heroPhotoBlob(hero.winner.proofId, hero.proof);
         if (media) {
-          objectUrl = URL.createObjectURL(media);
+          // Minting the object URL is itself a media step that can fail (memory
+          // pressure, an environment without a usable implementation). Unguarded
+          // it escaped the `try` below and hit the outer `.catch(() => null)`, so
+          // the whole card resolved to null and the farewell share silently lost
+          // its PNG — strictly worse than the photo-less fallback this path is
+          // supposed to degrade to (#660). Treat it as one more media failure:
+          // `data` stays `base` and the standings composition still renders.
+          try {
+            objectUrl = URL.createObjectURL(media);
+          } catch {
+            objectUrl = null;
+          }
+        }
+        if (objectUrl) {
           data = {
             ...base,
             mostLoved: {

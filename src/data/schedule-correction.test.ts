@@ -2,7 +2,15 @@ import { describe, it, expect } from 'vitest';
 import type { DayDef } from '../types';
 import { DAYS } from './seed';
 import { EVENT_SEED } from '../../scripts/seed-data/med-2026.mjs';
-import { ALLOWED_FIELDS, IMMUTABLE_FIELDS, diffDay, correctDay, planScheduleMigration } from '../../scripts/migrate-schedule-2026-07-17.mjs';
+import {
+  ALLOWED_FIELDS,
+  IMMUTABLE_FIELDS,
+  LEGACY_FIELDS,
+  diffDay,
+  correctDay,
+  planScheduleMigration,
+  formatMigrationReport,
+} from '../../scripts/migrate-schedule-2026-07-17.mjs';
 
 // A RAW live Day as persisted on the pre-migration med-2026 doc: `tonight`
 // may be absent, and `pool` carries the LEGACY persisted values
@@ -189,5 +197,75 @@ describe('schedule migration — planning core (specs/schedule-correction.md)', 
     expect(corrected.snapshotItemIds).toEqual(['m1', 'm2', 'm3']);
     expect(corrected.unlockAt).toBe(live.unlockAt);
     expect(corrected.pool).toBe('main');
+  });
+
+  // #652 — this script predates the #566 neutral vocabulary. `correctDay`
+  // spreads the live Day and overwrites only ALLOWED_FIELDS, so a Day still
+  // carrying `port`/`portEmoji` keeps them through the write, and
+  // `migrateDayFields` (src/data/converters.ts) gives a retained `portEmoji`
+  // display precedence over the corrected `placeEmoji`. The run would report and
+  // apply a correction clients never render, and every rerun would look
+  // idempotent. The fixtures below use the RAW legacy names on purpose: the
+  // `place`-vocabulary fixtures above cannot reach this case, which is why it
+  // went unnoticed.
+  type LegacyLiveDay = LiveDay & { port?: string; portEmoji?: string };
+  const legacyDay = (over: Partial<LegacyLiveDay> = {}): LegacyLiveDay => ({
+    ...oldLiveDays()[1],
+    ...over,
+  });
+
+  it('flags a live Day still carrying the pre-#566 port/portEmoji', () => {
+    expect(diffDay(legacyDay({ port: 'Split', portEmoji: '🇭🇷' }), DAYS[1]).legacyFields).toEqual([
+      'port',
+      'portEmoji',
+    ]);
+  });
+
+  it('flags a legacy field even when its value is empty', () => {
+    // Presence is the signal, not truthiness: `migrateDayFields` prefers a
+    // retained `portEmoji` whenever the key exists, empty string included.
+    expect(diffDay(legacyDay({ portEmoji: '' }), DAYS[1]).legacyFields).toEqual(['portEmoji']);
+  });
+
+  it('reports no legacy fields for a Day already on the neutral vocabulary', () => {
+    expect(diffDay(legacyDay(), DAYS[1]).legacyFields).toEqual([]);
+  });
+
+  it('correctDay retains the legacy key — the reason the refusal exists', () => {
+    // Pinned so a future change to `correctDay` cannot quietly make the guard
+    // look unnecessary.
+    const corrected: LegacyLiveDay = correctDay(legacyDay({ portEmoji: '🇭🇷' }), DAYS[1]);
+    expect(corrected.placeEmoji).toBe('🇭🇷');
+    expect(corrected.portEmoji).toBe('🇭🇷');
+  });
+
+  it('surfaces legacy-shaped Days on the plan as an abort condition', () => {
+    const live = oldLiveDays();
+    live[1] = legacyDay({ portEmoji: '🇭🇷' });
+    const plan = planScheduleMigration(live, DAYS);
+    expect(plan.legacyShaped).toHaveLength(1);
+    expect(plan.legacyShaped[0].legacyFields).toEqual(['portEmoji']);
+  });
+
+  it('leaves legacyShaped empty for a clean neutral-vocabulary schedule', () => {
+    expect(planScheduleMigration(oldLiveDays(), DAYS).legacyShaped).toEqual([]);
+  });
+
+  it('never reports a legacy-shaped Day as unchanged', () => {
+    // Corrected content with a retained legacy key: without the legacy check
+    // this Day renders as `unchanged` — the "reruns appear idempotent" symptom.
+    const live = planScheduleMigration(oldLiveDays(), DAYS).corrected as LegacyLiveDay[];
+    live[1] = { ...live[1], portEmoji: '🇭🇷' };
+    const report = formatMigrationReport(planScheduleMigration(live, DAYS));
+    expect(report).toContain('LEGACY FIELD');
+    expect(report).toContain('portEmoji');
+  });
+
+  it('keeps LEGACY_FIELDS detection-only — never added to the writable set', () => {
+    // The finding offered reverting this script to the legacy vocabulary as one
+    // remedy; we took refusal instead, so pin that the writable set stays neutral.
+    for (const field of LEGACY_FIELDS) {
+      expect(ALLOWED_FIELDS).not.toContain(field);
+    }
   });
 });
