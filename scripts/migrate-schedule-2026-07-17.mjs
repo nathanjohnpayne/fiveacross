@@ -64,6 +64,17 @@ export const ALLOWED_FIELDS = ['theme', 'place', 'placeEmoji', 'tonight'];
 // the migration preserves, not itinerary identity.
 export const ALIGNMENT_FIELDS = ['index', 'date', 'pool', 'tutorial'];
 
+// The pre-#566 vocabulary this script predates. A live Day still carrying
+// `port`/`portEmoji` cannot be corrected safely through `place`/`placeEmoji`:
+// `correctDay` spreads the live Day and overwrites only ALLOWED_FIELDS, so the
+// legacy keys survive the write — and `migrateDayFields` (src/data/converters.ts)
+// deliberately gives a retained `portEmoji` precedence over `placeEmoji`. The
+// run would therefore report and apply a correction that clients never display,
+// and every rerun would look idempotent while the stale emoji stayed on screen
+// (#652). Refuse instead: this migration is out of contract against legacy-shaped
+// data, and silently appearing to succeed is the worst of the available outcomes.
+export const LEGACY_FIELDS = ['port', 'portEmoji'];
+
 // The fields this migration must never change (everything a Day carries except
 // ALLOWED_FIELDS). Preservation is guaranteed by construction (`correctDay`
 // overwrites only ALLOWED_FIELDS) and re-asserted universally by `diffDay`'s
@@ -131,7 +142,20 @@ export function diffDay(liveDay, targetDay) {
     (key) => (key in live || key in (targetDay || {})) && !fieldEqual(live[key], targetDay?.[key]),
   );
 
-  return { index: live.index ?? targetDay?.index, corrected, allowed, forbidden, misalignedFields };
+  // Legacy keys are detected on the LIVE Day only: the target is the seed, which
+  // is canonical by construction. Presence alone is the signal — a legacy key
+  // survives `correctDay` whatever its value, and an empty-string `portEmoji`
+  // still wins the precedence check in `migrateDayFields`.
+  const legacyFields = LEGACY_FIELDS.filter((key) => key in live);
+
+  return {
+    index: live.index ?? targetDay?.index,
+    corrected,
+    allowed,
+    forbidden,
+    misalignedFields,
+    legacyFields,
+  };
 }
 
 /**
@@ -154,8 +178,9 @@ export function planScheduleMigration(liveDays, targetDays = TARGET_DAYS) {
   }
   const forbidden = diffs.filter((d) => d.forbidden.length > 0);
   const misaligned = lengthMismatch || diffs.some((d) => d.misalignedFields.length > 0);
+  const legacyShaped = diffs.filter((d) => d.legacyFields.length > 0);
   const changed = diffs.some((d) => Object.keys(d.allowed).length > 0);
-  return { corrected, diffs, forbidden, misaligned, lengthMismatch, changed };
+  return { corrected, diffs, forbidden, misaligned, lengthMismatch, legacyShaped, changed };
 }
 
 /** Render the before/after diff as human-readable lines for the console. */
@@ -164,9 +189,14 @@ export function formatMigrationReport(plan) {
   for (const d of plan.diffs) {
     const dayNo = (d.index ?? 0) + 1;
     const changedFields = Object.keys(d.allowed);
-    if (!changedFields.length && !d.forbidden.length && !d.misalignedFields.length) {
+    if (!changedFields.length && !d.forbidden.length && !d.misalignedFields.length && !d.legacyFields.length) {
       lines.push(`  Day ${dayNo}: unchanged`);
       continue;
+    }
+    for (const field of d.legacyFields) {
+      lines.push(
+        `  Day ${dayNo}: ⛔ LEGACY FIELD "${field}" — pre-#566 shape; a correction here would not reach clients`,
+      );
     }
     for (const field of d.misalignedFields) {
       lines.push(`  Day ${dayNo}: ⚠️ MISALIGNED — immutable field "${field}" differs between live and target`);
@@ -239,6 +269,18 @@ async function initFirestore() {
 }
 
 function assertWritablePlan(plan, liveDays) {
+  // Checked FIRST: a legacy-shaped live schedule makes every other verdict in
+  // the plan misleading, because the correction this script computes cannot
+  // reach the client through `migrateDayFields`' legacy precedence (#652).
+  if (plan.legacyShaped.length > 0) {
+    const days = plan.legacyShaped.map((d) => (d.index ?? 0) + 1).join(', ');
+    throw new Error(
+      `schedule-migration: REFUSING — Day(s) ${days} still carry pre-#566 field(s) (${LEGACY_FIELDS.join('/')}). ` +
+        'This migration writes place/placeEmoji, but a retained portEmoji takes display precedence, so the ' +
+        'correction would not reach clients and every rerun would look idempotent. Migrate the Day(s) to the ' +
+        'neutral vocabulary first. No write performed.',
+    );
+  }
   if (plan.misaligned) {
     throw new Error(
       'schedule-migration: REFUSING — live schedule is not aligned to the target' +
