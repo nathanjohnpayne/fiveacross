@@ -3373,11 +3373,14 @@ body:has(.sheet-backdrop) .guidelines-trigger {
    itself, credit line under it, the standings compressed to ranked rows.
    Daily honors yield their space and stay on the photo-less fallback. */
 .share-card-ml-hero {
-  /* 520x287 — the wireframe's 250:138 hero ratio inside the 600px frame. */
+  /* 500x276 — the wireframe's 250x138 hero at its exact 2x scale. Do NOT
+     size this box up: the extra 11px of a 520x287 hero came out of the
+     credit line's two-line budget, slicing its second line mid-glyph in
+     the shipped PNG (P1, #561 verification). */
   position: relative;
   flex: none;
-  width: 520px;
-  height: 287px;
+  width: 500px;
+  height: 276px;
   margin-top: 16px;
   border: 2px solid var(--accent);
   border-radius: 18px;
@@ -3420,11 +3423,19 @@ body:has(.sheet-backdrop) .guidelines-trigger {
 }
 .share-card-ml-by {
   /* Poster · “Prompt” · Day label (· shared with …) — clamped to two lines
-     so a long prompt can never push the rows out of the fixed frame. */
+     so a long prompt can never push the rows out of the fixed frame.
+     flex: none is load-bearing (P1, #561 verification): the clamp only
+     ellipsizes overflow of the box's OWN height — a shrinkable flex item
+     gets height-compressed by the fixed 750px column instead, slicing the
+     second line mid-glyph with no ellipsis. The explicit line-height pins
+     the two-line budget at 51px whether or not an emoji (whose larger
+     font metrics inflate a "normal" line box) lands in the credit. */
+  flex: none;
   margin-top: 10px;
-  max-width: 520px;
+  max-width: 500px;
   min-width: 0;
   font-size: 17px;
+  line-height: 1.5;
   color: var(--ink);
   overflow: hidden;
   overflow-wrap: anywhere;
@@ -3438,7 +3449,9 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   flex-direction: column;
   gap: 6px;
   width: 460px;
-  margin: 14px 0 4px;
+  /* 10px top (not the wireframe's 18): with the hero + a full two-line
+     credit + four rows, the frame needs the slack — see .share-card-ml-by. */
+  margin: 10px 0 4px;
 }
 .share-card-ml-row {
   display: flex;

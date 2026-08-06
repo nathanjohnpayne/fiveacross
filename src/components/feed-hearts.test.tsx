@@ -178,14 +178,23 @@ describe('index.css — Most-Loved Photo structure (#534/#561, specs/most-loved-
     expect(rule).toMatch(/color:\s*var\(--dim\)/);
   });
 
-  it('defines the share-card photo-hero block: 520x287 hero box, letterboxed img, badge, frozen-count chip, credit, rows', () => {
-    // The wireframe frame (fx-share-final-photo-*): hero ratio pinned so the
-    // photo box cannot silently drift out of the 600x750 card budget.
+  it('defines the share-card photo-hero block: 500x276 hero box, letterboxed img, badge, frozen-count chip, credit, rows', () => {
+    // The wireframe frame (fx-share-final-photo-*): hero pinned at the
+    // wireframe's exact 2x (250x138 -> 500x276) so the photo box cannot
+    // silently drift out of the 600x750 card budget — an oversized hero is
+    // what sliced the credit's second line (P1, #561 verification).
     const hero = indexCss.match(/\.share-card-ml-hero\s*\{[^}]*\}/)?.[0] ?? '';
-    expect(hero).toMatch(/width:\s*520px/);
-    expect(hero).toMatch(/height:\s*287px/);
+    expect(hero).toMatch(/width:\s*500px/);
+    expect(hero).toMatch(/height:\s*276px/);
     const img = indexCss.match(/\.share-card-ml-img\s*\{[^}]*\}/)?.[0] ?? '';
     expect(img).toMatch(/object-fit:\s*contain/); // letterboxed, never cropped
+    // The credit clamps to two lines AND is flex: none — the clamp alone
+    // cannot protect it: a shrinkable flex item in the fixed column gets
+    // height-compressed and its second line slices mid-glyph, no ellipsis.
+    const by = indexCss.match(/\.share-card-ml-by\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(by).toMatch(/-webkit-line-clamp:\s*2/);
+    expect(by).toMatch(/flex:\s*none/);
+    expect(by).toMatch(/line-height:\s*1\.5/); // deterministic 51px two-line budget
     for (const cls of [
       '.share-card-ml-badge',
       '.share-card-ml-hearts',
