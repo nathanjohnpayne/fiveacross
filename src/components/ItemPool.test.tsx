@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import type { ItemDoc } from '../types';
 
@@ -34,6 +34,8 @@ vi.mock('../data/api', () => ({
   itemRateLimitRemainingMs: () => 0,
 }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
+// #610: ItemPool reads EVENT_ID for the explainer's event-keyed storage key.
+vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
 import ItemPool from './ItemPool';
 
@@ -91,5 +93,113 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
     H.myPending = [item('pending-1', { text: 'Just submitted', status: 'pending' })];
     render(<ItemPool />);
     expect(screen.getByText('Just submitted')).toBeInTheDocument();
+  });
+});
+
+// #610 — the PLAYER half: a first-time 🔞 tick gets an explainer, once per
+// Event, never a gate. (The consequential-action confirm lives on the ADMIN
+// flip — `admin/adult-content-confirm.test.tsx` — because a player's tick
+// lands `pending` and changes nothing about the Event's posture.)
+describe('the first-time 🔞 explainer (#610)', () => {
+  const SEEN_KEY = 'gcb.seen.explicitTag.ev-1';
+  const tickSpicy = () => fireEvent.click(screen.getByRole('checkbox'));
+  const explainer = () => screen.queryByRole('dialog', { name: /What the 🔞 tag does/ });
+
+  // The CoachOverlay.test/reshuffle-intro.test storage-stub harness — this
+  // jsdom project ships no localStorage of its own.
+  function createStorageStub(): Storage {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
+  }
+
+  let storage: Storage;
+  beforeEach(() => {
+    storage = createStorageStub();
+    vi.stubGlobal('localStorage', storage);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('shows on the first tick in this Event — and the tick itself still lands', () => {
+    render(<ItemPool />);
+    expect(explainer()).not.toBeInTheDocument();
+    tickSpicy();
+    expect(explainer()).toBeInTheDocument();
+    // An explainer, not a confirm: the checkbox is already checked underneath.
+    expect(screen.getByRole('checkbox')).toBeChecked();
+  });
+
+  it('marks the Event-keyed storage on "Got it", and the next tick is silent', () => {
+    render(<ItemPool />);
+    tickSpicy();
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    expect(explainer()).not.toBeInTheDocument();
+    expect(storage.getItem(SEEN_KEY)).not.toBeNull();
+    // Untick, tick again: seen means seen.
+    tickSpicy();
+    tickSpicy();
+    expect(explainer()).not.toBeInTheDocument();
+  });
+
+  it('stays silent when this Event has already been seen (fresh mount)', () => {
+    storage.setItem(SEEN_KEY, String(Date.now()));
+    render(<ItemPool />);
+    tickSpicy();
+    expect(explainer()).not.toBeInTheDocument();
+  });
+
+  it('re-shows for a DIFFERENT Event: the key is event-scoped', () => {
+    storage.setItem('gcb.seen.explicitTag.some-other-event', String(Date.now()));
+    render(<ItemPool />);
+    tickSpicy();
+    expect(explainer()).toBeInTheDocument();
+  });
+
+  it('never opens on an untick', () => {
+    render(<ItemPool />);
+    tickSpicy();
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    tickSpicy(); // untick — checkbox back to false
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+    expect(explainer()).not.toBeInTheDocument();
+  });
+
+  it('shows (not suppresses) when localStorage is unavailable — fail open', () => {
+    // The reshuffle-intro suite's unavailable-storage shape: every access throws
+    // (private mode / storage disabled), and the try/catch falls OPEN.
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('storage disabled');
+      },
+      setItem: () => {
+        throw new Error('storage disabled');
+      },
+    } as unknown as Storage);
+    render(<ItemPool />);
+    tickSpicy();
+    expect(explainer()).toBeInTheDocument();
+    // Dismissal survives the failed persist (markSeen is a no-op) …
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    expect(explainer()).not.toBeInTheDocument();
+    // … and with nothing persisted, the next first tick shows it again.
+    tickSpicy();
+    tickSpicy();
+    expect(explainer()).toBeInTheDocument();
+  });
+
+  it('submits with spicy: true after the explainer was dismissed', () => {
+    render(<ItemPool />);
+    tickSpicy();
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'A spicy prompt' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true);
   });
 });

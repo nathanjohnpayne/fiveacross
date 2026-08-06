@@ -6,6 +6,7 @@ import { track } from '../analytics';
 import LoadingState from './LoadingState';
 import { editionBrand } from '../editions';
 import { useAdultContent } from '../hooks/useAdultContent';
+import { EVENT_ID } from '../firebase';
 
 // Pre-sail framing (ADR 0003): a Board freezes the moment a Player joins, so
 // a Prompt added afterward can never land on THAT Player's own card — it only
@@ -28,6 +29,36 @@ const APPROVAL_NOTE = "New prompts go to admin review before they join the pool�
 const ADD_THROTTLE_MESSAGE = 'Slow down—you can add another prompt in a few seconds.';
 const REPORT_THROTTLE_MESSAGE = 'Slow down—you can report again in a few seconds.';
 
+// First-time 🔞 explainer (#610) — the PLAYER half of the ticket, and
+// deliberately an EXPLAINER, not a confirm. A player's tick is a request:
+// their submission lands `status: 'pending'` (#210) and the #608 derivation
+// only counts `status: 'active'`, so nothing about the Event's posture changes
+// until an admin approves it — the consequential-action confirm lives on THAT
+// flip (`admin/AdultContentConfirm`), not here. This sheet just tells a
+// first-time tagger what the tag means, once per Event, and never gates the
+// checkbox itself.
+//
+// Event-keyed localStorage, the established one-time-explainer pattern
+// (`gcb.coachOverlay.${eventId}.dismissedAt`, `gcb.seen.reshuffleIntro`).
+// try/catch falls OPEN — private-mode/storage-unavailable shows the explainer
+// on every tick rather than never: annoying beats invisible, the same
+// direction CoachOverlay and LaunchIntro take.
+const explicitTagSeenKey = (eventId: string): string => `gcb.seen.explicitTag.${eventId}`;
+function hasSeenExplicitTag(eventId: string): boolean {
+  try {
+    return localStorage.getItem(explicitTagSeenKey(eventId)) !== null;
+  } catch {
+    return false;
+  }
+}
+function markExplicitTagSeen(eventId: string): void {
+  try {
+    localStorage.setItem(explicitTagSeenKey(eventId), String(Date.now()));
+  } catch {
+    /* nothing to persist */
+  }
+}
+
 export default function ItemPool() {
   const { user } = useAuth();
   const { items, loading } = useItems();
@@ -42,6 +73,10 @@ export default function ItemPool() {
   const { items: myPending } = useMyPendingItems(user?.uid);
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
+  // The first-time explainer (#610). State, not a render-time storage read:
+  // it opens on the TICK (the moment of first use), not on mount — a player
+  // who never touches the tag never sees it.
+  const [showExplicitIntro, setShowExplicitIntro] = useState(false);
   const [addThrottled, setAddThrottled] = useState(false);
   const [reportThrottled, setReportThrottled] = useState(false);
   const addTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -120,8 +155,20 @@ export default function ItemPool() {
         </button>
         {adult && (
           <label style={{ fontSize: 12 }}>
-            <input type="checkbox" checked={spicy} onChange={(e) => setSpicy(e.target.checked)} /> 🔞
-            Spicy
+            <input
+              type="checkbox"
+              checked={spicy}
+              onChange={(e) => {
+                const next = e.target.checked;
+                // The tick lands regardless — this is an explainer over the
+                // player's (reversible, non-consequential) choice, never a
+                // gate in front of it. Only a CHECK can open it: unticking
+                // needs no explanation.
+                setSpicy(next);
+                if (next && !hasSeenExplicitTag(EVENT_ID)) setShowExplicitIntro(true);
+              }}
+            />{' '}
+            🔞 Spicy
           </label>
         )}
       </div>
@@ -177,6 +224,48 @@ export default function ItemPool() {
         <p className="muted" role="alert" style={{ fontSize: 12 }}>
           {REPORT_THROTTLE_MESSAGE}
         </p>
+      )}
+      {/* The same `.sheet`/`.sheet-backdrop` shell as CoachOverlay and
+          LaunchIntro — the repo's one-time-explainer shape — with its own
+          identity class (the LaunchIntro discipline: `.coach-overlay` is that
+          overlay's IDENTITY, not a shared skin). One CTA, no cancel: there is
+          nothing to cancel, the tick already landed and stays reversible.
+          Copy carries no Edition-coded token, so it reads correctly in every
+          register (#608) — the substance must not change between Editions. */}
+      {showExplicitIntro && (
+        <div className="sheet-backdrop explicit-tag-intro-backdrop">
+          <div
+            className="sheet explicit-tag-intro"
+            role="dialog"
+            aria-modal="true"
+            aria-label="What the 🔞 tag does"
+          >
+            <p className="sheet-title">What the 🔞 tag does</p>
+            <p>
+              It marks a prompt as explicit. Explicit prompts only reach players who have confirmed
+              they&rsquo;re 18 or older.
+            </p>
+            <p>
+              An admin reviews every suggestion before it can be dealt&mdash;tagging it
+              doesn&rsquo;t put it on anyone&rsquo;s card by itself.
+            </p>
+            <div className="sheet-actions">
+              <button
+                type="button"
+                className="btn primary block"
+                onClick={() => {
+                  // Mark seen on DISMISS, not on open (the CoachOverlay
+                  // pattern): a sheet the player never acknowledged — tab
+                  // closed mid-read — shows again next time.
+                  markExplicitTagSeen(EVENT_ID);
+                  setShowExplicitIntro(false);
+                }}
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
