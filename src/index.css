@@ -2275,12 +2275,17 @@ textarea.input {
   margin-top: -12px;
 }
 /* The voice chip ("Take the detour. For the story.") — the wireframes' .vlock
-   .tag: italic, accent-colored, part of the lockup rather than body copy. */
+   .tag: italic, part of the lockup rather than body copy. `--ink`, NOT the
+   wireframe's `--primary` (Codex P2 round 1): .signin renders straight on
+   body's --primary radial tint, where --primary text is self-referential and
+   lands ~3.3:1 on the light fog-froth-farewells theme — the exact defect
+   specs/theme-on-color-contrast.md retired from .signin h1. Only --ink/--bg
+   is audited to 4.5:1 across every theme; the italic carries the voice. */
 .signin-tagline-chip {
   margin: -8px 0 0;
   font-style: italic;
   font-size: 14.5px;
-  color: var(--primary);
+  color: var(--ink);
 }
 /* The Event-preview card. Base treatment is the gcb/fiveacross Join frames'
    plain solid panel; vacay's brand row opts into the postcard variant below. */

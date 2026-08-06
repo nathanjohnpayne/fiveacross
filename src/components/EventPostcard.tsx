@@ -1,3 +1,4 @@
+import { useEffect, useReducer } from 'react';
 import { activeEventPreview, previewMetaLine } from '../eventPreview';
 import { editionBrand } from '../editions';
 
@@ -25,6 +26,31 @@ import { editionBrand } from '../editions';
 // `.banner`).
 export default function EventPostcard() {
   const preview = activeEventPreview();
+  // "Live" has to survive the gate being LEFT OPEN (Codex P2 round 1): the Day
+  // line is computed from the local date, so a phone sitting on this screen
+  // across midnight would otherwise keep yesterday's Day until some unrelated
+  // render. Re-render at each local date boundary while mounted. The +250ms
+  // lands the tick safely past the boundary, and the timer re-arms itself so a
+  // gate open across several days keeps advancing. Cheap enough not to gate on
+  // `preview?.days` — hooks must run unconditionally anyway, and one timeout a
+  // day is free.
+  const [, dateTick] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = () => {
+      const now = new Date();
+      const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+      timer = setTimeout(
+        () => {
+          dateTick();
+          arm();
+        },
+        Math.max(nextMidnight - now.getTime(), 1000) + 250,
+      );
+    };
+    arm();
+    return () => clearTimeout(timer);
+  }, []);
   if (!preview) return null;
   const stamped = editionBrand().signinCardVariant === 'postcard';
   const meta = previewMetaLine(preview);

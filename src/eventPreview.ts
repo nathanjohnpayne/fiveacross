@@ -18,8 +18,9 @@ export type { EventPreview, EventPreviewDay } from './types';
 
 /** Defensive caps. The document is Admin-SDK-seeded, so these are guardrails
  *  against a malformed seed (and a tampered localStorage cache entry), not a
- *  threat model: an over-long value drops the FIELD, an over-long schedule
- *  truncates, and a nameless slice drops entirely. */
+ *  threat model: an over-long value drops the FIELD, an over-long or partly
+ *  malformed schedule drops WHOLE (see the ordinal note below), and a
+ *  nameless slice drops entirely. */
 const MAX_TEXT = 200;
 const MAX_DAYS = 31;
 
@@ -54,19 +55,33 @@ export function coerceEventPreview(v: unknown): EventPreview | undefined {
   const hostedBy = asText(raw.hostedBy);
   if (hostedBy) preview.hostedBy = hostedBy;
   if (Array.isArray(raw.days)) {
+    // ALL-OR-NOTHING, unlike the scalar fields (Codex P2 round 1): a Day's
+    // ordinal is its array position, so silently skipping one malformed entry
+    // would renumber every Day after it and the gate would announce "Day 1"
+    // for the second Day of the schedule — incorrect guest-facing copy, not a
+    // degraded card. A schedule with any bad entry (or an over-long one, which
+    // truncation would likewise mis-shape) is dropped whole; the card then
+    // simply omits the Day line, keeping the fail-soft rendering honest.
     const days: EventPreviewDay[] = [];
-    for (const entry of raw.days.slice(0, MAX_DAYS)) {
-      if (typeof entry !== 'object' || entry === null) continue;
+    let valid = raw.days.length > 0 && raw.days.length <= MAX_DAYS;
+    for (const entry of valid ? raw.days : []) {
+      if (typeof entry !== 'object' || entry === null) {
+        valid = false;
+        break;
+      }
       const e = entry as Record<string, unknown>;
       const date = asText(e.date);
       const title = asText(e.title);
-      if (!date || !ISO_DATE.test(date) || !title) continue;
+      if (!date || !ISO_DATE.test(date) || !title) {
+        valid = false;
+        break;
+      }
       const day: EventPreviewDay = { date, title };
       const emoji = asText(e.emoji);
       if (emoji) day.emoji = emoji;
       days.push(day);
     }
-    if (days.length) preview.days = days;
+    if (valid) preview.days = days;
   }
   return preview;
 }

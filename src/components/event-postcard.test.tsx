@@ -1,4 +1,4 @@
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import SignIn from './SignIn';
 import EventPostcard from './EventPostcard';
@@ -56,6 +56,33 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
     const { container } = render(<EventPostcard />);
     expect(screen.getByText('Weekend in Bodega Bay')).toBeTruthy();
     expect(container.querySelector('.event-postcard-meta')).toBeNull();
+  });
+
+  it('advances the Day line across local midnight while mounted', () => {
+    // The gate can be LEFT OPEN overnight (Codex P2 round 1): the Day line is
+    // date-computed, so the card re-renders itself at each local date
+    // boundary rather than waiting for an unrelated render.
+    vi.useFakeTimers();
+    try {
+      const tonight = new Date(2026, 7, 7, 23, 59, 0); // local Aug 7, 23:59
+      vi.setSystemTime(tonight);
+      applyResolvedEventPreview({
+        eventName: 'Weekend in Bodega Bay',
+        days: [
+          { date: '2026-08-07', title: 'The Birds Have Entered the Chat' },
+          { date: '2026-08-08', title: 'Side Quests' },
+        ],
+      });
+      render(<EventPostcard />);
+      expect(screen.getByText(/Day 1: The Birds Have Entered the Chat/)).toBeTruthy();
+      act(() => {
+        vi.advanceTimersByTime(2 * 60 * 1000); // past midnight + the arm slack
+      });
+      expect(screen.getByText(/Day 2: Side Quests/)).toBeTruthy();
+      expect(screen.queryByText(/Day 1:/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('wears the stamp on vacay and a plain panel elsewhere', () => {

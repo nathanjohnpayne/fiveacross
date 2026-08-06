@@ -56,17 +56,27 @@ describe('coerceEventPreview — fail-soft field-by-field read', () => {
     expect(got).toEqual({ eventName: 'Weekend in Bodega Bay', hostedBy: 'Kim' });
   });
 
-  it('drops malformed Day entries without dropping the schedule', () => {
+  it('drops the WHOLE schedule on a malformed Day — never renumbers survivors', () => {
+    // A Day's ordinal is its array position: skipping a bad Day 1 would
+    // announce the second Day as "Day 1" (Codex P2 round 1). The rest of the
+    // slice keeps rendering; only the Day line goes quiet.
     const got = coerceEventPreview({
       eventName: 'Weekend in Bodega Bay',
+      hostedBy: 'Kim',
       days: [
         { date: 'Aug 7', title: 'not ISO' },
         { date: '2026-08-08', title: 'Side Quests' },
-        { date: '2026-08-09' },
-        null,
       ],
     });
-    expect(got?.days).toEqual([{ date: '2026-08-08', title: 'Side Quests' }]);
+    expect(got).toEqual({ eventName: 'Weekend in Bodega Bay', hostedBy: 'Kim' });
+  });
+
+  it('drops an over-long schedule whole rather than truncating it', () => {
+    const days = Array.from({ length: 40 }, (_, i) => ({
+      date: `2026-09-${String(i + 1).padStart(2, '0')}`,
+      title: `Title ${i + 1}`,
+    }));
+    expect(coerceEventPreview({ eventName: 'ok', days })?.days).toBeUndefined();
   });
 
   it('drops an over-long field rather than rendering it', () => {
