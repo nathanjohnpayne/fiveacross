@@ -7,7 +7,7 @@
 
 Project-specific constraints:
 
-- **TypeScript strict** everywhere; no `any` to force a compile. `src/types.ts` is the single shared domain contract — extend it there rather than redeclaring shapes locally.
+- **TypeScript strict** everywhere; no `any` to force a compile. `src/types.ts` is the stable public entrypoint for the single shared domain contract; its canonical declarations live in `src/domainTypes.d.ts` so both the app and the separately-rooted Functions project can import them. Extend the declarations there rather than redeclaring shapes locally.
 - **Don't duplicate the domain model.** The ubiquitous language lives in [`CONTEXT.md`](../../CONTEXT.md); the pure game rules live in `src/game/logic.ts`. Reuse them instead of re-deriving bingo/blackout/leaderboard logic inside components.
 - **Stats stay client-authoritative** ([ADR 0001](../adr/0001-honor-system-trust-model.md)) — never add a server-side stat recompute. Access boundaries are enforced by `firestore.rules` / `storage.rules`, not by hiding the (non-secret) client config.
 - **The prompt pool is Firestore data, not the bundle** ([ADR 0003](../adr/0003-pool-is-pre-cruise.md)): changing `ITEMS` requires a reseed, not just a deploy — see [`docs/app/README.md`](../app/README.md) §4 and run `npm run verify:seed`.

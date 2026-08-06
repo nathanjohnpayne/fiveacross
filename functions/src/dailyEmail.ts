@@ -38,6 +38,7 @@
  */
 import {
   buildDailyEmailModel,
+  firstBingoUid,
   standingsThrough,
   type EmailDay,
   type EmailEvent,
@@ -174,15 +175,15 @@ export function sanitizeEmailDayStats(value: unknown): Record<number, FinaleDayS
  *  any cap can apply, so a corrupted roster exhausts the function during the
  *  READ and never reaches the guard downstream. `limit` is one MORE than the
  *  ceiling so the caller can tell "exactly at the ceiling" from "truncated". */
-export async function readEmailRoster(
+async function readEmailRosterPage(
   db: DailyEmailFirestore,
   eventId: string,
   bannedUids: readonly string[] = [],
   limit?: number,
-): Promise<EmailPlayer[]> {
+): Promise<{ allPlayers: EmailPlayer[]; players: EmailPlayer[]; queriedCount: number }> {
   const base = db.collection(`events/${eventId}/players`);
   const snap = await (limit && limit > 0 ? base.limit(limit) : base).get();
-  return snap.docs
+  const allPlayers = snap.docs
     .map((d) => {
       const data = (d.data() ?? {}) as Record<string, unknown>;
       const uid = d.id || (typeof data.uid === 'string' ? data.uid : '');
@@ -199,7 +200,19 @@ export async function readEmailRoster(
         dayStats: sanitizeEmailDayStats(data.dayStats),
       };
     })
-    .filter((p) => p.uid !== '' && !bannedUids.includes(p.uid));
+    .filter((p) => p.uid !== '');
+  const banned = new Set(bannedUids);
+  const players = allPlayers.filter((p) => !banned.has(p.uid));
+  return { allPlayers, players, queriedCount: snap.docs.length };
+}
+
+export async function readEmailRoster(
+  db: DailyEmailFirestore,
+  eventId: string,
+  bannedUids: readonly string[] = [],
+  limit?: number,
+): Promise<EmailPlayer[]> {
+  return (await readEmailRosterPage(db, eventId, bannedUids, limit)).players;
 }
 
 /**
@@ -237,6 +250,11 @@ export async function resolveEventOrigin(
     if (chosen) return { origin: `https://${chosen.host}`, edition: chosen.edition };
   } catch (err) {
     console.error('resolveEventOrigin: hostname lookup failed', eventId, err);
+    // A failed read is not a confirmed absence. Falling back here would also
+    // erase the Event's Edition and can mail a Vacay/Five Across roster in the
+    // legacy Gay Cruise Bingo register. Let the per-Event sweep boundary log
+    // and skip this Event; the next quarter-hourly run can retry safely.
+    throw err;
   }
   return { origin: fallbackOrigin, edition: null };
 }
@@ -347,23 +365,31 @@ export async function sendDailyEmailForEvent(
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
   const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
 
-  const roster = await readEmailRoster(db, eventId, event.bannedUids ?? [], maxRecipients + 1);
-  if (roster.length === 0) return { sent: 0, skipped: 0, failed: 0, reason: 'no-roster' };
-  if (roster.length > maxRecipients) {
+  const rosterPage = await readEmailRosterPage(db, eventId, event.bannedUids ?? [], maxRecipients + 1);
+  const roster = rosterPage.players;
+  if (rosterPage.queriedCount > maxRecipients) {
     // Loud, because it means the Event is either pathological or has outgrown
     // the documented ceiling — and in the latter case nobody past the cap gets
-    // mail, which is a delivery gap, not a tidy degradation.
+    // mail, which is a delivery gap, not a tidy degradation. Count the RAW
+    // query page rather than the ban-filtered roster: a banned row inside the
+    // page must not hide the fact that valid participants beyond it were cut
+    // off by the query limit.
     console.error(
       `sendDailyEmailForEvent: roster exceeds the ${maxRecipients} ceiling; the remainder will not be mailed`,
       eventId,
       day.index,
     );
   }
+  if (roster.length === 0) return { sent: 0, skipped: 0, failed: 0, reason: 'no-roster' };
   // ONCE for the whole send, not once per recipient: the standings snapshot is
   // identical for everyone (the rank line is a lookup into it), so recomputing
   // it inside the loop would re-slice and re-sort the roster N times for the
   // same answer — quadratic in roster size.
-  const ranked = standingsThrough(roster, day.index, tutorialDayIndexes(event.days ?? []));
+  const tutorialDays = tutorialDayIndexes(event.days ?? []);
+  const rawRanked = standingsThrough(rosterPage.allPlayers, day.index, tutorialDays);
+  const starUid = firstBingoUid(rawRanked);
+  const banned = new Set(event.bannedUids ?? []);
+  const ranked = rawRanked.filter((player) => !banned.has(player.uid));
 
   const result: DailySendResult = { sent: 0, skipped: 0, failed: 0 };
   // EXAMINED, not attempted (Codex #623 P2). The cap used to count only real
@@ -405,6 +431,7 @@ export async function sendDailyEmailForEvent(
         day,
         players: roster,
         ranked,
+        starUid,
         recipient: { uid: player.uid, displayName: player.displayName },
         edition,
         feedUrl,
@@ -440,17 +467,52 @@ export async function sendDailyEmailForEvent(
   return result;
 }
 
-/** One sweep across every active Event. Best-effort per Event. */
+/** One sweep across every active Event. Best-effort per Event.
+ *
+ * Event work starts concurrently so a large or slow first Event cannot consume
+ * the whole 540-second invocation before later Events are even visited. Actual
+ * transport calls still pass through ONE shared pacing queue: concurrency is
+ * for fairness across Events, never a multiplier on Resend's account-wide
+ * request rate. Each Event keeps at most one delivery queued because its own
+ * recipient loop awaits every send before advancing. */
 export async function runDailyEmailSweep(
   db: DailyEmailFirestore,
   deps: DailyEmailDeps = {},
 ): Promise<void> {
   const events = await db.collection('events').where('status', '==', 'active').get();
-  for (const ev of events.docs) {
+  const transport = deps.send ?? (await import('./email')).sendEmail;
+  const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;
+  const sleep = deps.sleep ?? defaultSleep;
+  let deliveryTail: Promise<void> = Promise.resolve();
+  const pacedTransport: typeof sendEmail = async (args) => {
+    const turn = deliveryTail;
+    let release!: () => void;
+    deliveryTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await turn;
     try {
-      await sendDailyEmailForEvent(db, ev.id, deps);
-    } catch (err) {
-      console.error('runDailyEmailSweep: event failed', ev.id, err);
+      return await transport(args);
+    } finally {
+      try {
+        await sleep(pacingMs);
+      } finally {
+        release();
+      }
     }
-  }
+  };
+
+  await Promise.all(
+    events.docs.map(async (ev) => {
+      try {
+        await sendDailyEmailForEvent(db, ev.id, {
+          ...deps,
+          send: pacedTransport,
+          pacingMs: 0,
+        });
+      } catch (err) {
+        console.error('runDailyEmailSweep: event failed', ev.id, err);
+      }
+    }),
+  );
 }

@@ -303,33 +303,33 @@ describe('applyOptOut', () => {
 
   it('records the opt-out when the capability token matches', async () => {
     const db = seeded();
-    expect(await applyOptOut(db, 'e', 'u', 'good', true, { now: () => 9 })).toBe('updated');
+    expect(await applyOptOut(db, 'e', 'u', 'good', { now: () => 9 })).toBe('updated');
     expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ optedOut: true, token: 'good', updatedAt: 9 });
   });
 
-  it('reverses to opted-in on the same token, so a mistake is self-service', async () => {
+  it('is unsubscribe-only even when the stored record is already opted out', async () => {
     const db = makeDb({ [emailPrefsPath('e', 'u')]: { token: 'good', optedOut: true } });
-    expect(await applyOptOut(db, 'e', 'u', 'good', false)).toBe('updated');
-    expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ optedOut: false });
+    expect(await applyOptOut(db, 'e', 'u', 'good')).toBe('updated');
+    expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ optedOut: true });
   });
 
   it('answers "error", not "invalid", when the read FAILS — a 500 is retryable, a 404 is not', async () => {
     // Phase 4b P1: the convenience reader collapses missing and unreadable into
     // null, so a transient backend blip used to answer a permanent 404 and an
     // RFC 8058 one-click client would never retry.
-    expect(await applyOptOut(brokenDb(), 'e', 'u', 'anything', true)).toBe('error');
+    expect(await applyOptOut(brokenDb(), 'e', 'u', 'anything')).toBe('error');
   });
 
   it('still answers "invalid" for a CONFIRMED absence, so the two stay distinguishable', async () => {
-    expect(await applyOptOut(makeDb(), 'e', 'u', 'anything', true)).toBe('invalid');
+    expect(await applyOptOut(makeDb(), 'e', 'u', 'anything')).toBe('invalid');
   });
 
   it('answers the same "invalid" for a wrong token and for a uid that has no doc', async () => {
     // Identical answers on purpose: the endpoint must not double as a way to
     // enumerate which uids are participants in an Event.
-    expect(await applyOptOut(seeded(), 'e', 'u', 'wrong', true)).toBe('invalid');
-    expect(await applyOptOut(seeded(), 'e', 'nobody', 'good', true)).toBe('invalid');
-    expect(await applyOptOut(seeded(), 'e', 'u', '', true)).toBe('invalid');
+    expect(await applyOptOut(seeded(), 'e', 'u', 'wrong')).toBe('invalid');
+    expect(await applyOptOut(seeded(), 'e', 'nobody', 'good')).toBe('invalid');
+    expect(await applyOptOut(seeded(), 'e', 'u', '')).toBe('invalid');
   });
 
   it('rejects a request whose token was ROTATED between the read and the write', async () => {
@@ -344,7 +344,7 @@ describe('applyOptOut', () => {
       rotated = true; // the token is revoked inside our read window
       db.doc(path).set({ token: 'rotated' }, { merge: true });
     };
-    expect(await applyOptOut(db, 'e', 'u', 'good', true)).toBe('invalid');
+    expect(await applyOptOut(db, 'e', 'u', 'good')).toBe('invalid');
     expect(rotated).toBe(true);
     // The stale request changed nothing on the secured document.
     expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ token: 'rotated', optedOut: false });
@@ -352,13 +352,13 @@ describe('applyOptOut', () => {
 
   it('still applies cleanly when nothing races the write', async () => {
     const db = makeDb({ [emailPrefsPath('e', 'u')]: { token: 'good', optedOut: false } });
-    expect(await applyOptOut(db, 'e', 'u', 'good', true, { now: () => 11 })).toBe('updated');
+    expect(await applyOptOut(db, 'e', 'u', 'good', { now: () => 11 })).toBe('updated');
     expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ token: 'good', optedOut: true, updatedAt: 11 });
   });
 
   it('leaves the stored state untouched when the token is wrong', async () => {
     const db = seeded();
-    await applyOptOut(db, 'e', 'u', 'wrong', true);
+    await applyOptOut(db, 'e', 'u', 'wrong');
     expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ token: 'good', optedOut: false });
   });
 });
@@ -418,18 +418,20 @@ describe('handleUnsubscribeRequest', () => {
     expect(db.docs[emailPrefsPath('med-2026', 'theo')]).toMatchObject({ optedOut: true });
   });
 
-  it('resubscribes on the preferences action, so an accidental opt-out is reversible', async () => {
+  it('refuses anonymous re-subscribe so a leaked old email cannot reverse an opt-out', async () => {
     const db = makeDb({ [emailPrefsPath('med-2026', 'theo')]: { token: 'good', optedOut: true } });
     const res = makeRes();
     await handleUnsubscribeRequest(db, { method: 'POST', query: query({ a: 'resubscribe' }) }, res);
-    expect(res.body).toContain('You&#39;re back on the list');
-    expect(db.docs[emailPrefsPath('med-2026', 'theo')]).toMatchObject({ optedOut: false });
+    expect(res.code).toBe(400);
+    expect(res.body).not.toContain('back on the list');
+    expect(db.docs[emailPrefsPath('med-2026', 'theo')]).toMatchObject({ optedOut: true });
   });
 
-  it('offers the turn-them-back-on path from the confirmation page', async () => {
+  it('does not expose a bearer-token path that can turn email back on', async () => {
     const res = makeRes();
     await handleUnsubscribeRequest(seeded(), { method: 'GET', query: query() }, res);
-    expect(res.body).toContain('a=resubscribe');
+    expect(res.body).not.toContain('a=resubscribe');
+    expect(res.body).not.toContain('Turn them back on');
   });
 
   it('reveals nothing about token validity on the GET, only on the POST', async () => {
@@ -462,7 +464,7 @@ describe('handleUnsubscribeRequest', () => {
     expect(broken.body).toContain('try that link again');
   });
 
-  it('preserves a router parameter from the endpoint URL in the form action and links', async () => {
+  it('preserves a router parameter from the endpoint URL in the form action', async () => {
     // `EMAIL_UNSUBSCRIBE_URL` may carry its own query (a rewrite or router
     // selects the endpoint with it). A form action of `?e=…&u=…&t=…&a=…`
     // replaces the whole query, so the emailed GET would work and the POST
@@ -470,7 +472,6 @@ describe('handleUnsubscribeRequest', () => {
     const res = makeRes();
     await handleUnsubscribeRequest(seeded(), { method: 'GET', query: { ...query(), fn: 'unsub' } }, res);
     expect(res.body).toContain('action="?fn=unsub&amp;e=med-2026&amp;u=theo&amp;t=good&amp;a=unsubscribe"');
-    expect(res.body).toContain('fn=unsub&amp;e=med-2026&amp;u=theo&amp;t=good&amp;a=resubscribe');
   });
 
   it('does not duplicate its own parameters when passing extras through', async () => {
@@ -490,7 +491,7 @@ describe('handleUnsubscribeRequest', () => {
     await handleUnsubscribeRequest(seeded(), { method: 'GET', query: query({ u: '"><script>x</script>' }) }, res);
     // Two layers, both load-bearing: URLSearchParams percent-encodes the value
     // into the query string, and the query string is then HTML-escaped into the
-    // form action and the href.
+    // form action.
     expect(res.body).not.toContain('<script>x</script>');
     expect(res.body).not.toContain('"><script');
     expect(res.body).toContain('%3Cscript%3E');

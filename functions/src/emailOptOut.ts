@@ -270,8 +270,9 @@ export function tokenMatches(expected: string, supplied: string): boolean {
 export type OptOutResult = 'updated' | 'invalid' | 'error';
 
 /**
- * Apply an unsubscribe (or a re-subscribe) after verifying the capability
- * token.
+ * Apply an unsubscribe after verifying the capability token. The anonymous
+ * bearer capability is deliberately ONE-WAY: a forwarded or leaked old email
+ * must never be able to reverse the recipient's suppression.
  *
  * `'invalid'` is reserved for a CONFIRMED refusal — no such document, or a
  * token that does not match — and is deliberately the same answer for both, so
@@ -288,7 +289,6 @@ export async function applyOptOut(
   eventId: string,
   uid: string,
   suppliedToken: string,
-  optedOut: boolean,
   deps: OptOutDeps = {},
 ): Promise<OptOutResult> {
   // VERIFY AND WRITE IN ONE TRANSACTION. Reading the token, comparing it, and
@@ -308,7 +308,7 @@ export async function applyOptOut(
       const data = snap.data() ?? {};
       const token = typeof data.token === 'string' ? data.token : '';
       if (!tokenMatches(token, suppliedToken)) return 'invalid';
-      tx.set(ref, { optedOut, updatedAt: now }, { merge: true });
+      tx.set(ref, { optedOut: true, updatedAt: now }, { merge: true });
       return 'updated';
     });
   } catch (err) {
@@ -346,9 +346,9 @@ export function unsubscribeLink(args: UnsubscribeLinkArgs): string {
   return linkWith(args, 'unsubscribe');
 }
 
-/** The footer's "Email preferences" link — the same endpoint, showing current
- *  state with both actions available, so a mistaken unsubscribe is reversible
- *  without a support round-trip. */
+/** The footer's "Email preferences" link — the same endpoint's safe
+ *  unsubscribe confirmation. Re-enrollment is deliberately not exposed to an
+ *  anonymous bearer token; it belongs to a future authenticated surface. */
 export function preferencesLink(args: UnsubscribeLinkArgs): string {
   return linkWith(args, 'preferences');
 }
@@ -464,8 +464,10 @@ export async function handleUnsubscribeRequest(
     const uid = readParam(req.query, 'u');
     const token = readParam(req.query, 't');
     const action = readParam(req.query, 'a') || 'unsubscribe';
-    const resubscribe = action === 'resubscribe';
-
+    if (action !== 'unsubscribe' && action !== 'preferences') {
+      html(400, renderPage('That action is not available', '<p>Use the Unsubscribe link from the email itself.</p>'));
+      return;
+    }
     if (!eventId || !uid || !token) {
       html(400, renderPage('That link is incomplete', '<p>Use the Unsubscribe link from the email itself.</p>'));
       return;
@@ -482,21 +484,16 @@ export async function handleUnsubscribeRequest(
       // form posts and the POST answers — so a scanner learns nothing.
       const same = (action: string): string =>
         escapeAttr(samePageQuery(req.query, { e: eventId, u: uid, t: token, a: action }));
-      const verb = resubscribe ? 'Resume' : 'Stop';
       const body =
-        `<p>${resubscribe ? 'Start receiving the daily email for this event again?' : 'Stop the daily email for this event?'}</p>` +
-        `<form method="POST" action="?${same(resubscribe ? 'resubscribe' : 'unsubscribe')}">` +
+        '<p>Stop the daily email for this event?</p>' +
+        `<form method="POST" action="?${same('unsubscribe')}">` +
         `<button type="submit" style="font:inherit;padding:.7em 1.4em;border:0;border-radius:6px;` +
-        `background:#20232a;color:#fff;cursor:pointer;">${verb} these emails</button></form>` +
-        (resubscribe
-          ? ''
-          : `<p style="margin-top:1.5rem;font-size:.9rem;color:#5a5f6a;">Changed your mind later? ` +
-            `<a href="?${same('resubscribe')}">Turn them back on</a>.</p>`);
-      html(200, renderPage(resubscribe ? 'Daily email' : 'Unsubscribe', body));
+        'background:#20232a;color:#fff;cursor:pointer;">Stop these emails</button></form>';
+      html(200, renderPage('Unsubscribe', body));
       return;
     }
 
-    const result = await applyOptOut(db, eventId, uid, token, !resubscribe, deps);
+    const result = await applyOptOut(db, eventId, uid, token, deps);
     if (result === 'invalid') {
       html(
         404,
@@ -514,10 +511,8 @@ export async function handleUnsubscribeRequest(
     html(
       200,
       renderPage(
-        resubscribe ? "You're back on the list" : 'Unsubscribed',
-        resubscribe
-          ? '<p>The daily email for this event will start arriving again.</p>'
-          : '<p>You will not get the daily email for this event again. Nothing else changes—your card, your marks and the Feed are untouched.</p>',
+        'Unsubscribed',
+        '<p>You will not get the daily email for this event again. Nothing else changes—your card, your marks and the Feed are untouched.</p>',
       ),
     );
   } catch (err) {

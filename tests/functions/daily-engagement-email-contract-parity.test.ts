@@ -2,23 +2,12 @@ import { describe, it, expectTypeOf } from 'vitest';
 import type { DayDef, EventDoc, PlayerDoc } from '../../src/types';
 import type { EmailDay, EmailEvent, EmailPlayer } from '../../functions/src/dailyEmailContent';
 
-// Contract-parity guard for the email module's local domain shapes (#616,
-// Codex #623 P1).
+// Contract guard for the email module's canonical domain views (#616).
 //
-// WHY THE SHAPES ARE LOCAL AT ALL. `functions/` and `src/` are deliberately
-// decoupled TypeScript projects: `functions/tsconfig.json` sets
-// `rootDir: "src"` and `include: ["src"]`, so a functions module CANNOT import
-// `../../src/types` — and it should not, because that would pull the app's
-// contract module (and its transitive imports) into the Functions bundle. Every
-// functions module that needs a domain shape re-states the subset it reads:
-// `unlockDay.ts` (`DayLike`/`EventLike`), `autohide.ts` (`ReportableDoc`),
-// `notify.ts` (`ModeratedDoc`), `finaleContent.ts` (`FinalePlayer`/`FinaleDay`).
-// This module follows that established pattern rather than inventing a third.
-//
-// WHAT THIS FILE IS FOR. Decoupling is fine; SILENT divergence is not — the
-// exact failure `tests/functions/finale-parity.test.ts` was written after. A
-// TEST can import both projects even though neither can import the other, so
-// the drift risk is closed here rather than by collapsing the boundary.
+// `src/domainTypes.d.ts` is declaration-only, so the separately-rooted
+// Functions compiler can import the same source of truth without emitting an
+// app file outside `functions/src`. `EmailDay` / `EmailEvent` / `EmailPlayer`
+// are Pick/Partial views of those declarations, never restated interfaces.
 //
 // These are TYPE-LEVEL assertions: they cost nothing at runtime and fail at
 // `npm run typecheck` / `vitest` compile time. Each says "the email's local
@@ -69,5 +58,10 @@ describe('email domain shapes stay assignable from the canonical contracts', () 
     expectTypeOf<PlayerDoc['bingoCount']>().toExtend<EmailPlayer['bingoCount']>();
     expectTypeOf<PlayerDoc['squaresMarked']>().toExtend<EmailPlayer['squaresMarked']>();
     expectTypeOf<PlayerDoc['firstBingoAt']>().toExtend<EmailPlayer['firstBingoAt']>();
+    expectTypeOf<PlayerDoc['dayStats']>().toExtend<EmailPlayer['dayStats']>();
+  });
+
+  it('a whole PlayerDoc is a valid EmailPlayer', () => {
+    expectTypeOf<PlayerDoc>().toExtend<EmailPlayer>();
   });
 });

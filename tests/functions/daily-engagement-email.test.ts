@@ -20,6 +20,7 @@ import {
   dueDayForDailyEmail,
   resolveEventOrigin,
   readEmailRoster,
+  runDailyEmailSweep,
   sanitizeEmailDayStats,
   sendDailyEmailForEvent,
   shouldSendTo,
@@ -903,6 +904,9 @@ describe('sendDailyEmailForEvent', () => {
     expect(result.sent).toBe(1);
     expect(sent[0].to).toEqual(['theo@example.com']);
     expect(sent[0].html).not.toContain('Jess');
+    // Jess is the historical First-to-BINGO holder. Hiding her row must not
+    // rewrite that fact by promoting Theo to the honor.
+    expect(sent[0].html).not.toContain('Theo ⭐');
   });
 
   it('honours the recipient cap as a runaway guard', async () => {
@@ -944,6 +948,21 @@ describe('sendDailyEmailForEvent', () => {
     const all = await readEmailRoster(db, 'med-2026', []);
     expect(all.length).toBeGreaterThan(5);
   });
+
+  it('logs roster overflow even when a banned row makes the filtered page look within the ceiling', async () => {
+    const docs = seedEvent();
+    (docs['events/med-2026'] as Record<string, unknown>).bannedUids = ['theo'];
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await run(docs, { maxRecipients: 1 });
+
+    expect(error).toHaveBeenCalledWith(
+      'sendDailyEmailForEvent: roster exceeds the 1 ceiling; the remainder will not be mailed',
+      'med-2026',
+      3,
+    );
+    error.mockRestore();
+  });
 });
 
 describe('resolveEventOrigin', () => {
@@ -976,5 +995,70 @@ describe('resolveEventOrigin', () => {
       origin: 'https://fallback',
       edition: null,
     });
+  });
+
+  it('fails closed on a hostname read error rather than mailing the fallback Edition', async () => {
+    const base = makeDb({});
+    const failing = {
+      ...base,
+      collection: () => {
+        const query = {
+          where: () => query,
+          limit: () => query,
+          get: async () => {
+            throw new Error('hostname backend unavailable');
+          },
+        };
+        return query;
+      },
+    } as DailyEmailFirestore;
+
+    await expect(resolveEventOrigin(failing, 'e1', 'https://fallback')).rejects.toThrow(
+      'hostname backend unavailable',
+    );
+  });
+});
+
+describe('runDailyEmailSweep', () => {
+  it('lets every active Event reach the shared delivery queue when one Event has a slow send', async () => {
+    const docs = seedEvent();
+    docs['events/other'] = { ...(docs['events/med-2026'] ?? {}) };
+    docs['events/other/players/other-player'] = {
+      displayName: 'Other',
+      bingoCount: 1,
+      squaresMarked: 6,
+      firstBingoAt: 9000,
+    };
+    docs['hostnames/other.example.com'] = {
+      eventId: 'other',
+      canonicalHost: 'other.example.com',
+      edition: 'fiveacross',
+      status: 'active',
+      isCanonical: true,
+    };
+
+    let releaseFirst!: () => void;
+    const firstSend = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const lookedUp: string[] = [];
+    const sweep = runDailyEmailSweep(makeDb(docs), {
+      ...baseDeps(),
+      getEmailForUid: async (uid: string) => {
+        lookedUp.push(uid);
+        return `${uid}@example.com`;
+      },
+      send: async (args) => {
+        if (args.to[0] === 'theo@example.com') await firstSend;
+        return true;
+      },
+    });
+
+    try {
+      await vi.waitFor(() => expect(lookedUp).toContain('other-player'), { timeout: 100 });
+    } finally {
+      releaseFirst();
+      await sweep;
+    }
   });
 });

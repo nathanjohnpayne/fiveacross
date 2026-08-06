@@ -16,44 +16,29 @@
  * footer. The plain-text part mirrors the same order. Editions change the
  * WORDS; the Day changes the PALETTE; the order never moves.
  */
-import { compareFinalePlayers, tutorialDayIndexes, type FinaleDayStat } from './finaleContent';
+import type { DayDef, EventDoc, PlayerDoc } from '../../src/domainTypes';
+import { compareFinalePlayers, tutorialDayIndexes } from './finaleContent';
 import { emailThemeTokens, type EmailThemeTokens } from './dailyEmailTheme';
 
-// --- Minimal domain shapes (local, package-decoupled) ---------------------------
+// --- Canonical domain views -----------------------------------------------------
 
-/** The subset of a `DayDef` the email reads. */
-export interface EmailDay {
-  index: number;
-  /** ISO date, e.g. '2026-07-18'. Formatted in the Event's timezone. */
-  date?: string;
-  port?: string;
-  portEmoji?: string;
-  theme?: string;
-  /** The night's signature events, rendered as the "Tonight:" line. */
-  tonight?: string[];
-  tutorial?: boolean;
-  /** ms epoch — the Day's unlock, and this email's send moment. */
-  unlockAt: number;
-}
+/** The canonical `DayDef` fields the email reads. Firestore's legacy/malformed
+ *  tolerance makes display-only fields optional at this boundary; their value
+ *  types still come directly from the shared contract. */
+export type EmailDay = Pick<DayDef, 'index' | 'unlockAt'> &
+  Partial<Pick<DayDef, 'date' | 'port' | 'portEmoji' | 'theme' | 'tonight' | 'tutorial'>>;
 
-/** The subset of an `EventDoc` the email reads. */
-export interface EmailEvent {
-  name?: string;
-  timezone?: string;
+/** The canonical `EventDoc` fields the email reads, with legacy-safe presence. */
+export type EmailEvent = Partial<Pick<EventDoc, 'name' | 'timezone' | 'bannedUids'>> & {
   days?: EmailDay[];
-  bannedUids?: string[];
-  settings?: { dailyEmailEnabled?: boolean };
-}
+  settings?: Partial<Pick<EventDoc['settings'], 'dailyEmailEnabled'>>;
+};
 
-/** The subset of a `PlayerDoc` the standings snapshot reads. */
-export interface EmailPlayer {
-  uid: string;
-  displayName: string;
-  bingoCount: number;
-  squaresMarked: number;
-  firstBingoAt: number | null;
-  dayStats?: Record<number, FinaleDayStat>;
-}
+/** The canonical `PlayerDoc` fields the standings snapshot reads. */
+export type EmailPlayer = Pick<
+  PlayerDoc,
+  'uid' | 'displayName' | 'bingoCount' | 'squaresMarked' | 'firstBingoAt' | 'dayStats'
+>;
 
 /** One rendered standings row. */
 export interface StandingsRow {
@@ -266,7 +251,7 @@ function hasPlay(ranked: readonly EmailPlayer[]): boolean {
 
 /** The uid holding the Event-wide First to BINGO pin (⭐) across the ranked
  *  slice, or `null` when nobody has one. Earliest `firstBingoAt` wins. */
-function firstBingoUid(ranked: readonly EmailPlayer[]): string | null {
+export function firstBingoUid(ranked: readonly EmailPlayer[]): string | null {
   let best: EmailPlayer | null = null;
   for (const p of ranked) {
     if (p.firstBingoAt == null) continue;
@@ -390,6 +375,11 @@ export interface BuildDailyEmailArgs {
    * recomputed.
    */
   ranked?: readonly EmailPlayer[];
+  /** Historical First-to-BINGO holder from the RAW roster. `undefined` lets
+   *  the model derive it from `ranked`; `null` records that nobody holds it.
+   *  The sender passes this explicitly so a presentational ban hides the
+   *  holder's row without promoting a later Player. */
+  starUid?: string | null;
   /** The recipient — their row drives the one personalized line. */
   recipient: { uid: string; displayName: string };
   edition: string | null | undefined;
@@ -427,7 +417,7 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // --- ③ Standings snapshot -----------------------------------------------------
   const ranked = args.ranked ?? standingsThrough(players, day.index, tutorialDayIndexes(days));
   const played = hasPlay(ranked);
-  const starUid = played ? firstBingoUid(ranked) : null;
+  const starUid = played ? (args.starUid === undefined ? firstBingoUid(ranked) : args.starUid) : null;
   const rows: StandingsRow[] = played ? standingsRows(ranked, starUid) : [];
   const standingsHeading = played ? `Standings · through Day ${dayNumber - 1}` : `Standings · Day ${dayNumber}`;
   // Two empty states, not one. The OPENING Day has nothing to report because
