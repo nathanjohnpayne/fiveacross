@@ -8,6 +8,7 @@ import {
   formatDriftReport,
   orphanedSnapshotDays,
   reseedGuard,
+  reseedPlan,
   seedEntryTimestamp,
   seedItemDocId,
   seedItemMutations,
@@ -147,6 +148,15 @@ describe('w1-event-seed: reseedGuard — a rerun can never double-seed or casual
 
   it('allows a deliberate replace with RESEED=1', () => {
     expect(reseedGuard(120, '1')).toEqual({ allowed: true });
+  });
+
+  it('fails rather than silently skipping a requested schedule rewrite when the matching pool replace is refused', () => {
+    expect(reseedPlan(120, undefined, false)).toMatchObject({ action: 'metadata-only' });
+    expect(reseedPlan(120, undefined, true)).toMatchObject({
+      action: 'refuse',
+      reason: expect.stringContaining('SEED_DAYS=1'),
+    });
+    expect(reseedPlan(120, '1', true)).toEqual({ action: 'replace' });
   });
 });
 

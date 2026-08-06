@@ -191,6 +191,29 @@ describe('bodega-bay-2026 — pool pins', () => {
       ok: false,
       missing: [{ text: bodegaBay2026.ALL_ITEMS[rewrittenIndex]!.text }],
     });
+
+    const legacySnapshot = [{ index: 0, snapshotItemIds: [bodegaBay2026.VERIFY_ITEM_IDS[rewrittenIndex]!] }];
+    expect(
+      verifySeedPool(
+        makeLive(canonicalIds),
+        bodegaBay2026.ALL_ITEMS,
+        threshold,
+        bodegaBay2026.VERIFY_ITEM_IDS,
+        legacySnapshot,
+      ),
+    ).toMatchObject({
+      ok: false,
+      orphanedSnapshotIds: [{ dayIndex: 0, id: bodegaBay2026.VERIFY_ITEM_IDS[rewrittenIndex] }],
+    });
+    expect(
+      verifySeedPool(
+        makeLive(bodegaBay2026.VERIFY_ITEM_IDS),
+        bodegaBay2026.ALL_ITEMS,
+        threshold,
+        bodegaBay2026.VERIFY_ITEM_IDS,
+        legacySnapshot,
+      ),
+    ).toMatchObject({ ok: true, orphanedSnapshotIds: [] });
   });
 
   it('never carries the 🔞 glyph in display text', () => {

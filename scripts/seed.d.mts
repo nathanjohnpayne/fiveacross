@@ -27,7 +27,13 @@ export type SeedPoolReport = {
     canonical: string[];
     legacy: string[];
   };
+  orphanedSnapshotIds: Array<{ dayIndex: number; id: string }>;
 };
+
+export type ReseedPlan =
+  | { action: 'replace' }
+  | { action: 'metadata-only'; reason: string }
+  | { action: 'refuse'; reason: string };
 
 /**
  * One Event's seed payload (a scripts/seed-data module's EVENT_SEED). Shapes
@@ -73,6 +79,11 @@ export function reseedGuard(
   seedOwnedCount: number,
   reseedEnv: string | undefined,
 ): { allowed: boolean; reason?: string };
+export function reseedPlan(
+  seedOwnedCount: number,
+  reseedEnv: string | undefined,
+  includeDays: boolean,
+): ReseedPlan;
 export function orphanedSnapshotDays(
   days: unknown,
   deleteIds: readonly string[],
@@ -103,5 +114,6 @@ export function verifySeedPool(
   pool: SeedPrompt[],
   reportHideThreshold?: number,
   verifyItemIds?: readonly string[],
+  days?: unknown,
 ): SeedPoolReport;
 export function formatDriftReport(report: SeedPoolReport, eventId: string): string;

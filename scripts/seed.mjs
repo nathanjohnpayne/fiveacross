@@ -116,6 +116,26 @@ export function reseedGuard(seedOwnedCount, reseedEnv) {
 }
 
 /**
+ * Decide whether a seed run may replace its pool, perform only its harmless
+ * Event metadata merge, or must fail. A requested schedule write can never be
+ * silently downgraded to the metadata-only path: its canonical snapshots and
+ * the live prompt identities are one unit of state.
+ */
+export function reseedPlan(seedOwnedCount, reseedEnv, includeDays) {
+  const guard = reseedGuard(seedOwnedCount, reseedEnv);
+  if (guard.allowed) return { action: 'replace' };
+  if (includeDays) {
+    return {
+      action: 'refuse',
+      reason:
+        `${guard.reason} ` +
+        'SEED_DAYS=1 cannot rewrite the schedule while this run is refusing the matching prompt replacement.',
+    };
+  }
+  return { action: 'metadata-only', reason: guard.reason };
+}
+
+/**
  * The Day indexes whose stamped `snapshotItemIds` would be ORPHANED by an item
  * replace that is not also rewriting `days[]` (Codex P1, PR #644 round 2): a
  * snapshot id that is being deleted (`deleteIds`) and NOT re-written at the
@@ -252,6 +272,11 @@ export function verifySeedPool(
   // verification allowance only: `seedItemMutations` always writes the current
   // text-derived id for a new Event or an explicitly-safe reseed.
   verifyItemIds = undefined,
+  // The live Event's frozen Day snapshots. A pool can be internally consistent
+  // yet still be unusable if a snapshot points at an id that no longer exists.
+  // The runtime verifier reads this directly from events/{id}; the optional
+  // argument keeps this pure helper usable for item-only callers and tests.
+  days = undefined,
 ) {
   if (!Array.isArray(pool)) {
     throw new Error(
@@ -371,9 +396,22 @@ export function verifySeedPool(
     legacyIdentity && legacyIdentity.canonical.length > 0 && legacyIdentity.legacy.length > 0
       ? legacyIdentity
       : undefined;
+  const liveIds = new Set(existingDocs.map((doc) => doc.id));
+  const orphanedSnapshotIds = (Array.isArray(days) ? days : []).flatMap((day, position) => {
+    if (!Array.isArray(day?.snapshotItemIds)) return [];
+    const dayIndex = typeof day.index === 'number' ? day.index : position;
+    return day.snapshotItemIds
+      .filter((id) => typeof id !== 'string' || !liveIds.has(id))
+      .map((id) => ({ dayIndex, id: typeof id === 'string' ? id : JSON.stringify(id) ?? String(id) }));
+  });
 
   return {
-    ok: missing.length === 0 && mismatched.length === 0 && stale.length === 0 && !mixedIdentity,
+    ok:
+      missing.length === 0 &&
+      mismatched.length === 0 &&
+      stale.length === 0 &&
+      !mixedIdentity &&
+      orphanedSnapshotIds.length === 0,
     expected: expected.length,
     seedOwned: seedDocs.length,
     playerOwned: existingDocs.length - seedDocs.length,
@@ -381,6 +419,7 @@ export function verifySeedPool(
     mismatched,
     stale,
     mixedIdentity,
+    orphanedSnapshotIds,
   };
 }
 
@@ -513,17 +552,15 @@ async function seed() {
       const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
       const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
       const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
-      const guard = reseedGuard(seedOwnedCount, process.env.RESEED);
-      if (!guard.allowed) {
-        // A refused items replace must also refuse a requested Day rewrite. In
-        // particular, Bodega's canonical Day 0 snapshot ids are not necessarily
-        // the ids in its live, in-place-edited pool; writing them by themselves
-        // would strand the existing card pool. The safe no-op still permits the
-        // metadata-only admin-roster/config merge.
+      const plan = reseedPlan(seedOwnedCount, process.env.RESEED, includeDays);
+      if (plan.action === 'refuse') throw refusal(`✗ events/${EVENT_ID}: ${plan.reason} Nothing was written.`);
+      if (plan.action === 'metadata-only') {
+        // A refused items replace and an unrequested schedule write can still
+        // safely merge Event metadata such as an admin roster.
         transaction.set(eventRef, eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), false), {
           merge: true,
         });
-        return { skipped: true, reason: guard.reason };
+        return { skipped: true, reason: plan.reason };
       }
 
       const existingDocs = existing.docs.map((doc) => ({
@@ -597,8 +634,9 @@ async function seed() {
   // run that leaves drift (failed transaction, wrong project, stale doc a scoped
   // delete missed) should fail loudly right here, not weeks later when a
   // player notices the old prompts.
+  const [itemsSnap, eventSnap] = await Promise.all([col.get(), eventRef.get()]);
   const report = verifySeedPool(
-    (await col.get()).docs.map((doc) => ({
+    itemsSnap.docs.map((doc) => ({
       id: doc.id,
       text: doc.data().text,
       createdBy: doc.data().createdBy,
@@ -611,6 +649,7 @@ async function seed() {
     ALL_ITEMS,
     EVENT_SEED.settings.reportHideThreshold,
     seedEvent.VERIFY_ITEM_IDS,
+    eventSnap.data()?.days,
   );
   if (!report.ok) {
     console.error(formatDriftReport(report, EVENT_ID));
@@ -652,6 +691,15 @@ export function formatDriftReport(report, eventId) {
       `  mixed identity generation: ${report.mixedIdentity.canonical.length} canonical-only / ` +
         `${report.mixedIdentity.legacy.length} legacy-only rewritten prompt ids`,
     );
+  if (report.orphanedSnapshotIds.length)
+    lines.push(
+      `  frozen snapshot ids missing from live (${report.orphanedSnapshotIds.length}): ` +
+        report.orphanedSnapshotIds
+          .slice(0, 5)
+          .map(({ dayIndex, id }) => `Day ${dayIndex} → ${JSON.stringify(id)}`)
+          .join(', ') +
+        (report.orphanedSnapshotIds.length > 5 ? ', …' : ''),
+    );
   // Reconcile with a bare reseed — NO ADMIN_UID. The seed's event write merges,
   // and omitting ADMIN_UID leaves `events/{id}.admins` untouched (a reseed to
   // refresh prompts must never overwrite the live admin roster, Codex P2 PR
@@ -682,7 +730,10 @@ export function formatDriftReport(report, eventId) {
 // an actionable report) when it drifts.
 async function verify() {
   const { db, EVENT_ID, seedEvent } = await initFirestore();
-  const snap = await db.collection(`events/${EVENT_ID}/items`).get();
+  const [snap, eventSnap] = await Promise.all([
+    db.collection(`events/${EVENT_ID}/items`).get(),
+    db.doc(`events/${EVENT_ID}`).get(),
+  ]);
   const report = verifySeedPool(
     snap.docs.map((doc) => ({
       id: doc.id,
@@ -697,6 +748,7 @@ async function verify() {
     seedEvent.ALL_ITEMS,
     seedEvent.EVENT_SEED.settings.reportHideThreshold,
     seedEvent.VERIFY_ITEM_IDS,
+    eventSnap.data()?.days,
   );
   if (report.ok) {
     console.log(
