@@ -49,6 +49,16 @@ describe('resolveAuthDomain', () => {
     );
   });
 
+  it.each(['fiveacross.app', 'bodega-bay.fiveacross.app'])(
+    'pins Five Across host %s to its own first-party auth handler (#599/#600)',
+    (hostname) => {
+      // The shipped Bodega bundle bakes authDomain=bodega-bay.vacaybingo.com;
+      // on the fiveacross.app hosts the allowlist is what keeps the OAuth
+      // helper same-origin instead of resolving a foreign authDomain.
+      expect(resolveAuthDomain('bodega-bay.vacaybingo.com', hostname)).toBe(hostname);
+    },
+  );
+
   it.each([
     'gaycruisebingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
     'gaycruisebingo-git-some-other-branch-nathanjohnpaynes-projects.vercel.app',
@@ -152,6 +162,16 @@ describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
   it('still blocks an unconfigured wildcard host', () => {
     expect(isSignInReachableOnHost(CONFIGURED, 'bodega-bay.vacaybingo.com')).toBe(false);
     expect(isSignInReachableOnHost(CONFIGURED, 'anything-else.example.com')).toBe(false);
+  });
+
+  it('mounts the fiveacross.app hosts even under the Bodega-baked authDomain (#600)', () => {
+    // The live bundle on the fiveacross Hosting site bakes
+    // authDomain=bodega-bay.vacaybingo.com; the allowlist entries are what let
+    // the SAME bundle complete sign-in on the fiveacross.app hosts.
+    expect(isSignInReachableOnHost('bodega-bay.vacaybingo.com', 'fiveacross.app')).toBe(true);
+    expect(
+      isSignInReachableOnHost('bodega-bay.vacaybingo.com', 'bodega-bay.fiveacross.app'),
+    ).toBe(true);
   });
 
   it('still blocks a per-deployment host on the mirror project (#585)', () => {

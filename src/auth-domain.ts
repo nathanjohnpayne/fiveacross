@@ -54,6 +54,17 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // in the one situation it exists for, which is the canonical host being
   // unreachable (#625).
   'vacaybingo.vercel.app',
+  // The canonical Five Across domain and its Bodega Bay event host (#599, as
+  // amended; provisioned under #600). Both are exact Firebase Hosting custom
+  // domains on the `fiveacross` site, so `https://<host>/__/auth/handler` is
+  // served same-origin by Hosting's reserved namespace. Registered on the
+  // `fiveacross` project's authorized domains and its Google OAuth web client
+  // (like `fiveacross.vercel.app` above), not gaycruisebingo's. Without these
+  // entries the shipped Bodega bundle — whose baked authDomain is
+  // `bodega-bay.vacaybingo.com` — resolves a foreign authDomain on these
+  // hosts and the pre-mount gate darks them (#600 step 6's follow-up).
+  'fiveacross.app',
+  'bodega-bay.fiveacross.app',
 ]);
 
 /** Keep production OAuth helper storage on the same origin as the app. */
