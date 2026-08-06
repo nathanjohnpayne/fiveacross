@@ -1,5 +1,6 @@
 import type { HostnameDoc } from './types';
 import { ADULT_CONTENT_DEFAULT, coerceAdultContent } from './adultContent';
+import { coerceEventPreview, type EventPreview } from './eventPreview';
 
 // Startup Event resolution from the request hostname (ADR 0009, #543).
 //
@@ -38,6 +39,11 @@ export type Resolution =
        *  only a proven `false` is allowed to stand without revalidation. See the
        *  rule at the top of `src/adultContent.ts`. */
       adultContentProven: boolean;
+      /** The sign-in postcard's Event-preview slice (#647), when the routing
+       *  document carries one. Absent on the env short-circuit (no document is
+       *  read) and on documents seeded before the field existed — the gate
+       *  then draws no card, never a broken one. */
+      preview?: EventPreview;
       /** Where the answer came from — surfaced for diagnostics, never for logic. */
       source: 'cache' | 'network' | 'env';
     }
@@ -70,6 +76,10 @@ export const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 interface CacheEnvelope {
   v: number;
   fetchedAt: number;
+  /** Written only after this build has checked the optional preview slice.
+   *  Caches from before #647 lack it and need one network attempt so a newly
+   *  seeded postcard does not stay invisible for the routing TTL. */
+  previewValidated: boolean;
   doc: HostnameDoc;
 }
 
@@ -91,6 +101,9 @@ export interface CacheRead {
   doc: HostnameDoc;
   fetchedAt: number;
   stale: boolean;
+  /** A pre-preview cache remains a routing fallback, but cannot short-circuit
+   *  its first post-upgrade network read. */
+  requiresPreviewRevalidation: boolean;
 }
 
 /** Read a cached mapping. Tolerates absent, corrupt, version-drifted and
@@ -133,9 +146,14 @@ export function readCache(
         adultContent: coerceAdultContent(d.adultContent),
         slug: typeof d.slug === 'string' ? d.slug : undefined,
         isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
+        // Same non-version-gated posture as `adultContent` above: additive,
+        // optional, and absent-is-no-card, so an entry written before #647
+        // needs no CACHE_VERSION bump to read correctly.
+        preview: coerceEventPreview(d.preview),
       },
       fetchedAt: env.fetchedAt,
       stale: now - env.fetchedAt > CACHE_TTL_MS,
+      requiresPreviewRevalidation: env.previewValidated !== true,
     };
   } catch {
     return null;
@@ -151,7 +169,7 @@ export function writeCache(
   now: number = Date.now(),
 ): void {
   if (!storage) return;
-  const env: CacheEnvelope = { v: CACHE_VERSION, fetchedAt: now, doc };
+  const env: CacheEnvelope = { v: CACHE_VERSION, fetchedAt: now, previewValidated: true, doc };
   try {
     storage.setItem(cacheKey(hostname), JSON.stringify(env));
   } catch {
@@ -177,6 +195,7 @@ const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => (
   // been stamped since. Only the network read proves anything.
   adultContentProven: source === 'network',
   slug: doc.slug ?? null,
+  preview: doc.preview,
   source,
 });
 
@@ -334,7 +353,18 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   // Bingo host, and every Event that has already flipped — keeps the pure
   // offline-first cold boot ADR 0006 specifies, at no cost.
   const cacheMayUnGate = cached?.doc.adultContent === false;
-  if (cached && !cached.stale && !cacheMayUnGate && isServable(cached.doc)) {
+  // A cache written before the Event-preview slice existed must make ONE
+  // best-effort revalidation, even inside the usual TTL. It still reaches
+  // `staleOrNotFound` on failure, preserving its offline routing fallback;
+  // a successful read rewrites the envelope with `previewValidated: true`.
+  const cacheNeedsPreviewRevalidation = cached?.requiresPreviewRevalidation === true;
+  if (
+    cached &&
+    !cached.stale &&
+    !cacheMayUnGate &&
+    !cacheNeedsPreviewRevalidation &&
+    isServable(cached.doc)
+  ) {
     return asEvent(cached.doc, 'cache');
   }
 

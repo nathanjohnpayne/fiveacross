@@ -25,8 +25,9 @@ This ticket owns the collection and its rules only. Consuming it at startup—pa
 | `status` | string | `active` \| `disabled` \| `archived` |
 | `slug` | string | The first label, denormalised for the edge router |
 | `isCanonical` | bool | Whether this document is the canonical address or an alias |
+| `preview` | map (optional) | The sign-in gate's Event-preview slice (#647): `{ eventName, dateRange?, hostedBy?, days?: [{date, title, emoji?}] }`—display copy only, read fail-soft (`coerceEventPreview`, src/eventPreview.ts); absent means the gate draws no card |
 
-`edition` rides here rather than on the Event document for the reason ADR 0009 gives: `events/{eventId}` requires `signedIn()`, so an Edition read from it arrives after the surface that most needs it has already rendered.
+`edition` rides here rather than on the Event document for the reason ADR 0009 gives: `events/{eventId}` requires `signedIn()`, so an Edition read from it arrives after the surface that most needs it has already rendered. `preview` (#647) rides here for the same reason: the wireframes' Join frame draws the Event's name, dates, host and Day line on the sign-in screen itself, which renders before any authenticated read is possible.
 
 ## Rules contract
 
@@ -40,9 +41,23 @@ match /hostnames/{host} {
 
 **The get/list split is the safety property, not a stylistic choice.** `get` resolves an address the caller already knows; `list` would enumerate every Event on the platform, converting a set of unguessable addresses into a directory. `allow read` grants both and must not be used here.
 
-**World-readable is deliberate and bounded.** A Slug is an address, not a secret: knowing one grants nothing, because every read of Event data still passes the membership gate. What is exposed is that an Event exists at a hostname the reader already typed, plus its Edition—which the branding on the page announces regardless.
+**World-readable is deliberate and bounded.** A Slug is an address, not a secret: knowing one grants nothing, because every read of Event data still passes the membership gate. What is exposed is that an Event exists at a hostname the reader already typed, plus its Edition—which the branding on the page announces regardless—plus, when the document carries a `preview` slice (#647), the display copy the sign-in page itself shows to anyone who loads that hostname: the Event's name, its date range, the host's display name, and the Day schedule's titles. That is a real widening of the disclosure relative to the original contract, accepted deliberately with the postcard design (wireframes § "Join—the postcard, not the casino"): every field in the slice is copy the signed-out gate renders on screen, so the document discloses nothing the page does not. Nothing rules-gated may be moved into `preview`; membership, rosters, pools and everything else on the Event document stay behind `signedIn()`.
 
 **No client writes at all**, including admins. The mapping is authoritative routing state across a global namespace, where no per-Event admin has authority; a writable mapping would let a client point an existing hostname at an Event it should not see, or squat an address before its Event exists. Only the Admin SDK populates it.
+
+## Bodega postcard provisioning
+
+The Bodega sign-in postcard is public display copy on the same pre-auth lookup; it must exist on **every serving Bodega hostname**, never only on the canonical host. `scripts/provision-bodega-preview.mjs` is the controlled Admin-SDK maintenance path. It validates the fixed live set (`bodega-bay.fiveacross.app`, `bodega-bay.vacaybingo.com`, and `fiveacross.app`) before it writes anything, refuses missing, inactive, or repointed documents, and applies only `preview` in one transaction. It never creates a routing document or changes `eventId`, `status`, or canonical metadata.
+
+Run its dry run and then its explicit apply **before** deploying the postcard UI:
+
+```bash
+eval "$(scripts/op-preflight.sh --agent codex --mode deploy)"
+GOOGLE_CLOUD_PROJECT=fiveacross npm run provision:bodega-preview
+GOOGLE_CLOUD_PROJECT=fiveacross npm run provision:bodega-preview -- --apply
+```
+
+The command refuses any project other than `fiveacross`; no default Firebase target is trusted. It is idempotent when all three documents already carry the exact preview. `src/test/bodega-preview-provision.test.ts` proves its all-host plan and fail-closed validation.
 
 **An unknown host is a missing document, not a denial.** `get` succeeds against a non-existent path and returns `exists() == false`, so a client renders an Event-not-found state instead of a permission error it would otherwise have to distinguish from a network failure.
 

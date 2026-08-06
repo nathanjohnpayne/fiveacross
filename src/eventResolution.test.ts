@@ -48,6 +48,9 @@ function fakeStorage(seed: Record<string, string> = {}, opts: { throws?: boolean
 }
 
 const envelope = (doc: HostnameDoc, fetchedAt = T0) =>
+  JSON.stringify({ v: CACHE_VERSION, fetchedAt, previewValidated: true, doc });
+
+const prePreviewEnvelope = (doc: HostnameDoc, fetchedAt = T0) =>
   JSON.stringify({ v: CACHE_VERSION, fetchedAt, doc });
 
 const never = () => new Promise<HostnameDoc | null>(() => {});
@@ -65,6 +68,7 @@ describe('eventResolution — cache envelope', () => {
     expect(r?.doc).toMatchObject({ eventId: 'bodega-bay-2026', edition: 'vacay' });
     expect(r?.fetchedAt).toBe(T0);
     expect(r?.stale).toBe(false);
+    expect(r?.requiresPreviewRevalidation).toBe(false);
   });
 
   it('marks an entry stale once past the TTL', () => {
@@ -148,6 +152,26 @@ describe('eventResolution — resolveEvent decision table', () => {
     const r = await resolveEvent({ hostname: HOST, fetchDoc, storage: s, now: at(T0) });
     expect(r).toMatchObject({ kind: 'event', eventId: 'bodega-bay-2026', source: 'cache' });
     expect(fetchDoc).not.toHaveBeenCalled();
+  });
+
+  it('revalidates a fresh cache written before the optional preview slice', async () => {
+    const s = fakeStorage({ [cacheKey(HOST)]: prePreviewEnvelope(DOC, T0) });
+    const fresh = { ...DOC, preview: { eventName: 'Weekend in Bodega Bay' } };
+    const fetchDoc = vi.fn(async () => fresh);
+    const r = await resolveEvent({ hostname: HOST, fetchDoc, storage: s, now: at(T0) });
+    expect(r).toMatchObject({ kind: 'event', source: 'network', preview: fresh.preview });
+    expect(fetchDoc).toHaveBeenCalledOnce();
+    expect(readCache(s, HOST, T0)?.requiresPreviewRevalidation).toBe(false);
+  });
+
+  it('keeps a pre-preview cache as the offline routing fallback', async () => {
+    const s = fakeStorage({ [cacheKey(HOST)]: prePreviewEnvelope(DOC, T0) });
+    const fetchDoc = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    const r = await resolveEvent({ hostname: HOST, fetchDoc, storage: s, now: at(T0) });
+    expect(r).toMatchObject({ kind: 'event', source: 'cache', eventId: DOC.eventId });
+    expect(fetchDoc).toHaveBeenCalledOnce();
   });
 
   it('surfaces the Slug from a resolved hostname document (#556)', async () => {

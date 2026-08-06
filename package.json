@@ -22,6 +22,7 @@
     "emulator": "firebase emulators:start --only auth,firestore,storage",
     "seed": "node scripts/seed.mjs",
     "verify:seed": "GOOGLE_CLOUD_PROJECT=gaycruisebingo VITE_EVENT_ID=med-2026 node scripts/seed.mjs --verify",
+    "provision:bodega-preview": "node scripts/provision-bodega-preview.mjs",
     "bugs:pull": "node scripts/bug-reports.mjs pull",
     "bugs:archive": "node scripts/bug-reports.mjs archive",
     "bugs:disposition": "node scripts/bug-reports.mjs disposition",

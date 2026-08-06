@@ -43,6 +43,20 @@ export interface EditionBrand {
   wordmarkByline?: string;
   preEventVerb: string;
   tagline: string;
+  /** The gate's voice line ("Take the detour. For the story.") — the italic
+   *  chip the wireframes draw inside the Join lockup (#647, § Join). Optional
+   *  because only vacay's frame carries one; when present it REPLACES the
+   *  plain `tagline` on the signed-out gate, which the wireframe omits there. */
+  signinTaglineChip?: string;
+  /** The invitation copy block under the Join CTA ("Prompts are invitations,
+   *  not chores…"). Optional: only the vacay frame draws it. */
+  signinInviteNote?: string;
+  /** How the gate's Event-preview card is dressed: `'postcard'` adds the
+   *  dashed stamp corner the wireframes give the vacay Join frame; absent
+   *  draws the plain panel gcb and fiveacross use. A STRING variant rather
+   *  than a boolean so editions.test.ts's every-field-is-a-nonempty-string
+   *  exhaustiveness sweep covers it like any other brand field. */
+  signinCardVariant?: 'postcard';
   offlineNote: string;
   documentTitle: string;
   appName: string;
@@ -265,6 +279,49 @@ export interface HostnameDoc {
   adultContent: boolean;
   slug?: string;
   isCanonical?: boolean;
+  /**
+   * The sign-in gate's Event-preview slice (#647, wireframes § Join): the few
+   * display strings the pre-auth postcard renders. OPTIONAL and read fail-soft
+   * (`coerceEventPreview`) — absent means the gate simply draws no card, which
+   * is every hostname document written before #647.
+   *
+   * Lives HERE, on the one deliberately world-readable document, because
+   * `events/{eventId}` requires `signedIn()` and the screen this feeds is the
+   * one that gets you signed in. Same reasoning as `edition` and
+   * `adultContent`: what it exposes (the Event's name, dates, host first name)
+   * is exactly what the sign-in page announces to anyone who loads the
+   * hostname anyway. Admin-SDK-seeded like every other field — no client
+   * write arm exists, and none is added.
+   */
+  preview?: EventPreview;
+}
+
+/** One Day of the pre-auth preview schedule — enough to render "Day 1: The
+ *  Birds Have Entered the Chat" without reading the rules-gated Event doc. */
+export interface EventPreviewDay {
+  /** ISO date (`2026-08-07`), event-local. */
+  date: string;
+  /** The Day's display title, exactly as the schedule names it. */
+  title: string;
+  /** The Day Theme's decorative mark ("🐦"), drawn before the Day label. */
+  emoji?: string;
+}
+
+/** The world-readable Event slice behind the sign-in postcard (#647). Every
+ *  field is display copy, seeded via the Admin SDK; nothing here is an
+ *  authorization input. */
+export interface EventPreview {
+  /** The Event's display name ("Weekend in Bodega Bay"). REQUIRED — a card
+   *  with no name is not worth drawing, so `coerceEventPreview` rejects the
+   *  whole slice without it. */
+  eventName: string;
+  /** Pre-formatted date range ("Aug 7–9"). Authored, not computed, so the
+   *  seed controls its own abbreviation style. */
+  dateRange?: string;
+  /** The host's display name ("Kim") — the card prepends "hosted by". */
+  hostedBy?: string;
+  /** The preview schedule, in Day order, for the live "Day N" line. */
+  days?: EventPreviewDay[];
 }
 
 export interface ItemDoc {

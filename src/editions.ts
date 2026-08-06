@@ -87,6 +87,14 @@ const BRANDS: Record<string, EditionBrand> = {
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',
+    // The Join-frame voice pieces (#647, wireframes § "Join—the postcard, not
+    // the casino"). Only vacay's frame draws them: the tagline chip replaces
+    // the plain tagline on the signed-out gate, the invite note sits under the
+    // CTA, and the Event card wears the postcard's dashed stamp corner.
+    signinTaglineChip: 'Take the detour. For the story.',
+    signinInviteNote:
+      'Prompts are invitations, not chores. Take the fun detour, share the story if you want—five across earns a BINGO.',
+    signinCardVariant: 'postcard',
     offlineNote: 'Patchy signal? Your card keeps working offline—marks sync when you reconnect.',
     // Title case, not the caps wordmark: these render as a browser tab and a
     // home-screen label, not as the gate's display type. "Vacay Bingo" is 11

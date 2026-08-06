@@ -6,6 +6,7 @@ import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
 import { adultContentSettledAdult, coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
+import { applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
@@ -61,6 +62,9 @@ export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | 
     adultContent: coerceAdultContent(d.adultContent),
     slug: typeof d.slug === 'string' ? d.slug : undefined,
     isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
+    // The sign-in postcard's preview slice (#647). Optional and fail-soft like
+    // `slug`: a malformed or absent slice costs the card, never the Event.
+    preview: coerceEventPreview(d.preview),
   };
 }
 
@@ -136,6 +140,12 @@ export async function bootstrapEventResolution(
     // Alias concept, so the analytics consumers' own `window.location`
     // fallback already IS canonical for that build.
     applyResolvedCanonicalHost(resolution.canonicalHost);
+    // The sign-in postcard's preview slice (#647). `?? null` covers both
+    // absences the same way — a document with no slice and the env
+    // short-circuit that read no document — because they render identically:
+    // no card. Installed unconditionally so a re-bootstrap can not leak a
+    // previous hostname's preview onto another Event's gate.
+    applyResolvedEventPreview(resolution.preview ?? null);
   }
   return resolution;
 }

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { editionBrand } from '../editions';
+import EventPostcard from './EventPostcard';
 
 // The wordmark, the signed-out line and the offline note come from the resolved
 // EDITION (#543, src/editions.ts), not from constants. They cannot come from the
@@ -64,7 +65,13 @@ export default function SignIn() {
     // must never be load-bearing for uptime again.
     <div className="signin" data-testid="signin-gate">
       <h1>{brand.wordmark}</h1>
-      <p className="muted">
+      {/* The platform endorsement line under the wordmark (#647) — the Join
+          frames' lockup carries it wherever the brand table does (vacay only;
+          see `wordmarkByline`). A SIBLING of the h1, not inside it: the
+          heading's textContent is asserted brand-for-brand by
+          signin-edition-brand.test.tsx and must stay exactly the wordmark. */}
+      {brand.wordmarkByline && <span className="brand-byline">{brand.wordmarkByline}</span>}
+      <p className={brand.signinTaglineChip && !(reprompt && adult) ? 'signin-tagline-chip' : 'muted'}>
         {/* The re-prompt line makes an age claim of its own, so it is gated on
             the posture too — belt and braces. AuthProvider already refuses to
             mount the re-prompt on a non-adult Event, but a screen whose whole
@@ -72,8 +79,16 @@ export default function SignIn() {
             away from asserting it on an Event that never asked. */}
         {reprompt && adult
           ? 'One quick thing before you get your card: confirm you’re 18 or older.'
-          : brand.tagline}
+          : /* The voice chip ("Take the detour. For the story.") REPLACES the
+               plain tagline where the brand carries one — the wireframes' vacay
+               Join frame draws the chip in the lockup and no tagline line. */
+            (brand.signinTaglineChip ?? brand.tagline)}
       </p>
+      {/* The Event-preview postcard (#647): between the lockup and the 18+ /
+          CTA rows, exactly where the wireframes draw it, so the attestation —
+          when the posture requires one — keeps its position under the card.
+          Renders nothing when no pre-auth preview resolved. */}
+      <EventPostcard />
       {adult && (
         <label className="ack">
           <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
@@ -96,6 +111,11 @@ export default function SignIn() {
             ? 'Enter the event'
             : 'Continue with Google'}
       </button>
+      {/* The invitation copy block under the CTA (#647) — brand-carried, so
+          only the Editions whose Join frame draws it render it (vacay). */}
+      {brand.signinInviteNote && (
+        <p className="muted signin-invite-note">{brand.signinInviteNote}</p>
+      )}
       <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
     </div>
   );

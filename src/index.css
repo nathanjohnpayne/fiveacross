@@ -2275,6 +2275,87 @@ textarea.input {
 .ack input {
   margin-top: 3px;
 }
+/* ---------- sign-in Join frame (#647, wireframes § Join) ---------- */
+/* The endorsement line under the gate's wordmark — same class the header uses
+   (`.brand-byline`), scaled to sit under display type instead of the 26px
+   header brand, and pulled up against the h1 through the .signin flex gap. */
+.signin .brand-byline {
+  font-size: 11px;
+  letter-spacing: 0.26em;
+  margin-top: -12px;
+}
+/* The voice chip ("Take the detour. For the story.") — the wireframes' .vlock
+   .tag: italic, part of the lockup rather than body copy. `--ink`, NOT the
+   wireframe's `--primary` (Codex P2 round 1): .signin renders straight on
+   body's --primary radial tint, where --primary text is self-referential and
+   lands ~3.3:1 on the light fog-froth-farewells theme — the exact defect
+   specs/theme-on-color-contrast.md retired from .signin h1. Only --ink/--bg
+   is audited to 4.5:1 across every theme; the italic carries the voice. */
+.signin-tagline-chip {
+  margin: -8px 0 0;
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--ink);
+}
+/* The Event-preview card. Base treatment is the gcb/fiveacross Join frames'
+   plain solid panel; vacay's brand row opts into the postcard variant below. */
+.event-postcard {
+  position: relative;
+  text-align: left;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 12px 14px;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.event-postcard-name {
+  display: block;
+  color: var(--ink);
+  font-size: 15px;
+}
+.event-postcard-meta {
+  display: block;
+}
+.event-postcard-host {
+  display: block;
+  font-size: 11px;
+  margin-top: 2px;
+}
+/* The postcard treatment (vacay): tighter corners and the dashed stamp box in
+   the top-right — the wireframes' .postcard::after. Padding clears the stamp
+   so a long Event name wraps under it instead of through it. */
+.event-postcard-stamped {
+  border-radius: 4px;
+  padding-right: 58px;
+}
+.event-postcard-stamped::after {
+  content: '';
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  width: 34px;
+  height: 26px;
+  border: 1.5px dashed var(--border);
+  border-radius: 2px;
+}
+/* The invitation copy block under the CTA — left-set, unlike the centered
+   offline footnote below it. */
+.signin-invite-note {
+  text-align: left;
+  font-size: 12px;
+}
+/* The wireframes' filled accent primary (`.btn.ok`) on the Join CTA — the same
+   fill recipe as the #322 toast and claim-sheet primaries, replacing the
+   global primary's border-recolor + glow ("solid, not outline", #647). Also
+   picks up DealError's Retry, which reuses this shell on purpose. */
+.signin .btn.primary {
+  background: var(--primary);
+  color: var(--on-gradient, #000);
+  border-color: var(--primary);
+  box-shadow: none;
+}
 
 /* ---------- consent notice ---------- */
 .consent-notice {
