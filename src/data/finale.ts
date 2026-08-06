@@ -33,6 +33,14 @@ export interface Podium {
   firstBingo: PodiumFirstBingo | null;
   /** Each Day's pinned First to BINGO, sorted by Day index (present honors only). */
   dailyHonors: DayHonor[];
+  /**
+   * Standings rows 2-3 (#534/#561): the photo-hero share composition compresses
+   * the podium to ranked rows, so it needs the two runners-up the champion-only
+   * payload never carried. Same zero-activity guard as the champion (a row with
+   * no marks is not a rank). CLIENT-ONLY — the functions-side `PodiumPayload`
+   * and the podium Moment are NOT touched, so nothing served changes.
+   */
+  runnersUp: PodiumChampion[];
 }
 
 /** The farewell Day's `DayDef.index`, or `-1` when the schedule has none. */
@@ -135,6 +143,20 @@ export function buildPodium(
         }
       : null;
 
+  // Ranks 2-3 from the SAME sorted standings the champion came from — never a
+  // re-sort — with the champion's own zero-activity guard applied per row (the
+  // sort puts zero-activity rows last, so a filtered row can only ever be
+  // trailing; ranks never skip).
+  const runnersUp: PodiumChampion[] = standings
+    .slice(1, 3)
+    .filter((r) => r.bingoCount > 0 || r.squaresMarked > 0)
+    .map((r) => ({
+      uid: r.uid,
+      displayName: r.displayName,
+      bingoCount: r.bingoCount,
+      squaresMarked: r.squaresMarked,
+    }));
+
   const firstUid = cruiseFirstBingoUid(players, isTutorialDay);
   const firstPlayer = firstUid ? players.find((p) => p.uid === firstUid) : undefined;
   const firstAt = firstPlayer ? effectiveCruiseFirstBingoAt(firstPlayer, isTutorialDay) : null;
@@ -143,7 +165,12 @@ export function buildPodium(
       ? { uid: firstPlayer.uid, displayName: firstPlayer.displayName, at: firstAt }
       : null;
 
-  return { champion, firstBingo, dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded) };
+  return {
+    champion,
+    firstBingo,
+    dailyHonors: pinnedOrDerivedDailyHonors(players, days, dayMetas, dayMetasLoaded),
+    runnersUp,
+  };
 }
 
 /**

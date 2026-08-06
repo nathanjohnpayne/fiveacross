@@ -910,6 +910,63 @@ a {
 .farewell-podium-actions .btn {
   width: 100%;
 }
+/* ---- Most-Loved Photo award block (#534/#561, specs/most-loved-photo.md) ----
+   Renders ABOVE the podium title inside .farewell-podium: the frozen award
+   (all co-winners on a tie, one shared frozen heart chip) or the plain
+   photo-highlights fallback. Appreciation framing only — the heart chip is
+   the sole number in the block. */
+.farewell-most-loved {
+  margin-bottom: 10px;
+}
+.farewell-most-loved-title {
+  /* Same section-title treatment as .farewell-podium-title. */
+  margin: 0 0 8px;
+  font-weight: 700;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 12px;
+}
+.farewell-most-loved-item {
+  margin: 0 0 8px;
+}
+.farewell-most-loved-frame {
+  /* Clip the photo (and the chip) to the Feed's rounded media box. */
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+}
+.farewell-most-loved-photo {
+  /* Contain, never crop — the .proof-media rule (#363), same 320px clamp. */
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  background: color-mix(in srgb, var(--ink) 10%, var(--bg));
+}
+.farewell-most-loved-hearts {
+  /* The FROZEN eligible count on the photo itself. A fixed dark scrim, not a
+     theme token: it overlays arbitrary photo content, which no palette can
+     anticipate — both themes need the same legibility floor. */
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+}
+.farewell-most-loved-credit {
+  margin-top: 4px;
+  color: var(--dim);
+  font-size: 12.5px;
+}
+.farewell-most-loved-note {
+  margin: 2px 0 8px;
+  color: var(--dim);
+  font-size: 11px;
+}
 
 /* ---------- First-open coach overlay (specs/d15-coach-overlay.md) — reuses
    .sheet-backdrop/.sheet chrome plus a small legend-row layout. ---------- */
@@ -3309,6 +3366,129 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* ---- Final standings, photo-hero composition (#534/#561) ----
+   One surface, two compositions (plans/daily-cards-wireframes.html
+   `fx-share-final-photo-*`): with a displayable Most-Loved Photo the card
+   leads with the photo — award badge and FROZEN heart count on the photo
+   itself, credit line under it, the standings compressed to ranked rows.
+   Daily honors yield their space and stay on the photo-less fallback. */
+.share-card-ml-hero {
+  /* 520x287 — the wireframe's 250:138 hero ratio inside the 600px frame. */
+  position: relative;
+  flex: none;
+  width: 520px;
+  height: 287px;
+  margin-top: 16px;
+  border: 2px solid var(--accent);
+  border-radius: 18px;
+  overflow: hidden;
+  /* Dark-leaning themed fill: the letterbox bars behind a contained photo. */
+  background: color-mix(in srgb, var(--ink) 14%, var(--bg));
+}
+.share-card-ml-img {
+  /* Letterboxed, never cropped — the winning photo displays whole. */
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.share-card-ml-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.share-card-ml-hearts {
+  /* Frozen eligible-Heart total. Fixed dark scrim over arbitrary photo
+     content — same rationale as .farewell-most-loved-hearts. */
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 16px;
+  white-space: nowrap;
+}
+.share-card-ml-by {
+  /* Poster · “Prompt” · Day label (· shared with …) — clamped to two lines
+     so a long prompt can never push the rows out of the fixed frame. */
+  margin-top: 10px;
+  max-width: 520px;
+  min-width: 0;
+  font-size: 17px;
+  color: var(--ink);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.share-card-ml-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 460px;
+  margin: 14px 0 4px;
+}
+.share-card-ml-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 1px 8px;
+  font-size: 17px;
+  color: var(--dim);
+}
+.share-card-ml-rank {
+  font-family: 'Bebas Neue', 'Arial Narrow', sans-serif;
+  font-size: 20px;
+  min-width: 24px;
+  color: var(--ink);
+  text-align: center;
+}
+.share-card-ml-name {
+  /* One line with the compact-row name floor (Codex P2, PR #445 round 3
+     lineage): the honored name keeps 96px; the stat gives way instead. */
+  color: var(--ink);
+  font-weight: 600;
+  min-width: 96px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.share-card-ml-row.champ .share-card-ml-name {
+  /* The champion keeps the Bebas display treatment on the hero card. */
+  font-family: 'Bebas Neue', 'Arial Narrow', sans-serif;
+  font-weight: 400;
+  font-size: 30px;
+  line-height: 1;
+  color: var(--accent);
+}
+.share-card-ml-role {
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.share-card-ml-stat {
+  margin-left: auto;
+  color: var(--ink);
+  font-size: 16px;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .share-card-footer {
   margin-top: auto;
   padding-top: 14px;
@@ -3817,6 +3997,16 @@ body:has(.sheet-backdrop) .guidelines-trigger {
    is a quiet correction); the count is keyed by value in HeartButton, so any
    change (the viewer's own tap or another Player's heart arriving on the
    stream) remounts the number and replays the tick. */
+.feed-heart-cue {
+  /* The pre-freeze Hearts invitation (#534/#561): a quiet static strip at the
+     top of the Feed list — the Feed's muted-hint treatment (tokens, so both
+     themes come free), no emoji, no dismiss state, no motion, no badge. */
+  margin: 0;
+  padding: 2px 4px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 12.5px;
+}
 .heart-row {
   display: flex;
   align-items: center;
