@@ -19,7 +19,7 @@ const cest = (y: number, m: number, d: number, h = 12, min = 0) => Date.UTC(y, m
 describe('headerDayIdentity — the header is a "where are we" instrument', () => {
   it('pre-cruise reads "Sails Jul 15" / the embark theme line', () => {
     expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
-      port: 'Sails Jul 15',
+      place: 'Sails Jul 15',
       theme: '🛳️ Welcome Aboard',
     });
   });
@@ -30,14 +30,14 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
     // date and theme resolution are Edition-independent.
     setActiveEdition('vacay');
     expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
-      port: 'Starts Jul 15',
+      place: 'Starts Jul 15',
       theme: '🛳️ Welcome Aboard',
     });
   });
 
   it('embark day names the port', () => {
     expect(headerDayIdentity(EVENT, cest(2026, 7, 15))).toEqual({
-      port: '🇮🇹 Trieste',
+      place: '🇮🇹 Trieste',
       theme: '🛳️ Welcome Aboard',
     });
   });
@@ -46,7 +46,7 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
     // Noon on Day 2 (Split, 2026-07-16): its card unlocked at 08:00, so the
     // header names it.
     expect(headerDayIdentity(EVENT, cest(2026, 7, 16))).toEqual({
-      port: '🇭🇷 Split',
+      place: '🇭🇷 Split',
       theme: '🌍 Uniforms Without Borders',
     });
     // 06:00 on Day 3 (Sea Day, corrected 2026-07-17): its card is still locked
@@ -54,13 +54,13 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
     // — matching the board's default Day — instead of leading it to the Sea Day
     // at calendar midnight.
     expect(headerDayIdentity(EVENT, cest(2026, 7, 17, 6))).toEqual({
-      port: '🇭🇷 Split',
+      place: '🇭🇷 Split',
       theme: '🌍 Uniforms Without Borders',
     });
     // 08:00 on the Sea Day: the card unlocks and the header rolls to it in the
     // same beat as the board.
     expect(headerDayIdentity(EVENT, cest(2026, 7, 17, 8))).toEqual({
-      port: '🌊 Sea Day',
+      place: '🌊 Sea Day',
       theme: '💖 Neon Pink Playground',
     });
   });
@@ -68,22 +68,22 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
   it('sea day and farewell day render their own identities', () => {
     // Sea Day is Day 3 (Jul 17) in the corrected itinerary.
     expect(headerDayIdentity(EVENT, cest(2026, 7, 17))).toEqual({
-      port: '🌊 Sea Day',
+      place: '🌊 Sea Day',
       theme: '💖 Neon Pink Playground',
     });
     expect(headerDayIdentity(EVENT, cest(2026, 7, 24))).toEqual({
-      port: '🇪🇸 Barcelona',
+      place: '🇪🇸 Barcelona',
       theme: '👋 So Long, Farewell',
     });
   });
 
   it('post-cruise reads "Barcelona" / "👋 Until next year"', () => {
     expect(headerDayIdentity(EVENT, cest(2026, 7, 25))).toEqual({
-      port: 'Barcelona',
+      place: 'Barcelona',
       theme: '👋 Until next year',
     });
     expect(headerDayIdentity(EVENT, cest(2026, 12, 1))).toEqual({
-      port: 'Barcelona',
+      place: 'Barcelona',
       theme: '👋 Until next year',
     });
   });
@@ -96,7 +96,7 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
     // `now` epoch math, so it needs no timezone; only this calendar boundary
     // does.)
     expect(headerDayIdentity(EVENT, Date.UTC(2026, 6, 14, 22, 30))).toEqual({
-      port: '🇮🇹 Trieste',
+      place: '🇮🇹 Trieste',
       theme: '🛳️ Welcome Aboard',
     });
   });
@@ -120,7 +120,7 @@ describe('DayIdentityLines — presentational states', () => {
   });
 
   it('renders the two live lines, port bold-line first', () => {
-    const html = renderToStaticMarkup(<DayIdentityLines identity={{ port: '🇭🇷 Split', theme: '🌍 Uniforms Without Borders' }} />);
+    const html = renderToStaticMarkup(<DayIdentityLines identity={{ place: '🇭🇷 Split', theme: '🌍 Uniforms Without Borders' }} />);
     expect(html).not.toContain('aria-hidden');
     expect(html).toContain('🇭🇷 Split');
     expect(html).toContain('🌍 Uniforms Without Borders');

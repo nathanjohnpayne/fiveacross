@@ -43,8 +43,8 @@ const DAY4_UNLOCK = Date.parse('2026-07-18T06:00:00Z');
 const gcbDay4: EmailDay = {
   index: 3,
   date: '2026-07-18',
-  port: 'Valletta',
-  portEmoji: '🇲🇹',
+  place: 'Valletta',
+  placeEmoji: '🇲🇹',
   theme: 'sporty-splash',
   tonight: ['💦 Splash T-Dance', '🏋️ Get Sporty'],
   pool: 'main',
@@ -490,7 +490,7 @@ describe('buildDailyEmailModel', () => {
     const day1: EmailDay = {
       index: 0,
       date: '2026-08-07',
-      port: 'Bodega Bay',
+      place: 'Bodega Bay',
       theme: 'the-birds',
       tonight: ['🍷 Deck wine', '🎬 The Birds on the living-room wall'],
       unlockAt: Date.parse('2026-08-07T15:00:00Z'),
@@ -522,10 +522,23 @@ describe('buildDailyEmailModel', () => {
   });
 
   it('drops the Place from the context line and the morning line when a Day names none', () => {
-    const atSea = { ...gcbDay4, port: '', portEmoji: '' };
+    const atSea = { ...gcbDay4, place: '', placeEmoji: '' };
     const model = build({ day: atSea });
     expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18');
     expect(model.nudgeLine).toContain('A day at sea today');
+  });
+
+  it('reads a pre-#566 raw Day (port/portEmoji persisted names) — the email reads RAW Firestore days, so the legacy live doc must keep its Place label', () => {
+    const legacy = { ...gcbDay4, place: undefined, placeEmoji: undefined, port: 'Valletta', portEmoji: '🇲🇹' };
+    const model = build({ day: legacy });
+    expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18 · 🇲🇹 Valletta');
+    expect(model.nudgeLine).toContain('The boat docks in Valletta today');
+  });
+
+  it('preserves a live legacy emoji when a dual-written Day disagrees during the rename', () => {
+    const dualWritten = { ...gcbDay4, placeEmoji: '🌫️', portEmoji: '👋' };
+    const model = build({ day: dualWritten });
+    expect(model.contextLine).toBe('Day 4 of 4 · Saturday, Jul 18 · 👋 Valletta');
   });
 
   it('formats the unlock time in the EVENT timezone, and survives a bogus one', () => {

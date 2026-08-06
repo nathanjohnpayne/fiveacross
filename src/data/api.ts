@@ -25,6 +25,7 @@ import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
 import { adultContentRequired } from '../adultContent';
 import { itemsCol } from './paths';
 import { FREE_TEXT } from './seed';
+import { normalizePool } from '../game/pool';
 import {
   dealBoard,
   dayDealState,
@@ -625,9 +626,12 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       id,
       text: String(data.text ?? ''),
       spicy: data.spicy === true,
-      // Carry the pool so a main-day deal can stratify embark (the easy half) from
-      // main (specs/easy-mix.md). Absent → 'main' (legacy items, itemConverter default).
-      pool: typeof data.pool === 'string' ? data.pool : 'main',
+      // Carry the pool so a main-day deal can stratify the easy half from main
+      // (specs/easy-mix.md). This is a RAW hydration (no itemConverter), so
+      // normalize here — the live docs persist the legacy 'embark' spelling
+      // (#565; Codex P1 on PR #648) — and `dealBoard` normalizes again at
+      // comparison time as defense in depth. Absent → 'main'.
+      pool: normalizePool(data.pool),
     }));
 
   // No repeats across the cruise: exclude every Prompt already on ANY OTHER Day
@@ -957,8 +961,9 @@ export async function reshuffleBoard(params: {
       text: String(data.text ?? ''),
       spicy: data.spicy === true,
       // Same pool-carrying as the first deal — a reshuffle inherits the easy mix from
-      // the same frozen snapshot for free (specs/easy-mix.md).
-      pool: typeof data.pool === 'string' ? data.pool : 'main',
+      // the same frozen snapshot for free (specs/easy-mix.md). RAW hydration, so
+      // normalize the legacy persisted spelling here too (#565).
+      pool: normalizePool(data.pool),
     }));
 
   // The peer cards whose Prompts the replacement must avoid. Their refs are built

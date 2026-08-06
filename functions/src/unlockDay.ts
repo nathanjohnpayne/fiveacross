@@ -33,7 +33,7 @@
 /** The subset of a `DayDef` the scheduler reads/writes. */
 export interface DayLike {
   index: number;
-  pool: string; // 'main' | 'embark' | 'farewell'
+  pool: string; // canonical 'main' | 'easy' | 'closing'; legacy docs persist 'embark' | 'farewell' (normalizePool)
   unlockAt: number; // ms epoch
   snapshotItemIds?: string[];
   snapshotEasyMixRatio?: number;
@@ -59,6 +59,7 @@ import {
   type FinaleDayStat,
   type FinaleDayHonorDoc,
 } from './finaleContent';
+import { normalizePool } from './poolVocab';
 
 export type FinaleMomentKind = 'last_call' | 'podium';
 
@@ -96,12 +97,16 @@ export interface SnapshotItem {
 }
 
 /** The item pools a Day's snapshot draws from (specs/easy-mix.md § "Snapshot carries
- *  both pools"). A MAIN day now freezes BOTH the main pool AND the embark pool, so the
+ *  both pools"). A MAIN day freezes BOTH the main pool AND the easy pool, so the
  *  easy-mix squares live in the one snapshot and every deal / reshuffle inherits the
- *  mix for free. Tutorial days (embark/farewell) freeze only their own pool, unchanged.
+ *  mix for free. Curated Days (easy/closing) freeze only their own pool, unchanged.
+ *  Vocabulary-normalized on BOTH sides (#565): the returned set is canonical, and
+ *  `activeSnapshotIds` normalizes each item's pool before matching, so a Day or
+ *  item persisting the legacy values ('embark'/'farewell') behaves identically.
  */
 export function snapshotPoolsFor(dayPool: string): string[] {
-  return dayPool === 'main' ? ['main', 'embark'] : [dayPool];
+  const pool = normalizePool(dayPool);
+  return pool === 'main' ? ['main', 'easy'] : [pool];
 }
 
 function eventEasyMixRatio(event: EventLike | undefined): number {
@@ -113,7 +118,7 @@ export interface SnapshotFilter {
   pool: string;
   /**
    * The set of item pools this snapshot admits. When present it is authoritative
-   * (a main day passes `['main', 'embark']` — see `snapshotPoolsFor`); when absent it
+   * (a main day passes `['main', 'easy']` — see `snapshotPoolsFor`); when absent it
    * defaults to `[pool]`, so a caller that only sets `pool` keeps the pre-easy-mix
    * single-pool behavior.
    */
@@ -179,8 +184,13 @@ export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter)
   // permanently starving the Day (#289, the 2026-07-14 embark incident). Fail
   // OPEN: no cutoff, the snapshot is simply the active pool at run time.
   const cutoffApplies = cutoff > 0;
+  // Membership is tested in NORMALIZED vocabulary on both sides (#565): the
+  // admitted set and each item's persisted pool may independently be legacy
+  // ('embark'/'farewell') or canonical ('easy'/'closing') during the rename
+  // transition, and a mixed Event must still resolve to the same one pool.
+  const normalizedPools = pools.map(normalizePool);
   return items
-    .filter((it) => pools.includes(it.pool ?? 'main'))
+    .filter((it) => normalizedPools.includes(normalizePool(it.pool)))
     .filter((it) => !it.isFreeSpace)
     .filter((it) => !isReportHidden(it.reportCount ?? 0, reportHideThreshold))
     .filter((it) => !isBanned(it.createdBy, bannedUids))
@@ -223,7 +233,7 @@ export interface FinaleTimes {
  * point of #552 is that this file's arithmetic is timezone-free.
  */
 export function finaleTimes(days: DayLike[]): FinaleTimes | null {
-  const farewell = days.find((d) => d.pool === 'farewell');
+  const farewell = days.find((d) => normalizePool(d.pool) === 'closing');
   if (!farewell) return null;
   const dayNine = days.find((d) => d.index === farewell.index - 1);
   const lastCallAt = dayNine ? dayNine.unlockAt + LAST_CALL_LEAD_MS : farewell.unlockAt - LAST_CALL_LEAD_MS;

@@ -9,8 +9,17 @@ service cloud.firestore {
       return signedIn() &&
         request.auth.uid in get(/databases/$(database)/documents/events/$(eventId)).data.admins;
     }
+    // The three Prompt pools (CONTEXT.md § Pool). Canonical values are
+    // 'main' / 'easy' / 'closing'; 'embark' (= easy) and 'farewell'
+    // (= closing) are the pre-#565 persisted spellings, which BOTH live
+    // Events' docs still carry and which client writes keep emitting during
+    // the rename transition (`persistedPool`, src/data/admin.ts). Accepting
+    // both is deliberate and temporary: an admin update that carries an
+    // unchanged legacy value, and a post-flip client minting the canonical
+    // one, must both pass. Narrow this back to the canonical trio when the
+    // read-coercion (`migratePool`) is retired.
     function validItemPool() {
-      return request.resource.data.pool in ['main', 'embark', 'farewell'];
+      return request.resource.data.pool in ['main', 'easy', 'closing', 'embark', 'farewell'];
     }
     function nonAdminPendingMainItemCreate() {
       return request.resource.data.status == 'pending'

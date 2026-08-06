@@ -515,7 +515,7 @@ export function DayBar({
             <>First to BINGO: {honor.displayName}, {honorTime(honor.at, timezone)}</>
           ) : (
             <>
-              <span aria-hidden="true">{day.portEmoji}</span> {day.port}
+              <span aria-hidden="true">{day.placeEmoji}</span> {day.place}
             </>
           )}
         </div>
@@ -1226,8 +1226,8 @@ export default function Board() {
       day: vd
         ? {
             number: vd.index + 1,
-            port: vd.port,
-            portEmoji: vd.portEmoji,
+            place: vd.place,
+            placeEmoji: vd.placeEmoji,
             theme: vd.theme,
             label: themeLabel(vd.theme),
           }
@@ -1242,8 +1242,8 @@ export default function Board() {
     hasDays,
     viewedIndex,
     player?.bingoCount,
-    days[viewedIndex]?.port,
-    days[viewedIndex]?.portEmoji,
+    days[viewedIndex]?.place,
+    days[viewedIndex]?.placeEmoji,
     days[viewedIndex]?.theme,
   ]);
 
@@ -2296,7 +2296,7 @@ export default function Board() {
             podium is a public leaderboard-like surface, so a banned Player
             must never surface as champion, First to BINGO, or a daily
             honor (Codex #244). */}
-        {viewedDay?.pool === 'farewell' && event?.frozenAt != null && (
+        {viewedDay?.pool === 'closing' && event?.frozenAt != null && (
           <FarewellPodium
             players={players.filter((p) => !isBanned(p.uid, event?.bannedUids ?? []))}
             days={days}
@@ -2471,7 +2471,7 @@ export default function Board() {
           const nightSuffix = night ? ` · ${night} night` : '';
           const contextLine =
             winDay && event?.name
-              ? `${event.name} · Day ${winDay.index + 1} · ${winDay.port}`
+              ? `${event.name} · Day ${winDay.index + 1} · ${winDay.place}`
               : undefined;
           const statLine = winDay
             ? celebrate === 'blackout'

@@ -45,7 +45,7 @@ function cell(index: number, over: Partial<Cell> = {}): Cell {
 }
 const CELLS: Cell[] = Array.from({ length: 25 }, (_, i) => cell(i));
 
-const DAY: CardSnapshotDay = { number: 3, port: 'Split', portEmoji: '🇭🇷', theme: 'get-sporty', label: 'Get Sporty' };
+const DAY: CardSnapshotDay = { number: 3, place: 'Split', placeEmoji: '🇭🇷', theme: 'get-sporty', label: 'Get Sporty' };
 const SAVE = {
   uid: UID,
   dayIndex: 2,
@@ -87,6 +87,20 @@ describe('cardCache', () => {
     const snap = loadCardSnapshot(UID);
     expect(snap!.dayIndex).toBeNull();
     expect(snap!.day).toBeNull();
+  });
+
+  it('reads a pre-#566 stored day (port/portEmoji keys) as place/placeEmoji — the rename never orphans a device\'s durable card', () => {
+    // A blob written by the pre-rename bundle: identical except the Day carries
+    // the legacy field names. Must load (coerced), not read as a miss — losing
+    // the offline fallback mid-Event over a rename would be a regression.
+    saveCardSnapshot(SAVE);
+    const raw = JSON.parse(localStorage.getItem(latestKeyFor(UID))!);
+    raw.day = { number: 3, port: 'Split', portEmoji: '🇭🇷', theme: 'get-sporty', label: 'Get Sporty' };
+    localStorage.setItem(latestKeyFor(UID), JSON.stringify(raw));
+    const snap = loadCardSnapshot(UID);
+    expect(snap).not.toBeNull();
+    expect(snap!.day).toEqual(DAY);
+    expect(snap!.day).not.toHaveProperty('port');
   });
 
   it('reads a corrupt/unparseable blob as a miss, never a throw', () => {

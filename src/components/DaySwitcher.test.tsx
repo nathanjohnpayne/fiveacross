@@ -17,11 +17,11 @@ function makeDays(count = 10, startUnlock = 0): DayDef[] {
   return Array.from({ length: count }, (_, index) => ({
     index,
     date: `2026-07-${String(15 + index).padStart(2, '0')}`,
-    port: `Port ${index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${index}`,
+    placeEmoji: '🇭🇷',
     theme: 'get-sporty',
     tonight: [],
-    pool: index === 0 ? 'embark' : index === count - 1 ? 'farewell' : 'main',
+    pool: index === 0 ? 'easy' : index === count - 1 ? 'closing' : 'main',
     tutorial: index === 0 || index === count - 1,
     unlockAt: startUnlock + index * DAY_MS,
   }));
@@ -82,9 +82,9 @@ describe('<DaySwitcher />', () => {
     expect(chips[9].textContent?.startsWith('🔒')).toBe(true);
   });
 
-  it('uses a per-Day port emoji instead of stacking the Theme emoji, with the Theme as fallback', () => {
+  it('uses a per-Day place emoji instead of stacking the Theme emoji, with the Theme as fallback', () => {
     const days = makeDays(2);
-    days[1]!.portEmoji = '';
+    days[1]!.placeEmoji = '';
     render(<DaySwitcher days={days} viewedIndex={0} onSelect={vi.fn()} now={0} />);
     const chips = screen.getAllByRole('tab');
 

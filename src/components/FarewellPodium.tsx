@@ -38,7 +38,7 @@ function makeDayLabel(days: readonly DayDef[] | undefined): (dayIndex: number) =
   return (dayIndex: number): string => {
     const d = days?.find((day) => day.index === dayIndex);
     if (!d) return `Day ${dayIndex + 1}`;
-    return `Day ${dayIndex + 1} · ${d.port}${d.portEmoji ? ` ${d.portEmoji}` : ''}`;
+    return `Day ${dayIndex + 1} · ${d.place}${d.placeEmoji ? ` ${d.placeEmoji}` : ''}`;
   };
 }
 

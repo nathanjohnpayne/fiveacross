@@ -5,6 +5,9 @@ status: accepted
 
 # Schedule correction: unified day themes + two-event Tonight lines (`schedule-correction`)
 
+> **Vocabulary note (#565/#566):** this spec's persisted-contract language was updated for the neutral vocabulary — Day/Event fields `place`/`placeEmoji` and `startsOn`/`endsOn` (legacy `port`/`portEmoji`, `sailStart`/`sailEnd` coerced on read by `eventConverter`), and Pool values `easy`/`closing` (both live Events still PERSIST the legacy `embark`/`farewell` spellings; reads normalize via `migratePool`/`normalizePool`, rules accept both, and writes keep emitting the legacy values until the post-Event cleanup).
+
+
 Implements `plans/daily-cards-spec.md` § "Itinerary and schedule" (corrected 2026-07-17) and `plans/schedule-correction-ticket.md`. The published July 2026 itinerary differs from what was seeded: some days run two parties under one **unified day theme**, ports moved (Sea Day is Day 3, Valletta Day 4, Palermo Day 5, Naples Day 6, Rome Day 7, Villefranche Day 8, Marseille Day 9), and five unified themes are new. This is **display metadata only**—the correction re-labels the cards and never touches boards, cells, marks, tallies, proofs, doubts, moments, dayStats, Event totals, snapshots, pools, unlock times, dates, or day indexes. Theme is cosmetic by design, so already-dealt Day 1–3 cards keep their exact prompts and marks and simply re-render under corrected chrome.
 
 ## Model
@@ -43,7 +46,7 @@ Each `DayDef` keeps ONE `theme: ThemeId` (drives chrome, palette, chips, honors 
 
 Because Days 1–3 are already unlocked, the Admin Schedule editor and `firestore.rules` correctly refuse to change their `theme`, so the correction lands via the service account (bypasses rules; no rules change). The script:
 
-- **Dry-runs by default**—it prints a full before/after diff of only `theme` / `port` / `portEmoji` / `tonight` and writes nothing unless `--apply` is passed.
+- **Dry-runs by default**—it prints a full before/after diff of only `theme` / `place` / `placeEmoji` / `tonight` and writes nothing unless `--apply` is passed.
 - **Preserves game state**—the Day written back is the LIVE Day with only those four fields overwritten from the target, so `unlockAt`, `date`, `pool`, `tutorial`, `freeText`, and any scheduler-stamped `snapshotItemIds` are carried through byte-for-byte.
 - **Fails closed**—it refuses to run if any Day's immutable field (`index`, `date`, `pool`, `tutorial`, `unlockAt`, `freeText`) has drifted from the target, if the Day count mismatches, or if the write would change any field outside the allowed four.
 - **Is idempotent**—a second run reports "already correct" and writes nothing.
@@ -53,12 +56,12 @@ Because Days 1–3 are already unlocked, the Admin Schedule editor and `firestor
 - **Given** the corrected seed, **when** the mapping is read, **then** Days 1–10 carry the ports, unified themes, and two-event `tonight` lines in the table above, `EVENT_SEED.days` stays in sync with `DAYS`, and no `tonight` line contains the Atlantis mark.
 - **Given** any day card, **when** it renders, **then** the "Tonight:" line shows its two events; **and** the locked-day preview shows the same tease.
 - **Given** the five new `[data-theme]` blocks, **when** the contrast suites run, **then** all five clear the same 4.5:1 pairs the existing themes clear, with no suite edits.
-- **Given** the live event after the migration, **then** every board, mark, tally, proof, and stat is unchanged (the migration touches only `theme`/`port`/`portEmoji`/`tonight`), and Day 4's 08:00 unlock deals exactly as it would have.
+- **Given** the live event after the migration, **then** every board, mark, tally, proof, and stat is unchanged (the migration touches only `theme`/`place`/`placeEmoji`/`tonight`), and Day 4's 08:00 unlock deals exactly as it would have.
 - **Given** a player whose saved theme is a superseded ThemeId (e.g. `get-sporty`), **then** their choice still works, and Auto—match the day resolves to the new unified ThemeIds.
 
 ## Test coverage
 
-- `src/data/schedule-correction.test.ts`—the corrected day → theme/port/portEmoji/tonight mapping asserted against the seed, exactly-two-entries per day, the no-Atlantis-mark guard on every `tonight` line, and the migration planning core (corrects the old live schedule with no forbidden change, preserves the scheduler snapshot and every immutable field, is idempotent, and refuses on immutable-field drift / date shift / count mismatch).
+- `src/data/schedule-correction.test.ts`—the corrected day → theme/place/placeEmoji/tonight mapping asserted against the seed, exactly-two-entries per day, the no-Atlantis-mark guard on every `tonight` line, and the migration planning core (corrects the old live schedule with no forbidden change, preserves the scheduler snapshot and every immutable field, is idempotent, and refuses on immutable-field drift / date shift / count mismatch).
 - `src/components/d15-day-card-render.test.tsx`—the "Tonight:" line renders with both events on the dealt card and on the locked-day preview tease.
 - `src/components/Admin.test.tsx`—the "2 parties" pill on a two-party day (and its absence on a show+party day and a tutorial day), the editable Tonight field invoking `setDayTonight`, and its disabled state on an unlocked Day.
 - `src/theme/d15-two-themes.test.ts`—the tutorial themes' fixed positions after the five unified themes were appended.

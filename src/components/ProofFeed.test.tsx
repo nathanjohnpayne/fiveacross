@@ -583,8 +583,8 @@ describe('ProofFeed — Tally Card actions wired to the Board sheet (#261)', () 
   const dayFixture = (index: number) => ({
     index,
     date: `2026-07-${15 + index}`,
-    port: `Port ${index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${index}`,
+    placeEmoji: '🇭🇷',
     theme: 'get-sporty',
     pool: 'main',
     tutorial: false,
@@ -708,7 +708,7 @@ describe('ProofFeed — a corrected Notice is marked "edited" (#455)', () => {
   });
   const eventSnap = {
     exists: () => true,
-    data: () => ({ days: [{ index: 0, date: '2026-07-15', port: 'Sea', theme: 't', pool: 'main', tutorial: false, unlockAt: 0 }] }),
+    data: () => ({ days: [{ index: 0, date: '2026-07-15', place: 'Sea', theme: 't', pool: 'main', tutorial: false, unlockAt: 0 }] }),
     metadata: { fromCache: false },
   };
 

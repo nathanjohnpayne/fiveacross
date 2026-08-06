@@ -119,8 +119,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function day(over: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: `2026-07-${String(15 + over.index).padStart(2, '0')}`,
-    port: `Port ${over.index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${over.index}`,
+    placeEmoji: '🇭🇷',
     tonight: [],
     pool: 'main',
     tutorial: false,
@@ -199,7 +199,7 @@ describe('Board daily-cards wiring (#246)', () => {
       claimMode: 'honor',
       timezone: 'UTC',
       days: [
-        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, snapshotItemIds: ['x'], tutorial: true, pool: 'embark' }),
+        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, snapshotItemIds: ['x'], tutorial: true, pool: 'easy' }),
         day({ index: 1, theme: 'glamiators', unlockAt: now - 1 * DAY_MS, snapshotItemIds: ['x'] }),
       ],
     } as unknown as EventDoc;

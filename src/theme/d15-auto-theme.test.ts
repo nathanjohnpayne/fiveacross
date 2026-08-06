@@ -9,8 +9,8 @@ import type { DayDef, EventDoc } from '../types';
 function day(partial: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: '2027-01-01',
-    port: 'Test Port',
-    portEmoji: '🚢',
+    place: 'Test Port',
+    placeEmoji: '🚢',
     tonight: [],
     pool: 'main',
     tutorial: false,

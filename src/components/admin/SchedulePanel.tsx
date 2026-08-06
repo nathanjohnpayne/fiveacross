@@ -291,7 +291,7 @@ function ScheduleRow({
       <div className="schedule-row-top">
         <div className="grow">
           <div className="name">
-            Day {day.index + 1} · {day.date} · {day.portEmoji} {day.port}
+            Day {day.index + 1} · {day.date} · {day.placeEmoji} {day.place}
             {day.tutorial ? (
               <span className="pill">tutorial</span>
             ) : (

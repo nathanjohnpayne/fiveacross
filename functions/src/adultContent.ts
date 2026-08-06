@@ -44,7 +44,10 @@
  * by construction — `adminAddItem` forces `safeSpicy = pool === 'main' ? spicy :
  * false` (src/data/admin.ts) and the admin pool editor gates its 🔞 control on
  * `spicyAllowed = pool === 'main'` (src/components/admin/PromptPool.tsx) — so a
- * spicy embark/farewell item is a data anomaly, not a reason to gate an Event.
+ * spicy easy/closing-pool item is a data anomaly, not a reason to gate an
+ * Event. Both the canonical curated values ('easy'/'closing') and the legacy
+ * persisted ones ('embark'/'farewell') are non-main and therefore excluded —
+ * no normalization needed here, but the tests pin all four (#565).
  *
  * A MISSING `pool` counts as main. `ItemDoc.pool` arrived with the Phase 1.5
  * pools (#207); items seeded before it have no field, and every one of them is a

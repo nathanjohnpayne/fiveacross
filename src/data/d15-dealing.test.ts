@@ -132,8 +132,8 @@ function mkDay(over: Partial<DayDef>): DayDef {
   return {
     index: 2,
     date: '2026-07-18',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     theme: 'neon-playground',
     tonight: [],
     pool: 'main',
@@ -268,7 +268,7 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
       isFreeSpace: false,
       status: 'active',
       spicy: false,
-      pool: 'embark',
+      pool: 'easy',
       reportCount: 0,
     });
     H.event = {
@@ -360,9 +360,9 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
   });
 
   it('deals an all-tame tutorial Day unstratified without spicy-ratio starvation', async () => {
-    const ids = seedPool(30, 'embark');
+    const ids = seedPool(30, 'easy');
     H.event = {
-      days: daysWith(mkDay({ index: 2, pool: 'embark', tutorial: true, unlockAt: PAST, snapshotItemIds: ids })),
+      days: daysWith(mkDay({ index: 2, pool: 'easy', tutorial: true, unlockAt: PAST, snapshotItemIds: ids })),
       // A stray spicyRatio must NOT be forced against the all-tame tutorial pool.
       settings: { spicyRatio: 0.4 },
     };

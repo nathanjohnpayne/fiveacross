@@ -247,8 +247,8 @@ describe('Share Card BINGO number', () => {
 function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: `2026-07-${String(15 + overrides.index).padStart(2, '0')}`,
-    port: `Port ${overrides.index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${overrides.index}`,
+    placeEmoji: '🇭🇷',
     tonight: [],
     pool: 'main',
     tutorial: false,
@@ -1158,7 +1158,7 @@ describe('Durable cached-card fallback', () => {
           theme: 'welcome-aboard',
           unlockAt: now - DAY_MS,
           tutorial: true,
-          pool: 'embark',
+          pool: 'easy',
           snapshotItemIds: cells.filter((c) => !c.free).map((c) => c.itemId!),
         }),
       ],
@@ -1185,7 +1185,7 @@ describe('Durable cached-card fallback', () => {
           theme: 'welcome-aboard',
           unlockAt: now - DAY_MS,
           tutorial: true,
-          pool: 'embark',
+          pool: 'easy',
           snapshotItemIds: cells.filter((c) => !c.free).map((c) => c.itemId!),
         }),
       ],
@@ -1213,7 +1213,7 @@ describe('Durable cached-card fallback', () => {
           theme: 'welcome-aboard',
           unlockAt: now - DAY_MS,
           tutorial: true,
-          pool: 'embark',
+          pool: 'easy',
           snapshotItemIds: saved.filter((c) => !c.free).map((c) => c.itemId!),
         }),
       ],
@@ -1236,7 +1236,7 @@ describe('Day switcher retint', () => {
       claimMode: 'honor',
       timezone: 'UTC',
       days: [
-        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 3 * DAY_MS, tutorial: true, pool: 'embark' }),
+        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 3 * DAY_MS, tutorial: true, pool: 'easy' }),
         day({ index: 1, theme: 'get-sporty', unlockAt: now - 2 * DAY_MS }),
         day({ index: 2, theme: 'glamiators', unlockAt: now - 1 * DAY_MS }), // today
         day({ index: 3, theme: 'dog-tag', unlockAt: now + 1 * DAY_MS }), // locked
@@ -1321,7 +1321,7 @@ describe('Tutorial banner + board header (daybar)', () => {
     H.event = {
       claimMode: 'honor',
       timezone: 'UTC',
-      days: [day({ index: 0, theme: 'welcome-aboard', unlockAt: now - DAY_MS, tutorial: true, pool: 'embark' })],
+      days: [day({ index: 0, theme: 'welcome-aboard', unlockAt: now - DAY_MS, tutorial: true, pool: 'easy' })],
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
 
@@ -1360,7 +1360,7 @@ describe('Tutorial banner + board header (daybar)', () => {
     H.event = {
       claimMode: 'honor',
       timezone: 'UTC',
-      days: [day({ index: 9, theme: 'so-long-farewell', unlockAt: now - DAY_MS, tutorial: true, pool: 'farewell' })],
+      days: [day({ index: 9, theme: 'so-long-farewell', unlockAt: now - DAY_MS, tutorial: true, pool: 'closing' })],
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 9, seed: 1, createdAt: 0, cells: dealt() };
 
@@ -1466,7 +1466,7 @@ describe('Feed → Board square-opening intent (#261)', () => {
       claimMode: 'honor',
       timezone: 'UTC',
       days: [
-        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, tutorial: true, pool: 'embark' }),
+        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, tutorial: true, pool: 'easy' }),
         day({ index: 1, theme: 'get-sporty', unlockAt: now - DAY_MS }),
       ],
     } as unknown as EventDoc;
@@ -1544,7 +1544,7 @@ describe('per-Day First to BINGO (#264)', () => {
     H.event = {
       claimMode: 'honor',
       timezone: 'UTC',
-      days: [day({ index: 0, theme: 'welcome-aboard', unlockAt: now - DAY_MS, tutorial: true, pool: 'embark' })],
+      days: [day({ index: 0, theme: 'welcome-aboard', unlockAt: now - DAY_MS, tutorial: true, pool: 'easy' })],
     } as unknown as EventDoc;
     H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
     H.player = { uid: 'u1', displayName: 'Deck Daddy', photoURL: null, bingoCount: 0, squaresMarked: 0, firstBingoAt: null, blackout: false } as unknown as PlayerDoc;

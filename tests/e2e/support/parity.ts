@@ -126,11 +126,11 @@ export async function seedParityFixture(): Promise<ParityFixture> {
     const unlockAnchor = Math.min(Date.now(), PARITY_NOW);
     await updateDoc(doc(db, 'events', EVENT_ID), {
       days: [
-        { index: 0, date: '2026-07-15', port: 'Trieste', portEmoji: '🇮🇹', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: unlockAnchor - 50 * HOUR, snapshotItemIds: embarkIds, freeText: 'You made it aboard' },
-        { index: 1, date: '2026-07-16', port: 'Split', portEmoji: '🇭🇷', theme: 'get-sporty', pool: 'main', tutorial: false, unlockAt: unlockAnchor - 26 * HOUR, snapshotItemIds: mainIds },
-        { index: 2, date: '2026-07-17', port: 'Valletta', portEmoji: '🇲🇹', theme: 'duty-free', pool: 'main', tutorial: false, unlockAt: unlockAnchor - 6 * HOUR, snapshotItemIds: mainIds },
-        { index: 3, date: '2026-07-18', port: 'Palermo', portEmoji: '🇮🇹', theme: 'glamiators', pool: 'main', tutorial: false, unlockAt: unlockAt('2026-07-18') },
-        { index: 4, date: '2026-07-24', port: 'Barcelona', portEmoji: '🇪🇸', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: unlockAt('2026-07-24'), freeText: 'We had the best damn time' },
+        { index: 0, date: '2026-07-15', place: 'Trieste', placeEmoji: '🇮🇹', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: unlockAnchor - 50 * HOUR, snapshotItemIds: embarkIds, freeText: 'You made it aboard' },
+        { index: 1, date: '2026-07-16', place: 'Split', placeEmoji: '🇭🇷', theme: 'get-sporty', pool: 'main', tutorial: false, unlockAt: unlockAnchor - 26 * HOUR, snapshotItemIds: mainIds },
+        { index: 2, date: '2026-07-17', place: 'Valletta', placeEmoji: '🇲🇹', theme: 'duty-free', pool: 'main', tutorial: false, unlockAt: unlockAnchor - 6 * HOUR, snapshotItemIds: mainIds },
+        { index: 3, date: '2026-07-18', place: 'Palermo', placeEmoji: '🇮🇹', theme: 'glamiators', pool: 'main', tutorial: false, unlockAt: unlockAt('2026-07-18') },
+        { index: 4, date: '2026-07-24', place: 'Barcelona', placeEmoji: '🇪🇸', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: unlockAt('2026-07-24'), freeText: 'We had the best damn time' },
       ],
     });
 

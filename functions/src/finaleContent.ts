@@ -18,6 +18,8 @@
  * tutorial-exclusion rule ever changes, change it here too.
  */
 
+import { normalizePool } from './poolVocab';
+
 // --- Minimal domain shapes (local, package-decoupled) ---------------------------
 
 /** One Day Card's contribution to a Player's cruise totals. */
@@ -103,7 +105,7 @@ export function tutorialDayIndexes(days: readonly FinaleDay[] | undefined): Set<
  *  event). The farewell Day unlocks AT the freeze, so its marks are all post-freeze
  *  and must never move the frozen standings — the podium excludes this Day. */
 export function farewellDayIndex(days: readonly FinaleDay[] | undefined): number {
-  const f = (days ?? []).find((d) => d.pool === 'farewell');
+  const f = (days ?? []).find((d) => normalizePool(d.pool) === 'closing');
   return f ? f.index : -1;
 }
 

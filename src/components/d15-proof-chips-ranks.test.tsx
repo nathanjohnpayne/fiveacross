@@ -46,7 +46,7 @@ const mkProof = (uid: string, over: Partial<ProofDoc> = {}): ProofDoc =>
   }) as ProofDoc;
 
 const event: EventDoc = {
-  name: 'Med 2026', sailStart: '2026-07-16', sailEnd: '2026-07-25', status: 'active',
+  name: 'Med 2026', startsOn: '2026-07-16', endsOn: '2026-07-25', status: 'active',
   defaultTheme: 'neon-playground', claimMode: 'honor', admins: [], timezone: 'Europe/Rome',
   days: [], bannedUids: [], settings: { reportHideThreshold: 5 },
 };

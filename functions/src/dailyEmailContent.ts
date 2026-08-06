@@ -24,9 +24,18 @@ import { emailThemeTokens, type EmailThemeTokens } from './dailyEmailTheme';
 
 /** The canonical `DayDef` fields the email reads. Firestore's legacy/malformed
  *  tolerance makes display-only fields optional at this boundary; their value
- *  types still come directly from the shared contract. */
+ *  types still come directly from the shared contract. This boundary reads RAW
+ *  Firestore Day objects (no client converter), so it also models the
+ *  pre-#566 persisted field names — `port`/`portEmoji` — which `placeLabel`
+ *  and the arrival line use when present. The live Bodega wrap-up's
+ *  operator-corrected emoji remains on `portEmoji` during the transition. */
 export type EmailDay = Pick<DayDef, 'index' | 'unlockAt'> &
-  Partial<Pick<DayDef, 'date' | 'port' | 'portEmoji' | 'theme' | 'tonight' | 'tutorial'>>;
+  Partial<Pick<DayDef, 'date' | 'place' | 'placeEmoji' | 'theme' | 'tonight' | 'tutorial'>> & {
+    /** Legacy persisted name for `place` (pre-#566 Event docs). */
+    port?: string;
+    /** Legacy persisted name for `placeEmoji` (pre-#566 Event docs). */
+    portEmoji?: string;
+  };
 
 /** The canonical `EventDoc` fields the email reads, with legacy-safe presence. */
 export type EmailEvent = Partial<Pick<EventDoc, 'name' | 'timezone' | 'bannedUids'>> & {
@@ -304,12 +313,14 @@ export function formatUnlockTime(unlockAt: number, timeZone: string): string {
   return out.replace(/\s*AM$/, ' a.m.').replace(/\s*PM$/, ' p.m.');
 }
 
-/** "🇲🇹 Valletta", "Valletta", or `''` when the Day names no Place. */
+/** "🇲🇹 Valletta", "Valletta", or `''` when the Day names no Place. The
+ *  neutral place label wins; legacy `portEmoji` takes precedence while both
+ *  fields are dual-written, preserving a live operator correction. */
 function placeLabel(day: EmailDay): string {
-  const port = (day.port ?? '').trim();
-  if (!port) return '';
-  const emoji = (day.portEmoji ?? '').trim();
-  return emoji ? `${emoji} ${port}` : port;
+  const place = (day.place ?? day.port ?? '').trim();
+  if (!place) return '';
+  const emoji = (day.portEmoji ?? day.placeEmoji ?? '').trim();
+  return emoji ? `${emoji} ${place}` : place;
 }
 
 // --- The assembled model --------------------------------------------------------
@@ -450,8 +461,8 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const greeting = firstName ? `Morning, ${firstName}. ` : 'Morning. ';
   // The arrival line names the Place WITHOUT its flag emoji: the flag rides the
   // context line, and a flag mid-sentence reads as decoration rather than data.
-  const port = (day.port ?? '').trim();
-  const arrival = port ? register.arrivalLine(port) : register.arrivalLineNoPlace;
+  const arrivalPlace = (day.place ?? day.port ?? '').trim();
+  const arrival = arrivalPlace ? register.arrivalLine(arrivalPlace) : register.arrivalLineNoPlace;
   const nudgeLine = `${greeting}${arrival}—your Day ${dayNumber} card is live at ${formatUnlockTime(day.unlockAt, timeZone)}: 24 fresh squares.`;
   const tonight = (day.tonight ?? []).filter((t) => typeof t === 'string' && t.trim() !== '');
   const tonightLine = tonight.length > 0 ? tonight.join(' · ') : null;

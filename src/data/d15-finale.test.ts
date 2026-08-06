@@ -12,8 +12,8 @@ const HOUR = 3_600_000;
 function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'pool'>): DayDef {
   return {
     date: '2026-07-16',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     theme: 'neon-playground',
     tonight: [],
     tutorial: overrides.pool !== 'main',
@@ -23,9 +23,9 @@ function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'pool'>): DayDe
 }
 
 const DAYS: DayDef[] = [
-  day({ index: 0, pool: 'embark' }),
+  day({ index: 0, pool: 'easy' }),
   day({ index: 1, pool: 'main' }),
-  day({ index: 2, pool: 'farewell' }),
+  day({ index: 2, pool: 'closing' }),
 ];
 
 function player(overrides: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid'>): PlayerDoc {
@@ -48,7 +48,7 @@ describe('farewellPinIndex — default-view pin (never before the freeze)', () =
   });
 
   it('returns null when frozen but the farewell Day is still locked', () => {
-    const lockedFarewell = [DAYS[0], DAYS[1], day({ index: 2, pool: 'farewell', unlockAt: NOW + HOUR })];
+    const lockedFarewell = [DAYS[0], DAYS[1], day({ index: 2, pool: 'closing', unlockAt: NOW + HOUR })];
     expect(farewellPinIndex(lockedFarewell, NOW, NOW)).toBeNull();
   });
 

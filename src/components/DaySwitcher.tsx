@@ -98,7 +98,7 @@ export default function DaySwitcher({ days, viewedIndex, onSelect, now = Date.no
             type="button"
             role="tab"
             aria-selected={selected}
-            aria-label={`${weekday(d.date)} · ${d.port}${d.tutorial ? ` · ${tutorialTagLabel(d.pool)}` : ''}${state === 'locked' ? ' · locked' : ''}`}
+            aria-label={`${weekday(d.date)} · ${d.place}${d.tutorial ? ` · ${tutorialTagLabel(d.pool)}` : ''}${state === 'locked' ? ' · locked' : ''}`}
             className={`day-chip day-chip-${state}${selected ? ' selected' : ''}`}
             onClick={() => onSelect(i)}
           >
@@ -111,12 +111,14 @@ export default function DaySwitcher({ days, viewedIndex, onSelect, now = Date.no
             )}
             <span className="day-chip-weekday">{weekday(d.date)}</span>
             <span className="day-chip-port" aria-hidden="true">
-              {d.portEmoji}
+              {d.placeEmoji}
             </span>
             {/* An explicit per-Day emoji REPLACES the Theme's, it doesn't
-                stack with it — a Day wears one emoji. Every Day without a
-                portEmoji keeps showing its Theme's, unchanged. */}
-            {!d.portEmoji && (
+                stack with it — a Day wears one emoji (#646). Post-#566 the
+                chip reads the coerced `placeEmoji` (a live legacy `portEmoji`
+                wins inside `migrateDayFields`, preserving the operator's 👋);
+                a Day without any per-Day emoji keeps its Theme's, unchanged. */}
+            {!d.placeEmoji && (
               <span className="day-chip-theme" aria-hidden="true">
                 {themeEmoji(d.theme)}
               </span>

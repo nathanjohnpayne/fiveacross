@@ -141,16 +141,20 @@ export type ThemeId =
   | 'confetti-hour'
   | 'afterglow';
 
-// One Day of the cruise (daily-cards-spec § "Data model"). Ordered inside
-// `EventDoc.days` (length 10 for the July sailing, but the model assumes no
-// fixed length — a future cruise is a new EventDoc with its own days[]). Each
-// Day names a date, port, ThemeId, and item pool; the tutorial Days sit at the
-// ends but that placement is data, not a code assumption.
+// One Day of an Event (daily-cards-spec § "Data model"). Ordered inside
+// `EventDoc.days` (length 10 for the July sailing, 4 for Bodega Bay — the
+// model assumes no fixed length; a future Event is a new EventDoc with its own
+// days[]). Each Day names a date, place, ThemeId, and item pool; the tutorial
+// Days sit at the ends but that placement is data, not a code assumption.
 export interface DayDef {
   index: number;        // 0..9
   date: string;         // ISO date, e.g. '2026-07-16'
-  port: string;         // 'Split'
-  portEmoji: string;    // '🇭🇷'
+  // Where this Day happens — 'Split', 'Bodega Bay'. Docs written before the
+  // #566 rename persist `port`/`portEmoji`; `migrateDayFields`
+  // (data/converters) coerces them on read, and writes only ever emit the
+  // neutral names.
+  place: string;         // 'Split'
+  placeEmoji: string;    // '🇭🇷'
   theme: ThemeId;       // the UNIFIED day theme — drives card + chrome styling
   // The night's two signature events, shown on the card's "Tonight:" line
   // (day bar + locked-day tease). EXACTLY two display strings with emoji —
@@ -160,9 +164,14 @@ export interface DayDef {
   // scoring input reads it. Day 10's line is editorial (no disembark-day
   // events are published).
   tonight: string[];
-  pool: 'main' | 'embark' | 'farewell';
-  tutorial: boolean;    // true for the embark (Day 1) and farewell (Day 10) Days
-  unlockAt: number;     // ms epoch — 08:00 event-tz on `date`; embark Day = event open
+  // Which item set this Day deals from (CONTEXT.md § Pool): the main pool, the
+  // easy pool, or the closing pool. Docs written before the #565 rename
+  // persist 'embark' (easy) / 'farewell' (closing); `migratePool`
+  // (data/converters) coerces them on read. firestore.rules accept both
+  // vocabularies during the transition.
+  pool: 'main' | 'easy' | 'closing';
+  tutorial: boolean;    // true for the tutorial Days (GCB: Day 1 and Day 10)
+  unlockAt: number;     // ms epoch — 08:00 event-tz on `date`; an easy first Day may use the 0 open sentinel
   freeText?: string;    // per-day free-space override (tutorial Days)
   // The Day Snapshot: the frozen list of item ids stamped at `unlockAt` by the
   // scheduler (#202). Optional on purpose — absent until that function runs, so
@@ -176,8 +185,11 @@ export interface DayDef {
 
 export interface EventDoc {
   name: string;
-  sailStart: string; // ISO date
-  sailEnd: string;   // ISO date
+  // The Event's date window. Docs written before the #566 rename persist
+  // `sailStart`/`sailEnd`; the eventConverter coerces them on read, and
+  // writes only ever emit the neutral names.
+  startsOn: string; // ISO date
+  endsOn: string;   // ISO date
   status: 'active' | 'archived';
   defaultTheme: ThemeId;
   claimMode: ClaimMode;
@@ -340,11 +352,15 @@ export interface ItemDoc {
   // Whether this Prompt is in the 🔞-tagged "spicy" category (vs. "tame") for
   // stratified Board composition (`dealBoard`'s spicyRatio sampling).
   spicy: boolean;
-  // Which of the three Phase 1.5 pools this Prompt belongs to (main game vs the
-  // embark/farewell tutorial cards), separated by field within the one `items`
-  // collection. Absent on legacy docs → `'main'` via `itemConverter` default;
-  // no data backfill (daily-cards-spec § "Migration").
-  pool: 'main' | 'embark' | 'farewell';
+  // Which of the three Phase 1.5 pools this Prompt belongs to (main game vs
+  // the easy/closing curated cards), separated by field within the one `items`
+  // collection. Absent on legacy docs → `'main'`, and the pre-#565 persisted
+  // values ('embark'/'farewell') coerce to 'easy'/'closing' — both via
+  // `migratePool` in `itemConverter`; no data backfill (daily-cards-spec §
+  // "Migration"). Writes through the transition keep emitting the LEGACY
+  // values (see `adminAddItem`) so not-yet-redeployed Functions never see a
+  // vocabulary they don't know.
+  pool: 'main' | 'easy' | 'closing';
   approvedBy?: string; // uid of the approving admin
   approvedAt?: number; // ms epoch
 }
@@ -404,7 +420,7 @@ export interface BoardDoc {
 // rather than drifting in a component file. The Day subset is DERIVED from
 // `DayDef` (never re-declared) and keeps `ThemeId`, so the stored and live Day
 // contracts cannot diverge without a type error.
-export interface CardSnapshotDay extends Pick<DayDef, 'port' | 'portEmoji' | 'theme'> {
+export interface CardSnapshotDay extends Pick<DayDef, 'place' | 'placeEmoji' | 'theme'> {
   number: number; // day.index + 1 (1..10) — the 1-based label the header shows
   label: string; // resolved ThemeMeta label for the header line (themeLabel(theme))
 }

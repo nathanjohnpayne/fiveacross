@@ -45,7 +45,7 @@ export default function CachedCardFallback({
               Day {day.number} · {day.label}
             </div>
             <div className="daybar-meta">
-              <span aria-hidden="true">{day.portEmoji}</span> {day.port}
+              <span aria-hidden="true">{day.placeEmoji}</span> {day.place}
             </div>
           </div>
         </div>

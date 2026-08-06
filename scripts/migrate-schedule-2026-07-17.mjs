@@ -8,8 +8,15 @@
 // refuse to change their `theme` — this lands the correction via the Admin SDK,
 // which bypasses rules. No rules change; game state is never touched.
 //
+// HISTORICAL — already applied to prod on 2026-07-17; kept for the audit trail
+// and its unit-tested planning core. The #566 field rename updated its target
+// vocabulary to `place`/`placeEmoji` alongside the seed; the LIVE med-2026
+// days still persist the pre-rename `port`/`portEmoji` (read-coerced by the
+// app's eventConverter), so a hypothetical re-run would now ADD the neutral
+// fields beside the legacy ones rather than edit them — fine, but pointless.
+//
 // DISPLAY METADATA ONLY. This writes the event doc's `days[]` and, per Day, may
-// only change: `theme`, `port`, `portEmoji`, `tonight`. It refuses to run if the
+// only change: `theme`, `place`, `placeEmoji`, `tonight`. It refuses to run if the
 // corrected schedule would change ANY other Day field (index, date, pool,
 // tutorial, unlockAt, freeText, snapshotItemIds) or if it can't align the live
 // Days to the target by date. It never reads or writes boards, cells, marks,
@@ -41,7 +48,7 @@ import { EVENT_SEED } from './seed-data/med-2026.mjs';
 // freeText, snapshotItemIds, and anything the scheduler added) is preserved
 // byte-for-byte. That construction is what makes the "metadata only, zero game
 // impact" guarantee hold; `diffDay`'s `forbidden` list re-asserts it in code.
-export const ALLOWED_FIELDS = ['theme', 'port', 'portEmoji', 'tonight'];
+export const ALLOWED_FIELDS = ['theme', 'place', 'placeEmoji', 'tonight'];
 
 // Identity fields that must be IDENTICAL between the live Day and the seed
 // target for the correction to be applied to the RIGHT Day. The target metadata
@@ -267,7 +274,7 @@ async function main() {
   }
 
   const plan = planScheduleMigration(liveDays);
-  console.log('\nBefore → after (theme / port / portEmoji / tonight only):');
+  console.log('\nBefore → after (theme / port / placeEmoji / tonight only):');
   console.log(formatMigrationReport(plan));
 
   // Fail closed on either abort condition.

@@ -128,8 +128,8 @@ function dealt(markedIndex?: number): Cell[] {
 function day(over: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: '2026-07-17',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     pool: 'main',
     tutorial: false,
     ...over,

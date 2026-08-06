@@ -115,12 +115,17 @@ function daysWithMain(snapshotItemIds?: string[]): DayLike[] {
 }
 
 describe('snapshotPoolsFor — which pools a Day freezes', () => {
-  it('a main day freezes BOTH the main and embark pools', () => {
-    expect(snapshotPoolsFor('main')).toEqual(['main', 'embark']);
+  it('a main day freezes BOTH the main and easy pools (canonical vocabulary out)', () => {
+    expect(snapshotPoolsFor('main')).toEqual(['main', 'easy']);
   });
-  it('a tutorial day freezes only its own pool', () => {
-    expect(snapshotPoolsFor('embark')).toEqual(['embark']);
-    expect(snapshotPoolsFor('farewell')).toEqual(['farewell']);
+  it('a curated day freezes only its own pool — legacy persisted values normalize (#565)', () => {
+    // BOTH live Events' Day docs still persist the legacy values; the returned
+    // set is canonical either way, and activeSnapshotIds normalizes item pools
+    // before matching, so the pair keeps working across the rename transition.
+    expect(snapshotPoolsFor('embark')).toEqual(['easy']);
+    expect(snapshotPoolsFor('farewell')).toEqual(['closing']);
+    expect(snapshotPoolsFor('easy')).toEqual(['easy']);
+    expect(snapshotPoolsFor('closing')).toEqual(['closing']);
   });
 });
 
@@ -142,6 +147,28 @@ describe('activeSnapshotIds — the pools set drives which items are frozen', ()
 
   it('falls back to the single `pool` when `pools` is absent (pre-easy-mix behavior)', () => {
     expect(activeSnapshotIds(items, { pool: 'main', ...OPEN })).toEqual(['m1', 'legacy']);
+  });
+
+  it('matches pools across MIXED vocabularies (#565) — a legacy-persisted item lands in a canonical set and vice versa', () => {
+    // The live Events' items persist 'embark'/'farewell' while post-rename code
+    // passes canonical sets (and a future flip could mint canonical item
+    // values). Membership is normalized on BOTH sides, so a mixed Event never
+    // silently splits one pool into two — the failure mode that would drop an
+    // admin-added easy Prompt from the next morning's snapshot.
+    const mixed = [
+      { id: 'e-legacy', pool: 'embark' },
+      { id: 'e-new', pool: 'easy' },
+      { id: 'c-legacy', pool: 'farewell' },
+      { id: 'c-new', pool: 'closing' },
+      { id: 'm1', pool: 'main' },
+    ];
+    expect(activeSnapshotIds(mixed, { pool: 'main', pools: ['main', 'easy'], ...OPEN })).toEqual([
+      'e-legacy',
+      'e-new',
+      'm1',
+    ]);
+    expect(activeSnapshotIds(mixed, { pool: 'embark', ...OPEN })).toEqual(['e-legacy', 'e-new']);
+    expect(activeSnapshotIds(mixed, { pool: 'closing', ...OPEN })).toEqual(['c-legacy', 'c-new']);
   });
 });
 

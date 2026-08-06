@@ -7,7 +7,7 @@ import { useEventDoc, useMyUser, usePendingItemCount } from '../hooks/useData';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { useTextSize, type TextSize } from '../hooks/useTextSize';
 import { THEMES } from '../theme/themes';
-import { eventTitle, shortSailRange } from '../format';
+import { eventTitle, shortDateRange } from '../format';
 import { todaysDayTheme } from '../theme/autoTheme';
 import { track } from '../analytics';
 import { MoreRow } from './MoreRow';
@@ -186,9 +186,9 @@ export default function More() {
       <p className="more-version muted">
         v{__APP_VERSION__}
         {event?.days?.length
-          ? ` · ${event.days[0].port} → ${event.days[event.days.length - 1].port}${shortSailRange(event.sailStart, event.sailEnd) ? ` · ${shortSailRange(event.sailStart, event.sailEnd)}` : ''}`
+          ? ` · ${event.days[0].place} → ${event.days[event.days.length - 1].place}${shortDateRange(event.startsOn, event.endsOn) ? ` · ${shortDateRange(event.startsOn, event.endsOn)}` : ''}`
           : event
-            ? ` · ${eventTitle(event.name, event.sailStart, event.sailEnd)}`
+            ? ` · ${eventTitle(event.name, event.startsOn, event.endsOn)}`
             : ''}
       </p>
 
@@ -368,7 +368,7 @@ function ScheduleList({ event }: { event: { days: import('../types').DayDef[]; t
           <div key={day.index} className="row">
             <div className="grow">
               <div className="name">
-                {day.portEmoji} {day.port}
+                {day.placeEmoji} {day.place}
               </div>
               <div className="sub">
                 {theme ? `${theme.emoji} ${theme.label}` : day.theme} · unlocks {time}

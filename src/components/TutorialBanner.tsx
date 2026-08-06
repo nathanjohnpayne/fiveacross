@@ -7,8 +7,8 @@ import { editionBrand } from '../editions';
  * (tutorial) view" / "Farewell view", specs/d15-tutorial-banners.md). Board
  * mounts this ONE component above the grid, gated on the viewed Day's
  * `tutorial` flag; it renders nothing for any of the eight main Days. Which
- * of the two banners shows is read off `day.pool` (`'embark'` |
- * `'farewell'`) rather than `day.index`, so the banner tracks the seeded
+ * of the two banners shows is read off `day.pool` (`'easy'` |
+ * `'closing'`) rather than `day.index`, so the banner tracks the seeded
  * data (#207's `DAYS`) instead of assuming the tutorial Days sit at fixed
  * positions.
  *
@@ -112,11 +112,11 @@ export default function TutorialBanner({ day }: { day: DayDef }) {
   // EmbarkBanner itself unmounts whenever the viewed Day isn't 'embark'.
   const [embarkDismissed, setEmbarkDismissed] = useState(false);
   if (!day.tutorial) return null;
-  if (day.pool === 'embark') {
+  if (day.pool === 'easy') {
     if (embarkDismissed) return null;
     return <EmbarkBanner onDismiss={() => setEmbarkDismissed(true)} />;
   }
-  if (day.pool === 'farewell') return <FarewellBanner />;
+  if (day.pool === 'closing') return <FarewellBanner />;
   return null;
 }
 
@@ -131,7 +131,7 @@ export default function TutorialBanner({ day }: { day: DayDef }) {
  * cannot collide with that pin (mutually exclusive on `tutorial`).
  */
 export function tutorialTagLabel(pool: DayDef['pool']): string {
-  return pool === 'farewell' ? 'Goodbye' : 'Warm-up';
+  return pool === 'closing' ? 'Goodbye' : 'Warm-up';
 }
 
 export function TutorialTag({ pool, className }: { pool: DayDef['pool']; className?: string }) {

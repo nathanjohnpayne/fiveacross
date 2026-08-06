@@ -13,6 +13,7 @@ import {
   CENTER,
   type DealItem,
   standingsFrozen,
+  ceremonialDayIndexSet,
 } from './logic';
 
 const pool: DealItem[] = Array.from({ length: 32 }, (_, i) => ({
@@ -237,8 +238,8 @@ describe('bingoLineEdge (#176: the celebration re-fires on each NEW line)', () =
 
 describe('standingsFrozen (#265; Codex P2 on #278 — the stale-cache belt)', () => {
   const days = [
-    { index: 0, date: '2026-07-15', port: 'Trieste', portEmoji: '', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: 0 },
-    { index: 9, date: '2026-07-24', port: 'Barcelona', portEmoji: '', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: 1000 },
+    { index: 0, date: '2026-07-15', place: 'Trieste', placeEmoji: '', theme: 'welcome-aboard', pool: 'easy', tutorial: true, unlockAt: 0 },
+    { index: 9, date: '2026-07-24', place: 'Barcelona', placeEmoji: '', theme: 'so-long-farewell', pool: 'closing', tutorial: true, unlockAt: 1000 },
   ] as import('../types').DayDef[];
 
   it('frozen once the scheduler stamp is present, regardless of the clock', () => {
@@ -253,5 +254,17 @@ describe('standingsFrozen (#265; Codex P2 on #278 — the stale-cache belt)', ()
   it('never frozen on a legacy event (no schedule) or a null event', () => {
     expect(standingsFrozen({ days: [] }, Number.MAX_SAFE_INTEGER)).toBe(false);
     expect(standingsFrozen(null, Number.MAX_SAFE_INTEGER)).toBe(false);
+  });
+
+  it("freezes on the LEGACY persisted 'farewell' spelling too — raw event reads (admin resolve, deal transactions) bypass the converter (#565; Codex P2 on PR #648)", () => {
+    const rawDays = [
+      { index: 0, pool: 'embark', tutorial: true, unlockAt: 0 },
+      { index: 3, pool: 'farewell', tutorial: true, unlockAt: 1000 },
+    ] as unknown as import('../types').DayDef[];
+    expect(standingsFrozen({ days: rawDays }, 1000)).toBe(true);
+    expect(standingsFrozen({ days: rawDays }, 999)).toBe(false);
+    // …and the ceremonial set classifies the same raw Day.
+    expect(ceremonialDayIndexSet(rawDays).has(3)).toBe(true);
+    expect(ceremonialDayIndexSet(rawDays).has(0)).toBe(false);
   });
 });

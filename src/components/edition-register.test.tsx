@@ -39,10 +39,10 @@ const DAYS: DayDef[] = [
   {
     index: 0,
     date: '2026-07-15',
-    port: 'Trieste',
-    portEmoji: '🇮🇹',
+    place: 'Trieste',
+    placeEmoji: '🇮🇹',
     theme: 'welcome-aboard',
-    pool: 'embark',
+    pool: 'easy',
     unlockAt: 0,
     tutorial: true,
   } as DayDef,

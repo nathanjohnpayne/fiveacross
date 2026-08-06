@@ -29,7 +29,7 @@ function snapshot(over: Partial<CardSnapshot> = {}): CardSnapshot {
     savedAt: 1,
     bingoCount: 4,
     cells,
-    day: { number: 3, port: 'Split', portEmoji: '🇭🇷', theme: 'get-sporty', label: 'Get Sporty' },
+    day: { number: 3, place: 'Split', placeEmoji: '🇭🇷', theme: 'get-sporty', label: 'Get Sporty' },
     ...over,
   };
 }
