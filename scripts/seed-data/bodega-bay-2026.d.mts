@@ -14,6 +14,9 @@ export type BodegaSeedDay = {
   date: string;
   place: string;
   placeEmoji: string;
+  /** Transition dual-write: the legacy field names the shipped bundle reads. */
+  port: string;
+  portEmoji: string;
   theme: ThemeId;
   tonight: string[];
   pool: 'main' | 'embark' | 'farewell';
@@ -28,6 +31,9 @@ export const EVENT_SEED: {
   name: string;
   startsOn: string;
   endsOn: string;
+  /** Transition dual-write: the legacy window names the shipped bundle reads. */
+  sailStart: string;
+  sailEnd: string;
   status: 'active';
   defaultTheme: ThemeId;
   claimMode: string;

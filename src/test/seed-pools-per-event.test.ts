@@ -45,10 +45,18 @@ describe('seed-data registry — Event selection (#563)', () => {
         ...mod.EASY_ITEMS,
         ...mod.CLOSING_ITEMS,
       ]);
-      // ALL_ITEMS must be duplicate-free across the three pools — the doc id
-      // is a content hash of `text`, so a cross-pool duplicate would collapse
-      // into ONE doc and silently shrink the seeded pool.
-      expect(new Set(mod.ALL_ITEMS.map((i) => i.text)).size, eventId).toBe(mod.ALL_ITEMS.length);
+      // ALL_ITEMS should be duplicate-free across the three pools — the doc id
+      // is a content hash of `text`, so a duplicate collapses into ONE doc and
+      // silently shrinks the seeded pool. The Bodega closing pool's two known
+      // live-data duplicates (below) are the sole, deliberate exception.
+      const KNOWN_DUPS =
+        eventId === 'bodega-bay-2026'
+          ? ['Share your favorite photo of the weekend', 'Share your favorite quote of the weekend']
+          : [];
+      const counts = new Map<string, number>();
+      for (const i of mod.ALL_ITEMS) counts.set(i.text, (counts.get(i.text) ?? 0) + 1);
+      const dups = [...counts.entries()].filter(([, n]) => n > 1).map(([t]) => t).sort();
+      expect(dups, eventId).toEqual(KNOWN_DUPS);
       // Deal floor: every pool a Day deals a whole card from must clear
       // MIN_POOL (24, src/game/logic.ts).
       expect(mod.ITEMS.length, eventId).toBeGreaterThanOrEqual(24);
@@ -58,12 +66,13 @@ describe('seed-data registry — Event selection (#563)', () => {
   });
 });
 
-// The Bodega Bay Event (plans/bodega-prompt-pools.md, seeded live 2026-08-05).
-// 40 per pool — NOT the GCB 28 (§ "Why 40, not 28"): Friday and Sunday are
-// COMPETITIVE Days dealt whole from one pool, and 24-of-28 would give any two
-// players ~20.5 shared squares; 40 restores real card variety.
+// The Bodega Bay Event (plans/bodega-prompt-pools.md, seeded live 2026-08-05,
+// texts re-synced the same day to Nathan's edited draft — the live in-place
+// data pass). 40 per pool — NOT the GCB 28 (§ "Why 40, not 28"): Friday and
+// Sunday are COMPETITIVE Days dealt whole from one pool, and 24-of-28 would
+// give any two players ~20.5 shared squares; 40 restores real card variety.
 describe('bodega-bay-2026 — pool pins', () => {
-  it('pins 40 easy / 40 main / 40 closing, every entry tame', () => {
+  it('pins 40 easy / 40 main / 40 closing rows, every entry tame', () => {
     expect(bodegaBay2026.EASY_ITEMS).toHaveLength(40);
     expect(bodegaBay2026.ITEMS).toHaveLength(40);
     expect(bodegaBay2026.CLOSING_ITEMS).toHaveLength(40);
@@ -72,6 +81,23 @@ describe('bodega-bay-2026 — pool pins', () => {
     // spicyRatio 0 so the deal never reserves spicy slots.
     expect(bodegaBay2026.ALL_ITEMS.every((i) => i.spicy === false)).toBe(true);
     expect(bodegaBay2026.EVENT_SEED.settings.spicyRatio).toBe(0);
+  });
+
+  it('mirrors the two known live-data quirks verbatim (pending Nathan\'s call — see the module header)', () => {
+    // The 2026-08-05 in-place edit left two duplicated closing texts and one
+    // typo; the module mirrors the live text EXACTLY for now, so a silent
+    // "fix" here would desync it from the live pool. Change these pins only
+    // together with the live data.
+    const closingTexts = bodegaBay2026.CLOSING_ITEMS.map((i) => i.text);
+    expect(closingTexts.filter((t) => t === 'Share your favorite quote of the weekend')).toHaveLength(2);
+    expect(closingTexts.filter((t) => t === 'Share your favorite photo of the weekend')).toHaveLength(2);
+    expect(new Set(closingTexts).size).toBe(38); // 40 rows, 38 unique
+    expect(
+      bodegaBay2026.EASY_ITEMS.some((i) => i.text === 'Post of a picture of you and somebody else in your jammies'),
+    ).toBe(true);
+    // The draft's markdown escape must NOT leak into data: '#hashtag', no backslash.
+    expect(bodegaBay2026.CLOSING_ITEMS.some((i) => i.text === 'Give this trip a #hashtag')).toBe(true);
+    expect(bodegaBay2026.ALL_ITEMS.some((i) => i.text.includes('\\'))).toBe(false);
   });
 
   it('tags the curated pools with the persisted LEGACY pool values (#565 transition)', () => {
@@ -85,8 +111,8 @@ describe('bodega-bay-2026 — pool pins', () => {
     expect(bodegaBay2026.ITEMS.every((i) => i.pool === undefined)).toBe(true); // defaults to 'main'
   });
 
-  it('has no duplicate text within any single pool', () => {
-    for (const pool of [bodegaBay2026.EASY_ITEMS, bodegaBay2026.ITEMS, bodegaBay2026.CLOSING_ITEMS]) {
+  it('has no duplicate text within the easy or main pools (closing carries the two known dups)', () => {
+    for (const pool of [bodegaBay2026.EASY_ITEMS, bodegaBay2026.ITEMS]) {
       expect(new Set(pool.map((i) => i.text)).size).toBe(pool.length);
     }
   });
@@ -166,15 +192,23 @@ describe('bodega-bay-2026 — Event payload pins', () => {
     ]);
   });
 
-  it('uses the neutral place fields — this Event never carried port/portEmoji', () => {
+  it('dual-writes both field generations so the SHIPPED reader and the live doc shape both render (Codex P1, PR #644)', () => {
+    // The live doc was seeded with the neutral names (place/placeEmoji,
+    // startsOn/endsOn), but the currently deployed bundle reads the legacy
+    // names — so the seed payload persists BOTH pairs with matching values.
+    // Drop the legacy pair when the #566 read-coercion is deployed.
     for (const day of EVENT_SEED.days) {
       expect(typeof day.place).toBe('string');
       expect(day.place.length).toBeGreaterThan(0);
       expect(typeof day.placeEmoji).toBe('string');
-      expect(day).not.toHaveProperty('port');
-      expect(day).not.toHaveProperty('portEmoji');
+      expect(day.port).toBe(day.place);
+      expect(typeof day.portEmoji).toBe('string');
     }
-    expect(EVENT_SEED).not.toHaveProperty('sailStart');
-    expect(EVENT_SEED).not.toHaveProperty('sailEnd');
+    // The one deliberate divergence: Nathan set the wrap-up chip's legacy
+    // emoji to 👋 live; the neutral field keeps the Theme table's 🌫️.
+    expect(EVENT_SEED.days.map((d) => d.portEmoji === d.placeEmoji)).toEqual([true, true, true, false]);
+    expect(EVENT_SEED.days[3].portEmoji).toBe('👋');
+    expect(EVENT_SEED.sailStart).toBe(EVENT_SEED.startsOn);
+    expect(EVENT_SEED.sailEnd).toBe(EVENT_SEED.endsOn);
   });
 });

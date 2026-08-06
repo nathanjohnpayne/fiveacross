@@ -1,12 +1,30 @@
 // Five Across / Vacay Bingo — the bodega-bay-2026 Event's seed payload: the
 // Bodega Bay house weekend (2026-08-07..09) on the `fiveacross` Firebase
 // project. One module per Event (#563) so `node scripts/seed.mjs --verify`
-// compares live Firestore against THIS Event's canonical pools.
+// compares live Firestore against THIS Event's canonical pools — and so a
+// seed/verify run against `fiveacross` can never touch the Med pool (the
+// registry keys payloads by Event id; there is no global ALL_ITEMS).
 //
-// Content is plans/bodega-prompt-pools.md verbatim (40 easy / 40 exploratory /
-// 40 final-day, every entry tame — a general-audience Event, spicyRatio 0),
-// and was verified 2026-08-05 to match the LIVE seeded docs field-for-field
-// (doc ids are the content hash, so text fidelity here IS the drift check).
+// Content is the 2026-08-05 EDITED pool (Nathan's "Bodega Bay — prompt pool
+// draft" rev 2 — 65 prompt rewrites + 3 em-dash tightenings over the original
+// plans/bodega-prompt-pools.md draft), which is byte-identical to the LIVE
+// Firestore `text` fields after the same-day in-place data pass. 40 easy /
+// 40 exploratory / 40 final-day, every entry tame (general-audience Event,
+// spicyRatio 0).
+//
+// KNOWN LIVE-DATA QUIRKS (kept deliberately, pending Nathan's call):
+//   - the closing pool contains two duplicated texts ("Share your favorite
+//     quote of the weekend", "Share your favorite photo of the weekend") — 40
+//     rows, 38 unique. Doc ids are content hashes, so a reseed from this
+//     module would COLLAPSE them into 38 docs (the live pool holds 40 docs
+//     only because the texts were edited in place onto pre-edit ids);
+//   - "Post of a picture of you and somebody else in your jammies" carries
+//     the draft's typo verbatim.
+//   - the live docs' ids still hash the PRE-edit texts (in-place edit), so
+//     `--verify` against the live pool reports id-level drift until a real
+//     reconcile reseed (which must ALSO re-stamp Day 0's pre-stamped
+//     `snapshotItemIds` — pass SEED_DAYS=1 — or Friday's card would reference
+//     deleted docs). Do not run that reseed casually against the LIVE event.
 //
 // PERSISTED pool literals are the LEGACY values ('embark' for the easy pool,
 // 'farewell' for the closing pool) — deliberately, while the #565 pool-value
@@ -29,131 +47,135 @@ export const EASY_ITEMS = [
   { text: `Spot bird-themed art, a sign, or a souvenir`, spicy: false, pool: 'embark' },
   { text: `Photograph someone in full coastal-main-character mode`, spicy: false, pool: 'embark' },
   { text: `Capture a colorful buoy or crab pot`, spicy: false, pool: 'embark' },
-  { text: `Make a "for the story" toast`, spicy: false, pool: 'embark' },
+  { text: `Make a toast about friendship`, spicy: false, pool: 'embark' },
   { text: `Post a candid that makes the group laugh`, spicy: false, pool: 'embark' },
-  { text: `Wear the layer you swore you wouldn't need`, spicy: false, pool: 'embark' },
-  { text: `Catch someone checking the weather app for the fourth time`, spicy: false, pool: 'embark' },
+  { text: `Post of a picture of you and somebody else in your jammies`, spicy: false, pool: 'embark' },
+  { text: `Suggest something for the group to do tomorrow`, spicy: false, pool: 'embark' },
   { text: `Photograph the fog rolling in, or refusing to leave`, spicy: false, pool: 'embark' },
   { text: `Find the house's weirdest decorative object`, spicy: false, pool: 'embark' },
-  { text: `Claim your bed and photograph the view from it`, spicy: false, pool: 'embark' },
+  { text: `Take a photo of your favorite view from inside the house`, spicy: false, pool: 'embark' },
   { text: `Get a group photo where nobody is ready`, spicy: false, pool: 'embark' },
-  { text: `Spot a dog living its best coastal life`, spicy: false, pool: 'embark' },
+  { text: `Catch somebody talking about their partner`, spicy: false, pool: 'embark' },
   { text: `Photograph something the exact color of the sea today`, spicy: false, pool: 'embark' },
-  { text: `Start a group in-joke and write it down`, spicy: false, pool: 'embark' },
-  { text: `Take a photo through a window`, spicy: false, pool: 'embark' },
+  { text: `Take a picture of a fire`, spicy: false, pool: 'embark' },
+  { text: `Take a photo of somebody arriving at the house`, spicy: false, pool: 'embark' },
   { text: `Catch the moment someone says "I could live here"`, spicy: false, pool: 'embark' },
   { text: `Find a hand-painted sign`, spicy: false, pool: 'embark' },
-  { text: `Photograph your shoes somewhere they don't belong`, spicy: false, pool: 'embark' },
+  { text: `Catch somebody singing a quintessentially millennial song`, spicy: false, pool: 'embark' },
   { text: `Get everyone in one frame using a timer`, spicy: false, pool: 'embark' },
   { text: `Spot a gull, pelican, or heron doing something undignified`, spicy: false, pool: 'embark' },
   { text: `Photograph someone's hair losing a fight with the wind`, spicy: false, pool: 'embark' },
   { text: `Find something in the house older than everyone here`, spicy: false, pool: 'embark' },
   { text: `Capture a sunset, or the sky pretending it's going to be one`, spicy: false, pool: 'embark' },
-  { text: `Spot a hat you'd steal if you were a different person`, spicy: false, pool: 'embark' },
+  { text: `Win a game of something`, spicy: false, pool: 'embark' },
   { text: `Catch someone asleep in a chair they meant to sit in briefly`, spicy: false, pool: 'embark' },
   { text: `Photograph the group's shoes in a pile by the door`, spicy: false, pool: 'embark' },
   { text: `Find a flower growing somewhere it shouldn't`, spicy: false, pool: 'embark' },
   { text: `Photograph the drink of the day`, spicy: false, pool: 'embark' },
-  { text: `Get a reflection shot — window, puddle, or sunglasses`, spicy: false, pool: 'embark' },
-  { text: `Spot a license plate from a state nobody expected`, spicy: false, pool: 'embark' },
-  { text: `Listen for the fog horn and stop talking until it goes again`, spicy: false, pool: 'embark' },
+  { text: `Get a reflection shot—window, puddle, or sunglasses`, spicy: false, pool: 'embark' },
+  { text: `Take a picture of something red`, spicy: false, pool: 'embark' },
+  { text: `Take a picture of yourself in the hot tub`, spicy: false, pool: 'embark' },
   { text: `Catch someone talking to a bird`, spicy: false, pool: 'embark' },
-  { text: `Find the most dramatic cloud of the trip so far`, spicy: false, pool: 'embark' },
-  { text: `Photograph a handwritten note, menu, or chalkboard`, spicy: false, pool: 'embark' },
+  { text: `Give a friend a compliment`, spicy: false, pool: 'embark' },
+  { text: `Get everybody to sing along to a song from the 90’s`, spicy: false, pool: 'embark' },
   { text: `Take a photo where someone is laughing too hard to pose`, spicy: false, pool: 'embark' },
   { text: `Find something with a bird on it that isn't a bird`, spicy: false, pool: 'embark' },
-  { text: `Capture the exact moment the plan changes`, spicy: false, pool: 'embark' },
+  { text: `Capture a cheers/toast in action`, spicy: false, pool: 'embark' },
 ];
 
-// Main pool — exploratory (40): Saturday's discovery pool, blended 50/50 with
-// the easy pool. Untagged (defaults to 'main' in seedItemMutations).
+// Main pool — exploratory/social (40): Saturday's discovery pool, blended
+// 50/50 with the easy pool. Untagged (defaults to 'main' in
+// seedItemMutations).
 export const ITEMS = [
   { text: `Walk to a Bodega Head viewpoint`, spicy: false },
   { text: `Walk part of the Bird Walk Coastal Access Trail`, spicy: false },
   { text: `Stage an original suspense-movie still`, spicy: false },
   { text: `See St. Teresa of Avila Church in Bodega`, spicy: false },
-  { text: `Spot the Potter Schoolhouse from the public road — it's someone's home, so admire and keep moving`, spicy: false },
-  { text: `Find a Hitchcock detail at the Tides Wharf`, spicy: false },
-  { text: `Ask a local for a favorite view or detour`, spicy: false },
+  { text: `Spot the Potter Schoolhouse from the public road—it's someone's home, so admire and keep moving`, spicy: false },
+  { text: `Share a story you haven’t told anybody in the group before`, spicy: false },
+  { text: `Tell somebody in the group your favorite thing about them`, spicy: false },
   { text: `Discover a local artist, gallery, or studio`, spicy: false },
-  { text: `Fly a kite at Doran Beach`, spicy: false },
-  { text: `Watch marine wildlife from a safe distance and stay there`, spicy: false },
-  { text: `Watch a fishing boat come in or head out`, spicy: false },
-  { text: `Find the highest point you can safely walk to`, spicy: false },
-  { text: `Photograph the harbor at its foggiest`, spicy: false },
-  { text: `Count the crab pots stacked at the marina`, spicy: false },
-  { text: `Walk a beach end to end without checking your phone`, spicy: false },
-  { text: `Find a tide pool and leave everything exactly where it was`, spicy: false },
+  { text: `Paint a picture`, spicy: false },
+  { text: `Win a game`, spicy: false },
+  { text: `Karaoke your best song`, spicy: false },
+  { text: `Share a photo you’ve taken where you feel sexy`, spicy: false },
+  { text: `Photograph the fog`, spicy: false },
+  { text: `Share your favorite memory with each person you’re currently sitting with`, spicy: false },
+  { text: `Find a seashell on the beach`, spicy: false },
+  { text: `Tell a friend something that you love about her`, spicy: false },
   { text: `Photograph something you had to pull over on Highway 1 for`, spicy: false },
   { text: `Spot a whale spout, or convincingly claim you did`, spicy: false },
   { text: `Find the best bench on this coast and sit in it a while`, spicy: false },
-  { text: `Photograph a boat name that sounds like a warning`, spicy: false },
+  { text: `Photograph a boat name that is pun-y`, spicy: false },
   { text: `Get a group photo with the whole Pacific behind you`, spicy: false },
   { text: `Walk part of the Bodega Dunes`, spicy: false },
-  { text: `Find a shell, feather, or stone worth keeping — photograph it, then decide`, spicy: false },
-  { text: `Recreate a movie poster on the beach`, spicy: false },
-  { text: `Spot a bird of prey`, spicy: false },
-  { text: `Photograph a barn, silo, or fence line just inland`, spicy: false },
-  { text: `Find the town of Bodega — it is not the same place as Bodega Bay`, spicy: false },
-  { text: `Watch the fog swallow something entirely`, spicy: false },
-  { text: `Ask someone what they'd order if money were no object`, spicy: false },
-  { text: `Photograph a road disappearing into fog`, spicy: false },
-  { text: `Record ten seconds of the loudest birds you can find`, spicy: false },
-  { text: `Spot a cypress or pine bent flat by the wind`, spicy: false },
-  { text: `Photograph Salmon Creek Beach from above`, spicy: false },
-  { text: `Find something growing out of driftwood`, spicy: false },
+  { text: `Share your favorite music video with the group`, spicy: false },
+  { text: `Give a convincing speech on why men should not be included in this trip`, spicy: false },
+  { text: `Take a shot`, spicy: false },
+  { text: `Take a photo of your feet in the sand`, spicy: false },
+  { text: `Tell an embarrassing story from your 20s`, spicy: false },
+  { text: `Text a friend's significant other your favorite thing about that friend`, spicy: false },
+  { text: `Ask someone what they'd buy first if money were no object`, spicy: false },
+  { text: `Tell the story of the first time you told your partner you loved them`, spicy: false },
+  { text: `Ask a question and draw a tarot card`, spicy: false },
+  { text: `Share your enneagram number with the group and if you identify with it`, spicy: false },
+  { text: `Take a photo of somebody else looking sexy`, spicy: false },
+  { text: `Take a picture of a wildflower`, spicy: false },
   { text: `Take a photo with no horizon in it at all`, spicy: false },
-  { text: `Watch a sunset from a spot you found yourselves`, spicy: false },
-  { text: `Stand somewhere you can hear the surf and the fog horn at once`, spicy: false },
+  { text: `Share a favorite friendship memory you have of someone in the group`, spicy: false },
+  { text: `Catch somebody talking about their children, pet, or job`, spicy: false },
   { text: `Photograph the group's shadows instead of the group`, spicy: false },
   { text: `Find a bakery, farm stand, or roadside sign worth coming back for`, spicy: false },
-  { text: `Catch the moment this stops being a weekend and starts being the story`, spicy: false },
+  { text: `Ask somebody about their dream job`, spicy: false },
 ];
 
-// Closing pool — final day (40): the wrap-up card, which unlocks at the 11:00
-// check-out freeze alongside the podium. Deliberately achievable from a
-// kitchen or a passenger seat. Stored under the LEGACY 'farewell' pool value.
+// Closing pool — final day (40 rows, 38 unique texts; see the header's
+// duplicate quirk): the wrap-up card, which unlocks at the 11:00 check-out
+// freeze alongside the podium. Deliberately achievable from a kitchen or a
+// passenger seat. Stored under the LEGACY 'farewell' pool value.
 export const CLOSING_ITEMS = [
   { text: `One last sunrise or foggy-morning photo`, spicy: false, pool: 'farewell' },
-  { text: `Photograph whatever is keeping you upright this morning`, spicy: false, pool: 'farewell' },
-  { text: `Say the funniest thing that happened out loud one more time`, spicy: false, pool: 'farewell' },
+  { text: `Photograph the most chipper person this morning`, spicy: false, pool: 'farewell' },
+  { text: `Share your favorite quote of the weekend`, spicy: false, pool: 'farewell' },
   { text: `Photograph the house before anyone tidies it`, spicy: false, pool: 'farewell' },
   { text: `Find something someone almost left behind`, spicy: false, pool: 'farewell' },
-  { text: `Group photo in whatever you slept in`, spicy: false, pool: 'farewell' },
-  { text: `Name the trip`, spicy: false, pool: 'farewell' },
-  { text: `Photograph the fullest suitcase`, spicy: false, pool: 'farewell' },
-  { text: `Tell someone the thing you were too shy to say on Friday`, spicy: false, pool: 'farewell' },
-  { text: `Screenshot the group chat's new name`, spicy: false, pool: 'farewell' },
-  { text: `Post the photo dump`, spicy: false, pool: 'farewell' },
-  { text: `Swap favorite memories over the last cup of coffee`, spicy: false, pool: 'farewell' },
+  { text: `Take a photo of somebody still sleeping`, spicy: false, pool: 'farewell' },
+  { text: `Give this trip a #hashtag`, spicy: false, pool: 'farewell' },
+  { text: `Photograph the friend who brought the most stuff`, spicy: false, pool: 'farewell' },
+  { text: `Share your favorite picture you took of somebody this weekend`, spicy: false, pool: 'farewell' },
+  { text: `Share an accidental photo you took from the weekend`, spicy: false, pool: 'farewell' },
+  { text: `Share your favorite photo of the weekend`, spicy: false, pool: 'farewell' },
+  { text: `Pick the spot for the last coffee/breakfast moment`, spicy: false, pool: 'farewell' },
   { text: `Take a photo from the exact spot you took your first one`, spicy: false, pool: 'farewell' },
-  { text: `Find the receipt, ticket, or scrap worth keeping`, spicy: false, pool: 'farewell' },
+  { text: `Take a picture of the spot you spent the most time at`, spicy: false, pool: 'farewell' },
   { text: `Photograph the last of the snacks`, spicy: false, pool: 'farewell' },
-  { text: `Set a date for the next one`, spicy: false, pool: 'farewell' },
+  { text: `Suggest a location for the next girls' weekend`, spicy: false, pool: 'farewell' },
   { text: `Photograph someone doing the final sweep`, spicy: false, pool: 'farewell' },
-  { text: `Say thank you to whoever booked it`, spicy: false, pool: 'farewell' },
+  { text: `Share your favorite picture of yourself you took this weekend`, spicy: false, pool: 'farewell' },
   { text: `Photograph the view one last time`, spicy: false, pool: 'farewell' },
   { text: `Find something you'd swear wasn't there on Friday`, spicy: false, pool: 'farewell' },
-  { text: `Take the photo that becomes the group chat's picture`, spicy: false, pool: 'farewell' },
-  { text: `Photograph the car, packed and defeated`, spicy: false, pool: 'farewell' },
-  { text: `Admit which prompt you never managed`, spicy: false, pool: 'farewell' },
-  { text: `Photograph the fog one last time — it'll be there`, spicy: false, pool: 'farewell' },
+  { text: `Take the last group photo`, spicy: false, pool: 'farewell' },
+  { text: `Photograph a car, packed and ready to go`, spicy: false, pool: 'farewell' },
+  { text: `Take a picture of your soundtrack home`, spicy: false, pool: 'farewell' },
+  { text: `Photograph the fog one last time—it'll be there`, spicy: false, pool: 'farewell' },
   { text: `Group photo where everyone is genuinely ready to go`, spicy: false, pool: 'farewell' },
   { text: `Name the weekend's MVP moment`, spicy: false, pool: 'farewell' },
   { text: `Photograph the last shoes by the door`, spicy: false, pool: 'farewell' },
-  { text: `Tell the group your favorite photo of the weekend`, spicy: false, pool: 'farewell' },
-  { text: `Photograph the empty kitchen table`, spicy: false, pool: 'farewell' },
-  { text: `Find the thing you're taking home that nobody expected`, spicy: false, pool: 'farewell' },
+  // DUPLICATE (live data quirk — see header): same text as an earlier entry.
+  { text: `Share your favorite photo of the weekend`, spicy: false, pool: 'farewell' },
+  { text: `Prove that we followed the house rules`, spicy: false, pool: 'farewell' },
+  { text: `Take one last photo in the hot tub`, spicy: false, pool: 'farewell' },
   { text: `Photograph the road out`, spicy: false, pool: 'farewell' },
-  { text: `Say one thing you'd do differently and one you wouldn't change`, spicy: false, pool: 'farewell' },
-  { text: `Photograph the keys going back`, spicy: false, pool: 'farewell' },
-  { text: `Sing the song of the weekend one more time`, spicy: false, pool: 'farewell' },
-  { text: `Photograph whatever the group decided was cursed`, spicy: false, pool: 'farewell' },
-  { text: `Look at the first photo of the trip together`, spicy: false, pool: 'farewell' },
+  { text: `Share one word you’ll take away from this weekend`, spicy: false, pool: 'farewell' },
+  { text: `Take a picture of the front door on your way out`, spicy: false, pool: 'farewell' },
+  { text: `Sing the song “Closing Time” at the top of your lungs`, spicy: false, pool: 'farewell' },
+  { text: `Take a picture of your snack/drink/meal you got on the way home`, spicy: false, pool: 'farewell' },
+  // DUPLICATE (live data quirk — see header): same text as an earlier entry.
+  { text: `Share your favorite quote of the weekend`, spicy: false, pool: 'farewell' },
   { text: `Photograph the sky on the way home`, spicy: false, pool: 'farewell' },
-  { text: `Say who you'll miss most — they're in the car`, spicy: false, pool: 'farewell' },
+  { text: `Name one thing your partner missed about you this weekend`, spicy: false, pool: 'farewell' },
   { text: `Photograph the very last bird`, spicy: false, pool: 'farewell' },
-  { text: `Do it for the story, one more time`, spicy: false, pool: 'farewell' },
+  { text: `Text a girlfriend a compliment you need to give her`, spicy: false, pool: 'farewell' },
 ];
 // Unlock instants (all America/Los_Angeles, PDT for the August window).
 // 06:00 — this group is early to rise, so the card waits for them (06:00 PDT
@@ -164,17 +186,23 @@ export const CLOSING_ITEMS = [
 // same-day seed would stamp an EMPTY snapshot — and there is no un-stamp.
 const SAT_UNLOCK = Date.parse('2026-08-08T06:00:00-07:00');
 const SUN_UNLOCK = Date.parse('2026-08-09T06:00:00-07:00');
-// The wrap-up Day's unlock IS the Standings Freeze (check-out): a farewell-pool
+// The wrap-up Day's unlock IS the Standings Freeze (check-out): a closing-pool
 // unlock freezes the standings (`standingsFrozen`) and `finaleTimes` anchors
 // the podium on the same instant, so the podium fires exactly at 11:00.
 const CHECKOUT_FREEZE = Date.parse('2026-08-09T11:00:00-07:00');
 
 export const EVENT_SEED = {
   name: 'Bodega Bay',
-  // Neutral field names (#566): the Event was seeded startsOn/endsOn from day
-  // one — it never carried sailStart/sailEnd.
+  // TRANSITION DUAL-WRITE (#566, Codex P1 on PR #644): the LIVE doc carries the
+  // neutral startsOn/endsOn (it was seeded that way), but the currently
+  // SHIPPED bundle still reads sailStart/sailEnd — so this payload persists
+  // BOTH pairs with identical values, and a seed run can never leave the
+  // deployed app with a blank Event window. Drop the legacy pair when the
+  // #566 read-coercion is deployed.
   startsOn: '2026-08-07',
   endsOn: '2026-08-09',
+  sailStart: '2026-08-07',
+  sailEnd: '2026-08-09',
   status: 'active',
   defaultTheme: 'side-quests',
   claimMode: 'honor',
@@ -188,16 +216,22 @@ export const EVENT_SEED = {
   standingsFreezeAt: CHECKOUT_FREEZE,
   // Four Days for a three-day trip (plans/bodega-prompt-pools.md § "Why four
   // Days"): Sunday plays competitively on `main` all morning; the ceremonial
-  // wrap-up Day at 11:00 is the farewell-pool Day whose unlock IS the freeze.
-  // Friday is `embark`-pool but NOT tutorial — a competitive easy card, safe
+  // wrap-up Day at 11:00 is the closing-pool Day whose unlock IS the freeze.
+  // Friday is easy-pool but NOT tutorial — a competitive easy card, safe
   // because the podium mirrors key First-to-BINGO exclusion off the `tutorial`
   // flag alone (tests/functions/finale-parity.test.ts pins both sides).
   days: [
+    // Days carry the SAME dual-write posture: place/placeEmoji (the live
+    // doc's shape, and the post-#566 reader) PLUS port/portEmoji (what the
+    // currently shipped DaySwitcher/Board/Leaderboard render). Values mirror
+    // the live doc field-for-field.
     {
       index: 0,
       date: '2026-08-07',
       place: 'Bodega Bay',
       placeEmoji: '🐦',
+      port: 'Bodega Bay',
+      portEmoji: '🐦',
       theme: 'the-birds',
       tonight: ['🍷 Arrival pours', '🌊 First look at the water'],
       pool: 'embark',
@@ -210,16 +244,21 @@ export const EVENT_SEED = {
       // entirely (fail-open, #289), so without a pre-stamp Friday's card would
       // be whatever is active whenever the scheduler happens to run. Fixing the
       // snapshot in the seed makes the competitive Friday card deterministic —
-      // the seed run, not scheduler timing, decides its content.
-      snapshotItemIds: EASY_ITEMS.map((i) => seedItemDocId(i.text)).sort(),
+      // the seed run, not scheduler timing, decides its content. NOTE: the
+      // LIVE Day 0 snapshot currently holds the PRE-edit ids (see the header's
+      // in-place-edit quirk); this value is what a correct reseed re-stamps.
+      snapshotItemIds: [...new Set(EASY_ITEMS.map((i) => seedItemDocId(i.text)))].sort(),
     },
     {
       index: 1,
       date: '2026-08-08',
       place: 'Bodega Bay',
       placeEmoji: '🌊',
+      port: 'Bodega Bay',
+      portEmoji: '🌊',
       theme: 'side-quests',
-      tonight: ['🦀 Harbor dinner', '🔥 Fire pit'],
+      // Live-edited 2026-08-05: '🌅 Sunset' replaced the fire pit.
+      tonight: ['🦀 Harbor dinner', '🌅 Sunset'],
       pool: 'main',
       tutorial: false,
       scoring: 'competitive',
@@ -231,6 +270,8 @@ export const EVENT_SEED = {
       date: '2026-08-09',
       place: 'Bodega Bay',
       placeEmoji: '🌅',
+      port: 'Bodega Bay',
+      portEmoji: '🌅',
       theme: 'fog-froth-farewells',
       tonight: ['☕ Last coffee', '🧳 The slow pack'],
       pool: 'main',
@@ -244,11 +285,16 @@ export const EVENT_SEED = {
       date: '2026-08-09',
       place: 'The drive home',
       placeEmoji: '🌫️',
+      port: 'The drive home',
+      // Live-edited 2026-08-05: Nathan set the wrap-up chip's emoji to 👋 on
+      // the legacy field the shipped bundle renders; the neutral field keeps
+      // the Theme table's 🌫️. Mirrored as-is.
+      portEmoji: '👋',
       theme: 'fog-froth-farewells',
       tonight: ['📸 The photo dump', '📅 Next one'],
       pool: 'farewell',
       // tutorial: true keeps a ceremonial wrap-up bingo out of the Event-wide
-      // First to BINGO; buildPodium already excludes the farewell Day from
+      // First to BINGO; buildPodium already excludes the closing Day from
       // champion totals.
       tutorial: true,
       scoring: 'ceremonial',
