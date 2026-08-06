@@ -199,11 +199,16 @@ export function seedItemMutations(existingDocs, now = Date.now(), pool, fallback
       data: {
         text,
         createdBy: 'seed',
-        // Keep the matching doc's original entry time; an ID-changing prompt
-        // takes the oldest safe seed time supplied by `seedEntryTimestamp`.
-        // Otherwise a delayed scheduler would exclude the replacement from a
-        // past Day's cutoff and permanently stamp an empty card.
-        createdAt: existingSeedCreatedAt.get(seedItemDocId(text)) ?? fallbackCreatedAt,
+        // Keep a matching doc's original entry time only when it is already
+        // safe for every due, unstamped Day. A delayed earlier seed may have
+        // written a prompt after one of those Day cutoffs; preserving that late
+        // timestamp would still leave the prompt out of a permanent snapshot.
+        // `fallbackCreatedAt` is the oldest known safe time, so clamp rather
+        // than merely using it for replacement ids.
+        createdAt: Math.min(
+          existingSeedCreatedAt.get(seedItemDocId(text)) ?? fallbackCreatedAt,
+          fallbackCreatedAt,
+        ),
         isFreeSpace: false,
         status: 'active',
         reportCount: 0,
@@ -266,6 +271,7 @@ export function verifySeedPool(
     }
   }
   const expected = pool.map(({ text, spicy, pool: itemPool }, index) => ({
+    index,
     canonicalId: seedItemDocId(text),
     // The current content hash always remains valid, so a fresh seed and the
     // documented in-place production identity both verify cleanly. A Set
@@ -301,6 +307,15 @@ export function verifySeedPool(
   // answer) is itself drift the check must surface (Codex P2, PR #139).
   const mismatched = [];
   const matchedIds = new Set();
+  // A documented legacy identity is an Event-wide generation, not a
+  // per-prompt escape hatch. Accepting canonical and legacy ids independently
+  // would let one rewritten prompt move to its canonical hash while the rest
+  // remain legacy, even though frozen snapshots still name the complete legacy
+  // generation. Entries whose two ids are equal are neutral: unchanged text
+  // belongs to both generations and cannot distinguish them.
+  const legacyIdentity = verifyItemIds
+    ? { canonical: [], legacy: [] }
+    : undefined;
   for (const expectedDoc of expected) {
     const { canonicalId: id, text } = expectedDoc;
     const live = expectedDoc.acceptedIds.map((acceptedId) => seedById.get(acceptedId)).find(Boolean);
@@ -341,6 +356,10 @@ export function verifySeedPool(
     } else {
       matchedIds.add(live.id);
     }
+    if (legacyIdentity && expectedDoc.canonicalId !== verifyItemIds[expectedDoc.index]) {
+      if (live.id === expectedDoc.canonicalId) legacyIdentity.canonical.push(expectedDoc.canonicalId);
+      else legacyIdentity.legacy.push(verifyItemIds[expectedDoc.index]);
+    }
   }
   // Seed-owned docs the canonical pool no longer contains (an old prompt that a
   // reseed should have deleted — the #135 symptom for every retired entry).
@@ -348,14 +367,20 @@ export function verifySeedPool(
     .filter((doc) => !matchedIds.has(doc.id))
     .map((doc) => ({ id: doc.id, text: doc.text }));
 
+  const mixedIdentity =
+    legacyIdentity && legacyIdentity.canonical.length > 0 && legacyIdentity.legacy.length > 0
+      ? legacyIdentity
+      : undefined;
+
   return {
-    ok: missing.length === 0 && mismatched.length === 0 && stale.length === 0,
+    ok: missing.length === 0 && mismatched.length === 0 && stale.length === 0 && !mixedIdentity,
     expected: expected.length,
     seedOwned: seedDocs.length,
     playerOwned: existingDocs.length - seedDocs.length,
     missing,
     mismatched,
     stale,
+    mixedIdentity,
   };
 }
 
@@ -622,6 +647,11 @@ export function formatDriftReport(report, eventId) {
     lines.push(`  stale in live (${report.stale.length}): ${preview(report.stale)}`);
   if (report.mismatched.length)
     lines.push(`  field drift (${report.mismatched.length}): ${preview(report.mismatched)}`);
+  if (report.mixedIdentity)
+    lines.push(
+      `  mixed identity generation: ${report.mixedIdentity.canonical.length} canonical-only / ` +
+        `${report.mixedIdentity.legacy.length} legacy-only rewritten prompt ids`,
+    );
   // Reconcile with a bare reseed — NO ADMIN_UID. The seed's event write merges,
   // and omitting ADMIN_UID leaves `events/{id}.admins` untouched (a reseed to
   // refresh prompts must never overwrite the live admin roster, Codex P2 PR

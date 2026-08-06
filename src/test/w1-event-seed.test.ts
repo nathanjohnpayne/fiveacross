@@ -190,7 +190,7 @@ describe('w1-event-seed: reseed snapshot and timestamp interlocks (Codex P1, PR 
     expect(stampedDayIndexes(undefined)).toEqual([]);
   });
 
-  it('preserves a matching seed prompt timestamp and backdates replacement ids to a safe entry time', () => {
+  it('preserves a matching seed prompt timestamp when it is already safe and backdates replacement ids', () => {
     const existing = [
       { id: seedItemDocId('Survives'), createdBy: 'seed', createdAt: 100 },
       { id: 'renamed-away', createdBy: 'seed', createdAt: 120 },
@@ -206,6 +206,14 @@ describe('w1-event-seed: reseed snapshot and timestamp interlocks (Codex P1, PR 
       100,
     );
     expect(writes.map((write) => write.data.createdAt)).toEqual([100, 100]);
+  });
+
+  it('clamps a matching prompt written after a due Day cutoff to the safe seed time', () => {
+    const existing = [{ id: seedItemDocId('Survives'), createdBy: 'seed', createdAt: 900 }];
+    const { writes } = seedItemMutations(existing, 1_000, [{ text: 'Survives', spicy: false }], 200);
+    expect(writes).toEqual([
+      expect.objectContaining({ id: seedItemDocId('Survives'), data: expect.objectContaining({ createdAt: 200 }) }),
+    ]);
   });
 
   it('uses an already-due unlock for a brand-new delayed seed so the scheduler does not stamp an empty pool', () => {

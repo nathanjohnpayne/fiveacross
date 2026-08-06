@@ -144,6 +144,40 @@ describe('bodega-bay-2026 — pool pins', () => {
     ).toMatchObject({ ok: false, mismatched: [{ text: bodegaBay2026.ALL_ITEMS[0]!.text }] });
   });
 
+  it('requires one complete identity generation — canonical or recorded legacy — for the edited live pool', () => {
+    const makeLive = (ids: readonly string[]) =>
+      bodegaBay2026.ALL_ITEMS.map((item, index) => ({
+        id: ids[index]!,
+        text: item.text,
+        spicy: item.spicy,
+        pool: item.pool ?? 'main',
+        createdBy: 'seed',
+        isFreeSpace: false,
+        status: 'active',
+        reportCount: 0,
+      }));
+    const canonicalIds = bodegaBay2026.ALL_ITEMS.map((item) => seedItemDocId(item.text));
+    const threshold = bodegaBay2026.EVENT_SEED.settings.reportHideThreshold;
+
+    expect(
+      verifySeedPool(makeLive(canonicalIds), bodegaBay2026.ALL_ITEMS, threshold, bodegaBay2026.VERIFY_ITEM_IDS),
+    ).toMatchObject({ ok: true, mixedIdentity: undefined });
+
+    const mixedIds = [...bodegaBay2026.VERIFY_ITEM_IDS];
+    const rewrittenIndex = canonicalIds.findIndex((id, index) => id !== mixedIds[index]);
+    expect(rewrittenIndex).toBeGreaterThanOrEqual(0);
+    mixedIds[rewrittenIndex] = canonicalIds[rewrittenIndex]!;
+    expect(
+      verifySeedPool(makeLive(mixedIds), bodegaBay2026.ALL_ITEMS, threshold, bodegaBay2026.VERIFY_ITEM_IDS),
+    ).toMatchObject({
+      ok: false,
+      mixedIdentity: {
+        canonical: [canonicalIds[rewrittenIndex]],
+        legacy: expect.any(Array),
+      },
+    });
+  });
+
   it('never carries the 🔞 glyph in display text', () => {
     for (const item of bodegaBay2026.ALL_ITEMS) expect(item.text).not.toContain('🔞');
   });
