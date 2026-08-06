@@ -32,14 +32,14 @@ A **Namespace** is an apex domain whose wildcard subdomains address Events; an E
 
 | Domain | Role |
 |---|---|
-| `fiveacross.app` | **Canonical Brand domain going forward** ([#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599)). New Events provision here first; share links and analytics canonicalize here; this is the name we print on things. |
+| `fiveacross.app` | **Canonical Brand domain going forward** ([#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599) as amended). New Events provision here first; analytics canonicalize here (one canonical host per Event); this is the name we print on things. Share links deliberately do **not** canonicalize—a guest shares the host they are standing on ([#607](https://github.com/nathanjohnpayne/gaycruisebingo/issues/607)). |
 | `gaycruisebingo.com` | The Gay Cruise Bingo Edition's domain. |
-| `vacaybingo.com` | Travel Namespace, and the Bodega Bay Event's current canonical host. |
+| `vacaybingo.com` | Travel Namespace; the Bodega Bay Event's original host, still live—and still named canonical by its own `hostnames` doc until the post-event repoint ([#601](https://github.com/nathanjohnpayne/gaycruisebingo/issues/601)). |
 | `fiveacrossbingo.com` | Original Brand Namespace; live alternate. |
 
 **Every registered domain stays live as a first-class serving host.** The canonical pivot to `fiveacross.app` is a response to the shipboard network blocking `gaycruisebingo.com` — best theory, substring filtering on "bingo," which indicts the two other bingo-substring names equally. That is an edge case, not a reason to kill working domains. The operative rule is the one hostname resolution exists to serve: **any domain that serves must carry the right branding and resolve its Event and Edition dynamically.** No host may hardcode a wordmark.
 
-Each Event has exactly one **canonical hostname** and any number of validated **aliases**, which redirect at the edge before the application starts, so one Event never splits its sessions, installed PWAs, offline storage or share links across two origins. Analytics deliberately does **not** split: ingest is Brand-level, and one PostHog project carries `brand_id` / `edition_id` / `event_id`.
+Each Event has exactly one **canonical hostname** and any number of validated **aliases**. An alias serves the Event in place with correct branding—no edge redirect ([#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599) as amended); sessions, installed PWAs, and offline storage are per-origin facts of whichever host a guest uses, and share links carry that entry-point host ([#607](https://github.com/nathanjohnpayne/gaycruisebingo/issues/607)). What the canonical hostname does is keep the Event's analytics whole: every host reports the one canonical host, so cross-host traffic aggregates. Ingest is Brand-level besides, and one PostHog project carries `brand_id` / `edition_id` / `event_id`.
 
 ## Themes
 
