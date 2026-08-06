@@ -732,3 +732,62 @@ describe('ProofFeed — a corrected Notice is marked "edited" (#455)', () => {
     expect(screen.queryByText(/edited/)).toBeNull();
   });
 });
+
+// #534/#561 (specs/feed-hearts.md § Most-Loved Photo) — the Feed's standing
+// Hearts invitation: a quiet muted strip at the TOP of the list while Hearts
+// still count toward the freeze, gone the moment the standings freeze. No
+// streaks, no badge counts, no dismiss state, no notification hook.
+describe('ProofFeed — the Hearts cue (#534/#561)', () => {
+  const cueEntry: TallyEntry = {
+    uid: 'alice',
+    displayName: 'Alice Anchor',
+    markedAt: 1000,
+    dayIndex: 0,
+    itemText: 'Balcony or porthole photo',
+  };
+  const tallySnap = { docs: [markerDoc('p1', cueEntry)], metadata: { fromCache: false } };
+
+  it('renders the cue as the FIRST child of the Feed list before the freeze', () => {
+    H.onSnapshot.mockReset();
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+    const unfrozenEvent = {
+      exists: () => true,
+      data: () => ({ days: [] }),
+      metadata: { fromCache: false },
+    };
+    sub.fire(tallySnap, emptyColSnap, emptyColSnap, unfrozenEvent);
+
+    const list = document.querySelector('.list')!;
+    const cue = list.firstElementChild!;
+    expect(cue.className).toBe('feed-heart-cue');
+    expect(cue.textContent).toBe('Heart the moments you want to remember');
+  });
+
+  it('withholds the cue until the Event snapshot is available', () => {
+    H.onSnapshot.mockReset();
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+
+    sub.fire(tallySnap);
+
+    expect(document.querySelector('.tally-card')).toBeTruthy();
+    expect(document.querySelector('.feed-heart-cue')).toBeNull();
+  });
+
+  it('leaves with the freeze: no cue once the standings are frozen', () => {
+    H.onSnapshot.mockReset();
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+    const frozenEvent = {
+      exists: () => true,
+      data: () => ({ frozenAt: 123 }),
+      metadata: { fromCache: false },
+    };
+    sub.fire(tallySnap, emptyColSnap, emptyColSnap, frozenEvent);
+
+    // The Feed itself still renders; only the cue is gone.
+    expect(document.querySelector('.tally-card')).toBeTruthy();
+    expect(document.querySelector('.feed-heart-cue')).toBeNull();
+  });
+});

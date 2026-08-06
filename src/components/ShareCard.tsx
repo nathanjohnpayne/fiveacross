@@ -2,6 +2,7 @@ import { toBlob } from 'html-to-image';
 import { completedLines } from '../game/logic';
 import { editionBrand, editionLexicon } from '../editions';
 import { segmentEmojiRuns } from '../format';
+import { safeMediaUrl } from './safeMediaUrl';
 import type { Cell } from '../types';
 
 /**
@@ -354,6 +355,25 @@ export interface FarewellShareCardData {
   contextLine?: string;
   /** e.g. "Final standings · 10 days". Absent → nothing renders. */
   statLine?: string;
+  /**
+   * The frozen Most-Loved Photo hero (#534/#561, wireframes
+   * `fx-share-final-photo-*`): present → the card renders its PHOTO-HERO
+   * composition (hero box + compressed standings rows; the daily honors yield
+   * their space and stay on the photo-less fallback). Absent or `null` → the
+   * photo-less composition above, byte-identical to the pre-#534 card — the
+   * KEPT documented fallback for no award, `winners: []`, a hidden winner, or
+   * any media failure. The caller shapes everything (FarewellPodium.tsx):
+   * `photoUrl` is an already-fetched blob object URL (html-to-image needs
+   * same-origin-readable pixels), `heartCount` is the FROZEN eligible count,
+   * `creditLine` is fully composed (name · “prompt” · day label · tie suffix).
+   */
+  mostLoved?: { photoUrl: string; heartCount: number; creditLine: string } | null;
+  /**
+   * Standings rows 2-3 for the hero composition's compressed rows
+   * (`buildPodium().runnersUp`). Ignored by the photo-less composition, which
+   * keeps its honoree-blocks layout untouched.
+   */
+  runnersUp?: Array<{ displayName: string; bingoCount: number; squaresMarked: number }>;
 }
 
 /** A labeled honoree block: medal-tagged role line, then the name (and optional stat). */
@@ -369,36 +389,107 @@ function buildHonoree(
   return block;
 }
 
+/** One compressed standings row for the photo-hero composition (wireframes `fx-share-final-photo-*`: rank cell, name, optional role chip, optional right-aligned stat). */
+function buildMostLovedRow(opts: {
+  champ?: boolean;
+  rank: string;
+  name: string;
+  role?: string;
+  stat?: string;
+}): HTMLDivElement {
+  const row = el('div', 'share-card-ml-row' + (opts.champ ? ' champ' : ''));
+  row.append(el('span', 'share-card-ml-rank', opts.rank));
+  row.append(el('span', 'share-card-ml-name', opts.name));
+  if (opts.role) row.append(el('span', 'share-card-ml-role', opts.role));
+  if (opts.stat) row.append(el('span', 'share-card-ml-stat', opts.stat));
+  return row;
+}
+
 function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
+  // Sanitize the hero URL at the sink, the safeMediaUrl-last rule (PR #95's
+  // CodeQL barrier; blob: is allow-listed). A value the guard rejects renders
+  // the photo-less composition rather than an empty hero frame.
+  const heroSrc = data.mostLoved ? safeMediaUrl(data.mostLoved.photoUrl) : undefined;
+  const mostLoved = data.mostLoved && heroSrc ? { ...data.mostLoved, src: heroSrc } : null;
+
   const card = el('div', 'share-card share-card-farewell');
   card.style.width = `${CARD_WIDTH}px`;
   card.style.height = `${CARD_HEIGHT}px`;
   card.append(el('div', 'share-card-event', data.contextLine ?? data.eventName));
   card.append(el('div', 'share-card-title', 'FINAL STANDINGS'));
 
-  if (data.champion) {
-    card.append(
-      buildHonoree(
-        `🏆 ${editionBrand().championRole}`,
-        data.champion.displayName,
-        `${data.champion.bingoCount} bingo${data.champion.bingoCount === 1 ? '' : 's'} · ${data.champion.squaresMarked} squares`,
-      ),
-    );
-  }
-  if (data.firstBingo) {
-    card.append(buildHonoree('👑 First to BINGO', data.firstBingo.displayName));
-  }
+  if (mostLoved) {
+    // Photo-hero composition (#534/#561): the frozen Most-Loved Photo leads,
+    // letterboxed into the hero box with the award badge and the FROZEN heart
+    // count on the photo itself; the standings compress to ranked rows below.
+    // Daily honors are omitted — the one block that yields its space to the
+    // photo; they remain on the photo-less fallback.
+    const hero = el('div', 'share-card-ml-hero');
+    const img = document.createElement('img');
+    img.className = 'share-card-ml-img';
+    img.alt = '';
+    img.src = mostLoved.src;
+    hero.append(img);
+    hero.append(el('span', 'share-card-ml-badge', '📷 Most-loved photo'));
+    hero.append(el('span', 'share-card-ml-hearts', `❤ ${mostLoved.heartCount}`));
+    card.append(hero);
+    card.append(el('div', 'share-card-ml-by', mostLoved.creditLine));
 
-  if (data.honors.length > 0) {
-    card.append(el('div', 'share-card-honors-title', 'Daily honors'));
-    const honors = el('div', 'share-card-honors');
-    for (const h of data.honors) {
-      const row = el('div', 'share-card-honor-row');
-      row.append(el('span', 'share-card-honor-day', h.dayLabel));
-      row.append(el('span', 'share-card-honor-name', h.displayName));
-      honors.append(row);
+    const rows = el('div', 'share-card-ml-rows');
+    if (data.champion) {
+      rows.append(
+        buildMostLovedRow({
+          champ: true,
+          rank: '1',
+          name: data.champion.displayName,
+          role: `🏆 ${editionBrand().championRole}`,
+          stat: `${data.champion.bingoCount} bingo${data.champion.bingoCount === 1 ? '' : 's'}`,
+        }),
+      );
     }
-    card.append(honors);
+    (data.runnersUp ?? []).forEach((r, i) => {
+      rows.append(
+        buildMostLovedRow({
+          rank: String(i + 2),
+          name: r.displayName,
+          stat: `${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'} · ${r.squaresMarked} sq`,
+        }),
+      );
+    });
+    if (data.firstBingo) {
+      // Name only — the wireframe's timestamp stat is a recorded deviation
+      // (specs/most-loved-photo.md § Deviations): the card system renders no
+      // timezone-formatted times.
+      rows.append(
+        buildMostLovedRow({ rank: '👑', name: data.firstBingo.displayName, role: 'First to BINGO' }),
+      );
+    }
+    if (rows.childElementCount > 0) card.append(rows);
+  } else {
+    if (data.champion) {
+      card.append(
+        buildHonoree(
+          `🏆 ${editionBrand().championRole}`,
+          data.champion.displayName,
+          `${data.champion.bingoCount} bingo${data.champion.bingoCount === 1 ? '' : 's'} · ${data.champion.squaresMarked} squares`,
+        ),
+      );
+    }
+    if (data.firstBingo) {
+      card.append(buildHonoree('👑 First to BINGO', data.firstBingo.displayName));
+    }
+
+    if (data.honors.length > 0) {
+      card.append(el('div', 'share-card-honors-title', 'Daily honors'));
+      const honors = el('div', 'share-card-honors');
+      for (const h of data.honors) {
+        const row = el('div', 'share-card-honor-row');
+        row.append(el('span', 'share-card-honor-day', h.dayLabel));
+        row.append(el('span', 'share-card-honor-name', h.displayName));
+        honors.append(row);
+      }
+      card.append(honors);
+    }
   }
 
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
@@ -406,9 +497,26 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   return card;
 }
 
-/** The farewell podium as a Share Card (issue #449) — same pipeline, third card kind. */
+/**
+ * The farewell podium as a Share Card (issue #449) — same pipeline, third card
+ * kind. #534/#561: with `data.mostLoved` set the node is the photo-hero
+ * composition, and the hero image is DECODED before rasterization —
+ * html-to-image walks the DOM synchronously, so an undecoded image would
+ * raster as an empty box. `decode()` is feature-guarded (jsdom has none), and
+ * a decode failure falls back to the photo-less composition rather than ever
+ * sharing a broken hero.
+ */
 export async function renderFarewellShareCard(data: FarewellShareCardData): Promise<Blob> {
-  return rasterize(buildFarewellCardNode(data));
+  const node = buildFarewellCardNode(data);
+  const img = node.querySelector<HTMLImageElement>('.share-card-ml-img');
+  if (img && typeof img.decode === 'function') {
+    try {
+      await img.decode();
+    } catch {
+      return rasterize(buildFarewellCardNode({ ...data, mostLoved: null }));
+    }
+  }
+  return rasterize(node);
 }
 
 // e2e-only seam (#603): tests/e2e/emoji-raster.spec.ts builds the REAL

@@ -43,6 +43,10 @@ Motion (index.css § "feed hearts", inside the motion-polish vocabulary and cove
 
 No heart notification, no who-hearted list (the count is ambient warmth, not a roster—unlike a Tally, whose who-list is the point), no hearts on Tally Cards, no server-side counter (counts are client-derived from the live collection, ADR 0001), no exactly-once analytics (offline drains count late or not at all—accurate-but-delayed beats inflated), and no cascade-delete of hearts when a post dies (no cross-writer cleanup, the doubts posture): a deleted post's hearts are dead docs the incarnation filter structurally ignores forever.
 
+## One frozen downstream consumer
+
+Hearts stay a live, client-derived surface with one exception: at the Standings Freeze the scheduler computes the **Most-Loved Photo** award (specs/most-loved-photo.md, #534/#560) from this collection—once, server-side, persisted onto the Event doc, never recomputed. Its eligibility deliberately DIVERGES from `heartState`'s display semantics: a Player's own heart on their own Proof does not count, and banned Players' hearts are excluded unconditionally (no own-content exception). Nothing in this spec changes: the Heart button, counts, and display filtering are untouched.
+
 ## Test coverage
 
 `src/components/feed-hearts.test.tsx`: `heartDocId` binding, `heartState` counting/keying/incarnation-scoping/ban semantics with the own-content exception, HeartButton's pressed/label/burst/quiet-unheart/keyed-count contract plus the double-tap intent alternation and the optimistic override yielding to echo and rollback, and the CSS pins (keyframes exist, token-only fill, defined ahead of the kill switch). `tests/rules/feed-hearts.test.ts`: the full write gate against the emulator—bound slot, forged uid, phantom/wrong-kind targets, unknown kind, extra fields, stale/forged incarnation stamps, clock window, owner-overwrite-still-one-doc, no cross-Player update, owner/admin delete, re-heart, public read.

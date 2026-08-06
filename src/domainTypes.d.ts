@@ -183,6 +183,35 @@ export interface DayDef {
   snapshotEasyMixRatio?: number;
 }
 
+/** One co-winner of the Most-Loved Photo award (#534/#560,
+ *  specs/most-loved-photo.md). All fields are copied from the winning
+ *  `ProofDoc` AT the freeze; no media URL is persisted ON PURPOSE — display
+ *  always re-joins the LIVE Proof doc (`mostLovedDisplayWinners`,
+ *  src/data/mostLoved.ts), so a later-hidden photo can never be rendered from
+ *  a stale stored URL. */
+export interface MostLovedPhotoWinner {
+  proofId: string;
+  uid: string;              // owner
+  displayName: string;      // ProofDoc.displayName at freeze
+  promptText: string;       // ProofDoc.itemText
+  dayIndex: number | null;  // ProofDoc.dayIndex ?? null
+  proofCreatedAt: number;   // incarnation stamp (ProofDoc.createdAt) — the display join key
+}
+
+/** The frozen Most-Loved Photo result (#560). Field ABSENT = not yet computed
+ *  (the scheduler beat's idempotence key). Present with `winners: []` =
+ *  computed, no award — an explicit record, so a post-freeze heart can never
+ *  mint a late award (the "never recomputes" rule). `winners` retains a
+ *  deterministic bounded prefix; `winnerCount` records the complete tied
+ *  cardinality so an extreme tie cannot exceed Firestore's Event-doc limit. */
+export interface MostLovedPhotoAward {
+  winners: MostLovedPhotoWinner[]; // first 100 co-winners, ordered proofCreatedAt asc, then proofId asc
+  winnerCount?: number;            // complete tied cardinality; absent on records written before the bounded format
+  heartCount: number;              // frozen eligible count shared by all winners; 0 when winners is []
+  frozenAt: number;                // the freeze cutoff computed against (== EventDoc.frozenAt value)
+  computedAt: number;              // scheduler run clock, diagnostics only
+}
+
 export interface EventDoc {
   name: string;
   // The Event's date window. Docs written before the #566 rename persist
@@ -206,6 +235,13 @@ export interface EventDoc {
   // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
   // the standings freeze and the podium Moment posts. Absent until the finale.
   frozenAt?: number;
+  // The frozen Most-Loved Photo award (#534/#560, specs/most-loved-photo.md):
+  // computed and persisted exactly once by the same scheduler sweep that stamps
+  // `frozenAt`, as a sibling field because the award is Event-level frozen
+  // state exactly like the freeze stamp. ABSENT = not yet computed; present
+  // with `winners: []` = computed, no eligible winner (the explicit no-award
+  // record the write-once guard needs). Never recomputed after it exists.
+  mostLovedPhoto?: MostLovedPhotoAward;
   // Presentational, event-scoped hide/mute of a Player's content (ADR 0004
   // Phase 0) — NOT hard access revocation. An admin-maintained roster of banned
   // uids kept on the (already admin-writable) event doc; a follow-up (#108) will

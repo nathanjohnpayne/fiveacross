@@ -475,7 +475,22 @@ export function useLeaderboard() {
   return { players: sortPlayers(data), loading, hasServerData };
 }
 
-export function useProofFeed(max = 60) {
+/** A caller-owned, already-loaded moderation snapshot. Supplying this avoids a
+ * second Event subscription and keeps a surface's proof visibility aligned with
+ * the Event document that mounted it. */
+export interface ProofFeedModeration {
+  threshold: number | undefined;
+  bannedUids: readonly string[];
+}
+
+/**
+ * Visible proofs in newest-first order. `max: null` deliberately retains the
+ * complete visible set for a frozen award's moderation-aware proof join; it is
+ * a local display cap, not a Firestore query limit. A caller that already owns
+ * a loaded Event snapshot can pass its moderation fields to avoid a separate
+ * Event listener briefly failing open before it receives those fields.
+ */
+export function useProofFeed(max: number | null = 60, moderation?: ProofFeedModeration) {
   // Two layers hide a Proof from the public Feed. (1) The Admin hard-hide: only
   // 'active' proofs are readable by non-admins (firestore.rules), so a status
   // flip to 'hidden' removes it server-side — the Phase-0 override. (2) The ADR
@@ -487,7 +502,13 @@ export function useProofFeed(max = 60) {
   // Admin can still reach a threshold-hidden Proof to restore or delete it. This
   // one chokepoint also covers the merged Feed's proof side — `useFeed` composes
   // `useProofFeed`, so a Moment (no `reportCount`) is never touched.
-  const { threshold, bannedUids } = useEventModeration();
+  // Always call the hook so React's hook order remains stable. When a caller
+  // supplies an authoritative snapshot, disable its listener and use that
+  // snapshot verbatim — `undefined` is a meaningful fail-open threshold, not
+  // a reason to fall back to a second, initially-unloaded Event read.
+  const liveModeration = useEventModeration(moderation === undefined);
+  const threshold = moderation === undefined ? liveModeration.threshold : moderation.threshold;
+  const bannedUids = moderation === undefined ? liveModeration.bannedUids : moderation.bannedUids;
   const { data, loading } = useColSub<ProofDoc>(
     query(proofsCol(), where('status', '==', 'active')),
     'proofs',
@@ -501,11 +522,12 @@ export function useProofFeed(max = 60) {
   // public Feed (and, through `useFeed`, the merged stream) by its OWNER — the same
   // presentational hide `useReportedProofs` (Admin) deliberately does NOT apply.
   const proofs = useMemo(
-    () =>
-      data
+    () => {
+      const visible = data
         .filter((p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids))
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, max),
+        .sort((a, b) => b.createdAt - a.createdAt);
+      return max === null ? visible : visible.slice(0, max);
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [data, threshold, bannedKey, max],
   );

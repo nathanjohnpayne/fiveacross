@@ -48,18 +48,27 @@ export interface EventLike {
   settings?: { reportHideThreshold?: number; easyMixRatio?: number };
   /** ADR 0004 Phase 0 event-scoped ban roster (#108; mirrors the live deal pool). */
   bannedUids?: string[];
+  /** The frozen Most-Loved Photo award (#560) — the guard reads presence only
+   *  (`!= null` = already computed, the beat's idempotence key), so the type
+   *  stays `unknown` rather than restating the shared shape here. */
+  mostLovedPhoto?: unknown;
 }
 
 /** The finale Moment kinds this ticket posts. */
 import {
   lastCallStandingsCopy,
   buildPodiumPayload,
+  buildMostLovedPhotoAward,
   type FinalePlayer,
   type FinaleDay,
   type FinaleDayStat,
   type FinaleDayHonorDoc,
+  type MostLovedProofLike,
+  type MostLovedHeartLike,
 } from './finaleContent';
 import { normalizePool } from './poolVocab';
+// Declaration-only shared contract (the daily-engagement-email precedent) —
+// the persisted award shape both compiler roots agree on.
 
 export type FinaleMomentKind = 'last_call' | 'podium';
 
@@ -249,11 +258,13 @@ export interface FinaleDecision {
   postLastCall: boolean;
   freeze: boolean;
   postPodium: boolean;
+  computeMostLoved: boolean;
 }
 
 /**
  * Given the finale boundaries, `now`, and the current state (`frozenAt`, whether the
- * `last_call` / `podium` Moments already exist), decide which beats fire:
+ * `last_call` / `podium` Moments already exist, whether the Most-Loved award is
+ * already persisted), decide which beats fire:
  *
  *   - `postLastCall`: `now` is in `[lastCallAt, farewellUnlockAt)` and no last-call
  *     Moment exists yet. The upper bound means once the freeze time arrives the
@@ -265,17 +276,29 @@ export interface FinaleDecision {
  *     froze but its podium write failed transiently, the freeze guard now blocks
  *     re-freezing, but the podium retry stays open until the Moment actually lands.
  *     Concurrent double-posts collapse onto the one deterministic-id doc.
+ *   - `computeMostLoved` (#560): `now` has reached the farewell unlock, the Event
+ *     is not yet frozen, and no `mostLovedPhoto` award is persisted yet. It is
+ *     deliberately coupled to the freeze transaction: that transaction reads the
+ *     moderation state and the Proof/Heart collections, then writes both frozen
+ *     fields together. A retry therefore cannot rebuild an award from a later ban
+ *     roster, report threshold, or Proof visibility state.
  */
 export function finaleActions(
   times: FinaleTimes,
   now: number,
-  state: { frozenAt?: number | null; lastCallPosted: boolean; podiumPosted: boolean },
+  state: {
+    frozenAt?: number | null;
+    lastCallPosted: boolean;
+    podiumPosted: boolean;
+    mostLovedComputed: boolean;
+  },
 ): FinaleDecision {
   const atFreeze = now >= times.farewellUnlockAt;
   return {
     postLastCall: now >= times.lastCallAt && now < times.farewellUnlockAt && !state.lastCallPosted,
     freeze: atFreeze && state.frozenAt == null,
     postPodium: atFreeze && !state.podiumPosted,
+    computeMostLoved: atFreeze && state.frozenAt == null && !state.mostLovedComputed,
   };
 }
 
@@ -292,6 +315,8 @@ export class UnlockPermissionError extends Error {}
 interface DocSnapshot {
   readonly exists: boolean;
   readonly id: string;
+  /** Server-assigned document creation time, present on Admin SDK snapshots. */
+  readonly createTime?: { toMillis(): number; seconds?: number; nanoseconds?: number };
   data(): Record<string, unknown> | undefined;
 }
 interface DocRef {
@@ -533,6 +558,129 @@ async function freezeStandings(db: AdminFirestore, eventId: string, frozenAt: nu
   });
 }
 
+// --- Most-Loved Photo award (#534/#560) -------------------------------------------
+
+/** Map a proofs collection read onto the pure builder's input shape. Defensive
+ *  field-by-field reads, mirroring `snapshotItemsFrom`: a malformed doc gets
+ *  values the eligibility predicates simply exclude (`''` never equals
+ *  `'photo'`/`'active'`), never a throw. */
+function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[] {
+  return snap.docs.map((d) => {
+    const data = d.data() ?? {};
+    return {
+      id: d.id,
+      uid: typeof data.uid === 'string' ? data.uid : '',
+      displayName: typeof data.displayName === 'string' ? data.displayName : '',
+      type: typeof data.type === 'string' ? data.type : '',
+      status: typeof data.status === 'string' ? data.status : '',
+      reportCount: finiteNumber(data.reportCount, 0),
+      createdAt: finiteNumber(data.createdAt, 0),
+      itemText: typeof data.itemText === 'string' ? data.itemText : '',
+      dayIndex:
+        typeof data.dayIndex === 'number' && Number.isFinite(data.dayIndex) ? data.dayIndex : null,
+    };
+  });
+}
+
+/** Map a hearts collection read onto the pure builder's input shape. A missing
+ *  `targetCreatedAt` defaults to -1 so a malformed heart can never
+ *  incarnation-match a proof whose own missing `createdAt` defaulted to 0.
+ *  `createTime` is Firestore's server-assigned document-creation instant; the
+ *  client-set `createdAt` remains Feed ordering data, but is not trustworthy
+ *  enough to freeze eligibility because the rules intentionally tolerate clock
+ *  drift. A missing/malformed metadata value becomes NaN, which the pure
+ *  builder rejects rather than letting an unverifiable heart into the award. */
+function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[] {
+  return snap.docs.map((d) => {
+    const data = d.data() ?? {};
+    const serverCreatedAt = createTimeCeilingMillis(d.createTime);
+    return {
+      uid: typeof data.uid === 'string' ? data.uid : '',
+      targetKind: typeof data.targetKind === 'string' ? data.targetKind : '',
+      targetId: typeof data.targetId === 'string' ? data.targetId : '',
+      targetCreatedAt: finiteNumber(data.targetCreatedAt, -1),
+      createdAt: finiteNumber(data.createdAt, 0),
+      serverCreatedAt:
+        typeof serverCreatedAt === 'number' && Number.isFinite(serverCreatedAt)
+          ? serverCreatedAt
+          : Number.NaN,
+    };
+  });
+}
+
+/**
+ * Represent Firestore's nanosecond timestamp as the smallest whole millisecond
+ * that is not earlier than it. The award cutoff is millisecond precision, so
+ * this preserves the exact `createTime <= cutoff` predicate: a Heart at the
+ * cutoff stays at that millisecond, while one nanosecond after it rounds up and
+ * is excluded. `Timestamp#toMillis()` floors and would incorrectly include the
+ * latter. Missing precision fails closed rather than guessing from client data.
+ */
+function createTimeCeilingMillis(
+  createTime: { toMillis(): number; seconds?: number; nanoseconds?: number } | undefined,
+): number {
+  const seconds = createTime?.seconds;
+  const nanoseconds = createTime?.nanoseconds;
+  if (
+    typeof seconds !== 'number' ||
+    !Number.isSafeInteger(seconds) ||
+    typeof nanoseconds !== 'number' ||
+    !Number.isInteger(nanoseconds) ||
+    nanoseconds < 0 ||
+    nanoseconds >= 1_000_000_000
+  ) {
+    return Number.NaN;
+  }
+  return seconds * 1000 + Math.ceil(nanoseconds / 1_000_000);
+}
+
+/**
+ * Atomically freeze standings and persist the Most-Loved Photo award (#560).
+ *
+ * The Event's ban roster/report threshold, every eligible Proof's visibility,
+ * and every Heart's server creation time are read inside the same transaction
+ * that stamps `frozenAt` and `mostLovedPhoto`. That coupling is essential: a
+ * retry after an award-read/write failure must not rebuild an ostensibly frozen
+ * award from mutable moderation state. If any read fails, neither frozen field
+ * is written and the next tick retries the whole snapshot together. The podium
+ * remains its own best-effort beat.
+ *
+ * `cutoff` is the SCHEDULED freeze instant (`times.farewellUnlockAt`), never the
+ * run clock: post-cutoff Hearts remain excluded even if this transaction starts
+ * late. The atomic transaction also collapses concurrent scheduler/manual runs
+ * onto the first successful freeze.
+ */
+async function freezeStandingsAndPersistMostLovedAward(
+  db: AdminFirestore,
+  eventId: string,
+  cutoff: number,
+  now: number,
+): Promise<boolean> {
+  const eventRef = db.doc(`events/${eventId}`);
+  const proofsRef = db.collection(`events/${eventId}/proofs`);
+  const heartsRef = db.collection(`events/${eventId}/hearts`);
+  return db.runTransaction(async (tx) => {
+    const eventSnap = await tx.get(eventRef);
+    const event = eventSnap.data() as EventLike | undefined;
+    if (!event || event.frozenAt != null || event.mostLovedPhoto != null) return false;
+
+    // Firestore requires all transaction reads before its write. Reading every
+    // award input through `tx` gives the Event update a single, retry-safe view.
+    const [proofsSnap, heartsSnap] = await Promise.all([tx.get(proofsRef), tx.get(heartsRef)]);
+    const award = buildMostLovedPhotoAward(mostLovedProofsFrom(proofsSnap), mostLovedHeartsFrom(heartsSnap), {
+      bannedUids: event.bannedUids ?? [],
+      reportHideThreshold: event.settings?.reportHideThreshold,
+      cutoff,
+      computedAt: now,
+    });
+    tx.update(eventRef, {
+      frozenAt: cutoff,
+      mostLovedPhoto: award as unknown as Record<string, unknown>,
+    });
+    return true;
+  });
+}
+
 // --- Finale beats ---------------------------------------------------------------
 
 /**
@@ -552,10 +700,11 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
     hasMoment(db, eventId, 'last_call'),
     hasMoment(db, eventId, 'podium'),
   ]);
-  const { postLastCall, freeze, postPodium } = finaleActions(times, now, {
+  const { postLastCall, freeze, postPodium, computeMostLoved } = finaleActions(times, now, {
     frozenAt: event.frozenAt,
     lastCallPosted,
     podiumPosted,
+    mostLovedComputed: event.mostLovedPhoto != null,
   });
 
   if (postLastCall) {
@@ -586,14 +735,20 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       console.error('runFinaleBeats: last_call post failed', eventId, err);
     }
   }
-  // Freeze and podium are INDEPENDENT best-effort beats (Codex #228): freezing stamps
-  // the scheduled 08:00 cutoff exactly-once, while the podium retries on its own guard
-  // until the Moment lands — so a run that froze but failed to post the podium does not
-  // strand the finale. Both are idempotent (the frozenAt flip; the deterministic-id
-  // podium doc), so a re-run or a race is safe.
+  // Freeze and podium are INDEPENDENT best-effort beats (Codex #228): the podium
+  // retries on its own guard, while the freeze transaction atomically captures the
+  // Most-Loved eligibility state when that award is still owed. Both are idempotent,
+  // so a re-run or a race is safe.
   if (freeze) {
     try {
-      await freezeStandings(db, eventId, times.farewellUnlockAt);
+      if (computeMostLoved) {
+        await freezeStandingsAndPersistMostLovedAward(db, eventId, times.farewellUnlockAt, now);
+      } else {
+        // Defensive compatibility for an Event that already has a persisted
+        // award but lacks the historical freeze stamp. The normal new-event path
+        // always takes the atomic branch above.
+        await freezeStandings(db, eventId, times.farewellUnlockAt);
+      }
     } catch (err) {
       console.error('runFinaleBeats: freeze failed', eventId, err);
     }

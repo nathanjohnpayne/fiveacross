@@ -340,7 +340,7 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
 
   it('posts last-call in [20:00 Day9, 08:00 Day10) and only when not already posted', () => {
     const t = finaleTimes(mainDays())!;
-    const base = { lastCallPosted: false, podiumPosted: false };
+    const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
     expect(finaleActions(t, t.lastCallAt, base).postLastCall).toBe(true);
     expect(finaleActions(t, t.lastCallAt - 1, base).postLastCall).toBe(false); // before 20:00
     expect(finaleActions(t, t.farewellUnlockAt, base).postLastCall).toBe(false); // freeze supersedes
@@ -349,7 +349,7 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
 
   it('freezes at/after the farewell unlock only while not yet frozen', () => {
     const t = finaleTimes(mainDays())!;
-    const base = { lastCallPosted: false, podiumPosted: false };
+    const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
     expect(finaleActions(t, t.farewellUnlockAt, base).freeze).toBe(true);
     expect(finaleActions(t, t.farewellUnlockAt - 1, base).freeze).toBe(false);
     expect(finaleActions(t, t.farewellUnlockAt, { ...base, frozenAt: 123 }).freeze).toBe(false);
@@ -357,7 +357,7 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
 
   it('posts the podium at/after the farewell unlock only while not already posted', () => {
     const t = finaleTimes(mainDays())!;
-    const base = { lastCallPosted: false, podiumPosted: false };
+    const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
     expect(finaleActions(t, t.farewellUnlockAt, base).postPodium).toBe(true);
     expect(finaleActions(t, t.farewellUnlockAt - 1, base).postPodium).toBe(false);
     expect(finaleActions(t, t.farewellUnlockAt, { ...base, podiumPosted: true }).postPodium).toBe(false);
@@ -370,6 +370,7 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
       frozenAt: t.farewellUnlockAt,
       lastCallPosted: true,
       podiumPosted: false,
+      mostLovedComputed: false,
     });
     expect(d.freeze).toBe(false); // already frozen — never re-freeze
     expect(d.postPodium).toBe(true); // but the podium beat is still owed

@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { contrastRatio, hexToRgb, mixSrgb, parseThemeBlocks } from '../theme/contrast';
-import type { Cell, EventDoc, PlayerDoc } from '../types';
+import type { Cell, EventDoc, MostLovedPhotoAward, PlayerDoc, ProofDoc } from '../types';
 
 // specs/w2-share-cards.md (issue #36): on-device Share Cards (BINGO +
 // Leaderboard) rasterized with html-to-image and handed to the native share
@@ -43,6 +43,9 @@ const H = vi.hoisted(() => ({
   // Leaderboard's hook.
   players: [] as PlayerDoc[],
   leaderboardLoading: false,
+  // #561: FarewellPodium's award branch opens the Feed's proof hook.
+  proofs: [] as unknown[],
+  proofsLoading: false,
 }));
 
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user, loading: false }) }));
@@ -64,6 +67,9 @@ vi.mock('../hooks/useData', () => ({
   useMyPlayer: () => ({ data: null, loading: true, hasServerData: false }),
   useEventDoc: () => ({ data: H.event, loading: false }),
   useLeaderboard: () => ({ players: H.players, loading: H.leaderboardLoading }),
+  // #561: the Most-Loved award's display join reads the Feed's own filtered
+  // proofs; the hero tests below fixture them.
+  useProofFeed: () => ({ proofs: H.proofs, loading: H.proofsLoading }),
   // #218: no Proofs fixtured in this suite — an empty map keeps every row
   // chip-less, which is orthogonal to the Share Card assertions here.
   useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
@@ -84,6 +90,7 @@ import {
   renderFarewellShareCard,
   shareCardBlob,
   shareCardAppName,
+  type FarewellShareCardData,
   type LeaderboardShareRow,
 } from './ShareCard';
 // Real module, never mocked here: the #607 entry-origin tests below install a
@@ -134,6 +141,8 @@ beforeEach(() => {
   H.event = null;
   H.players = [];
   H.leaderboardLoading = false;
+  H.proofs = [];
+  H.proofsLoading = false;
 });
 
 afterEach(() => {
@@ -784,6 +793,153 @@ describe('ShareCard — renderFarewellShareCard', () => {
     expect(node.querySelector('.share-card-honors-title')).toBeNull();
     expect(node.querySelector('.share-card-event')?.textContent).toBe('Just The Event'); // eventName fallback
     expect(node.querySelector('.share-card-stat')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ShareCard — renderFarewellShareCard photo-hero composition (#534/#561)
+// ---------------------------------------------------------------------------
+
+describe('ShareCard — renderFarewellShareCard photo-hero composition (#534/#561)', () => {
+  const heroData: FarewellShareCardData = {
+    eventName: 'Allure of the Seas',
+    contextLine: 'Gay Cruise Bingo · Day 10 · Barcelona',
+    statLine: 'Final standings · 10 days',
+    champion: { displayName: 'Zacaria Arab', bingoCount: 16, squaresMarked: 124 },
+    firstBingo: { displayName: 'Turntilla' },
+    honors: [{ dayLabel: 'Day 1 · Trieste 🇮🇹', displayName: 'Andrew Levad' }],
+    runnersUp: [
+      { displayName: 'Logan Murdock', bingoCount: 14, squaresMarked: 117 },
+      { displayName: 'Nathan Payne', bingoCount: 13, squaresMarked: 110 },
+    ],
+    mostLoved: {
+      photoUrl: 'blob:mock-hero',
+      heartCount: 31,
+      creditLine: 'Ido Marcus · “Mirror-hall selfie” · Day 7 · Rome 🇮🇹 · shared with Jess',
+    },
+  };
+
+  function stubImageDecode(impl: () => Promise<void>): void {
+    // jsdom's HTMLImageElement has no decode() — define one so the renderer's
+    // feature-guarded await path runs; afterEach removes it.
+    Object.defineProperty(HTMLImageElement.prototype, 'decode', {
+      value: impl,
+      configurable: true,
+    });
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(HTMLImageElement.prototype, 'decode');
+  });
+
+  it('renders the hero box (badge + FROZEN heart chip + letterboxed img), credit line, and compressed rows — daily honors omitted', async () => {
+    stubImageDecode(() => Promise.resolve());
+    await renderFarewellShareCard(heroData);
+
+    const node = toBlobNode();
+    expect(node.querySelector('.share-card-event')?.textContent).toBe(
+      'Gay Cruise Bingo · Day 10 · Barcelona',
+    );
+    expect(node.textContent).toContain('FINAL STANDINGS');
+
+    // Hero box: the sanitized blob object URL, the award badge, the frozen count.
+    const hero = node.querySelector('.share-card-ml-hero')!;
+    expect(hero).toBeTruthy();
+    expect(hero.querySelector<HTMLImageElement>('.share-card-ml-img')?.src).toBe('blob:mock-hero');
+    expect(hero.querySelector('.share-card-ml-badge')?.textContent).toBe('📷 Most-loved photo');
+    expect(hero.querySelector('.share-card-ml-hearts')?.textContent).toBe('❤ 31');
+
+    // Credit line, tie suffix included.
+    expect(node.querySelector('.share-card-ml-by')?.textContent).toBe(
+      'Ido Marcus · “Mirror-hall selfie” · Day 7 · Rome 🇮🇹 · shared with Jess',
+    );
+
+    // Compressed standings: champion row (Bebas name treatment class + role
+    // chip + bingos-only stat), ranks 2-3 plain rows, then 👑 First to BINGO
+    // with NO stat (the recorded timestamp deviation).
+    const rows = node.querySelectorAll('.share-card-ml-row');
+    expect(rows).toHaveLength(4);
+    expect(rows[0].className).toContain('champ');
+    expect(rows[0].querySelector('.share-card-ml-rank')?.textContent).toBe('1');
+    expect(rows[0].querySelector('.share-card-ml-name')?.textContent).toBe('Zacaria Arab');
+    expect(rows[0].querySelector('.share-card-ml-role')?.textContent).toBe('🏆 Cruise champion');
+    expect(rows[0].querySelector('.share-card-ml-stat')?.textContent).toBe('16 bingos');
+    expect(rows[1].querySelector('.share-card-ml-rank')?.textContent).toBe('2');
+    expect(rows[1].querySelector('.share-card-ml-stat')?.textContent).toBe('14 bingos · 117 sq');
+    expect(rows[2].querySelector('.share-card-ml-rank')?.textContent).toBe('3');
+    expect(rows[2].querySelector('.share-card-ml-stat')?.textContent).toBe('13 bingos · 110 sq');
+    expect(rows[3].querySelector('.share-card-ml-rank')?.textContent).toBe('👑');
+    expect(rows[3].querySelector('.share-card-ml-name')?.textContent).toBe('Turntilla');
+    expect(rows[3].querySelector('.share-card-ml-role')?.textContent).toBe('First to BINGO');
+    expect(rows[3].querySelector('.share-card-ml-stat')).toBeNull();
+
+    // The one block that yields its space to the photo: NO daily honors, and
+    // none of the photo-less honoree blocks either.
+    expect(node.querySelector('.share-card-honors-title')).toBeNull();
+    expect(node.querySelectorAll('.share-card-honor-row')).toHaveLength(0);
+    expect(node.querySelectorAll('.share-card-honoree')).toHaveLength(0);
+
+    // Stat line + Edition footer as today.
+    expect(node.querySelector('.share-card-stat')?.textContent).toBe('Final standings · 10 days');
+    expect(node.querySelector('.share-card-footer')?.textContent).toContain(shareCardAppName());
+  });
+
+  it('isolates emoji runs on the hero surfaces — credit line flag, badge camera (#603)', async () => {
+    stubImageDecode(() => Promise.resolve());
+    await renderFarewellShareCard(heroData);
+    const node = toBlobNode();
+    const by = node.querySelector('.share-card-ml-by')!;
+    const atoms = by.querySelectorAll('span.emoji-run');
+    expect(atoms).toHaveLength(1);
+    expect(atoms[0].textContent).toBe('🇮🇹');
+    expect(node.querySelector('.share-card-ml-badge span.emoji-run')?.textContent).toBe('📷');
+  });
+
+  it('mostLoved absent and mostLoved: null render the SAME photo-less node — byte-identical to the pre-#534 card', async () => {
+    // The pre-#534 call shape: no mostLoved key, no runnersUp key at all.
+    const legacy: FarewellShareCardData = {
+      eventName: heroData.eventName,
+      contextLine: heroData.contextLine,
+      statLine: heroData.statLine,
+      champion: heroData.champion,
+      firstBingo: heroData.firstBingo,
+      honors: heroData.honors,
+    };
+    await renderFarewellShareCard(legacy);
+    await renderFarewellShareCard({ ...legacy, mostLoved: null, runnersUp: heroData.runnersUp });
+    expect(toBlobMock).toHaveBeenCalledTimes(2);
+    const absent = toBlobMock.mock.calls[0][0] as HTMLElement;
+    const nulled = toBlobMock.mock.calls[1][0] as HTMLElement;
+    // The photo-less composition ignores runnersUp entirely; both renders are
+    // the exact honoree-blocks card, markup-identical.
+    expect(nulled.outerHTML).toBe(absent.outerHTML);
+    expect(absent.querySelector('.share-card-ml-hero')).toBeNull();
+    expect(absent.querySelectorAll('.share-card-honoree')).toHaveLength(2);
+    expect(absent.querySelectorAll('.share-card-honor-row')).toHaveLength(1);
+  });
+
+  it('a decode failure falls back to the photo-less composition — never a broken hero', async () => {
+    stubImageDecode(() => Promise.reject(new Error('EncodingError')));
+    const blob = await renderFarewellShareCard(heroData);
+    expect(blob.size).toBeGreaterThan(0);
+    expect(toBlobMock).toHaveBeenCalledTimes(1);
+    const node = toBlobNode();
+    expect(node.querySelector('.share-card-ml-hero')).toBeNull();
+    // The full photo-less card, daily honors included.
+    expect(node.querySelectorAll('.share-card-honoree')).toHaveLength(2);
+    expect(node.querySelectorAll('.share-card-honor-row')).toHaveLength(1);
+  });
+
+  it('a photoUrl the safeMediaUrl sink guard rejects renders photo-less (PR #95 barrier holds)', async () => {
+    stubImageDecode(() => Promise.resolve());
+    await renderFarewellShareCard({
+      ...heroData,
+      mostLoved: { ...heroData.mostLoved!, photoUrl: 'javascript:alert(1)' },
+    });
+    const node = toBlobNode();
+    expect(node.querySelector('.share-card-ml-hero')).toBeNull();
+    expect(node.querySelector('img')).toBeNull();
+    expect(node.querySelectorAll('.share-card-honoree')).toHaveLength(2);
   });
 });
 
@@ -1634,9 +1790,195 @@ describe('FarewellPodium — share affordance', () => {
           champion: { uid: 'c', displayName: 'C', bingoCount: 2, squaresMarked: 20 },
           firstBingo: null,
           dailyHonors: [],
+          runnersUp: [],
         }}
       />,
     );
     expect(screen.queryByRole('button', { name: 'Share final standings' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FarewellPodium — photo-hero share (#534/#561)
+// ---------------------------------------------------------------------------
+
+describe('FarewellPodium — photo-hero share (#534/#561)', () => {
+  const champ = mkPlayer({
+    uid: 'champ',
+    displayName: 'Zacaria Arab',
+    bingoCount: 16,
+    squaresMarked: 124,
+    firstBingoAt: 9000,
+  });
+  const early = mkPlayer({
+    uid: 'early',
+    displayName: 'Turntilla',
+    bingoCount: 5,
+    squaresMarked: 60,
+    firstBingoAt: 1000,
+  });
+
+  const AWARD: MostLovedPhotoAward = {
+    winners: [
+      { proofId: 'w1', uid: 'ana', displayName: 'Ana', promptText: 'Sunset over the bay', dayIndex: 1, proofCreatedAt: 1000 },
+      { proofId: 'w2', uid: 'bea', displayName: 'Bea', promptText: 'Fog bank rolling in', dayIndex: 2, proofCreatedAt: 2000 },
+    ],
+    heartCount: 9,
+    frozenAt: 9_000,
+    computedAt: 9_050,
+  };
+
+  function liveProof(id: string, uid: string, createdAt: number): ProofDoc {
+    return {
+      id,
+      uid,
+      displayName: `Poster ${id}`,
+      photoURL: null,
+      type: 'photo',
+      cellIndex: 3,
+      itemText: `Prompt ${id}`,
+      mediaURL: `https://firebasestorage.googleapis.com/v0/b/x/o/proofs%2F${id}?alt=media`,
+      createdAt,
+      reportCount: 0,
+      status: 'active',
+      dayIndex: 1,
+    };
+  }
+
+  const eventProp = { name: 'Allure of the Seas', mostLovedPhoto: AWARD } as EventDoc;
+
+  const fetchMock = vi.fn();
+  const createObjectURL = vi.fn();
+  const revokeObjectURL = vi.fn();
+
+  beforeEach(() => {
+    H.proofs = [liveProof('w1', 'ana', 1000), liveProof('w2', 'bea', 2000)];
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({
+      ok: true,
+      blob: async () => new Blob(['jpeg-bytes'], { type: 'image/jpeg' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    createObjectURL.mockReset();
+    createObjectURL.mockReturnValue('blob:hero-1');
+    revokeObjectURL.mockReset();
+    // jsdom ships neither object-URL API; define both so the hero pipeline
+    // (fetch → blob → object URL → revoke after rasterization) runs for real.
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true });
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true });
+    Object.defineProperty(HTMLImageElement.prototype, 'decode', {
+      value: () => Promise.resolve(),
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(URL, 'createObjectURL');
+    Reflect.deleteProperty(URL, 'revokeObjectURL');
+    Reflect.deleteProperty(HTMLImageElement.prototype, 'decode');
+  });
+
+  it('shares the photo-hero card: fetched blob object URL as the hero, revoked after rasterization; slug and title do not fork', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    // One media fetch, of the WINNER's own mediaURL.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proofs%2Fw1');
+
+    const node = latestToBlobNode();
+    const img = node.querySelector<HTMLImageElement>('.share-card-ml-img')!;
+    expect(img.src).toBe('blob:hero-1');
+    expect(node.querySelector('.share-card-ml-hearts')?.textContent).toBe('❤ 9');
+    // Hero = earliest-posted winner; the credit names the recorded co-winner.
+    expect(node.querySelector('.share-card-ml-by')?.textContent).toBe(
+      'Ana · “Sunset over the bay” · Day 2 · shared with Bea',
+    );
+    // The object URL has no reader once the PNG settles.
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:hero-1');
+
+    // One surface: the slug and share title DO NOT fork on the hero composition.
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.files[0].name).toBe('gay-cruise-bingo-final-standings.png');
+    expect(shareArg.title).toBe('Gay Cruise Bingo—Final standings');
+  });
+
+  it('warm on hover + tap share ONE media fetch and ONE rasterization', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+    expect(toBlobMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed media fetch falls back to the photo-less composition — the documented fallback, never a broken hero', async () => {
+    fetchMock.mockResolvedValue({ ok: false, blob: async () => new Blob() });
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    const node = latestToBlobNode();
+    expect(node.querySelector('.share-card-ml-hero')).toBeNull();
+    expect(node.querySelectorAll('.share-card-honoree').length).toBeGreaterThan(0);
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('with the first winner hidden, the hero is the earliest STILL-VISIBLE winner and the credit still names the recorded co-winner', async () => {
+    H.proofs = [liveProof('w2', 'bea', 2000)];
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('proofs%2Fw2');
+    expect(latestToBlobNode().querySelector('.share-card-ml-by')?.textContent).toBe(
+      'Bea · “Fog bank rolling in” · Day 3 · shared with Ana',
+    );
+  });
+
+  it('the explicit no-award record shares the photo-less card without waiting on proofs', async () => {
+    H.proofs = [];
+    H.proofsLoading = true; // winners: [] waits for nothing
+    const noAward: MostLovedPhotoAward = {
+      winners: [],
+      heartCount: 0,
+      frozenAt: 9000,
+      computedAt: 9050,
+    };
+    const noAwardEvent = { name: 'Allure of the Seas', mostLovedPhoto: noAward } as EventDoc;
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={noAwardEvent} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(latestToBlobNode().querySelector('.share-card-ml-hero')).toBeNull();
   });
 });

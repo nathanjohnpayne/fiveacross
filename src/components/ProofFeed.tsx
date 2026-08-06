@@ -1144,6 +1144,14 @@ export default function ProofFeed() {
 
   return (
     <div className="list">
+      {/* The Hearts cue (#534/#561, specs/feed-hearts.md): a quiet standing
+          invitation while Hearts still count toward the Most-Loved Photo
+          freeze — no streaks, no badges, no notification pressure, and it
+          leaves with the freeze itself. Static copy, deliberately unstyled
+          beyond the muted-hint treatment. */}
+      {event != null && !standingsFrozen(event) && (
+        <p className="feed-heart-cue">Heart the moments you want to remember</p>
+      )}
       {entries.map((entry) => {
         if (entry.feedKind === 'notice') {
           return <NoticeCard key={`notice-${entry.notice.id}`} notice={entry.notice} days={event?.days} />;

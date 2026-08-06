@@ -19,6 +19,11 @@
  */
 
 import { normalizePool } from './poolVocab';
+// Declaration-only shared contract (the daily-engagement-email precedent): the
+// separately-rooted Functions compiler can consume `src/domainTypes.d.ts`
+// without emitting an app file, so both the client mirror
+// (src/data/mostLoved.ts) and this builder return the SAME named type.
+import type { MostLovedPhotoAward, MostLovedPhotoWinner } from '../../src/domainTypes';
 
 // --- Minimal domain shapes (local, package-decoupled) ---------------------------
 
@@ -293,4 +298,167 @@ export function buildPodiumPayload(
     .sort((a, b) => a.dayIndex - b.dayIndex);
 
   return { champion, firstBingo, dailyHonors };
+}
+
+// --- Most-Loved Photo award (#534/#560, specs/most-loved-photo.md) --------------
+
+/** The subset of a `ProofDoc` the award computation reads (local minimal shape,
+ *  package-decoupled like every other input in this file). */
+export interface MostLovedProofLike {
+  id: string;
+  uid: string;
+  displayName: string;
+  type: string;
+  status: string;
+  reportCount: number;
+  createdAt: number;
+  itemText: string;
+  dayIndex?: number | null;
+}
+
+/** The subset of a `HeartDoc` the award computation reads. */
+export interface MostLovedHeartLike {
+  uid: string;
+  targetKind: string;
+  targetId: string;
+  targetCreatedAt: number;
+  createdAt: number;
+  /** Firestore's server-assigned document creation instant. Optional only so
+   *  the client parity fixture can model the same pure rule without importing
+   *  Admin SDK snapshot types; scheduler input always supplies it. */
+  serverCreatedAt?: number;
+}
+
+/**
+ * A Proof's frozen attribution is bounded by the write target, not by the
+ * number of eligible photos. Firestore permits a 1 MiB document; retaining an
+ * unbounded tie list would make the freeze retry forever once that limit is
+ * crossed. The ordered prefix is deterministic and `winnerCount` preserves the
+ * full cardinality for callers that need to describe the tie.
+ */
+export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
+
+/** Local mirror of `src/data/moderation.ts`'s `isReportHidden` (this module
+ *  stays decoupled from the app package, like `autohide.ts`/`unlockDay.ts`).
+ *  True iff `reportCount` has REACHED a POSITIVE threshold; fails OPEN for a
+ *  missing/non-positive/NaN threshold. */
+function mostLovedReportHidden(reportCount: number, threshold: number | undefined): boolean {
+  return typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
+}
+
+/** Local mirror of `src/data/moderation.ts`'s `isBanned`. True iff `uid` is on
+ *  the roster; fails OPEN for a missing/malformed roster. */
+function mostLovedBanned(uid: string | undefined, bannedUids: readonly string[] | undefined): boolean {
+  return !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid);
+}
+
+/**
+ * Build the frozen Most-Loved Photo award (#560): the visible,
+ * moderation-eligible photo Proof holding the most eligible Hearts at the
+ * standings freeze. Pure and injectable — the scheduler beat in `unlockDay.ts`
+ * feeds it plain collection reads; `src/data/mostLoved.ts` mirrors it verbatim
+ * and `tests/functions/most-loved-parity.test.ts` pins the two against one
+ * fixture set (a mirror without a parity test is how mirrors drift).
+ *
+ * Eligibility, rule by rule (the 2026-08-04 verbatim decisions):
+ *
+ *   - an eligible PROOF is a photo (`type === 'photo'`) passing the Feed's
+ *     exact visibility filter (`useProofFeed`, src/hooks/useData.ts): `status
+ *     === 'active'` (excludes hidden/pending/flagged; deleted docs are absent
+ *     from the read set by construction), NOT report-hidden (fail-open
+ *     threshold, mirror of `isReportHidden`), owner not banned;
+ *   - an eligible HEART targets that proof (`targetKind === 'proof'`,
+ *     `targetId`), matches its incarnation (`targetCreatedAt ===
+ *     proof.createdAt`, the `heartState` rule), was committed at or before the
+ *     freeze cutoff (Firestore `createTime <= cutoff` — the SCHEDULED instant, never the run
+ *     clock), is NOT the owner's own heart (`h.uid !== proof.uid` — new logic:
+ *     `heartState` deliberately counts self-hearts for display and that stays
+ *     unchanged), and is NOT from a banned Player — UNCONDITIONALLY:
+ *     `heartState`'s own-content exception (a banned viewer still sees their
+ *     own heart) is display-only and does NOT apply to the award;
+ *   - the count is the number of UNIQUE eligible heart uids per proof (the
+ *     deterministic slot id already guarantees one doc per pair; the Set makes
+ *     this total over arbitrary fixtures);
+ *   - winners are the first 100 eligible proofs at the maximum count when that
+ *     maximum is >= 1, ordered `proofCreatedAt` asc then `proofId` asc (total,
+ *     deterministic; `winners[0]` is the share hero); `winnerCount` retains
+ *     the complete tied cardinality without an unbounded Event payload;
+ *   - zero eligible hearts (or zero eligible photo proofs) persists the
+ *     EXPLICIT no-award record `{ winners: [], heartCount: 0 }` — field
+ *     absence must keep meaning "not yet computed" (the write-once guard's
+ *     idempotence key), so "computed, none" needs its own frozen state.
+ *
+ * Winner entries are built entirely from the winning proof's own denormalized
+ * fields — no roster join, and NO media fields on purpose: display always
+ * re-joins the live Proof doc, so a later-hidden photo can never render from a
+ * stale stored URL.
+ */
+export function buildMostLovedPhotoAward(
+  proofs: readonly MostLovedProofLike[],
+  hearts: readonly MostLovedHeartLike[],
+  opts: {
+    bannedUids: readonly string[];
+    reportHideThreshold: number | undefined;
+    cutoff: number;
+    computedAt: number;
+  },
+): MostLovedPhotoAward {
+  const eligible = proofs.filter(
+    (p) =>
+      p.type === 'photo' &&
+      p.status === 'active' &&
+      !mostLovedReportHidden(p.reportCount, opts.reportHideThreshold) &&
+      !mostLovedBanned(p.uid, opts.bannedUids),
+  );
+  const byId = new Map<string, MostLovedProofLike>();
+  const heartUids = new Map<string, Set<string>>();
+  for (const p of eligible) {
+    byId.set(p.id, p);
+    heartUids.set(p.id, new Set());
+  }
+  for (const h of hearts) {
+    if (h.targetKind !== 'proof') continue;
+    const p = byId.get(h.targetId);
+    if (!p) continue;
+    if (h.targetCreatedAt !== p.createdAt) continue; // another incarnation's heart
+    // Firestore's server creation time, not the client-set `createdAt`, is the
+    // freeze boundary. Rules allow a bounded clock-skew window for createdAt,
+    // so a delayed sweep could otherwise accept a post-freeze heart backdated
+    // into that window. The pure client fixture has no Admin snapshot metadata
+    // and falls back to createdAt; scheduler input always carries serverCreatedAt.
+    const heartAt = h.serverCreatedAt ?? h.createdAt;
+    if (!Number.isFinite(heartAt) || heartAt > opts.cutoff) continue;
+    if (h.uid === p.uid) continue; // own heart on own proof does NOT count
+    if (mostLovedBanned(h.uid, opts.bannedUids)) continue; // no own-content exception here
+    heartUids.get(p.id)!.add(h.uid);
+  }
+  let max = 0;
+  for (const uids of heartUids.values()) {
+    if (uids.size > max) max = uids.size;
+  }
+  const allWinners: MostLovedPhotoWinner[] =
+    max < 1
+      ? []
+      : eligible
+          .filter((p) => heartUids.get(p.id)!.size === max)
+          .map((p) => ({
+            proofId: p.id,
+            uid: p.uid,
+            displayName: p.displayName,
+            promptText: p.itemText,
+            dayIndex: p.dayIndex ?? null,
+            proofCreatedAt: p.createdAt,
+          }))
+          .sort(
+            (a, b) =>
+              a.proofCreatedAt - b.proofCreatedAt ||
+              (a.proofId < b.proofId ? -1 : a.proofId > b.proofId ? 1 : 0),
+          );
+  return {
+    winners: allWinners.slice(0, MAX_PERSISTED_MOST_LOVED_WINNERS),
+    winnerCount: allWinners.length,
+    heartCount: max < 1 ? 0 : max,
+    frozenAt: opts.cutoff,
+    computedAt: opts.computedAt,
+  };
 }
