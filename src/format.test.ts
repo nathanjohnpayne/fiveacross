@@ -108,10 +108,27 @@ describe('segmentEmojiRuns', () => {
     ]);
   });
 
-  it('merges adjacent emoji clusters into one run so flags never split', () => {
+  it('keeps adjacent emoji clusters as SEPARATE runs so lines can still wrap between them (Codex P2, PR #645)', () => {
     expect(segmentEmojiRuns('🇭🇷🇮🇹 twin ports')).toEqual([
-      { text: '🇭🇷🇮🇹', emoji: true },
+      { text: '🇭🇷', emoji: true },
+      { text: '🇮🇹', emoji: true },
       { text: ' twin ports', emoji: false },
+    ]);
+  });
+
+  it('classifies a standalone skin-tone modifier as emoji WITHOUT swallowing the space its cluster glued on (Codex P2, PR #645)', () => {
+    // 'Alex 🏽' grapheme-segments as ['A','l','e','x',' 🏽'] — the modifier
+    // cluster includes the preceding space, which must stay in the text run
+    // (an inline-block box trims leading whitespace).
+    expect(segmentEmojiRuns('Alex 🏽')).toEqual([
+      { text: 'Alex ', emoji: false },
+      { text: '🏽', emoji: true },
+    ]);
+    // Attached to a base, the modifier rides inside the base's cluster.
+    expect(segmentEmojiRuns('nice 👍🏽!')).toEqual([
+      { text: 'nice ', emoji: false },
+      { text: '👍🏽', emoji: true },
+      { text: '!', emoji: false },
     ]);
   });
 
