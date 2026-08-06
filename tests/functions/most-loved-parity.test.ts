@@ -50,6 +50,7 @@ const H = (
   targetId,
   targetCreatedAt,
   createdAt: 5_000,
+  serverCreatedAt: 5_000,
   ...over,
 });
 
@@ -201,10 +202,13 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     expect(both([], [H('a', 'p1', 1_000)])).toEqual(NO_AWARD);
   });
 
-  it('Hearts after the freeze cutoff are excluded; AT the cutoff counts', () => {
+  it('Hearts after the freeze cutoff are excluded by their server creation time; AT the cutoff counts', () => {
     const award = both(
       [P('p1'), P('p2', { createdAt: 2_000 })],
-      [H('a', 'p1', 1_000, { createdAt: CUTOFF + 1 }), H('a', 'p2', 2_000, { createdAt: CUTOFF })],
+      [
+        H('a', 'p1', 1_000, { createdAt: CUTOFF - 1, serverCreatedAt: CUTOFF + 1 }),
+        H('a', 'p2', 2_000, { serverCreatedAt: CUTOFF }),
+      ],
     );
     expect(award.winners.map((w) => w.proofId)).toEqual(['p2']);
     expect(award.heartCount).toBe(1);

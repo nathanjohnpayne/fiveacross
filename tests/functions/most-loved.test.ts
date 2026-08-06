@@ -79,7 +79,14 @@ function makeDb(seed: {
       },
       async get() {
         const rows = backing().filter((row) => filters.every(([f, v]) => row[f] === v));
-        return { docs: rows.map((row) => ({ exists: true, id: row.id as string, data: () => row })) };
+        return {
+          docs: rows.map((row) => ({
+            exists: true,
+            id: row.id as string,
+            data: () => row,
+            createTime: { toMillis: () => row.serverCreatedAt ?? row.createdAt },
+          })),
+        };
       },
       doc(id?: string) {
         if (path.endsWith('/moments')) {
@@ -297,7 +304,29 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     expect(award.heartCount).toBe(1);
   });
 
-  it('(f) a compute failure is isolated — freeze and podium still land — and the award retries on its own guard', async () => {
+  it('(f) excludes a post-freeze heart that backdates its client timestamp into the allowed clock-skew window', async () => {
+    const db = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays() },
+      proofs: [proof('p1'), proof('p2', { createdAt: D9_UNLOCK + 2000 })],
+      hearts: [
+        // The Firestore rules permit `createdAt` up to 24h behind request time
+        // for clock drift. It therefore cannot define a hard server-side
+        // standings boundary; the snapshot's server createTime can.
+        heart('fan-1', 'p1', D9_UNLOCK + 1000, {
+          createdAt: D10_UNLOCK - 1,
+          serverCreatedAt: D10_UNLOCK + 1,
+        }),
+        heart('fan-2', 'p2', D9_UNLOCK + 2000, { serverCreatedAt: D10_UNLOCK }),
+      ],
+    });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 10 * 60_000 });
+    const award = db.readEvent().mostLovedPhoto!;
+    expect(award.winners.map((w) => w.proofId)).toEqual(['p2']);
+    expect(award.heartCount).toBe(1);
+  });
+
+  it('(g) a compute failure is isolated — freeze and podium still land — and the award retries on its own guard', async () => {
     const db = makeDb({
       eventId: 'e1',
       event: { days: mainDays() },

@@ -323,6 +323,10 @@ export interface MostLovedHeartLike {
   targetId: string;
   targetCreatedAt: number;
   createdAt: number;
+  /** Firestore's server-assigned document creation instant. Optional only so
+   *  the client parity fixture can model the same pure rule without importing
+   *  Admin SDK snapshot types; scheduler input always supplies it. */
+  serverCreatedAt?: number;
 }
 
 /** Local mirror of `src/data/moderation.ts`'s `isReportHidden` (this module
@@ -356,8 +360,8 @@ function mostLovedBanned(uid: string | undefined, bannedUids: readonly string[] 
  *     threshold, mirror of `isReportHidden`), owner not banned;
  *   - an eligible HEART targets that proof (`targetKind === 'proof'`,
  *     `targetId`), matches its incarnation (`targetCreatedAt ===
- *     proof.createdAt`, the `heartState` rule), landed at or before the freeze
- *     cutoff (`createdAt <= cutoff` — the SCHEDULED instant, never the run
+ *     proof.createdAt`, the `heartState` rule), was committed at or before the
+ *     freeze cutoff (Firestore `createTime <= cutoff` — the SCHEDULED instant, never the run
  *     clock), is NOT the owner's own heart (`h.uid !== proof.uid` — new logic:
  *     `heartState` deliberately counts self-hearts for display and that stays
  *     unchanged), and is NOT from a banned Player — UNCONDITIONALLY:
@@ -407,7 +411,13 @@ export function buildMostLovedPhotoAward(
     const p = byId.get(h.targetId);
     if (!p) continue;
     if (h.targetCreatedAt !== p.createdAt) continue; // another incarnation's heart
-    if (h.createdAt > opts.cutoff) continue; // post-freeze heart never moves the award
+    // Firestore's server creation time, not the client-set `createdAt`, is the
+    // freeze boundary. Rules allow a bounded clock-skew window for createdAt,
+    // so a delayed sweep could otherwise accept a post-freeze heart backdated
+    // into that window. The pure client fixture has no Admin snapshot metadata
+    // and falls back to createdAt; scheduler input always carries serverCreatedAt.
+    const heartAt = h.serverCreatedAt ?? h.createdAt;
+    if (!Number.isFinite(heartAt) || heartAt > opts.cutoff) continue;
     if (h.uid === p.uid) continue; // own heart on own proof does NOT count
     if (mostLovedBanned(h.uid, opts.bannedUids)) continue; // no own-content exception here
     heartUids.get(p.id)!.add(h.uid);

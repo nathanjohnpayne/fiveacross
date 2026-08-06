@@ -43,7 +43,7 @@ The verbatim rules (decided 2026-08-04) map onto the data model as follows; each
 |---|---|
 | visible, moderation-eligible photo Proof | `type === 'photo'` AND the Feed's exact filter (`useProofFeed`): `status === 'active'`, NOT report-hidden (fail-open threshold, `isReportHidden`), owner not banned (`isBanned`) |
 | hidden, deleted, retracted excluded | hidden = the status/report filters; deleted = doc removal, absent from the read set by construction; retracted has no Proof state (see § Deviations #2) |
-| a Heart counts for a Proof | `targetKind === 'proof'`, `targetId` match, incarnation match (`targetCreatedAt === proof.createdAt`, the `heartState` rule), `createdAt <= cutoff` |
+| a Heart counts for a Proof | `targetKind === 'proof'`, `targetId` match, incarnation match (`targetCreatedAt === proof.createdAt`, the `heartState` rule), Firestore server `createTime <= cutoff` (not the client-set Feed-ordering `createdAt`) |
 | own Heart on own Proof does NOT count | `heart.uid !== proof.uid`—new logic existing nowhere else; `heartState` deliberately counts self-hearts for display and that stays unchanged |
 | banned Players' Hearts do NOT count | `!isBanned(heart.uid, bannedUids)` UNCONDITIONALLY: `heartState`'s own-content exception (a banned viewer still sees their own heart) is display-only and does NOT apply to the award |
 | the count | unique eligible heart uids per proof (the deterministic slot id already guarantees one doc per pair; the Set makes the pure function total) |

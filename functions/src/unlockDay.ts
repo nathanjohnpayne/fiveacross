@@ -315,6 +315,8 @@ export class UnlockPermissionError extends Error {}
 interface DocSnapshot {
   readonly exists: boolean;
   readonly id: string;
+  /** Server-assigned document creation time, present on Admin SDK snapshots. */
+  readonly createTime?: { toMillis(): number };
   data(): Record<string, unknown> | undefined;
 }
 interface DocRef {
@@ -582,16 +584,26 @@ function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[
 
 /** Map a hearts collection read onto the pure builder's input shape. A missing
  *  `targetCreatedAt` defaults to -1 so a malformed heart can never
- *  incarnation-match a proof whose own missing `createdAt` defaulted to 0. */
+ *  incarnation-match a proof whose own missing `createdAt` defaulted to 0.
+ *  `createTime` is Firestore's server-assigned document-creation instant; the
+ *  client-set `createdAt` remains Feed ordering data, but is not trustworthy
+ *  enough to freeze eligibility because the rules intentionally tolerate clock
+ *  drift. A missing/malformed metadata value becomes NaN, which the pure
+ *  builder rejects rather than letting an unverifiable heart into the award. */
 function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[] {
   return snap.docs.map((d) => {
     const data = d.data() ?? {};
+    const serverCreatedAt = d.createTime?.toMillis();
     return {
       uid: typeof data.uid === 'string' ? data.uid : '',
       targetKind: typeof data.targetKind === 'string' ? data.targetKind : '',
       targetId: typeof data.targetId === 'string' ? data.targetId : '',
       targetCreatedAt: finiteNumber(data.targetCreatedAt, -1),
       createdAt: finiteNumber(data.createdAt, 0),
+      serverCreatedAt:
+        typeof serverCreatedAt === 'number' && Number.isFinite(serverCreatedAt)
+          ? serverCreatedAt
+          : Number.NaN,
     };
   });
 }

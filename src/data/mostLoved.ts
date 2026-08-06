@@ -31,7 +31,12 @@ export type MostLovedProofInput = Pick<
 export type MostLovedHeartInput = Pick<
   HeartDoc,
   'uid' | 'targetKind' | 'targetId' | 'targetCreatedAt' | 'createdAt'
->;
+> & {
+  /** The server creation time supplied by the scheduler's snapshot mapper. The
+   *  client mirror accepts it so the parity test exercises the real freeze
+   *  boundary; ordinary client HeartDocs intentionally have no such field. */
+  serverCreatedAt?: number;
+};
 
 /** The eligibility/visibility options both builders share. */
 export interface MostLovedAwardOptions {
@@ -70,8 +75,9 @@ export function proofFeedVisible(
  * as `functions/src/finaleContent.ts#buildMostLovedPhotoAward` (see its doc
  * comment for the full eligibility mapping; the parity test pins the two):
  * eligible proofs are visible photo proofs (`proofFeedVisible` + `type ===
- * 'photo'`); eligible hearts match the proof's incarnation, land at or before
- * the cutoff, are never the owner's own heart, and never a banned Player's
+ * 'photo'`); eligible hearts match the proof's incarnation, are server-committed
+ * at or before the cutoff (or use `createdAt` in the metadata-free fixture),
+ * are never the owner's own heart, and never a banned Player's
  * heart (unconditionally — `heartState`'s display-only own-content exception
  * does NOT apply); the count is unique eligible heart uids; winners are every
  * eligible proof at the max count when max >= 1, ordered `proofCreatedAt` asc
@@ -97,7 +103,8 @@ export function buildMostLovedPhotoAward(
     const p = byId.get(h.targetId);
     if (!p) continue;
     if (h.targetCreatedAt !== p.createdAt) continue; // another incarnation's heart
-    if (h.createdAt > opts.cutoff) continue; // post-freeze heart never moves the award
+    const heartAt = h.serverCreatedAt ?? h.createdAt;
+    if (!Number.isFinite(heartAt) || heartAt > opts.cutoff) continue;
     if (h.uid === p.uid) continue; // own heart on own proof does NOT count
     if (isBanned(h.uid, opts.bannedUids)) continue; // no own-content exception here
     heartUids.get(p.id)!.add(h.uid);
