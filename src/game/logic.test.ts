@@ -13,6 +13,7 @@ import {
   CENTER,
   type DealItem,
   standingsFrozen,
+  ceremonialDayIndexSet,
 } from './logic';
 
 const pool: DealItem[] = Array.from({ length: 32 }, (_, i) => ({
@@ -253,5 +254,17 @@ describe('standingsFrozen (#265; Codex P2 on #278 — the stale-cache belt)', ()
   it('never frozen on a legacy event (no schedule) or a null event', () => {
     expect(standingsFrozen({ days: [] }, Number.MAX_SAFE_INTEGER)).toBe(false);
     expect(standingsFrozen(null, Number.MAX_SAFE_INTEGER)).toBe(false);
+  });
+
+  it("freezes on the LEGACY persisted 'farewell' spelling too — raw event reads (admin resolve, deal transactions) bypass the converter (#565; Codex P2 on PR #648)", () => {
+    const rawDays = [
+      { index: 0, pool: 'embark', tutorial: true, unlockAt: 0 },
+      { index: 3, pool: 'farewell', tutorial: true, unlockAt: 1000 },
+    ] as unknown as import('../types').DayDef[];
+    expect(standingsFrozen({ days: rawDays }, 1000)).toBe(true);
+    expect(standingsFrozen({ days: rawDays }, 999)).toBe(false);
+    // …and the ceremonial set classifies the same raw Day.
+    expect(ceremonialDayIndexSet(rawDays).has(3)).toBe(true);
+    expect(ceremonialDayIndexSet(rawDays).has(0)).toBe(false);
   });
 });

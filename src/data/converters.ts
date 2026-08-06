@@ -1,4 +1,5 @@
 import { cellsFromData, cellsToMap } from '../game/cells';
+import { normalizePool } from '../game/pool';
 import type {
   FirestoreDataConverter,
   QueryDocumentSnapshot,
@@ -58,9 +59,7 @@ export function migrateClaimMode(raw: unknown): ClaimMode {
  * dropping this coercion and narrowing the rules.
  */
 export function migratePool(raw: unknown): 'main' | 'easy' | 'closing' {
-  if (raw === 'easy' || raw === 'embark') return 'easy';
-  if (raw === 'closing' || raw === 'farewell') return 'closing';
-  return 'main';
+  return normalizePool(raw);
 }
 
 /**

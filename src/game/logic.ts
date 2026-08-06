@@ -1,5 +1,6 @@
 // Pure, framework-free game logic. No Firebase, no React — fully unit-testable.
 import type { Cell, DayDef, EventDoc, PlayerDoc } from '../types';
+import { normalizePool } from './pool';
 
 export const GRID = 5;
 export const CENTER = 12;
@@ -48,10 +49,14 @@ export interface DealItem {
   text: string;
   spicy: boolean;
   /**
-   * Which item pool the Prompt belongs to (`main` | `embark` | `farewell`). Absent
-   * on the pre-easy-mix / synthetic-test items → treated as `main`. Only `'embark'`
-   * is load-bearing here: on a main-day deal, embark items form the EASY half of the
-   * mix (specs/easy-mix.md), while everything else is the main half.
+   * Which item pool the Prompt belongs to. RAW-tolerant on purpose: several
+   * callers hydrate items without the converter (the snapshot deal/reshuffle
+   * paths), so the value may be canonical (`main`/`easy`/`closing`) or the
+   * legacy persisted spelling (`embark`/`farewell`) — every comparison here
+   * goes through `normalizePool` (src/game/pool.ts). Absent on the
+   * pre-easy-mix / synthetic-test items → treated as `main`. Only the easy
+   * pool is load-bearing here: on a main-day deal, easy-pool items form the
+   * EASY half of the mix (specs/easy-mix.md); everything else is the main half.
    */
   pool?: string;
 }
@@ -264,8 +269,8 @@ export function dealBoard(
     // embark items are the easy half; everything else is the main half. The no-repeat
     // exclusion applies to the MAIN half ONLY — easy (embark) repeats across days are
     // intentional (per-day tallies), so embark items are never excluded.
-    const easyItems = pool.filter((p) => p.pool === 'easy');
-    const mainItems = pool.filter((p) => p.pool !== 'easy');
+    const easyItems = pool.filter((p) => normalizePool(p.pool) === 'easy');
+    const mainItems = pool.filter((p) => normalizePool(p.pool) !== 'easy');
     const requestedEasy = Number.isFinite(opts.easyMixRatio)
       ? Math.min(1, Math.max(0, opts.easyMixRatio as number))
       : 0;
@@ -767,7 +772,7 @@ export function tutorialDayIndexSet(days: readonly DayDef[] | undefined): Set<nu
  *  root totals, never the per-Day bucket. */
 export function ceremonialDayIndexSet(days: readonly DayDef[] | undefined): Set<number> {
   const s = new Set<number>();
-  for (const d of days ?? []) if (d.pool === 'closing') s.add(d.index);
+  for (const d of days ?? []) if (normalizePool(d.pool) === 'closing') s.add(d.index);
   return s;
 }
 
@@ -787,7 +792,7 @@ export function standingsFrozen(
   if (!event) return false;
   if (event.frozenAt != null) return true;
   for (const d of event.days ?? []) {
-    if (d.pool === 'closing' && now >= d.unlockAt) return true;
+    if (normalizePool(d.pool) === 'closing' && now >= d.unlockAt) return true;
   }
   return false;
 }

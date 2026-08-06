@@ -5,15 +5,18 @@ status: accepted
 
 # Phase 1.5 schema & type contract (`d15-schema-contract`)
 
+> **Vocabulary note (#565/#566):** this spec's persisted-contract language was updated for the neutral vocabulary — Day/Event fields `place`/`placeEmoji` and `startsOn`/`endsOn` (legacy `port`/`portEmoji`, `sailStart`/`sailEnd` coerced on read by `eventConverter`), and Pool values `easy`/`closing` (both live Events still PERSIST the legacy `embark`/`farewell` spellings; reads normalize via `migratePool`/`normalizePool`, rules accept both, and writes keep emitting the legacy values until the post-Event cleanup).
+
+
 Owns the shared Phase 1.5 domain type contract in `src/types.ts` and its read-side defaults in `src/data/converters.ts`, so every downstream daily-cards ticket imports these types and converters instead of colliding on the same two HOT files. This implements `plans/daily-cards-spec.md` § "Data model" (the `DayDef` shape, the `EventDoc`/`ItemDoc`/`BoardDoc`/`PlayerDoc`/`TallyDoc`/`ProofDoc`/`DoubtDoc`/`MomentDoc` additions, the two new tutorial `ThemeId`s, the finale `MomentKind`s, and the per-day `DayMetaDoc`), plus the `description` field on `ThemeMeta` from § "Theme reference" and the `pool`/`status` additions from § "Item pools and the approval flow." It is a types-and-converter-defaults ticket only: no rules, no UI, no scheduler logic, and no path/route wiring (the day-scoped Board and day-meta path helpers are added by the consuming tickets #204 and #212). Guarded by `src/data/d15-schema-contract.test.ts` (Vitest unit) and `scripts/ci/check_spec_test_alignment`.
 
 ## Contract
 
 - `src/types.ts`—the shared domain contract, extended per the spec's data model:
   - `ThemeId` gains `'welcome-aboard' | 'so-long-farewell'` (the two tutorial-day themes). Their `ThemeMeta` entries and `themes.css` token blocks land in #206; the union reserves the ids here so `DayDef.theme` and day chrome can name them.
-  - `DayDef` (new)—`{ index, date, port, portEmoji, theme: ThemeId, pool: 'main' | 'embark' | 'farewell', tutorial, unlockAt }` plus optional `freeText?` (per-day free-space override) and `snapshotItemIds?` (the Day Snapshot the scheduler #202 stamps at `unlockAt`; optional because it is absent until that function runs).
+  - `DayDef` (new)—`{ index, date, place, placeEmoji, theme: ThemeId, pool: 'main' | 'easy' | 'closing', tutorial, unlockAt }` plus optional `freeText?` (per-day free-space override) and `snapshotItemIds?` (the Day Snapshot the scheduler #202 stamps at `unlockAt`; optional because it is absent until that function runs).
   - `EventDoc` gains `timezone: string`, `days: DayDef[]`, `frozenAt?: number` (finale freeze stamp), and the `settings` additions `photoProofSource?: 'camera_or_library' | 'camera_only'`, `stripPhotoExif?: boolean`, `visionGate?: boolean`—all optional, read defensively at their runtime call sites, with the event-level defaults applied by #211 rather than baked into the type.
-  - `ItemDoc` gains `pool: 'main' | 'embark' | 'farewell'` and widens `status` to `'active' | 'hidden' | 'pending' | 'rejected'`, plus optional `approvedBy?`/`approvedAt?`. The type only adds the approval states; it migrates no data (every existing `active` item stays `active`).
+  - `ItemDoc` gains `pool: 'main' | 'easy' | 'closing'` and widens `status` to `'active' | 'hidden' | 'pending' | 'rejected'`, plus optional `approvedBy?`/`approvedAt?`. The type only adds the approval states; it migrates no data (every existing `active` item stays `active`).
   - `BoardDoc` gains `dayIndex: number`—one Board per Player per Day; the field is what lets the dealer look up a Player's earlier Day Cards to exclude repeats.
   - `PlayerDoc` gains `dayStats?: Record<number, { bingoCount, squaresMarked, firstBingoAt }>`; the existing `bingoCount`/`squaresMarked`/`firstBingoAt` stay the Event-wide totals.
   - `TallyDoc` gains `lastMarkedAt?`/`dayIndex?`; `ProofDoc` gains `source?: 'camera' | 'library'`/`dayIndex?`; `DoubtDoc` gains `dayIndex?`; `MomentDoc` gains `dayIndex?`; `MomentKind` gains `'last_call' | 'podium'` (the two finale beats). All the day-scoped fields are optional until their day-aware writers stamp them.

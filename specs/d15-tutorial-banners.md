@@ -5,6 +5,9 @@ status: accepted
 
 # Opening/closing tutorial banners + "Warm-up" tag (`d15-tutorial-banners`)
 
+> **Vocabulary note (#565/#566):** this spec's persisted-contract language was updated for the neutral vocabulary — Day/Event fields `place`/`placeEmoji` and `startsOn`/`endsOn` (legacy `port`/`portEmoji`, `sailStart`/`sailEnd` coerced on read by `eventConverter`), and Pool values `easy`/`closing` (both live Events still PERSIST the legacy `embark`/`farewell` spellings; reads normalize via `migratePool`/`normalizePool`, rules accept both, and writes keep emitting the legacy values until the post-Event cleanup).
+
+
 Implements `plans/daily-cards-spec.md` § "Embark (tutorial) view" and § "Farewell view" (the banners only—the closing view's podium banner is #217's content, this ticket owns only the goodbye banner beneath it), plus the "Warm-up" tag mentioned in both sections and in § "Tutorial days" under Scoring. Depends on `d15-day-switcher` (#205, the Day-scoped board view this ticket's banners mount inside), `d15-two-themes` (#206, the `welcome-aboard` / `so-long-farewell` Themes the tutorial views retint to), and `d15-tutorial-seed` (#207, `DayDef.tutorial` and the `pool: 'embark' | 'farewell'` this ticket branches on). Guarded by `src/components/TutorialBanner.test.tsx` and `src/components/DaySwitcher.test.tsx` / `src/components/Board.test.tsx` (RTL jsdom).
 
 ## Contract
@@ -18,7 +21,7 @@ Implements `plans/daily-cards-spec.md` § "Embark (tutorial) view" and § "Farew
 
 ## Resolved defaults (no open decisions)
 
-- **Opening vs. closing dispatch**: `day.pool` (`'embark'` | `'farewell'`), not `day.index`—both tutorial Days are flagged `tutorial: true`, so a second signal is needed to pick the banner; `pool` is the existing field that already distinguishes them one-to-one.
+- **Opening vs. closing dispatch**: `day.pool` (`'easy'` | `'closing'`), not `day.index`—both tutorial Days are flagged `tutorial: true`, so a second signal is needed to pick the banner; `pool` is the existing field that already distinguishes them one-to-one.
 - **Dismissal persistence**: session-only, plain `useState`—no localStorage key. The ticket body is explicit that this banner's dismissal need not persist "beyond the session the way the coach overlay's does."
 - **Board-header slot**: since #212 (the daily-honor pin) has not landed yet, this ticket establishes the `.board-header` slot's DOM position—a single row above `.bingo-head`, rendered only when the viewed Day is a tutorial Day. #212 will mount its own pin in the same position for the eight main Days; the two are mutually exclusive on `DayDef.tutorial`, so they cannot collide independently of each other.
 

@@ -4,6 +4,7 @@
 // mounting a component. The functions-side mirror (functions/src/finaleContent.ts)
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
+import { normalizePool } from '../game/pool';
 import {
   comparePlayers,
   cruiseFirstBingoUid,
@@ -36,7 +37,7 @@ export interface Podium {
 
 /** The farewell Day's `DayDef.index`, or `-1` when the schedule has none. */
 function farewellDayIndex(days: readonly DayDef[] | undefined): number {
-  const f = (days ?? []).find((d) => d.pool === 'closing');
+  const f = (days ?? []).find((d) => normalizePool(d.pool) === 'closing');
   return f ? f.index : -1;
 }
 
@@ -159,7 +160,7 @@ export function farewellPinIndex(
 ): number | null {
   if (frozenAt == null) return null;
   const arr = days ?? [];
-  const idx = arr.findIndex((d) => d.pool === 'closing');
+  const idx = arr.findIndex((d) => normalizePool(d.pool) === 'closing');
   if (idx < 0) return null;
   if (arr[idx].unlockAt > now) return null;
   return idx;

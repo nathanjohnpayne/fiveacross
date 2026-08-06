@@ -85,7 +85,7 @@ const pageHtml = ({ brand, byline, port, theme }) => `<!doctype html>
     ${byline ? `<span class="brand-byline">${byline}</span>` : ''}
   </div>
   <div class="day-identity">
-    <span class="day-identity-line day-identity-port">${port}</span>
+    <span class="day-identity-line day-identity-place">${port}</span>
     <span class="day-identity-line day-identity-theme">${theme}</span>
   </div>
 </div>

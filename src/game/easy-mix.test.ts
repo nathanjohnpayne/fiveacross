@@ -33,6 +33,30 @@ function dealtIds(pool: DealItem[], seed: number, opts: Parameters<typeof dealBo
     .map((c) => c.itemId);
 }
 
+
+describe('easy mix — LEGACY persisted pool spelling (#565; Codex P1 on PR #648)', () => {
+  it("deals the 12/12 mix when items carry the live docs' legacy 'embark' value (raw hydration path)", () => {
+    // The snapshot deal/reshuffle paths hydrate items WITHOUT the converter,
+    // so dealBoard can receive the persisted legacy spelling. normalizePool
+    // inside the split (and at the api.ts hydration) must keep the mix whole —
+    // a canonical-only comparison would deal an all-main card on the LIVE
+    // event.
+    const legacyEasy = Array.from({ length: 16 }, (_, i) => ({
+      id: `e${i}`,
+      text: `legacy easy ${i}`,
+      spicy: false,
+      pool: 'embark',
+    }));
+    const pool = [...mainPool(8, 16), ...legacyEasy];
+    const cells = dealBoard(pool, FREE, 7, undefined, { easyMixRatio: 0.5 });
+    const by = new Map(pool.map((p) => [p.id, p]));
+    const ids = cells.filter((c) => !c.free).map((c) => c.itemId);
+    const easy = ids.filter((id) => id && by.get(id!)?.pool === 'embark');
+    expect(easy).toHaveLength(12);
+    expect(ids).toHaveLength(24);
+  });
+});
+
 describe('easy mix — the 50/50 embark/main split (ratio 0.5)', () => {
   it('deals exactly 12 embark + 12 main, with ≈5 spicy inside the main half', () => {
     const pool = [...mainPool(8, 16), ...embarkPool(16)];
@@ -69,7 +93,7 @@ describe('easy mix — the 50/50 embark/main split (ratio 0.5)', () => {
 });
 
 describe('easy mix — ratio 0 is the no-regression proof (byte-for-byte today)', () => {
-  it('drops embark entirely and reproduces the main-only stratified deal', () => {
+  it('drops easy entirely and reproduces the main-only stratified deal', () => {
     const main = mainPool(10, 30);
     const combined = [...main, ...embarkPool(16)];
     for (const seed of [1, 42, 1337, 0x9e37]) {

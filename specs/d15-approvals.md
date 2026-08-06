@@ -5,13 +5,16 @@ status: accepted
 
 # d15-approvals—item approval flow: submissions → pending; Admin Approvals queue; grandfathering
 
+> **Vocabulary note (#565/#566):** this spec's persisted-contract language was updated for the neutral vocabulary — Day/Event fields `place`/`placeEmoji` and `startsOn`/`endsOn` (legacy `port`/`portEmoji`, `sailStart`/`sailEnd` coerced on read by `eventConverter`), and Pool values `easy`/`closing` (both live Events still PERSIST the legacy `embark`/`farewell` spellings; reads normalize via `migratePool`/`normalizePool`, rules accept both, and writes keep emitting the legacy values until the post-Event cleanup).
+
+
 Implements `plans/daily-cards-spec.md` § "Item pools and the approval flow". Today any signed-in Player's submitted Prompt goes straight to `status: 'active'` and is immediately dealable. This ticket adds an approval gate on the `main` pool: a submission now lands `pending`—invisible everywhere except the Admin queue and (as "pending review") its own submitter—and only an admin's approve/reject decision makes it `active` (or `rejected`, kept for audit). It also gives the Admin console an Approvals tab and relies on the Day Snapshot mechanism (owned elsewhere) to pick approved items up on every not-yet-unlocked Day.
 
 Depends on #200 (`d15-schema-contract`, the `ItemDoc.pool`/`status: 'pending'|'rejected'`/`approvedBy`/`approvedAt` fields this ticket is the first consumer of) and #201 (`d15-firestore-rules`, the pending/rejected item **read**-visibility carve-out). This ticket's own scope is the write path: the item **create** rule (`firestore.rules`) still required `status == 'active'` after #201 landed—#201's spec explicitly scoped itself to the read carve-out only ("items gain a pending-only submitter read carve-out")—so this ticket widens the create rule's allowed `status` set to `['active', 'pending']` as well, or a non-admin could never actually create a `pending` row for the read-side carve-out to apply to. `rejected` is deliberately NOT allowed on create—only an admin `update` may transition a row to `rejected`.
 
 ## What already shipped (consumed, not rebuilt)
 
-- `ItemDoc.status: 'active' | 'hidden' | 'pending' | 'rejected'`, `ItemDoc.pool: 'main' | 'embark' | 'farewell'`, `ItemDoc.approvedBy?: string`, `ItemDoc.approvedAt?: number` (`src/types.ts`, #200).
+- `ItemDoc.status: 'active' | 'hidden' | 'pending' | 'rejected'`, `ItemDoc.pool: 'main' | 'easy' | 'closing'`, `ItemDoc.approvedBy?: string`, `ItemDoc.approvedAt?: number` (`src/types.ts`, #200).
 - `firestore.rules` `items/{itemId}` read rule: `isAdmin(eventId) || status == 'active' || (status == 'pending' && createdBy == request.auth.uid)` (#201).
 - `useItems` already filters `pool == 'main'` alongside `status == 'active'` (`src/hooks/useData.ts`).
 - The Admin console's report queue, Ban roster, Claim mode, theme picker, pending-claims, and full Prompts list (`src/components/Admin.tsx`)—untouched by this ticket except for the new Approvals tab toggle.
@@ -40,7 +43,7 @@ Every item that is already `active` when this ships stays `active`—the gate is
 - Given an admin approves a pending item, when the write commits, then it becomes `active` with `approvedBy`/`approvedAt` stamped and is eligible for the next not-yet-unlocked Day's snapshot.
 - Given an admin rejects a pending item, then it becomes `rejected`, stays out of every player-facing surface, and remains visible to admins for audit.
 - An item that was already `active` before this ships stays `active` with no admin action required.
-- Only the `main` pool gates on approval; `embark`/`farewell` curated pools are unaffected.
+- Only the `main` pool gates on approval; the `easy`/`closing` curated pools are unaffected (the rules validator accepts both the canonical and legacy persisted spellings during the #565 transition).
 - Bulk approve works on the full pending list in one action.
 - A non-admin can create an item with `status: 'pending'` but never `status: 'rejected'`; only an admin's `update` can transition `pending → active`/`rejected`.
 
