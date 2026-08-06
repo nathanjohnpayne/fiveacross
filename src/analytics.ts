@@ -46,6 +46,17 @@ export const GA4_EVENTS = [
   // unhearted). Fired only once the write persists (the demand_proof posture).
   // Call site: src/data/hearts.ts.
   'heart_post',
+  // Most-Loved Photo (#534/#560, specs/most-loved-photo.md) — the frozen award
+  // was observed on this device for the first time (client-fired on first
+  // observation of the persisted `EventDoc.mostLovedPhoto`; functions have no
+  // capture path). Params: `winnersCount`, `heartCount`, `tie` (winnersCount >
+  // 1), `award` (false = the explicit no-award record — signal, still fired),
+  // `proofId` (winners[0] ?? null), `dayIndex` (winners[0] ?? null). NEVER
+  // mediaURL/thumbURL/storagePath/display names — ids and counts only; the
+  // payload comes from `mostLovedFrozenEventPayload` (src/data/mostLoved.ts),
+  // unit-tested to contain no media keys.
+  // Call site: components/FarewellPodium.tsx (#561).
+  'most_loved_photo_frozen',
   // A Mark's atomic batch was REJECTED online (#387) — a rules denial rolled
   // back the optimistic write and the square visibly reverted. Params: `code`
   // (the FirebaseError code, e.g. 'permission-denied'), `index`, `marked`,
