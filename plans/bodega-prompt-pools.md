@@ -174,7 +174,7 @@ The wrap-up card, which unlocks at the 11:00 check-out freeze alongside the podi
 
 | # | Day | pool | tutorial | scoring | theme | `unlockAt` |
 |---|---|---|---|---|---|---|
-| 0 | Friday, Aug 7 | `embark` | false | `competitive` | 🐦 The Birds Have Entered the Group Chat | `0` (open sentinel) |
+| 0 | Friday, Aug 7 | `embark` | false | `competitive` | 🐦 The Birds Have Entered the Chat | `0` (open sentinel) |
 | 1 | Saturday, Aug 8 | `main` | false | `competitive` | 🌊 Bodega Bay Side Quests | Sat 06:00 `America/Los_Angeles` |
 | 2 | Sunday, Aug 9 | `main` | false | `competitive` | 🌫️ Fog, Froth & Farewells | Sun 06:00 `America/Los_Angeles` |
 | 3 | The wrap-up | `farewell` | **true** | `ceremonial` | 🌫️ Fog, Froth & Farewells | Sun 11:00 `America/Los_Angeles` |
