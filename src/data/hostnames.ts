@@ -1,12 +1,12 @@
 import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
-import { db, applyResolvedEventId } from '../firebase';
-import { isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
+import { db, applyResolvedEventId, EVENT_ID } from '../firebase';
+import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
 import { adultContentSettledAdult, coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
-import { applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
+import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
@@ -238,7 +238,10 @@ function safeLocalStorage(): Storage | null {
  *
  * Returns an unsubscribe. Never throws.
  */
-export function watchAdultContent(hostname: string = window.location.hostname): () => void {
+export function watchAdultContent(
+  hostname: string = window.location.hostname,
+  resolvedEventId: string = EVENT_ID,
+): () => void {
   // The flag is monotone, so a proven `true` is terminal: no later snapshot could
   // change the answer. Never open the listener at all.
   if (adultContentSettledAdult()) return () => {};
@@ -264,7 +267,10 @@ export function watchAdultContent(hostname: string = window.location.hostname): 
         // initial cache-served snapshot can report a document it simply has
         // no local copy of, and blanking an already-painted card on that
         // non-evidence would flicker it for every guest.
-        if (proven) applyResolvedEventPreview(null);
+        if (proven) {
+          applyResolvedEventPreview(null);
+          dropCache(safeLocalStorage(), hostname);
+        }
         setActiveAdultContent(true, { proven: false });
         return;
       }
@@ -290,8 +296,19 @@ export function watchAdultContent(hostname: string = window.location.hostname): 
       // by then the same terminal snapshot has already carried its preview.
       const mapping = coerceHostnameDoc(data, hostname);
       const servable = mapping !== null && isServable(mapping);
-      const previewSlice = servable ? (mapping.preview ?? null) : null;
-      if (previewSlice || proven) applyResolvedEventPreview(previewSlice);
+      // The watcher is a display/update channel, never an Event switch. It must
+      // agree with the Event resolved before mount: an env-pinned bundle that
+      // sees a hostname remapped to another Event must clear its postcard, not
+      // advertise a card belonging to data the app will never serve.
+      const belongsToResolvedEvent =
+        mapping !== null && isServable(mapping) && mapping.eventId === resolvedEventId;
+      const previewSlice = belongsToResolvedEvent ? (mapping.preview ?? null) : null;
+      // A cached Firestore snapshot is useful to fill a blank card on a first
+      // visit, but it is not evidence newer than an already-installed preview.
+      // Only a server-backed snapshot may replace or clear that display copy.
+      if (proven || (previewSlice && activeEventPreview() === null)) {
+        applyResolvedEventPreview(previewSlice);
+      }
       // …and a PROVEN, servable mapping is cached whole, so the NEXT boot of
       // an env-pinned build paints the card at bootstrap instead of a beat
       // after mount (bootstrapEventResolution's env branch reads it back).
@@ -300,6 +317,10 @@ export function watchAdultContent(hostname: string = window.location.hostname): 
       // and only from server-backed snapshots, mirroring the resolver's rule
       // that Firestore's own cache is not evidence (Codex on #576).
       if (proven && servable) writeCache(safeLocalStorage(), hostname, mapping);
+      // Mirror resolveEvent's inactive/missing eviction. Without it, an
+      // env-pinned next boot can read the old active envelope before the live
+      // watcher has a chance to correct the card.
+      if (proven && !servable) dropCache(safeLocalStorage(), hostname);
       const adult = coerceAdultContent(data?.adultContent);
       if (!adult && !proven) return; // a cached `false` proves nothing
       setActiveAdultContent(adult, { proven });

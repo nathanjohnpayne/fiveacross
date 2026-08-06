@@ -19,7 +19,7 @@ vi.mock('firebase/firestore', () => ({
   getDocFromServer: mocks.getDocFromServer,
   onSnapshot: mocks.onSnapshot,
 }));
-vi.mock('../firebase', () => ({ db: {}, applyResolvedEventId: vi.fn() }));
+vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'bodega-bay-2026', applyResolvedEventId: vi.fn() }));
 vi.mock('./cardCache', () => ({ setCardCacheEventId: vi.fn() }));
 vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: vi.fn() }));
 
@@ -113,6 +113,27 @@ describe('watchAdultContent — the live preview channel (the env-pinned product
     expect(activeEventPreview()).toEqual(PREVIEW);
   });
 
+  it('never lets a cache-served snapshot roll an installed preview back', () => {
+    const newerPreview = { ...PREVIEW, eventName: 'Newly named Bodega weekend' };
+    applyResolvedEventPreview(newerPreview);
+    watchAdultContent(HOST);
+
+    listener().next(snap(DOC, true));
+
+    expect(activeEventPreview()).toEqual(newerPreview);
+    // A server response is authoritative and may intentionally replace it.
+    listener().next(snap(DOC));
+    expect(activeEventPreview()).toEqual(PREVIEW);
+  });
+
+  it('never advertises a servable mapping for a different resolved Event', () => {
+    watchAdultContent(HOST, 'another-event');
+
+    listener().next(snap(DOC));
+
+    expect(activeEventPreview()).toBeNull();
+  });
+
   it('never CLEARS an installed card on unproven evidence, only on proven', () => {
     applyResolvedEventPreview(PREVIEW);
     watchAdultContent(HOST);
@@ -142,8 +163,8 @@ describe('watchAdultContent — the live preview channel (the env-pinned product
     // Server-backed: cached, with the slice surviving the envelope read.
     listener().next(snap(DOC));
     expect(readCache(localStorage, HOST)?.doc.preview).toEqual(PREVIEW);
-    // An inactive mapping is never resurrected into the cache.
-    localStorage.clear();
+    // Proven retirement evicts a previously active envelope, so an env-pinned
+    // next boot cannot resurrect its postcard before the watcher runs.
     listener().next(snap({ ...DOC, status: 'archived' }));
     expect(localStorage.getItem(cacheKey(HOST))).toBeNull();
   });
