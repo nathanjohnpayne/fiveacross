@@ -1,4 +1,4 @@
-# Ticket workflow — keeping the Project board accurate
+# Ticket workflow—keeping the Project board accurate
 
 This is the manual board-update protocol every agent (and human) follows so [Project #7](https://github.com/users/nathanjohnpayne/projects/7) stays an accurate picture of the [Five Across backlog](../../plans/gaycruisebingo-backlog.md). The board is the shared source of truth for who is doing what; drift makes agents double-pick and hides what's actually Ready. The backlog and the dependency DAG / hot-file plan live in [`plans/gaycruisebingo-backlog.md`](../../plans/gaycruisebingo-backlog.md) and [`plans/gaycruisebingo-parallelization.md`](../../plans/gaycruisebingo-parallelization.md).
 
@@ -8,7 +8,7 @@ This is the manual board-update protocol every agent (and human) follows so [Pro
 |---|---|
 | **Backlog** | Created, not yet startable (a `Depends on` is still open) or not yet triaged. |
 | **Ready** | Every `Depends on` is `Done`; free for any agent to claim. Wave-0 unblocked tickets start here. |
-| **In progress** | Claimed — exactly one agent is working it, and is the assignee. |
+| **In progress** | Claimed—exactly one agent is working it, and is the assignee. |
 | **In review** | A PR with `Closes #<issue>` is open. |
 | **Done** | The PR merged (issue auto-closed). |
 
@@ -21,7 +21,7 @@ Project → **⋯** → **Workflows**. Enable:
 - **Pull request merged → set Status = Done**, and/or **Issue closed → set Status = Done**.
 - **Pull request opened / linked (auto-add) → set Status = In review** if your plan offers it.
 
-The built-ins cannot infer "claimed" or promote `Backlog → Ready` across a dependency edge — those are manual steps below.
+The built-ins cannot infer "claimed" or promote `Backlog → Ready` across a dependency edge—those are manual steps below.
 
 ## The manual protocol
 
@@ -29,7 +29,7 @@ Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode a
 
 ### 1. Claim a ticket (Ready → In progress)
 
-Pick a ticket whose Status is `Ready` and whose every `Depends on` is `Done`. Claim it **atomically** — self-assign **and** move it — then comment, so a racing agent sees it's taken:
+Pick a ticket whose Status is `Ready` and whose every `Depends on` is `Done`. Claim it **atomically**—self-assign **and** move it—then comment, so a racing agent sees it's taken:
 
 ```bash
 gh issue edit <num> --repo nathanjohnpayne/gaycruisebingo --add-assignee nathanjohnpayne
@@ -66,7 +66,7 @@ PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
 
 ### 4. Promote the unblocked (Backlog → Ready)
 
-When a ticket merges, whoever merged promotes the tickets that were waiting on it — every `Backlog` ticket whose `Depends on` set is now fully `Done`:
+When a ticket merges, whoever merged promotes the tickets that were waiting on it—every `Backlog` ticket whose `Depends on` set is now fully `Done`:
 
 ```bash
 PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
@@ -77,6 +77,6 @@ E.g. when `w0-test-harness` merges, promote `w0-firestore-rules`, `w0-storage-ru
 
 ## Rules of thumb
 
-- Never work a `Backlog` ticket. If it looks ready but is still `Backlog`, check its `Depends on` — a dependency is probably still open.
+- Never work a `Backlog` ticket. If it looks ready but is still `Backlog`, check its `Depends on`—a dependency is probably still open.
 - The board reflects reality: if you stop working a ticket, move it back to `Ready` and unassign.
-- `move-item.sh` discovers the Status field/option ids at runtime, so the exact option names (`Backlog` / `Ready` / `In progress` / `In review` / `Done`) are what it matches — pass them verbatim.
+- `move-item.sh` discovers the Status field/option ids at runtime, so the exact option names (`Backlog` / `Ready` / `In progress` / `In review` / `Done`) are what it matches—pass them verbatim.

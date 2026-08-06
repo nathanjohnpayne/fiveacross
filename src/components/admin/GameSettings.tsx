@@ -241,7 +241,7 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
         <div className="row">
           <div className="grow">
             <div className="name">Strip location data</div>
-            <div className="sub">Worth having regardless of the photo-source choice — library photos are far more likely to carry geotags than live captures.</div>
+            <div className="sub">Worth having regardless of the photo-source choice—library photos are far more likely to carry geotags than live captures.</div>
           </div>
           <label style={{ fontSize: 12 }}>
             <input
@@ -256,7 +256,7 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
         <div className="row">
           <div className="grow">
             <div className="name">AI image screen</div>
-            <div className="sub">Flags proofs for review via the existing moderation function. Live setting (#268): a deployed scanner consults it per upload — no redeploy needed. The deploy-time env flag remains the master kill-switch for whether the scanner exists at all.</div>
+            <div className="sub">Flags proofs for review via the existing moderation function. Live setting (#268): a deployed scanner consults it per upload—no redeploy needed. The deploy-time env flag remains the master kill-switch for whether the scanner exists at all.</div>
           </div>
           <label style={{ fontSize: 12 }}>
             <input
@@ -274,7 +274,7 @@ export default function GameSettings({ event }: { event: EventDoc | null | undef
             <div className="sub">
               {alreadyAdult
                 ? 'This Event is 18+. Turning this off removes the reason, not the posture.'
-                : 'Turn on for mature content the 🔞 tag does not catch — violence, drugs, self-harm.'}
+                : 'Turn on for mature content the 🔞 tag does not catch—violence, drugs, self-harm.'}
             </div>
           </div>
           <label>

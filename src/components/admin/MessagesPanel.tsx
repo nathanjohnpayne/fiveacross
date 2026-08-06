@@ -99,7 +99,7 @@ function ComposeNotice({ adminUid, adminName, days }: { adminUid: string; adminN
         </button>
         {failed && (
           <span className="pill pill-error" role="alert">
-            Didn’t post — try again.
+            Didn’t post—try again.
           </span>
         )}
       </div>
@@ -174,7 +174,7 @@ function EditNoticeRow({ notice, onDone }: { notice: NoticeDoc; onDone: () => vo
           </button>
           {failed && (
             <span className="pill pill-error" role="alert">
-              Didn’t save — try again.
+              Didn’t save—try again.
             </span>
           )}
         </div>

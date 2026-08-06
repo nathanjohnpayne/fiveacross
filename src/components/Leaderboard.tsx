@@ -362,7 +362,7 @@ export default function Leaderboard() {
                   <button
                     type="button"
                     className="lb-proof-chips"
-                    aria-label={`${p.displayName}'s latest proof — view in Feed`}
+                    aria-label={`${p.displayName}'s latest proof—view in Feed`}
                     onClick={() => navigate('/feed')}
                   >
                     {/* One <span> per chip so `.lb-proof-chips`'s flex gap spaces

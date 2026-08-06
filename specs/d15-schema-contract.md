@@ -9,22 +9,22 @@ Owns the shared Phase 1.5 domain type contract in `src/types.ts` and its read-si
 
 ## Contract
 
-- `src/types.ts` — the shared domain contract, extended per the spec's data model:
+- `src/types.ts`—the shared domain contract, extended per the spec's data model:
   - `ThemeId` gains `'welcome-aboard' | 'so-long-farewell'` (the two tutorial-day themes). Their `ThemeMeta` entries and `themes.css` token blocks land in #206; the union reserves the ids here so `DayDef.theme` and day chrome can name them.
-  - `DayDef` (new) — `{ index, date, port, portEmoji, theme: ThemeId, pool: 'main' | 'embark' | 'farewell', tutorial, unlockAt }` plus optional `freeText?` (per-day free-space override) and `snapshotItemIds?` (the Day Snapshot the scheduler #202 stamps at `unlockAt`; optional because it is absent until that function runs).
-  - `EventDoc` gains `timezone: string`, `days: DayDef[]`, `frozenAt?: number` (finale freeze stamp), and the `settings` additions `photoProofSource?: 'camera_or_library' | 'camera_only'`, `stripPhotoExif?: boolean`, `visionGate?: boolean` — all optional, read defensively at their runtime call sites, with the event-level defaults applied by #211 rather than baked into the type.
+  - `DayDef` (new)—`{ index, date, port, portEmoji, theme: ThemeId, pool: 'main' | 'embark' | 'farewell', tutorial, unlockAt }` plus optional `freeText?` (per-day free-space override) and `snapshotItemIds?` (the Day Snapshot the scheduler #202 stamps at `unlockAt`; optional because it is absent until that function runs).
+  - `EventDoc` gains `timezone: string`, `days: DayDef[]`, `frozenAt?: number` (finale freeze stamp), and the `settings` additions `photoProofSource?: 'camera_or_library' | 'camera_only'`, `stripPhotoExif?: boolean`, `visionGate?: boolean`—all optional, read defensively at their runtime call sites, with the event-level defaults applied by #211 rather than baked into the type.
   - `ItemDoc` gains `pool: 'main' | 'embark' | 'farewell'` and widens `status` to `'active' | 'hidden' | 'pending' | 'rejected'`, plus optional `approvedBy?`/`approvedAt?`. The type only adds the approval states; it migrates no data (every existing `active` item stays `active`).
-  - `BoardDoc` gains `dayIndex: number` — one Board per Player per Day; the field is what lets the dealer look up a Player's earlier Day Cards to exclude repeats.
+  - `BoardDoc` gains `dayIndex: number`—one Board per Player per Day; the field is what lets the dealer look up a Player's earlier Day Cards to exclude repeats.
   - `PlayerDoc` gains `dayStats?: Record<number, { bingoCount, squaresMarked, firstBingoAt }>`; the existing `bingoCount`/`squaresMarked`/`firstBingoAt` stay the Event-wide totals.
   - `TallyDoc` gains `lastMarkedAt?`/`dayIndex?`; `ProofDoc` gains `source?: 'camera' | 'library'`/`dayIndex?`; `DoubtDoc` gains `dayIndex?`; `MomentDoc` gains `dayIndex?`; `MomentKind` gains `'last_call' | 'podium'` (the two finale beats). All the day-scoped fields are optional until their day-aware writers stamp them.
-  - `DayMetaDoc` (new) — `{ firstBingo?: { uid, displayName, at } }` for `events/{eventId}/days/{dayIndex}/meta/{dayIndex}` (a `meta` subcollection holding one document whose id IS the encoded dayIndex — a valid document path). No `id` field: the doc id IS the dayIndex, encoded in the path.
+  - `DayMetaDoc` (new)—`{ firstBingo?: { uid, displayName, at } }` for `events/{eventId}/days/{dayIndex}/meta/{dayIndex}` (a `meta` subcollection holding one document whose id IS the encoded dayIndex—a valid document path). No `id` field: the doc id IS the dayIndex, encoded in the path.
   - **Frozen, untouched:** the 5×5 `Cell` contract, `ClaimMode`, `UserDoc`, `ClaimDoc`.
-- `src/data/converters.ts` — read-side defaults for a not-yet-migrated doc (daily-cards-spec § "Migration"; the precedent is the existing `bannedUids` default):
+- `src/data/converters.ts`—read-side defaults for a not-yet-migrated doc (daily-cards-spec § "Migration"; the precedent is the existing `bannedUids` default):
   - `itemConverter.fromFirestore` defaults a missing `pool` to `'main'` while still pinning `id` to `snap.id`.
   - `eventConverter.fromFirestore` defaults a missing/malformed `days` to `[]` and a missing/malformed `timezone` to `'Europe/Rome'`, alongside the existing `claimMode`/`bannedUids` handling.
-  - `dayMetaConverter` (new) — a passthrough `FirestoreDataConverter<DayMetaDoc>` (no id to pin; the id is the path-encoded dayIndex).
-- `src/theme/themes.ts` — `ThemeMeta` gains `description: string`, populated verbatim from daily-cards-spec § "Theme reference" for the eight existing entries. #206 adds the two new entries with their own descriptions and does not re-touch the eight.
-- `src/components/ProofFeed.tsx` — `MOMENT_COPY` (the exhaustive `Record<MomentKind, …>`) gains `last_call` and `podium` entries so the Feed keeps compiling and rendering the finale beats; #207 refines the finale presentation.
+  - `dayMetaConverter` (new)—a passthrough `FirestoreDataConverter<DayMetaDoc>` (no id to pin; the id is the path-encoded dayIndex).
+- `src/theme/themes.ts`—`ThemeMeta` gains `description: string`, populated verbatim from daily-cards-spec § "Theme reference" for the eight existing entries. #206 adds the two new entries with their own descriptions and does not re-touch the eight.
+- `src/components/ProofFeed.tsx`—`MOMENT_COPY` (the exhaustive `Record<MomentKind, …>`) gains `last_call` and `podium` entries so the Feed keeps compiling and rendering the finale beats; #207 refines the finale presentation.
 
 ## Acceptance criteria
 
@@ -35,4 +35,4 @@ Owns the shared Phase 1.5 domain type contract in `src/types.ts` and its read-si
 
 ## Test coverage
 
-`src/data/d15-schema-contract.test.ts` (Vitest, pure-logic unit — no Firebase, no emulator): the `itemConverter` pool default and passthrough, the `eventConverter` days/timezone defaults and malformed-value coercion, and the `ThemeMeta.description` presence check across every `THEMES` entry.
+`src/data/d15-schema-contract.test.ts` (Vitest, pure-logic unit—no Firebase, no emulator): the `itemConverter` pool default and passthrough, the `eventConverter` days/timezone defaults and malformed-value coercion, and the `ThemeMeta.description` presence check across every `THEMES` entry.

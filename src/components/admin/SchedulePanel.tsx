@@ -117,9 +117,9 @@ function ResnapshotButton({
         result === 'resnapshotted'
           ? 'Re-snapshotted with both pools.'
           : result === 'has-boards'
-            ? 'Denied — cards already dealt.'
+            ? 'Denied—cards already dealt.'
             : result === 'not-recoverable'
-              ? 'Denied — early Days stay untouched.'
+              ? 'Denied—early Days stay untouched.'
             : `No change (${result}).`,
       );
     } catch (err) {
@@ -298,7 +298,7 @@ function ScheduleRow({
               isTwoPartyDay(day) && <span className="pill">2 parties</span>
             )}
           </div>
-          <div className="sub">{locked ? 'locked — already unlocked or past' : 'editable until unlock'}</div>
+          <div className="sub">{locked ? 'locked—already unlocked or past' : 'editable until unlock'}</div>
           <input
             className="tonight-input"
             aria-label={`Day ${day.index + 1} tonight`}

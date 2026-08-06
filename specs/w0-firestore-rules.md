@@ -9,13 +9,13 @@ status: accepted
 
 ## Marks are client-authoritative: boards/players stay self-writable (ADR 0001)
 
-Because Marks are client-authoritative and the live Feed is the source of truth, a Player writes their own Board and denormalized stats directly. Self-writable `boards/{uid}` and `players/{uid}` are intentional, not a hole to close — a reviewer who "locks down" stat writes has misread the design.
+Because Marks are client-authoritative and the live Feed is the source of truth, a Player writes their own Board and denormalized stats directly. Self-writable `boards/{uid}` and `players/{uid}` are intentional, not a hole to close—a reviewer who "locks down" stat writes has misread the design.
 
 - **Given** the emulator + rules **When** an owner writes their own `boards/{uid}` or `players/{uid}` **Then** the write is ALLOWED, and a write to another Player's board or stats is DENIED. (Test: "ADR 0001: boards/players are self-writable; cross-player writes denied".)
 
 ## A Mark is private on the Board but public as an attributed per-Prompt Tally (ADR 0002)
 
-Marking is a deliberate public act at the per-Prompt grain: every Mark — proofed or not — publishes an attributed entry to its Prompt's Tally, even though the Board that holds it stays private. Attribution is enforced per marker at `tally/{itemId}/markers/{markerUid}`, whose doc id is the marker's uid, so a Player writes only their own entry and no anonymity is offered by design. The denormalized aggregate doc `tally/{itemId}` (the Square badge count) is public-read and admin/Cloud-Function-maintained, never client-forged.
+Marking is a deliberate public act at the per-Prompt grain: every Mark—proofed or not—publishes an attributed entry to its Prompt's Tally, even though the Board that holds it stays private. Attribution is enforced per marker at `tally/{itemId}/markers/{markerUid}`, whose doc id is the marker's uid, so a Player writes only their own entry and no anonymity is offered by design. The denormalized aggregate doc `tally/{itemId}` (the Square badge count) is public-read and admin/Cloud-Function-maintained, never client-forged.
 
 - **Given** a Mark **When** a Player writes their own `markers/{uid}` entry (uid + displayName + markedAt) **Then** the write is ALLOWED, is publicly readable, and unmarking removes exactly that entry, while targeting another Player's slot or forging the entry's uid is DENIED. (Test: "ADR 0002: a Mark publishes an attributed Tally entry; forgery denied; reads public".)
 - **Given** the denormalized aggregate **When** a non-admin writes `tally/{itemId}` **Then** it is DENIED, while an admin write is ALLOWED. (Same test.)
@@ -24,8 +24,8 @@ Marking is a deliberate public act at the per-Prompt grain: every Mark — proof
 
 A Player may post a `moments/{id}` announcement of their own BINGO / Blackout / First-to-BINGO beat (public read); a bare Mark broadcasts nothing to the Feed. A Player may raise a `doubts/{id}` on another Player's marked Prompt (public read); a Proof satisfies it but never blocks, unmarks, or discounts the Mark.
 
-- **Given** a Moment **When** a Player posts it for their own beat **Then** it is ALLOWED and publicly readable, while a forged-uid Moment is DENIED. (Test: "ADR 0002: Moments broadcast a big beat — own-attributed, public".)
-- **Given** a Doubt **When** a Player raises it on another's Mark **Then** it is ALLOWED and publicly readable, while a forged-`fromUid` Doubt is DENIED. (Test: "ADR 0001: Doubts are social pressure — own-attributed, public, never a gate".)
+- **Given** a Moment **When** a Player posts it for their own beat **Then** it is ALLOWED and publicly readable, while a forged-uid Moment is DENIED. (Test: "ADR 0002: Moments broadcast a big beat—own-attributed, public".)
+- **Given** a Doubt **When** a Player raises it on another's Mark **Then** it is ALLOWED and publicly readable, while a forged-`fromUid` Doubt is DENIED. (Test: "ADR 0001: Doubts are social pressure—own-attributed, public, never a gate".)
 
 ## Reactive moderation: report-only increments and a validated threshold (ADR 0004)
 

@@ -16,7 +16,7 @@ Everything below is the reconciled spec: original ticket + the #580 report work,
 best-of-both.
 -->
 
-# PART 1 — paste as the issue #602 body
+# PART 1—paste as the issue #602 body
 
 > **Status: SOURCE OF TRUTH for implementation.** Reconciled 2026-07-01 from the original ticket framing + the consolidated-report spec drafted off the #580 thread. Where the two disagreed, the choice and reason are recorded in the reconciliation comment (PART 2). Parent design: `plans/automated-phase-4b-handoff.md` (#580). Build against this body.
 
@@ -43,16 +43,16 @@ The consumer is the operator paying for model usage and shipping software with a
 - Report generation is **advisory to safety, never a gate**: if generation fails, the orchestrator posts the plain-summary approval it posts today. A report failure must never block a valid approval, and must never fabricate one.
 - Ships behind the existing `phase_4b_automation.enabled` (false) plus a new sub-toggle `phase_4b_automation.accounting.enabled` (default `true` under the disabled parent), so accounting can be turned off without disabling automation.
 
-## System context (exists already — do not rebuild)
+## System context (exists already—do not rebuild)
 
 - **Orchestrator** `scripts/phase-4b-review.sh`: HEAD-pins, selects reviewer ≠ author, runs one adapter pass per invocation, parses/validates the verdict, posts via `scripts/gh-as-reviewer.sh`, emits a JSON summary. Exit codes: `0` approved+posted · `1` changes requested · `3` error · `4` fell back to manual · `5` disabled/skipped.
 - **Adapters** `scripts/phase-4b/adapters/review-via-codex.sh` (Direction A, Claude→Codex, `codex exec --sandbox read-only --output-schema`) and `review-via-claude.sh` (Direction B, Codex→Claude, `claude -p --permission-mode plan --tools "" --output-format json`). Read-only; never post to GitHub.
 - **Verdict schema** `scripts/phase-4b/verdict.schema.json`: `{ verdict: APPROVED|CHANGES_REQUESTED, summary, findings:[{severity:P0|P1|P2|P3, path, line, body}], usage:{token_count,input_tokens,output_tokens,source}|null }`. `usage` is populated **only** from CLI-exposed counts; adapters must never estimate tokens.
 - **Shared lib** `scripts/phase-4b/lib.sh`: config readers, reviewer selection, bounded-exec/timeout helpers, `jq` verdict validator that reads `feedback_policy`.
-- **Policy** `.github/review-policy.yml`: `phase_4b_automation` block; `feedback_policy` (P0/P1 required, P2/P3 discretionary by default); `available_reviewers` (`nathanpayne-claude|-cursor|-codex`); `default_external_reviewer: nathanpayne-codex`; `author_identity: nathanjohnpayne`. Configurable adapter **timeout/effort** land via **#589** (closed) — record the *configured* values per loop.
+- **Policy** `.github/review-policy.yml`: `phase_4b_automation` block; `feedback_policy` (P0/P1 required, P2/P3 discretionary by default); `available_reviewers` (`nathanpayne-claude|-cursor|-codex`); `default_external_reviewer: nathanpayne-codex`; `author_identity: nathanjohnpayne`. Configurable adapter **timeout/effort** land via **#589** (closed)—record the *configured* values per loop.
 - **Merge gate (unchanged)** `scripts/codex-review-check.sh` gate (c): an `APPROVED` on the current HEAD from a non-author `available_reviewers` identity is the Phase 4b substitute clearance (`codex.allow_phase_4b_substitute`, #218). Do not touch it, `merge-clearance-gate.yml`, or `auto-clear-blocking-labels.yml`.
 - **Two auth planes.** Reasoning plane = reviewer CLI on the operator's **subscription plan only** (Codex `auth_mode=chatgpt`; Claude `apiProvider=firstParty`). API-key env is scrubbed; not-plan-logged-in fails closed. Attribution plane = reviewer PAT via `gh-as-reviewer.sh`. **Billed marginal cost of a review is $0** (flat-rate plan); dollar figures in the accounting are *notional* (metered-API equivalent), always labeled as not billed.
-- **Strict posting rule** (design invariant): the orchestrator auto-posts `APPROVED` only for a schema-conformant approval with **zero findings in any `feedback_policy`-required tier**. An approving verdict that carries findings routes to manual. The loop-centric model records the loops that surfaced advisories as history even though the posted approval is clean — this is how rigor is shown without loosening the rule.
+- **Strict posting rule** (design invariant): the orchestrator auto-posts `APPROVED` only for a schema-conformant approval with **zero findings in any `feedback_policy`-required tier**. An approving verdict that carries findings routes to manual. The loop-centric model records the loops that surfaced advisories as history even though the posted approval is clean—this is how rigor is shown without loosening the rule.
 
 ## Accounting model
 
@@ -65,7 +65,7 @@ Record **every** Phase 4b loop/attempt, including direct adapter probes, orchest
 - **Tokens** (when exposed): `input`, `output`, `cache_creation`, `cache_read`, `reasoning`, `total`, and `source`; explicit `"unavailable"` with reason when the CLI exposes nothing. Extend the verdict `usage` object with the cache/reasoning fields (additive, nullable, CLI-sourced only).
 - **Findings** normalized to the accounting severity superset `{P0, P1, P2, P3, nitpick, unknown}` (verdict contract stays P0–P3; nitpick/unknown buckets absorb CodeRabbit/Codex-bot/other sources and anything unmapped).
 - **CLI version** evidence per loop (integrate with **#586**), configured **timeout/effort** (from **#589**), `throttle_events`, and `plan_auth` posture.
-- **Fail-closed** record per loop: `{happened, reason, duration_seconds}` — counted as **positive safety evidence**, never hidden.
+- **Fail-closed** record per loop: `{happened, reason, duration_seconds}`—counted as **positive safety evidence**, never hidden.
 
 ### Findings lifecycle
 
@@ -77,7 +77,7 @@ Because the strict rule means an auto-posted approval has no blocking findings, 
 
 ## Cost model (the finance answer)
 
-Marginal **billed** cost on the plan-only path is `$0.00` — state it plainly. **Notional** cost makes consumption legible:
+Marginal **billed** cost on the plan-only path is `$0.00`—state it plainly. **Notional** cost makes consumption legible:
 
 ```
 notional_usd = input/1e6·p.input + output/1e6·p.output
@@ -86,9 +86,9 @@ notional_usd = input/1e6·p.input + output/1e6·p.output
 
 When only a total is exposed (Codex), apply a single `p.blended` per-million rate and mark it `~approx`. Store rates per model in a **versioned** table (`scripts/phase-4b/prices.json` or a `phase_4b_automation.accounting.prices` map) and stamp `price_table_version` into every record so historical totals stay reproducible. **Do not hardcode prices from memory**; populate from current published list prices and treat as config. Missing price ⇒ notional `n/a`, record still posts.
 
-When the CLI **reports** a cost directly (the Claude print-mode envelope's `total_cost_usd`), prefer it over the computed notional: the per-loop record carries it as `tokens.cost_usd`, the per-approval `totals.reported_cost_usd` sums it fail-closed (null unless every loop with measured usage also reported one — never a partial underreport), and the cost row labels its source (`CLI-reported` vs the price-table notional). Absent stays `n/a` — the never-guess contract is unchanged.
+When the CLI **reports** a cost directly (the Claude print-mode envelope's `total_cost_usd`), prefer it over the computed notional: the per-loop record carries it as `tokens.cost_usd`, the per-approval `totals.reported_cost_usd` sums it fail-closed (null unless every loop with measured usage also reported one—never a partial underreport), and the cost row labels its source (`CLI-reported` vs the price-table notional). Absent stays `n/a`—the never-guess contract is unchanged.
 
-Present the expense as four real costs, not one number: **wall-clock** (the actual scarce resource — merge-cycle latency), **tokens**, **plan-capacity/throttle events**, and the labeled **notional $**. Pair it with **human shuttle time avoided** — the manual Phase 4b handoff "typically adds 30 minutes to a few hours per PR" (`REVIEW_POLICY.md` § Phase 4b Triggers) — so the reader weighs cost against value.
+Present the expense as four real costs, not one number: **wall-clock** (the actual scarce resource—merge-cycle latency), **tokens**, **plan-capacity/throttle events**, and the labeled **notional $**. Pair it with **human shuttle time avoided**—the manual Phase 4b handoff "typically adds 30 minutes to a few hours per PR" (`REVIEW_POLICY.md` § Phase 4b Triggers)—so the reader weighs cost against value.
 
 ## Running totals (cumulative, computed at post time)
 
@@ -96,7 +96,7 @@ Below the per-PR cost, render repo-wide cumulative figures computed when the blo
 
 Compute **statelessly from GitHub** (recommended): each posted block embeds the machine-readable record; at post time, aggregate prior records across the repo (reviews by `available_reviewers` identities carrying the block marker). No state file to drift, fully auditable. Fallback: append-only `.mergepath/phase-4b-ledger.jsonl` cache if GitHub aggregation is rate-limited. Always print the totals source in the footer; aggregation failure degrades to `running totals unavailable — reason`, never wrong numbers.
 
-## Output shape — worked sample (golden output for the #580 case)
+## Output shape—worked sample (golden output for the #580 case)
 
 This reproduces the #580 four-loop story that had to be posted by hand, as the workflow would now emit it. Real measured numbers; running-totals figures are illustrative placeholders (no fleet history yet).
 
@@ -138,7 +138,7 @@ This reproduces the #580 four-loop story that had to be posted by hand, as the w
 | F3 | P3 | — | Harden Claude JSON extraction beyond first/last brace | current-head | 3 | 3 | deferred-to-follow-up | #587 |
 | F4 | P3 | — | Make local shellcheck absence more visible | current-head | 3 | 3 | deferred-to-follow-up | #588 |
 
-Unique findings across loops: 4 — 4 on the approved head, 0 historical (earlier loops only). Repeated across loops: 0. (Scope is derived per finding: `current-head` only when it was last seen on a loop that reviewed the final head sha; a finding last seen on a prior commit — the changes-requested-then-fixed lifecycle — renders `historical`, never as residual current-head risk. Summary is the first body line truncated to 80 chars; full bodies stay in the local loop log, never in the posted block.)
+Unique findings across loops: 4—4 on the approved head, 0 historical (earlier loops only). Repeated across loops: 0. (Scope is derived per finding: `current-head` only when it was last seen on a loop that reviewed the final head sha; a finding last seen on a prior commit—the changes-requested-then-fixed lifecycle—renders `historical`, never as residual current-head risk. Summary is the first body line truncated to 80 chars; full bodies stay in the local loop log, never in the posted block.)
 
 ### Cost and effort
 
@@ -147,12 +147,12 @@ Unique findings across loops: 4 — 4 on the approved head, 0 historical (earlie
 | Reviewer wall-clock | **225 s** across 4 loops (18 + 65 + 66 + 76) |
 | Timeout budget | 900 s configured (#589); max single loop 76 s / 900 s = 8% |
 | Tokens observed | **177,204 total** (Codex 169,844 total-only; Claude 7,360 = 1,589 in / 5,771 out; loop 4 unavailable) |
-| Billed cost | **$0.00** — operator subscription plan |
+| Billed cost | **$0.00**—operator subscription plan |
 | Notional API-equivalent | **~$0.66** *(not billed; blended, price table `2026-07-01`)* |
 | Plan-capacity throttle events | 1 (Codex plan throttle, early probe) |
 | Human shuttle avoided | **~30 min – 3 h** (manual Phase 4b handoff, per `REVIEW_POLICY.md`) |
 
-### Running totals — repo, to date *(illustrative)*
+### Running totals—repo, to date *(illustrative)*
 
 | Metric | Cumulative |
 |---|---|
@@ -166,11 +166,11 @@ Unique findings across loops: 4 — 4 on the approved head, 0 historical (earlie
 
 *Totals source: github-derived (24 `p4b-accounting:v1` records).*
 
-> Cumulative human-time-saved rendering (#615 Codex round 7): a bound below one hour renders in minutes, never floored to `~0 h`. Both bounds ≥ 60 min keep the shared-unit `~A – B h` form shown above; a sub-hour low bound switches to per-bound units — e.g. a single prior approval (`[30, 180]`) renders `~30 min – 3 h` (the documented 30-minute floor, matching the per-loop "Human shuttle avoided" line), and `[30, 50]` renders `~30 – 50 min`.
+> Cumulative human-time-saved rendering (#615 Codex round 7): a bound below one hour renders in minutes, never floored to `~0 h`. Both bounds ≥ 60 min keep the shared-unit `~A – B h` form shown above; a sub-hour low bound switches to per-bound units—e.g. a single prior approval (`[30, 180]`) renders `~30 min – 3 h` (the documented 30-minute floor, matching the per-loop "Human shuttle avoided" line), and `[30, 50]` renders `~30 – 50 min`.
 
 ### Safety and value notes
 
-- Fail-closed events: **1** (loop 4, approval-carried-findings, 76 s) — prevented an unsafe auto-approval. ✅
+- Fail-closed events: **1** (loop 4, approval-carried-findings, 76 s)—prevented an unsafe auto-approval. ✅
 - Required-severity (P0/P1) defects fixed before approval: 0 (none found).
 - Advisory follow-ups filed: 4 (#585–#588).
 - Total adapter tokens observed: 177,204. Total reviewer wall-clock: 225 s.
@@ -221,16 +221,16 @@ Unique findings across loops: 4 — 4 on the approved head, 0 historical (earlie
 - Accounting generation never blocks or fabricates an approval; on error, post the plain summary.
 - **No estimated tokens.** Missing counts render `unavailable` with source/reason.
 - **No green rigor checks without a captured signal.** Unverifiable rows render `n/a`.
-- A required-tier (P0/P1) finding can **never** accompany a posted `APPROVED` — assert and fail closed.
+- A required-tier (P0/P1) finding can **never** accompany a posted `APPROVED`—assert and fail closed.
 - Totals degrade to `unavailable` rather than guessing.
 - Machine-readable block uses explicit `null` / `"unavailable"`, never silent omission; schema-versioned (`p4b-accounting/v1`).
-- The embedded payload is HTML-comment-safe: any `-->` / `--!>` / `<!--` sequence inside a record string (e.g. a hostile finding title) is emitted with its angle bracket as a JSON unicode escape — identical parsed value, but the hidden comment can never terminate early (visible render) or truncate extraction.
+- The embedded payload is HTML-comment-safe: any `-->` / `--!>` / `<!--` sequence inside a record string (e.g. a hostile finding title) is emitted with its angle bracket as a JSON unicode escape—identical parsed value, but the hidden comment can never terminate early (visible render) or truncate extraction.
 
 ## Acceptance criteria
 
 1. A Phase 4b run with multiple adapter attempts produces a complete **per-loop** ledger; the final approval body embeds/references the accounting automatically.
 2. Exact severity counts per loop **and** for the final unique-finding set; current-head unique findings distinguished from repeated/stale.
-3. Token counts recorded whenever the CLI exposes them; missing token/internal-turn data represented explicitly as `unavailable` with source/reason — never estimated.
+3. Token counts recorded whenever the CLI exposes them; missing token/internal-turn data represented explicitly as `unavailable` with source/reason—never estimated.
 4. Cost section shows billed `$0.00` (plan) **and** labeled notional API-equivalent, plus wall-clock, throttle events, and human-time-saved.
 5. Running totals computed at post time from prior `p4b-accounting:v1` records (github-derived) with ledger-cache fallback and an explicit totals-source footer; aggregation failure degrades gracefully.
 6. Fail-closed loops are counted and described as positive safety evidence, not hidden.
@@ -246,14 +246,14 @@ Unique findings across loops: 4 — 4 on the approved head, 0 historical (earlie
 
 - No merge-gate, branch-protection, or `gh-as-reviewer.sh` identity changes.
 - No CI-runner execution mode (local-first, like the parent feature).
-- No live dashboard — only the embedded machine-readable block a future dashboard could read.
+- No live dashboard—only the embedded machine-readable block a future dashboard could read.
 - No change to reviewer selection, adapter review logic, or the verdict contract beyond the additive nullable `usage` cache/reasoning fields.
 
 ## Deliverables
 
-- `scripts/phase-4b/accounting.sh` — the loop-ledger builder + block renderer (sourced by the orchestrator; unit-testable in isolation).
-- `scripts/phase-4b/accounting.schema.json` — schema for the `p4b-accounting:v1` record.
-- `scripts/phase-4b/prices.json` (or `review-policy.yml` price map) — versioned notional-cost rates.
+- `scripts/phase-4b/accounting.sh`—the loop-ledger builder + block renderer (sourced by the orchestrator; unit-testable in isolation).
+- `scripts/phase-4b/accounting.schema.json`—schema for the `p4b-accounting:v1` record.
+- `scripts/phase-4b/prices.json` (or `review-policy.yml` price map)—versioned notional-cost rates.
 - Additive nullable `usage` fields (`cache_creation_input_tokens`, `cache_read_input_tokens`, `reasoning_tokens`, `total_cost_usd`) in `verdict.schema.json`, CLI-sourced only.
 - Orchestrator hook in `scripts/phase-4b-review.sh`: accumulate per-loop records, build the approval body via `accounting.sh`, fall back to plain summary on error.
 - `phase_4b_automation.accounting` block in `.github/review-policy.yml` (documented; `enabled: true` under the disabled parent; optional `prices`).
@@ -262,11 +262,11 @@ Unique findings across loops: 4 — 4 on the approved head, 0 historical (earlie
 
 ## Related
 
-#579 · #580 (parent) · #585 #586 #587 #588 (advisory follow-ups this accounting must link) · #586 (CLI-version evidence integration) · #589 (configurable effort/timeout, closed — record configured values) · #574 (feedback policy).
+#579 · #580 (parent) · #585 #586 #587 #588 (advisory follow-ups this accounting must link) · #586 (CLI-version evidence integration) · #589 (configurable effort/timeout, closed—record configured values) · #574 (feedback policy).
 
 ---
 
-# PART 2 — post as a comment on #602
+# PART 2—post as a comment on #602
 
 ## Reconciliation: what this spec keeps from the ticket vs. the #580 report work
 
@@ -274,8 +274,8 @@ I merged the original ticket with the consolidated-report spec I drafted off the
 
 **Adopted from the original ticket (better than the report framing):**
 
-- **Loop-centric recording** — record every adapter attempt, not just the final approval. This is the stronger frame and it dissolves an open question the report spec had flagged: advisory findings from non-final loops (e.g. the Claude direction's P2×2/P3×2) are now captured as loop history even though the posted approval is clean, so rigor is visible *without* loosening the strict "approve only on zero findings" posting rule.
-- **Findings-disposition lifecycle** — fixed / rebutted / deferred / accepted-risk / false-positive / unresolved, with fix-commit and follow-up-issue links.
+- **Loop-centric recording**—record every adapter attempt, not just the final approval. This is the stronger frame and it dissolves an open question the report spec had flagged: advisory findings from non-final loops (e.g. the Claude direction's P2×2/P3×2) are now captured as loop history even though the posted approval is clean, so rigor is visible *without* loosening the strict "approve only on zero findings" posting rule.
+- **Findings-disposition lifecycle**—fixed / rebutted / deferred / accepted-risk / false-positive / unresolved, with fix-commit and follow-up-issue links.
 - **Current-head-unique vs repeated/stale** finding distinction across loops.
 - **Fail-closed events as positive safety evidence** (reason + duration), counted, not hidden.
 - **Finance stakeholder** as an explicit consumer.
@@ -284,10 +284,10 @@ I merged the original ticket with the consolidated-report spec I drafted off the
 
 **Adopted from the report spec (fills gaps the ticket left open):**
 
-- **Posting decision resolved** — the accounting *is* the `APPROVED` review body (reusing the orchestrator's HEAD-pinned pull-review POST), and generation is fail-open: on error, post the plain summary; never block or fabricate an approval. The ticket left "approval body or a PR comment" open.
-- **Cost model** — the ticket asks "was it worth the cost" but doesn't address that plan-only billing makes the **billed** marginal cost `$0`. So the spec reports billed `$0.00` **plus** a clearly-labeled **notional** API-equivalent, **wall-clock** (the real scarce resource), and **plan-capacity/throttle events**, paired with **human-time-saved**. That's the actual answer for the finance stakeholder.
-- **Rigor-as-proof-of-work** — for a zero-finding approval, "rigor" can't be "bugs caught," so the rigor table is proof-of-work (exhaustive pass + time + tokens + read-only + plan-auth + CLI version + gates green) to separate *reviewed hard* from *rubber-stamped*.
-- **Inline running totals** computed **statelessly** from prior embedded `p4b-accounting:v1` blocks (github-derived, ledger-cache fallback) — this operationalizes the ticket's "aggregate across PRs" goal with no state file to drift.
-- **Data-source map, data-integrity rules, and grounded deliverables** — exact file names, exit codes, CI wiring (`repo_lint.yml` + `check_ci_scripts_wired`), and `.mergepath-sync.yml` registration.
+- **Posting decision resolved**—the accounting *is* the `APPROVED` review body (reusing the orchestrator's HEAD-pinned pull-review POST), and generation is fail-open: on error, post the plain summary; never block or fabricate an approval. The ticket left "approval body or a PR comment" open.
+- **Cost model**—the ticket asks "was it worth the cost" but doesn't address that plan-only billing makes the **billed** marginal cost `$0`. So the spec reports billed `$0.00` **plus** a clearly-labeled **notional** API-equivalent, **wall-clock** (the real scarce resource), and **plan-capacity/throttle events**, paired with **human-time-saved**. That's the actual answer for the finance stakeholder.
+- **Rigor-as-proof-of-work**—for a zero-finding approval, "rigor" can't be "bugs caught," so the rigor table is proof-of-work (exhaustive pass + time + tokens + read-only + plan-auth + CLI version + gates green) to separate *reviewed hard* from *rubber-stamped*.
+- **Inline running totals** computed **statelessly** from prior embedded `p4b-accounting:v1` blocks (github-derived, ledger-cache fallback)—this operationalizes the ticket's "aggregate across PRs" goal with no state file to drift.
+- **Data-source map, data-integrity rules, and grounded deliverables**—exact file names, exit codes, CI wiring (`repo_lint.yml` + `check_ci_scripts_wired`), and `.mergepath-sync.yml` registration.
 
-**One decision worth a second look:** the strict posting rule (approve only on zero findings) means a *posted* approval's Findings table is normally all-zeros, with advisories showing up only in the loop history / prior loops. If you'd rather a single approval be able to post *with* advisories attached (and auto-file them), that loosens the safety posture — I kept the strict rule and captured advisories via loop history instead. Flag if you want the looser posture.
+**One decision worth a second look:** the strict posting rule (approve only on zero findings) means a *posted* approval's Findings table is normally all-zeros, with advisories showing up only in the loop history / prior loops. If you'd rather a single approval be able to post *with* advisories attached (and auto-file them), that loosens the safety posture—I kept the strict rule and captured advisories via loop history instead. Flag if you want the looser posture.

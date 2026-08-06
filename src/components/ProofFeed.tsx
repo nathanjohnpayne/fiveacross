@@ -687,7 +687,7 @@ export function TallyCard({
           </button>
         )}
         {action === 'gotit' && (
-          <button className="iconbtn" title="Mark it — you’ve got this one too" onClick={() => onGotItToo?.(card.itemId)}>
+          <button className="iconbtn" title="Mark it—you’ve got this one too" onClick={() => onGotItToo?.(card.itemId)}>
             🙋 Got it too
           </button>
         )}

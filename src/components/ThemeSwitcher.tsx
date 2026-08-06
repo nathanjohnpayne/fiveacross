@@ -7,7 +7,7 @@ import { track } from '../analytics';
 /**
  * The Theme row's control (More menu § "Theme", daily-cards-spec § "More
  * menu"). Relocated from `Nav.tsx` into `More.tsx` by this ticket (#208).
- * Leads with the new **Auto — match the day** chip (the default, resolved by
+ * Leads with the new **Auto—match the day** chip (the default, resolved by
  * `ThemeContext`'s `autoThemeId`), followed by every pickable Theme for this
  * Edition (`themesForEdition`, #555 — the registry is scoped for the PICKER
  * only, so a Bodega Theme never appears in a Gay Cruise Bingo switcher) in its
@@ -33,7 +33,7 @@ export default function ThemeSwitcher() {
           if (user) clearPlayerTheme(user.uid).catch(() => {});
         }}
       >
-        🧭 Auto — match the day
+        🧭 Auto—match the day
       </button>
       {/* `…Including(preference)` for the same reason the admin controls use it,
           and more urgently here: `ThemeContext` validates a saved pick against

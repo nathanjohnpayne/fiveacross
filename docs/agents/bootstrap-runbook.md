@@ -15,8 +15,8 @@ Use the wizard when:
 
 Do NOT use the wizard for:
 
-- Existing repos — the wizard refuses to overwrite a populated target dir AND refuses to bootstrap over a pre-existing remote (preflight rejects both with `exit 2`).
-- Forks — Mergepath's review policy assumes single-owner; a fork's review topology is different.
+- Existing repos—the wizard refuses to overwrite a populated target dir AND refuses to bootstrap over a pre-existing remote (preflight rejects both with `exit 2`).
+- Forks—Mergepath's review policy assumes single-owner; a fork's review topology is different.
 
 ## Quick start
 
@@ -45,7 +45,7 @@ The wizard prompts for any input you didn't pass via flag, confirms, then runs f
 | `--codex-app` | `y` \| `n` | (prompt, default `n`) | Print the Codex App install URL at the end of stage D. |
 | `--project` | `new` \| `<N>` | (prompt, default `new`) | `new` creates a fresh Project v2 board; `<N>` attaches to existing project number. |
 | `--skip-firebase` | (none) | off | Alias for `--firebase none`; skips stage D's Firebase substeps. |
-| `--skip-board` | (none) | off | Skips stage E's Project v2 board sub-step. **The rest of stage E still runs** — scaffolds + summary are too valuable to gate on whether you wanted a board. |
+| `--skip-board` | (none) | off | Skips stage E's Project v2 board sub-step. **The rest of stage E still runs**—scaffolds + summary are too valuable to gate on whether you wanted a board. |
 | `--dry-run` | (none) | off | Print what would happen; zero side effects on disk or via gh/git/op. |
 | `--resume` | `[<stage>]` | off | Resume a partially-completed run. With an explicit stage name, skip up to and including `<stage>`. Without, read the last completed stage from `$TARGET_DIR/.bootstrap-state`. |
 | `--target-dir` | `<path>` | `$HOME/GitHub/<name>` | Override the new repo's local working tree. |
@@ -56,11 +56,11 @@ The wizard prompts for any input you didn't pass via flag, confirms, then runs f
 
 When you don't pass a flag, the wizard prompts interactively. Each prompt is single-line, default-on-empty. The prompts run in this order:
 
-1. **Description** — free-form one-line string.
-2. **Visibility** — `public` or `private` (default `private`).
-3. **Firebase scope** — `dev` / `dev+prod` / `none` (default `none`).
-4. **Codex App install URL printout** — `y` / `N`.
-5. **Project v2 board** — `new` / `<N>` (default `new`).
+1. **Description**—free-form one-line string.
+2. **Visibility**—`public` or `private` (default `private`).
+3. **Firebase scope**—`dev` / `dev+prod` / `none` (default `none`).
+4. **Codex App install URL printout**—`y` / `N`.
+5. **Project v2 board**—`new` / `<N>` (default `new`).
 
 After prompts, the wizard prints a "collected inputs" block and asks `Proceed? [y/N]`. Skip the confirm prompt with `BOOTSTRAP_AUTO_CONFIRM=1`.
 
@@ -70,7 +70,7 @@ After prompts, the wizard prints a "collected inputs" block and asks `Proceed? [
 |---|---|
 | `0` | All in-scope stages completed (or all skipped per `--resume`). |
 | `1` | Bad arguments / unknown flag / required arg missing. |
-| `2` | Preflight failed — missing dependency, dirty target dir, existing remote, mergepath not on main. |
+| `2` | Preflight failed—missing dependency, dirty target dir, existing remote, mergepath not on main. |
 | `3` | Mid-run stage failure. State file at `$TARGET_DIR/.bootstrap-state` records progress; re-run with `--resume`. |
 | `4` | User aborted at a confirmation prompt. |
 
@@ -78,7 +78,7 @@ After prompts, the wizard prints a "collected inputs" block and asks `Proceed? [
 
 ### Stage A: scaffold (#203 / sub-A)
 
-The wizard itself — argument parsing, preflight, prompts, dispatch, resume. Not a stage that runs side effects; it's the harness.
+The wizard itself—argument parsing, preflight, prompts, dispatch, resume. Not a stage that runs side effects; it's the harness.
 
 ### Stage B: template-mirror (#204 / sub-B)
 
@@ -89,7 +89,7 @@ Implementation: `scripts/bootstrap/template-mirror.sh`.
 3. Drop mergepath-specific entries from the new repo's `.repo-template.yml` (the `mergepath_playground` spec_test_map key + the `extra_top_level_dirs` guard).
 4. Apply name substitutions across the documented 6 name-bearing files (via `scripts/bootstrap/substitute.sh`).
 5. Initialize the new repo's git history with a single `"Initial commit (bootstrapped from mergepath)"` commit.
-6. Open a PR on Mergepath itself to add the new repo to the cross-repo loop lists in `DEPLOYMENT.md` and `REVIEW_POLICY.md` (gated on anchor presence — if the anchors aren't there, the step warns and skips).
+6. Open a PR on Mergepath itself to add the new repo to the cross-repo loop lists in `DEPLOYMENT.md` and `REVIEW_POLICY.md` (gated on anchor presence—if the anchors aren't there, the step warns and skips).
 
 **Failure recovery.** Each step captures its rc and short-circuits. On failure, the state file does NOT carry a `template-mirror` entry; re-run with `--resume` to retry. The cross-repo loop step has a "return to main on failure" recovery so a half-applied loop change doesn't strand mergepath's worktree on the throwaway branch.
 
@@ -97,7 +97,7 @@ Implementation: `scripts/bootstrap/template-mirror.sh`.
 
 Implementation: `scripts/bootstrap/github-infra.sh`.
 
-1. `gh repo create --source=. --push` against the target dir — creates the remote and pushes the bootstrap commit. Legitimate push to main on a greenfield remote (no `main` to protect yet).
+1. `gh repo create --source=. --push` against the target dir—creates the remote and pushes the bootstrap commit. Legitimate push to main on a greenfield remote (no `main` to protect yet).
 2. Seed the 12 canonical labels (`needs-external-review`, `needs-human-review`, `policy-violation`, `human-hold`, `human-action`, `decision-needed`, `agent-action`, `phase-0` through `phase-4`).
 3. Invite reviewer-identity collaborators (`nathanpayne-claude`, `-cursor`, `-codex` per `--reviewers`). Each invite is async; the wizard pauses for the human to accept each in the agent account's GitHub session.
 4. Provision the `REVIEWER_ASSIGNMENT_TOKEN` repo secret. Path order: inline (`BOOTSTRAP_REVIEWER_PAT_VALUE` env, tests only) → 1Password item → interactive prompt for a fine-grained PAT.
@@ -126,9 +126,9 @@ When `--firebase` is `none` (the default), the Firebase steps are all skipped wi
 CodeRabbit + Codex App posture is configured regardless:
 
 - Print the CodeRabbit App install URL (operator must accept on github.com per agent identity).
-- If `--codex-app y`: print the Codex App install URL + environment setup steps (chatgpt.com/codex/cloud/settings/environments — manual step the wizard cannot fully automate).
+- If `--codex-app y`: print the Codex App install URL + environment setup steps (chatgpt.com/codex/cloud/settings/environments—manual step the wizard cannot fully automate).
 - Wire `.github/review-policy.yml`'s `coderabbit` + `codex` blocks to match the operator's choices.
-- The template's `.coderabbit.yml` ships with `reviews.profile: chill` by default. Per CodeRabbit's docs, the 🧹 Nitpick category is "only in Assertive mode" — `chill` suppresses nitpicks at the source while preserving substantive findings (Potential issue / ⚠️ / Refactor / Security). The 2026-05-13 sweep (#234) surfaced 56 unresolved nit threads across 9 repos, none substantive; #237 commits to the quieter posture at the template level. Override per-repo by setting `reviews.profile: assertive` locally if a specific repo wants the polish pass. The override sticks because the wizard's template-mirror only seeds `.coderabbit.yml` on first bootstrap, not on every sync wave.
+- The template's `.coderabbit.yml` ships with `reviews.profile: chill` by default. Per CodeRabbit's docs, the 🧹 Nitpick category is "only in Assertive mode"—`chill` suppresses nitpicks at the source while preserving substantive findings (Potential issue / ⚠️ / Refactor / Security). The 2026-05-13 sweep (#234) surfaced 56 unresolved nit threads across 9 repos, none substantive; #237 commits to the quieter posture at the template level. Override per-repo by setting `reviews.profile: assertive` locally if a specific repo wants the polish pass. The override sticks because the wizard's template-mirror only seeds `.coderabbit.yml` on first bootstrap, not on every sync wave.
 
 **Failure recovery.** Firebase project-creation failures are fatal (the wizard refuses to record completion). CodeRabbit/Codex URL printouts can't fail in a meaningful way.
 
@@ -140,20 +140,20 @@ Implementation: `scripts/bootstrap/board-and-summary.sh`.
    - `--project new`: `gh project create --owner nathanjohnpayne --title <repo> --format json`, parse `.number`, then `gh project field-create` for the Status field (`SINGLE_SELECT` with Backlog / Ready / In progress / In review / Done), then `gh project edit --readme "..."`.
    - `--project <N>`: reuse existing project; skip create + field- create + readme writes.
 2. **Empty implementation-spec / plan scaffolds.** Always run (even when `--skip-board` skips sub-step 1):
-   - `specs/<repo>.md` — placeholder with the wizard's "deliberate-not-in-scope" note for repo-local behavior specs.
-   - `plans/<repo>-sprint-0.md` — same shape.
-   - `scripts/gh-projects/examples/<repo>/create-issues.sh` — minimal issue-seeding skeleton with `<repo>` placeholders. Executable.
+   - `specs/<repo>.md`—placeholder with the wizard's "deliberate-not-in-scope" note for repo-local behavior specs.
+   - `plans/<repo>-sprint-0.md`—same shape.
+   - `scripts/gh-projects/examples/<repo>/create-issues.sh`—minimal issue-seeding skeleton with `<repo>` placeholders. Executable.
 3. **Final summary block.** Always run. Printed to stdout AND appended to `$TARGET_DIR/.bootstrap-log`. Sections:
    - `REPO` / `PROJECT` / `LOCAL DIR` header.
-   - `DONE` — stages found in the state file at summary time.
-   - `SKIPPED` — stages NOT in the state file (or whose sub-steps were explicitly skipped, e.g., Firebase under `--skip-firebase`).
-   - `WARNINGS` — things the wizard couldn't automate (e.g., `.env.local` from Firebase web console; collaborator invite acceptance).
-   - `CROSS-REPO LOOP UPDATE` — pointer to the Mergepath PR opened in stage B (or a manual-action note if anchors were absent).
-   - `NEXT STEPS (human-action)` — the explicit checklist of things the operator owns: accept invites, write the canonical PRD in `nathanjohnpayne/docs/projects/<repo>/prds/`, fill the repo-local implementation spec, populate issues, set spend caps, drive Sprint 0.
+   - `DONE`—stages found in the state file at summary time.
+   - `SKIPPED`—stages NOT in the state file (or whose sub-steps were explicitly skipped, e.g., Firebase under `--skip-firebase`).
+   - `WARNINGS`—things the wizard couldn't automate (e.g., `.env.local` from Firebase web console; collaborator invite acceptance).
+   - `CROSS-REPO LOOP UPDATE`—pointer to the Mergepath PR opened in stage B (or a manual-action note if anchors were absent).
+   - `NEXT STEPS (human-action)`—the explicit checklist of things the operator owns: accept invites, write the canonical PRD in `nathanjohnpayne/docs/projects/<repo>/prds/`, fill the repo-local implementation spec, populate issues, set spend caps, drive Sprint 0.
 
 The project-board calls are `gh` write paths and run under the same token-verified author helper as stage C. The scaffold writes are direct shell redirects (no gh involved) and don't need the wrapper.
 
-**Failure recovery.** Project-board failures are fatal (stage returns non-zero). Scaffold-write failures are fatal. Summary emission failures are fatal but rare — the summary is in-memory string construction with a single tmpfile dump.
+**Failure recovery.** Project-board failures are fatal (stage returns non-zero). Scaffold-write failures are fatal. Summary emission failures are fatal but rare—the summary is in-memory string construction with a single tmpfile dump.
 
 ## Resume mechanism
 
@@ -164,7 +164,7 @@ The wizard records each completed stage's name to `$TARGET_DIR/.bootstrap-state`
 
 An unknown resume stage (typo or stale state file from an older wizard version) exits 1 with a diagnostic pointing at the state file (`Codex P1 round 1 on PR #232` introduced this guard).
 
-The state file is the source of truth for the summary's DONE list — edit it manually if you're recovering from a botched state.
+The state file is the source of truth for the summary's DONE list—edit it manually if you're recovering from a botched state.
 
 ## Failure modes
 
@@ -198,7 +198,7 @@ Per stage, the most common failures and their recovery paths:
 
 - **`gh project create` fails**: hard fail. Often auth-scope (the PAT needs Projects: Read+Write). Re-run with `--resume firebase-and- codereview` after granting scope.
 - **`gh project field-create` fails on a board that already has a Status field**: warn-not-fatal. Configure the field manually if needed.
-- **Scaffold-write failures**: rare — disk perms. Fix, re-run.
+- **Scaffold-write failures**: rare—disk perms. Fix, re-run.
 
 ## Human-action items the wizard cannot automate
 
@@ -206,7 +206,7 @@ These items require human attention AFTER the wizard completes. The summary bloc
 
 1. **Accept reviewer collaborator invites.** Each invited agent identity (`nathanpayne-claude`, `-cursor`, `-codex`) must sign into the new repo's invitations page and accept. Wizard invokes the invite but cannot accept it.
 2. **Populate `.env.local` from Firebase web console.** When Firebase is enabled, the deployer SA key handles deploys but the web app config (`firebaseConfig`) requires manual copy-paste from console.firebase.google.com.
-3. **Install the Codex App.** The wizard prints the install URL; the human must accept on github.com/apps/codex AND configure a Codex environment at chatgpt.com/codex/cloud/settings/environments. "Code Review enabled" is not sufficient — both pieces are required for review-readiness.
+3. **Install the Codex App.** The wizard prints the install URL; the human must accept on github.com/apps/codex AND configure a Codex environment at chatgpt.com/codex/cloud/settings/environments. "Code Review enabled" is not sufficient—both pieces are required for review-readiness.
 4. **Install the CodeRabbit App.** Same shape: wizard prints the URL, human accepts.
 5. **Write the PRD and implementation spec.** The canonical PRD belongs in `nathanjohnpayne/docs/projects/<repo>/prds/`; the wizard-created `specs/<repo>.md` placeholder is the repo-local implementation spec. `scripts/project-doc-sync.sh` is responsible for generated PRD/spec mirrors once the project is added to `.mergepath-project-docs.yml`.
 6. **Populate Phase 0 / Phase 1 issues.** The wizard creates the `scripts/gh-projects/examples/<repo>/create-issues.sh` skeleton. The human fills it in and runs it.
@@ -244,11 +244,11 @@ By the end of a successful run, the target dir contains:
 
 - The full mirrored mergepath template (minus the exclude list).
 - `.git/` initialized with one commit.
-- `.bootstrap-log` — full transcript of every side effect + the end-of-run summary block.
-- `.bootstrap-state` — append-only list of completed stages.
-- `specs/<repo>.md` — placeholder implementation spec.
-- `plans/<repo>-sprint-0.md` — placeholder Sprint 0 plan.
-- `scripts/gh-projects/examples/<repo>/create-issues.sh` — placeholder issue-seeding skeleton (executable).
+- `.bootstrap-log`—full transcript of every side effect + the end-of-run summary block.
+- `.bootstrap-state`—append-only list of completed stages.
+- `specs/<repo>.md`—placeholder implementation spec.
+- `plans/<repo>-sprint-0.md`—placeholder Sprint 0 plan.
+- `scripts/gh-projects/examples/<repo>/create-issues.sh`—placeholder issue-seeding skeleton (executable).
 
 And on GitHub:
 
@@ -256,7 +256,7 @@ And on GitHub:
 - 12 canonical labels.
 - Reviewer-identity collaborators invited.
 - `REVIEWER_ASSIGNMENT_TOKEN` repo secret set.
-- `AUTHOR_MERGE_TOKEN` unset by default (the wizard does not provision it). Required wherever Dependabot auto-merge is enabled (#426) — `dependabot-auto-merge.yml` hard-fails without it — and also gates non-Dependabot auto-merge, which stays disabled until a human provisions the author-owned token.
+- `AUTHOR_MERGE_TOKEN` unset by default (the wizard does not provision it). Required wherever Dependabot auto-merge is enabled (#426)—`dependabot-auto-merge.yml` hard-fails without it—and also gates non-Dependabot auto-merge, which stays disabled until a human provisions the author-owned token.
 - (When Firebase is enabled) per-project deployer SA keys minted + workflows wired.
 - Project v2 board (#N) with Status single-select field configured.
 
@@ -266,12 +266,12 @@ And on Mergepath:
 
 ## See also
 
-- **#156** — parent design document for the wizard.
-- **#203 / sub-A** — wizard scaffold (this doc's harness).
-- **#204 / sub-B** — template-mirror stage.
-- **#205 / sub-C** — github-infra stage.
-- **#206 / sub-D** — firebase-and-codereview stage.
-- **#207 / sub-E** — board-and-summary stage + this runbook.
-- `AGENTS.md` § Code Review Policy — the review topology the wizard configures.
-- `DEPLOYMENT.md` — the deploy + credential setup the wizard mirrors.
-- `REVIEW_POLICY.md` — the review-policy YAML the wizard wires into `.github/review-policy.yml`.
+- **#156**—parent design document for the wizard.
+- **#203 / sub-A**—wizard scaffold (this doc's harness).
+- **#204 / sub-B**—template-mirror stage.
+- **#205 / sub-C**—github-infra stage.
+- **#206 / sub-D**—firebase-and-codereview stage.
+- **#207 / sub-E**—board-and-summary stage + this runbook.
+- `AGENTS.md` § Code Review Policy—the review topology the wizard configures.
+- `DEPLOYMENT.md`—the deploy + credential setup the wizard mirrors.
+- `REVIEW_POLICY.md`—the review-policy YAML the wizard wires into `.github/review-policy.yml`.

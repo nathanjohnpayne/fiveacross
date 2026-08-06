@@ -1,4 +1,4 @@
-# Gay Cruise Bingo — Sprint 0
+# Gay Cruise Bingo—Sprint 0
 
 Sprint 0 = **Wave 0** of the [backlog](gaycruisebingo-backlog.md): the foundation + test-harness tickets that unblock everything else. Ready now: `w0-test-harness` (#8), `w0-type-contract` (#16), `w0-app-shell` (#17). They unblock `w0-firestore-rules` (#18), `w0-storage-rules` (#19), and `w0-offline-persistence` (#20), which follow the harness.
 

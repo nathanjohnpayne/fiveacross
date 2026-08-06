@@ -1,4 +1,4 @@
-# Layer 5 Templated Propagation — 6-Repo ESLint Rollout Retrospective
+# Layer 5 Templated Propagation—6-Repo ESLint Rollout Retrospective
 
 - **Date:** 2026-05-16
 - **Parent tracker:** [mergepath#250](https://github.com/nathanjohnpayne/mergepath/issues/250)
@@ -11,13 +11,13 @@
 ## Scope
 
 - **Infrastructure shipped:** [mergepath#313](https://github.com/nathanjohnpayne/mergepath/issues/313) (lib-only), [mergepath#316](https://github.com/nathanjohnpayne/mergepath/issues/316) (sync integration), [mergepath#318](https://github.com/nathanjohnpayne/mergepath/issues/318) (ESLint templated entry), [mergepath#319](https://github.com/nathanjohnpayne/mergepath/issues/319)/[mergepath#320](https://github.com/nathanjohnpayne/mergepath/issues/320)/[mergepath#321](https://github.com/nathanjohnpayne/mergepath/issues/321) (Phase D hotfixes)
-- **Consumer follow-ups:** [swipewatch#53](https://github.com/nathanjohnpayne/swipewatch/issues/53) (canary), [dpr#83](https://github.com/nathanjohnpayne/device-platform-reporting/issues/83), [ffb#274](https://github.com/nathanjohnpayne/friends-and-family-billing/issues/274), [tadlockpsychiatry#58](https://github.com/nathanjohnpayne/tadlockpsychiatry/issues/58), [npd#373](https://github.com/nathanjohnpayne/nathanpaynedotcom/issues/373), [matchline#234](https://github.com/nathanjohnpayne/matchline/issues/234) — all merged
+- **Consumer follow-ups:** [swipewatch#53](https://github.com/nathanjohnpayne/swipewatch/issues/53) (canary), [dpr#83](https://github.com/nathanjohnpayne/device-platform-reporting/issues/83), [ffb#274](https://github.com/nathanjohnpayne/friends-and-family-billing/issues/274), [tadlockpsychiatry#58](https://github.com/nathanjohnpayne/tadlockpsychiatry/issues/58), [npd#373](https://github.com/nathanjohnpayne/nathanpaynedotcom/issues/373), [matchline#234](https://github.com/nathanjohnpayne/matchline/issues/234)—all merged
 - **Span:** ~3 days of intensive work (mergepath + 6 consumer PRs + 4 closure-invariant hotfixes)
 
 ## What worked
 
 1. **The phased approach.** B1 (lib only) → B2 (sync integration) → C (ESLint templated entry) → D-canary (swipewatch) → D-fanout (5 more) avoided cliff failures. Each phase had its own merge ceremony with codex external review.
-2. **Conditional template syntax.** The `>>> if <expr> ... <<<` comment-marker scheme works well — readable, preserves the surrounding language's syntax, doesn't require a preprocessor.
+2. **Conditional template syntax.** The `>>> if <expr> ... <<<` comment-marker scheme works well—readable, preserves the surrounding language's syntax, doesn't require a preprocessor.
 3. **`facts.frameworks`** as closed vocabulary (react/typescript/astro) cleanly drives per-consumer rendering. The 8th-consumer case (overridebroadway, 0 lintable files) was handled by excluding from the manifest entry rather than rendering an empty config.
 4. **Canary discipline.** Swipewatch as canary (9 files, JS only) surfaced the yq syntax bug ([mergepath#319](https://github.com/nathanjohnpayne/mergepath/issues/319)) and propagation closure gaps ([mergepath#320](https://github.com/nathanjohnpayne/mergepath/issues/320), [mergepath#321](https://github.com/nathanjohnpayne/mergepath/issues/321)) before fanout. The fanout PRs all opened with the hardened infrastructure.
 5. **Codex Phase 4b external review.** Caught real bugs the local reviewer missed:
@@ -27,8 +27,8 @@
 
 ## What hurt
 
-1. **Per-consumer overrides were repetitive.** 5 of 6 consumers added the same vitest globals block, `^_`-prefix unused-vars convention, React Compiler off, allowEmptyCatch, no-explicit-any → warn. Filed as [mergepath#322](https://github.com/nathanjohnpayne/mergepath/issues/322) — template should ship better defaults so the next ESLint policy update isn't a churning diff that reverts every consumer's overrides.
-2. **Closure invariant was incomplete.** Initially propagated scripts/ci/check_* wrappers without the corresponding tests/test_*.sh files — caught by codex Phase 4b on [mergepath#316](https://github.com/nathanjohnpayne/mergepath/pull/316), fixed via [mergepath#320](https://github.com/nathanjohnpayne/mergepath/issues/320). The closure rule needs better static checking.
+1. **Per-consumer overrides were repetitive.** 5 of 6 consumers added the same vitest globals block, `^_`-prefix unused-vars convention, React Compiler off, allowEmptyCatch, no-explicit-any → warn. Filed as [mergepath#322](https://github.com/nathanjohnpayne/mergepath/issues/322)—template should ship better defaults so the next ESLint policy update isn't a churning diff that reverts every consumer's overrides.
+2. **Closure invariant was incomplete.** Initially propagated scripts/ci/check_* wrappers without the corresponding tests/test_*.sh files—caught by codex Phase 4b on [mergepath#316](https://github.com/nathanjohnpayne/mergepath/pull/316), fixed via [mergepath#320](https://github.com/nathanjohnpayne/mergepath/issues/320). The closure rule needs better static checking.
 3. **Identity drift cost cycles.** Multiple sessions left the gh keyring active on `nathanpayne-codex` after the human's 4b CLI run, breaking subsequent claude-side `request-label-removal.sh` / `resolve-pr-threads.sh` calls (identity-check refuses to fire). Filed as [mergepath#317](https://github.com/nathanjohnpayne/mergepath/issues/317).
 4. **Auto-clear flakiness.** `auto-clear-blocking-labels.yml` failed to fire on at least 3 of 6 propagation PRs; manual `request-label-removal.sh` invocations needed every time. Filed as [mergepath#324](https://github.com/nathanjohnpayne/mergepath/issues/324) (related to but distinct from [mergepath#315](https://github.com/nathanjohnpayne/mergepath/issues/315)).
 5. **`verify-propagation-pr.sh` doesn't enforce the templated lane gate yet.** A propagation PR with drifted rendered output would slip through. Filed as [mergepath#323](https://github.com/nathanjohnpayne/mergepath/issues/323).
