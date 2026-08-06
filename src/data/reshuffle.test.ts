@@ -357,7 +357,7 @@ describe('reshuffleBoard — tutorial Days', () => {
     for (const id of SNAPSHOT_IDS) {
       H.itemsById.set(id, { text: `Prompt ${id}`, spicy: false, isFreeSpace: false });
     }
-    H.event = { days: [day(0), day(1, { pool: 'embark', tutorial: true })], settings: {} };
+    H.event = { days: [day(0), day(1, { pool: 'easy', tutorial: true })], settings: {} };
     await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
     expect(writtenBoard()!.cells.filter((c) => !c.free && c.itemId).length).toBe(24);
   });

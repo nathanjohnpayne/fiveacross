@@ -1,8 +1,10 @@
 import type { DayDef } from '../src/types';
 
-export type MigrationDay = Omit<DayDef, 'tonight'> & {
+export type MigrationDay = Omit<DayDef, 'tonight' | 'pool'> & {
   tonight?: string[];
   snapshotItemIds?: string[];
+  /** RAW persisted pool value — the live doc holds the legacy vocabulary. */
+  pool: string;
 };
 
 export type DayDiff = {

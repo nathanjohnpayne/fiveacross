@@ -43,15 +43,36 @@ export function migrateClaimMode(raw: unknown): ClaimMode {
 }
 
 /**
- * Resolve a persisted Day to the current field contract (#566). Event docs
- * seeded before the neutral-vocabulary rename persist `port`/`portEmoji`
- * where the contract now reads `place`/`placeEmoji`; coerce them on read —
- * new names win when both are present — so existing docs keep working with no
- * data migration. Writes only ever emit the new names (the admin schedule
- * editors re-read the RAW stored `days` inside their transactions, so a
- * theme/tonight edit preserves whatever field names the live doc holds).
- * Mirrors `migrateClaimMode` below. Every other Day field passes through
- * untouched.
+ * Resolve a persisted pool value to the current contract (#565): `main`,
+ * `easy`, `closing`. Both live Events' docs persist the pre-rename values —
+ * `embark` for the easy pool, `farewell` for the closing pool — so coerce
+ * them on read; unknown or missing values fall back to `'main'` (the same
+ * default pre-Phase-1.5 items have always read as). Mirrors
+ * `migrateClaimMode`. NOTE (transition posture): unlike Claim Mode, the pool
+ * value is compared server-side (the scheduler's `snapshotPoolsFor` /
+ * `standingsFrozen`-equivalents and `firestore.rules`' `validItemPool`), so
+ * during the live-Event transition the client's curated-pool WRITES keep
+ * emitting the LEGACY values (`adminAddItem`) — a hosting-only deploy must
+ * never mint a value not-yet-redeployed Functions don't recognize. The flip
+ * to emitting `easy`/`closing` is the post-Event cleanup, together with
+ * dropping this coercion and narrowing the rules.
+ */
+export function migratePool(raw: unknown): 'main' | 'easy' | 'closing' {
+  if (raw === 'easy' || raw === 'embark') return 'easy';
+  if (raw === 'closing' || raw === 'farewell') return 'closing';
+  return 'main';
+}
+
+/**
+ * Resolve a persisted Day to the current field contract (#566/#565). Event
+ * docs seeded before the neutral-vocabulary rename persist `port`/`portEmoji`
+ * where the contract now reads `place`/`placeEmoji`, and the legacy pool
+ * values `migratePool` coerces; normalize them on read — new names win when
+ * both are present — so existing docs keep working with no data migration.
+ * Writes only ever emit the new field names (the admin schedule editors
+ * re-read the RAW stored `days` inside their transactions, so a theme/tonight
+ * edit preserves whatever names/values the live doc holds). Mirrors
+ * `migrateClaimMode` below. Every other Day field passes through untouched.
  */
 export function migrateDayFields(raw: unknown): DayDef {
   const day = (raw ?? {}) as Record<string, unknown>;
@@ -61,6 +82,7 @@ export function migrateDayFields(raw: unknown): DayDef {
     place: typeof day.place === 'string' ? day.place : typeof port === 'string' ? port : '',
     placeEmoji:
       typeof day.placeEmoji === 'string' ? day.placeEmoji : typeof portEmoji === 'string' ? portEmoji : '',
+    pool: migratePool(day.pool),
   } as DayDef;
 }
 
@@ -206,11 +228,12 @@ export const itemConverter: FirestoreDataConverter<ItemDoc> = {
     return {
       ...data,
       id: snap.id,
-      // Items seeded/written before Phase 1.5 carry no `pool`; default a missing
-      // field to 'main' (mirrors the `bannedUids` default above) so existing
-      // Prompts read as main-pool without a data backfill (daily-cards-spec §
-      // "Migration"). Writes only ever emit a real pool.
-      pool: data.pool ?? 'main',
+      // Items seeded/written before Phase 1.5 carry no `pool` (defaults to
+      // 'main', mirroring the `bannedUids` default above), and items written
+      // before the #565 rename persist 'embark'/'farewell' — both resolve
+      // through `migratePool` so existing Prompts read the current contract
+      // without a data backfill (daily-cards-spec § "Migration").
+      pool: migratePool(data.pool),
     };
   },
 };

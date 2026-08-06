@@ -714,7 +714,7 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
       ...(H.event as Record<string, unknown>),
       frozenAt: PAST,
       days: [
-        day(0, { snapshotItemIds: SNAP, pool: 'farewell', tutorial: true }),
+        day(0, { snapshotItemIds: SNAP, pool: 'closing', tutorial: true }),
         day(1, { snapshotItemIds: SNAP }),
       ],
     };

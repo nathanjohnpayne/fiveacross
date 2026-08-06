@@ -21,7 +21,7 @@ function makeDays(count = 10, startUnlock = 0): DayDef[] {
     placeEmoji: '🇭🇷',
     theme: 'get-sporty',
     tonight: [],
-    pool: index === 0 ? 'embark' : index === count - 1 ? 'farewell' : 'main',
+    pool: index === 0 ? 'easy' : index === count - 1 ? 'closing' : 'main',
     tutorial: index === 0 || index === count - 1,
     unlockAt: startUnlock + index * DAY_MS,
   }));

@@ -99,7 +99,7 @@ describe('FarewellPodiumView', () => {
       placeEmoji: '🇮🇹',
       theme: 'so-long-farewell',
       tonight: [],
-      pool: 'farewell',
+      pool: 'closing',
       tutorial: true,
       unlockAt: 0,
     };

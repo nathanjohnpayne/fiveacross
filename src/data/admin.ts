@@ -298,18 +298,36 @@ export const unbanUser = (uid: string) => updateDoc(evt(), { bannedUids: arrayRe
 
 /** Recompute a player's stats after an admin resolves one of their claims. */
 /**
+ * The pool value adminAddItem PERSISTS during the #565 rename transition. The
+ * app speaks the canonical vocabulary ('easy'/'closing'), but every persisted
+ * pool value stays LEGACY ('embark'/'farewell') until the coercion can be
+ * dropped: the pool value — unlike Claim Mode — is compared server-side (the
+ * deployed scheduler's `snapshotPoolsFor` matches items against
+ * ['main','embark']; `firestore.rules` validate it), and hosting and
+ * functions deploy separately. A hosting-only deploy that minted `'easy'`
+ * would leave a mid-Event admin-added easy Prompt silently missing from the
+ * next snapshot on not-yet-redeployed Functions. Reads coerce both
+ * vocabularies (`migratePool`), so the stored spelling is invisible to the
+ * app. Flip this to the identity mapping — and drop it — in the post-Event
+ * cleanup that also drops the coercion and narrows the rules.
+ */
+function persistedPool(pool: 'main' | 'easy' | 'closing'): 'main' | 'embark' | 'farewell' {
+  return pool === 'easy' ? 'embark' : pool === 'closing' ? 'farewell' : 'main';
+}
+
+/**
  * Admin-only curated add (#269, daily-cards-spec § "Item pools and the
  * approval flow": "Curated pools: … Admins can add/edit/hide them through the
  * Admin console"): lands ACTIVE directly — the approval gate exists for
  * player submissions; an admin adding a prompt IS the approval — with the
- * chosen pool (embark/farewell curation, or main). Same payload shape as the
+ * chosen pool (easy/closing curation, or main). Same payload shape as the
  * player path (src/data/api.ts addItem), same 80-char clamp the rules pin.
  */
 export async function adminAddItem(
   uid: string,
   text: string,
   spicy: boolean,
-  pool: 'main' | 'embark' | 'farewell',
+  pool: 'main' | 'easy' | 'closing',
 ): Promise<void> {
   const t = text.trim();
   if (!t) return;
@@ -322,7 +340,7 @@ export async function adminAddItem(
     status: 'active',
     reportCount: 0,
     spicy: safeSpicy,
-    pool,
+    pool: persistedPool(pool),
   });
 }
 

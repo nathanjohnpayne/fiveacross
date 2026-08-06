@@ -2296,7 +2296,7 @@ export default function Board() {
             podium is a public leaderboard-like surface, so a banned Player
             must never surface as champion, First to BINGO, or a daily
             honor (Codex #244). */}
-        {viewedDay?.pool === 'farewell' && event?.frozenAt != null && (
+        {viewedDay?.pool === 'closing' && event?.frozenAt != null && (
           <FarewellPodium
             players={players.filter((p) => !isBanned(p.uid, event?.bannedUids ?? []))}
             days={days}

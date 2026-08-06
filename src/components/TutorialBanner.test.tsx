@@ -19,10 +19,10 @@ function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'pool' | 'tutor
   };
 }
 
-const EMBARK_DAY = day({ index: 0, pool: 'embark', tutorial: true, theme: 'welcome-aboard' });
+const EMBARK_DAY = day({ index: 0, pool: 'easy', tutorial: true, theme: 'welcome-aboard' });
 const FAREWELL_DAY = day({
   index: 9,
-  pool: 'farewell',
+  pool: 'closing',
   tutorial: true,
   theme: 'so-long-farewell',
   place: 'Barcelona',
@@ -105,13 +105,13 @@ describe('TutorialBanner — farewell banner', () => {
 });
 
 describe('TutorialTag', () => {
-  it('renders "Warm-up" for the embark pool', () => {
-    render(<TutorialTag pool="embark" />);
+  it('renders "Warm-up" for the easy pool', () => {
+    render(<TutorialTag pool="easy" />);
     expect(screen.getByText('Warm-up')).toBeInTheDocument();
   });
 
-  it('renders "Goodbye" for the farewell pool (#260 — the wireframes Day-10 tag)', () => {
-    render(<TutorialTag pool="farewell" />);
+  it('renders "Goodbye" for the closing pool (#260 — the wireframes Day-10 tag)', () => {
+    render(<TutorialTag pool="closing" />);
     expect(screen.getByText('Goodbye')).toBeInTheDocument();
   });
 });

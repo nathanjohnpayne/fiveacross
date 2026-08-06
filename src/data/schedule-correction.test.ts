@@ -4,7 +4,12 @@ import { DAYS } from './seed';
 import { EVENT_SEED } from '../../scripts/seed-data/med-2026.mjs';
 import { ALLOWED_FIELDS, IMMUTABLE_FIELDS, diffDay, correctDay, planScheduleMigration } from '../../scripts/migrate-schedule-2026-07-17.mjs';
 
-type LiveDay = Omit<DayDef, 'tonight'> & { tonight?: string[] };
+// A RAW live Day as persisted on the pre-migration med-2026 doc: `tonight`
+// may be absent, and `pool` carries the LEGACY persisted values
+// ('embark'/'farewell', pre-#565) — the migration script compares raw
+// persisted data on both sides, so these fixtures deliberately keep the
+// legacy vocabulary the live doc actually holds.
+type LiveDay = Omit<DayDef, 'tonight' | 'pool'> & { tonight?: string[]; pool: string };
 const IMMUTABLE_DAY_FIELDS = IMMUTABLE_FIELDS as Array<keyof LiveDay>;
 
 // Covers specs/schedule-correction.md: the corrected itinerary (unified day

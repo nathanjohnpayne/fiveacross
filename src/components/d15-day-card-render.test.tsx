@@ -199,7 +199,7 @@ describe('Board daily-cards wiring (#246)', () => {
       claimMode: 'honor',
       timezone: 'UTC',
       days: [
-        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, snapshotItemIds: ['x'], tutorial: true, pool: 'embark' }),
+        day({ index: 0, theme: 'welcome-aboard', unlockAt: now - 2 * DAY_MS, snapshotItemIds: ['x'], tutorial: true, pool: 'easy' }),
         day({ index: 1, theme: 'glamiators', unlockAt: now - 1 * DAY_MS, snapshotItemIds: ['x'] }),
       ],
     } as unknown as EventDoc;

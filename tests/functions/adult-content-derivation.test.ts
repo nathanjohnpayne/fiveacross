@@ -42,11 +42,14 @@ describe('the predicate: which Prompt makes an Event 18+', () => {
   // forces `safeSpicy = pool === 'main' ? spicy : false`, and the admin pool
   // editor gates its 🔞 control the same way — so a spicy embark row is a data
   // anomaly, not a reason to gate an Event.
-  it('scopes to the dealable main pool', () => {
+  it('scopes to the dealable main pool — legacy AND canonical curated values excluded (#565)', () => {
     expect(isDealablePool('main')).toBe(true);
     expect(isDealablePool('embark')).toBe(false);
     expect(isDealablePool('farewell')).toBe(false);
+    expect(isDealablePool('easy')).toBe(false);
+    expect(isDealablePool('closing')).toBe(false);
     expect(itemImpliesAdultContent({ status: 'active', spicy: true, pool: 'embark' })).toBe(false);
+    expect(itemImpliesAdultContent({ status: 'active', spicy: true, pool: 'easy' })).toBe(false);
   });
 
   // `ItemDoc.pool` arrived with the Phase 1.5 pools (#207); items seeded before

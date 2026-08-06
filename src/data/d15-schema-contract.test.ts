@@ -67,7 +67,7 @@ describe('itemConverter (Phase 1.5 pool default)', () => {
   });
 
   it('preserves a present pool rather than overriding it', () => {
-    for (const pool of ['main', 'embark', 'farewell'] as const) {
+    for (const pool of ['main', 'easy', 'closing'] as const) {
       const item = itemConverter.fromFirestore(snapshotOf({ ...legacyItem, pool }));
       expect(item.pool).toBe(pool);
     }

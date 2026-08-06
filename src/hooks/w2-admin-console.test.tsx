@@ -243,8 +243,8 @@ describe('useItems — the live Prompt pool excludes threshold-hidden Prompts', 
       colSnap([
         item('legacy-main', 0, { pool: undefined as unknown as ItemDoc['pool'] }),
         item('explicit-main', 0, { pool: 'main' }),
-        item('embark', 0, { pool: 'embark' }),
-        item('farewell', 0, { pool: 'farewell' }),
+        item('easy', 0, { pool: 'easy' }),
+        item('closing', 0, { pool: 'closing' }),
       ]),
     );
 

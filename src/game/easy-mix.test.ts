@@ -19,7 +19,7 @@ function mainPool(spicy: number, tame: number): DealItem[] {
 
 /** A synthetic embark pool (all tame, as seeded), ids `e…`. */
 function embarkPool(n: number): DealItem[] {
-  return Array.from({ length: n }, (_, i) => ({ id: `e${i}`, text: `embark ${i}`, spicy: false, pool: 'embark' as const }));
+  return Array.from({ length: n }, (_, i) => ({ id: `e${i}`, text: `embark ${i}`, spicy: false, pool: 'easy' as const }));
 }
 
 /** Map an id → its pool/spicy, so a dealt Cell (which carries neither) can be classified. */
@@ -41,7 +41,7 @@ describe('easy mix — the 50/50 embark/main split (ratio 0.5)', () => {
 
     expect(ids).toHaveLength(24);
     expect(new Set(ids).size).toBe(24); // no same-card duplicates
-    const embark = ids.filter((id) => id && by.get(id)?.pool === 'embark');
+    const embark = ids.filter((id) => id && by.get(id)?.pool === 'easy');
     const main = ids.filter((id) => id && by.get(id)?.pool === 'main');
     expect(embark).toHaveLength(12);
     expect(main).toHaveLength(12);
@@ -54,7 +54,7 @@ describe('easy mix — the 50/50 embark/main split (ratio 0.5)', () => {
     const pool = [...mainPool(8, 16), ...embarkPool(16)];
     const by = classifier(pool);
     const ids = dealtIds(pool, 99, { stratify: true, easyMixRatio: 0.25 });
-    expect(ids.filter((id) => id && by.get(id)?.pool === 'embark')).toHaveLength(6);
+    expect(ids.filter((id) => id && by.get(id)?.pool === 'easy')).toHaveLength(6);
     expect(ids.filter((id) => id && by.get(id)?.pool === 'main')).toHaveLength(18);
   });
 
@@ -106,7 +106,7 @@ describe('easy mix — defensive backfill', () => {
     expect(ids).toHaveLength(24);
     expect(new Set(ids).size).toBe(24);
     // Only the 3 embark items exist, so at most 3 squares are embark; the rest main.
-    const embark = ids.filter((id) => id && by.get(id)?.pool === 'embark');
+    const embark = ids.filter((id) => id && by.get(id)?.pool === 'easy');
     expect(embark).toHaveLength(3);
     expect(ids.filter((id) => id && by.get(id)?.pool === 'main')).toHaveLength(21);
   });

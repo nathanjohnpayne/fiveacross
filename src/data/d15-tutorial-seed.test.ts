@@ -8,10 +8,10 @@ import { EVENT_SEED, EASY_ITEMS as SCRIPT_EASY_ITEMS, CLOSING_ITEMS as SCRIPT_CL
 // schedule", and "Free space per day".
 
 describe('EASY_ITEMS — the curated Welcome Aboard pool (28)', () => {
-  it('has exactly 28 entries, all tame, all tagged pool: embark', () => {
+  it('has exactly 28 entries, all tame, all tagged pool: easy (canonical, #565)', () => {
     expect(EASY_ITEMS).toHaveLength(28);
     expect(EASY_ITEMS.every((i) => i.spicy === false)).toBe(true);
-    expect(EASY_ITEMS.every((i) => i.pool === 'embark')).toBe(true);
+    expect(EASY_ITEMS.every((i) => i.pool === 'easy')).toBe(true);
   });
 
   it('has no duplicate text within the pool', () => {
@@ -20,10 +20,10 @@ describe('EASY_ITEMS — the curated Welcome Aboard pool (28)', () => {
 });
 
 describe('CLOSING_ITEMS — the curated So Long, Farewell pool (28)', () => {
-  it('has exactly 28 entries, all tame, all tagged pool: farewell', () => {
+  it('has exactly 28 entries, all tame, all tagged pool: closing (canonical, #565)', () => {
     expect(CLOSING_ITEMS).toHaveLength(28);
     expect(CLOSING_ITEMS.every((i) => i.spicy === false)).toBe(true);
-    expect(CLOSING_ITEMS.every((i) => i.pool === 'farewell')).toBe(true);
+    expect(CLOSING_ITEMS.every((i) => i.pool === 'closing')).toBe(true);
   });
 
   it('has no duplicate text within the pool', () => {
@@ -32,7 +32,7 @@ describe('CLOSING_ITEMS — the curated So Long, Farewell pool (28)', () => {
 });
 
 describe('EASY_ITEMS / CLOSING_ITEMS — no cross-pool or main-pool duplicates', () => {
-  it('has no duplicate text across embark and farewell', () => {
+  it('has no duplicate text across the easy and closing pools', () => {
     const combined = [...EASY_ITEMS.map((i) => i.text), ...CLOSING_ITEMS.map((i) => i.text)];
     expect(new Set(combined).size).toBe(56);
   });
@@ -46,14 +46,28 @@ describe('EASY_ITEMS / CLOSING_ITEMS — no cross-pool or main-pool duplicates',
 });
 
 describe('scripts/seed-data/med-2026.mjs — tutorial pool literals stay in sync with src/data/seed.ts', () => {
-  it('exports the same 28-entry EASY_ITEMS as src/data/seed.ts', () => {
+  // The SCRIPT constants carry the LEGACY persisted pool values
+  // ('embark'/'farewell') during the #565 transition — the seed writes what
+  // deployed Functions and the live docs speak — while the app-side constants
+  // speak the canonical vocabulary. Sync therefore compares text/spicy
+  // verbatim and pool through the same mapping `migratePool` applies on read.
+  const canonicalized = (items: readonly { text: string; spicy: boolean; pool?: string }[]) =>
+    items.map(({ text, spicy, pool }) => ({
+      text,
+      spicy,
+      pool: pool === 'embark' ? 'easy' : pool === 'farewell' ? 'closing' : (pool ?? 'main'),
+    }));
+
+  it('exports the same 28-entry EASY_ITEMS as src/data/seed.ts (pool via the legacy mapping)', () => {
     expect(SCRIPT_EASY_ITEMS.length).toBe(28);
-    expect(SCRIPT_EASY_ITEMS).toEqual(EASY_ITEMS);
+    expect(SCRIPT_EASY_ITEMS.every((i) => i.pool === 'embark')).toBe(true); // persisted-legacy, by design
+    expect(canonicalized(SCRIPT_EASY_ITEMS)).toEqual(EASY_ITEMS);
   });
 
-  it('exports the same 28-entry CLOSING_ITEMS as src/data/seed.ts', () => {
+  it('exports the same 28-entry CLOSING_ITEMS as src/data/seed.ts (pool via the legacy mapping)', () => {
     expect(SCRIPT_CLOSING_ITEMS.length).toBe(28);
-    expect(SCRIPT_CLOSING_ITEMS).toEqual(CLOSING_ITEMS);
+    expect(SCRIPT_CLOSING_ITEMS.every((i) => i.pool === 'farewell')).toBe(true); // persisted-legacy, by design
+    expect(canonicalized(SCRIPT_CLOSING_ITEMS)).toEqual(CLOSING_ITEMS);
   });
 });
 
@@ -71,7 +85,7 @@ describe('DAYS — the ten-Day itinerary mapping', () => {
     // relabeling; the migration preserves game state). The two-event `tonight[]`
     // line is asserted in schedule-correction.test.ts.
     const expected = [
-      ['2026-07-15', 'Trieste', '🇮🇹', 'welcome-aboard', 'embark', true],
+      ['2026-07-15', 'Trieste', '🇮🇹', 'welcome-aboard', 'easy', true],
       ['2026-07-16', 'Split', '🇭🇷', 'uniforms-without-borders', 'main', false],
       ['2026-07-17', 'Sea Day', '🌊', 'neon-pink-playground', 'main', false],
       ['2026-07-18', 'Valletta', '🇲🇹', 'sporty-splash', 'main', false],
@@ -80,7 +94,7 @@ describe('DAYS — the ten-Day itinerary mapping', () => {
       ['2026-07-21', 'Rome (Civitavecchia)', '🇮🇹', 'atlantis-classics', 'main', false],
       ['2026-07-22', 'Villefranche (Nice)', '🇫🇷', 'summer-white', 'main', false],
       ['2026-07-23', 'Marseille', '🇫🇷', 'revival-disco', 'main', false],
-      ['2026-07-24', 'Barcelona', '🇪🇸', 'so-long-farewell', 'farewell', true],
+      ['2026-07-24', 'Barcelona', '🇪🇸', 'so-long-farewell', 'closing', true],
     ] as const;
 
     expected.forEach(([date, port, placeEmoji, theme, pool, tutorial], i) => {
@@ -121,8 +135,14 @@ describe('scripts/seed-data/med-2026.mjs — EVENT_SEED carries the Phase 1.5 ti
     expect(EVENT_SEED.timezone).toBe('Europe/Rome');
   });
 
-  it('seeds a 10-entry days[] matching src/data/seed.ts DAYS exactly', () => {
+  it('seeds a 10-entry days[] matching src/data/seed.ts DAYS exactly (pool via the legacy mapping)', () => {
     expect(EVENT_SEED.days).toHaveLength(10);
-    expect(EVENT_SEED.days).toEqual(DAYS);
+    // Same transition posture as the pool literals above: the SCRIPT persists
+    // the legacy pool values; everything else must match byte-for-byte.
+    const canonicalDays = EVENT_SEED.days.map((d) => ({
+      ...d,
+      pool: d.pool === 'embark' ? 'easy' : d.pool === 'farewell' ? 'closing' : d.pool,
+    }));
+    expect(canonicalDays).toEqual(DAYS);
   });
 });

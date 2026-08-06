@@ -7,13 +7,13 @@ import type { ItemDoc } from '../../types';
 
 /**
  * Admin curated add (#269): text + spicy + pool, landing ACTIVE (an admin
- * adding IS the approval). Pool defaults to main; embark/farewell are the
+ * adding IS the approval). Pool defaults to main; easy/closing are the
  * curated pools the spec says admins edit through the console.
  */
 function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
-  const [pool, setPool] = useState<'main' | 'embark' | 'farewell'>('main');
+  const [pool, setPool] = useState<'main' | 'easy' | 'closing'>('main');
   const [busy, setBusy] = useState(false);
   // #411 (specs/admin-async-feedback.md): a rejected add surfaces inline
   // instead of vanishing — the draft text is kept so a retry is one tap.
@@ -66,14 +66,14 @@ function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
         aria-label="Pool"
         value={pool}
         onChange={(e) => {
-          const next = e.target.value as 'main' | 'embark' | 'farewell';
+          const next = e.target.value as 'main' | 'easy' | 'closing';
           setPool(next);
           if (next !== 'main') setSpicy(false);
         }}
       >
         <option value="main">main</option>
-        <option value="embark">embark</option>
-        <option value="farewell">farewell</option>
+        <option value="easy">easy</option>
+        <option value="closing">closing</option>
       </select>
       <button className="btn" disabled={busy || !text.trim()} onClick={() => void submit()}>
         Add

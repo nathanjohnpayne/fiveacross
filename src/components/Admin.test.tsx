@@ -288,7 +288,7 @@ describe('Admin Schedule surface (specs/d15-admin-schedule.md, at /more/admin/sc
       // Headline show (🎭) + party → no pill.
       dayDef({ index: 1, tonight: ['🎭 AirOtic', '🌌 Under the Stars'] }),
       // Tutorial Day → its own "tutorial" pill, never "2 parties".
-      dayDef({ index: 2, tutorial: true, pool: 'embark', tonight: ['⛵ Sail-Away Party', '🎉 Welcome Party'] }),
+      dayDef({ index: 2, tutorial: true, pool: 'easy', tonight: ['⛵ Sail-Away Party', '🎉 Welcome Party'] }),
     ];
     H.event = { ...H.event, days } as unknown as EventDoc;
     renderAdmin('/more/admin/schedule');
@@ -774,13 +774,13 @@ describe('Admin curated pools (#269, at /more/admin/pool)', () => {
     renderAdmin('/more/admin/pool');
     const input = screen.getByLabelText('New prompt text') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'Final soft-serve encore' } });
-    fireEvent.change(screen.getByLabelText('Pool'), { target: { value: 'farewell' } });
+    fireEvent.change(screen.getByLabelText('Pool'), { target: { value: 'closing' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     await Promise.resolve();
-    expect(H.adminAddItem).toHaveBeenCalledWith('admin-uid', 'Final soft-serve encore', false, 'farewell');
+    expect(H.adminAddItem).toHaveBeenCalledWith('admin-uid', 'Final soft-serve encore', false, 'closing');
   });
 
-  it('forces embark/farewell prompt additions to stay tame even after 🔞 was checked on main', async () => {
+  it('forces easy/closing prompt additions to stay tame even after 🔞 was checked on main', async () => {
     renderAdmin('/more/admin/pool');
     const input = screen.getByLabelText('New prompt text') as HTMLInputElement;
     const spicy = screen.getByRole('checkbox', { name: /🔞/ }) as HTMLInputElement;
@@ -788,22 +788,22 @@ describe('Admin curated pools (#269, at /more/admin/pool)', () => {
     fireEvent.click(spicy);
     expect(spicy.checked).toBe(true);
 
-    fireEvent.change(screen.getByLabelText('Pool'), { target: { value: 'embark' } });
+    fireEvent.change(screen.getByLabelText('Pool'), { target: { value: 'easy' } });
     expect(spicy.checked).toBe(false);
     expect(spicy.disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
 
     await Promise.resolve();
-    expect(H.adminAddItem).toHaveBeenCalledWith('admin-uid', 'Embark icebreaker', false, 'embark');
+    expect(H.adminAddItem).toHaveBeenCalledWith('admin-uid', 'Embark icebreaker', false, 'easy');
   });
 
   it('the inline edit saves via adminUpdateItemText and shows the pool pill', async () => {
     H.items = [
-      { id: 'i1', text: 'Original wording', createdBy: 'u1', createdAt: 1, isFreeSpace: false, status: 'active', reportCount: 0, spicy: false, pool: 'embark' } as unknown as ItemDoc,
+      { id: 'i1', text: 'Original wording', createdBy: 'u1', createdAt: 1, isFreeSpace: false, status: 'active', reportCount: 0, spicy: false, pool: 'easy' } as unknown as ItemDoc,
     ];
     renderAdmin('/more/admin/pool');
     // The row's sub line names its pool — the curated pools are visible.
-    expect(screen.getByText(/active · embark/)).toBeInTheDocument();
+    expect(screen.getByText(/active · easy/)).toBeInTheDocument();
     fireEvent.click(screen.getAllByTitle('Edit text')[0]);
     const edit = screen.getByLabelText('Edit prompt text') as HTMLInputElement;
     fireEvent.change(edit, { target: { value: 'Sharper wording' } });

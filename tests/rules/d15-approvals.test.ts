@@ -83,12 +83,18 @@ describe('d15-approvals — create: a non-admin CAN land status: "pending"', () 
     await assertFails(setDoc(doc(db(ALICE), at('items/a1')), pendingPayload(ALICE, { status: 'active' })));
   });
 
-  it('DENIES non-admin pending creates outside the main pool', async () => {
+  it('DENIES non-admin pending creates outside the main pool — legacy AND canonical curated values (#565)', async () => {
     await assertFails(setDoc(doc(db(ALICE), at('items/embark1')), pendingPayload(ALICE, { pool: 'embark' })));
     await assertFails(setDoc(doc(db(ALICE), at('items/farewell1')), pendingPayload(ALICE, { pool: 'farewell' })));
+    await assertFails(setDoc(doc(db(ALICE), at('items/easy1')), pendingPayload(ALICE, { pool: 'easy' })));
+    await assertFails(setDoc(doc(db(ALICE), at('items/closing1')), pendingPayload(ALICE, { pool: 'closing' })));
   });
 
-  it('ALLOWS an admin active create in curated pools', async () => {
+  it('ALLOWS an admin active create in curated pools — both vocabularies during the #565 transition', async () => {
+    // The client's curated writes keep emitting the LEGACY values during the
+    // transition (`persistedPool`, src/data/admin.ts), but the validator must
+    // accept the canonical ones too so the post-transition flip needs no rules
+    // deploy in lockstep with hosting.
     await assertSucceeds(
       setDoc(doc(db(ADMIN), at('items/a1')), pendingPayload(ADMIN, { status: 'active', pool: 'main' })),
     );
@@ -97,6 +103,18 @@ describe('d15-approvals — create: a non-admin CAN land status: "pending"', () 
     );
     await assertSucceeds(
       setDoc(doc(db(ADMIN), at('items/f1')), pendingPayload(ADMIN, { status: 'active', pool: 'farewell' })),
+    );
+    await assertSucceeds(
+      setDoc(doc(db(ADMIN), at('items/e2')), pendingPayload(ADMIN, { status: 'active', pool: 'easy' })),
+    );
+    await assertSucceeds(
+      setDoc(doc(db(ADMIN), at('items/f2')), pendingPayload(ADMIN, { status: 'active', pool: 'closing' })),
+    );
+  });
+
+  it('DENIES a create with a pool value outside both vocabularies', async () => {
+    await assertFails(
+      setDoc(doc(db(ADMIN), at('items/x1')), pendingPayload(ADMIN, { status: 'active', pool: 'bonus' })),
     );
   });
 

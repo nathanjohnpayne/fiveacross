@@ -48,7 +48,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Reshuffle**: Trading a pristine Day Card for a fresh deal; 3 per Event. _Avoid_: re-deal (that's pool recovery), mulligan
 
-**Pool**: Which item set a Prompt belongs to—the **main** pool, the **easy** pool, or the **closing** pool. Only the main pool accepts player submissions. The easy pool is both a Day's own content and the Easy Mix source on main Days; the closing pool belongs to a final Day. _Legacy_: the easy pool is stored as `embark` and the closing pool as `farewell`—nautical names that predate the platform and mean nothing about arrival or departure.
+**Pool**: Which item set a Prompt belongs to—the **main** pool, the **easy** pool, or the **closing** pool. Only the main pool accepts player submissions. The easy pool is both a Day's own content and the Easy Mix source on main Days; the closing pool belongs to a final Day. _Legacy (transition, #565)_: both live Events' docs still store the easy pool as `embark` and the closing pool as `farewell`—nautical names that predate the platform and mean nothing about arrival or departure. Code speaks only the neutral values: reads coerce (`migratePool` in `src/data/converters.ts`; `normalizePool` in `functions/src/poolVocab.ts`), `firestore.rules` accept both spellings, and persisted writes deliberately keep emitting the legacy values (`persistedPool`, `src/data/admin.ts`; the seed modules) until the post-Event cleanup flips writes, drops the coercions, and narrows the rules.
 
 **Pending**: A submitted Prompt awaiting admin approval—a Prompt-moderation state, distinct from a pending Claim (the Admin-confirmed Mark workflow, see Claim below). Invisible to players; never dealt.
 

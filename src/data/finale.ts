@@ -36,7 +36,7 @@ export interface Podium {
 
 /** The farewell Day's `DayDef.index`, or `-1` when the schedule has none. */
 function farewellDayIndex(days: readonly DayDef[] | undefined): number {
-  const f = (days ?? []).find((d) => d.pool === 'farewell');
+  const f = (days ?? []).find((d) => d.pool === 'closing');
   return f ? f.index : -1;
 }
 
@@ -159,7 +159,7 @@ export function farewellPinIndex(
 ): number | null {
   if (frozenAt == null) return null;
   const arr = days ?? [];
-  const idx = arr.findIndex((d) => d.pool === 'farewell');
+  const idx = arr.findIndex((d) => d.pool === 'closing');
   if (idx < 0) return null;
   if (arr[idx].unlockAt > now) return null;
   return idx;

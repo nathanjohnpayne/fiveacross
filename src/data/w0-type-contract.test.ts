@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { QueryDocumentSnapshot } from 'firebase/firestore';
-import { migrateClaimMode, migrateDayFields, eventConverter } from './converters';
+import { migrateClaimMode, migrateDayFields, migratePool, eventConverter, itemConverter } from './converters';
 import type {
   ClaimMode,
   DoubtDoc,
@@ -164,17 +164,48 @@ describe('migrateDayFields (#566 legacy Day field read-migration)', () => {
     expect(day.placeEmoji).toBe('🐦');
   });
 
-  it('passes a neutral-named Day through unchanged', () => {
+  it('passes a neutral-named Day through, coercing the legacy pool value (#565)', () => {
     const day = migrateDayFields({ index: 3, place: 'The drive home', placeEmoji: '🌫️', pool: 'farewell' });
     expect(day.place).toBe('The drive home');
     expect(day.placeEmoji).toBe('🌫️');
     expect(day.index).toBe(3);
+    expect(day.pool).toBe('closing');
   });
 
   it('defaults a Day with neither shape (malformed/minimal fixture) to empty strings', () => {
     const day = migrateDayFields({ index: 1 });
     expect(day.place).toBe('');
     expect(day.placeEmoji).toBe('');
+  });
+});
+
+describe('migratePool (#565 legacy pool value read-migration)', () => {
+  it('coerces the pre-rename persisted values to the canonical vocabulary', () => {
+    expect(migratePool('embark')).toBe('easy');
+    expect(migratePool('farewell')).toBe('closing');
+  });
+
+  it('passes canonical values through unchanged', () => {
+    for (const pool of ['main', 'easy', 'closing'] as const) expect(migratePool(pool)).toBe(pool);
+  });
+
+  it('defaults unknown/missing values to main — the pre-Phase-1.5 items default', () => {
+    expect(migratePool(undefined)).toBe('main');
+    expect(migratePool(null)).toBe('main');
+    expect(migratePool('bogus')).toBe('main');
+  });
+});
+
+describe('itemConverter (pool migration applied on read)', () => {
+  it('reads a legacy-persisted item pool as the canonical value, and defaults a missing pool to main', () => {
+    const read = (data: Record<string, unknown>) =>
+      itemConverter.fromFirestore({ data: () => data, id: 'item-1' } as unknown as Parameters<
+        typeof itemConverter.fromFirestore
+      >[0]);
+    expect(read({ text: 't', pool: 'embark' }).pool).toBe('easy');
+    expect(read({ text: 't', pool: 'farewell' }).pool).toBe('closing');
+    expect(read({ text: 't', pool: 'easy' }).pool).toBe('easy');
+    expect(read({ text: 't' }).pool).toBe('main');
   });
 });
 
