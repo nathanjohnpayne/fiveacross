@@ -6,8 +6,8 @@ import { ThemeProvider } from './theme/ThemeContext';
 import { todaysDayTheme, todaysDayIndex } from './theme/autoTheme';
 import { defaultThemeForEdition } from './theme/themes';
 import { useEventDoc, useMyPlayer } from './hooks/useData';
-import { initPostHog, phIdentify, phReset, isLocalDevHost } from './posthog';
-import { registerAnalyticsDimensions, registerDayIndexDimension } from './analytics';
+import { initPostHog, phSetAuthState, isLocalDevHost } from './posthog';
+import { registerAnalyticsDimensions, registerDayIndexDimension, emitInitialPageView } from './analytics';
 import { isSyntheticProbe } from './synthetic-probe';
 import type { ThemeId } from './types';
 import App from './App';
@@ -43,10 +43,14 @@ import './index.css';
  * time-to-first-paint; it only guarantees PostHog's own init — and
  * therefore its first capture — never begins until AFTER dimension
  * registration has run (when the resolution is a `kind: 'event'`) or, for
- * every other outcome, after there was a chance to register at all.
+ * every other outcome, after there was a chance to register at all. The
+ * production init then waits for Firebase's first resolved auth state; this
+ * function stays fire-and-forget, so that safety gate does not block render.
  */
 function startPostHogAfterResolution(): void {
-  if (!isSyntheticProbe() && !isLocalDevHost(window.location.hostname)) void initPostHog();
+  if (!isSyntheticProbe() && !isLocalDevHost(window.location.hostname)) {
+    void initPostHog({ waitForAuth: true });
+  }
 }
 
 // The out-of-tree half of the #342 force-reload floor (src/shellRecovery.ts).
@@ -114,13 +118,12 @@ function ThemedApp() {
   // Tie PostHog events to the signed-in User by uid; clear on sign-out. (#96)
   // Kept here (not in AuthContext) so the analytics wiring stays out of the
   // protected src/auth/** path. Wait for auth to resolve (`!loading`) before
-  // resetting: with autocaptured pageviews the initial `$pageview` fires at
-  // init under an anonymous id, and an eager reset during Firebase's loading
-  // state would orphan it under a discarded id instead of stitching it to the
-  // signed-in user via identify. (Codex P2 on #195.)
+  // resolving: production PostHog init waits for this FIRST authoritative
+  // state before starting the SDK, so a direct-host initial pageview cannot
+  // beat the reset/identify. A matching returning User is kept in the same
+  // PostHog session; only signed-out or changed-user states reset. (#613.)
   useEffect(() => {
-    if (user?.uid) phIdentify(user.uid);
-    else if (!loading) phReset();
+    if (!loading) phSetAuthState(user?.uid ?? null);
   }, [user?.uid, loading]);
   // SPA pageviews are autocaptured by posthog-js (`capture_pageview:
   // 'history_change'`, see posthog.ts), so no manual pageview call is needed here.
@@ -199,6 +202,10 @@ void bootstrapEventResolution()
     // `startPostHogAfterResolution`'s own doc for why this ordering is
     // load-bearing, not incidental.
     startPostHogAfterResolution();
+    // The ONE explicit GA4 page_view (#611, Phase 4b P1) — see
+    // `emitInitialPageView`'s own doc for why Event resolution having
+    // already settled here is half of the ordering guarantee it needs.
+    void emitInitialPageView();
     // An Event can resolve on an origin the AUTH stack has never been
     // configured for — hostname resolution is exactly what made that possible
     // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
@@ -211,6 +218,10 @@ void bootstrapEventResolution()
       resolution.kind === 'event' &&
       !isSignInReachableOnHost(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname);
     if (authBlocked) {
+      // This branch intentionally never mounts AuthProvider/ThemedApp, so it
+      // has no Firebase User. Release the PostHog startup gate explicitly as
+      // signed out before the fallback screen can capture anything.
+      phSetAuthState(null);
       root.render(
         <React.StrictMode>
           <EventNotFound hostname={window.location.hostname} reason="auth-unconfigured" />
@@ -219,15 +230,16 @@ void bootstrapEventResolution()
       );
       return;
     }
+    if (resolution.kind === 'not-found') phSetAuthState(null);
     root.render(
       resolution.kind === 'not-found' ? (
         <React.StrictMode>
           <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
           {/* The 18+ analytics disclosure has to survive this branch too. GA4
-              loads on `firebase.ts` import, and `startPostHogAfterResolution()`
-              a few lines above already ran for this outcome too, so collection
-              has ALREADY started by the time we decide NOT to mount the app —
-              and this is exactly the branch a first-time visitor to an unknown
+              loads on `firebase.ts` import, and PostHog startup plus its
+              explicit signed-out baseline have already been requested for
+              this outcome too. Collection can therefore begin as this task
+              unwinds — and this is exactly the branch a first-time visitor to an unknown
               wildcard host lands on (Codex on #576). Safe to put beside the
               deliberately dependency-free not-found screen: `ConsentNotice`
               imports `useState` and nothing else — no auth, no Firestore, no
@@ -244,18 +256,25 @@ void bootstrapEventResolution()
     // The resolution promise itself rejected — no dimensions could have been
     // registered either way, but PostHog still needs to run for whichever
     // screen renders below (same disclosure obligation as the other
-    // branches).
+    // branches). NOTE this handler ALSO catches an exception thrown by the
+    // `.then()` SUCCESS callback above (e.g. a render failure) — possibly
+    // AFTER that callback already started analytics. `emitInitialPageView`
+    // is idempotent for exactly this path (#613, Phase 4b round-2 P2: a
+    // second emission used to double-log the page_view), and a repeated
+    // `initPostHog` no-ops once ready.
     startPostHogAfterResolution();
+    void emitInitialPageView();
     if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
       root.render(appTree);
       return;
     }
+    phSetAuthState(null);
     root.render(
       <React.StrictMode>
         <EventNotFound hostname={window.location.hostname} reason="unreachable" />
         {/* Same disclosure obligation as the not-found branch above: analytics
-            started via the `startPostHogAfterResolution()` call above before
-            this decision was made. */}
+            was requested via `startPostHogAfterResolution()` above and released
+            with the explicit signed-out baseline before this screen mounted. */}
         <ConsentNotice />
       </React.StrictMode>,
     );

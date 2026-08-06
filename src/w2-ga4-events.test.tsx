@@ -60,12 +60,18 @@ describe('track()', () => {
     expect(logEvent).toHaveBeenCalledWith(mockAnalyticsInstance.current, 'demand_proof', {
       itemId: 'p1',
       cellIndex: 3,
+      // Always present on the GA4 sink (#613, Phase 4b P1): an event without
+      // an explicit page_location makes GA4 derive one from the full
+      // query-bearing URL, breaking the path-only policy.
+      page_location: `${window.location.origin}${window.location.pathname}`,
     });
   });
 
   it('fires install_pwa through logEvent (10 -> 12)', () => {
     track('install_pwa');
-    expect(logEvent).toHaveBeenCalledWith(mockAnalyticsInstance.current, 'install_pwa', undefined);
+    expect(logEvent).toHaveBeenCalledWith(mockAnalyticsInstance.current, 'install_pwa', {
+      page_location: `${window.location.origin}${window.location.pathname}`,
+    });
   });
 
   it('never throws and never calls logEvent when analytics is unavailable (null)', () => {

@@ -1,5 +1,5 @@
 import { logEvent, setDefaultEventParameters } from 'firebase/analytics';
-import { analytics } from './firebase';
+import { analytics, analyticsReady } from './firebase';
 import { phCapture, phRegister } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
 import { activeEdition } from './editions';
@@ -8,8 +8,9 @@ import { resolvedCanonicalHost } from './canonicalHost';
 /**
  * GA4 event catalog — the single source of truth for every analytics event
  * this app fires (the PRD's "GA4 events" list plus the Doubt-flow
- * `demand_proof` event). `track()` below is the only call into Firebase's
- * `logEvent`; nothing else should import `firebase/analytics` directly.
+ * `demand_proof` event). `track()` and `emitInitialPageView()` below are the
+ * only calls into Firebase's `logEvent`; nothing else should import
+ * `firebase/analytics` directly.
  * Call sites: `login` + `login_failed` (auth/AuthContext.tsx), `join_event` (App.tsx),
  * `add_item` + `report_item` (components/ItemPool.tsx, ProofFeed.tsx),
  * `mark_square` + `bingo` + `blackout` (components/Board.tsx),
@@ -64,14 +65,21 @@ export type GA4EventName = (typeof GA4_EVENTS)[number];
  * time rather than registered as a static default (#556, Phase 4b P1 on PR
  * #584) — this app is a `BrowserRouter` SPA, so a value frozen at whatever
  * pathname was current when dimensions were first registered would leave
- * every LATER tracked event attributed to the boot route. `null` when no
- * canonical host is resolved (a single-Event build, where GA4's own
- * automatic `page_location` already matches `window.location` exactly, so
- * there is nothing to override).
+ * every LATER tracked event attributed to the boot route. When no canonical
+ * host is resolved (a single-Event build, or the bootstrap failure branch),
+ * falls back to the page's own origin + pathname rather than omitting the
+ * param (#613, Phase 4b P1): an event sent WITHOUT an explicit
+ * `page_location` makes GA4 derive one from the browser's FULL current URL —
+ * query string and hash included — reintroducing exactly the query-string
+ * leakage (auth-handler OAuth params, invite codes) the documented path-only
+ * policy exists to prevent. Both branches are query/hash-free by
+ * construction.
  */
-function currentPageLocation(): string | null {
+function currentPageLocation(): string {
   const host = resolvedCanonicalHost();
-  return host ? `https://${host}${window.location.pathname}` : null;
+  return host
+    ? `https://${host}${window.location.pathname}`
+    : window.location.origin + window.location.pathname;
 }
 
 /**
@@ -87,9 +95,10 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
     // (e.g. `login`), so a union type like `GA4EventName` matches no single
     // overload — widen to `string` (the SDK's generic-event overload).
     if (analytics) {
-      const pageLocation = currentPageLocation();
-      const ga4Params = pageLocation ? { ...params, page_location: pageLocation } : params;
-      logEvent(analytics, name as string, ga4Params as Record<string, unknown>);
+      logEvent(analytics, name as string, {
+        ...params,
+        page_location: currentPageLocation(),
+      } as Record<string, unknown>);
     }
   } catch {
     /* no-op */
@@ -198,4 +207,66 @@ export function registerAnalyticsDimensions(resolved: { eventId: string; eventSl
 export function registerDayIndexDimension(dayIndex: number | null): void {
   if (dayIndex == null) return;
   registerBothSinks({ day_index: dayIndex });
+}
+
+/**
+ * Fire the ONE explicit GA4 `page_view` that replaces the automatic one
+ * `firebase.ts` now disables via `send_page_view: false` (#611, retro Phase
+ * 4b P1 on PR #584 — this reverses the #556 round-2 rebuttal). The automatic
+ * event fired deterministically BEFORE any pending `setDefaultEventParameters`
+ * could apply (confirmed via `@firebase/analytics`'s own `_initializeAnalytics`
+ * source in that rebuttal), so no ordering fix on this app's side could ever
+ * have closed the gap — disabling the automatic event sidesteps that argument
+ * entirely rather than trying to win a race against it.
+ *
+ * Call site: `main.tsx`, from `bootstrapEventResolution().then()`/`.catch()`,
+ * the SAME point `registerAnalyticsDimensions` and
+ * `startPostHogAfterResolution` already run from — Event resolution has
+ * therefore already settled (or definitively failed) by the time this runs.
+ * Internally awaits `analyticsReady` (`src/firebase.ts`) so it never races
+ * `analytics` still being `null` — together these two waits are the "BOTH
+ * analytics readiness AND Event resolution" ordering the fix requires.
+ *
+ * After readiness, RE-APPLIES the merged dimension cache (`ga4Dims`) before
+ * logging (#613, Phase 4b P1): Event resolution and firebase.ts's
+ * `isSupported()` chain settle independently, so `registerAnalyticsDimensions`
+ * may have run while `analytics` was still null. `@firebase/analytics` does
+ * queue a pre-init `setDefaultEventParameters` into its single
+ * `defaultEventParametersForInit` slot and applies it during its own
+ * `_initializeAnalytics` — but re-sending the full merged set here makes the
+ * "this page_view carries the registered dimensions" guarantee locally
+ * provable instead of resting on that SDK internal, and once gtag is live a
+ * resend is a harmless merge no-op (see `ga4Dims`'s own doc). The event also
+ * carries the same fresh `page_location` `track()` computes — ALWAYS
+ * explicit, so GA4 never derives one from the full query-bearing URL (#613).
+ *
+ * IDEMPOTENT — at most one emission per page load (#613, Phase 4b round-2
+ * P2): `main.tsx`'s `.catch()` also receives an exception thrown by the
+ * `.then()` SUCCESS callback (e.g. a render failure) AFTER that callback
+ * already called this function, and both bootstrap branches calling in is by
+ * design — so the guard lives here, at the single emission point, rather
+ * than in every caller. The flag is consumed on FIRST entry (before the
+ * await), which also collapses concurrent double-calls; a call that then
+ * resolves a null instance stays consumed deliberately — `analyticsReady` is
+ * settled exactly once, so retrying could never produce a different outcome.
+ */
+let initialPageViewEmitted = false;
+
+export async function emitInitialPageView(): Promise<void> {
+  if (initialPageViewEmitted) return;
+  initialPageViewEmitted = true;
+  const instance = await analyticsReady;
+  if (!instance) return;
+  if (Object.keys(ga4Dims).length > 0) {
+    try {
+      setDefaultEventParameters(ga4Dims);
+    } catch {
+      /* no-op */
+    }
+  }
+  try {
+    logEvent(instance, 'page_view', { page_location: currentPageLocation() });
+  } catch {
+    /* no-op */
+  }
 }

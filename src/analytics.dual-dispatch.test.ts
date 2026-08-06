@@ -14,7 +14,13 @@ describe('track() dual-dispatches to GA4 and PostHog (#96)', () => {
 
   it('fires the same event name + params to both sinks', () => {
     track('bingo', { lines: 2 });
-    expect(logEvent).toHaveBeenCalledWith({}, 'bingo', { lines: 2 });
+    // GA4 additionally always carries an explicit scrubbed page_location
+    // (#613, Phase 4b P1 — see currentPageLocation in analytics.ts); PostHog
+    // gets its URL properties from its own autocapture + before_send layer.
+    expect(logEvent).toHaveBeenCalledWith({}, 'bingo', {
+      lines: 2,
+      page_location: `${window.location.origin}${window.location.pathname}`,
+    });
     expect(phCapture).toHaveBeenCalledWith('bingo', { lines: 2 });
   });
 
