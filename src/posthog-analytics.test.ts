@@ -16,6 +16,7 @@ vi.mock('posthog-js', () => ({
 import posthog, { type CaptureResult } from 'posthog-js';
 import {
   POSTHOG_INIT_OPTIONS,
+  POSTHOG_BRAND_PROXY_HOST,
   POSTHOG_PROXY_HOST,
   POSTHOG_DIRECT_HOST,
   POSTHOG_PERSONAL_PROXY_HOST,
@@ -574,12 +575,13 @@ describe('PostHog init with a key', () => {
     expect(identifyOrder).toBeLessThan(captureOrder);
   });
 
-  it('defaults api_host to the personal proxy (chain primary) when VITE_POSTHOG_HOST is unset (#149/#344)', async () => {
+  it('defaults api_host to the Brand proxy (chain primary) when VITE_POSTHOG_HOST is unset (#149/#344/#612)', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     // Empty out the override (the repo's .env.local sets one for the loader) so
-    // this exercises the in-code default: both proxies answer → the chain
-    // primary (personal proxy) wins, and BOTH probes were actually issued.
+    // this exercises the in-code default: all proxies answer → the chain
+    // primary (Brand proxy, #612) wins, and ALL THREE probes were actually
+    // issued.
     vi.stubEnv('VITE_POSTHOG_HOST', '');
     const fetchMock = vi.fn().mockResolvedValue({ type: 'opaque' } as Response);
     vi.stubGlobal('fetch', fetchMock);
@@ -589,29 +591,58 @@ describe('PostHog init with a key', () => {
     vi.unstubAllGlobals();
     const probedHosts = fetchMock.mock.calls.map(([url]) => (url as string).split('/?')[0]);
     expect(probedHosts).toEqual(
-      expect.arrayContaining(['https://d.nathanpayne.com', 'https://d.gaycruisebingo.com']),
+      expect.arrayContaining([
+        'https://d.fiveacross.app',
+        'https://d.nathanpayne.com',
+        'https://d.gaycruisebingo.com',
+      ]),
     );
     expect(ph.init).toHaveBeenCalledWith(
       'phc_test',
       expect.objectContaining({
-        api_host: 'https://d.nathanpayne.com',
+        api_host: 'https://d.fiveacross.app',
         ui_host: 'https://us.posthog.com',
       }),
     );
   });
 
-  it('falls back to the gcb proxy when only the personal proxy is dead (#344)', async () => {
+  it('fails over to the personal proxy when the Brand proxy is dead/unresolvable (#612)', async () => {
+    // The deploy-before-DNS shape: d.fiveacross.app not yet resolving must
+    // cost nothing beyond its own concurrent ~1.5s-budget probe — the chain
+    // steps down, no event loss, no per-event penalty.
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', '');
-    // URL-aware stub: personal proxy dead, gcb proxy answering.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) =>
+        url.startsWith('https://d.fiveacross.app/')
+          ? Promise.reject(new TypeError('Load failed'))
+          : Promise.resolve({ type: 'opaque' } as Response),
+      ),
+    );
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+    vi.unstubAllGlobals();
+    expect(ph.init).toHaveBeenCalledWith(
+      'phc_test',
+      expect.objectContaining({ api_host: 'https://d.nathanpayne.com' }),
+    );
+  });
+
+  it('falls back to the gcb proxy when the Brand and personal proxies are dead (#344/#612)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', '');
+    // URL-aware stub: Brand + personal proxies dead, gcb proxy answering.
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) =>
         // Slash-anchored (CodeQL js/incomplete-url-substring-sanitization):
         // the probe URL is always `<host>/?alive=…`, and the anchored form
         // can't match a hostname that merely starts with ours.
-        url.startsWith('https://d.nathanpayne.com/')
+        url.startsWith('https://d.fiveacross.app/') || url.startsWith('https://d.nathanpayne.com/')
           ? Promise.reject(new TypeError('Load failed'))
           : Promise.resolve({ type: 'opaque' } as Response),
       ),
@@ -1276,9 +1307,10 @@ describe('PostHog init with a key', () => {
   });
 });
 
-describe('ingest-host failover chain (#342/#344 — shipboard SNI filter blocked the gcb proxy)', () => {
-  it('the chain is priority-ordered: personal proxy, gcb proxy, direct PostHog Cloud', () => {
+describe('ingest-host failover chain (#342/#344/#612 — Brand proxy default, ordered failover)', () => {
+  it('the chain is priority-ordered: Brand proxy, personal proxy, gcb proxy, direct PostHog Cloud (#612)', () => {
     expect(POSTHOG_INGEST_HOSTS).toEqual([
+      'https://d.fiveacross.app',
       'https://d.nathanpayne.com',
       'https://d.gaycruisebingo.com',
       'https://us.i.posthog.com',
@@ -1286,14 +1318,18 @@ describe('ingest-host failover chain (#342/#344 — shipboard SNI filter blocked
   });
 
   it('pickIngestHost takes the first alive host in chain order, direct as the unprobed last resort', () => {
-    expect(pickIngestHost(true, true)).toBe(POSTHOG_PERSONAL_PROXY_HOST);
-    expect(pickIngestHost(true, false)).toBe(POSTHOG_PERSONAL_PROXY_HOST);
-    expect(pickIngestHost(false, true)).toBe(POSTHOG_PROXY_HOST);
-    expect(pickIngestHost(false, false)).toBe(POSTHOG_DIRECT_HOST);
+    expect(pickIngestHost(true, true, true)).toBe(POSTHOG_BRAND_PROXY_HOST);
+    expect(pickIngestHost(true, false, false)).toBe(POSTHOG_BRAND_PROXY_HOST);
+    expect(pickIngestHost(false, true, true)).toBe(POSTHOG_PERSONAL_PROXY_HOST);
+    expect(pickIngestHost(false, true, false)).toBe(POSTHOG_PERSONAL_PROXY_HOST);
+    expect(pickIngestHost(false, false, true)).toBe(POSTHOG_PROXY_HOST);
+    expect(pickIngestHost(false, false, false)).toBe(POSTHOG_DIRECT_HOST);
   });
 
   it('an override restating a PROXY member does NOT bypass; the direct host and outside hosts do', () => {
     for (const envHost of [
+      POSTHOG_BRAND_PROXY_HOST,
+      `${POSTHOG_BRAND_PROXY_HOST}/`,
       POSTHOG_PERSONAL_PROXY_HOST,
       `${POSTHOG_PERSONAL_PROXY_HOST}/`,
       POSTHOG_PROXY_HOST,

@@ -170,7 +170,8 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
    | `VITE_FIREBASE_APP_ID` | from the `fiveacross` web app |
    | `VITE_EVENT_ID` | the Bodega Event id |
    | `VITE_EDITION` | whatever the primary Bodega build sets |
-   | `VITE_POSTHOG_KEY` / `VITE_POSTHOG_HOST` | same as the primary Bodega build |
+   | `VITE_POSTHOG_KEY` | same as the primary Bodega build |
+   | `VITE_POSTHOG_HOST` | **leave unset** (#612)—the client walks the in-code failover chain (`POSTHOG_INGEST_HOSTS`); setting a host outside that chain silently disables the failover |
 
    `VITE_FIREBASE_AUTH_DOMAIN` is belt-and-braces—`resolveAuthDomain` pins the mirror host in code regardless of what the dashboard holds, deliberately, for the reason ADR 0007 § "The host is pinned in code" gives. Setting it correctly anyway keeps the dashboard from documenting a lie.
 
