@@ -288,4 +288,25 @@ describe('emitInitialPageView (#611, retro Phase 4b P1 — replaces the automati
     const { emitInitialPageView } = await import('./analytics');
     await expect(emitInitialPageView()).resolves.toBeUndefined();
   });
+
+  it('is IDEMPOTENT — a second call logs nothing (#613, Phase 4b round-2 P2)', async () => {
+    // The double-invocation path this guards: main.tsx's .catch() also
+    // receives an exception thrown by the .then() SUCCESS callback (e.g. a
+    // render failure) AFTER that callback already emitted — without the
+    // once-guard the page_view logged twice.
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { emitInitialPageView } = await import('./analytics');
+    await emitInitialPageView();
+    await emitInitialPageView();
+    expect(logEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('collapses CONCURRENT double-calls too — the guard is consumed before the readiness await', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { emitInitialPageView } = await import('./analytics');
+    await Promise.all([emitInitialPageView(), emitInitialPageView()]);
+    expect(logEvent).toHaveBeenCalledTimes(1);
+  });
 });

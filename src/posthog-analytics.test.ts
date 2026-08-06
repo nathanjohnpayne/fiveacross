@@ -793,7 +793,7 @@ describe('PostHog init with a key', () => {
     expect(registerOrder).toBeLessThan(identifyOrder);
   });
 
-  it('coalesces adjacent identifies to the latest uid, keeping only actual sign-in/out transitions (#613)', async () => {
+  it('coalesces repeated identifies ONLY for the identical uid (#613 round 2)', async () => {
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
@@ -801,11 +801,103 @@ describe('PostHog init with a key', () => {
     const mod = await import('./posthog');
 
     mod.phIdentify('sailor-1');
-    mod.phIdentify('sailor-2'); // no reset between — same signed-in run, latest uid wins
+    mod.phIdentify('sailor-1'); // same account re-announced — nothing new
     await mod.initPostHog();
 
     expect(ph.identify).toHaveBeenCalledTimes(1);
-    expect(ph.identify).toHaveBeenCalledWith('sailor-2');
+    expect(ph.identify).toHaveBeenCalledWith('sailor-1');
+    expect(ph.reset).not.toHaveBeenCalled();
+  });
+
+  it('a queued uid CHANGE with no intervening sign-out inserts the reset the transition implies (#613, Phase 4b round-2 P1)', async () => {
+    // Firebase can deliver identify(A) then identify(B) without a signed-out
+    // render between them. Coalescing them to identify(B) alone would
+    // identify B directly against whatever identity posthog.init() loaded —
+    // possibly A's persisted distinct_id — merging the two accounts.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('account-A');
+    mod.phIdentify('account-B'); // A→B, no phReset in between
+    await mod.initPostHog();
+
+    const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
+    expect(identifyCalls).toEqual(['account-A', 'account-B']);
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrders = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder;
+    expect(identifyOrders[0]).toBeLessThan(resetOrder); // A first
+    expect(resetOrder).toBeLessThan(identifyOrders[1]); // reset before B
+  });
+
+  it('detects a queued uid change even when captures were queued after the first identify (#613 round 2)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('account-A');
+    mod.phCapture('mark_square', { index: 3 }); // the queue's tail is now a capture, not the identify
+    mod.phIdentify('account-B');
+    await mod.initPostHog();
+
+    expect(ph.reset).toHaveBeenCalledTimes(1); // the A→B reset was still inserted
+    const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
+    expect(identifyCalls).toEqual(['account-A', 'account-B']);
+  });
+
+  it('an in-session uid change on the READY path resets before identifying the new account (#613, Phase 4b round-2 P1)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+
+    mod.phIdentify('account-A');
+    expect(ph.reset).not.toHaveBeenCalled();
+    mod.phIdentify('account-A'); // same uid — no reset churn
+    expect(ph.reset).not.toHaveBeenCalled();
+    mod.phIdentify('account-B'); // A→B live, no sign-out delivered
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrders = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder;
+    expect(resetOrder).toBeLessThan(identifyOrders[identifyOrders.length - 1]);
+    expect(ph.identify).toHaveBeenLastCalledWith('account-B');
+  });
+
+  it('replays captures IN ARRIVAL ORDER with the identity ops, never re-attributed to a later identity (#613, Phase 4b round-2 P1)', async () => {
+    // The round-1 shape replayed the whole identity FIFO first and all
+    // captures after, so identify(A), capture(oldUserAction), reset,
+    // identify(B) recorded oldUserAction as B's.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('account-A');
+    mod.phCapture('old_user_action', { n: 1 });
+    mod.phReset();
+    mod.phIdentify('account-B');
+    await mod.initPostHog();
+
+    const order = (name: 'identify' | 'reset' | 'capture', call = 0): number =>
+      (ph[name] as unknown as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder[call];
+    expect(order('identify', 0)).toBeLessThan(order('capture', 0)); // A identified first
+    expect(order('capture', 0)).toBeLessThan(order('reset', 0)); // the capture lands while A is current
+    expect(order('reset', 0)).toBeLessThan(order('identify', 1)); // then reset, then B
+    expect(ph.capture).toHaveBeenCalledWith('old_user_action', { n: 1 });
+    const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
+    expect(identifyCalls).toEqual(['account-A', 'account-B']);
   });
 
   it("applies the queued reset before the SDK's DEFERRED init-time $pageview can capture (#613, Phase 4b P1)", async () => {

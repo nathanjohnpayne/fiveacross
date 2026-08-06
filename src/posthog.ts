@@ -355,20 +355,23 @@ export async function initPostHog(): Promise<void> {
     ready = false;
     return;
   }
-  // Replay the identity operations (sign-out resets / sign-in identifies) and
-  // the dimension registration that arrived while init was still probing,
-  // BEFORE any queued capture below. Identity ops replay in ARRIVAL ORDER
-  // (#613, Phase 4b P1 — FIFO, replacing the earlier last-write-wins slots):
+  // Replay EVERYTHING that arrived while init was still probing — captures
+  // and identity operations — as ONE queue, in ARRIVAL ORDER (#613, Phase 4b
+  // round-2 P1; round 1 replayed the identity FIFO first and all captures
+  // after, which re-attributed a capture queued between two identity
+  // transitions to the LATER identity: identify(A), capture(oldUserAction),
+  // reset, identify(B) recorded oldUserAction as B's). Identity ordering
+  // within the queue is equally load-bearing (#613 round-1 P1):
   // `posthog.init()` loads whatever identity PostHog PERSISTED from a prior
-  // session, so a fast sign-out → sign-in during the probe window must reach
-  // the SDK as reset-THEN-identify — replaying the identify alone would merge
-  // the NEW account's uid onto the PRIOR user's persisted distinct_id
-  // (cross-user attribution), and a silently dropped reset was exactly the
-  // #611 stale-identity leak. Dimension registration replays before the first
-  // identify so the `$identify` capture the SDK emits carries brand/edition/
-  // Event context (Codex P2 on #556); `applyReset` re-registers the full
-  // merged set itself, because `posthog.reset()` clears register() state
-  // (see `registeredDims`).
+  // session, so a fast sign-out → sign-in must reach the SDK as
+  // reset-THEN-identify — replaying the identify alone would merge the NEW
+  // account's uid onto the PRIOR user's persisted distinct_id (cross-user
+  // attribution), and a silently dropped reset was exactly the #611
+  // stale-identity leak. Dimension registration replays before the first
+  // identify OR capture so the `$identify` capture the SDK emits — and every
+  // replayed capture — carries brand/edition/Event context (Codex P2 on
+  // #556); `applyReset` re-registers the full merged set itself, because
+  // `posthog.reset()` clears register() state (see `registeredDims`).
   //
   // Ordering vs the SDK's own automatic first `$pageview` (#613, Phase 4b
   // P1): posthog-js does NOT capture it inside `init()` — the loaded step of
@@ -379,8 +382,8 @@ export async function initPostHog(): Promise<void> {
   // lands before that deferred capture can execute — the automatic first
   // pageview of a signed-out session never attributes to a prior session's
   // persisted identity.
-  const identityOps = pendingIdentityOps;
-  pendingIdentityOps = [];
+  const ops = pendingOps;
+  pendingOps = [];
   const replayRegister = (): void => {
     if (pendingRegister === null) return;
     const props = pendingRegister;
@@ -391,7 +394,25 @@ export async function initPostHog(): Promise<void> {
       /* no-op */
     }
   };
-  for (const op of identityOps) {
+  // PRIOR-load persisted captures first: they are OLDER than everything this
+  // load queued, and they belong to the identity `posthog.init()` just
+  // loaded — the load that queued them died before its own identity ops
+  // could apply, and that persisted identity is the closest surviving record
+  // of who was signed in when they fired — so they replay BEFORE this load's
+  // first identity transition can re-attribute them. Replayed only once
+  // their deletion is confirmed (Phase 4b P2 on #513): if the store would
+  // not let them go, replaying means re-sending them on every future load
+  // with no way to stop; dropping them is the lesser harm, on this module's
+  // standing rule that losing a telemetry event beats corrupting the data.
+  // In-memory entries are unaffected — they die with this page either way,
+  // so they can never double-send.
+  const carriedNow = carried();
+  const drained = clearPersistedCaptures();
+  carriedCaptures = [];
+  if (drained) {
+    for (const c of carriedNow) phCapture(c.name, c.params, c.options);
+  }
+  for (const op of ops) {
     if (op.type === 'reset') {
       // A reset supersedes the incremental replay: `applyReset` re-registers
       // the FULL merged `registeredDims`, which already contains everything
@@ -400,27 +421,11 @@ export async function initPostHog(): Promise<void> {
       applyReset();
     } else {
       replayRegister();
-      applyIdentify(op.uid);
+      if (op.type === 'identify') applyIdentify(op.uid);
+      else phCapture(op.name, op.params, op.options);
     }
   }
   replayRegister();
-  // Replay queued captures AFTER both of the above, so an `app_crash` from the
-  // probe window is attributed to the signed-in player rather than orphaned
-  // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
-  // — they are from a PRIOR load (the crash that triggered a recovery reload),
-  // so they are both older and the ones that matter most.
-  const carriedNow = carried();
-  // Replay the PERSISTED entries only once their deletion is confirmed (Phase
-  // 4b P2 on #513). If the store would not let them go, replaying means
-  // re-sending them on every future load with no way to stop; dropping them is
-  // the lesser harm, on this module's standing rule that losing a telemetry
-  // event beats corrupting the data. In-memory entries are unaffected — they
-  // die with this page either way, so they can never double-send.
-  const drained = clearPersistedCaptures();
-  const queued = [...(drained ? carriedNow : []), ...pendingCaptures];
-  carriedCaptures = [];
-  pendingCaptures = [];
-  for (const c of queued) phCapture(c.name, c.params, c.options);
 }
 
 export const posthogReady = (): boolean => ready;
@@ -440,16 +445,19 @@ export type CaptureOptions = { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_
  */
 export function phCapture(name: string, params?: Record<string, unknown>, options?: CaptureOptions): void {
   if (!ready) {
-    // Queue instead of dropping (Phase 4b P2 on #513). `initPostHog` is
-    // fire-and-forget and awaits ~1.5s of ingest-host probes, while main.tsx
-    // renders synchronously right after — so a STARTUP crash, the exact case
-    // `app_crash` exists to report, reliably lands in this window and used to
-    // vanish through the `ready` gate before any transport option could help.
-    // Same replay pattern as `pendingIdentifyUid` below. Bounded: a crash loop
-    // must not grow this without limit, and the earliest events are the ones
+    // Queue instead of dropping (Phase 4b P2 on #513) — into the SAME ordered
+    // queue as the identity ops (#613, Phase 4b round-2 P1), so replay keeps
+    // each capture attributed to the identity state that held when it was
+    // queued. `initPostHog` is fire-and-forget and awaits ~1.5s of
+    // ingest-host probes, while main.tsx renders synchronously right after —
+    // so a STARTUP crash, the exact case `app_crash` exists to report,
+    // reliably lands in this window and used to vanish through the `ready`
+    // gate before any transport option could help. Bounded (captures only —
+    // identity ops are bounded by their own coalescing): a crash loop must
+    // not grow this without limit, and the earliest events are the ones
     // worth keeping, so it drops newest-over-oldest once full.
-    if (carried().length + pendingCaptures.length < MAX_PENDING_CAPTURES) {
-      pendingCaptures.push({ name, params, options });
+    if (carried().length + queuedCaptures().length < MAX_PENDING_CAPTURES) {
+      pendingOps.push({ type: 'capture', name, params, options });
       // Also persist, because the queue's most important customer immediately
       // reloads the page (Codex P2 on #513): `componentDidCatch` starts
       // `resetShell()` right after queueing, and its same-origin probe can
@@ -471,10 +479,41 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
   }
 }
 
-/** Captures that arrived before init settled, replayed by `initPostHog`. */
+/** A capture queued before init settled — also the persisted-blob entry shape
+ *  (see `carried`), which is why it has no `type` discriminant of its own. */
 type PendingCapture = { name: string; params?: Record<string, unknown>; options?: CaptureOptions };
 const MAX_PENDING_CAPTURES = 20;
-let pendingCaptures: PendingCapture[] = [];
+
+/**
+ * EVERYTHING that arrived while the SDK was not ready — captures AND identity
+ * operations (sign-out resets / sign-in identifies) — as ONE ordered queue,
+ * replayed FIFO by `initPostHog` (#613, Phase 4b round-2 P1; unifies round
+ * 1's separate identity FIFO with the #513 capture queue). One queue is what
+ * makes attribution order-true: with separate queues, the sequence
+ * identify(A), capture(oldUserAction), reset, identify(B) replayed both
+ * identity transitions FIRST and then recorded oldUserAction as B's. Order
+ * is equally load-bearing within the identity ops (#613 round-1 P1):
+ * `posthog.init()` loads the PRIOR session's persisted identity, so a fast
+ * sign-out → account-switch must reach the SDK as reset-then-identify —
+ * replaying the identify alone would merge the new uid onto the previous
+ * account's persisted distinct_id. Coalescing is minimal and identity-aware
+ * (see `phIdentify`/`phReset`): only an identify repeating the queue's
+ * current identity uid, or a reset directly repeating a reset, is dropped;
+ * an A→B uid change enqueues the reset the transition implies. Identity ops
+ * are never persisted across loads — a new load re-derives identity from
+ * Firebase — so only the capture entries mirror to sessionStorage
+ * (`persistPendingCaptures`).
+ */
+type PendingOp = { type: 'reset' } | { type: 'identify'; uid: string } | ({ type: 'capture' } & PendingCapture);
+let pendingOps: PendingOp[] = [];
+
+/** The capture entries of `pendingOps`, in order — this load's queued
+ *  captures, in the persistable (type-less) shape. */
+function queuedCaptures(): PendingCapture[] {
+  return pendingOps
+    .filter((op): op is { type: 'capture' } & PendingCapture => op.type === 'capture')
+    .map(({ name, params, options }) => ({ name, params, options }));
+}
 
 /** Survives the recovery reload; drained by `initPostHog`. Session-scoped, so a
  *  queue that never drains dies with the tab rather than following the player. */
@@ -483,12 +522,15 @@ const PENDING_CAPTURES_KEY = 'gcb:ph-pending-captures';
 /**
  * Entries queued by a PRIOR load, read from storage exactly once (Codex P2 on
  * #513). Keeping them in their own array is what makes each event have exactly
- * ONE representation: `pendingCaptures` is strictly this load's queue, this is
- * strictly the previous load's, and the persisted blob is simply the two
- * concatenated. Merging both into one array and also persisting it — the
- * previous shape — double-counted every event whenever init settled without a
- * navigation, since the in-memory copy and its own persisted mirror were both
- * replayed. `null` means "not read yet"; `[]` means "read, nothing there".
+ * ONE representation: `pendingOps`'s capture entries are strictly this load's
+ * queue, this is strictly the previous load's, and the persisted blob is
+ * simply the two concatenated. Merging both into one array and also persisting
+ * it — the previous shape — double-counted every event whenever init settled
+ * without a navigation, since the in-memory copy and its own persisted mirror
+ * were both replayed. `null` means "not read yet"; `[]` means "read, nothing
+ * there". The first read always happens BEFORE this load persists anything
+ * (the `phCapture` bound check calls `carried()` before the first persist), so
+ * the cached value never includes this load's own entries.
  */
 let carriedCaptures: PendingCapture[] | null = null;
 
@@ -508,11 +550,14 @@ function carried(): PendingCapture[] {
   return carriedCaptures;
 }
 
-/** Mirrors the whole queue — prior load's entries included, so a second load
- *  that queues its own pre-init event cannot overwrite the first one's. */
+/** Mirrors every queued CAPTURE — prior load's entries included, so a second
+ *  load that queues its own pre-init event cannot overwrite the first one's.
+ *  Identity ops are deliberately NOT persisted: a new load re-derives its
+ *  identity from Firebase auth state, so replaying a stale reset/identify
+ *  from a dead load could only fight the fresh one. */
 function persistPendingCaptures(): void {
   try {
-    const all = [...carried(), ...pendingCaptures].slice(0, MAX_PENDING_CAPTURES);
+    const all = [...carried(), ...queuedCaptures()].slice(0, MAX_PENDING_CAPTURES);
     sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(all));
   } catch {
     /* quota/policy/absent — the in-memory queue still covers the no-reload case */
@@ -537,28 +582,22 @@ function clearPersistedCaptures(): boolean {
 }
 
 /**
- * Identity operations (sign-out resets / sign-in identifies) that arrived
- * while the SDK was not ready, replayed in ARRIVAL ORDER by `initPostHog`
- * (#613, Phase 4b P1 — replaces the earlier last-write-wins pair of slots,
- * where a later queued identify DISCARDED an earlier queued reset). Order is
- * what carries the meaning: `posthog.init()` loads the PRIOR session's
- * persisted identity, so [reset, identify(newUid)] — a fast sign-out →
- * account-switch during the ~1.5s probe window — must reach the SDK as
- * reset-then-identify; replaying the identify alone would merge newUid onto
- * the previous account's persisted distinct_id (cross-user attribution /
- * identity merging). The mirror sequence [identify(uid), reset] — a sign-in
- * that was undone before init settled — likewise replays in order, ending
- * anonymous. Adjacent duplicates coalesce (a run of identifies keeps only
- * the latest uid; back-to-back resets keep one), so the queue is bounded by
- * the number of actual sign-in/out TRANSITIONS in the probe window.
+ * The uid most recently applied to the LIVE SDK via `identify()`, `null`
+ * after a reset (or before any identify). Lets the ready path detect an
+ * A→B uid change with no intervening sign-out (#613, Phase 4b round-2 P1):
+ * Firebase can deliver one signed-in user directly after another without a
+ * signed-out render between them, and identifying B while the SDK still
+ * holds A's identity would MERGE the two accounts. Updated only inside
+ * `applyIdentify`/`applyReset`, so replayed queue ops and direct ready-path
+ * calls stay consistent.
  */
-type PendingIdentityOp = { type: 'reset' } | { type: 'identify'; uid: string };
-let pendingIdentityOps: PendingIdentityOp[] = [];
+let identifiedUid: string | null = null;
 
 /** The ready-path identify — shared by `phIdentify` and the queue replay. */
 function applyIdentify(uid: string): void {
   try {
     posthog.identify(uid);
+    identifiedUid = uid;
   } catch {
     /* no-op */
   }
@@ -572,20 +611,51 @@ function applyIdentify(uid: string): void {
 function applyReset(): void {
   try {
     posthog.reset();
+    identifiedUid = null;
     if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
   } catch {
     /* no-op */
   }
 }
 
+/**
+ * The most recent IDENTITY op (reset/identify) in the pending queue, looking
+ * past any captures queued after it — the identity state a newly queued op
+ * would follow. Scanning past captures matters (#613, Phase 4b round-2 P1):
+ * with [identify(A), capture] in the queue, a phIdentify(B) must still see
+ * A as the current queued identity and insert the reset the A→B transition
+ * implies; checking only the literal last element would miss it.
+ */
+function lastQueuedIdentityOp(): Exclude<PendingOp, { type: 'capture' }> | undefined {
+  for (let i = pendingOps.length - 1; i >= 0; i--) {
+    const op = pendingOps[i];
+    if (op.type !== 'capture') return op;
+  }
+  return undefined;
+}
+
 /** Tie subsequent events to the signed-in User by uid (no PII properties). */
 export function phIdentify(uid: string): void {
   if (!ready) {
-    const last = pendingIdentityOps[pendingIdentityOps.length - 1];
-    if (last?.type === 'identify') last.uid = uid;
-    else pendingIdentityOps.push({ type: 'identify', uid });
+    const last = lastQueuedIdentityOp();
+    if (last?.type === 'identify') {
+      // Identical uid: nothing new to say — the queue's identity state is
+      // already this account (#613 round 2: ONLY identical uids coalesce).
+      if (last.uid === uid) return;
+      // A→B with NO intervening sign-out: insert the reset the transition
+      // implies (#613, Phase 4b round-2 P1). Replaying identify(B) directly
+      // after identify(A) — or over A's identity as loaded by
+      // `posthog.init()` — would merge the two accounts.
+      pendingOps.push({ type: 'reset' }, { type: 'identify', uid });
+      return;
+    }
+    pendingOps.push({ type: 'identify', uid });
     return;
   }
+  // Same A→B protection on the ready path (#613, Phase 4b round-2 P1): an
+  // in-session uid change without a sign-out resets first, so B's events
+  // never merge onto A's identity.
+  if (identifiedUid !== null && identifiedUid !== uid) applyReset();
   applyIdentify(uid);
 }
 
@@ -633,12 +703,15 @@ export function phRegister(props: Record<string, unknown>): void {
 export function phReset(): void {
   if (!ready) {
     // Queued IN ORDER, never dropped (#611 → #613, Phase 4b P1) — see
-    // `pendingIdentityOps`'s own doc above: a silently dropped reset leaks a
-    // stale persisted identity into the whole signed-out session, and a
-    // reset discarded by a LATER identify merges the new account onto the
-    // prior user's persisted distinct_id.
-    if (pendingIdentityOps[pendingIdentityOps.length - 1]?.type !== 'reset') {
-      pendingIdentityOps.push({ type: 'reset' });
+    // `pendingOps`'s own doc above: a silently dropped reset leaks a stale
+    // persisted identity into the whole signed-out session, and a reset
+    // discarded by a LATER identify merges the new account onto the prior
+    // user's persisted distinct_id. Only a reset that would directly repeat
+    // the queue's current identity state (last identity op already a reset)
+    // coalesces away — captures queued between two resets keep their
+    // position and attribute the same either way (post-reset anonymous).
+    if (lastQueuedIdentityOp()?.type !== 'reset') {
+      pendingOps.push({ type: 'reset' });
     }
     return;
   }

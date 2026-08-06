@@ -248,7 +248,12 @@ void bootstrapEventResolution()
     // The resolution promise itself rejected — no dimensions could have been
     // registered either way, but PostHog still needs to run for whichever
     // screen renders below (same disclosure obligation as the other
-    // branches).
+    // branches). NOTE this handler ALSO catches an exception thrown by the
+    // `.then()` SUCCESS callback above (e.g. a render failure) — possibly
+    // AFTER that callback already started analytics. `emitInitialPageView`
+    // is idempotent for exactly this path (#613, Phase 4b round-2 P2: a
+    // second emission used to double-log the page_view), and a repeated
+    // `initPostHog` no-ops once ready.
     startPostHogAfterResolution();
     void emitInitialPageView();
     if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {

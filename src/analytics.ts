@@ -239,8 +239,22 @@ export function registerDayIndexDimension(dayIndex: number | null): void {
  * resend is a harmless merge no-op (see `ga4Dims`'s own doc). The event also
  * carries the same fresh `page_location` `track()` computes — ALWAYS
  * explicit, so GA4 never derives one from the full query-bearing URL (#613).
+ *
+ * IDEMPOTENT — at most one emission per page load (#613, Phase 4b round-2
+ * P2): `main.tsx`'s `.catch()` also receives an exception thrown by the
+ * `.then()` SUCCESS callback (e.g. a render failure) AFTER that callback
+ * already called this function, and both bootstrap branches calling in is by
+ * design — so the guard lives here, at the single emission point, rather
+ * than in every caller. The flag is consumed on FIRST entry (before the
+ * await), which also collapses concurrent double-calls; a call that then
+ * resolves a null instance stays consumed deliberately — `analyticsReady` is
+ * settled exactly once, so retrying could never produce a different outcome.
  */
+let initialPageViewEmitted = false;
+
 export async function emitInitialPageView(): Promise<void> {
+  if (initialPageViewEmitted) return;
+  initialPageViewEmitted = true;
   const instance = await analyticsReady;
   if (!instance) return;
   if (Object.keys(ga4Dims).length > 0) {
