@@ -184,6 +184,18 @@ describe('bootstrapEventResolution — the env-pinned boot paths', () => {
     expect(activeEventPreview()).toEqual(PREVIEW);
   });
 
+  it('does not borrow a cached postcard from another Event on an env-pinned build', async () => {
+    watchAdultContent(HOST);
+    listener().next(snap(DOC));
+    applyResolvedEventPreview(null); // fresh session, same localStorage
+    vi.stubEnv('VITE_EVENT_ID', 'another-event');
+
+    const r = await bootstrapEventResolution(HOST);
+
+    expect(r).toMatchObject({ kind: 'event', eventId: 'another-event', source: 'env' });
+    expect(activeEventPreview()).toBeNull();
+  });
+
   it('boots cardless — no errors — on an env-pinned build with nothing cached', async () => {
     vi.stubEnv('VITE_EVENT_ID', 'bodega-bay-2026');
     const r = await bootstrapEventResolution('localhost');

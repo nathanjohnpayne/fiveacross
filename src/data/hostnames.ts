@@ -164,7 +164,16 @@ export async function bootstrapEventResolution(
     // after first paint on a first-ever visit. Never blocks mount.
     let preview = resolution.preview ?? null;
     if (!preview && resolution.source === 'env') {
-      preview = readCache(storage, hostname)?.doc.preview ?? null;
+      // An env-pinned build still has an authoritative Event id. A cache entry
+      // from a prior Event on this hostname (or a manually retained inactive
+      // entry) must not borrow its postcard while the listener catches up.
+      const cachedMapping = readCache(storage, hostname)?.doc;
+      if (
+        cachedMapping?.eventId === resolution.eventId &&
+        isServable(cachedMapping)
+      ) {
+        preview = cachedMapping.preview ?? null;
+      }
     }
     applyResolvedEventPreview(preview);
   }
