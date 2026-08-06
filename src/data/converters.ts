@@ -178,6 +178,11 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
       // optional and absent until the 08:00-Day-10 scheduler run sets it, so a
       // pre-finale/legacy Event doc reads it through the spread above as
       // `undefined` (unset), exactly the pre-freeze state consumers branch on.
+      // `mostLovedPhoto` (#560) rides the same reasoning and passes through the
+      // spread untouched: ABSENT means "not yet computed" (the scheduler beat's
+      // idempotence key) while present-with-empty-`winners` is the explicit
+      // no-award record — inventing a default here would erase the distinction
+      // the write-once guard depends on.
     };
   },
 };
