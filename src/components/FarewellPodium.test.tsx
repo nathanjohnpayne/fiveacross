@@ -359,6 +359,20 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     );
   });
 
+  it('keeps an explicitly blank frozen winner day blank instead of borrowing the live Proof day', () => {
+    M.proofs = [proofDoc({ id: 'w1', uid: 'ana', createdAt: 1000, dayIndex: 8 })];
+    const noFrozenDay: MostLovedPhotoAward = {
+      ...AWARD,
+      winners: [{ ...AWARD.winners[0], dayIndex: null }, AWARD.winners[1]],
+    };
+    const { container } = render(
+      <FarewellPodium players={[]} days={undefined} event={awardedEvent(noFrozenDay)} />,
+    );
+    expect(container.querySelector('.farewell-most-loved-credit')?.textContent).toBe(
+      'Ana · “Sunset over the bay”',
+    );
+  });
+
   it('drops a hidden-after-freeze winner from display and falls back to photo highlights when none survive', () => {
     // Neither winner survives the Feed filter (w1 gone, w2 recreated later) —
     // the award record is untouched; DISPLAY falls back to highlights: the

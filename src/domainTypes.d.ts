@@ -201,10 +201,12 @@ export interface MostLovedPhotoWinner {
 /** The frozen Most-Loved Photo result (#560). Field ABSENT = not yet computed
  *  (the scheduler beat's idempotence key). Present with `winners: []` =
  *  computed, no award — an explicit record, so a post-freeze heart can never
- *  mint a late award (the "never recomputes" rule). Ties persist ALL
- *  co-winners. */
+ *  mint a late award (the "never recomputes" rule). `winners` retains a
+ *  deterministic bounded prefix; `winnerCount` records the complete tied
+ *  cardinality so an extreme tie cannot exceed Firestore's Event-doc limit. */
 export interface MostLovedPhotoAward {
-  winners: MostLovedPhotoWinner[]; // ALL co-winners, ordered proofCreatedAt asc, then proofId asc
+  winners: MostLovedPhotoWinner[]; // first 100 co-winners, ordered proofCreatedAt asc, then proofId asc
+  winnerCount?: number;            // complete tied cardinality; absent on records written before the bounded format
   heartCount: number;              // frozen eligible count shared by all winners; 0 when winners is []
   frozenAt: number;                // the freeze cutoff computed against (== EventDoc.frozenAt value)
   computedAt: number;              // scheduler run clock, diagnostics only

@@ -329,6 +329,15 @@ export interface MostLovedHeartLike {
   serverCreatedAt?: number;
 }
 
+/**
+ * A Proof's frozen attribution is bounded by the write target, not by the
+ * number of eligible photos. Firestore permits a 1 MiB document; retaining an
+ * unbounded tie list would make the freeze retry forever once that limit is
+ * crossed. The ordered prefix is deterministic and `winnerCount` preserves the
+ * full cardinality for callers that need to describe the tie.
+ */
+export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
+
 /** Local mirror of `src/data/moderation.ts`'s `isReportHidden` (this module
  *  stays decoupled from the app package, like `autohide.ts`/`unlockDay.ts`).
  *  True iff `reportCount` has REACHED a POSITIVE threshold; fails OPEN for a
@@ -370,9 +379,10 @@ function mostLovedBanned(uid: string | undefined, bannedUids: readonly string[] 
  *   - the count is the number of UNIQUE eligible heart uids per proof (the
  *     deterministic slot id already guarantees one doc per pair; the Set makes
  *     this total over arbitrary fixtures);
- *   - winners are EVERY eligible proof at the maximum count when that maximum
- *     is >= 1, ordered `proofCreatedAt` asc then `proofId` asc (total,
- *     deterministic; `winners[0]` is the share hero);
+ *   - winners are the first 100 eligible proofs at the maximum count when that
+ *     maximum is >= 1, ordered `proofCreatedAt` asc then `proofId` asc (total,
+ *     deterministic; `winners[0]` is the share hero); `winnerCount` retains
+ *     the complete tied cardinality without an unbounded Event payload;
  *   - zero eligible hearts (or zero eligible photo proofs) persists the
  *     EXPLICIT no-award record `{ winners: [], heartCount: 0 }` — field
  *     absence must keep meaning "not yet computed" (the write-once guard's
@@ -426,7 +436,7 @@ export function buildMostLovedPhotoAward(
   for (const uids of heartUids.values()) {
     if (uids.size > max) max = uids.size;
   }
-  const winners: MostLovedPhotoWinner[] =
+  const allWinners: MostLovedPhotoWinner[] =
     max < 1
       ? []
       : eligible
@@ -445,7 +455,8 @@ export function buildMostLovedPhotoAward(
               (a.proofId < b.proofId ? -1 : a.proofId > b.proofId ? 1 : 0),
           );
   return {
-    winners,
+    winners: allWinners.slice(0, MAX_PERSISTED_MOST_LOVED_WINNERS),
+    winnerCount: allWinners.length,
     heartCount: max < 1 ? 0 : max,
     frozenAt: opts.cutoff,
     computedAt: opts.computedAt,

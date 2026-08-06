@@ -68,6 +68,7 @@ function both(
 
 const NO_AWARD: MostLovedPhotoAward = {
   winners: [],
+  winnerCount: 0,
   heartCount: 0,
   frozenAt: CUTOFF,
   computedAt: COMPUTED_AT,
@@ -230,6 +231,7 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
           proofCreatedAt: 4_000,
         },
       ],
+      winnerCount: 1,
       heartCount: 1,
       frozenAt: CUTOFF,
       computedAt: COMPUTED_AT,
@@ -238,5 +240,15 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     // Firestore rejects undefined field values).
     const noDay = both([P('p1', { dayIndex: null })], [H('fan', 'p1', 1_000)]);
     expect(noDay.winners[0].dayIndex).toBeNull();
+  });
+
+  it('bounds the persisted tie prefix while retaining the complete cardinality', () => {
+    const proofs = Array.from({ length: 101 }, (_, i) => P(`p-${i}`, { createdAt: i + 1 }));
+    const hearts = proofs.map((p) => H('fan', p.id, p.createdAt));
+    const award = both(proofs, hearts);
+    expect(award.winnerCount).toBe(101);
+    expect(award.winners).toHaveLength(100);
+    expect(award.winners[0].proofId).toBe('p-0');
+    expect(award.winners.at(-1)?.proofId).toBe('p-99');
   });
 });

@@ -19,6 +19,10 @@
 import { isBanned, isReportHidden } from './moderation';
 import type { HeartDoc, MostLovedPhotoAward, MostLovedPhotoWinner, ProofDoc } from '../types';
 
+/** Keep the client parity mirror's persisted tie prefix aligned with the
+ * scheduler. The full cardinality is carried separately as `winnerCount`. */
+export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
+
 /** The subset of a `ProofDoc` the award computation reads. Structurally
  *  assignable to the functions-side `MostLovedProofLike`, so one fixture set
  *  can feed both builders in the parity test. */
@@ -81,8 +85,10 @@ export function proofFeedVisible(
  * heart (unconditionally — `heartState`'s display-only own-content exception
  * does NOT apply); the count is unique eligible heart uids; winners are every
  * eligible proof at the max count when max >= 1, ordered `proofCreatedAt` asc
- * then `proofId` asc; zero eligible hearts yields the EXPLICIT no-award record
- * `{ winners: [], heartCount: 0 }`.
+ * then `proofId` asc. The persisted prefix is capped at 100 so an anomalous
+ * large tie cannot exceed the Event document limit; `winnerCount` preserves
+ * its full cardinality. Zero eligible hearts yields the EXPLICIT no-award
+ * record `{ winners: [], winnerCount: 0, heartCount: 0 }`.
  */
 export function buildMostLovedPhotoAward(
   proofs: readonly MostLovedProofInput[],
@@ -113,7 +119,7 @@ export function buildMostLovedPhotoAward(
   for (const uids of heartUids.values()) {
     if (uids.size > max) max = uids.size;
   }
-  const winners: MostLovedPhotoWinner[] =
+  const allWinners: MostLovedPhotoWinner[] =
     max < 1
       ? []
       : eligible
@@ -132,7 +138,8 @@ export function buildMostLovedPhotoAward(
               (a.proofId < b.proofId ? -1 : a.proofId > b.proofId ? 1 : 0),
           );
   return {
-    winners,
+    winners: allWinners.slice(0, MAX_PERSISTED_MOST_LOVED_WINNERS),
+    winnerCount: allWinners.length,
     heartCount: max < 1 ? 0 : max,
     frozenAt: opts.cutoff,
     computedAt: opts.computedAt,
@@ -191,10 +198,11 @@ export function mostLovedFrozenEventPayload(award: MostLovedPhotoAward): {
   dayIndex: number | null;
 } {
   const hero = award.winners.length > 0 ? award.winners[0] : null;
+  const winnerCount = award.winnerCount ?? award.winners.length;
   return {
-    winnersCount: award.winners.length,
+    winnersCount: winnerCount,
     heartCount: award.heartCount,
-    tie: award.winners.length > 1,
+    tie: winnerCount > 1,
     award: award.winners.length > 0,
     proofId: hero ? hero.proofId : null,
     dayIndex: hero ? hero.dayIndex : null,

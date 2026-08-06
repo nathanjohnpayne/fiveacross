@@ -246,6 +246,7 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
           proofCreatedAt: D9_UNLOCK + 1000,
         },
       ],
+      winnerCount: 1,
       heartCount: 2,
       // The SCHEDULED freeze instant, never the run clock (Codex #228 rule).
       frozenAt: D10_UNLOCK,
@@ -283,6 +284,7 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK });
     expect(db.readEvent().mostLovedPhoto).toEqual({
       winners: [],
+      winnerCount: 0,
       heartCount: 0,
       frozenAt: D10_UNLOCK,
       computedAt: D10_UNLOCK,
@@ -294,6 +296,7 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 15 * 60_000 });
     expect(db.readEvent().mostLovedPhoto).toEqual({
       winners: [],
+      winnerCount: 0,
       heartCount: 0,
       frozenAt: D10_UNLOCK,
       computedAt: D10_UNLOCK,

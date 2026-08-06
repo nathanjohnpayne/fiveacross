@@ -425,7 +425,9 @@ function FarewellPodiumInner({
       src: safeMediaUrl(resolveProofMediaUrl(p.mediaURL ?? p.thumbURL)),
       displayName: winner?.displayName ?? p.displayName,
       promptText: winner?.promptText ?? p.itemText,
-      dayIndex: winner?.dayIndex ?? p.dayIndex ?? null,
+      // `null` is frozen attribution too: only a highlights fallback reads
+      // live metadata. Nullish coalescing here would invent a Day after freeze.
+      dayIndex: winner ? winner.dayIndex : p.dayIndex ?? null,
     });
     const winnerPhotos = displayable
       .map(({ winner, proof }) => shape(proof, winner))

@@ -64,6 +64,7 @@ const award = (over: Partial<MostLovedPhotoAward> = {}): MostLovedPhotoAward => 
       proofCreatedAt: 1_000,
     },
   ],
+  winnerCount: 1,
   heartCount: 4,
   frozenAt: CUTOFF,
   computedAt: 20_000,
@@ -102,12 +103,14 @@ describe('buildMostLovedPhotoAward — client mirror sanity (full matrix in the 
     );
     expect(result.heartCount).toBe(1);
     expect(result.winners.map((w) => w.proofId)).toEqual(['early', 'late']);
+    expect(result.winnerCount).toBe(2);
     expect(result.frozenAt).toBe(CUTOFF);
   });
 
   it('returns the explicit no-award record when nothing is eligible', () => {
     expect(buildMostLovedPhotoAward([P('p1')], [H('u-p1', 'p1', 1_000)], OPTS)).toEqual({
       winners: [],
+      winnerCount: 0,
       heartCount: 0,
       frozenAt: CUTOFF,
       computedAt: 20_000,
@@ -196,11 +199,11 @@ describe('mostLovedFrozenEventPayload — ids and counts only, never media or na
         { proofId: 'p2', uid: 'u-p2', displayName: 'B', promptText: 'y', dayIndex: 2, proofCreatedAt: 2_000 },
       ],
     });
-    expect(mostLovedFrozenEventPayload(a)).toMatchObject({ winnersCount: 2, tie: true, proofId: 'p1', dayIndex: null });
+    expect(mostLovedFrozenEventPayload({ ...a, winnerCount: 9 })).toMatchObject({ winnersCount: 9, tie: true, proofId: 'p1', dayIndex: null });
   });
 
   it('the no-award record is still a payload (award: false is signal)', () => {
-    expect(mostLovedFrozenEventPayload(award({ winners: [], heartCount: 0 }))).toEqual({
+    expect(mostLovedFrozenEventPayload(award({ winners: [], winnerCount: 0, heartCount: 0 }))).toEqual({
       winnersCount: 0,
       heartCount: 0,
       tie: false,

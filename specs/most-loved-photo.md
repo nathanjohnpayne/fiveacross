@@ -11,15 +11,15 @@ At the Standings Freeze the scheduler computes and persists, exactly once, the v
 
 **Award**—the frozen `EventDoc.mostLovedPhoto` record. Appreciation for a moment, never player rank: it touches no stats, no leaderboard, no win logic (ADR 0001 untouched, the feed-hearts posture).
 
-**Winner**—one co-winner entry inside the award. Ties share the honour: ALL co-winners persist, ordered `proofCreatedAt` ascending then `proofId` ascending, so `winners[0]` is the earliest-posted (the share hero, per the epic-comment amendment).
+**Winner**—one persisted co-winner entry inside the award. Ties share the honour: the first 100 co-winners, ordered `proofCreatedAt` ascending then `proofId` ascending, persist as the deterministic display/share prefix (`winners[0]` is the earliest-posted hero); `winnerCount` records the full tied cardinality.
 
 **No-award record**—the award with `winners: []`, persisted when no eligible Heart exists at the freeze. Explicit on purpose; see § Idempotence.
 
 ## The persisted artefact
 
-`events/{eventId}.mostLovedPhoto`—a sibling of `frozenAt`, NOT a Moment and NOT a new collection. The award is Event-level frozen state exactly like the freeze stamp; the client already holds the Event doc everywhere the finale needs it (Board's `useEventDoc` flows into `FarewellPodium` as a prop per the no-second-listener rule); Moments carry report/heart surfaces an award must not have; a new collection would need new read rules. The payload is a few hundred bytes against the 1 MiB doc limit.
+`events/{eventId}.mostLovedPhoto`—a sibling of `frozenAt`, NOT a Moment and NOT a new collection. The award is Event-level frozen state exactly like the freeze stamp; the client already holds the Event doc everywhere the finale needs it (Board's `useEventDoc` flows into `FarewellPodium` as a prop per the no-second-listener rule); Moments carry report/heart surfaces an award must not have; a new collection would need new read rules. `winners` is a deterministic first-100 prefix, so even an anomalously large zero/one-Heart tie stays comfortably below the 1 MiB doc limit; `winnerCount` retains its full cardinality.
 
-The shape is the shared contract in `src/domainTypes.d.ts` (`MostLovedPhotoAward` / `MostLovedPhotoWinner`), consumed by both compiler roots via the declaration-only import (the daily-engagement-email precedent): `winners` (all co-winners, each carrying `proofId`, `uid`, `displayName`, `promptText`, `dayIndex`, `proofCreatedAt`—the winning ProofDoc's own denormalized fields at the freeze, no roster join), `heartCount` (the frozen eligible count shared by all winners, 0 when `winners` is empty), `frozenAt` (the freeze cutoff computed against, equal to the `EventDoc.frozenAt` value), and `computedAt` (the scheduler run clock, diagnostics only). `eventConverter` passes the field through untouched—absence is meaningful and gets no default.
+The shape is the shared contract in `src/domainTypes.d.ts` (`MostLovedPhotoAward` / `MostLovedPhotoWinner`), consumed by both compiler roots via the declaration-only import (the daily-engagement-email precedent): `winners` (the first 100 ordered co-winners, each carrying `proofId`, `uid`, `displayName`, `promptText`, `dayIndex`, `proofCreatedAt`—the winning ProofDoc's own denormalized fields at the freeze, no roster join), `winnerCount` (the complete tied cardinality, including co-winners outside the bounded display prefix), `heartCount` (the frozen eligible count shared by all winners, 0 when `winners` is empty), `frozenAt` (the freeze cutoff computed against, equal to the `EventDoc.frozenAt` value), and `computedAt` (the scheduler run clock, diagnostics only). `eventConverter` passes the field through untouched—absence is meaningful and gets no default.
 
 **No media URL is persisted, deliberately.** The winners carry no `mediaURL`/`thumbURL`/`storagePath`. The client must consult the live Proof doc anyway to honor the hidden-after-freeze display fallback, and the live doc carries the media; persisting a URL would create exactly one failure mode—rendering an image moderation has since hidden. `proofCreatedAt` is the display join key (the incarnation stamp).
 
@@ -47,7 +47,7 @@ The verbatim rules (decided 2026-08-04) map onto the data model as follows; each
 | own Heart on own Proof does NOT count | `heart.uid !== proof.uid`—new logic existing nowhere else; `heartState` deliberately counts self-hearts for display and that stays unchanged |
 | banned Players' Hearts do NOT count | `!isBanned(heart.uid, bannedUids)` UNCONDITIONALLY: `heartState`'s own-content exception (a banned viewer still sees their own heart) is display-only and does NOT apply to the award |
 | the count | unique eligible heart uids per proof (the deterministic slot id already guarantees one doc per pair; the Set makes the pure function total) |
-| winner / tie | every eligible proof at the maximum count when the maximum is at least 1, ALL persisted, ordered `proofCreatedAt` asc then `proofId` asc |
+| winner / tie | every eligible proof at the maximum count when the maximum is at least 1; `winnerCount` preserves that full cardinality, while the first 100 in `proofCreatedAt`/`proofId` order persist for the bounded display/share prefix |
 | no eligible Hearts means no award | the explicit `{ winners: [], heartCount: 0 }` record |
 | the frozen result never recomputes; hidden later stays recorded | the transaction guard prevents recomputation; display fallback is render-time (`mostLovedDisplayWinners`) |
 
