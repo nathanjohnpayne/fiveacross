@@ -1,5 +1,5 @@
 import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
-import { db, applyResolvedEventId, EVENT_ID } from '../firebase';
+import { db, applyResolvedEventId } from '../firebase';
 import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
@@ -13,6 +13,11 @@ import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } fro
 // module is the only part that touches the network.
 
 const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
+// The Event chosen before React mounts. The live hostname watcher is an update
+// channel, not an Event switch, so its preview must keep agreeing with this
+// bootstrap result. `null` keeps the watcher test seam usable on its own; the
+// production watcher mounts only after bootstrap has installed the value.
+let bootstrappedEventId: string | null = null;
 
 /**
  * Fetch `hostnames/{host}` FROM THE SERVER.
@@ -101,6 +106,7 @@ export async function bootstrapEventResolution(
     envAdultContent: import.meta.env.VITE_ADULT_CONTENT || null,
   });
   if (resolution.kind === 'event') {
+    bootstrappedEventId = resolution.eventId;
     applyResolvedEventId(resolution.eventId);
     // cardCache keeps its own copy of the id on purpose (it must stay free of
     // the Firebase import graph), so it has to be told separately. Miss this
@@ -240,7 +246,7 @@ function safeLocalStorage(): Storage | null {
  */
 export function watchAdultContent(
   hostname: string = window.location.hostname,
-  resolvedEventId: string = EVENT_ID,
+  resolvedEventId: string | null = bootstrappedEventId,
 ): () => void {
   // The flag is monotone, so a proven `true` is terminal: no later snapshot could
   // change the answer. Never open the listener at all.
@@ -301,7 +307,9 @@ export function watchAdultContent(
       // sees a hostname remapped to another Event must clear its postcard, not
       // advertise a card belonging to data the app will never serve.
       const belongsToResolvedEvent =
-        mapping !== null && isServable(mapping) && mapping.eventId === resolvedEventId;
+        mapping !== null &&
+        isServable(mapping) &&
+        (resolvedEventId === null || mapping.eventId === resolvedEventId);
       const previewSlice = belongsToResolvedEvent ? (mapping.preview ?? null) : null;
       // A cached Firestore snapshot is useful to fill a blank card on a first
       // visit, but it is not evidence newer than an already-installed preview.
