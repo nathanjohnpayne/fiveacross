@@ -144,7 +144,7 @@ describe('Gay Cruise Bingo is byte-identical to what shipped', () => {
 
   it.each([
     ['wordmark', 'GAY CRUISE BINGO'],
-    ['tagline', 'Trieste → Barcelona · July 2026. Sign in, get your card, mark it if you see it.'],
+    ['tagline', 'Sign in, get your card, mark it if you see it.'],
     ['offlineNote', 'Lost signal at sea? The printed cards and PDF still work.'],
     ['documentTitle', 'Gay Cruise Bingo'],
     ['appName', 'Gay Cruise Bingo'],

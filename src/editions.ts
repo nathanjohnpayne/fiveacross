@@ -35,7 +35,7 @@ const BRANDS: Record<string, EditionBrand> = {
     wordmark: 'GAY CRUISE BINGO',
     wordmarkBold: 'BINGO',
     preEventVerb: 'Sails',
-    tagline: 'Trieste → Barcelona · July 2026. Sign in, get your card, mark it if you see it.',
+    tagline: 'Sign in, get your card, mark it if you see it.',
     offlineNote: 'Lost signal at sea? The printed cards and PDF still work.',
     // Verbatim the strings index.html and the manifest hardcoded before #586,
     // so a `gcb` build is byte-identical to the shipped deployment.
