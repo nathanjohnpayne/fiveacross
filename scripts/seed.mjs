@@ -169,6 +169,14 @@ export function seedEntryTimestamp(existingDocs, days, now = Date.now()) {
   return Math.min(now, ...knownSeedTimes, ...dueCutoffs);
 }
 
+/** The timestamp and the Event payload must describe the same schedule. On a
+ * fresh Event the existing document has no `days` yet, so use the schedule we
+ * are about to atomically install; on a routine reseed preserve the live
+ * schedule that the item pool will continue serving. */
+export function effectiveSeedSchedule(existingDays, seedDays, includeDays) {
+  return includeDays ? seedDays : existingDays;
+}
+
 // `pool` is REQUIRED (the target Event's ALL_ITEMS): with per-Event seed data
 // (#563) there is no one global pool a default could safely point at, and a
 // caller that omitted it would silently seed nothing or the wrong Event's
@@ -418,52 +426,108 @@ async function seed() {
   // without a schedule (e.g. med-2026 pre-dating this migration): the
   // existence check alone left `days` permanently missing until an operator
   // knew to pass SEED_DAYS=1 (Codex P1, PR #229).
-  const existingEventSnap = await eventRef.get();
-  const existingDays = existingEventSnap.data()?.days;
-  const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
-  const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
-  // The event-doc merge write is NOT committed here: it joins the SAME batch
-  // as the item mutations below (Codex P1, PR #644 round 3), so a days rewrite
-  // that re-stamps `snapshotItemIds` (SEED_DAYS=1) and the item replace that
-  // creates those documents commit ATOMICALLY — a process/batch failure can
-  // never leave a snapshot pointing at documents that were not written, and a
-  // concurrent reader/scheduler can never observe the split state.
-  const eventPayload = eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), includeDays);
-
   const col = eventRef.collection('items');
 
   // Replace semantics, not append (w1-seed-and-composition): every SEED-OWNED
   // item doc is deleted and the current ITEMS are (re)written in ONE atomic
-  // batch (Codex P2, PR #135) — not a delete batch committed separately from
-  // the write batch, which would leave events/{id}/items with no seed prompts
-  // (and joinAndDeal short of MIN_POOL) if the process died or the write
-  // batch failed between the two commits. A doc whose id is unchanged across
-  // reseeds (same text) gets a delete followed by a set within the same
-  // batch; Firestore applies per-document batch ops in order, so the set is
-  // what lands. The delete pass is scoped to `createdBy === 'seed'`
+  // transaction (Codex P2, PR #135) — not a delete operation committed
+  // separately from the writes, which would leave events/{id}/items with no
+  // seed prompts (and joinAndDeal short of MIN_POOL) if the process died
+  // between commits. A doc whose id is unchanged across reseeds (same text)
+  // gets a delete followed by a set within the transaction, so the set is what
+  // lands. The delete pass is scoped to `createdBy === 'seed'`
   // (CodeRabbit Major, PR #135) — addItem writes live Player-submitted
   // prompts into this SAME collection with their own uid as createdBy, so an
   // unscoped delete-everything would erase user content on every reseed.
-  const existing = await col.get();
-  // Never double-seed a live Event: replace semantics can't append, but even a
-  // replace is refused against an already-seeded Event unless RESEED=1 — see
-  // `reseedGuard`. The refusal is a LOUD NO-OP on the items step (exit 0)
-  // rather than a hard error: the event-doc merge still commits (alone), which
-  // is how an admin grant re-run works and never clobbers — so a rerun without
-  // RESEED=1 grants rosters / refreshes event config while leaving the live
-  // pool byte-for-byte untouched.
-  const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
-  const guard = reseedGuard(seedOwnedCount, process.env.RESEED);
-  if (!guard.allowed) {
-    // A refused items replace must also refuse a requested Day rewrite. In
-    // particular, Bodega's canonical Day 0 snapshot ids are not necessarily
-    // the ids in its live, in-place-edited pool; writing them by themselves
-    // would strand the existing card pool. The safe no-op still permits the
-    // metadata-only admin-roster/config merge.
-    await eventRef.set(eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), false), {
-      merge: true,
+  // A seed is a single Firestore transaction, rather than a preflight read
+  // followed by a batch. That makes the Day snapshot interlocks a true
+  // precondition: if the scheduler stamps a Day or another seed changes the
+  // pool after either read, Firestore retries the whole callback against the
+  // current Event and collection before it can replace anything.
+  const runAt = Date.now();
+  const refusal = (message) => Object.assign(new Error(message), { code: 'seed-safety-refusal' });
+  let result;
+  try {
+    result = await db.runTransaction(async (transaction) => {
+      const [existingEventSnap, existing] = await Promise.all([
+        transaction.get(eventRef),
+        transaction.get(col),
+      ]);
+      const existingDays = existingEventSnap.data()?.days;
+      const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
+      const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
+      const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
+      const guard = reseedGuard(seedOwnedCount, process.env.RESEED);
+      if (!guard.allowed) {
+        // A refused items replace must also refuse a requested Day rewrite. In
+        // particular, Bodega's canonical Day 0 snapshot ids are not necessarily
+        // the ids in its live, in-place-edited pool; writing them by themselves
+        // would strand the existing card pool. The safe no-op still permits the
+        // metadata-only admin-roster/config merge.
+        transaction.set(eventRef, eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), false), {
+          merge: true,
+        });
+        return { skipped: true, reason: guard.reason };
+      }
+
+      const existingDocs = existing.docs.map((doc) => ({
+        id: doc.id,
+        createdBy: doc.data().createdBy,
+        createdAt: doc.data().createdAt,
+      }));
+      const { deleteIds, writes } = seedItemMutations(
+        existingDocs,
+        runAt,
+        ALL_ITEMS,
+        seedEntryTimestamp(
+          existingDocs,
+          effectiveSeedSchedule(existingDays, EVENT_SEED.days, includeDays),
+          runAt,
+        ),
+      );
+      if (includeDays) {
+        const stampedDays = stampedDayIndexes(existingDays);
+        if (stampedDays.length) {
+          throw refusal(
+            `✗ events/${EVENT_ID}: refusing SEED_DAYS=1 because Day ${stampedDays.join(', ')} already has a frozen snapshot. ` +
+              'A schedule rewrite may only happen before snapshots exist; use a dedicated transactional maintenance path that proves zero boards before any re-stamp. Nothing was written.',
+          );
+        }
+      }
+      // Snapshot-integrity interlock: if this replace deletes ids a stamped Day
+      // snapshot still references WITHOUT rewriting `days[]`, that Day would
+      // deal from documents that no longer exist. This is evaluated inside the
+      // transaction so a scheduler stamp that races us causes a retry, not an
+      // orphaned snapshot.
+      if (!includeDays) {
+        const orphaned = orphanedSnapshotDays(existingDays, deleteIds, writes.map((w) => w.id));
+        if (orphaned.length) {
+          throw refusal(
+            `✗ events/${EVENT_ID}: replacing the seed-owned pool would orphan the stamped snapshot on Day ${orphaned.join(', ')} ` +
+              '(snapshotItemIds reference ids this replace deletes without rewriting). ' +
+              'Do not re-run with SEED_DAYS=1: schedule overwrites are also refused after a snapshot. ' +
+              'Use a dedicated transactional maintenance path that proves zero dealt boards before any re-stamp. Nothing was written.',
+          );
+        }
+      }
+      transaction.set(
+        eventRef,
+        eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), includeDays),
+        { merge: true },
+      );
+      for (const id of deleteIds) transaction.delete(col.doc(id));
+      for (const { id, data } of writes) transaction.set(col.doc(id), data, { merge: true });
+      return { skipped: false };
     });
-    console.log(`Event doc written (merge). Prompts SKIPPED: ${guard.reason}`);
+  } catch (error) {
+    if (error?.code === 'seed-safety-refusal') {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
+  if (result.skipped) {
+    console.log(`Event doc written (merge). Prompts SKIPPED: ${result.reason}`);
     console.log(
       admins.length
         ? `Admins: set (${admins.length})`
@@ -471,56 +535,10 @@ async function seed() {
     );
     process.exit(0);
   }
-  const existingDocs = existing.docs.map((doc) => ({
-    id: doc.id,
-    createdBy: doc.data().createdBy,
-    createdAt: doc.data().createdAt,
-  }));
-  const runAt = Date.now();
-  const { deleteIds, writes } = seedItemMutations(
-    existingDocs,
-    runAt,
-    ALL_ITEMS,
-    seedEntryTimestamp(existingDocs, existingDays, runAt),
-  );
-  if (includeDays) {
-    const stampedDays = stampedDayIndexes(existingDays);
-    if (stampedDays.length) {
-      console.error(
-        `✗ events/${EVENT_ID}: refusing SEED_DAYS=1 because Day ${stampedDays.join(', ')} already has a frozen snapshot. ` +
-          'A schedule rewrite may only happen before snapshots exist; use a dedicated transactional maintenance path that proves zero boards before any re-stamp. Nothing was written.',
-      );
-      process.exit(1);
-    }
-  }
-  // Snapshot-integrity interlock (Codex P1, PR #644 round 2): if this replace
-  // deletes ids a stamped Day snapshot still references WITHOUT rewriting
-  // `days[]` (SEED_DAYS=1), that Day would deal from documents that no longer
-  // exist. Refuse rather than orphan — the days rewrite is what re-stamps the
-  // module's canonical snapshot ids (e.g. Bodega's pre-stamped Day 0).
-  if (!includeDays) {
-    const orphaned = orphanedSnapshotDays(existingDays, deleteIds, writes.map((w) => w.id));
-    if (orphaned.length) {
-      console.error(
-        `✗ events/${EVENT_ID}: replacing the seed-owned pool would orphan the stamped snapshot on Day ${orphaned.join(', ')} ` +
-          '(snapshotItemIds reference ids this replace deletes without rewriting). ' +
-          'Re-run with SEED_DAYS=1 as well — it rewrites days[] wholesale, re-stamping the canonical snapshot — ' +
-          'or clear/re-stamp those snapshots first. Nothing was written.',
-      );
-      process.exit(1);
-    }
-  }
-  // ONE atomic batch: the event-doc merge (incl. any days/snapshot re-stamp)
-  // plus every item delete/write — see the atomicity note above.
-  const batch = db.batch();
-  batch.set(eventRef, eventPayload, { merge: true });
-  for (const id of deleteIds) batch.delete(col.doc(id));
-  for (const { id, data } of writes) batch.set(col.doc(id), data, { merge: true });
-  await batch.commit();
 
   // Self-check: read the collection back and confirm the live seed pool now
   // matches the canonical ALL_ITEMS (main + both curated pools). A green seed
-  // run that leaves drift (partial batch, wrong project, stale doc a scoped
+  // run that leaves drift (failed transaction, wrong project, stale doc a scoped
   // delete missed) should fail loudly right here, not weeks later when a
   // player notices the old prompts.
   const report = verifySeedPool(
@@ -591,7 +609,7 @@ export function formatDriftReport(report, eventId) {
     // snapshotItemIds; seed() refuses that combination outright and names the
     // affected Days (Codex P1, PR #644 round 2), so the caution rides the
     // command it applies to.
-    '    (if a Day carries a pre-stamped snapshot, seed() will require SEED_DAYS=1 too — it rewrites days[] wholesale, re-stamping the canonical snapshot)',
+    '    (if a Day carries a pre-stamped snapshot, do not run this command: use a dedicated transactional maintenance path that proves zero dealt boards)',
   );
   return lines.join('\n');
 }

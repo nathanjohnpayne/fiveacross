@@ -77,6 +77,11 @@ export function seedEntryTimestamp(
   days: unknown,
   now?: number,
 ): number;
+export function effectiveSeedSchedule(
+  existingDays: unknown,
+  seedDays: readonly object[],
+  includeDays: boolean,
+): unknown;
 export function seedItemMutations(
   existingDocs: Array<{ id: string; createdBy: string; createdAt?: number }>,
   now: number,

@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import {
   adminRoster,
   eventWritePayload,
+  effectiveSeedSchedule,
   formatDriftReport,
   orphanedSnapshotDays,
   reseedGuard,
@@ -211,6 +212,16 @@ describe('w1-event-seed: reseed snapshot and timestamp interlocks (Codex P1, PR 
     expect(seedEntryTimestamp([], [{ unlockAt: 0 }, { unlockAt: 200 }, { unlockAt: 2_000 }], 1_000)).toBe(
       200,
     );
+  });
+
+  it('timestamps a fresh seed from the schedule it is about to install', () => {
+    const futureExistingSchedule = [{ unlockAt: 2_000 }];
+    const effective = effectiveSeedSchedule(
+      futureExistingSchedule,
+      [{ unlockAt: 200 }],
+      true,
+    );
+    expect(seedEntryTimestamp([], effective, 1_000)).toBe(200);
   });
 });
 
