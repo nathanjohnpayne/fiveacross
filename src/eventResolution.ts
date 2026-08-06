@@ -1,5 +1,6 @@
 import type { HostnameDoc } from './types';
 import { ADULT_CONTENT_DEFAULT, coerceAdultContent } from './adultContent';
+import { coerceEventPreview, type EventPreview } from './eventPreview';
 
 // Startup Event resolution from the request hostname (ADR 0009, #543).
 //
@@ -38,6 +39,11 @@ export type Resolution =
        *  only a proven `false` is allowed to stand without revalidation. See the
        *  rule at the top of `src/adultContent.ts`. */
       adultContentProven: boolean;
+      /** The sign-in postcard's Event-preview slice (#647), when the routing
+       *  document carries one. Absent on the env short-circuit (no document is
+       *  read) and on documents seeded before the field existed — the gate
+       *  then draws no card, never a broken one. */
+      preview?: EventPreview;
       /** Where the answer came from — surfaced for diagnostics, never for logic. */
       source: 'cache' | 'network' | 'env';
     }
@@ -133,6 +139,10 @@ export function readCache(
         adultContent: coerceAdultContent(d.adultContent),
         slug: typeof d.slug === 'string' ? d.slug : undefined,
         isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
+        // Same non-version-gated posture as `adultContent` above: additive,
+        // optional, and absent-is-no-card, so an entry written before #647
+        // needs no CACHE_VERSION bump to read correctly.
+        preview: coerceEventPreview(d.preview),
       },
       fetchedAt: env.fetchedAt,
       stale: now - env.fetchedAt > CACHE_TTL_MS,
@@ -177,6 +187,7 @@ const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => (
   // been stamped since. Only the network read proves anything.
   adultContentProven: source === 'network',
   slug: doc.slug ?? null,
+  preview: doc.preview,
   source,
 });
 
