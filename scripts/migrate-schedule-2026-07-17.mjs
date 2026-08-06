@@ -12,8 +12,17 @@
 // and its unit-tested planning core. The #566 field rename updated its target
 // vocabulary to `place`/`placeEmoji` alongside the seed; the LIVE med-2026
 // days still persist the pre-rename `port`/`portEmoji` (read-coerced by the
-// app's eventConverter), so a hypothetical re-run would now ADD the neutral
-// fields beside the legacy ones rather than edit them — fine, but pointless.
+// app's eventConverter).
+//
+// A RE-RUN AGAINST THAT LIVE SHAPE NOW REFUSES (#652). An earlier version of
+// this note called such a re-run "fine, but pointless" — it was neither. The
+// corrected Day is the live Day with only ALLOWED_FIELDS overwritten, so the
+// legacy keys survive the write, and `migrateDayFields` (src/data/converters.ts)
+// gives a retained `portEmoji` display precedence over the freshly-written
+// `placeEmoji`: the run would report and apply a correction clients never
+// render, and every subsequent run would look idempotent. `assertWritablePlan`
+// therefore rejects any legacy-shaped Day FIRST, before every other verdict.
+// Migrate the live days to the neutral vocabulary before re-running this.
 //
 // DISPLAY METADATA ONLY. This writes the event doc's `days[]` and, per Day, may
 // only change: `theme`, `place`, `placeEmoji`, `tonight`. It refuses to run if the
