@@ -378,10 +378,11 @@ export async function initPostHog(): Promise<void> {
   // init (`kn()` in the 1.409.5 dist) SCHEDULES it one macrotask later via
   // `setTimeout(..., 1)`, and the capture computes `distinct_id` at capture
   // time. Everything in this replay block runs SYNCHRONOUSLY after
-  // `posthog.init()` returns (no awaits in between), so a queued reset always
-  // lands before that deferred capture can execute — the automatic first
-  // pageview of a signed-out session never attributes to a prior session's
-  // persisted identity.
+  // `posthog.init()` returns (no awaits in between), including the unconditional
+  // startup baseline reset below. That baseline cannot be delegated to
+  // main.tsx's later React auth effect: a direct-host override makes this init
+  // synchronous, so the SDK timer can otherwise win. The automatic first
+  // pageview therefore never attributes to a prior session's persisted identity.
   const ops = pendingOps;
   pendingOps = [];
   const replayRegister = (): void => {
@@ -412,16 +413,40 @@ export async function initPostHog(): Promise<void> {
   if (drained) {
     for (const c of carriedNow) phCapture(c.name, c.params, c.options);
   }
+  // Establish a clean identity baseline for THIS load before the SDK's
+  // deferred initial pageview can fire. main.tsx starts PostHog before React
+  // mounts, so the auth-driven phReset/phIdentify effect cannot be assumed to
+  // have queued an operation yet — especially when a direct-host override
+  // makes init synchronous. Replaying prior-load captures first preserves
+  // their closest surviving attribution (the identity init restored); this
+  // reset then prevents that restored identity from leaking into the current
+  // load. A later phIdentify stitches the new anonymous pageview to the
+  // resolved signed-in User without ever merging two persisted Users.
+  let replayIsAnonymous = applyReset();
+  if (replayIsAnonymous) {
+    // applyReset re-registered the FULL merged set, so the incremental replay
+    // is already satisfied and must not register the same values twice.
+    pendingRegister = null;
+  }
   for (const op of ops) {
     if (op.type === 'reset') {
       // A reset supersedes the incremental replay: `applyReset` re-registers
       // the FULL merged `registeredDims`, which already contains everything
       // `pendingRegister` held (`phRegister` merges into both).
-      pendingRegister = null;
-      applyReset();
+      // The startup baseline above is itself an anonymous reset. A queued
+      // reset before any identify is therefore redundant (the same coalescing
+      // phReset applies while queueing, even when captures sit between them)
+      // and would only orphan those anonymous captures under a discarded id.
+      if (!replayIsAnonymous && applyReset()) {
+        pendingRegister = null;
+        replayIsAnonymous = true;
+      }
     } else {
       replayRegister();
-      if (op.type === 'identify') applyIdentify(op.uid);
+      if (op.type === 'identify') {
+        applyIdentify(op.uid);
+        replayIsAnonymous = false;
+      }
       else phCapture(op.name, op.params, op.options);
     }
   }
@@ -608,13 +633,15 @@ function applyIdentify(uid: string): void {
  * the dimensions `reset()` just cleared (#556, Codex P2) — see
  * `registeredDims`'s own doc below for why this must not be skipped.
  */
-function applyReset(): void {
+function applyReset(): boolean {
   try {
     posthog.reset();
     identifiedUid = null;
     if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
+    return true;
   } catch {
     /* no-op */
+    return false;
   }
 }
 

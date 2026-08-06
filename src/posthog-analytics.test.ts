@@ -6,7 +6,7 @@ vi.mock('posthog-js', () => ({
   default: { init: vi.fn(), capture: vi.fn(), identify: vi.fn(), reset: vi.fn(), register: vi.fn() },
 }));
 
-import posthog from 'posthog-js';
+import posthog, { type CaptureResult } from 'posthog-js';
 import {
   POSTHOG_INIT_OPTIONS,
   POSTHOG_PROXY_HOST,
@@ -288,8 +288,7 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
       uuid: 'p',
       event: 'custom',
       properties: { day_index: 9 },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+    } satisfies CaptureResult);
     expect(out?.properties.day_index).toBe(1);
   });
 
@@ -301,8 +300,7 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
       uuid: 'p',
       event: 'custom',
       properties: { some_future_default: 'from-the-event' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+    } satisfies CaptureResult);
     expect(out?.properties.some_future_default).toBe('from-the-event');
   });
 
@@ -317,8 +315,7 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
       uuid: 'p',
       event: '$pageview',
       properties: { event_id: 'stale-prior-session-event', edition_id: 'gcb', $browser: 'Chrome' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+    } satisfies CaptureResult);
     expect(out?.properties.event_id).toBeUndefined();
     expect(out?.properties.edition_id).toBeUndefined();
     expect(out?.properties.$browser).toBe('Chrome'); // non-controlled properties untouched
@@ -334,8 +331,7 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
       uuid: 'p',
       event: '$pageview',
       properties: { day_index: 7 }, // leftover from a prior session/tab
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+    } satisfies CaptureResult);
     expect(out?.properties.day_index).toBeUndefined();
     expect(out?.properties).toMatchObject({ brand_id: 'five-across', edition_id: 'gcb', event_id: 'med-2026' });
   });
@@ -347,8 +343,7 @@ describe('sanitizeUrls guarantees dimensions on EVERY event, independent of SDK-
       uuid: 'p',
       event: '$pageview',
       properties: { $browser: 'Chrome' },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any);
+    } satisfies CaptureResult);
     expect(out?.properties).toEqual({ $browser: 'Chrome' });
   });
 });
@@ -675,12 +670,13 @@ describe('PostHog init with a key', () => {
     // must not leak the stubbed fetch into later tests and cascade.
     vi.unstubAllGlobals();
     expect(ph.identify).toHaveBeenCalledWith('sailor-9');
-    expect(ph.reset).toHaveBeenCalledTimes(1);
+    expect(ph.reset).toHaveBeenCalledTimes(2); // startup baseline, then the queued sign-out
     const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
       .invocationCallOrder[0];
-    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
-      .invocationCallOrder[0];
-    expect(identifyOrder).toBeLessThan(resetOrder);
+    const resetOrders = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder;
+    expect(resetOrders[0]).toBeLessThan(identifyOrder);
+    expect(identifyOrder).toBeLessThan(resetOrders[1]);
   });
 
   it('a reset requested while SIGNED OUT during the probe window is applied on the real SDK once init settles (#611, retro Phase 4b P1)', async () => {
@@ -806,7 +802,7 @@ describe('PostHog init with a key', () => {
 
     expect(ph.identify).toHaveBeenCalledTimes(1);
     expect(ph.identify).toHaveBeenCalledWith('sailor-1');
-    expect(ph.reset).not.toHaveBeenCalled();
+    expect(ph.reset).toHaveBeenCalledTimes(1); // the startup baseline only
   });
 
   it('a queued uid CHANGE with no intervening sign-out inserts the reset the transition implies (#613, Phase 4b round-2 P1)', async () => {
@@ -826,13 +822,14 @@ describe('PostHog init with a key', () => {
 
     const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
     expect(identifyCalls).toEqual(['account-A', 'account-B']);
-    expect(ph.reset).toHaveBeenCalledTimes(1);
-    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
-      .invocationCallOrder[0];
+    expect(ph.reset).toHaveBeenCalledTimes(2); // startup baseline + the A→B transition
+    const resetOrders = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder;
     const identifyOrders = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
       .invocationCallOrder;
-    expect(identifyOrders[0]).toBeLessThan(resetOrder); // A first
-    expect(resetOrder).toBeLessThan(identifyOrders[1]); // reset before B
+    expect(resetOrders[0]).toBeLessThan(identifyOrders[0]); // clean baseline before A
+    expect(identifyOrders[0]).toBeLessThan(resetOrders[1]); // A first
+    expect(resetOrders[1]).toBeLessThan(identifyOrders[1]); // transition reset before B
   });
 
   it('detects a queued uid change even when captures were queued after the first identify (#613 round 2)', async () => {
@@ -847,7 +844,7 @@ describe('PostHog init with a key', () => {
     mod.phIdentify('account-B');
     await mod.initPostHog();
 
-    expect(ph.reset).toHaveBeenCalledTimes(1); // the A→B reset was still inserted
+    expect(ph.reset).toHaveBeenCalledTimes(2); // startup baseline + the A→B reset
     const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
     expect(identifyCalls).toEqual(['account-A', 'account-B']);
   });
@@ -859,6 +856,7 @@ describe('PostHog init with a key', () => {
     const ph = (await import('posthog-js')).default;
     const mod = await import('./posthog');
     await mod.initPostHog();
+    vi.mocked(ph.reset).mockClear(); // isolate subsequent ready-path transitions from the startup baseline
 
     mod.phIdentify('account-A');
     expect(ph.reset).not.toHaveBeenCalled();
@@ -892,24 +890,26 @@ describe('PostHog init with a key', () => {
 
     const order = (name: 'identify' | 'reset' | 'capture', call = 0): number =>
       (ph[name] as unknown as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder[call];
+    expect(order('reset', 0)).toBeLessThan(order('identify', 0)); // clean startup baseline before A
     expect(order('identify', 0)).toBeLessThan(order('capture', 0)); // A identified first
-    expect(order('capture', 0)).toBeLessThan(order('reset', 0)); // the capture lands while A is current
-    expect(order('reset', 0)).toBeLessThan(order('identify', 1)); // then reset, then B
+    expect(order('capture', 0)).toBeLessThan(order('reset', 1)); // the capture lands while A is current
+    expect(order('reset', 1)).toBeLessThan(order('identify', 1)); // then transition reset, then B
     expect(ph.capture).toHaveBeenCalledWith('old_user_action', { n: 1 });
     const identifyCalls = (ph.identify as unknown as { mock: { calls: [string][] } }).mock.calls.map((c) => c[0]);
     expect(identifyCalls).toEqual(['account-A', 'account-B']);
   });
 
-  it("applies the queued reset before the SDK's DEFERRED init-time $pageview can capture (#613, Phase 4b P1)", async () => {
+  it("resets the SDK before its DEFERRED init-time $pageview even when the auth effect has not run yet (#613, Phase 4b P1)", async () => {
     // posthog-js does NOT capture the automatic initial $pageview inside
     // init(): the loaded step of init schedules it one macrotask later via
     // setTimeout(..., 1) (verified in the installed 1.409.5 dist), and the
     // capture computes distinct_id at CAPTURE time. This test mirrors that
     // scheduling in the init mock and pins our side of the contract: the
-    // queued reset is applied SYNCHRONOUSLY after posthog.init() returns —
+    // startup reset is applied SYNCHRONOUSLY after posthog.init() returns —
     // no awaits in between — so it always lands before the deferred capture
-    // task runs, and the first pageview of a signed-out session can never
-    // attribute to a prior session's persisted identity.
+    // task runs, even though main.tsx's auth effect has not run yet. The first
+    // pageview can therefore never attribute to a prior session's persisted
+    // identity.
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
@@ -924,7 +924,6 @@ describe('PostHog init with a key', () => {
         order.push('reset');
       }) as never);
       const mod = await import('./posthog');
-      mod.phReset(); // the signed-out effect fires before init settles
       await mod.initPostHog();
       vi.runAllTimers();
       expect(order).toEqual(['reset', 'sdk-initial-pageview']);
