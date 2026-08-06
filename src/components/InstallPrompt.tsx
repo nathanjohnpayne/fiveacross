@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { useHasMarkedSquare, useToastSlot } from '../hooks/useToastStack';
+import { editionLexicon } from '../editions';
 
 const DISMISS_KEY = 'gcb.install.dismissedAt';
 /** Toggled on <body> while the banner (either variant) is on screen — index.css
@@ -78,7 +79,7 @@ export default function InstallPrompt() {
           the app, which is what lets this toast afford to be shy. */}
       <div className="install-prompt-body">
         <p className="toast-title">Add me to your Home Screen</p>
-        <p>Full screen, works offline at sea.</p>
+        <p>Full screen, works offline {editionLexicon().offlineWhy}.</p>
         {/* The expansion defers while another toast shares the stack (Codex
             P2 on #281 round 2): the slot offset is a fixed height, so a
             three-line toast under the urgent one would overlap — solo, it

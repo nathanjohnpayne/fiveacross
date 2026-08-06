@@ -4,17 +4,21 @@ import { useItems, useMyPendingItems } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
 import { track } from '../analytics';
 import LoadingState from './LoadingState';
+import { editionBrand } from '../editions';
+import { useAdultContent } from '../hooks/useAdultContent';
 
 // Pre-sail framing (ADR 0003): a Board freezes the moment a Player joins, so
 // a Prompt added afterward can never land on THAT Player's own card — it only
 // ever joins the pool for a FUTURE deal. Mid-cruise adds are allowed (and
 // still take effect for late joiners / future Events); they are just mostly
 // inert on cards already dealt, which is expected, not a bug.
-const PRESAIL_NOTE =
-  "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.";
+// Whole-string per Edition (#608): the DEADLINE is the cruise-coded part
+// ("before we sail"), and it has no neutral token — a general Event's deadline
+// is the first deal, not a departure.
+const presailNote = (): string => editionBrand().promptDeadlineNote;
 
 // Phase 1.5 approval flow (#210, daily-cards-spec § "Item pools and the approval
-// flow"): a companion caption to PRESAIL_NOTE, not a replacement — PRESAIL_NOTE
+// flow"): a companion caption to `presailNote`, not a replacement — that one
 // explains freeze-on-deal, this one explains the NEW admin-review gate a
 // submission passes through before it can ever be dealt.
 const APPROVAL_NOTE = "New prompts go to admin review before they join the pool—yours will show here as “pending review” until then.";
@@ -27,6 +31,11 @@ const REPORT_THROTTLE_MESSAGE = 'Slow down—you can report again in a few secon
 export default function ItemPool() {
   const { user } = useAuth();
   const { items, loading } = useItems();
+  // The 🔞 tag is a CATEGORY within an adults-only pool, not a warning label
+  // (#608): on an Event with no adult content there is nothing to categorise,
+  // so the control is hidden rather than shown-and-inert. `spicy` then stays
+  // false on every submission, which is what the derivation reads.
+  const adult = useAdultContent();
   // The submitter's own pending submissions (#210): `useItems` reads only
   // `status == 'active'`, so a fresh `pending` add would otherwise vanish from
   // this list the instant it lands. Merged in below, tagged "pending review".
@@ -65,7 +74,7 @@ export default function ItemPool() {
       return;
     }
     try {
-      await addItem(user.uid, text, spicy);
+      await addItem(user.uid, text, adult && spicy);
       track('add_item');
       setText('');
       setSpicy(false);
@@ -109,12 +118,15 @@ export default function ItemPool() {
         <button className="btn primary" onClick={add} disabled={!text.trim() || addThrottled}>
           Add
         </button>
-        <label style={{ fontSize: 12 }}>
-          <input type="checkbox" checked={spicy} onChange={(e) => setSpicy(e.target.checked)} /> 🔞 Spicy
-        </label>
+        {adult && (
+          <label style={{ fontSize: 12 }}>
+            <input type="checkbox" checked={spicy} onChange={(e) => setSpicy(e.target.checked)} /> 🔞
+            Spicy
+          </label>
+        )}
       </div>
       <p className="muted" style={{ fontSize: 12 }}>
-        {PRESAIL_NOTE} {items.length} in the pool.
+        {presailNote()} {items.length} in the pool.
       </p>
       <p className="muted" style={{ fontSize: 12 }}>
         {APPROVAL_NOTE}

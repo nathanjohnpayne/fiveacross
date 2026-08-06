@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Shuffle } from 'lucide-react';
+import { editionLexicon } from '../editions';
 
 /**
  * The one-time launch announcement for Reshuffle (#378,
@@ -43,7 +44,14 @@ function markSeen(): void {
 
 type Beat = { key: string; chip: ReactNode; chipVariant: string; copy: ReactNode };
 
-const BEATS: Beat[] = [
+// A FUNCTION, not a module-scope constant (#608, Codex P2 on #615). The
+// resolved Edition is installed by `bootstrapEventResolution` before React
+// mounts but AFTER this module is imported, so a `const BEATS = [...]` built at
+// import time captures the default `gcb` lexicon and says "the whole cruise"
+// forever — on every hostname-resolved Vacay or Five Across host. Building the
+// beats per render is the same discipline every other Edition call site here
+// follows; the list is three items long, so there is nothing to memoise.
+const beats = (): Beat[] => [
   {
     key: 'trade',
     chip: <Shuffle aria-hidden="true" className="launch-intro-icon" />,
@@ -56,7 +64,8 @@ const BEATS: Beat[] = [
     chipVariant: 'warn',
     copy: (
       <>
-        <b>Three for the whole cruise</b>—spend them wisely. A reshuffle never comes back.
+        <b>Three for the whole {editionLexicon().occasion}</b>—spend them wisely. A reshuffle never comes
+        back.
       </>
     ),
   },
@@ -107,7 +116,7 @@ export default function LaunchIntro({ forceOpen = false, onDismiss }: LaunchIntr
       >
         <p className="sheet-title">🆕 New today: reshuffles</p>
         <ul className="coach-overlay-legend">
-          {BEATS.map((beat) => (
+          {beats().map((beat) => (
             <li key={beat.key} className="coach-overlay-row">
               <span
                 className={`coach-overlay-chip coach-overlay-chip-${beat.chipVariant}`}

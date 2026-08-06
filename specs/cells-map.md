@@ -37,7 +37,7 @@ A Board's `cells` was one 25-element ARRAY, replaced wholesale by every Mark wri
 
 **Same-cell cross-device conflict is last-write-wins.** The same player marking/unmarking the SAME Square from two devices resolves to the later write. That is the correct semantic for a single square owned by a single player, and no schema can do better without timestamps-per-field.
 
-**A pre-migration PWA bundle's queued board writes are denied post-deploy.** Its full-array write fails the `cells is map` gate at drain and rolls back locally; the update prompt / next reload re-marks under the current bundle. Bounded by the deploy moment (post-cruise, traffic near zero) and strictly narrower than the alternative (keeping an array escape reopens the clobber).
+**A pre-migration PWA bundle's queued board writes are denied post-deploy.** Its full-array write fails the `cells is map` gate at drain and rolls back locally; the update prompt / next reload re-marks under the current bundle. Bounded by the deploy moment (after the Event, traffic near zero) and strictly narrower than the alternative (keeping an array escape reopens the clobber).
 
 **The legacy `events/{id}/boards/{uid}` path is migrated for read consistency only.** It has no live write rule (the day-scoped rules removed the path); its docs are converted so every reader of `cellsFromData` sees one shape family.
 

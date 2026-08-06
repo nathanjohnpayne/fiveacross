@@ -1,7 +1,8 @@
 import { render, screen, act, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AuthProvider, useAuth } from '../auth/AuthContext';
+import { setActiveAdultContent } from '../adultContent';
 
 // Covers specs/w1-attestation.md — the 18+ re-prompt gate (#23). Mock the Firebase
 // + data-layer boundary so the REAL AuthProvider + SignIn run under jsdom, and
@@ -57,6 +58,11 @@ vi.mock('./ConfirmWinMoments', () => ({
 // subscription this suite does not wire; stub it — this suite is about the attestation
 // gate, not the watcher (its own suite is ./w1-deal-auto-retry.test.tsx).
 vi.mock('./PoolRecoveryWatcher', () => ({ default: () => null }));
+// AuthProvider also mounts the 18+ posture watcher (#608). This suite drives
+// the posture directly with `setActiveAdultContent`, and its Firebase mock is
+// deliberately narrow, so stub the seam rather than widen the mock — the
+// watcher has its own suite in ./adult-content-revalidation.test.tsx.
+vi.mock('../data/hostnames', () => ({ watchAdultContent: () => () => {} }));
 // The #479 retraction fall observer mounts at the same shell spot; stub it for
 // the same reason (its own suites are ./RetractWinMoments.test.tsx and the
 // moments unit suite).
@@ -89,7 +95,7 @@ const mount = () =>
 // continuation (popup → attest) deterministically — needed to reproduce the
 // Finding-3 race where attest() lands optimistically before a later, still-stale
 // auth-state callback read.
-let ctxSignIn: () => Promise<void> = async () => {};
+let ctxSignIn: (acknowledgedAdultContent: boolean) => Promise<void> = async () => {};
 function CaptureContext() {
   ctxSignIn = useAuth().signIn;
   return null;
@@ -253,7 +259,7 @@ describe('attestation gates the deal side effect + sticky optimistic attest (#23
     // 1. Continuation: popup resolves → signIn calls attest() → attested flips true
     //    and the uid is marked sticky. The User is not published yet, so no deal.
     await act(async () => {
-      await ctxSignIn();
+      await ctxSignIn(true);
     });
     expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
@@ -331,5 +337,100 @@ describe('a FAILED attestation bootstrap is a retryable error, never a silent st
     await userEvent.click(screen.getByRole('button', { name: /enter the event/i }));
     expect(boardShown()).toBe(true);
     await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+  });
+});
+
+// #608 — the gate stops being a constant and becomes a consequence of the
+// Event's content. Everything above still describes an Event whose pool holds
+// explicit Prompts (`adultContent: true`, the fail-closed default this suite
+// runs under); this block flips the posture and asserts the OTHER branch.
+//
+// The trap these pin: `attested` settles a permanent `false` on an Event that
+// never asks for an attestation, so a naive `needsAttestation && adultContent`
+// change would suppress the re-prompt AND strand the Player un-dealt behind the
+// gate the deal effect keys on.
+describe('the 18+ gate follows the EVENT, not the Edition (#608)', () => {
+  beforeEach(() => setActiveAdultContent(false));
+  afterEach(() => setActiveAdultContent(true));
+
+  it('never re-prompts an un-attested Player on an Event with no adult content', async () => {
+    mocks.readAdultAttestation.mockResolvedValue(null); // definitely no stamp
+    mocks.auth.currentUser = FAKE_USER;
+    mount();
+    await signIn(FAKE_USER);
+    await waitFor(() => expect(boardShown()).toBe(true));
+    expect(rePrompted()).toBe(false);
+  });
+
+  it('still DEALS them — the gate is lifted, not merely hidden', async () => {
+    // The regression this exists for: `attested` is permanently `false` here, so
+    // a deal effect that keeps gating on it would leave every Player on a blank
+    // Board forever. The equivalent authority signal is the settled profile
+    // bootstrap, which still runs `ensureUserProfile` before any deal.
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    mocks.auth.currentUser = FAKE_USER;
+    mount();
+    await signIn(FAKE_USER);
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    expect(mocks.ensureUserProfile).toHaveBeenCalled();
+  });
+
+  it('writes no attestation stamp, because none was ever collected', async () => {
+    // `attestedAdultAt` is a CROSS-EVENT record on the global users/{uid} doc.
+    // Stamping it from an Event that showed no checkbox would fabricate a
+    // self-attestation the Player never made and carry it everywhere else.
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    mocks.auth.currentUser = FAKE_USER;
+    mountWithCapture();
+    await signIn(FAKE_USER);
+    await act(async () => void (await ctxSignIn(false)));
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+  });
+
+  // Codex P2 on #615. `profileReady` is true after a bootstrap FAILURE too — that
+  // is its contract — so reading it as the deal authority would call joinAndDeal
+  // on a timed-out `ensureUserProfile`, creating Event rows before the profile
+  // bootstrap it is supposed to follow ever landed. The authority is
+  // `profileBootstrapOk`, the direct analogue of `attestedAuthoritative`.
+  it('does NOT deal when the profile bootstrap failed, even with no age gate', async () => {
+    mocks.readAdultAttestation.mockRejectedValue(new Error('network request failed'));
+    mocks.auth.currentUser = FAKE_USER;
+    mountWithProbe();
+    await signIn(FAKE_USER);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    expect(rePrompted()).toBe(false); // …and still no age prompt: none is owed
+  });
+
+  it('deals once the retried bootstrap actually succeeds', async () => {
+    mocks.readAdultAttestation
+      .mockRejectedValueOnce(new Error('network request failed'))
+      .mockResolvedValue(null);
+    mocks.auth.currentUser = FAKE_USER;
+    mountWithProbe();
+    await signIn(FAKE_USER);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByText('retry'));
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+  });
+
+  it('re-gates every un-attested Player the moment the Event turns 18+', async () => {
+    // The retroactive path, and the whole reason the posture rides the pre-auth
+    // routing document: an admin approves the first explicit Prompt, the
+    // derivation flips `hostnames/{host}.adultContent`, the next resolution
+    // installs `true`, and the EXISTING re-prompt does the rest — no new
+    // surface, no new state machine.
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    mocks.auth.currentUser = FAKE_USER;
+    const { unmount } = mount();
+    await signIn(FAKE_USER);
+    await waitFor(() => expect(boardShown()).toBe(true));
+    unmount();
+
+    setActiveAdultContent(true);
+    mount();
+    await signIn(FAKE_USER);
+    await waitFor(() => expect(rePrompted()).toBe(true));
+    expect(boardShown()).toBe(false);
   });
 });

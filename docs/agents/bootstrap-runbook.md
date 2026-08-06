@@ -1,6 +1,6 @@
 # Bootstrap Wizard Runbook
 
-> **Consumer-repo note.** Gay Cruise Bingo is a downstream *consumer* of the [mergepath](https://github.com/nathanjohnpayne/mergepath) template, not the template hub. This runbook describes bootstrapping **new** repos from mergepath; it is mirrored here for reference and is not part of working on this app. For the app, see [`README.md`](../../README.md).
+> **Consumer-repo note.** Five Across is a downstream *consumer* of the [mergepath](https://github.com/nathanjohnpayne/mergepath) template, not the template hub. This runbook describes bootstrapping **new** repos from mergepath; it is mirrored here for reference and is not part of working on this app. For the app, see [`README.md`](../../README.md).
 
 Operator-facing reference for `scripts/bootstrap-new-repo.sh`. Goal: **an operator can run a fresh bootstrap without reading the source.**
 

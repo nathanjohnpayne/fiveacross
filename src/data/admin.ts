@@ -106,6 +106,28 @@ export const setVisionGate = (on: boolean): Promise<void> =>
 export const setReportHideThreshold = (n: number): Promise<void> =>
   updateDoc(evt(), { 'settings.reportHideThreshold': n });
 
+/**
+ * The Admin override on the Event's 18+ posture (#608).
+ *
+ * An INPUT to the derivation, not the derived flag. `hostnames/{host}.adultContent`
+ * is written only by `functions/src/adultContent.ts` — no client may write that
+ * collection at all — and this is the field it ORs in:
+ *
+ *     adultContent = settings.forceAdult || (any active spicy Prompt in a dealable pool)
+ *
+ * It exists because `spicy` is narrower than it looks: it tracks SEXUAL
+ * explicitness specifically, so an Event whose only mature content is violence,
+ * drugs or self-harm would derive `false` and show no gate at all. Rather than
+ * invent a content taxonomy, a human gets a lever.
+ *
+ * Turning it OFF does NOT un-gate the Event. The derived flag is monotone by
+ * design, so clearing this removes the reason but not the posture — un-gating an
+ * already-gated Event is an operator action, deliberately not a toggle. The
+ * confirm on the way ON (`AdultContentConfirm`) says so.
+ */
+export const setForceAdult = (on: boolean): Promise<void> =>
+  updateDoc(evt(), { 'settings.forceAdult': on });
+
 // Easy mix (specs/easy-mix.md): the share of a main-day Board dealt from the embark
 // pool, a live `settings.easyMixRatio` write mirroring the four above. A DOT-PATH
 // merge so it never clobbers a sibling `settings` key. Difficulty becomes a dial, not

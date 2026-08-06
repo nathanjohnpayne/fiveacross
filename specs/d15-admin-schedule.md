@@ -5,7 +5,7 @@ status: accepted
 
 # d15-admin-schedule — Admin Schedule editor: ten Days as rows, theme dropdown, locked once unlocked
 
-Implements `plans/daily-cards-spec.md` § "Admin console" (the Schedule editor) and the admin-editability promise in § "Itinerary and schedule" ("the schedule stays admin-editable in the Admin console anyway"). The ten-Day mapping (`EventDoc.days[]`) is seeded once by `d15-tutorial-seed`, but party order can shift onboard and a future cruise needs its own mapping — this ticket gives admins a rows-per-Day editor for date, port, and theme, with the one write-time rule the spec asks for: a Day's theme is editable while it is still locked-future, and locked once that Day has unlocked.
+Implements `plans/daily-cards-spec.md` § "Admin console" (the Schedule editor) and the admin-editability promise in § "Itinerary and schedule" ("the schedule stays admin-editable in the Admin console anyway"). The ten-Day mapping (`EventDoc.days[]`) is seeded once by `d15-tutorial-seed`, but party order can shift mid-Event and a future Event needs its own mapping — this ticket gives admins a rows-per-Day editor for date, port, and theme, with the one write-time rule the spec asks for: a Day's theme is editable while it is still locked-future, and locked once that Day has unlocked.
 
 Depends on #200 (`d15-schema-contract`, the `EventDoc.days: DayDef[]` shape this ticket edits) and #201 (`d15-firestore-rules`, the rules baseline this ticket's Day-theme lock extends).
 

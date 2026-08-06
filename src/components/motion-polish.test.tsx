@@ -25,7 +25,7 @@ vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: null, loading: false }),
 }));
 vi.mock('./ShareCard', () => ({
-  SHARE_CARD_APP_NAME: 'Gay Cruise Bingo',
+  shareCardAppName: () => 'Gay Cruise Bingo',
   renderBingoShareCard: vi.fn(() => Promise.resolve(new Blob(['x'], { type: 'image/png' }))),
   shareCardBlob: vi.fn(() => Promise.resolve('shared')),
 }));

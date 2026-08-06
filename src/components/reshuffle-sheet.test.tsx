@@ -53,7 +53,7 @@ describe('ReshuffleSheet — the wireframe copy', () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /2 of 3 cruise reshuffles left · available only before you've marked a square/,
+        /2 of 3 reshuffles left · available only before you've marked a square/,
       ),
     ).toBeInTheDocument();
   });
@@ -65,7 +65,7 @@ describe('ReshuffleSheet — the wireframe copy', () => {
 
   it('counts down the remaining allowance', () => {
     setup({ used: 2 });
-    expect(screen.getByText(/1 of 3 cruise reshuffles left/)).toBeInTheDocument();
+    expect(screen.getByText(/1 of 3 reshuffles left/)).toBeInTheDocument();
   });
 
   it('offers Keep my card as the primary and Reshuffle it as the danger action', () => {

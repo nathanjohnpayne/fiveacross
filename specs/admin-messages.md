@@ -9,7 +9,7 @@ Implements `plans/admin-messages-ticket.md` (issue #439), matching `plans/daily-
 
 ## Concept
 
-A **Notice** is an admin-authored broadcast: a title and body the admin writes, optionally **pinned**. It is a first-class Feed citizen, not a chat — no recipients, no threading, no read receipts, no report counter. Glossary-distinct from a Moment (CONTEXT.md): a Moment announces a game beat and carries no authored copy; a Notice IS the admin's own words. Nothing in the model is specific to the first message — a future announcement, or the next cruise's, is simply a new document.
+A **Notice** is an admin-authored broadcast: a title and body the admin writes, optionally **pinned**. It is a first-class Feed citizen, not a chat — no recipients, no threading, no read receipts, no report counter. Glossary-distinct from a Moment (CONTEXT.md): a Moment announces a game beat and carries no authored copy; a Notice IS the admin's own words. Nothing in the model is specific to the first message — a future announcement, or the next Event's, is simply a new document.
 
 ## Data model
 
@@ -76,7 +76,7 @@ While a Notice is pinned, the Card tab shows it once as a dismissible banner (�
 ## Decisions (from the ticket, resolved)
 
 - **Name** — "Notice" (glossary-distinct from Moment).
-- **Dismissal persistence** — per-device `localStorage` (zero schema, matches theme/coach persistence; a cruise-length product favors local over per-user Firestore).
+- **Dismissal persistence** — per-device `localStorage` (zero schema, matches theme/coach persistence; an Event-length product favors local over per-user Firestore).
 - **Multiple pins** — allowed; newest pinned first in both the Feed masthead and the banner selection.
 - **First-Notice copy** — "Final stretch 🏁" / the final-days body, posted through the shipped UI (the feature's own acceptance test), not seeded by script.
 

@@ -13,7 +13,7 @@ import {
 } from './editions';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 
-const EDITIONS = ['gcb', 'vacay'];
+const EDITIONS = ['gcb', 'vacay', 'fiveacross'];
 
 // Covers the pre-auth Edition brand (#543, ADR 0009 § Consequences). The whole
 // point of this module is that the sign-in gate can be branded BEFORE there is
@@ -55,21 +55,30 @@ describe('editions — the pre-auth brand', () => {
     // player sees first — or, since #586, a blank browser tab and a nameless
     // installed app.
     for (const edition of EDITIONS) {
-      const brand = editionBrand(edition);
-      for (const [field, value] of Object.entries(brand)) {
+      const { lexicon, ...text } = editionBrand(edition);
+      for (const [field, value] of Object.entries(text)) {
         expect(value, `${edition}.${field}`).toBeTypeOf('string');
         expect(value.length, `${edition}.${field}`).toBeGreaterThan(0);
+      }
+      // …and the lexicon it now carries (#608). Destructured out above rather
+      // than skipped by name: a future non-string field on EditionBrand would
+      // fail the destructure's exhaustiveness at the type level, not silently
+      // slip past a `typeof value === 'string'` filter here.
+      for (const [field, value] of Object.entries(lexicon)) {
+        expect(value, `${edition}.lexicon.${field}`).toBeTypeOf('string');
+        expect(value.length, `${edition}.lexicon.${field}`).toBeGreaterThan(0);
       }
     }
   });
 
   it('keeps the cruise itinerary OUT of every non-cruise Edition', () => {
-    for (const edition of ['vacay']) {
+    for (const edition of ['vacay', 'fiveacross']) {
       const brand = editionBrand(edition);
       // Every field, not a hand-listed three: the leak #586 fixed was in the
       // chrome identity, which the original spelling of this guard did not
       // reach — a new field must be covered by default, not by remembering.
-      const all = Object.values(editionBrand(edition)).join(' ');
+      const { lexicon, ...text } = editionBrand(edition);
+      const all = [...Object.values(text), ...Object.values(lexicon)].join(' ');
       expect(all).not.toMatch(/cruise|sailing|at sea|aboard/i);
       expect(brand.documentTitle).not.toMatch(/cruise/i);
     }

@@ -524,7 +524,7 @@ export function DayBar({
             type="button"
             className="reshuf"
             onClick={reshuffle.onOpen}
-            aria-label={`Reshuffle this card — ${reshuffle.left} of ${RESHUFFLE_ALLOWANCE} cruise reshuffles left`}
+            aria-label={`Reshuffle this card — ${reshuffle.left} of ${RESHUFFLE_ALLOWANCE} reshuffles left`}
           >
             <Shuffle aria-hidden="true" className="reshuf-icon" />
             <span aria-hidden="true">×{reshuffle.left}</span>

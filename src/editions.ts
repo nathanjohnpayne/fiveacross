@@ -21,43 +21,12 @@
 // them inside a function is fine: the config only ever calls `editionBrand`
 // with an explicit Edition id.
 
-export interface EditionBrand {
-  /** The wordmark on the signed-out gate. */
-  wordmark: string;
-  /** The trailing segment of `wordmark` the app header renders in `<b>` —
-   *  "GAY CRUISE **BINGO**" (#602). Must be a suffix of `wordmark`;
-   *  `wordmarkSegments` degrades to an unbolded wordmark when it is not, so a
-   *  mismatch is a weight defect, never wrong words. */
-  wordmarkBold: string;
-  /** The verb before the start date on the header's pre-event identity line —
-   *  "Sails Jul 15" on the cruise, "Starts Aug 7" on a house event (#602).
-   *  Post-auth copy, but Edition (not Event) identity, so it lives with the
-   *  rest of the brand strings. The full nautical-vocabulary retirement is
-   *  epic #535's job; this is the one word that reaches the header. */
-  preEventVerb: string;
-  /** One line under it: what this is and when. Signed-out state only. */
-  tagline: string;
-  /** The offline reassurance at the foot of the gate. Edition-specific because
-   *  the reason you might lose signal is. */
-  offlineNote: string;
-  /** `<title>`: the browser tab, the bookmark name, and the title the share
-   *  sheet pre-fills. Deliberately NOT the same field as `appName` — retitling
-   *  a page must not be able to silently rename an already-installed icon,
-   *  which is the reason index.html sets `apple-mobile-web-app-title`
-   *  explicitly rather than letting iOS fall back to `<title>`. */
-  documentTitle: string;
-  /** The INSTALLED app's full name: the PWA manifest `name` (Android's install
-   *  prompt and app info) and, via `apple-mobile-web-app-title`, the iOS
-   *  home-screen label. */
-  appName: string;
-  /** Android's home-screen label (manifest `short_name`); iOS ignores it in
-   *  favour of `appName` (#364). Keep it under ~12 characters or Android
-   *  truncates it — dropping a word beats letting the launcher choose which
-   *  half of the brand to show (#359). */
-  appShortName: string;
-  /** One line beside the install prompt (manifest `description`). */
-  appDescription: string;
-}
+import type { EditionBrand, EditionLexicon } from './types';
+export type { EditionBrand, EditionLexicon } from './types';
+
+// An Edition is a dialect as well as a name. Token skeletons and whole-string
+// overrides live in the table below; their shared shape lives in `src/types.ts`
+// with the rest of the app's cross-consumer contracts.
 
 export const DEFAULT_EDITION = 'gcb';
 
@@ -74,6 +43,31 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Gay Cruise Bingo',
     appShortName: 'Gay Bingo',
     appDescription: 'Live multiplayer bingo for the high seas.',
+    lexicon: {
+      occasion: 'cruise',
+      occasionWide: 'cruise-wide',
+      place: 'port',
+      placePlural: 'Ports',
+      crowd: 'the whole boat',
+      offlineWhy: 'at sea',
+      shareMark: '🚢',
+      fileSlug: 'gay-cruise-bingo',
+    },
+    passCheckLabel: 'Checking your cruise pass…',
+    scheduleTitle: 'Cruise schedule',
+    scheduleSub: 'Ports, parties, unlock times',
+    walkthroughReplaySub: 'Replay the Welcome Aboard walkthrough',
+    promptDeadlineNote:
+      "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.",
+    championRole: 'Cruise champion',
+    podiumLabel: 'Cruise podium',
+    reviewQueueAllClear: 'All clear. Go enjoy the boat.',
+    bingoShareText: 'I got BINGO on the high seas 🚢',
+    blackoutShareText: 'BLACKOUT. I win the boat. 🚢',
+    updateToastMark: '🚢',
+    updateToastTitle: 'A fresh build just docked',
+    guidelinesScope: 'one sailing’s friend group',
   },
   vacay: {
     wordmark: 'VACAY BINGO',
@@ -89,6 +83,83 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Vacay Bingo',
     appShortName: 'Vacay Bingo',
     appDescription: 'Live multiplayer bingo for the trip.',
+    lexicon: {
+      occasion: 'trip',
+      occasionWide: 'trip-wide',
+      place: 'stop',
+      placePlural: 'Stops',
+      crowd: 'the whole group',
+      offlineWhy: 'wherever you land',
+      shareMark: '🗺️',
+      fileSlug: 'vacay-bingo',
+    },
+    passCheckLabel: 'Checking your trip pass…',
+    scheduleTitle: 'Trip schedule',
+    scheduleSub: 'Stops, parties, unlock times',
+    walkthroughReplaySub: 'Replay the welcome walkthrough',
+    promptDeadlineNote:
+      "Get your prompts in before we set off—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares, close to home. The real chaos starts tomorrow at 8.",
+    championRole: 'Trip champion',
+    podiumLabel: 'Trip podium',
+    reviewQueueAllClear: 'All clear. Go enjoy the trip.',
+    bingoShareText: 'I got BINGO on this trip 🗺️',
+    blackoutShareText: 'BLACKOUT. I win the trip. 🗺️',
+    updateToastMark: '🗺️',
+    updateToastTitle: 'A fresh build just landed',
+    guidelinesScope: 'one trip’s friend group',
+  },
+  // Five Across (#599, fiveacross.app) — the OCCASION-NEUTRAL register. Minimal
+  // camp, no water, no spatial metaphor: a conference hall, a wedding, a
+  // birthday weekend all have to read naturally in it. Its offline story is the
+  // STRONGEST of the three, not the weakest (#608): a few hundred phones on one
+  // cell, behind concrete and structural steel, drops signal more reliably than
+  // a ship does — congestion and physical barriers, which the player experiences
+  // identically as "no bars".
+  fiveacross: {
+    wordmark: 'FIVE ACROSS',
+    // "FIVE **ACROSS**" — the second word, matching how the other two Editions
+    // bold their own last word (#602). The wordmark IS the mechanic here, so the
+    // emphasis lands on the thing you are trying to get.
+    wordmarkBold: 'ACROSS',
+    // The general register's pre-event verb (#602 × #608). "Sails" is cruise
+    // vocabulary and "Starts" is the trip Edition's; a conference, a wedding and
+    // a birthday weekend all read naturally as "Opens Aug 7" — the doors-open
+    // framing its default Theme (✨ Marquee, #617) already speaks.
+    preEventVerb: 'Opens',
+    tagline: 'Sign in, get your card, mark it if you see it.',
+    offlineNote: 'Packed room, no bars? Your card keeps working offline — marks sync when you reconnect.',
+    // Title case for the tab and the home-screen label, as above. "Five Across"
+    // is 11 characters, so it survives Android's short_name truncation whole.
+    documentTitle: 'Five Across',
+    appName: 'Five Across',
+    appShortName: 'Five Across',
+    appDescription: 'Live multiplayer bingo for your group.',
+    lexicon: {
+      occasion: 'event',
+      occasionWide: 'event-wide',
+      place: 'place',
+      placePlural: 'Places',
+      crowd: 'everyone here',
+      offlineWhy: 'in a packed venue',
+      shareMark: '✳️',
+      fileSlug: 'five-across',
+    },
+    passCheckLabel: 'Checking your pass…',
+    scheduleTitle: 'Schedule',
+    scheduleSub: 'Places, events, unlock times',
+    walkthroughReplaySub: 'Replay the welcome walkthrough',
+    promptDeadlineNote:
+      "Get your prompts in before the first card is dealt—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares to warm up. The real chaos starts tomorrow at 8.",
+    championRole: 'Champion',
+    podiumLabel: 'Final podium',
+    reviewQueueAllClear: 'All clear. Go enjoy yourself.',
+    bingoShareText: 'I got BINGO. ✳️',
+    blackoutShareText: 'BLACKOUT. I win. ✳️',
+    updateToastMark: '⬆️',
+    updateToastTitle: 'A new version is ready',
+    guidelinesScope: 'one event’s friend group',
   },
 };
 
@@ -125,11 +196,30 @@ export function activeEdition(): string {
   return (currentEdition ??= seedEdition());
 }
 
+/**
+ * Is `edition` a real row in `BRANDS` — an OWN property, not an inherited one?
+ *
+ * `BRANDS` is an object literal, so it inherits `Object.prototype`, and a plain
+ * `BRANDS[edition]` therefore answers for `constructor`, `toString`,
+ * `valueOf`, `hasOwnProperty` and friends (#597). Every one of those is TRUTHY
+ * and none of them is an `EditionBrand`, so the two lookups below would install
+ * a function as the resolved Edition and hand `undefined` to every copy site —
+ * a blank wordmark and a blank tagline on the sign-in gate — instead of falling
+ * back to `gcb`. `hostnames/{host}.edition` is operator-authored data, so the
+ * value reaching here is not under this module's control.
+ *
+ * `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: this program
+ * targets ES2021, where `Object.hasOwn` is not in `lib`.
+ */
+function isKnownEdition(edition: string | null | undefined): boolean {
+  return typeof edition === 'string' && Object.prototype.hasOwnProperty.call(BRANDS, edition);
+}
+
 /** Install the resolved Edition. A falsy or unknown value resets to the legacy
  *  Edition: an unrecognised Edition should degrade to the shipped experience,
  *  never to an unbranded screen. */
 export function setActiveEdition(edition: string | null | undefined): void {
-  currentEdition = edition && BRANDS[edition] ? edition : DEFAULT_EDITION;
+  currentEdition = isKnownEdition(edition) ? edition! : DEFAULT_EDITION;
 }
 
 /** Brand copy for the active Edition (or an explicit one, for tests).
@@ -138,7 +228,13 @@ export function setActiveEdition(edition: string | null | undefined): void {
  *  the default argument resolves through `activeEdition()`, which reads
  *  `import.meta.env` and therefore only works in the app. */
 export function editionBrand(edition: string = activeEdition()): EditionBrand {
-  return BRANDS[edition] ?? BRANDS[DEFAULT_EDITION];
+  return isKnownEdition(edition) ? BRANDS[edition]! : BRANDS[DEFAULT_EDITION]!;
+}
+
+/** The active Edition's vocabulary (#608) — the token layer. Whole-string
+ *  overrides come off `editionBrand()` instead; see `EditionLexicon`. */
+export function editionLexicon(edition: string = activeEdition()): EditionLexicon {
+  return editionBrand(edition).lexicon;
 }
 
 /**
@@ -184,9 +280,18 @@ export function buildTimeEdition(
   return envEdition || DEFAULT_EDITION;
 }
 
+/** The brand fields that are plain strings — i.e. the ones a static HTML
+ *  placeholder could carry. `EditionBrand` gained a nested `lexicon` in #608, so
+ *  a bare `keyof EditionBrand` would let a token be pointed at an OBJECT and
+ *  stringify it into the tab title as `[object Object]`. Narrowing here makes
+ *  that a compile error at the table below rather than a shipped defect. */
+type EditionBrandTextField = {
+  [K in keyof EditionBrand]: EditionBrand[K] extends string ? K : never;
+}[keyof EditionBrand];
+
 /** The `index.html` placeholders, and the field each one carries. Adding a row
  *  here is the whole cost of branding a new static tag. */
-const HTML_IDENTITY_TOKENS: Record<string, keyof EditionBrand> = {
+const HTML_IDENTITY_TOKENS: Record<string, EditionBrandTextField> = {
   '%EDITION_DOCUMENT_TITLE%': 'documentTitle',
   '%EDITION_APP_NAME%': 'appName',
 };

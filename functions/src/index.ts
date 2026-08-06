@@ -12,6 +12,11 @@ import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import { shouldNotify, notifyAdminsOfModeration, type ModeratedDoc } from './notify';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
+import {
+  applyEventAdultContent,
+  applyItemAdultContent,
+  reconcileHostnameAdultContent,
+} from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
 import {
   manualUnlockNow,
@@ -272,6 +277,70 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
       event.data?.before.data()?.settings?.reportHideThreshold,
       event.data?.after.data()?.settings?.reportHideThreshold,
     ),
+);
+
+/**
+ * The Event's 18+ posture, derived server-side (#608). The decision predicates
+ * and the idempotent stamp live in `adultContent.ts` so they are unit-testable
+ * without a Functions runtime; these are the thin trigger seams, mirroring the
+ * auto-hide pair above.
+ *
+ * WHY A FUNCTION AT ALL. The 18+ acknowledgement is on the sign-in gate —
+ * pre-auth — and `events/{eventId}/items/{id}` requires `signedIn()`, so the one
+ * client that must know whether the pool holds explicit Prompts is the one
+ * client that can never read it. The derivation publishes the answer onto the
+ * world-readable routing documents the resolver already fetches before mount.
+ *
+ * Both pin `ADMIN_SDK_SERVICE_ACCOUNT`: they read `hostnames` (a collection no
+ * client may `list`) and write it (a collection no client may write at all), and
+ * the project's default Gen2 compute identity has no Firestore data-plane
+ * access, so an unpinned run would fail its first read. Neither writes anything
+ * under `events/`, so neither can re-fire itself or the other.
+ *
+ * Both also set `retry: true`, and that is load-bearing rather than defensive
+ * (Phase 4b P1). `adultContent.ts` deliberately THROWS on a failed stamp instead
+ * of swallowing it — but event-driven Functions do not retry failed invocations
+ * by default, so without this the throw bought nothing: a transient hostname
+ * query or update failure would leave the routing document at `false`
+ * indefinitely, and nothing would try again unless another qualifying Prompt
+ * happened to be written. That is precisely the fail-open the throw was added to
+ * close.
+ *
+ * Retrying is safe because both handlers are idempotent by construction: the
+ * stamp skips documents already at `true`, and the cheap predicates short-circuit
+ * before any read, so a redelivery on a write that never qualified cannot fail
+ * and cannot loop. The one cost is that a PERMANENT failure (a broken IAM
+ * binding) retries for up to seven days — which for a fail-closed security flag
+ * is the behaviour you want, and is loud in the logs rather than silent.
+ */
+export const deriveAdultContentOnItem = onDocumentWritten(
+  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
+  (event) => applyItemAdultContent(event.params.eventId, event.data?.after.data()),
+);
+
+export const deriveAdultContentOnEvent = onDocumentWritten(
+  { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
+  (event) => applyEventAdultContent(event.params.eventId, event.data?.after.data()),
+);
+
+/**
+ * The third side of the same invariant (Phase 4b round 3).
+ *
+ * The two triggers above cover every way an Event can BECOME adult. This covers
+ * the opposite order: a routing document that appears AFTER it already is — an
+ * alias added to a running Event, or a document created concurrently with a
+ * derivation run, after that run's `hostnames` query snapshot was taken. In both
+ * cases no qualifying source document will ever change again, so nothing would
+ * re-derive and the new host would serve the un-gated shell indefinitely.
+ *
+ * Watches `hostnames` itself, which is why it is the one trigger here whose own
+ * writes land on the collection it observes. That is safe and needs no separate
+ * loop guard: the handler returns before any read when the document is already
+ * `adultContent: true`, which is exactly what its own stamp produces.
+ */
+export const reconcileHostnameOnWrite = onDocumentWritten(
+  { document: 'hostnames/{host}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
+  (event) => reconcileHostnameAdultContent(event.params.host, event.data?.after.data()),
 );
 
 /**

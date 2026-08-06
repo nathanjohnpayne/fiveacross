@@ -1,6 +1,6 @@
 # Ticket workflow — keeping the Project board accurate
 
-This is the manual board-update protocol every agent (and human) follows so [Project #7](https://github.com/users/nathanjohnpayne/projects/7) stays an accurate picture of the [Gay Cruise Bingo backlog](../../plans/gaycruisebingo-backlog.md). The board is the shared source of truth for who is doing what; drift makes agents double-pick and hides what's actually Ready. The backlog and the dependency DAG / hot-file plan live in [`plans/gaycruisebingo-backlog.md`](../../plans/gaycruisebingo-backlog.md) and [`plans/gaycruisebingo-parallelization.md`](../../plans/gaycruisebingo-parallelization.md).
+This is the manual board-update protocol every agent (and human) follows so [Project #7](https://github.com/users/nathanjohnpayne/projects/7) stays an accurate picture of the [Five Across backlog](../../plans/gaycruisebingo-backlog.md). The board is the shared source of truth for who is doing what; drift makes agents double-pick and hides what's actually Ready. The backlog and the dependency DAG / hot-file plan live in [`plans/gaycruisebingo-backlog.md`](../../plans/gaycruisebingo-backlog.md) and [`plans/gaycruisebingo-parallelization.md`](../../plans/gaycruisebingo-parallelization.md).
 
 ## Board columns (Status) and their meaning
 

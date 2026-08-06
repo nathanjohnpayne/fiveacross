@@ -21,7 +21,8 @@ import {
 import type { User } from 'firebase/auth';
 import { db, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
-import { isReportHidden, isBanned } from './moderation';
+import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
+import { adultContentRequired } from '../adultContent';
 import { itemsCol } from './paths';
 import { FREE_TEXT } from './seed';
 import {
@@ -491,6 +492,16 @@ export async function joinAndDeal(u: User): Promise<boolean> {
   // prompts AFTER the community hide AND the ban, so a pool padded past the floor by
   // heavily-reported or banned-author Prompts still fails fast rather than dealing a
   // card that hides squares the moment it renders.
+  //
+  // `isExplicitWithheld` joins them for the publish race (Phase 4b round 4): an
+  // admin's approval write and the Cloud Function that publishes the 18+ posture
+  // are two writes with an invocation between them, so a deal landing in that
+  // window would otherwise freeze an explicit Prompt onto the card of a Player
+  // this Event has not yet asked to acknowledge anything — and a Board freezes on
+  // deal, so unlike the live pool that one does not resolve itself when the
+  // posture catches up. Reads the module accessor, not the hook: this is not a
+  // component, and it wants the posture at deal time.
+  const adultRequired = adultContentRequired();
   const pool: DealItem[] = snap.docs
     .map((d) => d.data())
     .filter(
@@ -498,6 +509,7 @@ export async function joinAndDeal(u: User): Promise<boolean> {
         !it.isFreeSpace &&
         (it.pool ?? 'main') === 'main' &&
         !isReportHidden(it.reportCount, threshold) &&
+        !isExplicitWithheld(it.spicy, adultRequired) &&
         !isBanned(it.createdBy, bannedUids),
     )
     // spicy is coerced to a strict boolean (CodeRabbit, PR #135): a legacy or
@@ -597,10 +609,18 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // MEMBERSHIP is the snapshot alone; this only hydrates the text/spicy the deal
   // needs. A snapshot id whose doc is missing or is the free space is dropped.
   const itemSnaps = await Promise.all(snapshotIds.map((id) => getDoc(rawItem(id)).catch(() => null)));
+  // The Day Snapshot freezes membership, but it must not bypass the same
+  // approval→hostname-stamp race guard as the legacy deal. Capture the posture
+  // once: false→true while these reads run may withhold extra Prompts for this
+  // attempt, which is safe; the server flag is monotone so true cannot lower.
+  const adultRequired = adultContentRequired();
   const pool: DealItem[] = itemSnaps
     .filter((s): s is NonNullable<typeof s> => !!s && s.exists())
     .map((s) => ({ id: s.id, data: s.data() as Partial<ItemDoc> }))
-    .filter(({ data }) => data.isFreeSpace !== true)
+    .filter(
+      ({ data }) =>
+        data.isFreeSpace !== true && !isExplicitWithheld(data.spicy, adultRequired),
+    )
     .map(({ id, data }) => ({
       id,
       text: String(data.text ?? ''),
@@ -921,10 +941,17 @@ export async function reshuffleBoard(params: {
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id)).catch(() => null)),
   );
+  // A reshuffle is another frozen-card publish path. During the asynchronous
+  // window between approving the first explicit Prompt and publishing the 18+
+  // hostname posture, it must fail closed exactly like the first Day deal.
+  const adultRequired = adultContentRequired();
   const pool: DealItem[] = itemSnaps
     .filter((s): s is NonNullable<typeof s> => !!s && s.exists())
     .map((s) => ({ id: s.id, data: s.data() as Partial<ItemDoc> }))
-    .filter(({ data }) => data.isFreeSpace !== true)
+    .filter(
+      ({ data }) =>
+        data.isFreeSpace !== true && !isExplicitWithheld(data.spicy, adultRequired),
+    )
     .map(({ id, data }) => ({
       id,
       text: String(data.text ?? ''),
@@ -1014,7 +1041,7 @@ export async function reshuffleBoard(params: {
     const player = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
     const used = typeof player?.reshufflesUsed === 'number' ? player.reshufflesUsed : 0;
     if (used >= RESHUFFLE_ALLOWANCE) {
-      throw new Error('reshuffleBoard: no cruise reshuffles left.');
+      throw new Error('reshuffleBoard: no reshuffles left.');
     }
 
     // No-repeat exclusion computed from KEPT cards only (the ticket's decision):

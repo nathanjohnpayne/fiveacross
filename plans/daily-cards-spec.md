@@ -1,18 +1,18 @@
-# Spec: Daily Cards—one themed board per cruise day
+# Spec: Daily Cards—one themed board per Event day
 
 Status: draft for review. No code changes; wireframes in `daily-cards-wireframes.html`.
 
 ## Summary
 
-Today the app deals one Board per Player for the whole Event. This feature makes the card daily: each cruise day has a theme, and each day unlocks a fresh themed Board at 8:00 a.m. ship time. Players play through all ten cards over the cruise; locked days are visible (themed chrome, lock icon, blank squares except the free space) to tease what's coming. The two non-party days become tutorial days: **Welcome Aboard** (embark, teaches the game with easy on-ship items) and **So Long, Farewell** (disembark, a reflective goodbye card). New pool submissions now require admin approval before they can appear on a card.
+Today the app deals one Board per Player for the whole Event. This feature makes the card daily: each Day of the Event has a theme, and each day unlocks a fresh themed Board at 8:00 a.m. Event time. Players play through all ten cards over the Event; locked days are visible (themed chrome, lock icon, blank squares except the free space) to tease what's coming. The two non-party days become tutorial days: **Welcome Aboard** (the opening Day, teaches the game with easy items) and **So Long, Farewell** (the closing Day, a reflective goodbye card). New pool submissions now require admin approval before they can appear on a card.
 
-Decisions already made with Nathan: one cruise-long leaderboard plus per-day First to BINGO honors; all eight themed days deal from the shared main pool (theme is visual only); the embark card is live pre-cruise; embark/farewell pools are curated (admin-editable, no player submissions).
+Decisions already made with Nathan: one Event-long leaderboard plus per-day First to BINGO honors; all eight themed days deal from the shared main pool (theme is visual only); the opening Day's card is live before the Event opens; the easy and closing pools are curated (admin-editable, no player submissions).
 
 ## Glossary additions (CONTEXT.md language)
 
-- **Day**: One calendar day of the sailing, owning a date, port, Theme, and unlock state. The Event owns an ordered list of ten Days. *Avoid:* round, stage.
+- **Day**: One calendar day of the Event, owning a date, Place, Theme, and unlock state. The Event owns an ordered list of ten Days. *Avoid:* round, stage.
 - **Day Card**: A Player's Board for one Day—same 5×5 contract as today, now one per Player per Day. "Board" continues to mean this object; "Day Card" is the player-facing name.
-- **Tutorial Day**: The embark and disembark Days. Dealt from their own curated pools, framed as onboarding/farewell rather than competition.
+- **Tutorial Day**: The opening and closing Days. Dealt from their own curated pools, framed as onboarding/send-off rather than competition.
 - **Pool**: Which item set a Prompt belongs to—`main`, `embark`, or `farewell`. Only `main` accepts player submissions.
 - **Pending**: A submitted Prompt awaiting admin approval. Invisible to players; never dealt.
 - **Day Snapshot**: The frozen list of approved Prompts captured at a Day's unlock moment. All of that Day's deals draw from the snapshot, so everyone's card reflects the same pool regardless of when they first open it.
@@ -20,9 +20,9 @@ Decisions already made with Nathan: one cruise-long leaderboard plus per-day Fir
 
 ## Itinerary and schedule
 
-Sailing: July 15–24, 2026, Trieste → Barcelona (Virgin Voyages Scarlet Lady). Every port is CEST, so a single event timezone (`Europe/Rome`) covers the whole cruise—no ship-clock drift handling needed.
+Event window: July 15–24, 2026, Trieste → Barcelona (Virgin Voyages Scarlet Lady). Every port is CEST, so a single event timezone (`Europe/Rome`) covers the whole Event—no ship-clock drift handling needed.
 
-**Corrected 2026-07-17 (mid-cruise), from `schedule_1.xlsx` + the VB26 vacation guide's Entertainment Preview—supersedes the seeded mapping.** The model split: each Day has ONE **unified theme** (drives chrome, palette, chips, honors emoji) and a **"Tonight:" line of exactly two signature events** (parties when the day has them, else the night's headline show/concert + party, per the guide). `DayDef` gains `tonight: string[]` (two display strings with emoji); the theme stays a single ThemeId.
+**Corrected 2026-07-17 (mid-Event), from `schedule_1.xlsx` + the VB26 vacation guide's Entertainment Preview—supersedes the seeded mapping.** The model split: each Day has ONE **unified theme** (drives chrome, palette, chips, honors emoji) and a **"Tonight:" line of exactly two signature events** (parties when the day has them, else the night's headline show/concert + party, per the guide). `DayDef` gains `tonight: string[]` (two display strings with emoji); the theme stays a single ThemeId.
 
 | Day | Date       | Port                     | Unified theme                    | Tonight (two signature events)                    |
 |-----|------------|--------------------------|----------------------------------|---------------------------------------------------|
@@ -37,7 +37,7 @@ Sailing: July 15–24, 2026, Trieste → Barcelona (Virgin Voyages Scarlet Lady)
 | 9   | Thu Jul 23 | 🇫🇷 Marseille            | 🪩 Revival! Classic Disco        | 🪩 Revival! Classic Disco T-Dance · 🎉 Last Dance |
 | 10  | Fri Jul 24 | 🇪🇸 Barcelona            | 👋 So Long, Farewell (tutorial)  | 🧳 Disembark in Barcelona · 👋 Until next year *(editorial—no guide events)* |
 
-Sources: every Tonight pair is from the guide's Entertainment Preview except Day 10 (disembark morning—no events published; the line is editorial). The guide's port for Monday still reads Sorrento; the corrected sheet (Naples) supersedes it. The schedule stays **admin-editable** for future days; Days 1–3 are already unlocked, so this correction lands via a one-time owner migration (see `plans/schedule-correction-ticket.md`)—labels, themes, and the tonight lines only, never boards, snapshots, or stats.
+Sources: every Tonight pair is from the guide's Entertainment Preview except Day 10 (closing morning—no events published; the line is editorial). The guide's port for Monday still reads Sorrento; the corrected sheet (Naples) supersedes it. The schedule stays **admin-editable** for future days; Days 1–3 are already unlocked, so this correction lands via a one-time owner migration (see `plans/schedule-correction-ticket.md`)—labels, themes, and the tonight lines only, never boards, snapshots, or stats.
 
 ## Theme reference
 
@@ -61,7 +61,7 @@ The existing `ThemeMeta` (id, label, emoji—the theme-switcher button's data) i
 | `under-the-stars` *(unified)* | 🌌 Under the Stars | No theme. Just dance. An open-deck night under the Mediterranean sky. *(Guide copy.)* |
 | `atlantis-classics` *(unified)* | 🏺 Atlantis Classics | Three decades of Atlantis dance music—big anthems, diva voices, and classic sounds that still sound amazing today. *(Guide copy.)* |
 
-New party (no ThemeId—display-only in `tonight`): **💦 Splash T-Dance**—"Nothing to this one but water, and lots of it. Leave your phone and anything precious in your cabin and get soaked in the summer heat." The five superseded ThemeIds (`get-sporty`, `duty-free`, `dog-tag`, `seriously-pink`, `neon-playground`) remain valid—they still back the theme switcher, saved player preferences, and `neon-playground` stays the app default—they're just no longer day themes on this sailing; their names live on in `tonight` strings.
+New party (no ThemeId—display-only in `tonight`): **💦 Splash T-Dance**—"Nothing to this one but water, and lots of it. Leave your phone and anything precious in your cabin and get soaked in the summer heat." The five superseded ThemeIds (`get-sporty`, `duty-free`, `dog-tag`, `seriously-pink`, `neon-playground`) remain valid—they still back the theme switcher, saved player preferences, and `neon-playground` stays the app default—they're just no longer day themes on this Event; their names live on in `tonight` strings.
 
 ### Proposed palettes for the two new themes
 
@@ -184,17 +184,17 @@ Tallies, Doubts, Proofs, and Moments gain a `dayIndex` field so the feed can say
 
 ## Unlock mechanics
 
-- **Rule**: a Day unlocks at 08:00 event-timezone on its date. One exception only: the embark Day is unlocked from the moment the Event opens (pre-cruise tutorial). The farewell Day follows the standard 08:00 rule on disembark morning (decided 2026-07-11—one rule, no special case).
-- **Snapshot at unlock**: a scheduled Cloud Function (one daily run at 08:00 Europe/Rome, tolerant of retries/idempotent) writes `snapshotItemIds` for the unlocking Day: all `status: 'active'` items in that Day's pool at that moment. This is how items approved mid-cruise "get in"—they enter every not-yet-unlocked Day, never an already-dealt one.
+- **Rule**: a Day unlocks at 08:00 event-timezone on its date. One exception only: the opening Day is unlocked from the moment the Event opens (a tutorial that runs before the Event opens). The closing Day follows the standard 08:00 rule on closing morning (decided 2026-07-11—one rule, no special case).
+- **Snapshot at unlock**: a scheduled Cloud Function (one daily run at 08:00 Europe/Rome, tolerant of retries/idempotent) writes `snapshotItemIds` for the unlocking Day: all `status: 'active'` items in that Day's pool at that moment. This is how items approved mid-Event "get in"—they enter every not-yet-unlocked Day, never an already-dealt one.
 - **Lazy dealing**: a Player's Day Card is dealt on first open at/after `unlockAt`, from the snapshot, using the existing `dealBoard` stratification (10 spicy / 14 tame for main days; tutorial pools are all tame so they deal unstratified). No per-player fan-out at 8:00; the function only stamps the snapshot.
 - **Client fallback**: if the client's clock says a Day is unlocked but the snapshot isn't stamped yet (function lag), the client waits and shows the locked state with a "waking up" message rather than dealing from an unfrozen pool. Deals never bypass the snapshot.
-- **No repeats across the cruise**: each Player's deal excludes prompts already on their earlier Day Cards until the pool is exhausted (80 main items ÷ 24/day ≈ 3⅓ days), then the exclusion resets. Spicy/tame stratification still applies within what remains; if a stratum runs dry the deal backfills from the other, same as today's defensive behavior.
-- **Joining mid-cruise**: every Day with `unlockAt <= now` is open; the Player can deal and play all of them immediately. Locked future Days behave the same for everyone.
-- **Past Days stay open**: cards remain markable for the whole cruise once unlocked. No end-of-day locking.
+- **No repeats across the Event**: each Player's deal excludes prompts already on their earlier Day Cards until the pool is exhausted (80 main items ÷ 24/day ≈ 3⅓ days), then the exclusion resets. Spicy/tame stratification still applies within what remains; if a stratum runs dry the deal backfills from the other, same as today's defensive behavior.
+- **Joining mid-Event**: every Day with `unlockAt <= now` is open; the Player can deal and play all of them immediately. Locked future Days behave the same for everyone.
+- **Past Days stay open**: cards remain markable for the whole Event once unlocked. No end-of-day locking.
 
 ### Reshuffle (added 2026-07-14; simplified same day)
 
-A player may reshuffle a Day Card—a fresh deal from the same Day snapshot—under two constraints that eliminate all cascade complexity: the card must be **pristine** (zero player-marked squares; the free center doesn't count) and the allowance is **3 for the whole cruise** (`PlayerDoc.reshufflesUsed`, increment bound in rules to the board write, ≤ 3). A pristine card has produced nothing, so nothing is retracted anywhere—no tally, Feed, doubt, stat, or Moment surgery. Marking a square locks the card in; a player who unmarks everything returns it to pristine and may reshuffle, performing the "cascade" themselves through the existing unmark path, in the open. Confirm sheet gates the spend (the counter never refunds); online-only; discarded prompts return to the eligible pool. A one-time launch-day intro overlay announces the feature. Full ticket: `plans/reshuffle-ticket.md`; mockups: wireframes `#frame-reshuffle` and `#frame-launch-intro`.
+A player may reshuffle a Day Card—a fresh deal from the same Day snapshot—under two constraints that eliminate all cascade complexity: the card must be **pristine** (zero player-marked squares; the free center doesn't count) and the allowance is **3 for the whole Event** (`PlayerDoc.reshufflesUsed`, increment bound in rules to the board write, ≤ 3). A pristine card has produced nothing, so nothing is retracted anywhere—no tally, Feed, doubt, stat, or Moment surgery. Marking a square locks the card in; a player who unmarks everything returns it to pristine and may reshuffle, performing the "cascade" themselves through the existing unmark path, in the open. Confirm sheet gates the spend (the counter never refunds); online-only; discarded prompts return to the eligible pool. A one-time launch-day intro overlay announces the feature. Full ticket: `plans/reshuffle-ticket.md`; mockups: wireframes `#frame-reshuffle` and `#frame-launch-intro`.
 
 ## Free space per day
 
@@ -209,16 +209,16 @@ The center square keeps "Complain about circuit music" on the eight party Days. 
 - **Pending items**: invisible everywhere except the Admin queue and (as "pending review") to their submitter. Never dealt, never in tallies.
 - **Admin queue** (new Admin console tab): list of pending items with submitter attribution, spicy toggle, approve / reject actions. Approve → `active` (+ `approvedBy/At`); reject → `rejected` (kept for audit, hidden from all non-admins). Bulk approve for taste.
 - **Grandfathering**: every existing `active` item stays `active`. The approval gate applies only to submissions after this ships.
-- **Curated pools**: embark and farewell items are seeded from the lists below with `pool` set accordingly. Admins can add/edit/hide them through the Admin console; the player submission form only ever writes to `main`.
+- **Curated pools**: easy-pool and closing-pool items are seeded from the lists below with `pool` set accordingly. Admins can add/edit/hide them through the Admin console; the player submission form only ever writes to `main`.
 
 ## Scoring and social surfaces
 
-- **Leaderboard**: one cruise-long ranking, summing bingos and squares across all Day Cards; tiebreak by earliest first bingo, as today.
+- **Leaderboard**: one Event-long ranking, summing bingos and squares across all Day Cards; tiebreak by earliest first bingo, as today.
 - **Daily honors**: each Day pins its own First to BINGO (stored on the day meta doc, shown on that Day's board view and as an honors strip on the Leaderboard).
-- **Cruise-wide First to BINGO**: anchored to main-game Days only (2–9); decided 2026-07-11. Rationale: the embark card is live pre-cruise and trivially easy by design, so it would otherwise decide the headline honor before anyone boards. The tutorial Days still get their own daily honors.
-- **Tutorial days**: the embark card counts toward squares-marked and bingo totals (pre-freeze real play, just easy); the farewell card is **ceremonial**—it unlocks at the freeze, so its marks never move the standings. Blackout remains per-card; a per-card blackout posts a Moment naming the day.
-- **The finale—two-beat finish (decided 2026-07-11)**: at **20:00 on Day 9** the scheduler posts a **last-call Moment** with going-into-the-final-night standings ("Jess leads by 2 bingos—standings freeze at 8 a.m."), stoking the last night rather than ending it and giving admins something to read aloud at the final show. At **08:00 on Day 10** the standings **freeze** (event `frozenAt`), the farewell Day unlocks, and the farewell view opens with the **podium**—cruise champion, cruise-wide First to BINGO, and the ten daily honors—also posted as a final Moment.
-- **Moments/Feed**: moment cards and proofs display the day chip ("Day 3 · 🏛️ Glamiators") so the feed reads as a cruise diary.
+- **Event-wide First to BINGO**: anchored to main-game Days only (2–9); decided 2026-07-11. Rationale: the opening Day's card is live before the Event opens and trivially easy by design, so it would otherwise decide the headline honor before the Event begins. The tutorial Days still get their own daily honors.
+- **Tutorial days**: the opening Day's card counts toward squares-marked and bingo totals (pre-freeze real play, just easy); the closing Day's card is **ceremonial**—it unlocks at the freeze, so its marks never move the standings. Blackout remains per-card; a per-card blackout posts a Moment naming the day.
+- **The finale—two-beat finish (decided 2026-07-11)**: at **20:00 on Day 9** the scheduler posts a **last-call Moment** with going-into-the-final-night standings ("Jess leads by 2 bingos—standings freeze at 8 a.m."), stoking the last night rather than ending it and giving admins something to read aloud at the final show. At **08:00 on Day 10** the standings **freeze** (event `frozenAt`), the closing Day unlocks, and the closing view opens with the **podium**—Event champion, Event-wide First to BINGO, and the ten daily honors—also posted as a final Moment.
+- **Moments/Feed**: moment cards and proofs display the day chip ("Day 3 · 🏛️ Glamiators") so the feed reads as a diary of the Event.
 
 ## UI
 
@@ -226,7 +226,7 @@ Wireframes for every state below are in `daily-cards-wireframes.html`.
 
 ### Header
 
-Two stacked lines next to the "Gay Cruise Bingo" title, always showing **today's** port and theme (not the viewed Day's—the header is a "where are we" instrument; the board chrome communicates the viewed Day). Mid-cruise, "today" is the latest **unlocked** Day—the same notion the day switcher and Auto theme use—so the header and the board's default Day roll to a new port together at the 08:00 unlock rather than the header leading it from calendar midnight. The pre-cruise "Sails …" and post-cruise "Until next year" states stay keyed on the calendar date in the event timezone:
+Two stacked lines next to the "Gay Cruise Bingo" title, always showing **today's** Place and theme (not the viewed Day's—the header is a "where are we" instrument; the board chrome communicates the viewed Day). Mid-Event, "today" is the latest **unlocked** Day—the same notion the day switcher and Auto theme use—so the header and the board's default Day roll to a new Place together at the 08:00 unlock rather than the header leading it from calendar midnight. The "Sails …" state before the Event opens and the "Until next year" state after it closes stay keyed on the calendar date in the event timezone:
 
 ```
 ┌──────────────────────────────────────────┐
@@ -235,13 +235,13 @@ Two stacked lines next to the "Gay Cruise Bingo" title, always showing **today's
 └──────────────────────────────────────────┘
 ```
 
-Pre-cruise the lines read "Sails Jul 15" / "🛳️ Welcome Aboard". Post-cruise: "Barcelona" / "👋 Until next year".
+Before the Event opens the lines read "Sails Jul 15" / "🛳️ Welcome Aboard". After it closes: "Barcelona" / "👋 Until next year".
 
 The top bar simplifies to exactly this—the avatar (today's profile-edit affordance) and the sign-out button relocate to the More menu, so the brand and the day's identity own the header. Identity stays glanceable because the More tab wears the player's avatar as its icon.
 
 ### Day switcher
 
-A horizontally scrolling strip of ten day chips under the header, replacing nothing (Board tab keeps its position). Each chip: weekday + port emoji + theme emoji. States: past (✓, tappable), today (filled, default-selected), locked future (🔒, tappable → locked preview). Selecting a chip swaps the board area and retints the whole view to that Day's theme (the existing `data-theme` mechanism; the user's own theme choice still governs the rest of the app outside the board view—board chrome follows the viewed Day).
+A horizontally scrolling strip of ten day chips under the header, replacing nothing (Board tab keeps its position). Each chip: weekday + Place emoji + theme emoji. States: past (✓, tappable), today (filled, default-selected), locked future (🔒, tappable → locked preview). Selecting a chip swaps the board area and retints the whole view to that Day's theme (the existing `data-theme` mechanism; the user's own theme choice still governs the rest of the app outside the board view—board chrome follows the viewed Day).
 
 ### Square tap—the Claim sheet
 
@@ -267,13 +267,13 @@ Today a Mark with no Proof broadcasts nothing, so most play is invisible to the 
 
 ### First-open coach overlay
 
-Once per event, over the Player's first dealt card (naturally the embark card for day-one joiners; a mid-cruise joiner sees it on whatever they open first): a scrim with a badge legend—the Tally count (tap to see who), the 👀 Doubt badge (proof clears it, never unmarks), the ＋ add-proof affordance, and the free space. CTA: "Got it—deal me in." Dismissal is stored per-event (localStorage, keyed like the theme choice); replayable from More → How to play. The Welcome Aboard banner carries the game's narrative; this overlay only decodes the notation—they complement rather than repeat.
+Once per event, over the Player's first dealt card (naturally the opening Day's card for day-one joiners; a mid-Event joiner sees it on whatever they open first): a scrim with a badge legend—the Tally count (tap to see who), the 👀 Doubt badge (proof clears it, never unmarks), the ＋ add-proof affordance, and the free space. CTA: "Got it—deal me in." Dismissal is stored per-event (localStorage, keyed like the theme choice); replayable from More → How to play. The Welcome Aboard banner carries the game's narrative; this overlay only decodes the notation—they complement rather than repeat.
 
 ### Locked Day preview
 
-Full themed chrome for that Day (name, port, palette) over a 5×5 grid of blank squares; only the free space is populated. A centered lock badge with "Unlocks 8:00 a.m. · Wed Jul 22". No countdown timer needed—the date is enough. The theme's dress-code description renders under the day name, so the locked view doubles as the party tease ("Dog Tag T-Dance—men in small uniforms; souvenir dog tags provided"). Tapping squares does nothing; a caption sells it: "24 fresh squares land at 8. Come back after coffee."
+Full themed chrome for that Day (name, Place, palette) over a 5×5 grid of blank squares; only the free space is populated. A centered lock badge with "Unlocks 8:00 a.m. · Wed Jul 22". No countdown timer needed—the date is enough. The theme's dress-code description renders under the day name, so the locked view doubles as the party tease ("Dog Tag T-Dance—men in small uniforms; souvenir dog tags provided"). Tapping squares does nothing; a caption sells it: "24 fresh squares land at 8. Come back after coffee."
 
-### Embark (tutorial) view
+### Opening Day (tutorial) view
 
 The Welcome Aboard card plus a dismissible "How this works" banner above the grid, three beats:
 
@@ -283,9 +283,9 @@ The Welcome Aboard card plus a dismissible "How this works" banner above the gri
 
 Caption under the banner: "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8." Tutorial days show a "Warm-up" tag on the day chip and board header in place of daily-honor competitiveness.
 
-### Farewell view
+### Closing Day view
 
-So Long, Farewell card, opening with the **podium banner**—cruise champion, cruise-wide First to BINGO, daily-honors strip—above the goodbye banner: "Last one. Mark your goodbyes—then go book next year." Standings are frozen by then, so the card is pure ceremony. After the cruise ends the app pins this Day, podium included, as the default view.
+So Long, Farewell card, opening with the **podium banner**—Event champion, Event-wide First to BINGO, daily-honors strip—above the goodbye banner: "Last one. Mark your goodbyes—then go book next year." Standings are frozen by then, so the card is pure ceremony. After the Event ends the app pins this Day, podium included, as the default view.
 
 ### More menu (⋯ tab)
 
@@ -294,18 +294,18 @@ The bottom bar becomes **Card · Feed · Ranks · More**; Prompts and Admin leav
 1. **Profile card**—avatar, name, @handle; tap opens the existing ProfileEditor sheet. Replaces the top-bar avatar.
 2. **Theme**—the ThemeSwitcher relocates here, gaining a new default: **Auto—match the day** (board chrome already follows the viewed Day; this makes the whole app follow today), with the existing manual pick as the override. Persistence semantics unchanged (explicit pick saved; auto never auto-saved).
 3. **Text size**—Small / Medium / Large segmented control, persisted per device like the theme choice (`gcb.textSize`). Scales the square's base type (S ≈90%, M 100%, L ≈115%) and body text, but the cell's auto-fit guard always has the last word: a long prompt steps its font down until it fits inside its square (the same measure-and-shrink approach as the print card's `fitText`), so Large is a ceiling, never an overflow. Badges, chips, and chrome don't scale.
-4. **Play**: Cruise schedule (a read-only view of the ten Days—ports, parties, unlock times), Suggest a square (ItemPool, with "goes to admin review" caption), How to play (replays the Welcome Aboard walkthrough banner), Install the app (the existing PWA InstallPrompt, shown only when installable).
+4. **Play**: Event schedule (a read-only view of the ten Days—Places, parties, unlock times), Suggest a square (ItemPool, with "goes to admin review" caption), How to play (replays the Welcome Aboard walkthrough banner), Install the app (the existing PWA InstallPrompt, shown only when installable).
 5. **Support**: Report a bug (existing BugReport flow), 18+ advisory & acceptable use (the ConsentNotice/AcceptableUse content plus the player's attestation date).
 6. **Admin** (admins only): one row into the Admin console, badged with the pending-approvals count.
 7. **Sign out**—last, visually quiet (dashed/dim). Rare actions don't need permanent chrome.
-8. Version footer: build, sailing, dates.
+8. Version footer: build, Event, dates.
 
 ### Install nudge and update banner
 
 Both components exist (`InstallPrompt`, w1-pwa #30; `UpdatePrompt`, #178) and their mechanics are kept; this feature only adjusts presentation and timing.
 
 - **Install nudge**: restyled as a quiet toast above the tab bar, and its trigger moves from app-load to **after the player's first Mark**—someone who just marked a square has decided the app is worth keeping, so the nudge lands as a favor instead of a gate. Copy leads with the cruise-specific benefit: "Full screen, works offline at sea." ✕ dismisses forever (existing `gcb.install.dismissedAt`); the affordance persists in More → Install the app, which is what lets the nudge afford to be shy. Platform split unchanged: Android/Chromium gets the captured one-tap `beforeinstallprompt`; iOS Safari (no such event) gets a Share → Add to Home Screen walkthrough.
-- **Update banner**: `UpdatePrompt` behavior unchanged (prompt-type service worker, Reload activates the waiting worker, Not now is session-only, 60-second polling keeps long-lived sea-day tabs current, offline ticks skip). Two refinements: copy ("A fresh build just docked—your marks are safe") because "reload" makes people fear losing state, and the banner defers while a claim sheet is open so it never interrupts a proof mid-capture.
+- **Update banner**: `UpdatePrompt` behavior unchanged (prompt-type service worker, Reload activates the waiting worker, Not now is session-only, 60-second polling keeps long-lived tabs current, offline ticks skip). Two refinements: copy ("A fresh build just docked—your marks are safe") because "reload" makes people fear losing state, and the banner defers while a claim sheet is open so it never interrupts a proof mid-capture.
 - **Toast stacking**: both toasts anchor above the tab bar and reserve bottom clearance via the existing body-class mechanism, so the board never jumps. Stack rule when they coincide: newest on top, urgent (update) outranks invitational (install), never more than two visible—a third-comer waits for a slot.
 
 Wireframe baseline: iPhone 15 Pro—393×852 pt CSS canvas (19.5:9), Safari. Installed frames render standalone; only the install-nudge frame shows Safari chrome, since that's the one moment players are in the browser.
@@ -332,43 +332,43 @@ The built console outgrew its three tabs (the Moderation tab alone stacked six u
 
 ## Tutorial item lists
 
-### Welcome Aboard (embark pool, 28)
+### Welcome Aboard (easy pool, 28)
 
 Get your favorite dessert · Find your muster station · Get lost finding your cabin · Ride an elevator the wrong way · Locate the late-night pizza · First soft-serve of the cruise · Toast at the sailaway party · Wave goodbye to land · Hear the ship's horn · Meet someone from another country · Learn a crew member's name · Befriend a bartender · Compliment a stranger's outfit · Ask "where are you from?" three times · Exchange Instagrams with a new friend · Spot matching Speedos · Unpack a truly unhinged outfit · Plan tomorrow's party look · Test the bed (nap counts) · Stateroom mirror selfie · Balcony or porthole photo · Order a frozen drink with zero shame · Sunscreen a stranger's back (or volunteer yours) · Scope out the gym you'll never use · Find the theater · Locate the Dick Deck (reconnaissance only) · Sign up for something you'll never attend · Overhear someone already complaining
 
-### So Long, Farewell (farewell pool, 28)
+### So Long, Farewell (closing pool, 28)
 
 One last sunrise or sunset photo · Say goodbye to your cruise boyfriend · Exchange numbers with your new best friend · Promise to visit someone in their city · Say "see you next year"—and mean it · Book next year's cruise (or swear you will) · Final soft-serve · Thank your cabin steward by name · Thank the bartender who carried you · One last lap around the ship · Last dance to one more song · Group photo with your chosen family · Cry (or valiantly almost cry) · Find glitter somewhere impossible · Suitcase no longer closes · Wear your softest airport look · Breakfast in sunglasses, one last time · Swap favorite memories of the week · "I'm never drinking again" (sincere) · Post the photo dump · Screenshot the group chat's new name · Set a reunion date · Give away your leftover sunscreen · Realize you never used the gym · Hum the song of the week · Take home a (legal) souvenir · Five-star shoutout for your favorite crew member · Stand at the back of the ship and feel things
 
 ## Security rules and functions (shape only)
 
 - `firestore.rules`: boards move under `days/{dayIndex}`; write allowed only when `request.time >= day.unlockAt` and the board doc doesn't exist (deal) or is the owner's (marks). Pending/rejected items readable only by admins + submitter. Day meta (`firstBingo`) written via the same client path that posts first-bingo Moments today, guarded to once.
-- Scheduled function `unlockDay`: 08:00 Europe/Rome daily during the sailing window; stamps `snapshotItemIds` and `unlockAt` reconciliation. Idempotent; a manual admin "unlock now" button covers function failure (there's precedent for admin-triggered recovery in PoolRecoveryWatcher). The finale rides the same scheduler: a 20:00 run on Day 9 posts the last-call standings Moment; the Day 10 08:00 run sets `frozenAt` and posts the podium Moment.
+- Scheduled function `unlockDay`: 08:00 Europe/Rome daily during the Event window; stamps `snapshotItemIds` and `unlockAt` reconciliation. Idempotent; a manual admin "unlock now" button covers function failure (there's precedent for admin-triggered recovery in PoolRecoveryWatcher). The finale rides the same scheduler: a 20:00 run on Day 9 posts the last-call standings Moment; the Day 10 08:00 run sets `frozenAt` and posts the podium Moment.
 
 ## Migration
 
-Pre-cruise ship: archive existing test boards (or map the current board to nothing—players re-deal per day). No live-cruise migration needed if this deploys before July 15. Existing items get `pool: 'main'` via converter default; no data backfill required.
+Ship before the Event opens: archive existing test boards (or map the current board to nothing—players re-deal per day). No live-Event migration needed if this deploys before July 15. Existing items get `pool: 'main'` via converter default; no data backfill required.
 
-## Reusability—adding a future cruise
+## Reusability—adding a future Event
 
-Nothing sailing-specific lives in code paths; a new cruise is a new `EventDoc`:
+Nothing about a particular Event lives in code paths; a new Event is a new `EventDoc`:
 
 1. Create the event with its own `timezone` and `days[]` (any length—the model doesn't assume 10 days or that tutorials sit at the ends, only that each Day names a date, port, ThemeId, and pool).
-2. Seed the main pool (or carry forward a curated export of last cruise's best player additions—worth a follow-up admin tool).
-3. Copy or edit the embark/farewell curated pools; the tutorial framing travels with `pool` + `tutorial`, not with hard-coded content.
-4. If the season introduces new party themes, that is the one content-code touchpoint: add a token block to `themes.css` and a `ThemeMeta` entry (the contrast test suites pick new themes up automatically). The schedule only references ThemeIds, so existing themes are reusable across cruises for free.
-5. Multi-day timezone itineraries (a future Caribbean sailing that changes clocks) are handled by an optional per-Day `unlockAt` override—the field already stores an absolute timestamp, so per-day adjustment needs no model change.
+2. Seed the main pool (or carry forward a curated export of the last Event's best player additions—worth a follow-up admin tool).
+3. Copy or edit the easy/closing curated pools; the tutorial framing travels with `pool` + `tutorial`, not with hard-coded content.
+4. If the season introduces new party themes, that is the one content-code touchpoint: add a token block to `themes.css` and a `ThemeMeta` entry (the contrast test suites pick new themes up automatically). The schedule only references ThemeIds, so existing themes are reusable across Events for free.
+5. Multi-day timezone itineraries (a future Event that changes clocks) are handled by an optional per-Day `unlockAt` override—the field already stores an absolute timestamp, so per-day adjustment needs no model change.
 
 ## Resolved decisions (Nathan, 2026-07-11)
 
-1. **Farewell unlock**: 08:00 on Day 10—the standard rule, no Day 9 evening special case.
-2. **Cruise-wide First to BINGO excludes tutorial days**: confirmed; tutorial Days keep their per-day honors.
+1. **Closing Day unlock**: 08:00 on Day 10—the standard rule, no Day 9 evening special case.
+2. **Event-wide First to BINGO excludes tutorial days**: confirmed; tutorial Days keep their per-day honors.
 3. **Theme names**: Welcome Aboard / So Long, Farewell—confirmed.
 4. **Palettes**: as proposed (nautical navy/cyan/brass; dusk plum/coral/peach), subject only to the contrast suites.
 5. **Photo source (#190)**: default `camera_or_library` with the 🖼️ Feed badge; `camera_only` remains an event-level admin override.
-6. **Winners announcement**: the two-beat finish—last-call standings Moment at 20:00 Day 9; standings freeze + podium at the 08:00 Day 10 farewell unlock; the farewell card is ceremonial (embark still counts toward totals).
+6. **Winners announcement**: the two-beat finish—last-call standings Moment at 20:00 Day 9; standings freeze + podium at the 08:00 Day 10 closing unlock; the closing Day's card is ceremonial (the opening Day's card still counts toward totals).
 7. **Schedule correction (2026-07-17, from `schedule_1.xlsx`)**: unified day theme + a required two-event `tonight[]` line per the corrected itinerary above (Naples on Day 6, Villefranche on Day 8, sea day moved to Day 3; events from the VB26 guide); five new unified ThemeIds with palettes; applied to the live event via a metadata-only owner migration—game state untouched.
-8. **Easy mix (2026-07-17)**: cards were too hard—from Day 4 onward, main-day deals blend the embark pool in via `settings.easyMixRatio` (default 0.5: 12 easy + 12 main, `spicyRatio` applying within the main half). Snapshot carries both pools; easy-half repeats across days are intentional; admin-tunable without a deploy. Ticket: `plans/easy-mix-ticket.md`.
+8. **Easy mix (2026-07-17)**: cards were too hard—from Day 4 onward, main-day deals blend the easy pool in via `settings.easyMixRatio` (default 0.5: 12 easy + 12 main, `spicyRatio` applying within the main half). Snapshot carries both pools; easy-half repeats across days are intentional; admin-tunable without a deploy. Ticket: `plans/easy-mix-ticket.md`.
 
 ## Out of scope
 

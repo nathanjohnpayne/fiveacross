@@ -18,15 +18,13 @@ The domain's ubiquitous language — Brand, Edition, Namespace, Slug, Event, Day
 | `vacay` | Vacay Bingo | Travel — trips, house weekends, road trips | **Trip** — travel without water. Moderate camp. |
 | `fiveacross` | Five Across | Occasion-neutral — weddings, conferences, festivals | **General** — Event, place, everyone. Minimal camp. |
 
-`gcb` and `vacay` are live in `BRANDS` (`src/editions.ts`). The general-audience `fiveacross` Edition is decided but not yet built; it lands with the Edition lexicon in [#608](https://github.com/nathanjohnpayne/gaycruisebingo/issues/608), which also converts the cruise vocabulary still embedded in shared copy into per-register tokens and overrides.
+All three Editions are implemented in `BRANDS` (`src/editions.ts`). Their shared contract lives in `src/types.ts`; each supplies a vocabulary register plus whole-string overrides for copy whose grammar does not survive token replacement.
 
 `gcb` is the fallback **Edition**, which is a narrower guarantee than it sounds: it covers a hostname document that resolves but names an unknown or absent `edition`, so a misconfigured Edition field degrades to the shipped experience rather than an unbranded screen. It does **not** cover a hostname that fails to resolve at all — a missing or inactive `hostnames/{host}` document, or a revalidation failure with no usable cached mapping, renders the not-found state (`src/eventResolution.ts`). Resolution fails closed; only the Edition field falls back.
 
 The Edition is resolved **pre-auth** from `hostnames/{host}.edition` (ADR [0009](docs/adr/0009-event-resolved-from-hostname.md)), because the sign-in gate has to be branded and the Event document requires an authenticated read. A single-Event build may seed it from `VITE_EDITION`; a bundle serving many Events may not.
 
-**The one-identity rule:** after a player enters through an Edition's hostname, the experience shows that Edition and nothing else. It holds today for the wordmark, tagline, document title, PWA identity, crash panel and Themes.
-
-It does **not** hold yet for share surfaces or for the cruise vocabulary embedded in shared copy. `SHARE_CARD_APP_NAME` is still the constant `'Gay Cruise Bingo'` in `src/components/ShareCard.tsx`; the card footers, the celebration and leaderboard share text, and the generated filenames all still carry it, so a Vacay Bingo player sharing standings today leaks the old brand. That is a known gap, not a guarantee — [#607](https://github.com/nathanjohnpayne/gaycruisebingo/issues/607) threads the Edition through those callers, [#587](https://github.com/nathanjohnpayne/gaycruisebingo/issues/587) covers the unfurl metadata, and [#608](https://github.com/nathanjohnpayne/gaycruisebingo/issues/608) supplies the per-Edition wording. Treat the rule as the target contract and the list above as what it currently covers.
+**The one-identity rule:** after a player enters through an Edition's hostname, the experience shows that Edition and nothing else. It covers the wordmark, tagline, document title, PWA identity, crash panel, Themes, shared UI vocabulary, Share Card footers and filenames, and celebration/share copy. The Share Card app-name consumer moved into #608 while closing the source-wide vocabulary leak; #607 retains any share work not represented by those local card surfaces, and [#587](https://github.com/nathanjohnpayne/gaycruisebingo/issues/587) still owns unfurl metadata.
 
 ## Namespaces and domains
 
@@ -51,7 +49,7 @@ A **Theme** is a named look the whole app reskins into — cosmetic only, never 
 
 Whether an Event shows the 18+ acknowledgement and adults-only copy is a property of **the Event's prompt pool**, not of its Edition ([#608](https://github.com/nathanjohnpayne/gaycruisebingo/issues/608)). A `fiveacross` Event with spicy Prompts is 18+ with general vocabulary; a `gcb` Event with a tame pool is not 18+ at all. The two axes are independent, and copy must never assume otherwise.
 
-The signal is `hostnames/{host}.adultContent` — world-readable, derived server-side from active spicy Prompts in dealable pools, OR'd with an Admin override, monotone once true, and failing to `true` when missing or malformed. Today the acknowledgement is still unconditional; the flag and the surfaces that follow it ship with #608.
+The signal is `hostnames/{host}.adultContent` — world-readable, derived server-side from active spicy Prompts in dealable pools, OR'd with an Admin override, monotone once true, and failing to `true` when missing or malformed (ADR [0012](docs/adr/0012-server-derived-adult-content-posture.md)). The acknowledgement and adults-only copy render only when that posture requires them; open tabs watch for a raise and re-gate un-attested Players.
 
 ## Relationship to mergepath
 

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { isReportHidden, isBanned, isSystemAuthor } from '../../hooks/useData';
 import {
   confirmClaim,
@@ -20,6 +21,8 @@ import { deleteProof } from '../../data/proofs';
 import AsyncButton from './AsyncButton';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
+import { editionBrand } from '../../editions';
+import { useAdultContentFlipConfirm } from './AdultContentConfirm';
 
 // One report row, tagged so the render can branch to the per-kind affordances
 // (Proof vs Prompt writes) while a single list orders across both kinds.
@@ -215,12 +218,21 @@ function ItemQueueRow({
  */
 function ApprovalQueueRow({
   item: it,
+  spicy,
   adminUid,
   onToggleSpicy,
+  onApprove,
 }: {
   item: ItemDoc;
+  /** The queue's optimistic view of `it.spicy` — the admin's own tick, before
+   *  the Firestore snapshot carrying it has come back. */
+  spicy: boolean;
   adminUid: string;
   onToggleSpicy: (id: string, spicy: boolean) => void;
+  /** Routed through the queue's flip confirm (#610) rather than calling
+   *  `approveItem` directly: approving the FIRST explicit Prompt is what turns
+   *  the whole Event 18+ (#608), and the row cannot know it is the first. */
+  onApprove: (item: ItemDoc) => Promise<unknown>;
 }) {
   return (
     <div className="row">
@@ -233,12 +245,12 @@ function ApprovalQueueRow({
       <label style={{ fontSize: 12 }}>
         <input
           type="checkbox"
-          checked={it.spicy}
+          checked={spicy}
           onChange={(e) => onToggleSpicy(it.id, e.target.checked)}
         />{' '}
         🔞 Spicy
       </label>
-      <AsyncButton className="btn primary" onAction={() => approveItem(it.id, adminUid)}>
+      <AsyncButton className="btn primary" onAction={() => onApprove(it)}>
         Approve
       </AsyncButton>
       <AsyncButton className="iconbtn" title="Reject" onAction={() => rejectItem(it.id, adminUid)}>
@@ -277,12 +289,53 @@ export default function ReviewQueue({
   const admins = event?.admins ?? [];
   const claimsVisible = event?.claimMode === 'admin_confirmed';
   const total = reports.length + pendingItems.length + (claimsVisible ? claims.length : 0);
+  // The 18+ flip confirm (#610, required by #608's acceptance). BOTH approve
+  // paths go through it, and the bulk one is the easy miss: a batch containing
+  // one explicit Prompt flips the Event just as surely as approving that Prompt
+  // alone. Cancelling applies NONE of the batch — a partial apply would flip the
+  // Event anyway and leave the admin unsure which half landed.
+  const { guard, dialog } = useAdultContentFlipConfirm();
+  // The 🔞 toggle writes to Firestore and the row re-renders from the NEXT
+  // snapshot, so an admin who ticks the box and immediately taps Approve can
+  // hand the guard a `spicy` that is already out of date — and the confirm for
+  // the write that actually flips the Event would be skipped (Codex P2 on
+  // #615). This optimistic overlay records the admin's own intent the instant
+  // they express it and outranks the snapshot until it catches up. Deliberately
+  // ONE-WAY toward `true`: an un-tick that has not landed yet must not be
+  // trusted to suppress a confirm, which is the same fail-closed direction the
+  // whole posture takes.
+  const [optimisticSpicy, setOptimisticSpicy] = useState<Record<string, boolean>>({});
+  const isSpicy = (it: ItemDoc) => it.spicy || optimisticSpicy[it.id] === true;
+  const toggleSpicy = (id: string, spicy: boolean) => {
+    setOptimisticSpicy((prev) => ({ ...prev, [id]: spicy }));
+    setItemSpicy(id, spicy);
+  };
+  const explicitPending = pendingItems.filter(isSpicy);
+  const approveOne = (it: ItemDoc) =>
+    guard(isSpicy(it), 'approve', () => approveItem(it.id, adminUid));
+  const approveAll = () =>
+    guard(explicitPending.length > 0, 'bulk-approve', () => bulkApproveItems(pendingItems, adminUid), {
+      explicitCount: explicitPending.length,
+      totalCount: pendingItems.length,
+    });
 
+  // The empty state and the flip confirm render TOGETHER, and the dialog is
+  // deliberately outside the early return (Phase 4b P2). Confirming the last
+  // pending Prompt removes it from the pending query by Firestore's latency
+  // compensation — immediately, before the server has accepted or rejected the
+  // write — so `total` hits zero and an early return that owned the dialog would
+  // unmount it mid-write. The admin would watch the confirm vanish and "All
+  // clear." appear, and a rejection would take its own error state down with it:
+  // the write silently did not happen, on the one action in this console that
+  // cannot be undone.
   if (!total) {
     return (
-      <p className="muted" style={{ fontSize: 13 }}>
-        All clear. Go enjoy the boat.
-      </p>
+      <>
+        <p className="muted" style={{ fontSize: 13 }}>
+          {editionBrand().reviewQueueAllClear}
+        </p>
+        {dialog}
+      </>
     );
   }
 
@@ -331,13 +384,20 @@ export default function ReviewQueue({
           </p>
         )}
         {!!pendingItems.length && (
-          <AsyncButton onAction={() => bulkApproveItems(pendingItems, adminUid)}>
+          <AsyncButton onAction={approveAll}>
             Approve all
           </AsyncButton>
         )}
         <div className="list">
           {pendingItems.map((it) => (
-            <ApprovalQueueRow key={it.id} item={it} adminUid={adminUid} onToggleSpicy={setItemSpicy} />
+            <ApprovalQueueRow
+              key={it.id}
+              item={it}
+              spicy={isSpicy(it)}
+              adminUid={adminUid}
+              onToggleSpicy={toggleSpicy}
+              onApprove={approveOne}
+            />
           ))}
         </div>
       </div>
@@ -366,6 +426,7 @@ export default function ReviewQueue({
           </div>
         </div>
       )}
+      {dialog}
     </>
   );
 }

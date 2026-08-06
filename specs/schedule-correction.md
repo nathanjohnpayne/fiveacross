@@ -5,11 +5,11 @@ status: accepted
 
 # Schedule correction: unified day themes + two-event Tonight lines (`schedule-correction`)
 
-Implements `plans/daily-cards-spec.md` § "Itinerary and schedule" (corrected 2026-07-17) and `plans/schedule-correction-ticket.md`. The published July 2026 itinerary differs from what was seeded: some days run two parties under one **unified day theme**, ports moved (Sea Day is Day 3, Valletta Day 4, Palermo Day 5, Naples Day 6, Rome Day 7, Villefranche Day 8, Marseille Day 9), and five unified themes are new. This is **display metadata only** — the correction re-labels the cards and never touches boards, cells, marks, tallies, proofs, doubts, moments, dayStats, cruise totals, snapshots, pools, unlock times, dates, or day indexes. Theme is cosmetic by design, so already-dealt Day 1–3 cards keep their exact prompts and marks and simply re-render under corrected chrome.
+Implements `plans/daily-cards-spec.md` § "Itinerary and schedule" (corrected 2026-07-17) and `plans/schedule-correction-ticket.md`. The published July 2026 itinerary differs from what was seeded: some days run two parties under one **unified day theme**, ports moved (Sea Day is Day 3, Valletta Day 4, Palermo Day 5, Naples Day 6, Rome Day 7, Villefranche Day 8, Marseille Day 9), and five unified themes are new. This is **display metadata only** — the correction re-labels the cards and never touches boards, cells, marks, tallies, proofs, doubts, moments, dayStats, Event totals, snapshots, pools, unlock times, dates, or day indexes. Theme is cosmetic by design, so already-dealt Day 1–3 cards keep their exact prompts and marks and simply re-render under corrected chrome.
 
 ## Model
 
-Each `DayDef` keeps ONE `theme: ThemeId` (drives chrome, palette, chips, honors emoji) and gains `tonight: string[]` — EXACTLY two signature events with emoji, rendered as a "Tonight:" line in the day bar and the locked-day tease. The two events are parties when the day has them, else the night's headline show/concert plus its party, sourced from the VB26 vacation guide's Entertainment Preview. Day 10's line is editorial (disembark morning publishes no events).
+Each `DayDef` keeps ONE `theme: ThemeId` (drives chrome, palette, chips, honors emoji) and gains `tonight: string[]` — EXACTLY two signature events with emoji, rendered as a "Tonight:" line in the day bar and the locked-day tease. The two events are parties when the day has them, else the night's headline show/concert plus its party, sourced from the VB26 vacation guide's Entertainment Preview. Day 10's line is editorial (the closing morning publishes no events).
 
 ## Corrected itinerary
 

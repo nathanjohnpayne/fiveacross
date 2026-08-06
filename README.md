@@ -24,13 +24,13 @@ Two production Firebase projects back these — `gaycruisebingo` and `fiveacross
 - **Tally** publishes a public, attributed per-Prompt record — a count plus tap-to-see-who-else-got-it — while your board's layout stays private. **Doubts** let one Player publicly ask another to back up a Mark; **Hearts** add warmth and touch no stats.
 - The **Feed** carries Proofs (photo / audio / text), Moments that broadcast the big beats, and admin-authored Notices. The **Leaderboard** ranks bingos → squares → earliest first-bingo with a pinned First to BINGO, and a **Standings Freeze** computes the finale.
 - **Share Cards** for a BINGO, the leaderboard and the final standings render on-device and go straight to the native share sheet (ADR [0005](docs/adr/0005-client-side-share-images.md)) — no server in the path.
-- Google sign-in with an 18+ acknowledgement, Edition-scoped Themes, Honor-mode Marks that survive a dead zone and a reload (ADR [0006](docs/adr/0006-offline-resilience.md)), and analytics dual-dispatched to GA4 and PostHog, dimensioned by Brand / Edition / Event.
+- Google sign-in with a content-derived 18+ acknowledgement (ADR [0012](docs/adr/0012-server-derived-adult-content-posture.md)), Edition-scoped Themes, Honor-mode Marks that survive a dead zone and a reload (ADR [0006](docs/adr/0006-offline-resilience.md)), and analytics dual-dispatched to GA4 and PostHog, dimensioned by Brand / Edition / Event.
 
 ## Stack
 
 Vite · React 19 · TypeScript (strict) · Firebase (Auth · Firestore · Storage · Hosting · Analytics) · `vite-plugin-pwa` with a custom service worker · Cloud Functions · Cloud Scheduler · GA4 and PostHog · Cloudflare DNS and edge redirects.
 
-The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate (`ENABLE_VISION_MODERATION`) and stays off until deliberately enabled — and because the thumbnail write lives inside that same handler, the default off state means proof uploads get **neither** Vision scanning nor server-side thumbnails. Player stats stay client-authoritative by design (ADR 0001).
+The Functions package carries only what needs a server: scheduled Day unlocks and finale computation, server-authoritative hiding once a report count crosses the Event threshold, three idempotent triggers that derive/reconcile the public adult-content posture from Prompt, Event and hostname writes, admin moderation email, and bug-report intake. Cloud Vision proof moderation ships behind a deploy-time gate (`ENABLE_VISION_MODERATION`) and stays off until deliberately enabled — and because the thumbnail write lives inside that same handler, the default off state means proof uploads get **neither** Vision scanning nor server-side thumbnails. Player stats stay client-authoritative by design (ADR 0001).
 
 ## Quick start
 
@@ -46,7 +46,7 @@ npm test                       # game-logic unit tests
 npm run typecheck              # tsc --noEmit, app + service worker
 ```
 
-`app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions` — scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, and server-authoritative auto-hide), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
+`app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions` — scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, server-authoritative auto-hide, and adult-posture derivation/reconciliation), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
 
 Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (1Password-backed service-account impersonation; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards.
 
@@ -55,6 +55,8 @@ Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (1Passw
 1. **The build env.** `scripts/deploy.sh` builds before it deploys, from the ambient Vite env (`.env.local` / exported `VITE_*`). Passing a different Firebase target does not change what got baked — a Gay Cruise Bingo shell can publish a `med-2026` bundle straight to the `fiveacross` project.
 2. **The Firebase target.** `.firebaserc`'s default is `gaycruisebingo`, so a Five Across deploy that omits the project ships to the wrong one (ADR [0008](docs/adr/0008-five-across-second-firebase-project.md) § Consequences).
 3. **The cache zone.** `CF_ZONE_ID` falls back to a hardcoded Gay Cruise Bingo zone, so an unset value purges the wrong zone and leaves the Edition you just deployed stale. Set it to that Edition's zone, or pass `--skip-cf-purge` when the canonical host is not Cloudflare-proxied.
+
+Within the build environment, `VITE_ADULT_CONTENT` is a single-Event posture seed, not a permanent switch: only the literal value `false` hides the initial gate, and the deployed origin must also have a `hostnames/{host}` document because the live watcher re-proves that opt-out and observes a later server-side raise. Hostname-resolved builds ignore this seed and use the routing document directly (ADR 0012; app guide § Event id).
 
 ```bash
 # Five Across — with the Five Across .env.local in place, not Gay Cruise Bingo's

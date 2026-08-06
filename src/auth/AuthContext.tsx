@@ -18,11 +18,14 @@ import {
   readAdultAttestationFromServer,
 } from '../data/api';
 import { track } from '../analytics';
+import { adultContentRequired } from '../adultContent';
+import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
 import PoolRecoveryWatcher from '../components/PoolRecoveryWatcher';
+import AdultContentWatcher from '../components/AdultContentWatcher';
 
 // Connectivity probe for the boot path (#115). The auth bootstrap and the deal
 // are both network-bound: a create-once transaction (ensureUserProfile) and a
@@ -122,6 +125,57 @@ function consumePendingRedirectAttestation(): boolean {
   }
 }
 
+/**
+ * Whether the 18+ acknowledgement was actually COLLECTED when a redirect
+ * sign-in began (Phase 4b round 4).
+ *
+ * Separate from the marker above, in a different store, because the two answer
+ * different questions and have different durability needs. The marker scopes
+ * FAILURE reporting and may be lost — #346 exists precisely because Safari drops
+ * sessionStorage across the provider round-trip, and that path still has to
+ * complete. This record decides whether a durable, cross-Event
+ * `attestedAdultAt` may be written, so losing it must not silently fabricate
+ * one, and it must survive the round trip that loses the marker.
+ *
+ * `localStorage`, therefore: it survives the same partitioning that drops
+ * sessionStorage — which is how Firebase restores the session at all — so #346's
+ * guarantee (login AND attestation both land on a marker-less return) is kept
+ * intact rather than traded away.
+ *
+ * TTL-bounded so an abandoned redirect cannot authorize an unrelated sign-in
+ * days later. Anything unparseable, expired, or absent reads as NOT collected,
+ * which costs one re-prompt — the direction this whole feature fails in.
+ */
+export const SIGNIN_ADULT_ACK_KEY = 'gcb.signin.adultAck';
+const SIGNIN_ADULT_ACK_TTL_MS = 10 * 60 * 1000;
+
+function markCollectedAcknowledgement(): void {
+  try {
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+  } catch {
+    // Private mode / disabled storage: the re-prompt collects it instead.
+  }
+}
+
+function clearCollectedAcknowledgement(): void {
+  try {
+    localStorage.removeItem(SIGNIN_ADULT_ACK_KEY);
+  } catch {
+    // Private mode / disabled storage already fails toward re-prompting.
+  }
+}
+
+function consumeCollectedAcknowledgement(now: number = Date.now()): boolean {
+  try {
+    const raw = localStorage.getItem(SIGNIN_ADULT_ACK_KEY);
+    clearCollectedAcknowledgement();
+    const at = Number(raw);
+    return Number.isFinite(at) && at > 0 && now - at <= SIGNIN_ADULT_ACK_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
 // Read the marker WITHOUT consuming it. Evaluated during the first render —
 // before any effect can subscribe to auth or arm the settle timer — so the
 // pending-redirect-return guard (#357) is in place before either could fire;
@@ -184,7 +238,7 @@ interface AuthContextValue {
   dealing: boolean;
   // Reserved for auth startup readiness; current host selection is synchronous.
   signInReady: boolean;
-  signIn: () => Promise<void>;
+  signIn: (acknowledgedAdultContent: boolean) => Promise<void>;
   signOutUser: () => Promise<void>;
   // Persist the current User's 18+ self-attestation (ADR 0001) and lift the gate.
   attest: () => Promise<void>;
@@ -328,6 +382,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // deal until the authoritative read confirms the stamp. Re-armed false per auth
   // change; never set true offline (the cache lift is provisional).
   const [attestedAuthoritative, setAttestedAuthoritative] = useState(false);
+  // Whether the online bootstrap SUCCEEDED, as distinct from having SETTLED
+  // (Codex P2 on #615). `profileReady` is true after a bootstrap FAILURE too —
+  // that is its contract, and every consumer that renders on it is right to.
+  // But on an Event with no age gate it is also the only remaining deal
+  // authority, and a failed `ensureUserProfile` must not license creating
+  // board/player rows any more than a missing attestation stamp does. So the
+  // deal reads THIS, which is the direct analogue of `attestedAuthoritative`:
+  // set only where the authoritative read actually landed, re-armed false on
+  // every auth change and every connectivity flip.
+  const [profileBootstrapOk, setProfileBootstrapOk] = useState(false);
+  // The 18+ posture as REACTIVE state (Phase 4b P1). The callbacks below keep
+  // reading `adultContentRequired()` directly — they run outside render and
+  // want the value at call time — but every DERIVED gate in this provider
+  // (`needsAttestation`, `mayDeal`, `canRenderEventContent`) has to recompute
+  // when the Event turns adult under an open tab, and only a subscription
+  // makes that happen.
+  const attestationRequired = useAdultContent();
   // A ref mirror of `attestedAuthoritative` so async code (attest()'s catch) can
   // read the LATEST value without a stale closure (Codex #117 round 9, finding B):
   // the attest-failure rollback must NOT downgrade a User the bootstrap already
@@ -472,6 +543,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // stale-attempt discipline, and what makes reconnect recovery deterministic.
   const bootstrapUser = useCallback(async (u: User, attempt: number) => {
     if (!isOnline()) {
+      // NO AGE GATE ON THIS EVENT (#608) — there is nothing to prove offline, so
+      // there is nothing to hold for. The whole cache-first dance below exists to
+      // avoid rendering the Board without proof-of-18+; an Event whose pool holds
+      // no adult content never asked for that proof, so holding "Loading…" until
+      // reconnect would strand an offline Player on a spinner over a question
+      // nobody posed. Released BEFORE the IndexedDB read, which would only ever
+      // answer about a stamp this Event does not want.
+      if (!adultContentRequired()) {
+        if (profileAttemptRef.current !== attempt) return;
+        setLoading(false);
+        clearDealError();
+        return;
+      }
       // OFFLINE: settle the gate CACHE-FIRST and RELEASE the render only with
       // PROOF of 18+ (finding B). A cached stamp — or a same-session optimistic
       // attest (#112 Finding 3) — provisionally lifts the gate and paints the
@@ -574,6 +658,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Board (or re-prompt) renders, not the stale panel. A confirmed-attested User
       // then deals, and a genuine re-deal failure re-sets dealError from runDeal.
       clearDealError();
+      // The authoritative read landed — the deal may proceed on an Event that
+      // asks for no attestation. Set ONLY here, never in the failure arm above.
+      setProfileBootstrapOk(true);
     }
     setProfileReady(true);
     // Online gate resolved — release the "Loading…" hold and render (finding B).
@@ -595,6 +682,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfileReady(false);
       setAttested(undefined);
       setAttestedAuthoritative(false);
+      setProfileBootstrapOk(false);
       setUser(u);
       if (!u) {
         if (handoffSignedOutWebApp()) {
@@ -678,6 +766,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // succeeded THIS session, durable authority, not a stale cross-offline read
       // and not a merely optimistic pre-commit lift).
       if (!attestCommittedUidsRef.current.has(u.uid)) setAttestedAuthoritative(false);
+      // Same reasoning for the non-adult path's authority (Codex P2 on #615): a
+      // pre-offline success must not survive the dead zone as a licence to
+      // create rows during the reconnect window, before the fresh read lands.
+      setProfileBootstrapOk(false);
       // A mid-bootstrap connectivity LOSS SUPERSEDES the in-flight ONLINE bootstrap
       // (whose ensureUserProfile transaction may never settle offline and would
       // otherwise strand "Loading…") and switches to the cache-first path: release
@@ -813,9 +905,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // succeeded), so that User deals on reconnect. A returning boarded User re-runs
   // joinAndDeal on that flip but its board-exists early-return makes it a no-op;
   // the dealAttempt guard keeps any reconnect re-run from clobbering state.
+  //
+  // #608 SPLITS THE GATE FROM ITS SUBJECT. Every guarantee above is about
+  // proving an 18+ attestation before creating durable rows — which presupposes
+  // that this Event asks for one. When `hostnames/{host}.adultContent` is false
+  // no attestation is ever collected, so `attested` settles a permanent `false`
+  // and the deal would never fire at all. The equivalent "the bootstrap settled
+  // authoritatively" signal on that path is `profileReady`, which the ONLINE
+  // branch sets only after `ensureUserProfile` has actually run — so the
+  // write-safety property (never create board/player rows before the profile
+  // bootstrap SUCCEEDS, never offline) is preserved rather than dropped —
+  // `profileBootstrapOk`, not `profileReady`, because the latter is also true
+  // after a bootstrap FAILURE and would deal on a timed-out `ensureUserProfile`
+  // (Codex P2 on #615). The offline branch never sets it, and `online` gates
+  // besides.
+  const mayDeal = attestationRequired ? attested === true && attestedAuthoritative : profileBootstrapOk;
   useEffect(() => {
-    if (user && attested === true && attestedAuthoritative && online) void runDeal(user);
-  }, [user, attested, attestedAuthoritative, online, runDeal]);
+    if (user && mayDeal && online) void runDeal(user);
+  }, [user, mayDeal, online, runDeal]);
 
   // Re-attempt a FAILED attestation bootstrap (#112 round 2): re-runs
   // ensureUserProfile + readAdultAttestation under profileAttemptRef — the same
@@ -843,6 +950,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (profileAttemptRef.current !== attempt) return;
       const optimisticSticky = attestedUidsRef.current.has(u.uid);
       const committedSticky = attestCommittedUidsRef.current.has(u.uid);
+      // The retry re-runs the SAME work `bootstrapUser`'s online branch does, so
+      // it grants the same authority on success (#608, Codex P2 on #615): without
+      // this, an Event with no age gate whose first bootstrap failed would sit on
+      // the retry surface forever — the retry would land, clear the error, and
+      // still never license the deal.
+      setProfileBootstrapOk(true);
       // UI: server stamp OR optimistic attest (no re-prompt). AUTHORITY: server
       // stamp OR a COMMITTED same-session attest — never an optimistic pre-commit
       // lift (round 7).
@@ -867,9 +980,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Retry the current User's path to a dealt Board, in place (no reload). The
   // manual retry must honor the SAME write-safety gate as the automatic deal
-  // effect (Codex #117 round 3, finding A): deal ONLY when online AND the
-  // attestation is AUTHORITATIVE (server-settled or same-session attest) AND
-  // `attested === true`. Otherwise — offline, or on a merely PROVISIONAL cached
+  // effect (Codex #117 round 3, finding A) — literally the same `mayDeal`
+  // expression, so the two can never drift: online AND the attestation
+  // AUTHORITATIVE (server-settled or same-session attest) and `attested === true`,
+  // or, on an Event that asks for no attestation at all (#608), the profile
+  // bootstrap settled. Otherwise — offline, or on a merely PROVISIONAL cached
   // attestation (e.g. an offline cold boot whose reconnect bootstrap threw before
   // an authoritative read) — re-run the bootstrap instead, never joinAndDeal. A
   // retry can therefore never create board/player rows offline or on un-proven
@@ -886,14 +1001,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // cached Board and clear the stale error; else stay held/retryable), and
       // never awaits the transaction. It also never deals (offline gate).
       void bootstrapUser(user, (profileAttemptRef.current += 1));
-    } else if (attestedAuthoritative && attested === true) {
+    } else if (mayDeal) {
       // Online + authoritative → re-deal in place.
       void runDeal(user);
     } else {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user);
     }
-  }, [user, attestedAuthoritative, attested, runDeal, retryBootstrap, bootstrapUser]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the
@@ -952,9 +1067,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // completion signal: it settles once per mount, nothing render-critical
   // awaits it, and it resolves non-null ONLY on an actual redirect return —
   // never on an ordinary mount — so it cannot emit phantom `login` events. And
-  // signIn() is the only initiator of signInWithRedirect, always behind the
-  // checked 18+ box, so a non-null result is itself proof the acknowledgement
-  // happened. The marker still scopes FAILURE reporting: a rejection becomes
+  // signIn() is the only initiator of signInWithRedirect, and it records the
+  // actual checkbox value separately below. A non-null result proves the auth
+  // round trip happened, not that a checkbox was shown. The marker still scopes
+  // FAILURE reporting: a rejection becomes
   // `login_failed` only when the marker proves an app-owned redirect was in
   // flight — a marker-less rejection on an ordinary mount (e.g. partitioned
   // helper storage) stays out of analytics.
@@ -962,12 +1078,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
     const appOwnedRedirect = consumePendingRedirectAttestation();
+    // Read from its OWN store, and unconditionally — the marker above may have
+    // been lost (#346) while this record survives, which is the whole reason
+    // they are separate.
+    const acknowledged = consumeCollectedAcknowledgement();
 
     void getRedirectResult(auth)
       .then(async (result) => {
         if (!result) return;
         track('login', { method: 'google' });
-        await persistAttestation(result.user);
+        // Persist ONLY an acknowledgement that was actually collected (Phase 4b
+        // round 4). The posture is read when the redirect STARTS, not when it
+        // returns: an Event that turns adult while the player is away at Google
+        // would otherwise have this branch stamp a durable, cross-Event
+        // `attestedAdultAt` for a checkbox that was never on screen — and walk
+        // them straight through the gate it had just raised. When the
+        // acknowledgement was not collected, doing nothing is exactly right:
+        // `needsAttestation` settles true against the newly raised posture and
+        // the existing re-prompt collects it properly.
+        if (acknowledged) await persistAttestation(result.user);
       })
       .catch((err: unknown) => {
         if (appOwnedRedirect) trackSignInFailure(err);
@@ -983,8 +1112,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
   }, [persistAttestation]);
 
-  const signIn = useCallback((): Promise<void> => {
+  const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
+
+    // Captured from SignIn's actual checkbox state BEFORE any auth transaction
+    // starts, and threaded through both paths. The mutable Event posture answers
+    // whether a box is needed now; it cannot prove one was shown and ticked on
+    // the render whose button the player pressed.
+    const acknowledged = acknowledgedAdultContent === true;
 
     const attempt = (async () => {
       if (onFallbackAuthOrigin) {
@@ -1007,11 +1142,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // mobile tab and the installed desktop PWA (#395) both need. See
         // shouldRedirectSignIn; the popup path below still serves desktop browser
         // tabs and installed iOS PWAs.
+        // A failed or abandoned prior attempt must not authorize this one.
+        // Clear first, then write only the acknowledgement collected for this
+        // exact redirect transaction.
+        clearCollectedAcknowledgement();
         markPendingRedirectAttestation();
+        // Recorded only when the box was actually shown and ticked; the return
+        // path reads THIS, never the posture as it stands on return.
+        if (acknowledged) markCollectedAcknowledgement();
         try {
           await signInWithRedirect(auth, googleProvider);
         } catch (err) {
           consumePendingRedirectAttestation();
+          clearCollectedAcknowledgement();
           trackSignInFailure(err);
           throw err;
         }
@@ -1037,7 +1180,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // The 18+ checkbox gated this sign-in (SignIn.tsx), so signing in IS the
       // attestation — persist it now that we have a uid, so a first-time User is not
       // re-prompted for the box they just ticked (#23).
-      await attest();
+      //
+      // …UNLESS no acknowledgement was collected (#608, tightened by Phase 4b
+      // round 4). `attestedAdultAt` is a cross-Event record on the global
+      // `users/{uid}` document, and on an Event with no adult content SignIn
+      // renders no checkbox at all — so writing the stamp would fabricate a
+      // self-attestation the Player never made and carry it to every other Event
+      // they join. `acknowledged` is captured at the START of this attempt, not
+      // re-read here: a popup can stay open while an admin approves the first
+      // explicit Prompt, and the posture that governs what the player agreed to
+      // is the one that was on their screen.
+      if (acknowledged) await attest();
     })();
 
     signInAttemptRef.current = attempt;
@@ -1058,8 +1211,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // SignIn gate App renders on `!user`. Gated on profileReady so a still-loading
   // bootstrap (attestation UNKNOWN) never flashes the prompt. `SignIn` reads
   // `user` from context to render its re-prompt mode.
-  const needsAttestation = user != null && profileReady && attested === false;
-  const canRenderEventContent = user != null && attested === true;
+  //
+  // …and gated FIRST on whether this Event asks at all (#608). This is the whole
+  // retroactive path the dynamic posture needs, and it needs no new surface: an
+  // Event that turns 18+ mid-flight (an admin approves the first explicit Prompt)
+  // flips `hostnames/{host}.adultContent`, the next resolution installs `true`,
+  // and this one condition re-gates every un-attested Player through the
+  // re-prompt that already exists.
+  const needsAttestation = attestationRequired && user != null && profileReady && attested === false;
+  // Event content may render once the age gate is settled — or once it is
+  // established that this Event has no age gate and the profile bootstrap has
+  // landed. `profileReady` rather than a bare `user != null` keeps the durable
+  // card fallback from painting before the bootstrap it is meant to follow.
+  const canRenderEventContent =
+    user != null && (attestationRequired ? attested === true : profileReady);
 
   return (
     <AuthContext.Provider
@@ -1088,6 +1253,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           player attests. Its uid-keyed module state (getConfirmState) also carries
           any parked ceremony across the remount. Renders nothing; scoped to the
           mount location only — the attestation gate itself is #117's surface. */}
+      {/* Keeps the 18+ posture current while a tab stays open (Phase 4b P1).
+          Deliberately NOT gated on `user`, unlike the watchers below it: the
+          posture decides what the SIGNED-OUT gate renders. */}
+      <AdultContentWatcher />
       {user && <ConfirmWinMoments />}
       {/* The retraction-path fall observer (#479) mounts at the SAME shell spot
           and for the same reason: a published win can stop standing while Board

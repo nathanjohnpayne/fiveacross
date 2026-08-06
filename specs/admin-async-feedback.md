@@ -5,7 +5,7 @@ status: accepted
 
 # admin-async-feedback — pending/error feedback on the moderation click handlers
 
-Implements #411 (deferred from PR #410's review): the admin moderation row actions fired async `data/admin` writes with no local catch or pending state — a rejected write (offline at sea, a rules denial) gave the admin no feedback and surfaced as an unhandled promise rejection. Every such action now disables while its write is in flight and surfaces a rejected write inline, in the spirit of `SchedulePanel`'s `UnlockNowButton`/`ResnapshotButton`. **No write path changes** — this wraps the exact calls the console already made.
+Implements #411 (deferred from PR #410's review): the admin moderation row actions fired async `data/admin` writes with no local catch or pending state — a rejected write (offline, a rules denial) gave the admin no feedback and surfaced as an unhandled promise rejection. Every such action now disables while its write is in flight and surfaces a rejected write inline, in the spirit of `SchedulePanel`'s `UnlockNowButton`/`ResnapshotButton`. **No write path changes** — this wraps the exact calls the console already made.
 
 ## Contract
 

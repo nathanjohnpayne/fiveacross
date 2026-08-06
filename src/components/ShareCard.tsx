@@ -1,5 +1,6 @@
 import { toBlob } from 'html-to-image';
 import { completedLines } from '../game/logic';
+import { editionBrand, editionLexicon } from '../editions';
 import type { Cell } from '../types';
 
 /**
@@ -28,7 +29,24 @@ import type { Cell } from '../types';
 const PIXEL_RATIO = 3;
 const CARD_WIDTH = 600;
 const CARD_HEIGHT = 750;
-export const SHARE_CARD_APP_NAME = 'Gay Cruise Bingo';
+/**
+ * The app's name as it appears ON a share card — the footer, the Web Share
+ * title, and the fallback when an Event has no name of its own.
+ *
+ * A FUNCTION, resolved through the Edition (Phase 4b P2 on #615). It was a
+ * `const 'Gay Cruise Bingo'`, and #608's scope table assigned it to #607 — but
+ * that left every Vacay and Five Across card carrying another product's name
+ * beside the Edition-correct filename, mark, brag text and champion label this
+ * ticket had just given it, which is a guest-visible branding leak rather than
+ * a scoping nicety. #607 keeps the other half of its scope: which ORIGIN the
+ * shared URL points at.
+ *
+ * Read at call time, never captured at module scope: the resolved Edition is
+ * installed before React mounts but after this module is imported.
+ */
+export function shareCardAppName(): string {
+  return editionBrand().appName;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -182,7 +200,7 @@ function buildBingoCardNode(data: BingoShareCardData): HTMLDivElement {
   }
   card.append(grid);
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
-  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} 🚢`));
+  card.append(el('div', 'share-card-footer', `${shareCardAppName()} ${editionLexicon().shareMark}`));
   return card;
 }
 
@@ -284,7 +302,7 @@ function buildLeaderboardCardNode(data: LeaderboardShareCardData): HTMLDivElemen
   }
 
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
-  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} 🚢`));
+  card.append(el('div', 'share-card-footer', `${shareCardAppName()} ${editionLexicon().shareMark}`));
   return card;
 }
 
@@ -333,7 +351,7 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   if (data.champion) {
     card.append(
       buildHonoree(
-        '🏆 Cruise champion',
+        `🏆 ${editionBrand().championRole}`,
         data.champion.displayName,
         `${data.champion.bingoCount} bingo${data.champion.bingoCount === 1 ? '' : 's'} · ${data.champion.squaresMarked} squares`,
       ),
@@ -356,7 +374,7 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   }
 
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
-  card.append(el('div', 'share-card-footer', `${SHARE_CARD_APP_NAME} 🚢`));
+  card.append(el('div', 'share-card-footer', `${shareCardAppName()} ${editionLexicon().shareMark}`));
   return card;
 }
 

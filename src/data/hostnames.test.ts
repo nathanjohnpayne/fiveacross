@@ -24,6 +24,7 @@ vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: mocks.applyReso
 
 import { fetchHostnameDoc, bootstrapEventResolution } from './hostnames';
 import { activeEdition, setActiveEdition, DEFAULT_EDITION } from '../editions';
+import { adultContentRequired, resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 
 const snap = (data: unknown) => ({ exists: () => data != null, data: () => data });
 
@@ -37,6 +38,11 @@ const DOC = {
 beforeEach(() => {
   vi.clearAllMocks();
   setActiveEdition(DEFAULT_EDITION);
+  // resetAdultContentForTests, not setActiveAdultContent(true): a live read
+  // that returned `true` LATCHES the session (the monotone mirror), so
+  // re-installing would not clear it and every later case would inherit the
+  // gate from whichever test ran first.
+  resetAdultContentForTests();
 });
 
 describe('fetchHostnameDoc — the read must reach the server', () => {
@@ -91,6 +97,34 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     // #556: analytics and share metadata must report THIS host, never a
     // raw window.location that could reflect a validated Alias.
     expect(mocks.applyResolvedCanonicalHost).toHaveBeenCalledWith('bodega-bay.vacaybingo.com');
+  });
+
+  // #608. The 18+ posture rides the SAME pre-auth read as the Edition, for the
+  // same reason: the gate that must reflect it renders before there is a
+  // signed-in user to read `events/{eventId}/items` with.
+  it('installs the 18+ posture from the routing document', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, adultContent: false }));
+    await bootstrapEventResolution('bodega-bay.vacaybingo.com');
+    expect(adultContentRequired()).toBe(false);
+  });
+
+  it('gates the Event when the routing document predates the field', async () => {
+    // Every hostname document written before #608 has no `adultContent`, and
+    // must keep exactly today's gate rather than silently losing it. That is
+    // what makes this ship with no backfill.
+    setActiveAdultContent(false);
+    mocks.getDocFromServer.mockResolvedValue(snap(DOC));
+    await bootstrapEventResolution('bodega-bay.vacaybingo.com');
+    expect(adultContentRequired()).toBe(true);
+  });
+
+  it('gates the Event on a malformed value, rather than trusting it', async () => {
+    for (const bad of ['false', 0, null, {}]) {
+      setActiveAdultContent(false);
+      mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, adultContent: bad }));
+      await bootstrapEventResolution('bodega-bay.vacaybingo.com');
+      expect(adultContentRequired(), String(bad)).toBe(true);
+    }
   });
 
   it('installs nothing when the hostname resolves to no Event', async () => {

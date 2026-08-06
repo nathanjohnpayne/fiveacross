@@ -1,9 +1,10 @@
-import { doc, getDocFromServer } from 'firebase/firestore';
+import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
 import { resolveEvent, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
+import { adultContentSettledAdult, coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
@@ -52,6 +53,12 @@ export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | 
     canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
     edition: typeof d.edition === 'string' ? d.edition : '',
     status: d.status as HostnameDoc['status'],
+    // The 18+ posture (#608). Validated field-by-field like everything else
+    // here, but it does NOT join the two null-returning guards above: a missing
+    // or malformed `adultContent` is not a malformed routing record, it is an
+    // Event that predates the field. Coercing it to `true` gates the Event;
+    // rejecting the whole document would take the Event off the air.
+    adultContent: coerceAdultContent(d.adultContent),
     slug: typeof d.slug === 'string' ? d.slug : undefined,
     isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
   };
@@ -77,6 +84,9 @@ export async function bootstrapEventResolution(
     // PRESENCE marks a single-Event build, and short-circuits the lookup
     // entirely — see resolveEvent step 0.
     envEventId: import.meta.env.VITE_EVENT_ID || null,
+    // The 18+ opt-out for that same single-Event build (#608). Passed as the
+    // raw string; `resolveEvent` owns the fail-closed reading of it.
+    envAdultContent: import.meta.env.VITE_ADULT_CONTENT || null,
   });
   if (resolution.kind === 'event') {
     applyResolvedEventId(resolution.eventId);
@@ -103,6 +113,13 @@ export async function bootstrapEventResolution(
     // would outrank the mapping it exists to defer to (Codex P3 round 6 on
     // #576).
     if (resolution.edition !== null) setActiveEdition(resolution.edition);
+    // The 18+ posture (#608). UNCONDITIONAL, unlike the Edition setter above,
+    // because the two absences are not the same absence: `edition: null` means
+    // "a build-time seed already installed one, don't clobber it", whereas
+    // `adultContent` has no build-time seed — the env short-circuit reports the
+    // fail-closed default, so installing it there is a no-op that writes the
+    // value the accessor would have answered anyway.
+    setActiveAdultContent(resolution.adultContent, { proven: resolution.adultContentProven });
     // …and the browser chrome around it (#586). Unconditional, unlike the
     // setter above: the guard there protects the ENV-SEEDED Edition from being
     // reset by a lookup that never ran, whereas this only reads whatever
@@ -131,4 +148,87 @@ function safeLocalStorage(): Storage | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Watch THIS origin's 18+ posture and keep it installed (Phase 4b).
+ *
+ * The posture is the one field on `hostnames/{host}` that is expected to change
+ * mid-session: an admin approves the first explicit Prompt, the derivation
+ * stamps the routing document, and every already-open tab is now serving an
+ * adults-only Event with no acknowledgement. Startup resolution cannot cover
+ * that — it runs once, before the flip.
+ *
+ * A LISTENER, not a poll (Phase 4b round 3). The first cut polled on an
+ * interval, on the mistaken reasoning that a listener would need `list`. It does
+ * not: `onSnapshot` on an EXACT document path exercises the same `get` the rule
+ * already grants — the `list` denial only blocks queries. The distinction
+ * matters because a poll loses the race that matters. The Prompts a Player sees
+ * arrive over their own live `items` listener the moment an admin approves, so a
+ * five-minute posture poll means explicit content can reach the screen minutes
+ * before the acknowledgement that gates it. A listener makes the gate arrive on
+ * the same round trip as the content.
+ *
+ * Only the posture. This deliberately does NOT re-resolve the Event, re-stamp
+ * the mapping cache, or touch the Edition: routing is durable and re-deciding it
+ * mid-session is the churn `resolveEvent`'s 12-hour TTL exists to avoid.
+ *
+ * PROVEN vs provisional, which is what licenses UN-gating. A snapshot served
+ * from Firestore's local cache is not evidence about the posture NOW, so it may
+ * raise the gate but never lower it; only a server-backed snapshot
+ * (`metadata.fromCache === false`) can prove `false`. Same rule the resolver
+ * follows, same reason.
+ *
+ * ON ERROR, GATE. A listener that errors — permission, transport, a dead origin
+ * — leaves the posture UNKNOWN, and unknown resolves to gated (Phase 4b round
+ * 3). Preserving a previously proven `false` through a failure was the exact
+ * hazard: after the Event has transitioned, a transient failure reading THIS
+ * document would leave the session ungated while every other Firestore read
+ * happily delivers the newly active explicit Prompt. The gate installed here is
+ * provisional, so a later successful server snapshot saying `false` lowers it
+ * again.
+ *
+ * Runs on EVERY build shape, including the single-Event short-circuit. That
+ * build resolves its Event from `VITE_EVENT_ID` and never reads a routing
+ * document for routing — but if it baked `VITE_ADULT_CONTENT=false` it holds an
+ * ungated posture that nothing can currently revoke, and this is the revocation
+ * channel. A missing document therefore gates, which is the honest answer: an
+ * opt-out with no channel to withdraw it is not one this design can offer.
+ *
+ * Returns an unsubscribe. Never throws.
+ */
+export function watchAdultContent(hostname: string = window.location.hostname): () => void {
+  // The flag is monotone, so a proven `true` is terminal: no later snapshot could
+  // change the answer. Never open the listener at all.
+  if (adultContentSettledAdult()) return () => {};
+  // `settled` rather than calling the unsubscribe directly: a snapshot can be
+  // delivered before `onSnapshot` has returned its unsubscribe, so the terminal
+  // case has to be recorded and acted on once the handle exists.
+  let settled = false;
+  let unsubscribe: (() => void) | null = null;
+  const detach = () => {
+    settled = true;
+    unsubscribe?.();
+  };
+  unsubscribe = onSnapshot(
+    doc(db, 'hostnames', hostname.toLowerCase()),
+    (snap) => {
+      // Server-backed snapshots prove; cached ones may only ever RAISE.
+      const proven = snap.metadata.fromCache === false;
+      if (!snap.exists()) {
+        // No routing document: no channel through which an ungated posture
+        // could ever be withdrawn, so it is not one we can hold.
+        setActiveAdultContent(true, { proven: false });
+        return;
+      }
+      const adult = coerceAdultContent(snap.data()?.adultContent);
+      if (!adult && !proven) return; // a cached `false` proves nothing
+      setActiveAdultContent(adult, { proven });
+      // Monotone: a proven `true` is terminal, so stop listening.
+      if (adult && proven) detach();
+    },
+    () => setActiveAdultContent(true, { proven: false }),
+  );
+  if (settled) unsubscribe();
+  return detach;
 }

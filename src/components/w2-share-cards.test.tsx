@@ -83,7 +83,7 @@ import {
   renderLeaderboardShareCard,
   renderFarewellShareCard,
   shareCardBlob,
-  SHARE_CARD_APP_NAME,
+  shareCardAppName,
   type LeaderboardShareRow,
 } from './ShareCard';
 
@@ -1188,9 +1188,9 @@ describe('Celebration — image share + fallback', () => {
     await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
     // Assert on the `.share-card-event` node specifically, not just
     // `textContent` at large — the card's footer always renders
-    // `${SHARE_CARD_APP_NAME} 🚢` regardless of `eventName`, so a whole-node
+    // `${shareCardAppName()} 🚢` regardless of `eventName`, so a whole-node
     // substring check would pass even if the eventName fallback were broken.
-    expect(toBlobNode().querySelector('.share-card-event')?.textContent).toBe(SHARE_CARD_APP_NAME);
+    expect(toBlobNode().querySelector('.share-card-event')?.textContent).toBe(shareCardAppName());
   });
 
   it('"Keep playing" closes without sharing — the eager pre-render never leaves the device', async () => {
@@ -1303,10 +1303,10 @@ describe('Leaderboard — share affordance', () => {
     const { rerender } = render(<Leaderboard />, { wrapper: MemoryRouter });
     await user.hover(screen.getByRole('button', { name: 'Share leaderboard' }));
     expect(toBlobMock).toHaveBeenCalledTimes(1);
-    expect(toBlobNode().querySelector('.share-card-event')?.textContent).toBe(SHARE_CARD_APP_NAME);
+    expect(toBlobNode().querySelector('.share-card-event')?.textContent).toBe(shareCardAppName());
 
     H.event = {
-      name: SHARE_CARD_APP_NAME,
+      name: shareCardAppName(),
       days: [
         {
           index: 0,
@@ -1328,13 +1328,13 @@ describe('Leaderboard — share affordance', () => {
     await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
     expect(toBlobMock).toHaveBeenCalledTimes(2);
     expect(latestToBlobNode().querySelector('.share-card-event')?.textContent).toBe(
-      `${SHARE_CARD_APP_NAME} · Day 1 · Palermo`,
+      `${shareCardAppName()} · Day 1 · Palermo`,
     );
   });
 
   it('keys leaderboard Share Card copy on the derived event schedule lines', () => {
     const first = leaderboardShareCopy({
-      name: SHARE_CARD_APP_NAME,
+      name: shareCardAppName(),
       days: [
         {
           index: 0,
@@ -1350,7 +1350,7 @@ describe('Leaderboard — share affordance', () => {
       ],
     }, 2000);
     const changed = leaderboardShareCopy({
-      name: SHARE_CARD_APP_NAME,
+      name: shareCardAppName(),
       days: [
         {
           index: 0,
@@ -1366,8 +1366,8 @@ describe('Leaderboard — share affordance', () => {
       ],
     }, 2000);
 
-    expect(first.contextLine).toBe(`${SHARE_CARD_APP_NAME} · Day 1 · Palermo`);
-    expect(changed.contextLine).toBe(`${SHARE_CARD_APP_NAME} · Day 1 · Valletta`);
+    expect(first.contextLine).toBe(`${shareCardAppName()} · Day 1 · Palermo`);
+    expect(changed.contextLine).toBe(`${shareCardAppName()} · Day 1 · Valletta`);
     expect(changed.cacheKey).not.toBe(first.cacheKey);
   });
 

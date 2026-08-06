@@ -101,10 +101,18 @@ export function definitelyOffline(): boolean {
  * thing that licenses the destructive teardown (Phase 4b P1 on #513).
  *
  * The earlier `!definitelyOffline()` gate was too weak, and on this app's own
- * primary surface: ship Wi-Fi and captive portals leave `navigator.onLine`
- * TRUE while the origin is unreachable. In that state the boundary would delete
- * the only precached shell and reload into a browser error page — precisely the
- * stranding this module exists to prevent, re-created by the fix for it.
+ * primary surface: congested venue Wi-Fi and captive portals leave
+ * `navigator.onLine` TRUE while the origin is unreachable. In that state the
+ * boundary would delete the only precached shell and reload into a browser
+ * error page — precisely the stranding this module exists to prevent,
+ * re-created by the fix for it.
+ *
+ * This is a HEADLINE capability, not a cruise footnote (#608). Signal at a
+ * crowded event is blocked by network congestion from high user density and by
+ * physical barriers — thick concrete, structural steel — and a conference hall
+ * or a wedding venue behind both drops signal more reliably than a ship does. A
+ * few hundred phones on one cell behind a captive portal IS the case below;
+ * "ship Wi-Fi" was only ever the first place this app met it.
  *
  * So we ask the origin directly. `/build-floor.json` is the natural probe: it is
  * tiny, deliberately un-precached (the workbox glob excludes `.json`), and

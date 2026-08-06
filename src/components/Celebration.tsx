@@ -8,11 +8,16 @@ import {
   CONFETTI_COUNT_BLACKOUT,
   type ConfettiPiece,
 } from '../game/motion';
-import { renderBingoShareCard, shareCardBlob, SHARE_CARD_APP_NAME } from './ShareCard';
+import { renderBingoShareCard, shareCardBlob, shareCardAppName } from './ShareCard';
+import { editionBrand, editionLexicon } from '../editions';
 import type { Cell } from '../types';
 
+// Whole-string per Edition (#608), and the clearest case for the override
+// layer in the whole ticket: tokenising this produces "I got BINGO on the high
+// event". Each Edition writes its own brag, mark included.
 function celebrationCopy(kind: 'bingo' | 'blackout'): string {
-  return kind === 'blackout' ? 'BLACKOUT. I win the boat. 🚢' : 'I got BINGO on the high seas 🚢';
+  const brand = editionBrand();
+  return kind === 'blackout' ? brand.blackoutShareText : brand.bingoShareText;
 }
 
 /** The confetti gate (specs/motion-polish.md): decoration only, so a reduced-
@@ -79,7 +84,7 @@ export default function Celebration({
   // is not identity (no per-user staleness to leak) and has a benign
   // app-name fallback, pinned by the "falls back to the app name" test.
   const { data: event } = useEventDoc();
-  const eventName = event?.name ?? SHARE_CARD_APP_NAME;
+  const eventName = event?.name ?? shareCardAppName();
 
   // EAGER pre-render (Codex P2, PR #111 round 2 finding 2): rasterization
   // starts at MOUNT — the card's data is fixed by then — not at tap time. A
@@ -162,8 +167,8 @@ export default function Celebration({
     try {
       await shareCardBlob({
         blob,
-        filename: `gay-cruise-bingo-${kind}.png`,
-        title: SHARE_CARD_APP_NAME,
+        filename: `${editionLexicon().fileSlug}-${kind}.png`,
+        title: shareCardAppName(),
         text,
         url,
       });

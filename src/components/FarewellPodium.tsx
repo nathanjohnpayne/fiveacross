@@ -6,14 +6,15 @@ import { canonicalOrigin } from '../canonicalHost';
 import {
   renderFarewellShareCard,
   shareCardBlob,
-  SHARE_CARD_APP_NAME,
+  shareCardAppName,
   type FarewellShareCardData,
 } from './ShareCard';
 import { leaderboardShareCopy } from './Leaderboard';
+import { editionBrand, editionLexicon } from '../editions';
 
 /**
  * The farewell view's podium banner (#217, daily-cards-spec § "Farewell view"):
- * the cruise champion, the cruise-wide First to BINGO, and the ten daily honors,
+ * the champion, the Event-wide First to BINGO, and the ten daily honors,
  * shown once the standings freeze. Mounts ABOVE the goodbye banner
  * (`TutorialBanner`'s farewell copy) — Board owns that stacking order — so the
  * ceremony reads podium-then-goodbye. `d15-tutorial-banners` owns the goodbye
@@ -58,17 +59,21 @@ export function FarewellPodiumView({
   share?: { onShare: () => void; onWarm: () => void };
 }) {
   const { champion, firstBingo, dailyHonors } = podium;
+  // The winner's ROLE and the podium's accessible name are Edition copy (#608):
+  // "Cruise champion" on a conference standings card is the leak this ticket is
+  // about — it survives a brand-name find-and-replace untouched.
+  const brand = editionBrand();
   if (!champion && !firstBingo && dailyHonors.length === 0) return null;
 
   return (
-    <section className="farewell-podium" aria-label="Cruise podium">
+    <section className="farewell-podium" aria-label={brand.podiumLabel}>
       <p className="farewell-podium-title">The podium</p>
       {champion && (
         <div className="farewell-podium-champion">
           <span className="farewell-podium-medal" aria-hidden="true">
             🏆
           </span>
-          <span className="farewell-podium-role">Cruise champion</span>
+          <span className="farewell-podium-role">{brand.championRole}</span>
           <span className="farewell-podium-name">{champion.displayName}</span>
           <span className="farewell-podium-stat">
             {champion.bingoCount} bingo{champion.bingoCount === 1 ? '' : 's'} · {champion.squaresMarked} squares
@@ -197,9 +202,9 @@ export default function FarewellPodium({
     try {
       await shareCardBlob({
         blob,
-        filename: 'gay-cruise-bingo-final-standings.png',
-        title: `${SHARE_CARD_APP_NAME}—Final standings`,
-        text: 'Final standings from Gay Cruise Bingo 🏆',
+        filename: `${editionLexicon().fileSlug}-final-standings.png`,
+        title: `${shareCardAppName()}—Final standings`,
+        text: `Final standings from ${editionBrand().appName} 🏆`,
         // Canonical hostname (#556), not the raw origin — see Leaderboard's
         // shareLeaderboard for the rationale.
         url: canonicalOrigin(),

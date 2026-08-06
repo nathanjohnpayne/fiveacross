@@ -5,7 +5,8 @@ import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { canonicalOrigin } from '../canonicalHost';
-import { renderLeaderboardShareCard, shareCardBlob, SHARE_CARD_APP_NAME, type LeaderboardShareRow } from './ShareCard';
+import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
+import { editionBrand, editionLexicon } from '../editions';
 import Avatar from './Avatar';
 import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
 import LoadingState from './LoadingState';
@@ -71,7 +72,7 @@ export function leaderboardShareCopy(
   event: Pick<EventDoc, 'name' | 'days'> | null | undefined,
   now = Date.now(),
 ): { eventName: string; contextLine: string | undefined; statLine: string | undefined; cacheKey: string } {
-  const eventName = event?.name ?? SHARE_CARD_APP_NAME;
+  const eventName = event?.name ?? shareCardAppName();
   const days = [...(event?.days ?? [])].sort((a, b) => a.index - b.index);
   const unlocked = days.filter((d) => d.unlockAt <= now);
   const currentDay = unlocked.length ? unlocked[unlocked.length - 1] : days[0];
@@ -291,9 +292,9 @@ export default function Leaderboard() {
     try {
       await shareCardBlob({
         blob,
-        filename: 'gay-cruise-bingo-leaderboard.png',
-        title: `${SHARE_CARD_APP_NAME}—Leaderboard`,
-        text: 'Check out the Gay Cruise Bingo leaderboard 🏆',
+        filename: `${editionLexicon().fileSlug}-leaderboard.png`,
+        title: `${shareCardAppName()}—Leaderboard`,
+        text: `Check out the ${editionBrand().appName} leaderboard 🏆`,
         // Canonical hostname (#556), not the raw origin — a Player on a
         // validated Alias must never hand that address off in a share link.
         url: canonicalOrigin(),
@@ -381,7 +382,8 @@ export default function Leaderboard() {
       {/* The wireframes' explanatory footnote (#264), re-voiced as player copy (#298). */}
       <p className="muted lb-footnote">
         Every Day Card counts here—except the farewell, which is pure ceremony. ⭐ marks the
-        cruise-wide First to BINGO—main days only. Tap a proof chip for the receipts in the Feed.
+        {editionLexicon().occasionWide} First to BINGO—main days only. Tap a proof chip for the receipts in
+        the Feed.
       </p>
       <div className="lb-actions">
         <button

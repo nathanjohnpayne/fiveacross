@@ -1,4 +1,5 @@
 import type { HostnameDoc } from './types';
+import { ADULT_CONTENT_DEFAULT, coerceAdultContent } from './adultContent';
 
 // Startup Event resolution from the request hostname (ADR 0009, #543).
 //
@@ -27,6 +28,16 @@ export type Resolution =
        *  field; callers fall back to `eventId` as the closest available
        *  identifier. */
       slug: string | null;
+      /** Whether this Event shows the 18+ acknowledgement (#608). Never `null`,
+       *  unlike `edition`: there is no "unknown" posture a gate could render, so
+       *  an unknown answer resolves to the gated one. */
+      adultContent: boolean;
+      /** Whether `adultContent` came from a LIVE read of `hostnames/{host}`, as
+       *  opposed to a build-time seed, a cached entry, or the fail-closed
+       *  default. Only a proven `true` latches the session (`sessionRaised`);
+       *  only a proven `false` is allowed to stand without revalidation. See the
+       *  rule at the top of `src/adultContent.ts`. */
+      adultContentProven: boolean;
       /** Where the answer came from — surfaced for diagnostics, never for logic. */
       source: 'cache' | 'network' | 'env';
     }
@@ -112,6 +123,14 @@ export function readCache(
         canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
         edition: typeof d.edition === 'string' ? d.edition : '',
         status: d.status,
+        // Coerced, not version-gated. Adding a field to the cached shape would
+        // normally argue for a CACHE_VERSION bump, but a bump invalidates every
+        // stored mapping — and the entries this would evict are exactly the ones
+        // an offline cold boot depends on (step 3 below), so it would trade a
+        // correct fail-closed default for a not-found screen. `undefined` here
+        // reads as `true`, which IS the safe direction, so an entry written
+        // before #608 is already correct.
+        adultContent: coerceAdultContent(d.adultContent),
         slug: typeof d.slug === 'string' ? d.slug : undefined,
         isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
       },
@@ -153,6 +172,10 @@ const asEvent = (doc: HostnameDoc, source: 'cache' | 'network'): Resolution => (
   eventId: doc.eventId,
   canonicalHost: doc.canonicalHost,
   edition: doc.edition,
+  adultContent: doc.adultContent,
+  // A cache hit is not evidence about the posture NOW — the document may have
+  // been stamped since. Only the network read proves anything.
+  adultContentProven: source === 'network',
   slug: doc.slug ?? null,
   source,
 });
@@ -164,6 +187,12 @@ export interface ResolveOptions {
   storage?: StorageLike | null;
   /** `VITE_EVENT_ID`. Its PRESENCE marks a single-Event build. */
   envEventId?: string | null;
+  /** `VITE_ADULT_CONTENT`, verbatim. Only a literal `'false'` opts a
+   *  single-Event build out of the 18+ posture (#608); read as a raw string
+   *  rather than a boolean so the fail-closed coercion lives in ONE place and
+   *  an unset/blank/typo'd var cannot un-gate a build. Ignored entirely on the
+   *  hostname-resolved path, which defers to the routing document. */
+  envAdultContent?: string | null;
   /** Hard ceiling on the network read. */
   timeoutMs?: number;
   /** Injected for tests; defaults to a real timer. */
@@ -228,11 +257,86 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
 
   // 0. Single-Event build: answer immediately, never touch the network.
   if (envEventId) {
-    return { kind: 'event', eventId: envEventId, canonicalHost: null, edition: null, slug: null, source: 'env' };
+    // `adultContent` defaults CLOSED here, like everywhere else — this path
+    // reads no hostname document, so there is nothing to derive from, and the
+    // legacy Gay Cruise Bingo build it serves is 18+ anyway.
+    //
+    // `envAdultContent` is the build-time opt-out — a SEED, and deliberately not
+    // an answer (Phase 4b P1). A single-Event build is the shape the repo
+    // documents for a small standalone deployment, and without some build-time
+    // input it could never be anything but adults-only. But a baked `false` that
+    // simply STOOD would be the worst version of that: the build never reads a
+    // routing document, so an admin who later approves an explicit Prompt or
+    // flips `forceAdult` would change nothing on those clients — not on a reload,
+    // not ever, short of a rebuild — while the ticket advertises exactly that
+    // transition.
+    //
+    // So the seed is marked UNPROVEN (`adultContentProven: false` below). It
+    // paints the first frame, and `revalidateAdultContent` then has to confirm it
+    // against `hostnames/{host}` like any other ungated claim. If that read says
+    // `true`, the gate goes up. If the document does not exist, there is no
+    // channel through which this posture could ever be revoked — so the posture
+    // returns to gated rather than standing forever on a promise nobody can keep.
+    // A deployment that wants to be non-adult needs a routing document, which is
+    // the same document the derivation already writes to.
+    //
+    // Only a literal `'false'` seeds the opt-out; a typo, a blank, or an unset
+    // var all gate.
+    const envUngated = opts.envAdultContent === 'false';
+    return {
+      kind: 'event',
+      eventId: envEventId,
+      canonicalHost: null,
+      edition: null,
+      adultContent: envUngated ? false : ADULT_CONTENT_DEFAULT,
+      // Never proven: a build-time string is a claim about the past.
+      adultContentProven: false,
+      slug: null,
+      source: 'env',
+    };
   }
 
   const cached = readCache(storage, hostname, now());
-  if (cached && !cached.stale && isServable(cached.doc)) return asEvent(cached.doc, 'cache');
+  // A fresh cache hit wins outright — UNLESS it would UN-GATE the Event (#608,
+  // Codex P1 on #615).
+  //
+  // `adultContent` is the one cached field that can only ever move in one
+  // direction, and it is the direction that matters: an admin approves the first
+  // explicit Prompt, the derivation stamps the routing document `true`, and every
+  // device holding a cached `false` would keep short-circuiting to it for the
+  // rest of the 12-hour TTL — booting straight past the 18+ gate the Event has
+  // since acquired. The re-prompt path #608 relies on ("a spicy Prompt approved
+  // mid-Event flips the flag and the existing re-prompt gate does the rest")
+  // simply never fires on those devices.
+  //
+  // So a cached `false` is treated as a REVALIDATION CANDIDATE rather than an
+  // answer: fall through to the network read below.
+  //
+  // AND, if that read fails, the posture resolves to GATED — not back to the
+  // cached `false` (Phase 4b P1, correcting the first cut of this rule). The
+  // reasoning that talked me into the softer version was about the offline cost:
+  // gating asks a Player of a tame Event for an attestation nobody offered them,
+  // and `bootstrapUser`'s offline branch holds on "Loading…" without a cached
+  // stamp. But that argument answers the wrong question. A failed revalidation
+  // does not mean "the posture is still false" — it means the posture is
+  // UNKNOWN, and this field is monotone, so the one direction it could have
+  // moved in is the direction that matters. Serving a cached `false` on no
+  // evidence is precisely the fail-open the whole design is built to refuse.
+  //
+  // The offline cost is real and is paid deliberately. Two things bound it: an
+  // Event that has ALREADY flipped caches `true` and short-circuits normally, so
+  // this only touches the never-yet-adult case; and the gate is provisional, not
+  // latched (`setActiveAdultContent(..., { proven: false })`), so the first
+  // successful revalidation lowers it again. It is a gate until we can ask, not
+  // a gate forever.
+  //
+  // A cached `true` still short-circuits, so the gated path — every Gay Cruise
+  // Bingo host, and every Event that has already flipped — keeps the pure
+  // offline-first cold boot ADR 0006 specifies, at no cost.
+  const cacheMayUnGate = cached?.doc.adultContent === false;
+  if (cached && !cached.stale && !cacheMayUnGate && isServable(cached.doc)) {
+    return asEvent(cached.doc, 'cache');
+  }
 
   const TIMED_OUT = Symbol('timeout');
   let doc: HostnameDoc | null;
@@ -266,13 +370,25 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
 }
 
 /** Revalidation failed. A stale-but-active cached mapping is still the best
- *  answer available — an expired entry beats a dead app when the network is
- *  simply unreachable. */
+ *  answer available for ROUTING — an expired entry beats a dead app when the
+ *  network is simply unreachable.
+ *
+ *  Its POSTURE is a different question, and gets the opposite answer (Phase 4b
+ *  P1). Routing is effectively immutable: a hostname's Event assignment is
+ *  durable, which is why serving a stale one is safe at all. `adultContent` is
+ *  the one field on the document that is expected to change, in exactly one
+ *  direction, and we have just failed to find out whether it has. So the Event
+ *  still resolves — the player is not stranded on a not-found screen — but it
+ *  resolves GATED, and unproven, so the first successful revalidation can lower
+ *  it again. */
 function staleOrNotFound(
   cached: CacheRead | null,
   hostname: string,
   reason: 'missing' | 'unreachable',
 ): Resolution {
-  if (cached && isServable(cached.doc)) return asEvent(cached.doc, 'cache');
+  if (cached && isServable(cached.doc)) {
+    const stale = asEvent(cached.doc, 'cache');
+    return stale.kind === 'event' ? { ...stale, adultContent: true, adultContentProven: false } : stale;
+  }
   return { kind: 'not-found', hostname, reason };
 }

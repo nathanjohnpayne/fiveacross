@@ -266,7 +266,18 @@ const EDITION_DEFAULT_THEME: Record<string, ThemeId> = {
 };
 
 export function defaultThemeForEdition(edition: string = activeEdition()): ThemeId {
-  return EDITION_DEFAULT_THEME[edition] ?? EDITION_DEFAULT_THEME[DEFAULT_EDITION]!;
+  // OWN property, not an inherited one — the exact twin of the `BRANDS` bug
+  // (#597, fixed in `src/editions.ts` alongside this). This table is an object
+  // literal too, so a plain `EDITION_DEFAULT_THEME[edition]` answers TRUTHY for
+  // `constructor`, `toString` and friends, and the `??` fallback never fires:
+  // the pre-auth shell would then set `[data-theme]` to a stringified function
+  // and render unstyled. The Edition id comes from operator-authored routing
+  // data, so this is reachable without a code change.
+  //
+  // `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: ES2021 target.
+  return Object.prototype.hasOwnProperty.call(EDITION_DEFAULT_THEME, edition)
+    ? EDITION_DEFAULT_THEME[edition]!
+    : EDITION_DEFAULT_THEME[DEFAULT_EDITION]!;
 }
 
 /**
