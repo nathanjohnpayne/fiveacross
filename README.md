@@ -9,7 +9,7 @@ The platform wears an **Edition** per class of occasion and runs one **Event** p
 | Edition | Event | Host | State |
 |---|---|---|---|
 | Gay Cruise Bingo | `med-2026`—Atlantis, Trieste → Barcelona | `gaycruisebingo.com` · `gaycruisebingo.web.app` | Sailed and completed, July 15–24 2026 |
-| Vacay Bingo | `bodega-bay-2026`—Bodega Bay house trip | `bodega-bay.vacaybingo.com` (alias `bodega-bay.fiveacrossbingo.com` → 301) | Live; Event runs August 7–9 2026 |
+| Vacay Bingo | `bodega-bay-2026`—Bodega Bay house trip | `bodega-bay.fiveacross.app` (canonical, [#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599)) · `bodega-bay.vacaybingo.com` and the apex `fiveacross.app` stay live as serving hosts. The old host's `hostnames` doc still names itself canonical, so its analytics repoint to the new canonical only after the event ([#601](https://github.com/nathanjohnpayne/gaycruisebingo/issues/601)) | Live; Event runs August 7–9 2026 |
 
 Two production Firebase projects back these—`gaycruisebingo` and `fiveacross`—giving the Editions separate Firebase resources, credentials and deploy targets. One repository, one source tree, one release process; this is not a fork.
 

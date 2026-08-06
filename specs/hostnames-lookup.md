@@ -11,7 +11,7 @@ This ticket owns the collection and its rules only. Consuming it at startup—pa
 
 ## Glossary
 
-**Hostname document**—the mapping from one public address to one Event. Keyed by the full hostname (`bodega-bay.vacaybingo.com`), not by [Slug](../CONTEXT.md), so an Event's canonical address and each of its aliases are separate documents pointing at the same Event, with the alias naming its canonical. *Avoid:* route, domain record.
+**Hostname document**—the mapping from one public address to one Event. Keyed by the full hostname (`bodega-bay.fiveacross.app`), not by [Slug](../CONTEXT.md), so an Event's canonical address and each of its aliases are separate documents pointing at the same Event, with the alias naming its canonical. *Avoid:* route, domain record.
 
 ## Data model
 
