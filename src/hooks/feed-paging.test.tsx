@@ -269,6 +269,18 @@ describe('useFeed — the render window and hasMore (#441)', () => {
 // always build a fresh array via `.filter`/`.sort`/`.slice`, so this only
 // passes once the derivation is actually memoized.
 describe('referentially-stable derived arrays (#443)', () => {
+  it('useProofFeed(null) retains every visible proof for a frozen-award join', () => {
+    const fire = capture();
+    const view = renderHook(() => useProofFeed(null));
+    fire.fireEvent(eventSnap);
+    fire.fireProofs(colSnap(Array.from({ length: 61 }, (_, i) => proof(i + 1))));
+
+    // The normal Feed's 60-item window is not a valid source of truth for a
+    // frozen winner: an earlier eligible photo must still be joinable.
+    expect(view.result.current.proofs).toHaveLength(61);
+    expect(view.result.current.proofs.at(-1)?.id).toBe('p1');
+  });
+
   it('useProofFeed returns the same array across an unrelated re-render', () => {
     const fire = capture();
     const view = renderHook(() => useProofFeed(10));

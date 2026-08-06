@@ -20,14 +20,14 @@ vi.mock('../analytics', () => ({ track }));
 const M = vi.hoisted(() => ({
   proofs: [] as unknown[],
   proofsLoading: false,
-  proofFeedCalls: [] as number[],
+  proofFeedCalls: [] as Array<number | null>,
 }));
 vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: null, loading: false }),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useLeaderboard: () => ({ players: [], loading: false }),
   useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
-  useProofFeed: (max: number) => {
+  useProofFeed: (max: number | null) => {
     M.proofFeedCalls.push(max);
     return { proofs: M.proofs, loading: M.proofsLoading };
   },
@@ -330,16 +330,19 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     const { container } = render(
       <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
     );
-    // The Feed's OWN hook, uncapped: a winning photo may predate an arbitrary
+    // The Feed's OWN hook, explicitly uncapped: a winning photo may predate an arbitrary
     // recent-items ceiling, but it must remain available for the frozen award's
     // moderation-aware join.
-    expect(M.proofFeedCalls).toContain(Number.POSITIVE_INFINITY);
+    expect(M.proofFeedCalls).toContain(null);
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(2);
     expect(photos[0].src).toContain('proofs%2Fw1'); // award order — earliest-posted first
     expect(container.querySelector('.farewell-most-loved-hearts')?.textContent).toBe('❤ 5');
-    // Winner display data comes from the FROZEN award record, not the live doc.
-    expect(container.querySelector('.farewell-most-loved-credit')?.textContent).toContain('Poster w1');
+    // Winner display data comes from the FROZEN award record, not the mutable
+    // live doc (whose fixture display name is "Poster w1").
+    expect(container.querySelector('.farewell-most-loved-credit')?.textContent).toContain(
+      'Ana · “Sunset over the bay” · Day 2',
+    );
   });
 
   it('drops a hidden-after-freeze winner from display and falls back to photo highlights when none survive', () => {

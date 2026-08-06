@@ -351,7 +351,7 @@ export default function FarewellPodium(props: FarewellPodiumProps) {
  * the closing-Day view).
  */
 function FarewellPodiumAwarded(props: FarewellPodiumProps & { award: MostLovedPhotoAward }) {
-  const { proofs, loading } = useProofFeed(Number.POSITIVE_INFINITY);
+  const { proofs, loading } = useProofFeed(null);
   const { award } = props;
   // Once per device per event; the ref backs the localStorage guard up within
   // a session when storage is unavailable (private mode). The no-award record
@@ -407,24 +407,27 @@ function FarewellPodiumInner({
   // visible photos, no award framing. Nothing to show → no section.
   let mostLoved: FarewellMostLoved | null = null;
   if (award && proofsLoaded) {
-    const shape = (p: ProofDoc): FarewellMostLovedPhoto => ({
-      proofId: p.id,
+    const shape = (p: ProofDoc, winner?: MostLovedPhotoWinner): FarewellMostLovedPhoto => ({
+      // Attribution is frozen with the award. The live proof is only the
+      // moderation/incarnation/media gate, so an edit after the standings
+      // freeze cannot rewrite what the award records.
+      proofId: winner?.proofId ?? p.id,
       // resolveProofMediaUrl FIRST, safeMediaUrl LAST before the DOM (the
       // proofMediaUrl.ts ordering note; PR #95's CodeQL barrier).
       src: safeMediaUrl(resolveProofMediaUrl(p.mediaURL ?? p.thumbURL)),
-      displayName: p.displayName,
-      promptText: p.itemText,
-      dayIndex: p.dayIndex ?? null,
+      displayName: winner?.displayName ?? p.displayName,
+      promptText: winner?.promptText ?? p.itemText,
+      dayIndex: winner?.dayIndex ?? p.dayIndex ?? null,
     });
     const winnerPhotos = displayable
-      .map(({ proof }) => shape(proof))
+      .map(({ winner, proof }) => shape(proof, winner))
       .filter((p) => p.src !== undefined);
     if (winnerPhotos.length > 0) {
       mostLoved = { kind: 'award', heartCount: award.heartCount, photos: winnerPhotos };
     } else {
       const highlights = proofs
         .filter((p) => p.type === 'photo')
-        .map(shape)
+        .map((p) => shape(p))
         .filter((p) => p.src !== undefined)
         .slice(0, 3);
       mostLoved = highlights.length > 0 ? { kind: 'highlights', photos: highlights } : null;

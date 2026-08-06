@@ -475,7 +475,12 @@ export function useLeaderboard() {
   return { players: sortPlayers(data), loading, hasServerData };
 }
 
-export function useProofFeed(max = 60) {
+/**
+ * Visible proofs in newest-first order. `max: null` deliberately retains the
+ * complete visible set for a frozen award's moderation-aware proof join; it is
+ * a local display cap, not a Firestore query limit.
+ */
+export function useProofFeed(max: number | null = 60) {
   // Two layers hide a Proof from the public Feed. (1) The Admin hard-hide: only
   // 'active' proofs are readable by non-admins (firestore.rules), so a status
   // flip to 'hidden' removes it server-side — the Phase-0 override. (2) The ADR
@@ -501,11 +506,12 @@ export function useProofFeed(max = 60) {
   // public Feed (and, through `useFeed`, the merged stream) by its OWNER — the same
   // presentational hide `useReportedProofs` (Admin) deliberately does NOT apply.
   const proofs = useMemo(
-    () =>
-      data
+    () => {
+      const visible = data
         .filter((p) => !isReportHidden(p.reportCount, threshold) && !isBanned(p.uid, bannedUids))
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .slice(0, max),
+        .sort((a, b) => b.createdAt - a.createdAt);
+      return max === null ? visible : visible.slice(0, max);
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [data, threshold, bannedKey, max],
   );
