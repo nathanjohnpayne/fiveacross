@@ -45,7 +45,7 @@ const ALLOWED = new Map<string, string>([
 
 /** The nouns. Word-bounded, so `report`, `transport` and `passport` are safe. */
 const CRUISE_NOUN =
-  /\b(cruise|cruises|sail|sails|sailing|sailings|sea|seas|ship|ships|boat|boats|aboard|onboard|docked|voyage)\b/i;
+  /\b(cruise|cruises|sail|sails|sailing|sailings|sea|seas|ship|ships|boat|boats|port|ports|aboard|onboard|docked|voyage)\b/i;
 
 /** A string literal or a JSX text node — the two shapes user-facing copy takes.
  *
@@ -72,6 +72,12 @@ function scannableBody(source: string): string {
     .replace(/\$\{[^{}]*\}/g, '\u00a4');
 }
 
+/** CSS class / test-id strings are implementation identifiers, not rendered
+ * copy. Keep them out without allowing ordinary prose such as “Meet at port”. */
+function isIdentifierList(text: string): boolean {
+  return /[-_]/.test(text) && text.split(/\s+/).every((part) => /^[a-z][a-z0-9_-]*$/i.test(part));
+}
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
@@ -96,6 +102,7 @@ describe('no cruise noun survives in a string every Edition shares', () => {
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
         const text = (m[1] ?? m[2] ?? m[3] ?? '').trim();
+        if (isIdentifierList(text)) continue;
         if (CRUISE_NOUN.test(text)) offenders.push({ file: rel, text });
       }
     }
@@ -124,6 +131,7 @@ describe('no cruise noun survives in a string every Edition shares', () => {
       "const a = 'Cruise schedule';",
       'const b = `Three for the whole cruise`;',
       '<p>Works offline at sea.</p>',
+      "const c = 'Meet at the next port';",
       "const ok = 'Report a problem';", // `report` must NOT trip the word boundary
       '// a comment about the cruise', // comments are prose about code, not copy
     ].join('\n');
@@ -134,10 +142,16 @@ describe('no cruise noun survives in a string every Edition shares', () => {
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
         const text = (m[1] ?? m[2] ?? m[3] ?? '').trim();
+        if (isIdentifierList(text)) continue;
         if (CRUISE_NOUN.test(text)) found.push(text);
       }
     }
-    expect(found).toEqual(['Cruise schedule', 'Three for the whole cruise', 'Works offline at sea.']);
+    expect(found).toEqual([
+      'Cruise schedule',
+      'Three for the whole cruise',
+      'Meet at the next port',
+      'Works offline at sea.',
+    ]);
   });
 
   // A guard whose allowlist quietly grows is not a guard. Pinning the size means

@@ -110,6 +110,15 @@ describe('App — Card route deal-error routing (#434)', () => {
     renderApp();
     expect(screen.getByText(DEAL_ERROR)).toBeInTheDocument();
     expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
+  });
+
+  it('withholds the routed shell while attestation authority is still settling', () => {
+    authState.value = { canRenderEventContent: false, dealError: null };
+    renderApp();
+    expect(screen.getByText(/Checking your cruise pass/)).toBeInTheDocument();
+    expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
   });
 
   it('keeps the reload screen when attestation proof is not established', () => {
@@ -123,6 +132,8 @@ describe('App — Card route deal-error routing (#434)', () => {
     renderApp();
     expect(screen.getByText(DEAL_ERROR)).toBeInTheDocument();
     expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('nav')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('board')).not.toBeInTheDocument();
   });
 
   it('keeps a PERMANENT failure on the error surface even when a snapshot exists', () => {

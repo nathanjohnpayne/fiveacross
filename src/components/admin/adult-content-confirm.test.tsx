@@ -1,7 +1,9 @@
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setActiveAdultContent } from '../../adultContent';
+import { DEFAULT_EDITION, setActiveEdition } from '../../editions';
 import ReviewQueue from './ReviewQueue';
+import { AdultContentConfirmDialog } from './AdultContentConfirm';
 import type { ItemDoc } from '../../types';
 
 // Covers the confirm that stands between an admin action and an Event turning
@@ -69,10 +71,33 @@ beforeEach(() => {
   // The interesting posture: an Event that is NOT yet 18+, so the next explicit
   // approval is the flip.
   setActiveAdultContent(false);
+  // Existing assertions use the general register's “Event” wording. Dedicated
+  // cases below prove the same component follows another resolved Edition.
+  setActiveEdition('fiveacross');
 });
 afterEach(() => {
   cleanup();
   setActiveAdultContent(true);
+  setActiveEdition(DEFAULT_EDITION);
+});
+
+describe('resolved Edition register', () => {
+  it('uses trip copy and the correct add verb for Vacay Bingo', () => {
+    setActiveEdition('vacay');
+    render(
+      <AdultContentConfirmDialog
+        pending={{ reason: 'add', run: vi.fn() }}
+        busy={false}
+        failed={false}
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('This makes the whole Trip 18+')).toBeTruthy();
+    expect(screen.getByText(/first explicit prompt in this trip\. Adding it means/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add and make this Trip 18+' })).toBeTruthy();
+  });
 });
 
 describe('approving the first explicit Prompt', () => {

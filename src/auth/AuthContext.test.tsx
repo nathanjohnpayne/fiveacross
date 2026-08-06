@@ -75,7 +75,7 @@ function Harness() {
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       <button onClick={() => retryDeal()}>retry</button>
-      <button onClick={() => void signIn()}>signin</button>
+      <button onClick={() => void signIn(false)}>signin</button>
     </div>
   );
 }
@@ -341,7 +341,7 @@ describe('AuthContext deal-error hardening', () => {
 
     // Capture signIn directly so we can assert its rejection contract, rather
     // than routing through the Harness button (which discards the promise).
-    let signIn!: () => Promise<void>;
+    let signIn!: (acknowledgedAdultContent: boolean) => Promise<void>;
     function Capture() {
       ({ signIn } = useAuth());
       return null;
@@ -353,7 +353,7 @@ describe('AuthContext deal-error hardening', () => {
     );
 
     // Rethrow contract: signIn surfaces the original error to its caller.
-    await expect(signIn()).rejects.toBe(err);
+    await expect(signIn(false)).rejects.toBe(err);
 
     // The failure event carries only allowlisted, PII-free fields.
     expect(mocks.track).toHaveBeenCalledWith('login_failed', {
@@ -376,6 +376,8 @@ describe('AuthContext deal-error hardening', () => {
     });
     const authMock = mockedAuth as { config?: { authDomain?: string } };
     authMock.config = { authDomain: window.location.hostname };
+    // A previous abandoned attempt must not authorize this no-checkbox one.
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
 
     mount();
     await userEvent.click(screen.getByText('signin'));
@@ -384,6 +386,7 @@ describe('AuthContext deal-error hardening', () => {
     expect(mocks.signInWithRedirect).toHaveBeenCalledWith(mockedAuth, expect.anything());
     expect(mocks.signInWithPopup).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).not.toBeNull();
+    expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBeNull();
 
     delete authMock.config;
     sessionStorage.clear();
@@ -502,7 +505,7 @@ describe('AuthContext deal-error hardening', () => {
     const popup = deferred<Record<string, never>>();
     mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
 
-    let signIn!: () => Promise<void>;
+    let signIn!: (acknowledgedAdultContent: boolean) => Promise<void>;
     function Capture() {
       ({ signIn } = useAuth());
       return null;
@@ -513,12 +516,36 @@ describe('AuthContext deal-error hardening', () => {
       </AuthProvider>,
     );
 
-    const first = signIn();
-    const second = signIn();
+    const first = signIn(false);
+    const second = signIn(false);
     expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
 
     popup.settle({});
     await Promise.all([first, second]);
+  });
+
+  it('persists only the popup acknowledgement the sign-in screen actually collected', async () => {
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    let signIn!: (acknowledgedAdultContent: boolean) => Promise<void>;
+    function Capture() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    render(
+      <AuthProvider>
+        <Capture />
+      </AuthProvider>,
+    );
+
+    // A no-checkbox tap remains un-attested even if the Event posture changes
+    // before this callback runs; the mutable posture is not proof of consent.
+    await act(async () => void (await signIn(false)));
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+
+    await act(async () => void (await signIn(true)));
+    expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
+    delete authMock.currentUser;
   });
 
   it('persists the checked 18+ acknowledgement after returning from mobile redirect sign-in', async () => {

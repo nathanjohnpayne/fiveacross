@@ -78,6 +78,7 @@ vi.mock('firebase/firestore', () => {
 });
 
 import { cellsFromData } from '../game/cells';
+import { resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 import { joinAndDeal, reshuffleBoard, reshuffleSeed } from './api';
 
 const snap = (exists: boolean, id = '', data: unknown = undefined) => ({
@@ -182,6 +183,7 @@ const writtenMarker = () => {
 };
 
 beforeEach(() => {
+  resetAdultContentForTests();
   vi.clearAllMocks();
   seedItems();
   H.dayBoards = new Map();
@@ -225,6 +227,19 @@ describe('reshuffleBoard — the happy path', () => {
     await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
     const dealt = writtenBoard()!.cells.filter((c) => !c.free).map((c) => c.itemId!);
     for (const id of dealt) expect(SNAPSHOT_IDS).toContain(id);
+  });
+
+  it('withholds explicit snapshot Prompts until the 18+ posture is published', async () => {
+    for (const [i, id] of SNAPSHOT_IDS.entries()) {
+      H.itemsById.set(id, { text: `Prompt ${id}`, spicy: i >= 24, isFreeSpace: false });
+    }
+    setActiveAdultContent(false);
+
+    await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
+
+    const dealt = writtenBoard()!.cells.filter((cell) => !cell.free).map((cell) => cell.itemId!);
+    expect(dealt).toHaveLength(24);
+    expect(dealt.every((id) => SNAPSHOT_IDS.indexOf(id) < 24)).toBe(true);
   });
 
   it('preserves the card’s frozen easy-mix ratio instead of reading a later event setting', async () => {

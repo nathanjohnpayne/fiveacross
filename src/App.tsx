@@ -29,6 +29,20 @@ export default function App() {
   // Event doc exists, so the resolved Edition is the only vocabulary available.
   if (loading) return <LoadingState label={editionBrand().passCheckLabel} />;
   if (!user) return <SignIn />;
+  // `canRenderEventContent` is the authority boundary, not merely a condition
+  // on the cached-card fallback. A failed server attestation read leaves the
+  // signed-in shell otherwise usable, including Feed/More routes; rendering it
+  // here would expose Event content while the 18+ posture is known but the
+  // Player's acknowledgement is not. During a reconnect/posture transition,
+  // keep the whole shell on Loading until authority settles. A settled failure
+  // keeps the existing retry surface, now globally rather than only on Card.
+  if (canRenderEventContent === false) {
+    return dealError ? (
+      <DealError message={dealError} onRetry={retryDeal} retrying={dealing} />
+    ) : (
+      <LoadingState label={editionBrand().passCheckLabel} />
+    );
+  }
 
   // Frozen route -> page-component mapping, one entry per stable mount
   // point in `./components/tabs`. `Record<TabId, ReactElement>` makes the

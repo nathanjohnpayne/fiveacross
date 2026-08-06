@@ -5,7 +5,7 @@ implemented: true
 
 # The Event is resolved from the hostname through a world-readable `hostnames/{host}` lookup
 
-> **Implemented in #542 (rules) and #543 (resolver).** A multi-Event build resolves its Event from `window.location.hostname` before first paint; a single-Event build still uses build-time `VITE_EVENT_ID` and never consults the lookup. The membership gate referred to below remains a target contract, not a property of the current rules.
+> **Implemented in #542 (rules) and #543 (resolver).** A multi-Event build resolves its Event from `window.location.hostname` before first paint; a single-Event build still uses build-time `VITE_EVENT_ID` for routing and does not consult the lookup for Event identity. Every build shape may still read and watch its hostname document for the server-derived 18+ posture (ADR 0012). The membership gate referred to below remains a target contract, not a property of the current rules.
 
 `EVENT_ID` was a build-time constant (`src/firebase.ts`), so one bundle served exactly one Event. Serving many Events from wildcard subdomains means resolving the Event **before** the app has an authenticated user — which rules out reading the Event doc itself, since that read requires `signedIn()`. The decision is a deliberately **world-readable** `hostnames/{host}` collection: one document per public address, holding `eventId`, `canonicalHost`, `edition`, and `status`. Keying by full hostname (rather than by Slug) makes the PRD's "exactly one canonical hostname, plus validated aliases" directly representable — `bodega-bay.vacaybingo.com` and `bodega-bay.fiveacrossbingo.com` are two documents pointing at one Event, the alias naming its canonical — and gives the edge Worker and client one server-backed mapping to revalidate against.
 
@@ -23,7 +23,7 @@ A world-readable collection in an app whose intended posture is membership isola
 
 Four refinements the review surfaced, each stated because the naive version is tempting:
 
-- **A single-Event build never consults the lookup at all.** `VITE_EVENT_ID`'s presence means the bundle serves exactly one Event, so reading the mapping and discarding the answer would be incoherent — and since resolution gates first paint, it would cost the legacy build a round trip it cannot use, or the full timeout on captive Wi-Fi.
+- **A single-Event build never consults the lookup for Event identity.** `VITE_EVENT_ID`'s presence means the bundle already knows which Event it serves, so startup routing short-circuits. The independent 18+ watcher may still consult `hostnames/{host}` after that short-circuit because a build-time non-adult seed must observe a later server-side raise (ADR 0012).
 - **The cache is bounded, not permanent.** A hostname's Event assignment is durable, which is why caching is safe at all, but an unbounded cache would keep a browser booting an *archived* Event forever.
 - **Revalidation must reach the server to count.** The seam uses `getDocFromServer`, not `getDoc`. A plain `getDoc` may answer from Firestore's own cache, so an offline or captive client would read a stale mapping, treat it as a successful revalidation, and restamp the entry for another full TTL — a bound that renews itself is not a bound.
 - **Status must be explicit.** A routing document with no recognised `status` is not servable. Defaulting a missing field to active would let a half-written document publish an Event before the record opts in.
@@ -32,7 +32,7 @@ Four refinements the review surfaced, each stated because the naive version is t
 
 `localStorage`, keyed by hostname (not by Slug: two hostnames can resolve to one Event, and a shared key would let an alias serve the canonical's cached Edition on the wrong origin). Each entry is an envelope carrying a schema version and `fetchedAt`; a version mismatch reads as a miss rather than being coerced.
 
-- A **fresh** entry — inside the 12-hour TTL and `status: 'active'` — selects the Event outright, with no network read. This is what makes offline cold boot work (ADR 0006), and it is a deliberate reversal of this ADR's original draft, which said a cached mapping must never select an Event and capped the hint at five minutes. That design paid a mandatory round trip on every boot to protect against a change that is rare by construction, and it could not survive the offline case this app exists to handle.
+- A **fresh** entry — inside the 12-hour TTL and `status: 'active'` — selects the Event outright, with no network read when its cached adult posture is `true`. A cached `adultContent: false` is not current proof and forces a bounded revalidation before it may un-gate; if that revalidation fails, Event identity may still come from the cache but the posture becomes gated. This preserves offline cold boot (ADR 0006) without letting a stale opt-out expose newly approved explicit content (ADR 0012).
 - A **stale** entry triggers a server revalidation. If the mapping changed, the new one wins and is restamped. If the mapping is **gone or inactive**, the entry is dropped outright — not merely expired — so the browser stops serving that Event immediately.
 - If revalidation **fails**, a stale-but-active entry still serves, without restamping. An expired mapping beats a dead app when the network is simply unreachable; it just stops counting as evidence the mapping is still good.
 
@@ -40,6 +40,7 @@ Four refinements the review surfaced, each stated because the naive version is t
 
 - Rules are `allow get: if true; allow list: if false` — resolvable, never enumerable.
 - `edition` on this document brands the **pre-auth shell** (`src/editions.ts`): the signed-out gate's wordmark, its one-line description, and its offline note. This is the surface that most needs it and the one an Event-doc answer arrives too late for — `events/{eventId}` requires `signedIn()`, so the Event doc cannot brand the screen whose job is to get you signed in.
+- `adultContent` on the same document is a server-derived, monotone pre-auth posture, not routing identity and not client-owned configuration. ADR 0012 owns its derivation, fail direction, and live watcher.
 - The same table brands the **browser chrome** (#586) — document title, iOS home-screen label, PWA manifest names — but only a single-Event build can bake it, because `index.html` and the manifest are built once and the lookup answers per hostname. A hostname-resolved build corrects the title and the iOS label in the DOM after resolution and takes its manifest from the edge Worker (#546); the manifest is fetched as a file at install time, so it is the one part of the identity resolution cannot repair on its own.
 - The not-found branch renders the analytics disclosure alongside it. Analytics initialise at module scope, before resolution, so a visitor who never reaches the app has still been counted.
 - Renaming a Slug means repointing documents and deciding a redirect policy; addresses are durable by default.

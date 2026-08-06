@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { adultContentRequired } from '../../adultContent';
+import { editionLexicon } from '../../editions';
 
 /**
  * The confirm that stands between an admin action and an Event turning 18+
@@ -42,7 +43,7 @@ interface PendingFlip {
   run: () => Promise<unknown> | unknown;
 }
 
-function bodyFor(pending: PendingFlip): ReactNode {
+function bodyFor(pending: PendingFlip, occasion: string): ReactNode {
   if (pending.reason === 'force') {
     return (
       <>
@@ -61,9 +62,10 @@ function bodyFor(pending: PendingFlip): ReactNode {
       </>
     );
   }
+  const action = pending.reason === 'add' ? 'Adding' : 'Approving';
   return (
     <>
-      This is the first explicit prompt in this Event. Approving it means every player is asked to
+      This is the first explicit prompt in this {occasion}. {action} it means every player is asked to
       confirm they’re 18 or older before they can keep playing — including the ones already playing
       right now.
     </>
@@ -71,10 +73,10 @@ function bodyFor(pending: PendingFlip): ReactNode {
 }
 
 /** The action label — the confirm button names what it is about to do. */
-function confirmLabelFor(reason: AdultFlipReason): string {
-  if (reason === 'force') return 'Make this Event 18+';
-  if (reason === 'add') return 'Add and make this Event 18+';
-  return 'Approve and make this Event 18+';
+function confirmLabelFor(reason: AdultFlipReason, occasionLabel: string): string {
+  if (reason === 'force') return `Make this ${occasionLabel} 18+`;
+  if (reason === 'add') return `Add and make this ${occasionLabel} 18+`;
+  return `Approve and make this ${occasionLabel} 18+`;
 }
 
 /**
@@ -180,7 +182,9 @@ export function AdultContentConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const title = 'This makes the whole Event 18+';
+  const occasion = editionLexicon().occasion;
+  const occasionLabel = occasion.charAt(0).toUpperCase() + occasion.slice(1);
+  const title = `This makes the whole ${occasionLabel} 18+`;
   return (
     // Backdrop guarded by `busy` like both buttons (the ReshuffleSheet
     // discipline): a stray tap must not tear the dialog down mid-write and leave
@@ -194,7 +198,7 @@ export function AdultContentConfirmDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sheet-title">{title}</div>
-        <p>{bodyFor(pending)}</p>
+        <p>{bodyFor(pending, occasion)}</p>
         <div className="warnbox">
           <b>This can't be undone.</b>
         </div>
@@ -213,7 +217,7 @@ export function AdultContentConfirmDialog({
             disabled={busy}
             onClick={onConfirm}
           >
-            {confirmLabelFor(pending.reason)}
+            {confirmLabelFor(pending.reason, occasionLabel)}
           </button>
         </div>
       </div>

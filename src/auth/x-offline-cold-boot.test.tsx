@@ -88,7 +88,7 @@ function deferred<T>() {
 // "would the Board render?". `board` renders only when the re-prompt gate is DOWN;
 // when it is up, AuthProvider renders <SignIn/> in its place. signIn/attest are
 // captured to drive the same-session optimistic-attest path (#112 Finding 3).
-let ctxSignIn: () => Promise<void> = async () => {};
+let ctxSignIn: (acknowledgedAdultContent: boolean) => Promise<void> = async () => {};
 let ctxRetryDeal: () => void = () => {};
 let ctxAttest: () => Promise<void> = async () => {};
 function Probe() {
@@ -344,7 +344,7 @@ describe('offline cold boot (#115)', () => {
     mount();
     mocks.auth.currentUser = RETURNING_USER;
     await act(async () => {
-      await ctxSignIn(); // signInWithPopup → attest(): sticky + optimistic true
+      await ctxSignIn(true); // signInWithPopup → attest(): sticky + optimistic true
     });
     await coldBoot(RETURNING_USER);
 
@@ -515,7 +515,7 @@ describe('offline cold boot (#115)', () => {
     mount();
     mocks.auth.currentUser = RETURNING_USER;
     await act(async () => {
-      await ctxSignIn(); // attest(): attestedUidsRef + authoritative
+      await ctxSignIn(true); // attest(): attestedUidsRef + authoritative
     });
     await coldBoot(RETURNING_USER);
     await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));

@@ -95,7 +95,7 @@ const mount = () =>
 // continuation (popup → attest) deterministically — needed to reproduce the
 // Finding-3 race where attest() lands optimistically before a later, still-stale
 // auth-state callback read.
-let ctxSignIn: () => Promise<void> = async () => {};
+let ctxSignIn: (acknowledgedAdultContent: boolean) => Promise<void> = async () => {};
 function CaptureContext() {
   ctxSignIn = useAuth().signIn;
   return null;
@@ -259,7 +259,7 @@ describe('attestation gates the deal side effect + sticky optimistic attest (#23
     // 1. Continuation: popup resolves → signIn calls attest() → attested flips true
     //    and the uid is marked sticky. The User is not published yet, so no deal.
     await act(async () => {
-      await ctxSignIn();
+      await ctxSignIn(true);
     });
     expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
@@ -383,7 +383,7 @@ describe('the 18+ gate follows the EVENT, not the Edition (#608)', () => {
     mocks.auth.currentUser = FAKE_USER;
     mountWithCapture();
     await signIn(FAKE_USER);
-    await act(async () => void (await ctxSignIn()));
+    await act(async () => void (await ctxSignIn(false)));
     expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 

@@ -37,18 +37,6 @@
  * re-fire itself, and no loop guard is needed.
  */
 
-/** The subset of a Prompt this derivation reads. */
-export interface AdultItemDoc {
-  status?: string;
-  spicy?: boolean;
-  pool?: string;
-}
-
-/** The subset of an Event this derivation reads. */
-export interface AdultEventDoc {
-  settings?: { forceAdult?: unknown };
-}
-
 /**
  * Can a Prompt in this pool make the Event 18+?
  *
@@ -63,12 +51,12 @@ export interface AdultEventDoc {
  * main-game Prompt. Reading `undefined` as "not main" would leave exactly the
  * oldest explicit content un-gated, which is the wrong direction.
  */
-export function isDealablePool(pool: string | undefined): boolean {
+export function isDealablePool(pool: unknown): boolean {
   return pool === undefined || pool === 'main';
 }
 
 /** Does this Prompt, as it now stands, make its Event 18+? */
-export function itemImpliesAdultContent(item: AdultItemDoc | undefined): boolean {
+export function itemImpliesAdultContent(item: Record<string, unknown> | undefined): boolean {
   if (!item) return false; // deleted
   return item.status === 'active' && item.spicy === true && isDealablePool(item.pool);
 }
@@ -84,8 +72,13 @@ export function itemImpliesAdultContent(item: AdultItemDoc | undefined): boolean
  * common case with no admin effort) while leaving a lever for the case the flag
  * cannot see. Strict `=== true`: a stray string or number does not gate.
  */
-export function eventForcesAdultContent(event: AdultEventDoc | undefined): boolean {
-  return event?.settings?.forceAdult === true;
+export function eventForcesAdultContent(event: Record<string, unknown> | undefined): boolean {
+  const settings = event?.settings;
+  return (
+    typeof settings === 'object' &&
+    settings !== null &&
+    (settings as Record<string, unknown>).forceAdult === true
+  );
 }
 
 // --- Admin-SDK Firestore surface (minimal, injectable) --------------------------
@@ -191,7 +184,7 @@ async function defaultRaise(eventId: string): Promise<number> {
  */
 export async function applyItemAdultContent(
   eventId: string,
-  after: AdultItemDoc | undefined,
+  after: Record<string, unknown> | undefined,
   deps: AdultContentDeps = {},
 ): Promise<number> {
   if (!itemImpliesAdultContent(after)) return 0;
@@ -211,7 +204,7 @@ export async function applyItemAdultContent(
  */
 export async function applyEventAdultContent(
   eventId: string,
-  after: AdultEventDoc | undefined,
+  after: Record<string, unknown> | undefined,
   deps: AdultContentDeps = {},
 ): Promise<number> {
   if (!eventForcesAdultContent(after)) return 0;
@@ -255,11 +248,11 @@ export async function applyEventAdultContent(
  */
 export async function eventIsAdult(db: AdultFirestore, eventId: string): Promise<boolean> {
   const eventSnap = await db.doc(`events/${eventId}`).get();
-  if (eventSnap.exists && eventForcesAdultContent(eventSnap.data() as AdultEventDoc | undefined)) {
+  if (eventSnap.exists && eventForcesAdultContent(eventSnap.data())) {
     return true;
   }
   const spicy = await db.collection(`events/${eventId}/items`).where('spicy', '==', true).get();
-  return spicy.docs.some((d) => itemImpliesAdultContent(d.data() as AdultItemDoc | undefined));
+  return spicy.docs.some((d) => itemImpliesAdultContent(d.data()));
 }
 
 export interface HostnameReconcileDeps {

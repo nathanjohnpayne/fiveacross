@@ -157,10 +157,18 @@ function markCollectedAcknowledgement(): void {
   }
 }
 
+function clearCollectedAcknowledgement(): void {
+  try {
+    localStorage.removeItem(SIGNIN_ADULT_ACK_KEY);
+  } catch {
+    // Private mode / disabled storage already fails toward re-prompting.
+  }
+}
+
 function consumeCollectedAcknowledgement(now: number = Date.now()): boolean {
   try {
     const raw = localStorage.getItem(SIGNIN_ADULT_ACK_KEY);
-    localStorage.removeItem(SIGNIN_ADULT_ACK_KEY);
+    clearCollectedAcknowledgement();
     const at = Number(raw);
     return Number.isFinite(at) && at > 0 && now - at <= SIGNIN_ADULT_ACK_TTL_MS;
   } catch {
@@ -230,7 +238,7 @@ interface AuthContextValue {
   dealing: boolean;
   // Reserved for auth startup readiness; current host selection is synchronous.
   signInReady: boolean;
-  signIn: () => Promise<void>;
+  signIn: (acknowledgedAdultContent: boolean) => Promise<void>;
   signOutUser: () => Promise<void>;
   // Persist the current User's 18+ self-attestation (ADR 0001) and lift the gate.
   attest: () => Promise<void>;
@@ -1059,9 +1067,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // completion signal: it settles once per mount, nothing render-critical
   // awaits it, and it resolves non-null ONLY on an actual redirect return —
   // never on an ordinary mount — so it cannot emit phantom `login` events. And
-  // signIn() is the only initiator of signInWithRedirect, always behind the
-  // checked 18+ box, so a non-null result is itself proof the acknowledgement
-  // happened. The marker still scopes FAILURE reporting: a rejection becomes
+  // signIn() is the only initiator of signInWithRedirect, and it records the
+  // actual checkbox value separately below. A non-null result proves the auth
+  // round trip happened, not that a checkbox was shown. The marker still scopes
+  // FAILURE reporting: a rejection becomes
   // `login_failed` only when the marker proves an app-owned redirect was in
   // flight — a marker-less rejection on an ordinary mount (e.g. partitioned
   // helper storage) stays out of analytics.
@@ -1103,16 +1112,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
   }, [persistAttestation]);
 
-  const signIn = useCallback((): Promise<void> => {
+  const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
 
-    // Captured BEFORE any auth transaction starts, and threaded through both
-    // paths (Phase 4b round 4). `SignIn` disables its button unless the Event is
-    // non-adult OR the box is checked, so a `true` here means the checkbox was
-    // shown AND ticked at the moment the player committed. Re-reading the posture
-    // after the popup or redirect settles answers a different question — "is this
-    // Event adult NOW" — and the two diverge exactly when it matters.
-    const acknowledged = adultContentRequired();
+    // Captured from SignIn's actual checkbox state BEFORE any auth transaction
+    // starts, and threaded through both paths. The mutable Event posture answers
+    // whether a box is needed now; it cannot prove one was shown and ticked on
+    // the render whose button the player pressed.
+    const acknowledged = acknowledgedAdultContent === true;
 
     const attempt = (async () => {
       if (onFallbackAuthOrigin) {
@@ -1135,6 +1142,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // mobile tab and the installed desktop PWA (#395) both need. See
         // shouldRedirectSignIn; the popup path below still serves desktop browser
         // tabs and installed iOS PWAs.
+        // A failed or abandoned prior attempt must not authorize this one.
+        // Clear first, then write only the acknowledgement collected for this
+        // exact redirect transaction.
+        clearCollectedAcknowledgement();
         markPendingRedirectAttestation();
         // Recorded only when the box was actually shown and ticked; the return
         // path reads THIS, never the posture as it stands on return.
@@ -1143,6 +1154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await signInWithRedirect(auth, googleProvider);
         } catch (err) {
           consumePendingRedirectAttestation();
+          clearCollectedAcknowledgement();
           trackSignInFailure(err);
           throw err;
         }

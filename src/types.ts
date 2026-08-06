@@ -11,6 +11,54 @@
  */
 export type ClaimMode = 'honor' | 'proof_required' | 'admin_confirmed';
 
+/** Vocabulary fragments shared by every consumer of an Edition register. */
+export interface EditionLexicon {
+  /** The occasion itself, lowercase, mid-sentence: "the whole {occasion}". */
+  occasion: string;
+  /** Scope adjective: "⭐ marks the {occasionWide} First to BINGO". */
+  occasionWide: string;
+  /** One location on the schedule, lowercase singular. */
+  place: string;
+  /** The same, Title Case plural — it opens a list. */
+  placePlural: string;
+  /** Audience fragment, including any determiner the register needs. */
+  crowd: string;
+  /** WHY signal for Edition-specific offline reassurance. */
+  offlineWhy: string;
+  /** Decorative share mark; functional emoji remain Edition-invariant. */
+  shareMark: string;
+  /** Download filename stem for a rasterised share card. */
+  fileSlug: string;
+}
+
+/** The shared code-table contract for one resolved Edition. */
+export interface EditionBrand {
+  wordmark: string;
+  wordmarkBold: string;
+  preEventVerb: string;
+  tagline: string;
+  offlineNote: string;
+  documentTitle: string;
+  appName: string;
+  appShortName: string;
+  appDescription: string;
+  lexicon: EditionLexicon;
+  passCheckLabel: string;
+  scheduleTitle: string;
+  scheduleSub: string;
+  walkthroughReplaySub: string;
+  promptDeadlineNote: string;
+  tutorialWarmupNote: string;
+  championRole: string;
+  podiumLabel: string;
+  reviewQueueAllClear: string;
+  bingoShareText: string;
+  blackoutShareText: string;
+  updateToastMark: string;
+  updateToastTitle: string;
+  guidelinesScope: string;
+}
+
 export type ThemeId =
   | 'neon-playground'
   | 'get-sporty'

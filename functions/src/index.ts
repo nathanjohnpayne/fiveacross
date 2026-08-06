@@ -16,8 +16,6 @@ import {
   applyEventAdultContent,
   applyItemAdultContent,
   reconcileHostnameAdultContent,
-  type AdultEventDoc,
-  type AdultItemDoc,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
 import {
@@ -317,12 +315,12 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
  */
 export const deriveAdultContentOnItem = onDocumentWritten(
   { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
-  (event) => applyItemAdultContent(event.params.eventId, event.data?.after.data() as AdultItemDoc | undefined),
+  (event) => applyItemAdultContent(event.params.eventId, event.data?.after.data()),
 );
 
 export const deriveAdultContentOnEvent = onDocumentWritten(
   { document: 'events/{eventId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
-  (event) => applyEventAdultContent(event.params.eventId, event.data?.after.data() as AdultEventDoc | undefined),
+  (event) => applyEventAdultContent(event.params.eventId, event.data?.after.data()),
 );
 
 /**

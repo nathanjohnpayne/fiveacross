@@ -43,7 +43,11 @@ export default function SignIn() {
     setBusy(true);
     try {
       if (reprompt) await attest();
-      else await signIn();
+      // Pass the acknowledgement THIS render actually collected. Re-reading
+      // the mutable posture inside AuthContext can turn a no-checkbox tap into
+      // a fabricated cross-Event attestation if the Event flips 18+ between
+      // the click and the auth transaction starting.
+      else await signIn(adult && ack);
     } catch {
       setBusy(false);
     }

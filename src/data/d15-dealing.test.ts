@@ -73,6 +73,7 @@ vi.mock('firebase/firestore', () => {
 });
 
 import { cellsFromData } from '../game/cells';
+import { resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 import { dealDayCard } from './api';
 
 const snap = (exists: boolean, id = '', data: unknown = undefined) => ({
@@ -154,6 +155,7 @@ function daysWith(target: DayDef): DayDef[] {
 }
 
 beforeEach(() => {
+  resetAdultContentForTests();
   H.event = null;
   H.itemsById.clear();
   H.dayBoards.clear();
@@ -225,6 +227,25 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     // Every non-free cell id came from the snapshot.
     const nonFree = board!.data.cells.filter((c) => !c.free).map((c) => c.itemId);
     for (const id of nonFree) expect(ids).toContain(id);
+  });
+
+  it('withholds explicit snapshot Prompts until the 18+ posture is published', async () => {
+    const ids = seedPool(60);
+    for (const [i, id] of ids.entries()) {
+      H.itemsById.set(id, { ...H.itemsById.get(id), spicy: i >= 24 });
+    }
+    setActiveAdultContent(false);
+    H.event = {
+      days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })),
+      settings: { spicyRatio: 0.4 },
+    };
+
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+    const dealt = writtenBoard()!.data.cells
+      .filter((cell) => !cell.free)
+      .map((cell) => cell.itemId);
+    expect(dealt).toHaveLength(24);
+    expect(dealt.every((id) => id != null && ids.indexOf(id) < 24)).toBe(true);
   });
 
   it('is a no-op when a Day Card already exists for this Player+Day (never re-deals)', async () => {

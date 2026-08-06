@@ -609,10 +609,18 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // MEMBERSHIP is the snapshot alone; this only hydrates the text/spicy the deal
   // needs. A snapshot id whose doc is missing or is the free space is dropped.
   const itemSnaps = await Promise.all(snapshotIds.map((id) => getDoc(rawItem(id)).catch(() => null)));
+  // The Day Snapshot freezes membership, but it must not bypass the same
+  // approval→hostname-stamp race guard as the legacy deal. Capture the posture
+  // once: false→true while these reads run may withhold extra Prompts for this
+  // attempt, which is safe; the server flag is monotone so true cannot lower.
+  const adultRequired = adultContentRequired();
   const pool: DealItem[] = itemSnaps
     .filter((s): s is NonNullable<typeof s> => !!s && s.exists())
     .map((s) => ({ id: s.id, data: s.data() as Partial<ItemDoc> }))
-    .filter(({ data }) => data.isFreeSpace !== true)
+    .filter(
+      ({ data }) =>
+        data.isFreeSpace !== true && !isExplicitWithheld(data.spicy, adultRequired),
+    )
     .map(({ id, data }) => ({
       id,
       text: String(data.text ?? ''),
@@ -933,10 +941,17 @@ export async function reshuffleBoard(params: {
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id)).catch(() => null)),
   );
+  // A reshuffle is another frozen-card publish path. During the asynchronous
+  // window between approving the first explicit Prompt and publishing the 18+
+  // hostname posture, it must fail closed exactly like the first Day deal.
+  const adultRequired = adultContentRequired();
   const pool: DealItem[] = itemSnaps
     .filter((s): s is NonNullable<typeof s> => !!s && s.exists())
     .map((s) => ({ id: s.id, data: s.data() as Partial<ItemDoc> }))
-    .filter(({ data }) => data.isFreeSpace !== true)
+    .filter(
+      ({ data }) =>
+        data.isFreeSpace !== true && !isExplicitWithheld(data.spicy, adultRequired),
+    )
     .map(({ id, data }) => ({
       id,
       text: String(data.text ?? ''),
