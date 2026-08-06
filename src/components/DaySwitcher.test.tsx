@@ -82,9 +82,9 @@ describe('<DaySwitcher />', () => {
     expect(chips[9].textContent?.startsWith('🔒')).toBe(true);
   });
 
-  it('uses a per-Day port emoji instead of stacking the Theme emoji, with the Theme as fallback', () => {
+  it('uses a per-Day place emoji instead of stacking the Theme emoji, with the Theme as fallback', () => {
     const days = makeDays(2);
-    days[1]!.portEmoji = '';
+    days[1]!.placeEmoji = '';
     render(<DaySwitcher days={days} viewedIndex={0} onSelect={vi.fn()} now={0} />);
     const chips = screen.getAllByRole('tab');
 
