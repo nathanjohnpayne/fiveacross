@@ -30,29 +30,36 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
     <title>%EDITION_DOCUMENT_TITLE%</title>
-    <meta name="description" content="Live multiplayer bingo for the high seas. Trieste to Barcelona, July 2026." />
+    <meta name="description" content="%EDITION_META_DESCRIPTION%" />
 
     <!-- Static default Open Graph for bare-URL unfurl (ADR 0005). No server-rendered
          per-share images — Share Cards are generated on-device (#36) and handed to
-         the native share sheet instead. -->
+         the native share sheet instead.
+
+         Edition-scoped at BUILD time like the chrome tags above (#587, artwork
+         #609): crawlers do not run JS, so unlike the document title there is no
+         runtime repair for these — a hostname-resolved bundle keeps the default
+         Edition's share block until the edge Worker (#546) rewrites it per
+         hostname. og:description stays static: it is the Edition-invariant
+         tagline, shared verbatim by every brand row. -->
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="Gay Cruise Bingo" />
-    <meta property="og:title" content="Gay Cruise Bingo" />
+    <meta property="og:site_name" content="%EDITION_SHARE_NAME%" />
+    <meta property="og:title" content="%EDITION_SHARE_NAME%" />
     <meta property="og:description" content="Sign in, get your card, mark it if you see it." />
-    <meta property="og:url" content="https://gaycruisebingo.com/" />
-    <!-- og:image is served from the always-healthy web.app host, not the apex:
-         the apex custom domain TLS-resets for link crawlers (#340), which is
-         exactly the fetch iMessage/WhatsApp/Telegram make to build a preview,
-         and it is SNI-blocked on the ship network the app is used from (#164).
-         og:url stays the canonical apex on purpose. Revisit the og:image host
-         once the apex data plane is verified healed (#338 / #340). -->
-    <meta property="og:image" content="https://gaycruisebingo.web.app/og-default.png" />
+    <meta property="og:url" content="%EDITION_OG_URL%" />
+    <!-- og:image is an absolute URL on the serving project's always-healthy
+         web.app host, never a custom-domain apex: the gcb apex TLS-resets for
+         link crawlers (#340), which is exactly the fetch iMessage/WhatsApp/
+         Telegram make to build a preview, and it is SNI-blocked on the ship
+         network the app is used from (#164). og:url stays the canonical origin
+         on purpose. Both URLs live on the Edition's brand row (src/editions.ts). -->
+    <meta property="og:image" content="%EDITION_OG_IMAGE%" />
     <meta property="og:image:type" content="image/png" />
-    <meta property="og:image:width" content="2400" />
-    <meta property="og:image:height" content="1260" />
-    <meta property="og:image:alt" content="Gay Cruise Bingo—a marked-up live multiplayer bingo card for the July 2026 sailing, Trieste to Barcelona" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="%EDITION_OG_IMAGE_ALT%" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:image" content="https://gaycruisebingo.web.app/og-default.png" />
+    <meta name="twitter:image" content="%EDITION_OG_IMAGE%" />
     <meta name="robots" content="noindex" />
     <!-- Inline on purpose: this paints before newly deployed hashed assets load. -->
     <style>

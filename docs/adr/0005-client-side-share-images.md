@@ -8,7 +8,7 @@ The audience is a private, noindex, 18+ friend group sharing into group chats, w
 
 ## Consequences
 
-- The scaffolded `cloud-run/og-renderer/` and the public share pages are **not used at launch** (deferred, likely dropped). A static `og-default.png` covers the bare-URL unfurl.
+- The scaffolded `cloud-run/og-renderer/` and the public share pages are **not used at launch** (deferred, likely dropped). Bare-URL unfurls use static, Edition-specific `og-gcb.png`, `og-vacay.png`, or `og-fiveacross.png` artwork; `og-default.png` remains only so crawler caches can re-fetch old image URLs.
 - **No public unauthenticated pages** exposing win/leaderboard data—everything stays behind the auth wall, which matters for an 18+ app.
 - Sharing moves from **Phase 1 into Phase 0**.
 - Revisit the Cloud Run OG path only if public link-unfurls ever become a real want.

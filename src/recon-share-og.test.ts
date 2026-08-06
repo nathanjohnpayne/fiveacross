@@ -78,21 +78,47 @@ describe('recon: storage.rules drops the inert /og/** block', () => {
 });
 
 describe('recon: bare-URL unfurl keeps working with no server', () => {
-  it('keeps public/og-default.png and the static index.html OG meta', () => {
-    expect(existsSync(resolve('../public/og-default.png'))).toBe(true);
-    // #338: og:image (and twitter:image) point at the web.app host, NOT the
-    // apex — the apex TLS-resets for link crawlers (#340) and is SNI-blocked
-    // on the ship network (#164), which is what broke iMessage unfurls. The
-    // page's canonical identity (og:url) stays the apex.
-    expect(indexHtml).toMatch(/<meta property="og:image" content="https:\/\/gaycruisebingo\.web\.app\/og-default\.png" \/>/);
-    expect(indexHtml).toMatch(/<meta name="twitter:image" content="https:\/\/gaycruisebingo\.web\.app\/og-default\.png" \/>/);
-    expect(indexHtml).toMatch(/<meta property="og:url" content="https:\/\/gaycruisebingo\.com\/" \/>/);
+  // #587 Edition-scoped the static OG meta: the concrete gcb values this guard
+  // used to pin are now `%EDITION_…%` placeholders substituted at build time
+  // (src/editions.ts, brandHtmlIdentity), and the per-Edition VALUES are pinned
+  // by src/editions.test.ts against the brand table. What stays recon-guarded
+  // here is ADR 0005's property itself: a static meta block plus static images,
+  // no server.
+  it('keeps the static index.html OG meta block, Edition-tokenised (#587)', () => {
+    expect(indexHtml).toMatch(/<meta property="og:image" content="%EDITION_OG_IMAGE%" \/>/);
+    expect(indexHtml).toMatch(/<meta name="twitter:image" content="%EDITION_OG_IMAGE%" \/>/);
+    expect(indexHtml).toMatch(/<meta property="og:url" content="%EDITION_OG_URL%" \/>/);
     // Crawler hints that let messengers lay out the preview without sniffing
-    // the image: MIME type, pixel dimensions, and alt text.
+    // the image: MIME type, pixel dimensions, and alt text. 1200×630 is the
+    // #609 artwork generation (down from og-default.png's 2400×1260).
     expect(indexHtml).toMatch(/<meta property="og:image:type" content="image\/png" \/>/);
-    expect(indexHtml).toMatch(/<meta property="og:image:width" content="2400" \/>/);
-    expect(indexHtml).toMatch(/<meta property="og:image:height" content="1260" \/>/);
-    expect(indexHtml).toMatch(/<meta property="og:image:alt" content="[^"]+" \/>/);
+    expect(indexHtml).toMatch(/<meta property="og:image:width" content="1200" \/>/);
+    expect(indexHtml).toMatch(/<meta property="og:image:height" content="630" \/>/);
+    expect(indexHtml).toMatch(/<meta property="og:image:alt" content="%EDITION_OG_IMAGE_ALT%" \/>/);
+  });
+
+  it('ships every Edition unfurl image, and keeps the superseded og-default.png (#609)', () => {
+    // og-default.png stays until the deployed HTML that references it is gone
+    // from crawler caches: platforms that re-fetch a previously unfurled
+    // image URL would otherwise 404.
+    for (const file of ['og-gcb.png', 'og-vacay.png', 'og-fiveacross.png', 'og-default.png']) {
+      expect(existsSync(resolve(`../public/${file}`)), file).toBe(true);
+    }
+  });
+
+  it('wires each unfurl image into the configs that fail quietly (#609)', () => {
+    // Named explicitly in #609 because the miss ships without an error: a file
+    // absent from the firebase.json no-cache rule falls to the default cache
+    // policy, so stale artwork survives a redeploy in crawler-facing caches.
+    for (const file of ['og-gcb.png', 'og-vacay.png', 'og-fiveacross.png']) {
+      expect(firebaseJson, `firebase.json headers must name ${file}`).toContain(file);
+    }
+    // …and the flip side: the artwork must stay OUT of the service-worker
+    // precache. og-*.png is crawler-facing — the app never renders it — and
+    // without this glob the *.png precache pattern would tax every phone ~1 MB
+    // at install time for files no client ever loads.
+    const viteConfig = read('../vite.config.ts');
+    expect(viteConfig).toContain(`globIgnores: ['og-*.png']`);
   });
 
   it('og-default.png is regenerable from a design source depicting a real seeded Day (#338)', () => {

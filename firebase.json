@@ -19,7 +19,7 @@
         "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
       },
       {
-        "source": "/@(sw.js|favicon.svg|og-default.png|apple-touch-icon.png|pwa-192.png|pwa-512.png)",
+        "source": "/@(sw.js|favicon.svg|og-default.png|og-gcb.png|og-vacay.png|og-fiveacross.png|apple-touch-icon.png|pwa-192.png|pwa-512.png)",
         "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
       }
     ]

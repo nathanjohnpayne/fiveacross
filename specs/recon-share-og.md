@@ -34,9 +34,9 @@ ADR 0005 supersedes the scaffolded server-side Open Graph pipeline: Share Cards 
 
 ## Bare-URL unfurl keeps working with no server
 
-`public/og-default.png` and the static Open Graph `<meta>` block in `index.html` are untouched—they are the permanent (not Phase-1-temporary) unfurl path per ADR 0005, not a placeholder pending a dynamic renderer.
+The static Open Graph `<meta>` block in `index.html` is the permanent (not Phase-1-temporary) unfurl path per ADR 0005, not a placeholder pending a dynamic renderer. #587 later Edition-scoped the block (build-time `%EDITION_…%` substitution against `src/editions.ts`, per-Edition artwork from #609 at `public/og-{gcb,vacay,fiveacross}.png`)—still static markup plus static images, no server, so ADR 0005's property is unchanged; `public/og-default.png` is retained for crawler caches that re-fetch previously unfurled image URLs.
 
-- **Given** a crawler fetches a bare URL **when** `index.html` and `public/og-default.png` are read **then** both are present and the static OG `<meta property="og:image">` still points at `og-default.png`. (Test: "keeps public/og-default.png and the static index.html OG meta".)
+- **Given** a crawler fetches a bare URL **when** `index.html` and `public/og-*.png` are read **then** the tokenised static OG `<meta>` block and all per-Edition images are present. (Tests: "keeps the static index.html OG meta block, Edition-tokenised (#587)", "ships every Edition unfurl image, and keeps the superseded og-default.png (#609)".)
 
 ## Docs no longer instruct deploying or configuring the removed pipeline
 
@@ -50,4 +50,4 @@ No live doc or operator-facing spec describes the Cloud Run OG renderer, the `sh
 
 - **Given** the merged removal, **when** `npm run build` runs, **then** it is green.
 - **Given** the merged removal, **when** the repo is grepped for `og-renderer`, `OG_RENDERER_URL`, `/s/**`, or the `share` Function, **then** the only remaining hits are intentional-historical (the ADR, the `plans/**` planning tables, the `scripts/gh-projects/examples/**` issue-authoring scaffolding, this spec/test, and the two `phase-1-deploy.md` cleanup/retirement mentions above)—no live code path, config, or operator-facing doc/spec still instructs deploying, configuring, or depending on the pipeline.
-- **Given** a bare URL pasted into chat, **when** a crawler fetches it, **then** the static `index.html` OG + `og-default.png` still unfurl with no server involved.
+- **Given** a bare URL pasted into chat, **when** a crawler fetches it, **then** the static `index.html` OG + the Edition's `og-*.png` (#587/#609) still unfurl with no server involved.
