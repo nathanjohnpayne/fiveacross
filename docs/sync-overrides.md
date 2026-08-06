@@ -4,10 +4,10 @@ Each downstream consumer of the Mergepath template can carry a `.sync-overrides.
 
 This is the third leg of the propagation system. The other two:
 
-- **The manifest** — `.mergepath-sync.yml` in mergepath's repo root. Declares which paths are canonical / kit / templated, and which consumers opt in to each. Single source of truth for **what** propagates.
-- **The propagation script** — `scripts/sync-to-downstream.sh`. Reads the manifest + a target commit, computes per-consumer file diffs, opens a PR per consumer.
+- **The manifest**—`.mergepath-sync.yml` in mergepath's repo root. Declares which paths are canonical / kit / templated, and which consumers opt in to each. Single source of truth for **what** propagates.
+- **The propagation script**—`scripts/sync-to-downstream.sh`. Reads the manifest + a target commit, computes per-consumer file diffs, opens a PR per consumer.
 
-Without the override mechanism the script would either silently overwrite legitimate per-repo divergence (data loss) or have to abort whenever it detected a difference (which makes the script useless on any non-trivial consumer). The override file resolves that by giving each repo a documented escape hatch — every divergence carries a `reason`, so drift without a paper trail is the failure mode the schema exists to prevent.
+Without the override mechanism the script would either silently overwrite legitimate per-repo divergence (data loss) or have to abort whenever it detected a difference (which makes the script useless on any non-trivial consumer). The override file resolves that by giving each repo a documented escape hatch—every divergence carries a `reason`, so drift without a paper trail is the failure mode the schema exists to prevent.
 
 ## File location and lifecycle
 
@@ -59,7 +59,7 @@ substitutions:
 
 Absence of the file → exit 0. Empty file → exit 0 (no entries means no constraints to validate).
 
-The "every marker is declared" rule is the strictest of these and is intentional. The v1 manifest currently has no `type: templated` paths, so any non-empty `substitutions:` content fails validation — that's correct: the validator picks up new templated paths automatically once they land in the manifest, without a code change here.
+The "every marker is declared" rule is the strictest of these and is intentional. The v1 manifest currently has no `type: templated` paths, so any non-empty `substitutions:` content fails validation—that's correct: the validator picks up new templated paths automatically once they land in the manifest, without a code change here.
 
 ## Worked examples
 
@@ -103,7 +103,7 @@ substitutions:
 
 (This example assumes a future templated path in the manifest declares `phase_4b_default` as a substitution marker. v1 manifest doesn't yet.)
 
-The `reason` field is part of the substitution map, not a YAML comment — the validator's Rule 7 enforces it the same way `skip_paths[].reason` is enforced. A bare-scalar override (`phase_4b_default: fallback-only`) fails validation explicitly.
+The `reason` field is part of the substitution map, not a YAML comment—the validator's Rule 7 enforces it the same way `skip_paths[].reason` is enforced. A bare-scalar override (`phase_4b_default: fallback-only`) fails validation explicitly.
 
 ## Workflow: adding an override
 
@@ -144,12 +144,12 @@ else
 fi
 ```
 
-The helpers are read-only, treat any error or absent file as "no override" (conservative — over-propagation is safer than silent skips), and never abort the caller. They assume a previously-validated overrides file (downstream CI runs `validate-overrides.sh` on every PR).
+The helpers are read-only, treat any error or absent file as "no override" (conservative—over-propagation is safer than silent skips), and never abort the caller. They assume a previously-validated overrides file (downstream CI runs `validate-overrides.sh` on every PR).
 
 ## References
 
-- [#168](https://github.com/nathanjohnpayne/mergepath/issues/168) — parent: `sync-to-downstream.sh` propagation tool design.
-- [#198](https://github.com/nathanjohnpayne/mergepath/issues/198) — sub-A: manifest spec (closed; landed via PR #215).
-- [#199](https://github.com/nathanjohnpayne/mergepath/issues/199) — sub-B: main propagation script (in progress).
-- [#200](https://github.com/nathanjohnpayne/mergepath/issues/200) — sub-C: this override mechanism.
-- [#201](https://github.com/nathanjohnpayne/mergepath/issues/201) — sub-D: `--audit` drift detection (closed; landed via PR #215).
+- [#168](https://github.com/nathanjohnpayne/mergepath/issues/168)—parent: `sync-to-downstream.sh` propagation tool design.
+- [#198](https://github.com/nathanjohnpayne/mergepath/issues/198)—sub-A: manifest spec (closed; landed via PR #215).
+- [#199](https://github.com/nathanjohnpayne/mergepath/issues/199)—sub-B: main propagation script (in progress).
+- [#200](https://github.com/nathanjohnpayne/mergepath/issues/200)—sub-C: this override mechanism.
+- [#201](https://github.com/nathanjohnpayne/mergepath/issues/201)—sub-D: `--audit` drift detection (closed; landed via PR #215).

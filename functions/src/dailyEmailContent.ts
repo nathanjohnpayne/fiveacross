@@ -462,7 +462,7 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
 
   // --- ① Preheader and the subject ----------------------------------------------
   const tail = played ? register.subjectTail : register.subjectTailDayOne;
-  const subject = `Day ${dayNumber} · ${theme.label} ${theme.emoji} — ${tail}`;
+  const subject = `Day ${dayNumber} · ${theme.label} ${theme.emoji}—${tail}`;
   // ~85 characters, the Day plus one hook — never a second sentence, because
   // clients truncate hard and the hook is what earns the open.
   const preheader = played

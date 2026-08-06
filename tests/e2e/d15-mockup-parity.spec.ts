@@ -346,7 +346,7 @@ test('structural parity — every screen against the wireframes', async ({ page 
     await settings.getByRole('button', { name: 'Admin', exact: true }).click();
     await hub.getByRole('button', { name: 'Schedule' }).click();
     await expect(page.getByRole('dialog', { name: 'Schedule' })).toBeVisible();
-    await expect(page.getByText('locked — already unlocked or past').first()).toBeVisible();
+    await expect(page.getByText('locked—already unlocked or past').first()).toBeVisible();
     await expect(page.getByText('editable until unlock').first()).toBeVisible();
     const done = page.getByRole('dialog', { name: 'Schedule' }).getByRole('button', { name: 'Done' });
     await expect(done).toBeVisible();

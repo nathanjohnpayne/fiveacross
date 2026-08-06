@@ -138,7 +138,7 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
 
     const row = screen.getByText('Doomed prompt').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByTitle('Delete'));
-    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed — try again.');
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
 
     // The button re-enabled — a retry fires the write again and clears the pill.
     fireEvent.click(within(row).getByTitle('Delete'));
@@ -172,7 +172,7 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
 
     const row = screen.getByText('Alice').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByRole('button', { name: 'Confirm' }));
-    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed — try again.');
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
   });
 
   it('a rejected Unban alerts inline in Players', async () => {
@@ -182,7 +182,7 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
 
     const row = screen.getByText('ghost-uid').closest('.row') as HTMLElement;
     fireEvent.click(within(row).getByRole('button', { name: 'Unban' }));
-    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed — try again.');
+    expect(await within(row).findByRole('alert')).toHaveTextContent('Failed—try again.');
   });
 
   it('a rejected curated add keeps the draft text and shows the add-specific alert', async () => {
@@ -192,7 +192,7 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     const input = screen.getByLabelText('New prompt text') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'Fragile prompt' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Didn’t add — try again.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Didn’t add—try again.');
     expect(input.value).toBe('Fragile prompt'); // draft kept for a one-tap retry
   });
 
@@ -226,7 +226,7 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     fireEvent.change(edit, { target: { value: 'Sharper wording' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Didn’t save — try again.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Didn’t save—try again.');
     expect((screen.getByLabelText('Edit prompt text') as HTMLInputElement).value).toBe('Sharper wording');
   });
 });

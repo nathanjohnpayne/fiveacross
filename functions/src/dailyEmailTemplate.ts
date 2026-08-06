@@ -231,7 +231,7 @@ export function renderDailyEmailHtml(model: DailyEmailModel): string {
     // ⑦ Footer: sender identity, why-you-got-this, visible unsubscribe.
     `<tr><td bgcolor="${bg}" style="background-color:${bg};color:${dim};padding:18px 24px;` +
     `font-family:${BODY_STACK};font-size:12px;line-height:1.6;">` +
-    `<strong style="color:${ink};">${esc(model.footerBrandLine)}</strong> — ` +
+    `<strong style="color:${ink};">${esc(model.footerBrandLine)}</strong>—` +
     `${esc(model.footerWhyLine)}<br />` +
     `<a href="${safeUrl(model.unsubscribeUrl)}" style="color:${dim};">Unsubscribe</a> · ` +
     `<a href="${safeUrl(model.preferencesUrl)}" style="color:${dim};">Email preferences</a>` +
@@ -260,7 +260,7 @@ export function renderDailyEmailText(model: DailyEmailModel): string {
     for (const r of s.rows) {
       const star = r.starred ? ' *' : '';
       lines.push(
-        `${r.rank}. ${r.displayName}${star} — ${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'}, ${r.squaresMarked} squares`,
+        `${r.rank}. ${r.displayName}${star}—${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'}, ${r.squaresMarked} squares`,
       );
     }
     if (s.youLine) lines.push('', s.youLine);
@@ -277,7 +277,7 @@ export function renderDailyEmailText(model: DailyEmailModel): string {
     '',
     `${model.ctaLabel}: ${model.ctaUrl}`,
     '',
-    `${model.footerBrandLine} — ${model.footerWhyLine}`,
+    `${model.footerBrandLine}—${model.footerWhyLine}`,
     `Unsubscribe: ${model.unsubscribeUrl}`,
     `Email preferences: ${model.preferencesUrl}`,
     '',

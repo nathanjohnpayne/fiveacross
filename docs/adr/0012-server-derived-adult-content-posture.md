@@ -31,7 +31,7 @@ A single-Event build may seed the initial posture with `VITE_ADULT_CONTENT=false
 
 ## Considered alternatives
 
-- **Derive from Edition** — rejected because Edition and adult content are independent axes.
-- **Query Prompts from the signed-out client** — rejected because it widens the pre-auth data boundary and still races first paint.
-- **Allow `true` to lower automatically** — rejected because a flapping gate cannot retract an acknowledgement already collected and creates new under-gating races.
-- **Trust cached or build-time `false` indefinitely** — rejected because an Admin can approve the first explicit Prompt while a tab is open or a build remains deployed.
+- **Derive from Edition**—rejected because Edition and adult content are independent axes.
+- **Query Prompts from the signed-out client**—rejected because it widens the pre-auth data boundary and still races first paint.
+- **Allow `true` to lower automatically**—rejected because a flapping gate cannot retract an acknowledgement already collected and creates new under-gating races.
+- **Trust cached or build-time `false` indefinitely**—rejected because an Admin can approve the first explicit Prompt while a tab is open or a build remains deployed.

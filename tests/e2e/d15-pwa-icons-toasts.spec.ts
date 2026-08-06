@@ -89,7 +89,7 @@ test.describe('iconography — Lucide chrome, emoji flavor', () => {
     const rowIcons = page.locator('.more-rows .more-row svg.more-row-icon');
     await expect(rowIcons).toHaveCount(await rowIcons.count()); // sanity: locator resolves
     expect(await rowIcons.count()).toBeGreaterThanOrEqual(3); // schedule / suggest / how-to-play
-    const autoChip = page.getByRole('button', { name: /Auto — match the day/ });
+    const autoChip = page.getByRole('button', { name: /Auto—match the day/ });
     await expect(autoChip).toContainText('🧭');
     const firstThemeChip = page.locator('.themes[aria-label="Theme"] button').nth(1);
     expect(await firstThemeChip.textContent()).toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);

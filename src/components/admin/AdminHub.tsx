@@ -57,7 +57,7 @@ export default function AdminHub({
     queueTotal === 0
       ? 'All clear'
       : [`Reports ${reportCount}`, `Approvals ${approvalCount}`, ...(claimsVisible ? [`Claims ${claimCount}`] : [])].join(' · ') +
-        ' — one inbox, oldest first';
+        '—one inbox, oldest first';
 
   return (
     <div className="more-rows">

@@ -129,11 +129,12 @@ export async function bootstrapEventResolution(
     // Cruise Bingo".
     applyEditionDocumentIdentity();
     // The canonical hostname (#556, CONTEXT.md § Canonical hostname) — the
-    // address analytics and share metadata must report even when the Player
-    // is presently on a validated Alias. `null` on the env short-circuit is
-    // correct as-is: a single-Event build has no separate Alias concept, so
-    // `canonicalOrigin()`'s own `window.location` fallback already IS
-    // canonical for that build.
+    // address ANALYTICS must report even when the Player is presently on a
+    // validated Alias. Analytics only: share links deliberately carry the
+    // entry-point origin instead (`shareOrigin()`, #607). `null` on the env
+    // short-circuit is correct as-is: a single-Event build has no separate
+    // Alias concept, so the analytics consumers' own `window.location`
+    // fallback already IS canonical for that build.
     applyResolvedCanonicalHost(resolution.canonicalHost);
   }
   return resolution;

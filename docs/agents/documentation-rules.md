@@ -36,7 +36,7 @@ No CI check rejects a direct edit to a repo-owned `docs/**` file, and CodeRabbit
 
 ## Incident-fix documentation diffs stay narrow
 
-When a PR fixes an incident or a live behavioral bug, its documentation hunks must contain only the behavioral text that changed — no formatter-wide churn (reflowing untouched paragraphs, renumbering lists, restyling emphasis, reordering sections) riding along in the same diff. Reviewers audit an incident fix by reading its doc delta as a statement of what behavior changed; every cosmetic hunk mixed in dilutes that signal and slows the review exactly when speed matters (#349, observed on PR #345's `docs/app/README.md` hunks). Run repo-wide formatting passes as their own change — e.g. a dedicated `scripts/lint-md-prose-wrap.sh --write` PR — where a reviewer can wave the whole diff through as render-neutral, instead of untangling it from a behavioral fix.
+When a PR fixes an incident or a live behavioral bug, its documentation hunks must contain only the behavioral text that changed—no formatter-wide churn (reflowing untouched paragraphs, renumbering lists, restyling emphasis, reordering sections) riding along in the same diff. Reviewers audit an incident fix by reading its doc delta as a statement of what behavior changed; every cosmetic hunk mixed in dilutes that signal and slows the review exactly when speed matters (#349, observed on PR #345's `docs/app/README.md` hunks). Run repo-wide formatting passes as their own change—e.g. a dedicated `scripts/lint-md-prose-wrap.sh --write` PR—where a reviewer can wave the whole diff through as render-neutral, instead of untangling it from a behavioral fix.
 
 ## Prose line-wrapping
 

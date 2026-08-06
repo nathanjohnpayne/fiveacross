@@ -170,8 +170,9 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
       expect(mocks.getDocFromServer).not.toHaveBeenCalled();
       expect(activeEdition()).toBe('vacay');
       // No hostname document was read, so there is no separate canonical
-      // host to install — `canonicalOrigin()`'s own window.location
-      // fallback already IS canonical for a single-Event build.
+      // host to install — the analytics consumers' own window.location
+      // fallback already IS canonical for a single-Event build (#556;
+      // share links carry the entry origin regardless, #607).
       expect(mocks.applyResolvedCanonicalHost).toHaveBeenCalledWith(null);
     } finally {
       vi.unstubAllEnvs();

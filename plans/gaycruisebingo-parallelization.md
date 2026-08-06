@@ -1,4 +1,4 @@
-# Gay Cruise Bingo — Parallelization Plan (DAG · Waves · Hot Files · Claim Protocol)
+# Gay Cruise Bingo—Parallelization Plan (DAG · Waves · Hot Files · Claim Protocol)
 
 How multiple agents run the [backlog](gaycruisebingo-backlog.md) in parallel without colliding. Each ticket is sized to a **single PR** and scoped to disjoint files where possible; the shared/hot files are serialized behind owner tickets.
 
@@ -6,11 +6,11 @@ How multiple agents run the [backlog](gaycruisebingo-backlog.md) in parallel wit
 
 A Wave is a dependency depth, not a phase. Wave 0 is the foundation that unblocks everything; higher waves depend on lower ones. Tickets **within** a wave are mutually independent unless an explicit dependency says otherwise, so they can be claimed in parallel.
 
-- **Wave 0 — Foundation.** `w0-test-harness`, `w0-type-contract`, `w0-app-shell` (no deps → **Ready** now); `w0-firestore-rules`, `w0-storage-rules`, `w0-offline-persistence` (depend on the harness). Owns the shared contract files (types, routes, rules, firebase init, test infra).
-- **Wave 1 — Identity & core play.** Auth, 18+ attestation, profile/avatar, event seed; Board deal/join, Mark/win, prompt pool, themes, PWA.
-- **Wave 2 — Social core.** Tally, Proof, Doubts, Feed/Moments, Leaderboard, Share Cards, admin/moderation console, GA4, the two Phase-0 reconciliations.
-- **Wave 3 — Remaining social + hardening.** Claim Modes, security hardening, e2e happy-path.
-- **Wave 4 — Phase 1 backend & infra, then Phase 2 hardening.** Phase 1 (largely merged): server-authoritative report-count hide, domain/SSL, Blaze/budget. **Phase 2 hardening** (epic #131): Cloud Vision re-enable (`p2-vision-proof` → `p2-vision-moderation`), `w4-app-check`, `p2-archive`; plus launch checklist and multi-event schema.
+- **Wave 0—Foundation.** `w0-test-harness`, `w0-type-contract`, `w0-app-shell` (no deps → **Ready** now); `w0-firestore-rules`, `w0-storage-rules`, `w0-offline-persistence` (depend on the harness). Owns the shared contract files (types, routes, rules, firebase init, test infra).
+- **Wave 1—Identity & core play.** Auth, 18+ attestation, profile/avatar, event seed; Board deal/join, Mark/win, prompt pool, themes, PWA.
+- **Wave 2—Social core.** Tally, Proof, Doubts, Feed/Moments, Leaderboard, Share Cards, admin/moderation console, GA4, the two Phase-0 reconciliations.
+- **Wave 3—Remaining social + hardening.** Claim Modes, security hardening, e2e happy-path.
+- **Wave 4—Phase 1 backend & infra, then Phase 2 hardening.** Phase 1 (largely merged): server-authoritative report-count hide, domain/SSL, Blaze/budget. **Phase 2 hardening** (epic #131): Cloud Vision re-enable (`p2-vision-proof` → `p2-vision-moderation`), `w4-app-check`, `p2-archive`; plus launch checklist and multi-event schema.
 
 ## Dependency DAG
 
@@ -48,7 +48,7 @@ x-decisions-needed ─(soft)─> w1-event-seed, w2-admin-console, w4-app-check, 
 
 **Ready queue at kickoff (Wave-0, unblocked):** `w0-test-harness`, `w0-type-contract`, `w0-app-shell`. Set to `Ready`; everything else starts `Backlog`. When `w0-test-harness` merges, move `w0-firestore-rules` / `w0-storage-rules` / `w0-offline-persistence` to `Ready`; when the Wave-0 owners merge, promote the unblocked Wave-1 set, and so on.
 
-## Hot / shared files — serialize behind an owner ticket
+## Hot / shared files—serialize behind an owner ticket
 
 The contention risk is not the count of tickets but the count of tickets touching the **same** file. These files are touched by many tickets; each has a single **owner** ticket that lands its shape first, after which other tickets extend it in disjoint regions (or are sequenced).
 
@@ -64,14 +64,14 @@ The contention risk is not the count of tickets but the count of tickets touchin
 | `src/analytics.ts` | **w2-ga4-events** | Owns the event catalog; `w1-pwa` (`install_pwa`) and `w2-doubts` (`demand_proof`) add one call site each, coordinated via the catalog ticket. |
 | `src/theme/*` | **w1-themes** | Single owner; no other ticket edits themes. |
 
-Rule of thumb for an agent: **if your ticket must edit a hot file whose owner ticket is not yet merged, it is not Ready — wait or coordinate.** The board's `Depends on` edges encode this; do not start a ticket whose dependency is still open.
+Rule of thumb for an agent: **if your ticket must edit a hot file whose owner ticket is not yet merged, it is not Ready—wait or coordinate.** The board's `Depends on` edges encode this; do not start a ticket whose dependency is still open.
 
 ## Protected-path / over-threshold tickets (`needs-phase-4`)
 
 Keep these PRs small (< 300 changed lines) so review stays tractable, and expect external (Phase 4) review:
 
 - Auto-escalated by path today (`src/auth/**`): `w1-auth-google`, `w1-adult-attestation`.
-- Security/backend-sensitive (mark `needs-phase-4`, keep small — not auto-escalated unless ≥ 300 lines): `w0-firestore-rules`, `w0-storage-rules`, `recon-recompute-stats`, `w3-security-hardening`, `w4-phase1-functions`, `w4-app-check`, `w4-infra-domain`, `w4-infra-blaze-budget`, `p2-vision-proof`, `p2-vision-moderation`, `p2-archive`. (Note: `firestore.rules` / `storage.rules` / `functions/**` are now in `external_review_paths`, so the `functions/`- and rules-touching ones also auto-escalate regardless of size.)
+- Security/backend-sensitive (mark `needs-phase-4`, keep small—not auto-escalated unless ≥ 300 lines): `w0-firestore-rules`, `w0-storage-rules`, `recon-recompute-stats`, `w3-security-hardening`, `w4-phase1-functions`, `w4-app-check`, `w4-infra-domain`, `w4-infra-blaze-budget`, `p2-vision-proof`, `p2-vision-moderation`, `p2-archive`. (Note: `firestore.rules` / `storage.rules` / `functions/**` are now in `external_review_paths`, so the `functions/`- and rules-touching ones also auto-escalate regardless of size.)
 - `w3-security-hardening` proposes adding `firestore.rules` / `storage.rules` / `functions/**` to `external_review_paths` so these auto-escalate in future.
 
 ## Claim protocol (so agents don't double-pick)
@@ -79,7 +79,7 @@ Keep these PRs small (< 300 changed lines) so review stays tractable, and expect
 The repo has **no** built-in claim convention, so this backlog defines one (also encoded in [`docs/agents/ticket-workflow.md`](../docs/agents/ticket-workflow.md)):
 
 1. **Pick** a ticket whose Status is `Ready` and whose every `Depends on` is `Done`. Never pick `Backlog`.
-2. **Claim atomically**: self-assign the issue **and** set Status → `In progress` in the same step, then post a one-line comment "claiming — <agent identity>". If two agents race, the second to assign backs off (assignee already set) and picks another `Ready` ticket.
+2. **Claim atomically**: self-assign the issue **and** set Status → `In progress` in the same step, then post a one-line comment "claiming—<agent identity>". If two agents race, the second to assign backs off (assignee already set) and picks another `Ready` ticket.
 3. **Branch**: `feat/<slug>` off `main` (never push to `main`).
 4. **Open the PR** with `Closes #<issue>`; set Status → `In review`. The project's built-in "item added / reopened" workflow handles `Backlog`; the `Closes` link + merge drive `Done`.
 5. **Merge** as `nathanjohnpayne` after review clears; Status → `Done` (auto via the closed-issue workflow, verified manually).
