@@ -289,6 +289,12 @@ const CONTROLLED_DIMENSION_KEYS: readonly string[] = [
  */
 export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null {
   if (!event) return event;
+  // The production entrypoint waits for Firebase's authoritative auth state
+  // before letting the SDK send anything. If that startup identity cannot be
+  // established, fail closed: posthog.init() may already have scheduled its
+  // first pageview, but before_send is the final common gate for that event,
+  // autocapture, explicit captures, and replay snapshots alike.
+  if (identityGateRequired && !identityGateReady) return null;
   const incoming = event.properties;
   const hasStaleControlledKey = incoming != null && CONTROLLED_DIMENSION_KEYS.some((k) => k in incoming);
   if (Object.keys(registeredDims).length > 0 || hasStaleControlledKey) {
@@ -314,6 +320,22 @@ export function sanitizeUrls(event: CaptureResult | null): CaptureResult | null 
 }
 
 let ready = false;
+let initInFlight: Promise<void> | null = null;
+let identityGateRequired = false;
+let identityGateReady = false;
+
+export type InitPostHogOptions = { waitForAuth?: boolean };
+
+// The first resolved Firebase auth state is a startup BASELINE, not an
+// ordinary point-in-time queue operation. It must apply before every capture
+// that accumulated while auth was loading (including a recovery-reload crash),
+// while later auth transitions remain in pendingOps' strict FIFO.
+let initialAuthUid: string | null | undefined;
+let lastObservedAuthUid: string | null | undefined;
+let resolveInitialAuth: (() => void) | null = null;
+const initialAuthReady = new Promise<void>((resolve) => {
+  resolveInitialAuth = resolve;
+});
 
 // Moved to its own dependency-free module (src/local-host.ts) so the pre-mount
 // auth gate can share it without importing posthog-js; re-exported here for the
@@ -325,10 +347,25 @@ export { isLocalDevHost } from './local-host';
  * the GA4 guard in firebase.ts, so dev/test/CI without env vars stay silent. The
  * `phc_` project key is client-safe (public) by design.
  */
-export async function initPostHog(): Promise<void> {
-  if (ready) return;
+export function initPostHog(options: InitPostHogOptions = {}): Promise<void> {
+  if (ready) return Promise.resolve();
+  if (initInFlight) return initInFlight;
+  const attempt = initializePostHog(options);
+  initInFlight = attempt;
+  const clearAttempt = (): void => {
+    if (initInFlight === attempt) initInFlight = null;
+  };
+  void attempt.then(clearAttempt, clearAttempt);
+  return attempt;
+}
+
+async function initializePostHog(options: InitPostHogOptions): Promise<void> {
   const key = import.meta.env.VITE_POSTHOG_KEY as string | undefined;
   if (!key) return;
+  if (options.waitForAuth) {
+    identityGateRequired = true;
+    if (initialAuthUid === undefined) await initialAuthReady;
+  }
   const envHost = import.meta.env.VITE_POSTHOG_HOST as string | undefined;
   // Walk the ingest chain unless an env override forces a host genuinely
   // outside it (#342/#344): a blocked proxy (shipboard SNI filter) silently
@@ -350,11 +387,21 @@ export async function initPostHog(): Promise<void> {
   }
   try {
     posthog.init(key, { api_host, ...POSTHOG_INIT_OPTIONS });
-    ready = true;
   } catch {
     ready = false;
     return;
   }
+  if (options.waitForAuth) {
+    // `initialAuthUid` cannot still be undefined after initialAuthReady, but
+    // fail closed if that invariant is ever broken rather than capture under
+    // whatever User the SDK restored from local persistence.
+    if (initialAuthUid === undefined || !applyInitialAuthState(initialAuthUid)) {
+      ready = false;
+      return;
+    }
+    identityGateReady = true;
+  }
+  ready = true;
   // Replay EVERYTHING that arrived while init was still probing — captures
   // and identity operations — as ONE queue, in ARRIVAL ORDER (#613, Phase 4b
   // round-2 P1; round 1 replayed the identity FIFO first and all captures
@@ -377,12 +424,11 @@ export async function initPostHog(): Promise<void> {
   // P1): posthog-js does NOT capture it inside `init()` — the loaded step of
   // init (`kn()` in the 1.409.5 dist) SCHEDULES it one macrotask later via
   // `setTimeout(..., 1)`, and the capture computes `distinct_id` at capture
-  // time. Everything in this replay block runs SYNCHRONOUSLY after
-  // `posthog.init()` returns (no awaits in between), including the unconditional
-  // startup baseline reset below. That baseline cannot be delegated to
-  // main.tsx's later React auth effect: a direct-host override makes this init
-  // synchronous, so the SDK timer can otherwise win. The automatic first
-  // pageview therefore never attributes to a prior session's persisted identity.
+  // time. Production init itself waits for Firebase's first resolved auth
+  // state, then applies that baseline SYNCHRONOUSLY after `posthog.init()`
+  // returns (no awaits in between). The baseline therefore lands before the
+  // SDK timer even with a direct-host override, without resetting a returning
+  // User whose persisted PostHog uid already matches Firebase.
   const ops = pendingOps;
   pendingOps = [];
   const replayRegister = (): void => {
@@ -395,12 +441,12 @@ export async function initPostHog(): Promise<void> {
       /* no-op */
     }
   };
-  // PRIOR-load persisted captures first: they are OLDER than everything this
-  // load queued, and they belong to the identity `posthog.init()` just
-  // loaded — the load that queued them died before its own identity ops
-  // could apply, and that persisted identity is the closest surviving record
-  // of who was signed in when they fired — so they replay BEFORE this load's
-  // first identity transition can re-attribute them. Replayed only once
+  // PRIOR-load persisted captures are older than this load's queue, but the
+  // production auth baseline above still applies FIRST. Identity ops are not
+  // persisted, so the SDK's restored identity is not reliable evidence of who
+  // owned a capture that survived a recovery reload (a signed-out reset may
+  // have died with the page). Fresh Firebase auth is authoritative and keeps
+  // those captures from leaking to a stale prior User. Replayed only once
   // their deletion is confirmed (Phase 4b P2 on #513): if the store would
   // not let them go, replaying means re-sending them on every future load
   // with no way to stop; dropping them is the lesser harm, on this module's
@@ -413,39 +459,19 @@ export async function initPostHog(): Promise<void> {
   if (drained) {
     for (const c of carriedNow) phCapture(c.name, c.params, c.options);
   }
-  // Establish a clean identity baseline for THIS load before the SDK's
-  // deferred initial pageview can fire. main.tsx starts PostHog before React
-  // mounts, so the auth-driven phReset/phIdentify effect cannot be assumed to
-  // have queued an operation yet — especially when a direct-host override
-  // makes init synchronous. Replaying prior-load captures first preserves
-  // their closest surviving attribution (the identity init restored); this
-  // reset then prevents that restored identity from leaking into the current
-  // load. A later phIdentify stitches the new anonymous pageview to the
-  // resolved signed-in User without ever merging two persisted Users.
-  let replayIsAnonymous = applyReset();
-  if (replayIsAnonymous) {
-    // applyReset re-registered the FULL merged set, so the incremental replay
-    // is already satisfied and must not register the same values twice.
-    pendingRegister = null;
-  }
   for (const op of ops) {
     if (op.type === 'reset') {
       // A reset supersedes the incremental replay: `applyReset` re-registers
       // the FULL merged `registeredDims`, which already contains everything
       // `pendingRegister` held (`phRegister` merges into both).
-      // The startup baseline above is itself an anonymous reset. A queued
-      // reset before any identify is therefore redundant (the same coalescing
-      // phReset applies while queueing, even when captures sit between them)
-      // and would only orphan those anonymous captures under a discarded id.
-      if (!replayIsAnonymous && applyReset()) {
+      if (applyReset()) {
         pendingRegister = null;
-        replayIsAnonymous = true;
       }
     } else {
       replayRegister();
       if (op.type === 'identify') {
+        if (identifiedUid !== null && identifiedUid !== op.uid && !applyReset()) continue;
         applyIdentify(op.uid);
-        replayIsAnonymous = false;
       }
       else phCapture(op.name, op.params, op.options);
     }
@@ -619,12 +645,14 @@ function clearPersistedCaptures(): boolean {
 let identifiedUid: string | null = null;
 
 /** The ready-path identify — shared by `phIdentify` and the queue replay. */
-function applyIdentify(uid: string): void {
+function applyIdentify(uid: string): boolean {
   try {
     posthog.identify(uid);
     identifiedUid = uid;
+    return true;
   } catch {
     /* no-op */
+    return false;
   }
 }
 
@@ -637,12 +665,46 @@ function applyReset(): boolean {
   try {
     posthog.reset();
     identifiedUid = null;
-    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
-    return true;
   } catch {
     /* no-op */
     return false;
   }
+  // Identity reset succeeded, so report success even if this best-effort
+  // dimension re-register fails. before_send still supplies the controlled
+  // dimensions, and treating a register failure as a reset failure would
+  // cause a second reset that needlessly rotates the new anonymous session.
+  try {
+    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
+  } catch {
+    /* no-op */
+  }
+  return true;
+}
+
+type RestoredUserUid = { known: true; uid: string | null } | { known: false };
+
+/** Read the SDK identity that init restored without guessing from distinct_id. */
+function restoredUserUid(): RestoredUserUid {
+  try {
+    const value = posthog.get_property('$user_id');
+    return { known: true, uid: typeof value === 'string' && value.length > 0 ? value : null };
+  } catch {
+    return { known: false };
+  }
+}
+
+/**
+ * Apply Firebase's authoritative first auth state before this load captures.
+ * A matching returning User is identified in place (preserving PostHog's
+ * session/replay); an anonymous visitor is stitched normally; only a signed-
+ * out state or a DIFFERENT persisted User needs reset().
+ */
+function applyInitialAuthState(uid: string | null): boolean {
+  if (uid === null) return applyReset();
+  const restored = restoredUserUid();
+  if (!restored.known) return false;
+  if (restored.uid !== null && restored.uid !== uid && !applyReset()) return false;
+  return applyIdentify(uid);
 }
 
 /**
@@ -684,6 +746,29 @@ export function phIdentify(uid: string): void {
   // never merge onto A's identity.
   if (identifiedUid !== null && identifiedUid !== uid) applyReset();
   applyIdentify(uid);
+}
+
+/**
+ * Feed the resolved Firebase auth state into PostHog. The first observation is
+ * the startup baseline awaited by production init; later observations become
+ * ordinary FIFO identity transitions. Repeated StrictMode effects coalesce.
+ */
+export function phSetAuthState(uid: string | null): void {
+  const previous = lastObservedAuthUid;
+  if (previous === uid) return;
+  lastObservedAuthUid = uid;
+  if (initialAuthUid === undefined && !ready) {
+    initialAuthUid = uid;
+    resolveInitialAuth?.();
+    resolveInitialAuth = null;
+    return;
+  }
+  if (uid === null) {
+    phReset();
+    return;
+  }
+  if (previous !== undefined && previous !== null && previous !== uid) phReset();
+  phIdentify(uid);
 }
 
 // Dimensions registered before init settled (#556) — merged (not replaced)
