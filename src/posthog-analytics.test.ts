@@ -655,7 +655,12 @@ describe('PostHog init with a key', () => {
     expect(ph.identify).toHaveBeenCalledWith('sailor-9');
   });
 
-  it('a sign-out during the probe window clears the pending identity — never resurrected after init (#342)', async () => {
+  it('a sign-out during the probe window replays AFTER the identify it followed — the session ends anonymous, in order (#342 → #613)', async () => {
+    // Previously the queued reset simply DELETED the pending identify
+    // (last-write-wins slots). The FIFO queue (#613, Phase 4b P1) replays
+    // both, in arrival order: the identify stitches the probe-window events
+    // to the user who really was signed in, and the reset that FOLLOWED it
+    // still lands last, so the identity is never resurrected past sign-out.
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', '');
@@ -669,7 +674,13 @@ describe('PostHog init with a key', () => {
     // Unstub BEFORE asserting (CodeRabbit on #342): an assertion failure here
     // must not leak the stubbed fetch into later tests and cascade.
     vi.unstubAllGlobals();
-    expect(ph.identify).not.toHaveBeenCalled();
+    expect(ph.identify).toHaveBeenCalledWith('sailor-9');
+    expect(ph.reset).toHaveBeenCalledTimes(1);
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(identifyOrder).toBeLessThan(resetOrder);
   });
 
   it('a reset requested while SIGNED OUT during the probe window is applied on the real SDK once init settles (#611, retro Phase 4b P1)', async () => {
@@ -730,19 +741,104 @@ describe('PostHog init with a key', () => {
     expect(resetOrder).toBeLessThan(registerOrder);
   });
 
-  it('a later identify supersedes an earlier queued reset (#611) — same "last call wins" posture the reset side already had', async () => {
+  it('a fast sign-out → sign-in during the probe window replays reset THEN identify — never identify alone (#613, Phase 4b P1)', async () => {
+    // The cross-user attribution hazard: posthog.init() loads the PREVIOUS
+    // account's persisted distinct_id. The earlier last-write-wins slots let
+    // the later queued identify DISCARD the queued reset, so the new uid was
+    // identified straight onto the prior user's persisted identity — merging
+    // the two accounts. The FIFO queue preserves the reset and executes
+    // reset-then-identify for this sequence.
     vi.resetModules();
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
     const ph = (await import('posthog-js')).default;
     const mod = await import('./posthog');
 
-    mod.phReset(); // momentarily signed out
-    mod.phIdentify('sailor-9'); // signs back in before init ever settled
+    mod.phReset(); // the account switch starts: previous user signs out
+    mod.phIdentify('sailor-9'); // the NEW account signs in before init ever settled
     await mod.initPostHog();
 
-    expect(ph.reset).not.toHaveBeenCalled();
+    expect(ph.reset).toHaveBeenCalledTimes(1);
     expect(ph.identify).toHaveBeenCalledWith('sailor-9');
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(identifyOrder);
+  });
+
+  it('replays a reset-then-identify with the dimension registration BETWEEN them, so the $identify is dimensioned and the dims survive the reset (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phRegister({ brand_id: 'five-across' });
+    mod.phReset();
+    mod.phIdentify('sailor-9');
+    await mod.initPostHog();
+
+    // The reset's own re-register carries the FULL merged set, and it must
+    // land after the reset (or the reset would wipe it) and before the
+    // identify (or the $identify capture would be undimensioned).
+    expect(ph.register).toHaveBeenCalledWith({ brand_id: 'five-across' });
+    const resetOrder = (ph.reset as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const registerOrder = (ph.register as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const identifyOrder = (ph.identify as unknown as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(resetOrder).toBeLessThan(registerOrder);
+    expect(registerOrder).toBeLessThan(identifyOrder);
+  });
+
+  it('coalesces adjacent identifies to the latest uid, keeping only actual sign-in/out transitions (#613)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+
+    mod.phIdentify('sailor-1');
+    mod.phIdentify('sailor-2'); // no reset between — same signed-in run, latest uid wins
+    await mod.initPostHog();
+
+    expect(ph.identify).toHaveBeenCalledTimes(1);
+    expect(ph.identify).toHaveBeenCalledWith('sailor-2');
+  });
+
+  it("applies the queued reset before the SDK's DEFERRED init-time $pageview can capture (#613, Phase 4b P1)", async () => {
+    // posthog-js does NOT capture the automatic initial $pageview inside
+    // init(): the loaded step of init schedules it one macrotask later via
+    // setTimeout(..., 1) (verified in the installed 1.409.5 dist), and the
+    // capture computes distinct_id at CAPTURE time. This test mirrors that
+    // scheduling in the init mock and pins our side of the contract: the
+    // queued reset is applied SYNCHRONOUSLY after posthog.init() returns —
+    // no awaits in between — so it always lands before the deferred capture
+    // task runs, and the first pageview of a signed-out session can never
+    // attribute to a prior session's persisted identity.
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    vi.useFakeTimers();
+    try {
+      const ph = (await import('posthog-js')).default;
+      const order: string[] = [];
+      vi.mocked(ph.init).mockImplementationOnce(((): void => {
+        setTimeout(() => order.push('sdk-initial-pageview'), 1);
+      }) as never);
+      vi.mocked(ph.reset).mockImplementationOnce(((): void => {
+        order.push('reset');
+      }) as never);
+      const mod = await import('./posthog');
+      mod.phReset(); // the signed-out effect fires before init settles
+      await mod.initPostHog();
+      vi.runAllTimers();
+      expect(order).toEqual(['reset', 'sdk-initial-pageview']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('forwards super-properties directly once ready (#556)', async () => {

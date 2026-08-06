@@ -131,12 +131,21 @@ describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1
     window.history.replaceState({}, '', '/');
   });
 
-  it('does not add page_location when no canonical host is resolved (single-Event build)', async () => {
+  it('falls back to a scrubbed origin + pathname page_location when no canonical host is resolved (#613, Phase 4b P1)', async () => {
+    // Omitting page_location entirely (the earlier behavior) made GA4 derive
+    // it from the browser's FULL current URL — query string included —
+    // reintroducing the query-string leakage the path-only policy exists to
+    // prevent, exactly on the branches with no canonical host (a
+    // single-Event build, or the bootstrap failure branch).
     vi.doMock('./firebase', () => ({ analytics: {} }));
     vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    window.history.replaceState({}, '', '/feed?invite=SECRET#frag');
     const { track } = await import('./analytics');
     track('login', { method: 'google' });
-    expect(logEvent).toHaveBeenCalledWith({}, 'login', { method: 'google' });
+    expect(logEvent).toHaveBeenCalledWith({}, 'login', {
+      method: 'google',
+      page_location: `${window.location.origin}/feed`, // no query, no hash
+    });
   });
 
   it('adds a canonicalized page_location matching the CURRENT pathname when a canonical host is resolved', async () => {
@@ -191,13 +200,18 @@ describe('emitInitialPageView (#611, retro Phase 4b P1 — replaces the automati
     expect(logEvent).not.toHaveBeenCalled();
   });
 
-  it('fires exactly ONE explicit page_view once analytics becomes ready, with no canonical host to override', async () => {
+  it('fires exactly ONE explicit page_view once analytics becomes ready, with the scrubbed origin+pathname fallback when no canonical host is resolved (#613)', async () => {
     vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
     vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    window.history.replaceState({}, '', '/enter?code=SECRET');
     const { emitInitialPageView } = await import('./analytics');
     await emitInitialPageView();
     expect(logEvent).toHaveBeenCalledTimes(1);
-    expect(logEvent).toHaveBeenCalledWith({}, 'page_view', undefined);
+    // NEVER sent without an explicit page_location (#613, Phase 4b P1): GA4
+    // would derive one from the full query-bearing URL otherwise.
+    expect(logEvent).toHaveBeenCalledWith({}, 'page_view', {
+      page_location: `${window.location.origin}/enter`,
+    });
   });
 
   it('fires the page_view with the canonicalized CURRENT page_location when a canonical host is resolved', async () => {
@@ -209,6 +223,60 @@ describe('emitInitialPageView (#611, retro Phase 4b P1 — replaces the automati
     expect(logEvent).toHaveBeenCalledWith({}, 'page_view', {
       page_location: 'https://bodega-bay.vacaybingo.com/leaderboard',
     });
+  });
+
+  it('re-applies the cached GA4 defaults AFTER readiness and BEFORE logging, when registration won the isSupported() race (#613, Phase 4b P1)', async () => {
+    // Event resolution and firebase.ts's isSupported() chain settle
+    // independently. When registerAnalyticsDimensions runs while `analytics`
+    // is still null, the dimensions live only in the local ga4Dims cache (and
+    // @firebase/analytics's single pre-init slot); re-sending the full merged
+    // set once the instance exists — before the page_view — makes the
+    // "this event is dimensioned" guarantee locally provable rather than
+    // resting on the SDK's internal init ordering.
+    let resolveReady!: (instance: object) => void;
+    vi.doMock('./firebase', () => ({
+      analytics: null,
+      analyticsReady: new Promise<object>((resolve) => {
+        resolveReady = resolve;
+      }),
+    }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { registerAnalyticsDimensions, emitInitialPageView } = await import('./analytics');
+    registerAnalyticsDimensions({ eventId: 'bodega-bay-2026', eventSlug: 'bodega-bay' });
+    setDefaultEventParameters.mockClear(); // isolate the post-readiness re-apply
+    const settled = emitInitialPageView();
+    resolveReady({}); // GA4's support/config check finishes LAST
+    await settled;
+    expect(setDefaultEventParameters).toHaveBeenCalledWith({
+      brand_id: 'five-across',
+      edition_id: 'gcb',
+      event_id: 'bodega-bay-2026',
+      event_slug: 'bodega-bay',
+    });
+    const setOrder = setDefaultEventParameters.mock.invocationCallOrder[0];
+    const logOrder = logEvent.mock.invocationCallOrder[0];
+    expect(setOrder).toBeLessThan(logOrder);
+  });
+
+  it('skips the defaults re-apply when nothing was ever registered (not-found / failure branches)', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { emitInitialPageView } = await import('./analytics');
+    await emitInitialPageView();
+    expect(setDefaultEventParameters).not.toHaveBeenCalled();
+    expect(logEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('still fires the page_view even if the defaults re-apply throws', async () => {
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
+    vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
+    const { registerAnalyticsDimensions, emitInitialPageView } = await import('./analytics');
+    registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });
+    setDefaultEventParameters.mockImplementationOnce(() => {
+      throw new Error('ga4 unavailable');
+    });
+    await emitInitialPageView();
+    expect(logEvent).toHaveBeenCalledTimes(1);
   });
 
   it('never throws into product code even if logEvent itself throws', async () => {

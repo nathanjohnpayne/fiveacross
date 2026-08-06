@@ -355,33 +355,34 @@ export async function initPostHog(): Promise<void> {
     ready = false;
     return;
   }
-  // Apply a reset requested WHILE init was still probing (#611, retro Phase
-  // 4b P1 on PR #584), BEFORE anything else below — `posthog.init()` loads
-  // whatever identity/distinct_id PostHog had PERSISTED from a prior
-  // session, so a signed-out visitor whose `phReset()` landed in this window
-  // (the exact case `pendingIdentifyUid` already guards on the identify
-  // side) would otherwise have every capture in this session — including the
-  // automatic first `$pageview` — attribute to that stale persisted user
-  // until some LATER event happened to call `phReset()` again. Must run
-  // before the `pendingRegister` replay too: `posthog.reset()` clears
-  // persisted `register()` state along with the identity, so resetting
-  // first and re-registering after (mirroring `phReset`'s own ready-branch
-  // order) is what makes THIS session's dimensions win instead of getting
-  // wiped by a reset that runs after they were already applied.
-  if (pendingReset) {
-    pendingReset = false;
-    try {
-      posthog.reset();
-    } catch {
-      /* no-op */
-    }
-  }
-  // Replay dimensions registered while init was still probing (#556), BEFORE
-  // the identify below — `posthog.identify()` itself emits an `$identify` /
-  // `$set` capture the moment it transitions the anonymous user (Codex P2 on
-  // #556), so registering first means THAT capture carries brand/edition/
-  // Event context too, not just the ones queued after it.
-  if (pendingRegister !== null) {
+  // Replay the identity operations (sign-out resets / sign-in identifies) and
+  // the dimension registration that arrived while init was still probing,
+  // BEFORE any queued capture below. Identity ops replay in ARRIVAL ORDER
+  // (#613, Phase 4b P1 — FIFO, replacing the earlier last-write-wins slots):
+  // `posthog.init()` loads whatever identity PostHog PERSISTED from a prior
+  // session, so a fast sign-out → sign-in during the probe window must reach
+  // the SDK as reset-THEN-identify — replaying the identify alone would merge
+  // the NEW account's uid onto the PRIOR user's persisted distinct_id
+  // (cross-user attribution), and a silently dropped reset was exactly the
+  // #611 stale-identity leak. Dimension registration replays before the first
+  // identify so the `$identify` capture the SDK emits carries brand/edition/
+  // Event context (Codex P2 on #556); `applyReset` re-registers the full
+  // merged set itself, because `posthog.reset()` clears register() state
+  // (see `registeredDims`).
+  //
+  // Ordering vs the SDK's own automatic first `$pageview` (#613, Phase 4b
+  // P1): posthog-js does NOT capture it inside `init()` — the loaded step of
+  // init (`kn()` in the 1.409.5 dist) SCHEDULES it one macrotask later via
+  // `setTimeout(..., 1)`, and the capture computes `distinct_id` at capture
+  // time. Everything in this replay block runs SYNCHRONOUSLY after
+  // `posthog.init()` returns (no awaits in between), so a queued reset always
+  // lands before that deferred capture can execute — the automatic first
+  // pageview of a signed-out session never attributes to a prior session's
+  // persisted identity.
+  const identityOps = pendingIdentityOps;
+  pendingIdentityOps = [];
+  const replayRegister = (): void => {
+    if (pendingRegister === null) return;
     const props = pendingRegister;
     pendingRegister = null;
     try {
@@ -389,17 +390,20 @@ export async function initPostHog(): Promise<void> {
     } catch {
       /* no-op */
     }
+  };
+  for (const op of identityOps) {
+    if (op.type === 'reset') {
+      // A reset supersedes the incremental replay: `applyReset` re-registers
+      // the FULL merged `registeredDims`, which already contains everything
+      // `pendingRegister` held (`phRegister` merges into both).
+      pendingRegister = null;
+      applyReset();
+    } else {
+      replayRegister();
+      applyIdentify(op.uid);
+    }
   }
-  // Replay an identity that arrived while init was still probing (Codex P2 on
-  // #342): Firebase restores a cached signed-in user fast on reload, and a
-  // phIdentify() landing in the probe window used to no-op via the `ready`
-  // gate — leaving the whole session anonymous in analytics. Apply the last
-  // one now that the SDK is live.
-  if (pendingIdentifyUid !== null) {
-    const uid = pendingIdentifyUid;
-    pendingIdentifyUid = null;
-    phIdentify(uid);
-  }
+  replayRegister();
   // Replay queued captures AFTER both of the above, so an `app_crash` from the
   // probe window is attributed to the signed-in player rather than orphaned
   // under the anonymous id (Phase 4b P2 on #513). Persisted entries come first
@@ -532,36 +536,57 @@ function clearPersistedCaptures(): boolean {
   }
 }
 
-// The most recent identify that arrived before init settled (#342) — replayed
-// by initPostHog once the SDK is live, cleared by phReset so a sign-out during
-// the probe window never resurrects the identity afterwards.
-let pendingIdentifyUid: string | null = null;
+/**
+ * Identity operations (sign-out resets / sign-in identifies) that arrived
+ * while the SDK was not ready, replayed in ARRIVAL ORDER by `initPostHog`
+ * (#613, Phase 4b P1 — replaces the earlier last-write-wins pair of slots,
+ * where a later queued identify DISCARDED an earlier queued reset). Order is
+ * what carries the meaning: `posthog.init()` loads the PRIOR session's
+ * persisted identity, so [reset, identify(newUid)] — a fast sign-out →
+ * account-switch during the ~1.5s probe window — must reach the SDK as
+ * reset-then-identify; replaying the identify alone would merge newUid onto
+ * the previous account's persisted distinct_id (cross-user attribution /
+ * identity merging). The mirror sequence [identify(uid), reset] — a sign-in
+ * that was undone before init settled — likewise replays in order, ending
+ * anonymous. Adjacent duplicates coalesce (a run of identifies keeps only
+ * the latest uid; back-to-back resets keep one), so the queue is bounded by
+ * the number of actual sign-in/out TRANSITIONS in the probe window.
+ */
+type PendingIdentityOp = { type: 'reset' } | { type: 'identify'; uid: string };
+let pendingIdentityOps: PendingIdentityOp[] = [];
 
-// A reset requested WHILE the SDK was still not ready (#611, retro Phase 4b
-// P1 on PR #584) — applied by `initPostHog` immediately after `posthog.init()`
-// succeeds, BEFORE any capture is replayed. Without this, a signed-out
-// visitor whose `phReset()` call landed in the init-probe window used to
-// just no-op: `posthog.init()` still loads whatever identity PostHog
-// PERSISTED from a PRIOR session, so every capture in the new, signed-out
-// session — including the automatic first `$pageview` — kept attributing to
-// that stale user until something else happened to call `phReset()` again.
-let pendingReset = false;
-
-/** Tie subsequent events to the signed-in User by uid (no PII properties). */
-export function phIdentify(uid: string): void {
-  if (!ready) {
-    pendingIdentifyUid = uid;
-    // A later identify supersedes an earlier queued reset (#611) — the
-    // Player signed back in before init ever settled, so there is no longer
-    // a stale-persisted-identity window for `initPostHog` to guard against.
-    pendingReset = false;
-    return;
-  }
+/** The ready-path identify — shared by `phIdentify` and the queue replay. */
+function applyIdentify(uid: string): void {
   try {
     posthog.identify(uid);
   } catch {
     /* no-op */
   }
+}
+
+/**
+ * The ready-path reset — shared by `phReset` and the queue replay. Reapplies
+ * the dimensions `reset()` just cleared (#556, Codex P2) — see
+ * `registeredDims`'s own doc below for why this must not be skipped.
+ */
+function applyReset(): void {
+  try {
+    posthog.reset();
+    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
+  } catch {
+    /* no-op */
+  }
+}
+
+/** Tie subsequent events to the signed-in User by uid (no PII properties). */
+export function phIdentify(uid: string): void {
+  if (!ready) {
+    const last = pendingIdentityOps[pendingIdentityOps.length - 1];
+    if (last?.type === 'identify') last.uid = uid;
+    else pendingIdentityOps.push({ type: 'identify', uid });
+    return;
+  }
+  applyIdentify(uid);
 }
 
 // Dimensions registered before init settled (#556) — merged (not replaced)
@@ -606,20 +631,16 @@ export function phRegister(props: Record<string, unknown>): void {
 
 /** Clear the identity association on sign-out. */
 export function phReset(): void {
-  pendingIdentifyUid = null;
   if (!ready) {
-    // Queue it (#611, retro Phase 4b P1 on PR #584) — see `pendingReset`'s
-    // own doc above for why silently returning here used to leak a stale
-    // persisted identity into the whole rest of the signed-out session.
-    pendingReset = true;
+    // Queued IN ORDER, never dropped (#611 → #613, Phase 4b P1) — see
+    // `pendingIdentityOps`'s own doc above: a silently dropped reset leaks a
+    // stale persisted identity into the whole signed-out session, and a
+    // reset discarded by a LATER identify merges the new account onto the
+    // prior user's persisted distinct_id.
+    if (pendingIdentityOps[pendingIdentityOps.length - 1]?.type !== 'reset') {
+      pendingIdentityOps.push({ type: 'reset' });
+    }
     return;
   }
-  try {
-    posthog.reset();
-    // Reapply the dimensions `reset()` just cleared (#556, Codex P2) — see
-    // `registeredDims`'s own doc above for why this must not be skipped.
-    if (Object.keys(registeredDims).length > 0) posthog.register(registeredDims);
-  } catch {
-    /* no-op */
-  }
+  applyReset();
 }

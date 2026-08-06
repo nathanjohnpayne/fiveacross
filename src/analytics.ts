@@ -65,14 +65,21 @@ export type GA4EventName = (typeof GA4_EVENTS)[number];
  * time rather than registered as a static default (#556, Phase 4b P1 on PR
  * #584) — this app is a `BrowserRouter` SPA, so a value frozen at whatever
  * pathname was current when dimensions were first registered would leave
- * every LATER tracked event attributed to the boot route. `null` when no
- * canonical host is resolved (a single-Event build, where GA4's own
- * automatic `page_location` already matches `window.location` exactly, so
- * there is nothing to override).
+ * every LATER tracked event attributed to the boot route. When no canonical
+ * host is resolved (a single-Event build, or the bootstrap failure branch),
+ * falls back to the page's own origin + pathname rather than omitting the
+ * param (#613, Phase 4b P1): an event sent WITHOUT an explicit
+ * `page_location` makes GA4 derive one from the browser's FULL current URL —
+ * query string and hash included — reintroducing exactly the query-string
+ * leakage (auth-handler OAuth params, invite codes) the documented path-only
+ * policy exists to prevent. Both branches are query/hash-free by
+ * construction.
  */
-function currentPageLocation(): string | null {
+function currentPageLocation(): string {
   const host = resolvedCanonicalHost();
-  return host ? `https://${host}${window.location.pathname}` : null;
+  return host
+    ? `https://${host}${window.location.pathname}`
+    : window.location.origin + window.location.pathname;
 }
 
 /**
@@ -88,9 +95,10 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
     // (e.g. `login`), so a union type like `GA4EventName` matches no single
     // overload — widen to `string` (the SDK's generic-event overload).
     if (analytics) {
-      const pageLocation = currentPageLocation();
-      const ga4Params = pageLocation ? { ...params, page_location: pageLocation } : params;
-      logEvent(analytics, name as string, ga4Params as Record<string, unknown>);
+      logEvent(analytics, name as string, {
+        ...params,
+        page_location: currentPageLocation(),
+      } as Record<string, unknown>);
     }
   } catch {
     /* no-op */
@@ -217,18 +225,33 @@ export function registerDayIndexDimension(dayIndex: number | null): void {
  * therefore already settled (or definitively failed) by the time this runs.
  * Internally awaits `analyticsReady` (`src/firebase.ts`) so it never races
  * `analytics` still being `null` — together these two waits are the "BOTH
- * analytics readiness AND Event resolution" ordering the fix requires. By
- * the time both have settled, dimension registration (when applicable) has
- * already run too, so this event carries the same registered dimensions
- * every other GA4 event does via gtag's persisted `set` state — no need to
- * pass them explicitly, only the same fresh `page_location` `track()` computes.
+ * analytics readiness AND Event resolution" ordering the fix requires.
+ *
+ * After readiness, RE-APPLIES the merged dimension cache (`ga4Dims`) before
+ * logging (#613, Phase 4b P1): Event resolution and firebase.ts's
+ * `isSupported()` chain settle independently, so `registerAnalyticsDimensions`
+ * may have run while `analytics` was still null. `@firebase/analytics` does
+ * queue a pre-init `setDefaultEventParameters` into its single
+ * `defaultEventParametersForInit` slot and applies it during its own
+ * `_initializeAnalytics` — but re-sending the full merged set here makes the
+ * "this page_view carries the registered dimensions" guarantee locally
+ * provable instead of resting on that SDK internal, and once gtag is live a
+ * resend is a harmless merge no-op (see `ga4Dims`'s own doc). The event also
+ * carries the same fresh `page_location` `track()` computes — ALWAYS
+ * explicit, so GA4 never derives one from the full query-bearing URL (#613).
  */
 export async function emitInitialPageView(): Promise<void> {
   const instance = await analyticsReady;
   if (!instance) return;
+  if (Object.keys(ga4Dims).length > 0) {
+    try {
+      setDefaultEventParameters(ga4Dims);
+    } catch {
+      /* no-op */
+    }
+  }
   try {
-    const pageLocation = currentPageLocation();
-    logEvent(instance, 'page_view', pageLocation ? { page_location: pageLocation } : undefined);
+    logEvent(instance, 'page_view', { page_location: currentPageLocation() });
   } catch {
     /* no-op */
   }
