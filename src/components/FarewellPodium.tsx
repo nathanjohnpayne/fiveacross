@@ -343,12 +343,15 @@ export default function FarewellPodium(props: FarewellPodiumProps) {
  * hook — literally the same visibility filters as the Feed, because it IS the
  * Feed's hook (status=='active' query + report-threshold + banned-owner) — and
  * fires the `most_loved_photo_frozen` analytics beat on first observation of
- * the persisted award (#560 § Analytics). The 500 cap guards a winner against
- * falling off the Feed's default 60; the listener exists only during the
- * finale (Board mounts this post-freeze on the closing-Day view).
+ * the persisted award (#560 § Analytics). It deliberately retains every
+ * Feed-visible proof: an older winner can legitimately fall below the Feed's
+ * default (or any arbitrary) recency cap, and the frozen award must still be
+ * able to join its live proof for the required moderation-aware display gate.
+ * The listener exists only during the finale (Board mounts this post-freeze on
+ * the closing-Day view).
  */
 function FarewellPodiumAwarded(props: FarewellPodiumProps & { award: MostLovedPhotoAward }) {
-  const { proofs, loading } = useProofFeed(500);
+  const { proofs, loading } = useProofFeed(Number.POSITIVE_INFINITY);
   const { award } = props;
   // Once per device per event; the ref backs the localStorage guard up within
   // a session when storage is unavailable (private mode). The no-award record

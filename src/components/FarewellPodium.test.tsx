@@ -330,8 +330,10 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     const { container } = render(
       <FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />,
     );
-    // The Feed's OWN hook, raised cap (a winner must not fall off the 60 default).
-    expect(M.proofFeedCalls).toContain(500);
+    // The Feed's OWN hook, uncapped: a winning photo may predate an arbitrary
+    // recent-items ceiling, but it must remain available for the frozen award's
+    // moderation-aware join.
+    expect(M.proofFeedCalls).toContain(Number.POSITIVE_INFINITY);
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(2);
     expect(photos[0].src).toContain('proofs%2Fw1'); // award order — earliest-posted first
