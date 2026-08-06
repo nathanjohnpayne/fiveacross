@@ -202,9 +202,9 @@ describe('Day-Theme token mirror (parity with the app)', () => {
   it('falls back to the EDITION default, so a degraded Day never wears another product’s skin', () => {
     // A Vacay Event whose Day lost its Theme must not open in Gay Cruise
     // Bingo's Neon Playground — the one-identity rule (Codex #623 P2).
-    expect(emailThemeTokens('no-such-theme', 'vacay').label).toBe('The Birds Have Entered the Group Chat');
+    expect(emailThemeTokens('no-such-theme', 'vacay').label).toBe('The Birds Have Entered the Chat');
     expect(emailThemeTokens(undefined, 'fiveacross').label).toBe('Marquee');
-    expect(emailThemeTokens('constructor', 'vacay').label).toBe('The Birds Have Entered the Group Chat');
+    expect(emailThemeTokens('constructor', 'vacay').label).toBe('The Birds Have Entered the Chat');
     expect(emailThemeTokens(undefined, 'no-such-edition').label).toBe('Neon Playground');
   });
 
@@ -510,7 +510,7 @@ describe('buildDailyEmailModel', () => {
       unsubscribeUrl: 'https://example.com/u',
       preferencesUrl: 'https://example.com/u?a=preferences',
     });
-    expect(model.themeHeadline).toBe('🐦 The Birds Have Entered the Group Chat');
+    expect(model.themeHeadline).toBe('🐦 The Birds Have Entered the Chat');
     expect(model.contextLine).toBe('Day 1 of 3 · Friday, Aug 7 · Bodega Bay');
     expect(model.standings.heading).toBe('Standings · Day 1');
     expect(model.standings.emptyLine).toContain('the trip starts today');
@@ -518,7 +518,7 @@ describe('buildDailyEmailModel', () => {
     expect(model.nudgeLine).toContain('The group lands in Bodega Bay today');
     expect(model.nudgeLine).toContain('8:00 a.m.'); // 15:00Z is 08:00 Pacific
     expect(model.awardLead).toBe('most-loved photo of the trip');
-    expect(model.subject).toBe('Day 1 · The Birds Have Entered the Group Chat 🐦 — your card is live');
+    expect(model.subject).toBe('Day 1 · The Birds Have Entered the Chat 🐦 — your card is live');
   });
 
   it('drops the Place from the context line and the morning line when a Day names none', () => {

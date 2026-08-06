@@ -153,7 +153,19 @@ a {
   gap: 10px;
   padding: 8px 4px 12px;
 }
+/* No min-width override here, on purpose: the flex default (min-width:auto =
+   the nowrap wordmark's full width) is what makes the wordmark unsqueezable,
+   so the day-identity block is the flex item that yields (its text wraps). */
 .brand {
+  flex: 1;
+}
+/* The wordmark is ONE line, always (daily-cards-wireframes § in-app header
+   lockup). Without nowrap the flex squeeze from a long Day identity ("The
+   Birds Have Entered the Chat") wrapped "VACAY BINGO" into a two-line stack
+   at iPhone width; nowrap makes the wordmark's full width its min-content,
+   so the identity block wraps instead. */
+.brand-wordmark {
+  display: block;
   font-family: 'Bebas Neue', 'Arial Narrow', sans-serif;
   font-weight: 400;
   letter-spacing: 0.03em;
@@ -161,7 +173,22 @@ a {
   line-height: 1;
   color: var(--ink);
   text-shadow: 0 0 12px var(--shadow);
-  flex: 1;
+  white-space: nowrap;
+}
+/* The platform endorsement micro-line under the wordmark ("BY FIVE ACROSS")
+   — wireframes' .hdr .by: tiny, tracked wide, dim, no glow. Rendered only
+   when the Edition's brand table carries `wordmarkByline` (vacay does; gcb
+   and fiveacross don't). Body font, not Bebas: it is an annotation, not
+   display type. */
+.brand-byline {
+  display: block;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  color: var(--dim);
+  margin-top: 2px;
+  text-shadow: none;
+  white-space: nowrap;
 }
 /* The header's two "where are we" lines (#259, daily-cards-spec § "Header"):
    today's port (bold) over today's theme (dim), right-aligned against the
