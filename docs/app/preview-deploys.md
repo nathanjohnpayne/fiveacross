@@ -134,7 +134,7 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 | 1. Vercel project | **Done** | **Done** |
 | 2. Minted host confirmed exact | **Done** | **Done** |
 | 3. Production env vars | **Done** — nine `VITE_*`, Production scope | **Done** — same nine, own `authDomain`, `VITE_EDITION=vacay` |
-| 4. Git connected (no Ignored Build Step — see below) | **Done** — production branch `main` | **Done** — production branch `main` |
+| 4. Git connected + Ignored Build Step | **Done** — production branch `main` | **Done** — production branch `main` |
 | 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
 | 6. Google OAuth redirect URI | **Outstanding — console-only** | **Outstanding — console-only** |
 
@@ -176,17 +176,30 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and never consults the `hostnames/{host}` lookup, which is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build** — a mismatch ships the backup host under different branding and chrome than the host it is backing up.
 
-4. **Connect Git. Do not set an Ignored Build Step.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. Stop there.
-
-   An Ignored Build Step is the obvious optimisation — the mirror projects rebuild on every push to every branch, which is noise and build minutes — and both mirrors ran with `[ "$VERCEL_ENV" != "production" ]` briefly. It is **not worth it**, for an asymmetry that is easy to talk yourself out of: the upside is saved build minutes on preview branches whose hosts cannot sign in anyway, and the downside is a backup host that silently stops updating. You find out about the downside at the exact moment the backup is load-bearing.
-
-   The concrete scare: on 2026-08-05 every Git-triggered deployment on both mirror projects came back `CANCELED`, production ones included, while the hosts kept happily serving an older manually-pushed build. That is indistinguishable at a glance from a healthy mirror. The likeliest culprit is Vercel's own auto-cancelation of concurrent/queued builds rather than the ignore step (an API-triggered production build succeeded *with* the step still in place), but "likeliest" is not a standard worth applying to the fallback host two days before an event. Both projects now have no ignore step, and duplicate preview builds are accepted as the cost of a mirror that always tracks `main`.
-
-   **Whatever you do here, never assume a merge reached the mirrors.** Vercel can cancel a queued deployment when several commits land close together, which is normal on a busy day and leaves no visible mark on the running site. After any merge that matters, check that the latest **production** deployment is `READY` on the sha you expect:
+4. **Connect Git, then set the Ignored Build Step.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. Then Settings → Git → **Ignored Build Step**:
 
    ```bash
-   vercel ls fiveacross    # and: vercel ls vacaybingo
+   [ "$VERCEL_ENV" != "production" ]
    ```
+
+   **The exit codes are inverted from the intuitive reading.** Vercel *skips* the build on exit `0` and *proceeds* on any non-zero exit, so the command above exits `0` (skip) on a preview and non-zero (build) on production. Getting it backwards disables production builds instead of preview ones.
+
+   **This is load-bearing, not an optimisation, and it was proven the hard way.** It was briefly removed from both mirrors on the theory that skipping builds risked a silently stale backup host. Within minutes, preview builds from the two mirror projects — on top of the existing `gaycruisebingo` project, all three now building on every branch push — exhausted the **account-wide build rate limit**, and Vercel began refusing deployments across the whole team with *"Deployment rate limited — retry in 24 hours."* That takes out the ability to deploy `gaycruisebingo.vercel.app`, the brand's own ship-network fallback, for a day. Three projects on one repository is enough build volume that unbounded preview builds are not affordable.
+
+   Those preview builds are pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so every one of them fails the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests.
+
+   **Never assume a merge reached the mirrors.** This is the real lesson, and it holds with the ignore step in place: Vercel cancels queued deployments under build pressure, which leaves no visible mark on the running site — the host keeps serving its previous build at `HTTP 200` with correct branding. After any merge that matters, check the latest **production** deployment's state *and its commit*:
+
+   ```bash
+   TOKEN=$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/Library/Application Support/com.vercel.cli/auth.json')))['token'])")
+   for p in fiveacross vacaybingo; do
+     curl -s -H "Authorization: Bearer $TOKEN" \
+       "https://api.vercel.com/v6/deployments?app=$p&target=production&limit=1&teamId=<teamId>" \
+     | python3 -c "import json,sys;d=json.loads(sys.stdin.read(),strict=False)['deployments'][0];print(p, d['state'], (d.get('meta') or {}).get('githubCommitSha','?')[:12])"
+   done
+   ```
+
+   It has to be the API. Neither `vercel ls` nor `vercel inspect` reports the Git SHA — they show `Ready` / `Production` and nothing that distinguishes current from stale, which is precisely the confusion this check exists to resolve.
 
 5. **Firebase Auth authorized domains on `fiveacross`.** Console: **Firebase console (fiveacross project) → Authentication → Settings → Authorized domains → Add domain** → `fiveacross.vercel.app`. Scriptable, with a deploy credential for `fiveacross` active — read, append, write back:
 
