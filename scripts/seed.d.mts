@@ -23,6 +23,10 @@ export type SeedPoolReport = {
   missing: Array<{ id: string; text: string }>;
   mismatched: Array<{ id: string; text: string; [key: string]: unknown }>;
   stale: Array<{ id: string; text: string }>;
+  mixedIdentity?: {
+    canonical: string[];
+    legacy: string[];
+  };
 };
 
 /**

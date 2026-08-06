@@ -356,7 +356,7 @@ export function verifySeedPool(
     } else {
       matchedIds.add(live.id);
     }
-    if (legacyIdentity && expectedDoc.canonicalId !== verifyItemIds[expectedDoc.index]) {
+    if (live && legacyIdentity && expectedDoc.canonicalId !== verifyItemIds[expectedDoc.index]) {
       if (live.id === expectedDoc.canonicalId) legacyIdentity.canonical.push(expectedDoc.canonicalId);
       else legacyIdentity.legacy.push(verifyItemIds[expectedDoc.index]);
     }

@@ -176,6 +176,21 @@ describe('bodega-bay-2026 — pool pins', () => {
         legacy: expect.any(Array),
       },
     });
+
+    const missingLegacyItem = makeLive(bodegaBay2026.VERIFY_ITEM_IDS).filter(
+      (doc) => doc.id !== bodegaBay2026.VERIFY_ITEM_IDS[rewrittenIndex],
+    );
+    expect(
+      verifySeedPool(
+        missingLegacyItem,
+        bodegaBay2026.ALL_ITEMS,
+        threshold,
+        bodegaBay2026.VERIFY_ITEM_IDS,
+      ),
+    ).toMatchObject({
+      ok: false,
+      missing: [{ text: bodegaBay2026.ALL_ITEMS[rewrittenIndex]!.text }],
+    });
   });
 
   it('never carries the 🔞 glyph in display text', () => {
