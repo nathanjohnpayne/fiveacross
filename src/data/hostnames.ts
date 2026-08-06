@@ -265,14 +265,23 @@ export function watchAdultContent(hostname: string = window.location.hostname): 
       // document, so this shared snapshot — already streaming for the 18+
       // posture — is the only live channel through which its gate can learn
       // the Event's name. The store deduplicates by value, so re-delivery is
-      // free. Provenance mirrors the posture's asymmetry in miniature: any
-      // snapshot may SUPPLY a card (stale display copy beats no card, and a
-      // server-backed delivery follows to correct it), but only a proven one
-      // may CLEAR an already-installed card — an older cache-served copy of
-      // the document is not evidence the slice was removed. NOTE the
+      // free.
+      //
+      // The MAPPING is validated before its preview is believed (Codex P2):
+      // the resolver refuses to serve a disabled, archived or half-written
+      // document, so the gate must not advertise that document's Event either
+      // — a retired hostname with a leftover slice would otherwise keep
+      // drawing its card. An unservable mapping reads as "no preview here",
+      // which the provenance rule below then applies: any snapshot may SUPPLY
+      // a card (stale display copy beats no card, and a server-backed
+      // delivery follows to correct it), but only a proven one may CLEAR an
+      // already-installed card — an older cache-served copy of the document,
+      // valid or not, is not evidence about the slice NOW. NOTE the
       // proven-adult detach below closes the channel once the posture latches;
       // by then the same terminal snapshot has already carried its preview.
-      const previewSlice = coerceEventPreview(data?.preview) ?? null;
+      const mapping = coerceHostnameDoc(data, hostname);
+      const servable = mapping !== null && isServable(mapping);
+      const previewSlice = servable ? (mapping.preview ?? null) : null;
       if (previewSlice || proven) applyResolvedEventPreview(previewSlice);
       // …and a PROVEN, servable mapping is cached whole, so the NEXT boot of
       // an env-pinned build paints the card at bootstrap instead of a beat
@@ -281,10 +290,7 @@ export function watchAdultContent(hostname: string = window.location.hostname): 
       // shape `readCache` would reject, never resurrect an inactive mapping —
       // and only from server-backed snapshots, mirroring the resolver's rule
       // that Firestore's own cache is not evidence (Codex on #576).
-      if (proven) {
-        const mapping = coerceHostnameDoc(data, hostname);
-        if (mapping && isServable(mapping)) writeCache(safeLocalStorage(), hostname, mapping);
-      }
+      if (proven && servable) writeCache(safeLocalStorage(), hostname, mapping);
       const adult = coerceAdultContent(data?.adultContent);
       if (!adult && !proven) return; // a cached `false` proves nothing
       setActiveAdultContent(adult, { proven });

@@ -148,6 +148,20 @@ describe('watchAdultContent — the live preview channel (the env-pinned product
     expect(localStorage.getItem(cacheKey(HOST))).toBeNull();
   });
 
+  it('never advertises a retired or malformed mapping, even with a valid slice (Codex P2)', () => {
+    // The resolver refuses to SERVE these documents, so the gate must not
+    // advertise their Event either — a decommissioned hostname with a
+    // leftover slice would otherwise keep drawing its card.
+    watchAdultContent(HOST);
+    listener().next(snap({ ...DOC, status: 'archived' }));
+    expect(activeEventPreview(), 'proven archived mapping installs nothing').toBeNull();
+    applyResolvedEventPreview(PREVIEW);
+    listener().next(snap({ ...DOC, status: 'disabled' }, true));
+    expect(activeEventPreview(), 'an unproven copy still proves nothing').toEqual(PREVIEW);
+    listener().next(snap({ ...DOC, eventId: '' }));
+    expect(activeEventPreview(), 'proven malformed mapping clears the card').toBeNull();
+  });
+
   it('keeps the displayed card through a listener error', () => {
     applyResolvedEventPreview(PREVIEW);
     watchAdultContent(HOST);
