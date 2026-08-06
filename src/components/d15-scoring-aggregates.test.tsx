@@ -210,7 +210,11 @@ describe('Leaderboard honors strip prefers the PINNED day-meta honor (#264)', ()
     );
     const strip = screen.getByLabelText('Daily First to BINGO');
     expect(strip).not.toHaveTextContent('Banned Bart');
-    const d3chip = within(strip).getByText('🌈 D3').closest('.lb-honor');
+    // EmojiText (#603) splits the chip label across an .emoji-run span and a
+    // text node, so match on the span's aggregate textContent, not one node.
+    const d3chip = within(strip)
+      .getByText((_, node) => node?.classList.contains('lb-honor-day') === true && node.textContent === '🌈 D3')
+      .closest('.lb-honor');
     expect(d3chip?.textContent).toContain('—');
     H.dayMetas = new Map();
   });

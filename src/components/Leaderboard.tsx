@@ -8,6 +8,7 @@ import { shareOrigin } from '../canonicalHost';
 import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
 import Avatar from './Avatar';
+import { EmojiText } from './EmojiText';
 import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
 import LoadingState from './LoadingState';
 
@@ -331,7 +332,12 @@ export default function Leaderboard() {
           <ul className="lb-honors-strip">
             {(honors.length > 0 ? honors : legacyHonors.map((h) => ({ dayIndex: h.dayIndex, displayName: h.displayName as string | null }))).map((h) => (
               <li key={h.dayIndex} className="lb-honor">
-                <span className="lb-honor-day">{dayChipLabel(h.dayIndex)}</span>
+                {/* EmojiText (#603): the chip label leads with the Day-Theme
+                    emoji; in a bare text run the bug-report capture pass
+                    displaces the "D1" text out of the pill. */}
+                <span className="lb-honor-day">
+                  <EmojiText text={dayChipLabel(h.dayIndex)} />
+                </span>
                 <span className="lb-honor-name">{h.displayName ?? '—'}</span>
               </li>
             ))}

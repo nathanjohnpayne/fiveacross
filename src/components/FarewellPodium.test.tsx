@@ -64,6 +64,26 @@ describe('FarewellPodiumView', () => {
     expect(screen.getByText('1 bingo · 5 squares')).toBeTruthy();
   });
 
+  it('isolates the honor-day label emoji in an inline-block .emoji-run span (#603)', () => {
+    const { container } = render(
+      <FarewellPodiumView
+        podium={FIXTURE}
+        dayLabel={(i) => (i === 1 ? 'Day 2 · Split 🇭🇷' : `Day ${i + 1}`)}
+      />,
+    );
+    const days = container.querySelectorAll('.farewell-podium-honor-day');
+    // Emoji-bearing label: the flag is atomized so the bug-report screenshot
+    // capture (html-to-image) cannot paint it over the port name; the visible
+    // text is unchanged.
+    const atoms = days[1].querySelectorAll('span.emoji-run');
+    expect(atoms).toHaveLength(1);
+    expect(atoms[0].textContent).toBe('🇭🇷');
+    expect(days[1].textContent).toBe('Day 2 · Split 🇭🇷');
+    // Plain label: no wrapper spam.
+    expect(days[0].querySelector('span.emoji-run')).toBeNull();
+    expect(days[0].textContent).toBe('Day 1');
+  });
+
   it('renders nothing for an entirely empty podium', () => {
     const { container } = render(
       <FarewellPodiumView podium={{ champion: null, firstBingo: null, dailyHonors: [] }} />,

@@ -10,6 +10,7 @@ import {
   type FarewellShareCardData,
 } from './ShareCard';
 import { leaderboardShareCopy } from './Leaderboard';
+import { EmojiText } from './EmojiText';
 import { editionBrand, editionLexicon } from '../editions';
 
 /**
@@ -95,7 +96,12 @@ export function FarewellPodiumView({
           <ul className="farewell-podium-honors-strip">
             {dailyHonors.map((h) => (
               <li key={h.dayIndex} className="farewell-podium-honor">
-                <span className="farewell-podium-honor-day">{dayLabel(h.dayIndex)}</span>
+                {/* EmojiText (#603): the label carries the Day's port emoji, and
+                    this section is a primary bug-report screenshot subject — a
+                    bare text run rasterizes as "Day 4 🌊alletta". */}
+                <span className="farewell-podium-honor-day">
+                  <EmojiText text={dayLabel(h.dayIndex)} />
+                </span>
                 <span className="farewell-podium-honor-name">{h.displayName}</span>
               </li>
             ))}

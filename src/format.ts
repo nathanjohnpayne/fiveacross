@@ -91,6 +91,91 @@ export function shortSailRange(sailStart: string, sailEnd: string): string {
   const b = parse(sailEnd);
   if (!a || !b || new Date(b.y, b.m - 1, b.d) < new Date(a.y, a.m - 1, a.d)) return '';
   if (a.y === b.y && a.m === b.m && a.d === b.d) return `${SHORT_MONTHS[a.m - 1]} ${a.d}`;
-  if (a.y === b.y && a.m === b.m) return `${SHORT_MONTHS[a.m - 1]} ${a.d}\u2013${b.d}`;
-  return `${SHORT_MONTHS[a.m - 1]} ${a.d} \u2013 ${SHORT_MONTHS[b.m - 1]} ${b.d}`;
+  if (a.y === b.y && a.m === b.m) return `${SHORT_MONTHS[a.m - 1]} ${a.d}–${b.d}`;
+  return `${SHORT_MONTHS[a.m - 1]} ${a.d} – ${SHORT_MONTHS[b.m - 1]} ${b.d}`;
+}
+
+/** One run of `segmentEmojiRuns` output: either a maximal stretch of
+ *  non-emoji text, or ONE emoji grapheme cluster (adjacent emoji clusters
+ *  stay separate runs — Codex P2 on PR #645: one atomic box per emoji
+ *  preserves the wrap opportunities BETWEEN emoji that constrained surfaces
+ *  like a line-clamped name or a bingo cell rely on). */
+export interface EmojiRun {
+  text: string;
+  emoji: boolean;
+}
+
+/**
+ * Grapheme clusters that need emoji-run isolation (#603). A cluster counts
+ * when it contains an Extended_Pictographic code point (the emoji set proper,
+ * incl. ZWJ-sequence members), a Regional Indicator (flag pairs), an emoji
+ * skin-tone modifier (U+1F3FB–U+1F3FF carry Emoji_Modifier but NOT
+ * Extended_Pictographic, so a standalone modifier in user text would
+ * otherwise slip through — Codex P2 on PR #645), or a keycap combiner.
+ * Over-matching a text-presentation pictograph is harmless — the wrapper
+ * span renders identically on-page — while under-matching leaves a glyph in
+ * a shared text run where html-to-image's raster pass can mis-measure it.
+ */
+const EMOJI_CLUSTER =
+  /[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\u20E3]/u;
+/** Leading whitespace glued onto an emoji cluster by grapheme segmentation —
+ *  a standalone skin-tone modifier segments as one cluster WITH the
+ *  preceding space (' 🏽'). An inline-block box would swallow that leading
+ *  whitespace (white-space processing trims it at the start of the box),
+ *  changing the on-page text, so it stays in the text run. ONLY whitespace
+ *  is peeled: any other glued base (a keycap's digit, a modifier's base
+ *  letter) is part of the composed glyph and must stay inside the box. */
+const EMOJI_CLUSTER_LEADING_SPACE = /^\s+/;
+
+/** The slice of Intl.Segmenter this module uses. Local because the project's
+ *  `lib: ES2021` predates the built-in typings (they land in ES2022); every
+ *  supported runtime (browsers, Node 22, jsdom) ships the real API and the
+ *  code degrades to a single run when it is absent. */
+type GraphemeSegmenter = new (
+  locale?: string,
+  options?: { granularity: 'grapheme' },
+) => { segment(input: string): Iterable<{ segment: string }> };
+
+/**
+ * Split `text` into emoji / non-emoji runs (#603).
+ *
+ * Why: html-to-image rasterizes through an SVG `<foreignObject>`, and that
+ * pass can shape an emoji differently from the live document (observed in
+ * desktop Chrome: the re-measured run wraps or the glyph paints displaced,
+ * overlapping neighbouring characters — the "Day 4 🌊alletta" defect). Text
+ * that may carry emoji therefore renders each emoji run in its own
+ * `display: inline-block` element (`.emoji-run`): the raster clone freezes
+ * that box at its live size, so however the raster pass shapes the glyph it
+ * stays inside its own box and cannot displace the surrounding text.
+ *
+ * Grapheme segmentation (Intl.Segmenter) keeps flags and ZWJ sequences whole,
+ * and each emoji cluster becomes its OWN run — never merged with an adjacent
+ * one (Codex P2 on PR #645) — so lines still wrap between emoji
+ * (inline-block boxes wrap as units). In an environment without
+ * Intl.Segmenter the text is returned as a single non-emoji run — the
+ * pre-#603 behavior, never a crash.
+ */
+export function segmentEmojiRuns(text: string): EmojiRun[] {
+  if (!text) return [];
+  const Segmenter = (Intl as { Segmenter?: GraphemeSegmenter }).Segmenter;
+  if (typeof Segmenter !== 'function' || !EMOJI_CLUSTER.test(text)) {
+    return [{ text, emoji: false }];
+  }
+  const runs: EmojiRun[] = [];
+  const pushText = (t: string): void => {
+    if (!t) return;
+    const last = runs[runs.length - 1];
+    if (last && !last.emoji) last.text += t;
+    else runs.push({ text: t, emoji: false });
+  };
+  for (const { segment } of new Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
+    if (!EMOJI_CLUSTER.test(segment)) {
+      pushText(segment);
+      continue;
+    }
+    const prefix = EMOJI_CLUSTER_LEADING_SPACE.exec(segment)?.[0] ?? '';
+    pushText(prefix);
+    runs.push({ text: segment.slice(prefix.length), emoji: true });
+  }
+  return runs;
 }
