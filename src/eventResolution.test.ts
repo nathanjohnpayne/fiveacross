@@ -68,6 +68,7 @@ describe('eventResolution — cache envelope', () => {
     expect(r?.doc).toMatchObject({ eventId: 'bodega-bay-2026', edition: 'vacay' });
     expect(r?.fetchedAt).toBe(T0);
     expect(r?.stale).toBe(false);
+    expect(r?.requiresPreviewRevalidation).toBe(false);
   });
 
   it('marks an entry stale once past the TTL', () => {

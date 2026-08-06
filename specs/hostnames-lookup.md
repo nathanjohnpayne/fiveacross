@@ -45,6 +45,20 @@ match /hostnames/{host} {
 
 **No client writes at all**, including admins. The mapping is authoritative routing state across a global namespace, where no per-Event admin has authority; a writable mapping would let a client point an existing hostname at an Event it should not see, or squat an address before its Event exists. Only the Admin SDK populates it.
 
+## Bodega postcard provisioning
+
+The Bodega sign-in postcard is public display copy on the same pre-auth lookup; it must exist on **every serving Bodega hostname**, never only on the canonical host. `scripts/provision-bodega-preview.mjs` is the controlled Admin-SDK maintenance path. It validates the fixed live set (`bodega-bay.fiveacross.app`, `bodega-bay.vacaybingo.com`, and `fiveacross.app`) before it writes anything, refuses missing, inactive, or repointed documents, and applies only `preview` in one transaction. It never creates a routing document or changes `eventId`, `status`, or canonical metadata.
+
+Run its dry run and then its explicit apply **before** deploying the postcard UI:
+
+```bash
+eval "$(scripts/op-preflight.sh --agent codex --mode deploy)"
+GOOGLE_CLOUD_PROJECT=fiveacross npm run provision:bodega-preview
+GOOGLE_CLOUD_PROJECT=fiveacross npm run provision:bodega-preview -- --apply
+```
+
+The command refuses any project other than `fiveacross`; no default Firebase target is trusted. It is idempotent when all three documents already carry the exact preview. `src/test/bodega-preview-provision.test.ts` proves its all-host plan and fail-closed validation.
+
 **An unknown host is a missing document, not a denial.** `get` succeeds against a non-existent path and returns `exists() == false`, so a client renders an Event-not-found state instead of a permission error it would otherwise have to distinguish from a network failure.
 
 ## Acceptance criteria

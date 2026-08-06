@@ -535,7 +535,7 @@ export function verifySeedPool(
 // script runs directly. The specifiers are computed + @vite-ignore so Vite (which transforms
 // this module when a test imports the pure payload/verify builders) never tries
 // to resolve them at transform time — Node resolves them normally at run time.
-async function initFirestore() {
+export async function initFirestore() {
   const { readFileSync, existsSync } = await import('node:fs');
   const adminAppModule = 'firebase-admin/app';
   const adminFirestoreModule = 'firebase-admin/firestore';
@@ -583,7 +583,7 @@ async function initFirestore() {
       : { credential: applicationDefault() }),
     ...(projectId ? { projectId } : {}),
   });
-  return { db: getFirestore(), EVENT_ID, FieldValue };
+  return { db: getFirestore(), EVENT_ID, FieldValue, projectId };
 }
 
 async function seed() {
