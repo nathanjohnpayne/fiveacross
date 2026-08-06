@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { track } from '../analytics';
-import { canonicalOrigin } from '../canonicalHost';
+import { shareOrigin } from '../canonicalHost';
 import { useEventDoc } from '../hooks/useData';
 import {
   confettiPieces,
@@ -155,9 +155,9 @@ export default function Celebration({
     // gate; this is belt-and-braces against a programmatic call.
     if (playerName == null || pending == null) return;
     const text = celebrationCopy(kind);
-    // Canonical hostname (#556), not the raw origin — see Leaderboard's
-    // shareLeaderboard for the rationale.
-    const url = canonicalOrigin();
+    // Entry-point origin (#607), never the analytics-canonical host — see
+    // Leaderboard's shareLeaderboard for the rationale.
+    const url = shareOrigin();
 
     // Settled by construction: the button only enables once `pending`
     // settled, so this await resolves on the microtask queue and

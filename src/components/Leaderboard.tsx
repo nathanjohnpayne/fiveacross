@@ -4,7 +4,7 @@ import { useEventDoc, useDayMetasStatus, useLeaderboard, useLatestProofByUid, is
 import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/logic';
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
-import { canonicalOrigin } from '../canonicalHost';
+import { shareOrigin } from '../canonicalHost';
 import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type LeaderboardShareRow } from './ShareCard';
 import { editionBrand, editionLexicon } from '../editions';
 import Avatar from './Avatar';
@@ -295,9 +295,12 @@ export default function Leaderboard() {
         filename: `${editionLexicon().fileSlug}-leaderboard.png`,
         title: `${shareCardAppName()}—Leaderboard`,
         text: `Check out the ${editionBrand().appName} leaderboard 🏆`,
-        // Canonical hostname (#556), not the raw origin — a Player on a
-        // validated Alias must never hand that address off in a share link.
-        url: canonicalOrigin(),
+        // Entry-point origin (#607, amended multi-domain policy #599), not
+        // the analytics-canonical host: every serving host brands
+        // dynamically, so the link must land recipients on the SAME host the
+        // sharer is standing on — a rewritten link unfurls and lands under
+        // another Edition's brand.
+        url: shareOrigin(),
       });
     } catch {
       // shareCardBlob is designed to never throw, but a share failure must

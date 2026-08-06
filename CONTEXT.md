@@ -16,7 +16,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Slug**: The first hostname label identifying an Event—`bodega-bay` in `bodega-bay.vacaybingo.com`. A lowercase DNS-safe friendly address, globally unique across Namespaces, and explicitly **not** an authorization secret: knowing a Slug grants nothing. _Avoid_: Code, join code, invite code (those are secrets; a Slug is not)
 
-**Canonical hostname**: The single address an Event is actually served from. It selects the Event's Edition identity—branding, PWA manifest, share metadata—and is the hostname analytics **report**, but not the host they **ingest to**: ingestion is Brand-level, so every Edition sends to the one Five Across host. _Avoid_: Primary domain, main URL
+**Canonical hostname**: The single address an Event is actually served from. It selects the Event's Edition identity—branding, PWA manifest—and is the hostname analytics **report**, but not the host they **ingest to**: ingestion is Brand-level, so every Edition sends to the one Five Across host. Share links are the other exception (#607): they carry the entry-point host the sharer is standing on, so recipients land on the same-branded surface. _Avoid_: Primary domain, main URL
 
 **Alias**: A validated non-canonical hostname for an Event, which redirects to the Canonical hostname at the edge before the application starts. Exists so one Event never splits its sessions, installed PWAs, offline storage, or share links across two origins. _Avoid_: Mirror, vanity URL
 
