@@ -43,6 +43,15 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Gay Cruise Bingo',
     appShortName: 'Gay Bingo',
     appDescription: 'Live multiplayer bingo for the high seas.',
+    // Verbatim the share block index.html hardcoded before #587: the flagship
+    // unfurl's wording does not change, only its delivery. The artwork DID
+    // change — og-gcb.png is the #609 render (1200×630), superseding the
+    // 2400×1260 og-default.png.
+    metaDescription: 'Live multiplayer bingo for the high seas. Trieste to Barcelona, July 2026.',
+    ogUrl: 'https://gaycruisebingo.com/',
+    ogImage: 'https://gaycruisebingo.web.app/og-gcb.png',
+    ogImageAlt:
+      'Gay Cruise Bingo—a marked-up live multiplayer bingo card for the July 2026 sailing, Trieste to Barcelona',
     lexicon: {
       occasion: 'cruise',
       occasionWide: 'cruise-wide',
@@ -87,6 +96,15 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Vacay Bingo',
     appShortName: 'Vacay Bingo',
     appDescription: 'Live multiplayer bingo for the trip.',
+    metaDescription: 'Live multiplayer bingo for the trip.',
+    // The Event canonical host, not the vacaybingo.com apex: the apex serves
+    // nothing today, and og:url is the one tag whose per-Event truth the #546
+    // Worker will own — see the field note on `EditionBrand.ogUrl`.
+    ogUrl: 'https://bodega-bay.vacaybingo.com/',
+    // Served by the fiveacross project (ADR 0008), which hosts every Five
+    // Across Edition — vacaybingo.com hostnames included.
+    ogImage: 'https://fiveacross.web.app/og-vacay.png',
+    ogImageAlt: 'Vacay Bingo—a marked-up live multiplayer bingo card for the trip',
     lexicon: {
       occasion: 'trip',
       occasionWide: 'trip-wide',
@@ -139,6 +157,10 @@ const BRANDS: Record<string, EditionBrand> = {
     appName: 'Five Across',
     appShortName: 'Five Across',
     appDescription: 'Live multiplayer bingo for your group.',
+    metaDescription: 'Live multiplayer bingo for your group.',
+    ogUrl: 'https://fiveacross.app/',
+    ogImage: 'https://fiveacross.web.app/og-fiveacross.png',
+    ogImageAlt: 'Five Across—a marked-up live multiplayer bingo card',
     lexicon: {
       occasion: 'event',
       occasionWide: 'event-wide',
@@ -302,6 +324,20 @@ type EditionBrandTextField = {
 const HTML_IDENTITY_TOKENS: Record<string, EditionBrandTextField> = {
   '%EDITION_DOCUMENT_TITLE%': 'documentTitle',
   '%EDITION_APP_NAME%': 'appName',
+  // The share block (#587). Crawlers fetch index.html without running JS, so
+  // unlike the two tags above there is NO runtime repair path for these — a
+  // hostname-resolved bundle keeps the default Edition's share metadata until
+  // the edge Worker (#546) rewrites the block per hostname. `%EDITION_SHARE_NAME%`
+  // appears twice (og:site_name and og:title — both carry the product name);
+  // `%EDITION_OG_IMAGE%` twice (og:image and twitter:image). og:description is
+  // NOT tokenised: "Sign in, get your card, mark it if you see it." is the
+  // Edition-invariant tagline, and keeping it static keeps the gcb unfurl
+  // wording byte-identical to what shipped before #587.
+  '%EDITION_META_DESCRIPTION%': 'metaDescription',
+  '%EDITION_SHARE_NAME%': 'documentTitle',
+  '%EDITION_OG_URL%': 'ogUrl',
+  '%EDITION_OG_IMAGE%': 'ogImage',
+  '%EDITION_OG_IMAGE_ALT%': 'ogImageAlt',
 };
 
 /** Matches every placeholder of that SHAPE, including ones with no row above —

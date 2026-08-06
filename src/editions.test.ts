@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   DEFAULT_EDITION,
@@ -121,6 +121,14 @@ describe('editions — the chrome identity (#586)', () => {
     expect(brand.appName).toBe('Gay Cruise Bingo');
     expect(brand.appShortName).toBe('Gay Bingo');
     expect(brand.appDescription).toBe('Live multiplayer bingo for the high seas.');
+    // #587's share fields, same rule: the flagship unfurl's WORDING is exactly
+    // what index.html hardcoded before the block was tokenised. (The artwork
+    // moved to the #609 render, og-gcb.png — that change is deliberate.)
+    expect(brand.metaDescription).toBe(
+      'Live multiplayer bingo for the high seas. Trieste to Barcelona, July 2026.',
+    );
+    expect(brand.ogUrl).toBe('https://gaycruisebingo.com/');
+    expect(brand.ogImage).toBe('https://gaycruisebingo.web.app/og-gcb.png');
   });
 
   it('keeps every short_name inside Android’s truncation budget', () => {
@@ -130,6 +138,47 @@ describe('editions — the chrome identity (#586)', () => {
     for (const edition of EDITIONS) {
       expect(editionBrand(edition).appShortName.length, edition).toBeLessThanOrEqual(12);
     }
+  });
+});
+
+// #587: crawlers do not run JS, so the share block has no runtime repair path —
+// these fields ARE the unfurl. Before this, a Bodega guest who shared
+// bodega-bay.vacaybingo.com into a group chat sent a link that previewed as a
+// gay cruise, to people who are not guests and have attested nothing.
+describe('editions — the share block (#587, artwork #609)', () => {
+  it('points every Edition og:image at a web.app host, at a file that ships in public/', () => {
+    // Two constraints with a history behind them: custom-domain apexes
+    // TLS-reset for link crawlers (#340) / get SNI-blocked (#164), so the URL
+    // must be on an always-healthy web.app host; and the referenced file must
+    // actually be in the bundle, or every unfurl on that Edition is an empty
+    // grey rectangle — a defect only ever discovered in someone's group chat.
+    for (const edition of EDITIONS) {
+      const url = new URL(editionBrand(edition).ogImage);
+      expect(url.protocol, edition).toBe('https:');
+      expect(url.hostname, edition).toMatch(/\.web\.app$/);
+      const file = url.pathname.replace(/^\//, '');
+      expect(file, edition).toMatch(/^og-[a-z]+\.png$/);
+      expect(existsSync(resolve(process.cwd(), 'public', file)), `${edition} → ${file}`).toBe(true);
+    }
+  });
+
+  it('keeps every og:url on HTTPS with no other Edition’s hostname', () => {
+    // og:url is the canonical identity a crawler files the link under. The
+    // vacay row carries its Event canonical host (bodega-bay) rather than the
+    // dead vacaybingo.com apex — per-Event truth carried per-Edition until the
+    // #546 Worker rewrites it per hostname (see the EditionBrand.ogUrl note).
+    expect(editionBrand('vacay').ogUrl).toBe('https://bodega-bay.vacaybingo.com/');
+    expect(editionBrand('fiveacross').ogUrl).toBe('https://fiveacross.app/');
+    for (const edition of ['vacay', 'fiveacross']) {
+      const brand = editionBrand(edition);
+      expect(brand.ogUrl, edition).not.toMatch(/gaycruisebingo/);
+      expect(brand.ogImage, edition).not.toMatch(/gaycruisebingo/);
+    }
+  });
+
+  it('gives no Edition another Edition’s artwork', () => {
+    const images = EDITIONS.map((e) => editionBrand(e).ogImage);
+    expect(new Set(images).size).toBe(EDITIONS.length);
   });
 });
 
@@ -201,10 +250,20 @@ describe('brandHtmlIdentity — baking the Edition into index.html', () => {
       // The same shape the build's fail-closed scan uses, so this test asserts
       // exactly the property the build enforces — no more, no less.
       expect(out, edition).not.toMatch(/%EDITION_[A-Z_]+%/);
-      expect(out, edition).toContain(`<title>${editionBrand(edition).documentTitle}</title>`);
+      const brand = editionBrand(edition);
+      expect(out, edition).toContain(`<title>${brand.documentTitle}</title>`);
       expect(out, edition).toContain(
-        `<meta name="apple-mobile-web-app-title" content="${editionBrand(edition).appName}" />`,
+        `<meta name="apple-mobile-web-app-title" content="${brand.appName}" />`,
       );
+      // The share block (#587): what a crawler — which runs none of the app's
+      // JS — reads out of this Edition's baked HTML.
+      expect(out, edition).toContain(`<meta name="description" content="${brand.metaDescription}" />`);
+      expect(out, edition).toContain(`<meta property="og:site_name" content="${brand.documentTitle}" />`);
+      expect(out, edition).toContain(`<meta property="og:title" content="${brand.documentTitle}" />`);
+      expect(out, edition).toContain(`<meta property="og:url" content="${brand.ogUrl}" />`);
+      expect(out, edition).toContain(`<meta property="og:image" content="${brand.ogImage}" />`);
+      expect(out, edition).toContain(`<meta property="og:image:alt" content="${brand.ogImageAlt}" />`);
+      expect(out, edition).toContain(`<meta name="twitter:image" content="${brand.ogImage}" />`);
     }
   });
 });

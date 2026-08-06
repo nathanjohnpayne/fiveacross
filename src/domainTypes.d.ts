@@ -48,6 +48,25 @@ export interface EditionBrand {
   appName: string;
   appShortName: string;
   appDescription: string;
+  /** The `<meta name="description">` line (#587). Crawlers read it without
+   *  running JS, so it is baked into index.html at build time alongside the
+   *  og:* block — see `HTML_IDENTITY_TOKENS` in `src/editions.ts`. */
+  metaDescription: string;
+  /** `og:url` — the canonical origin an unfurl attributes the link to (#587).
+   *  Strictly this is a per-EVENT fact (the Event's canonical hostname), but a
+   *  build can only bake per-Edition data, so each Edition carries its flagship
+   *  origin here until the edge Worker (#546) rewrites the tag per hostname. */
+  ogUrl: string;
+  /** `og:image` / `twitter:image` — an ABSOLUTE URL (#587, artwork #609).
+   *  Absolute because crawlers resolve unfurl images poorly against relative
+   *  paths, and pinned to the serving project's always-healthy `web.app` host
+   *  rather than a custom domain: the gcb apex TLS-resets for link crawlers
+   *  (#340) and is SNI-blocked on the ship network (#164). The referenced file
+   *  must ship in `public/` of the same bundle — guarded by
+   *  `src/recon-share-og.test.ts`. */
+  ogImage: string;
+  /** `og:image:alt` for the artwork above (#609 supplies the wording). */
+  ogImageAlt: string;
   lexicon: EditionLexicon;
   passCheckLabel: string;
   scheduleTitle: string;

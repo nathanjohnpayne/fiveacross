@@ -118,7 +118,16 @@ export default defineConfig(({ command, mode }) => {
         strategies: 'injectManifest',
         srcDir: 'src',
         filename: 'sw.ts',
-        includeAssets: ['favicon.svg', 'og-default.png', 'apple-touch-icon.png'],
+        // og-*.png (the unfurl artwork, #587/#609) is deliberately NOT here —
+        // and is excluded from the precache below. The images still ship: they
+        // live in public/, so Vite copies every one of them into dist/ and
+        // hosting serves them; all three Editions' artwork rides in every
+        // bundle so the #546 Worker can point any hostname at its Edition's
+        // image without a coordinated redeploy. But they are CRAWLER-facing —
+        // the app never renders them — and precaching them (as the *.png glob
+        // otherwise would, and historically did for og-default.png) taxes
+        // every phone ~1 MB at install time for files no client ever loads.
+        includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
         // The installed app's identity, from the build's Edition rather than
         // from a hardcoded product name (#586). This is what Android's install
         // prompt, home-screen label and app info read — a Vacay Event used to
@@ -158,7 +167,10 @@ export default defineConfig(({ command, mode }) => {
         // stale shell must be able to read fresh, and precaching it would let a
         // stale worker answer its own eviction notice.
         injectManifest: {
-          globPatterns: ['**/*.{js,css,html,svg,png,woff2}']
+          globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+          // Keep the unfurl artwork out of every client's precache — see the
+          // includeAssets note above. Guarded by src/recon-share-og.test.ts.
+          globIgnores: ['og-*.png']
         }
       })
     ],
