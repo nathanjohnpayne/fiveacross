@@ -115,6 +115,29 @@ export function reseedGuard(seedOwnedCount, reseedEnv) {
   };
 }
 
+/**
+ * The Day indexes whose stamped `snapshotItemIds` would be ORPHANED by an item
+ * replace that is not also rewriting `days[]` (Codex P1, PR #644 round 2): a
+ * snapshot id that is being deleted (`deleteIds`) and NOT re-written at the
+ * same id (`writeIds`) would reference a document that no longer exists, and
+ * every deal for that Day would come up short. Ids outside `deleteIds`
+ * (player-submitted or already-gone docs) are not this replace's doing and are
+ * ignored. `seed()` refuses a RESEED=1 items replace while any such Day exists
+ * unless SEED_DAYS=1 is ALSO set — the days rewrite is what re-stamps the
+ * module's canonical snapshot ids.
+ */
+export function orphanedSnapshotDays(days, deleteIds, writeIds) {
+  const deletes = new Set(deleteIds);
+  const writes = new Set(writeIds);
+  return (Array.isArray(days) ? days : [])
+    .filter(
+      (d) =>
+        Array.isArray(d?.snapshotItemIds) &&
+        d.snapshotItemIds.some((id) => deletes.has(id) && !writes.has(id)),
+    )
+    .map((d) => d.index);
+}
+
 // `pool` is REQUIRED (the target Event's ALL_ITEMS): with per-Event seed data
 // (#563) there is no one global pool a default could safely point at, and a
 // caller that omitted it would silently seed nothing or the wrong Event's
@@ -393,6 +416,23 @@ async function seed() {
     Date.now(),
     ALL_ITEMS,
   );
+  // Snapshot-integrity interlock (Codex P1, PR #644 round 2): if this replace
+  // deletes ids a stamped Day snapshot still references WITHOUT rewriting
+  // `days[]` (SEED_DAYS=1), that Day would deal from documents that no longer
+  // exist. Refuse rather than orphan — the days rewrite is what re-stamps the
+  // module's canonical snapshot ids (e.g. Bodega's pre-stamped Day 0).
+  if (!includeDays) {
+    const orphaned = orphanedSnapshotDays(existingDays, deleteIds, writes.map((w) => w.id));
+    if (orphaned.length) {
+      console.error(
+        `✗ events/${EVENT_ID}: replacing the seed-owned pool would orphan the stamped snapshot on Day ${orphaned.join(', ')} ` +
+          '(snapshotItemIds reference ids this replace deletes without rewriting). ' +
+          'Re-run with SEED_DAYS=1 as well — it rewrites days[] wholesale, re-stamping the canonical snapshot — ' +
+          'or clear/re-stamp those snapshots first. Nothing was written to items.',
+      );
+      process.exit(1);
+    }
+  }
   const batch = db.batch();
   for (const id of deleteIds) batch.delete(col.doc(id));
   for (const { id, data } of writes) batch.set(col.doc(id), data, { merge: true });
@@ -467,6 +507,11 @@ export function formatDriftReport(report, eventId) {
   const eventEnv = eventId ? `VITE_EVENT_ID=${eventId} ` : '';
   lines.push(
     `  → reconcile (prompts only, replaces the seed-owned pool): ADMIN_UID= RESEED=1 ${eventEnv}GOOGLE_CLOUD_PROJECT=${project} node scripts/seed.mjs`,
+    // A replace that changes doc ids would orphan any Day's pre-stamped
+    // snapshotItemIds; seed() refuses that combination outright and names the
+    // affected Days (Codex P1, PR #644 round 2), so the caution rides the
+    // command it applies to.
+    '    (if a Day carries a pre-stamped snapshot, seed() will require SEED_DAYS=1 too — it rewrites days[] wholesale, re-stamping the canonical snapshot)',
   );
   return lines.join('\n');
 }

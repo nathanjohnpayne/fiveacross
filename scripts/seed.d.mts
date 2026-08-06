@@ -66,6 +66,11 @@ export function reseedGuard(
   seedOwnedCount: number,
   reseedEnv: string | undefined,
 ): { allowed: boolean; reason?: string };
+export function orphanedSnapshotDays(
+  days: unknown,
+  deleteIds: readonly string[],
+  writeIds: readonly string[],
+): number[];
 export function seedItemMutations(
   existingDocs: Array<{ id: string; createdBy: string }>,
   now: number,

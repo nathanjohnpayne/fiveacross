@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { adminRoster, eventWritePayload, formatDriftReport, reseedGuard, seedItemDocId, verifySeedPool } from '../../scripts/seed.mjs';
+import { adminRoster, eventWritePayload, formatDriftReport, orphanedSnapshotDays, reseedGuard, seedItemDocId, verifySeedPool } from '../../scripts/seed.mjs';
 import { EVENT_SEED, ITEMS, ALL_ITEMS } from '../../scripts/seed-data/med-2026.mjs';
 
 type SeedItem = { text: string; spicy: boolean };
@@ -135,6 +135,34 @@ describe('w1-event-seed: reseedGuard — a rerun can never double-seed or casual
 
   it('allows a deliberate replace with RESEED=1', () => {
     expect(reseedGuard(120, '1')).toEqual({ allowed: true });
+  });
+});
+
+describe('w1-event-seed: orphanedSnapshotDays — a replace may not strand a stamped Day snapshot (Codex P1, PR #644 round 2)', () => {
+  const days = [
+    { index: 0, snapshotItemIds: ['seed-a', 'seed-b'] },
+    { index: 1 }, // unstamped — never orphanable
+    { index: 2, snapshotItemIds: ['seed-c', 'player-x'] },
+  ];
+
+  it('flags Days whose snapshot references ids the replace deletes without rewriting', () => {
+    // seed-a is deleted and NOT re-written (a text edit moved its hash);
+    // seed-b/seed-c survive at the same id.
+    expect(orphanedSnapshotDays(days, ['seed-a', 'seed-b', 'seed-c'], ['seed-b', 'seed-c', 'seed-new'])).toEqual([0]);
+  });
+
+  it('passes when every referenced deleted id is re-written at the same id (unchanged texts)', () => {
+    expect(orphanedSnapshotDays(days, ['seed-a', 'seed-b', 'seed-c'], ['seed-a', 'seed-b', 'seed-c'])).toEqual([]);
+  });
+
+  it('ignores snapshot ids outside the delete set — player docs and already-gone ids are not this replace\'s doing', () => {
+    // player-x is not seed-owned; its absence from the writes is irrelevant.
+    expect(orphanedSnapshotDays(days, ['seed-c'], ['seed-c'])).toEqual([]);
+  });
+
+  it('handles a missing/malformed days array as nothing to orphan', () => {
+    expect(orphanedSnapshotDays(undefined, ['a'], [])).toEqual([]);
+    expect(orphanedSnapshotDays('bogus', ['a'], [])).toEqual([]);
   });
 });
 
