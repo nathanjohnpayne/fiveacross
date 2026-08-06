@@ -497,6 +497,38 @@ service cloud.firestore {
       allow delete: if isOwner(uid);
     }
 
+    // Daily engagement email preferences (#616, specs/daily-engagement-email.md).
+    //
+    // `events/{eventId}/emailPrefs/{uid}` — one server-owned doc per participant
+    // per Event: `{ optedOut, token, lastSentDayIndex, updatedAt }`.
+    //
+    // FULLY DENIED TO CLIENTS, both directions, and each direction for its own
+    // reason:
+    //
+    //   NO READ, because `token` is an unguessable per-user CAPABILITY — it is
+    //   the only authority the unsubscribe endpoint accepts, precisely so the
+    //   link works from a mail client with no session. A readable token would
+    //   let any signed-in reader (or an Event admin, under the `users/{uid}`
+    //   read posture) unsubscribe someone else, which is the one thing a
+    //   consent record must not permit.
+    //
+    //   NO WRITE, because the opt-out is the record of a consent decision. It
+    //   is written by the unsubscribe endpoint after verifying that token, and
+    //   by the sender when it stamps `lastSentDayIndex` — both through the
+    //   Admin SDK, which bypasses rules entirely. A client write path would add
+    //   nothing the endpoint does not already do and would let a Player forge
+    //   another Player's `lastSentDayIndex` to suppress their mail.
+    //
+    // Written out rather than left to the default-deny so the intent is stated
+    // where the next person editing this file will read it: this collection is
+    // server-owned ON PURPOSE, and a future "let the app show email settings"
+    // ticket must add a callable, not an allowance here. It nests inside no
+    // other match block, so no wildcard above can widen it.
+    match /events/{eventId}/emailPrefs/{uid} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     match /events/{eventId} {
       allow read: if signedIn();
       // Only admins can change event config (theme default, claimMode, admins,

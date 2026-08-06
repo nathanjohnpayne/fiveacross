@@ -1,7 +1,7 @@
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { onObjectFinalized, type StorageEvent } from 'firebase-functions/v2/storage';
 import { onDocumentWritten } from 'firebase-functions/v2/firestore';
-import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
@@ -25,6 +25,8 @@ import {
   UnlockPermissionError,
   type AdminFirestore,
 } from './unlockDay';
+import { runDailyEmailSweep, type DailyEmailFirestore } from './dailyEmail';
+import { handleUnsubscribeRequest } from './emailOptOut';
 
 initializeApp();
 setGlobalOptions({ region: 'us-central1', maxInstances: 10 });
@@ -465,3 +467,51 @@ export const unlockDayNow = onCall(
     throw err;
   }
 });
+
+// --- Daily themed engagement email (#616) ---------------------------------------
+// Thin trigger seams only; the sweep, the content, the template and the consent
+// store live in `dailyEmail.ts` / `dailyEmailContent.ts` / `dailyEmailTemplate.ts`
+// / `emailOptOut.ts`, all pure + dependency-injected (specs/daily-engagement-email.md).
+
+/**
+ * The daily send. QUARTER-HOURLY, not daily, for the reason `unlockDay` above
+ * is: the send must land at the Day's unlock in the EVENT's timezone, and a
+ * cron is one fixed schedule for every Event a deployment serves. The sweep is
+ * dumb and frequent; `dueDayForDailyEmail` is the real clock, and every beat is
+ * self-guarded (admin toggle off by default, a six-hour due window, a
+ * per-recipient `lastSentDayIndex`, and a Resend idempotency key), so running
+ * 96× a day sends at most one email per participant per Day.
+ *
+ * Pins `ADMIN_SDK_SERVICE_ACCOUNT` — it reads Events, rosters and hostnames and
+ * writes opt-out docs through the Admin SDK, which the default Gen2 compute
+ * identity cannot reach — and binds `RESEND_API_KEY` like the moderation
+ * notifiers. `timeoutSeconds` is generous because the fan-out is paced to stay
+ * inside Resend's per-second limit.
+ */
+export const dailyEngagementEmail = onSchedule(
+  {
+    schedule: '*/15 * * * *',
+    timeZone: 'Etc/UTC',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    secrets: [RESEND_API_KEY],
+    timeoutSeconds: 540,
+    memory: '512MiB',
+  },
+  () => runDailyEmailSweep(db as unknown as DailyEmailFirestore),
+);
+
+/**
+ * The unsubscribe endpoint — the target of every daily email's visible
+ * Unsubscribe link and of its `List-Unsubscribe` header.
+ *
+ * HTTP, not a callable, and it has to be: RFC 8058 one-click unsubscribe is a
+ * plain POST issued by the mail client itself, with no Firebase SDK, no session
+ * and no callable envelope, and the visible link is a URL a mail app opens in a
+ * browser. Authorization is the per-user capability token in the URL, verified
+ * in constant time by `applyOptOut`; the endpoint reveals nothing about whether
+ * a uid exists. Pins the Admin-SDK identity because it writes the opt-out doc.
+ */
+export const emailUnsubscribe = onRequest(
+  { serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, maxInstances: 10, timeoutSeconds: 30 },
+  (req, res) => handleUnsubscribeRequest(db as unknown as DailyEmailFirestore, req, res),
+);

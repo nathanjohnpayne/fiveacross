@@ -36,7 +36,7 @@ const ALLOWED = new Map<string, string>([
   // `welcome-aboard` / `so-long-farewell` are Theme IDS, deliberately kept by
   // #535 and GCB-scoped by `themesForEdition` — they never render elsewhere.
   ['theme/themes.ts', 'GCB-scoped Theme ids + labels, deliberately kept (#535)'],
-  ['types.ts', 'the ThemeId union naming those same GCB-scoped ids'],
+  ['domainTypes.d.ts', 'the canonical ThemeId union naming those same GCB-scoped ids'],
   // Nothing else. `Nav.tsx` and `dayIdentity.tsx` were here until #602 shipped,
   // and `ShareCard.tsx` until Phase 4b folded its app name into the Edition —
   // the allowlist shrinks as the leaks close rather than being left to rot,

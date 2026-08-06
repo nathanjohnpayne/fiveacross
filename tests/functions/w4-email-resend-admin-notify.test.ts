@@ -78,11 +78,110 @@ describe('sendEmail', () => {
     vi.doMock('../../functions/src/params', () => ({
       RESEND_API_KEY: { value: () => { throw new Error('secret unresolved'); } },
       EMAIL_FROM: { value: () => 'Test <t@example.com>' },
+      // Present so the throw under test is the SECRET's, not a missing mock
+      // key's — the params destructure covers EMAIL_REPLY_TO too (#616).
+      EMAIL_REPLY_TO: { value: () => '' },
       ADMIN_NOTIFY_EMAIL: { value: () => '' },
       APP_BASE_URL: { value: () => 'https://example.com' },
     }));
     const result = sendEmail({ to: ['a@example.com'], subject: 's', html: '<p>h</p>', idempotencyKey: 'k' });
     await expect(result).resolves.toBe(false); // resolves false, does NOT reject
+    vi.doUnmock('../../functions/src/params');
+  });
+
+  // Reply-To (#616, at Nathan's request). `EMAIL_FROM` must be an address on a
+  // Resend-verified sending domain; replies want a mailbox a human reads, and
+  // on the Five Across deployment those are deliberately different hosts.
+  //
+  // Both cases drive the REAL param path — `sender` is injected to capture the
+  // payload but `from` is not, so the params module is resolved exactly as it
+  // is in the Functions runtime.
+  const capturePayload = async (): Promise<EmailPayload> => {
+    let seen: EmailPayload | undefined;
+    await sendEmail({
+      to: ['a@example.com'],
+      subject: 's',
+      html: '<p>h</p>',
+      idempotencyKey: 'k',
+      sender: async (payload: EmailPayload) => {
+        seen = payload;
+        return { error: null };
+      },
+    });
+    return seen as EmailPayload;
+  };
+
+  const mockParams = (replyTo: string) =>
+    vi.doMock('../../functions/src/params', () => ({
+      RESEND_API_KEY: { value: () => 'key' },
+      EMAIL_FROM: { value: () => 'Test <t@example.com>' },
+      EMAIL_REPLY_TO: { value: () => replyTo },
+      ADMIN_NOTIFY_EMAIL: { value: () => '' },
+      APP_BASE_URL: { value: () => 'https://example.com' },
+    }));
+
+  it('omits replyTo ENTIRELY when EMAIL_REPLY_TO is empty (the shipped default)', async () => {
+    // An empty `Reply-To:` is a malformed header, not an absent one, so the
+    // key must not appear at all — a project that sets nothing sends exactly
+    // what it sent before this param existed.
+    mockParams('');
+    const payload = await capturePayload();
+    expect(payload).not.toHaveProperty('replyTo');
+    expect(payload.from).toBe('Test <t@example.com>');
+    vi.doUnmock('../../functions/src/params');
+  });
+
+  it('sends replyTo under the Resend SDK’s camelCase field when the param is set', async () => {
+    // `replyTo`, verified against the installed resend@4.8.0 typings
+    // (`CreateEmailOptions.replyTo`). The `reply_to` in those same typings is
+    // the RESPONSE shape; sending it would be silently ignored.
+    mockParams('fiveacross@nathanpayne.com');
+    const payload = await capturePayload();
+    expect(payload.replyTo).toBe('fiveacross@nathanpayne.com');
+    expect(payload).not.toHaveProperty('reply_to');
+    vi.doUnmock('../../functions/src/params');
+  });
+
+  it('lets an explicit argument override the param, like `from` does', async () => {
+    mockParams('param@example.com');
+    let seen: EmailPayload | undefined;
+    await sendEmail({
+      to: ['a@example.com'],
+      subject: 's',
+      html: '<p>h</p>',
+      idempotencyKey: 'k',
+      replyTo: 'explicit@example.com',
+      sender: async (payload: EmailPayload) => {
+        seen = payload;
+        return { error: null };
+      },
+    });
+    expect(seen?.replyTo).toBe('explicit@example.com');
+    vi.doUnmock('../../functions/src/params');
+  });
+
+  it('stays free of the params module when both `from` and `sender` are injected', async () => {
+    // The resolution guard's existing property, re-asserted because #616 added
+    // a second param read inside it: a fully-injected call must not drag
+    // firebase-functions into a unit test. A params mock that throws on ANY
+    // access proves the module is never reached.
+    vi.doMock('../../functions/src/params', () => {
+      throw new Error('params must not be imported on the fully-injected path');
+    });
+    let seen: EmailPayload | undefined;
+    const ok = await sendEmail({
+      to: ['a@example.com'],
+      subject: 's',
+      html: '<p>h</p>',
+      idempotencyKey: 'k',
+      from: 'from@example.com',
+      sender: async (payload: EmailPayload) => {
+        seen = payload;
+        return { error: null };
+      },
+    });
+    expect(ok).toBe(true);
+    expect(seen).not.toHaveProperty('replyTo');
     vi.doUnmock('../../functions/src/params');
   });
 });
