@@ -332,10 +332,21 @@ export async function initFirestore() {
   // Resolve the target Event: an explicit VITE_EVENT_ID wins; otherwise the
   // resolved project's default Event (#563) so `verify:seed` /
   // `verify:seed:fiveacross` each compare their own project's live pool
-  // against that Event's canon. `resolveSeedEvent` fails loudly on an Event id
-  // this repo has no seed data for.
-  const EVENT_ID =
-    process.env.VITE_EVENT_ID || PROJECT_DEFAULT_EVENT[projectId] || 'med-2026';
+  // against that Event's canon. A project with NO registered default is an
+  // ERROR, never a fallback (Codex P1, PR #644 round 3): silently selecting
+  // med-2026 would seed the Med Event into an unknown project, or verify a
+  // project against the wrong canon. `resolveSeedEvent` fails loudly on an
+  // Event id this repo has no seed data for.
+  const EVENT_ID = process.env.VITE_EVENT_ID || PROJECT_DEFAULT_EVENT[projectId];
+  if (!EVENT_ID) {
+    console.error(
+      `✗ no VITE_EVENT_ID set and project '${projectId || '(unresolved)'}' has no registered default Event ` +
+        `(known: ${Object.entries(PROJECT_DEFAULT_EVENT)
+          .map(([p, e]) => `${p} → ${e}`)
+          .join(', ')}). Set VITE_EVENT_ID explicitly.`,
+    );
+    process.exit(1);
+  }
   const seedEvent = resolveSeedEvent(EVENT_ID);
 
   const keyUrl = new URL('../serviceAccountKey.json', import.meta.url);
@@ -371,9 +382,13 @@ async function seed() {
   const existingDays = existingEventSnap.data()?.days;
   const hasScheduledDays = Array.isArray(existingDays) && existingDays.length > 0;
   const includeDays = !hasScheduledDays || process.env.SEED_DAYS === '1';
-  await eventRef.set(eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), includeDays), {
-    merge: true,
-  });
+  // The event-doc merge write is NOT committed here: it joins the SAME batch
+  // as the item mutations below (Codex P1, PR #644 round 3), so a days rewrite
+  // that re-stamps `snapshotItemIds` (SEED_DAYS=1) and the item replace that
+  // creates those documents commit ATOMICALLY — a process/batch failure can
+  // never leave a snapshot pointing at documents that were not written, and a
+  // concurrent reader/scheduler can never observe the split state.
+  const eventPayload = eventWritePayload(EVENT_SEED, admins, FieldValue.delete(), includeDays);
 
   const col = eventRef.collection('items');
 
@@ -393,13 +408,14 @@ async function seed() {
   // Never double-seed a live Event: replace semantics can't append, but even a
   // replace is refused against an already-seeded Event unless RESEED=1 — see
   // `reseedGuard`. The refusal is a LOUD NO-OP on the items step (exit 0)
-  // rather than a hard error: the event write above is itself a merge (that is
-  // how an admin grant re-run works, and it never clobbers), so a rerun
-  // without RESEED=1 grants rosters / refreshes event config while leaving the
-  // live pool byte-for-byte untouched.
+  // rather than a hard error: the event-doc merge still commits (alone), which
+  // is how an admin grant re-run works and never clobbers — so a rerun without
+  // RESEED=1 grants rosters / refreshes event config while leaving the live
+  // pool byte-for-byte untouched.
   const seedOwnedCount = existing.docs.filter((doc) => doc.data().createdBy === 'seed').length;
   const guard = reseedGuard(seedOwnedCount, process.env.RESEED);
   if (!guard.allowed) {
+    await eventRef.set(eventPayload, { merge: true });
     console.log(`Event doc written (merge). Prompts SKIPPED: ${guard.reason}`);
     console.log(
       admins.length
@@ -428,12 +444,15 @@ async function seed() {
         `✗ events/${EVENT_ID}: replacing the seed-owned pool would orphan the stamped snapshot on Day ${orphaned.join(', ')} ` +
           '(snapshotItemIds reference ids this replace deletes without rewriting). ' +
           'Re-run with SEED_DAYS=1 as well — it rewrites days[] wholesale, re-stamping the canonical snapshot — ' +
-          'or clear/re-stamp those snapshots first. Nothing was written to items.',
+          'or clear/re-stamp those snapshots first. Nothing was written.',
       );
       process.exit(1);
     }
   }
+  // ONE atomic batch: the event-doc merge (incl. any days/snapshot re-stamp)
+  // plus every item delete/write — see the atomicity note above.
   const batch = db.batch();
+  batch.set(eventRef, eventPayload, { merge: true });
   for (const id of deleteIds) batch.delete(col.doc(id));
   for (const { id, data } of writes) batch.set(col.doc(id), data, { merge: true });
   await batch.commit();
