@@ -20,15 +20,21 @@ vi.mock('../analytics', () => ({ track }));
 const M = vi.hoisted(() => ({
   proofs: [] as unknown[],
   proofsLoading: false,
-  proofFeedCalls: [] as Array<number | null>,
+  proofFeedCalls: [] as Array<{
+    max: number | null;
+    moderation?: { threshold: number | undefined; bannedUids: readonly string[] };
+  }>,
 }));
 vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: null, loading: false }),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useLeaderboard: () => ({ players: [], loading: false }),
   useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
-  useProofFeed: (max: number | null) => {
-    M.proofFeedCalls.push(max);
+  useProofFeed: (
+    max: number | null,
+    moderation?: { threshold: number | undefined; bannedUids: readonly string[] },
+  ) => {
+    M.proofFeedCalls.push({ max, moderation });
     return { proofs: M.proofs, loading: M.proofsLoading };
   },
   isBanned: () => false,
@@ -288,7 +294,12 @@ const AWARD: MostLovedPhotoAward = {
 };
 
 function awardedEvent(award: MostLovedPhotoAward): EventDoc {
-  return { name: 'Bodega Bay 2026', mostLovedPhoto: award } as EventDoc;
+  return {
+    name: 'Bodega Bay 2026',
+    mostLovedPhoto: award,
+    settings: { reportHideThreshold: 4 },
+    bannedUids: ['hidden-owner'],
+  } as EventDoc;
 }
 
 describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)', () => {
@@ -333,7 +344,10 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     // The Feed's OWN hook, explicitly uncapped: a winning photo may predate an arbitrary
     // recent-items ceiling, but it must remain available for the frozen award's
     // moderation-aware join.
-    expect(M.proofFeedCalls).toContain(null);
+    expect(M.proofFeedCalls).toContainEqual({
+      max: null,
+      moderation: { threshold: 4, bannedUids: ['hidden-owner'] },
+    });
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(2);
     expect(photos[0].src).toContain('proofs%2Fw1'); // award order — earliest-posted first

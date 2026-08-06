@@ -84,7 +84,21 @@ function makeDb(seed: {
             exists: true,
             id: row.id as string,
             data: () => row,
-            createTime: { toMillis: () => row.serverCreatedAt ?? row.createdAt },
+            createTime: (() => {
+              const millis = Number(row.serverCreatedAt ?? row.createdAt);
+              const seconds = Number(row.serverCreatedAtSeconds ?? Math.floor(millis / 1000));
+              const nanoseconds = Number(
+                row.serverCreatedAtNanoseconds ?? Math.round((millis - seconds * 1000) * 1_000_000),
+              );
+              return {
+                // Matches Firestore Timestamp#toMillis: deliberately floored,
+                // so the test below proves the production mapper uses the
+                // seconds/nanoseconds fields instead for the cutoff predicate.
+                toMillis: () => seconds * 1000 + Math.floor(nanoseconds / 1_000_000),
+                seconds,
+                nanoseconds,
+              };
+            })(),
           })),
         };
       },
@@ -320,6 +334,32 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
         heart('fan-2', 'p2', D9_UNLOCK + 2000, { serverCreatedAt: D10_UNLOCK }),
       ],
     });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 10 * 60_000 });
+    const award = db.readEvent().mostLovedPhoto!;
+    expect(award.winners.map((w) => w.proofId)).toEqual(['p2']);
+    expect(award.heartCount).toBe(1);
+  });
+
+  it('(f2) excludes a Heart one nanosecond after the cutoff, despite Timestamp#toMillis rounding it down', async () => {
+    const cutoffSeconds = Math.floor(D10_UNLOCK / 1000);
+    const cutoffNanoseconds = (D10_UNLOCK - cutoffSeconds * 1000) * 1_000_000;
+    const db = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays() },
+      proofs: [proof('p1'), proof('p2', { createdAt: D9_UNLOCK + 2000 })],
+      hearts: [
+        heart('fan-1', 'p1', D9_UNLOCK + 1000, {
+          createdAt: D10_UNLOCK - 1,
+          serverCreatedAtSeconds: cutoffSeconds,
+          serverCreatedAtNanoseconds: cutoffNanoseconds + 1,
+        }),
+        heart('fan-2', 'p2', D9_UNLOCK + 2000, {
+          serverCreatedAtSeconds: cutoffSeconds,
+          serverCreatedAtNanoseconds: cutoffNanoseconds,
+        }),
+      ],
+    });
+
     await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 10 * 60_000 });
     const award = db.readEvent().mostLovedPhoto!;
     expect(award.winners.map((w) => w.proofId)).toEqual(['p2']);

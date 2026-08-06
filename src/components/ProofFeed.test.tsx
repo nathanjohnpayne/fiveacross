@@ -751,12 +751,28 @@ describe('ProofFeed — the Hearts cue (#534/#561)', () => {
     H.onSnapshot.mockReset();
     const sub = captureOnNext();
     render(<ProofFeed />);
-    sub.fire(tallySnap);
+    const unfrozenEvent = {
+      exists: () => true,
+      data: () => ({ days: [] }),
+      metadata: { fromCache: false },
+    };
+    sub.fire(tallySnap, emptyColSnap, emptyColSnap, unfrozenEvent);
 
     const list = document.querySelector('.list')!;
     const cue = list.firstElementChild!;
     expect(cue.className).toBe('feed-heart-cue');
     expect(cue.textContent).toBe('Heart the moments you want to remember');
+  });
+
+  it('withholds the cue until the Event snapshot is available', () => {
+    H.onSnapshot.mockReset();
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+
+    sub.fire(tallySnap);
+
+    expect(document.querySelector('.tally-card')).toBeTruthy();
+    expect(document.querySelector('.feed-heart-cue')).toBeNull();
   });
 
   it('leaves with the freeze: no cue once the standings are frozen', () => {

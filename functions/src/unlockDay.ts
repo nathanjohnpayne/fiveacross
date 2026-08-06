@@ -316,7 +316,7 @@ interface DocSnapshot {
   readonly exists: boolean;
   readonly id: string;
   /** Server-assigned document creation time, present on Admin SDK snapshots. */
-  readonly createTime?: { toMillis(): number };
+  readonly createTime?: { toMillis(): number; seconds?: number; nanoseconds?: number };
   data(): Record<string, unknown> | undefined;
 }
 interface DocRef {
@@ -593,7 +593,7 @@ function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[
 function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[] {
   return snap.docs.map((d) => {
     const data = d.data() ?? {};
-    const serverCreatedAt = d.createTime?.toMillis();
+    const serverCreatedAt = createTimeCeilingMillis(d.createTime);
     return {
       uid: typeof data.uid === 'string' ? data.uid : '',
       targetKind: typeof data.targetKind === 'string' ? data.targetKind : '',
@@ -606,6 +606,32 @@ function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[
           : Number.NaN,
     };
   });
+}
+
+/**
+ * Represent Firestore's nanosecond timestamp as the smallest whole millisecond
+ * that is not earlier than it. The award cutoff is millisecond precision, so
+ * this preserves the exact `createTime <= cutoff` predicate: a Heart at the
+ * cutoff stays at that millisecond, while one nanosecond after it rounds up and
+ * is excluded. `Timestamp#toMillis()` floors and would incorrectly include the
+ * latter. Missing precision fails closed rather than guessing from client data.
+ */
+function createTimeCeilingMillis(
+  createTime: { toMillis(): number; seconds?: number; nanoseconds?: number } | undefined,
+): number {
+  const seconds = createTime?.seconds;
+  const nanoseconds = createTime?.nanoseconds;
+  if (
+    typeof seconds !== 'number' ||
+    !Number.isSafeInteger(seconds) ||
+    typeof nanoseconds !== 'number' ||
+    !Number.isInteger(nanoseconds) ||
+    nanoseconds < 0 ||
+    nanoseconds >= 1_000_000_000
+  ) {
+    return Number.NaN;
+  }
+  return seconds * 1000 + Math.ceil(nanoseconds / 1_000_000);
 }
 
 /**

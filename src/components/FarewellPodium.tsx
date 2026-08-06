@@ -334,7 +334,7 @@ const NO_PROOFS: readonly ProofDoc[] = [];
  */
 export default function FarewellPodium(props: FarewellPodiumProps) {
   const award = props.event?.mostLovedPhoto;
-  if (award) return <FarewellPodiumAwarded {...props} award={award} />;
+  if (award && props.event) return <FarewellPodiumAwarded {...props} event={props.event} award={award} />;
   return <FarewellPodiumInner {...props} award={null} proofs={NO_PROOFS} proofsLoaded={false} />;
 }
 
@@ -350,8 +350,16 @@ export default function FarewellPodium(props: FarewellPodiumProps) {
  * The listener exists only during the finale (Board mounts this post-freeze on
  * the closing-Day view).
  */
-function FarewellPodiumAwarded(props: FarewellPodiumProps & { award: MostLovedPhotoAward }) {
-  const { proofs, loading } = useProofFeed(null);
+function FarewellPodiumAwarded(
+  props: FarewellPodiumProps & {
+    award: MostLovedPhotoAward;
+    event: NonNullable<FarewellPodiumProps['event']>;
+  },
+) {
+  const { proofs, loading } = useProofFeed(null, {
+    threshold: props.event.settings?.reportHideThreshold,
+    bannedUids: props.event.bannedUids ?? [],
+  });
   const { award } = props;
   // Once per device per event; the ref backs the localStorage guard up within
   // a session when storage is unavailable (private mode). The no-award record

@@ -1149,7 +1149,7 @@ export default function ProofFeed() {
           freeze — no streaks, no badges, no notification pressure, and it
           leaves with the freeze itself. Static copy, deliberately unstyled
           beyond the muted-hint treatment. */}
-      {!standingsFrozen(event) && (
+      {event != null && !standingsFrozen(event) && (
         <p className="feed-heart-cue">Heart the moments you want to remember</p>
       )}
       {entries.map((entry) => {
