@@ -14,10 +14,12 @@ import {
   type EmailPlayer,
 } from '../../functions/src/dailyEmailContent';
 import { renderDailyEmailHtml, renderDailyEmailText, safeUrl } from '../../functions/src/dailyEmailTemplate';
+import { standingsRows } from '../../functions/src/dailyEmailContent';
 import {
   dailyEmailEnabled,
   dueDayForDailyEmail,
   resolveEventOrigin,
+  readEmailRoster,
   sanitizeEmailDayStats,
   sendDailyEmailForEvent,
   shouldSendTo,
@@ -429,6 +431,56 @@ describe('buildDailyEmailModel', () => {
     expect(day4.standings.emptyLine).toContain('⭐ cruise-wide honor');
   });
 
+  it('keeps the ⭐ holder in the snapshot when they have slipped out of the top three', () => {
+    // Codex #623 P2: the top-3 slice used to drop an honor holder who had
+    // fallen to 4th, so the email rendered NO star at all while the in-app
+    // Leaderboard still showed one. `buildShareStandings`
+    // (src/components/Leaderboard.tsx, specs/w2-leaderboard.md) makes the same
+    // exception — "the pin can never silently drop off the card".
+    const ranked: EmailPlayer[] = [
+      { uid: 'a', displayName: 'A', bingoCount: 5, squaresMarked: 50, firstBingoAt: 900 },
+      { uid: 'b', displayName: 'B', bingoCount: 4, squaresMarked: 40, firstBingoAt: 901 },
+      { uid: 'c', displayName: 'C', bingoCount: 3, squaresMarked: 30, firstBingoAt: 902 },
+      { uid: 'star', displayName: 'Star', bingoCount: 1, squaresMarked: 10, firstBingoAt: 1 },
+    ];
+    const rows = standingsRows(ranked, 'star');
+    expect(rows.map((r) => r.displayName)).toEqual(['A', 'B', 'C', 'Star']);
+    expect(rows.filter((r) => r.starred).map((r) => r.displayName)).toEqual(['Star']);
+    // …and carries their TRUE rank, never a fabricated fourth place.
+    expect(rows[3].rank).toBe(4);
+  });
+
+  it('does not append or duplicate when the ⭐ holder is already in the top three', () => {
+    const ranked: EmailPlayer[] = [
+      { uid: 'star', displayName: 'Star', bingoCount: 5, squaresMarked: 50, firstBingoAt: 1 },
+      { uid: 'b', displayName: 'B', bingoCount: 4, squaresMarked: 40, firstBingoAt: 900 },
+      { uid: 'c', displayName: 'C', bingoCount: 3, squaresMarked: 30, firstBingoAt: 901 },
+      { uid: 'd', displayName: 'D', bingoCount: 2, squaresMarked: 20, firstBingoAt: 902 },
+    ];
+    const rows = standingsRows(ranked, 'star');
+    expect(rows).toHaveLength(3);
+    expect(rows.filter((r) => r.starred)).toHaveLength(1);
+    // No honor at all → plain top three.
+    expect(standingsRows(ranked, null)).toHaveLength(3);
+  });
+
+  it('renders the appended ⭐ holder in the email body, not just the model', () => {
+    const players: EmailPlayer[] = [
+      { uid: 'a', displayName: 'Alpha', bingoCount: 5, squaresMarked: 50, firstBingoAt: 900,
+        dayStats: { 0: { bingoCount: 5, squaresMarked: 50, firstBingoAt: 900 } } },
+      { uid: 'b', displayName: 'Bravo', bingoCount: 4, squaresMarked: 40, firstBingoAt: 901,
+        dayStats: { 0: { bingoCount: 4, squaresMarked: 40, firstBingoAt: 901 } } },
+      { uid: 'c', displayName: 'Charlie', bingoCount: 3, squaresMarked: 30, firstBingoAt: 902,
+        dayStats: { 0: { bingoCount: 3, squaresMarked: 30, firstBingoAt: 902 } } },
+      { uid: 'z', displayName: 'Zulu', bingoCount: 1, squaresMarked: 5, firstBingoAt: 1,
+        dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 1 } } },
+    ];
+    const model = build({ players, recipient: { uid: 'z', displayName: 'Zulu' } });
+    expect(model.standings.rows.map((r) => r.displayName)).toEqual(['Alpha', 'Bravo', 'Charlie', 'Zulu']);
+    expect(renderDailyEmailHtml(model)).toContain('Zulu');
+    expect(renderDailyEmailText(model)).toContain('4. Zulu');
+  });
+
   it('omits the rank line for an address that is not on the roster', () => {
     expect(build({ recipient: { uid: 'ghost', displayName: 'Ghost' } }).standings.youLine).toBeNull();
   });
@@ -692,14 +744,16 @@ function makeDb(seed: Docs): DailyEmailFirestore & { docs: Docs } {
       return undefined;
     },
   });
-  const query = (path: string, filters: Array<[string, unknown]>) => ({
-    where: (field: string, _op: string, value: unknown) => query(path, [...filters, [field, value]]),
-    get: async () => ({
-      docs: Object.keys(docs)
+  const query = (path: string, filters: Array<[string, unknown]>, cap?: number) => ({
+    where: (field: string, _op: string, value: unknown) => query(path, [...filters, [field, value]], cap),
+    limit: (count: number) => query(path, filters, count),
+    get: async () => {
+      const matched = Object.keys(docs)
         .filter((p) => p.startsWith(`${path}/`) && !p.slice(path.length + 1).includes('/'))
         .map(snapshotOf)
-        .filter((s) => filters.every(([field, value]) => (s.data() ?? {})[field] === value)),
-    }),
+        .filter((s) => filters.every(([field, value]) => (s.data() ?? {})[field] === value));
+      return { docs: cap === undefined ? matched : matched.slice(0, cap) };
+    },
   });
   const runTransaction = async <T,>(fn: (tx: never) => Promise<T>): Promise<T> =>
     fn({
@@ -854,6 +908,41 @@ describe('sendDailyEmailForEvent', () => {
   it('honours the recipient cap as a runaway guard', async () => {
     const { result } = await run(seedEvent(), { maxRecipients: 1 });
     expect(result.sent).toBe(1);
+  });
+
+  it('bounds EXAMINED players, not just send attempts, so an all-suppressed roster cannot run away', async () => {
+    // Codex #623 P2: the cap counted only real sends, so a roster that is
+    // entirely opted out incremented nothing and ran to the end — each
+    // iteration still costing a preference read.
+    const docs = seedEvent();
+    for (let i = 0; i < 6; i++) {
+      docs[`events/med-2026/players/p${i}`] = { displayName: `P${i}`, bingoCount: 0, squaresMarked: 0 };
+      docs[`events/med-2026/emailPrefs/p${i}`] = { optedOut: true, token: 'tok-fixed' };
+    }
+    const seen: string[] = [];
+    const { result } = await run(docs, {
+      maxRecipients: 3,
+      getEmailForUid: async (uid: string) => {
+        seen.push(uid);
+        return `${uid}@example.com`;
+      },
+    });
+    // Exactly three players examined, then the loop stops — sends + skips == cap.
+    expect(result.sent + result.skipped).toBe(3);
+    expect(seen.length).toBeLessThanOrEqual(3);
+  });
+
+  it('bounds the roster QUERY too, so a corrupted collection cannot exhaust the read', async () => {
+    const docs = seedEvent();
+    for (let i = 0; i < 40; i++) {
+      docs[`events/med-2026/players/q${i}`] = { displayName: `Q${i}`, bingoCount: 0, squaresMarked: 0 };
+    }
+    const db = makeDb(docs);
+    // limit = cap + 1, so the caller can tell "at the ceiling" from "truncated".
+    const roster = await readEmailRoster(db, 'med-2026', [], 5);
+    expect(roster).toHaveLength(5);
+    const all = await readEmailRoster(db, 'med-2026', []);
+    expect(all.length).toBeGreaterThan(5);
   });
 });
 

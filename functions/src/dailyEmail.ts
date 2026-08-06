@@ -64,6 +64,7 @@ interface Snapshot {
 }
 interface Query {
   where(field: string, op: string, value: unknown): Query;
+  limit(count: number): Query;
   get(): Promise<{ docs: Snapshot[] }>;
 }
 /** The minimal surface the daily email uses: the opt-out doc surface
@@ -166,13 +167,21 @@ export function sanitizeEmailDayStats(value: unknown): Record<number, FinaleDayS
 
 /** The Event's roster as `EmailPlayer[]`, ban-filtered. Mirrors
  *  `readFinaleRoster`/`visibleFinaleRoster` in `unlockDay.ts` — the standings a
- *  banned Player is hidden from must be the same standings the email prints. */
+ *  banned Player is hidden from must be the same standings the email prints.
+ *
+ *  BOUNDED AT THE QUERY, not just in the loop that consumes it (Codex #623 P2):
+ *  an unbounded `.get()` materializes the whole collection into memory before
+ *  any cap can apply, so a corrupted roster exhausts the function during the
+ *  READ and never reaches the guard downstream. `limit` is one MORE than the
+ *  ceiling so the caller can tell "exactly at the ceiling" from "truncated". */
 export async function readEmailRoster(
   db: DailyEmailFirestore,
   eventId: string,
   bannedUids: readonly string[] = [],
+  limit?: number,
 ): Promise<EmailPlayer[]> {
-  const snap = await db.collection(`events/${eventId}/players`).get();
+  const base = db.collection(`events/${eventId}/players`);
+  const snap = await (limit && limit > 0 ? base.limit(limit) : base).get();
   return snap.docs
     .map((d) => {
       const data = (d.data() ?? {}) as Record<string, unknown>;
@@ -338,8 +347,18 @@ export async function sendDailyEmailForEvent(
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
   const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
 
-  const roster = await readEmailRoster(db, eventId, event.bannedUids ?? []);
+  const roster = await readEmailRoster(db, eventId, event.bannedUids ?? [], maxRecipients + 1);
   if (roster.length === 0) return { sent: 0, skipped: 0, failed: 0, reason: 'no-roster' };
+  if (roster.length > maxRecipients) {
+    // Loud, because it means the Event is either pathological or has outgrown
+    // the documented ceiling — and in the latter case nobody past the cap gets
+    // mail, which is a delivery gap, not a tidy degradation.
+    console.error(
+      `sendDailyEmailForEvent: roster exceeds the ${maxRecipients} ceiling; the remainder will not be mailed`,
+      eventId,
+      day.index,
+    );
+  }
   // ONCE for the whole send, not once per recipient: the standings snapshot is
   // identical for everyone (the rank line is a lookup into it), so recomputing
   // it inside the loop would re-slice and re-sort the roster N times for the
@@ -347,13 +366,24 @@ export async function sendDailyEmailForEvent(
   const ranked = standingsThrough(roster, day.index, tutorialDayIndexes(event.days ?? []));
 
   const result: DailySendResult = { sent: 0, skipped: 0, failed: 0 };
-  let attempted = 0;
+  // EXAMINED, not attempted (Codex #623 P2). The cap used to count only real
+  // send attempts, so a roster that is entirely opted out, already sent, or
+  // missing verified addresses incremented nothing and ran the loop to the end
+  // — each iteration still costing a preference read. The ceiling has to bound
+  // the WORK, and the work is per-player regardless of whether mail goes out.
+  //
+  // Counting examined players does not strand a legitimate large Event: every
+  // roster at or under the ceiling is examined in full on every sweep, so
+  // continuation is unaffected. Only a roster ABOVE the ceiling is truncated,
+  // which is the runaway case this guard exists for, and it is logged above.
+  let examined = 0;
 
   for (const player of roster) {
-    if (attempted >= maxRecipients) {
-      console.warn(`sendDailyEmailForEvent: recipient cap ${maxRecipients} reached`, eventId, day.index);
+    if (examined >= maxRecipients) {
+      console.warn(`sendDailyEmailForEvent: examined cap ${maxRecipients} reached`, eventId, day.index);
       break;
     }
+    examined++;
     try {
       // Consent FIRST, address second: an opted-out participant's email address
       // is never even looked up, and a participant whose opt-out doc cannot be
@@ -381,7 +411,6 @@ export async function sendDailyEmailForEvent(
         unsubscribeUrl: unsubUrl,
         preferencesUrl: preferencesLink(linkArgs),
       });
-      attempted++;
       const ok = await send({
         to: [to],
         subject: model.subject,

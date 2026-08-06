@@ -332,6 +332,30 @@ describe('applyOptOut', () => {
     expect(await applyOptOut(seeded(), 'e', 'u', '', true)).toBe('invalid');
   });
 
+  it('rejects a request whose token was ROTATED between the read and the write', async () => {
+    // Codex #623 P2: read → compare → write in three steps let a request
+    // bearing the OLD token land its write on the newly-secured document,
+    // defeating the field-write revocation this module documents. Inside a
+    // transaction the rotation forces a retry, and the retry sees the new token.
+    const db = makeDb({ [emailPrefsPath('e', 'u')]: { token: 'good', optedOut: false } });
+    let rotated = false;
+    db.onTxRead = (path) => {
+      if (rotated) return;
+      rotated = true; // the token is revoked inside our read window
+      db.doc(path).set({ token: 'rotated' }, { merge: true });
+    };
+    expect(await applyOptOut(db, 'e', 'u', 'good', true)).toBe('invalid');
+    expect(rotated).toBe(true);
+    // The stale request changed nothing on the secured document.
+    expect(db.docs[emailPrefsPath('e', 'u')]).toMatchObject({ token: 'rotated', optedOut: false });
+  });
+
+  it('still applies cleanly when nothing races the write', async () => {
+    const db = makeDb({ [emailPrefsPath('e', 'u')]: { token: 'good', optedOut: false } });
+    expect(await applyOptOut(db, 'e', 'u', 'good', true, { now: () => 11 })).toBe('updated');
+    expect(db.docs[emailPrefsPath('e', 'u')]).toEqual({ token: 'good', optedOut: true, updatedAt: 11 });
+  });
+
   it('leaves the stored state untouched when the token is wrong', async () => {
     const db = seeded();
     await applyOptOut(db, 'e', 'u', 'wrong', true);

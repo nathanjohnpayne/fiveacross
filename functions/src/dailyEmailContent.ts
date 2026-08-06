@@ -31,7 +31,6 @@ export interface EmailDay {
   theme?: string;
   /** The night's signature events, rendered as the "Tonight:" line. */
   tonight?: string[];
-  pool?: string;
   tutorial?: boolean;
   /** ms epoch — the Day's unlock, and this email's send moment. */
   unlockAt: number;
@@ -58,6 +57,9 @@ export interface EmailPlayer {
 
 /** One rendered standings row. */
 export interface StandingsRow {
+  /** Carried so the ⭐-holder append can test membership without re-deriving
+   *  it from a display name, which is neither unique nor stable. */
+  uid: string;
   rank: number;
   displayName: string;
   bingoCount: number;
@@ -212,6 +214,47 @@ export function standingsThrough(
       return { ...p, bingoCount, squaresMarked, firstBingoAt };
     })
     .sort(compareFinalePlayers);
+}
+
+/** How many ranked rows the standings module shows before the ⭐ exception. */
+export const STANDINGS_ROWS = 3;
+
+/**
+ * The rendered rows: the top three by rank, PLUS the Event-wide First to BINGO
+ * holder appended when their rank falls outside that slice.
+ *
+ * The append is not a nicety. Without it, an honor holder who has since slipped
+ * to 4th vanishes from the email entirely and the ⭐ renders nowhere — so the
+ * email would silently claim there is no First to BINGO while the in-app
+ * Leaderboard still shows one (Codex #623 P2). `buildShareStandings` in
+ * `src/components/Leaderboard.tsx` makes exactly the same exception for exactly
+ * the same reason (specs/w2-leaderboard.md: "the pin can never silently drop
+ * off the card just because its holder isn't otherwise a top-ranked Player"),
+ * and this mirrors it so the email, the Share Card and the Leaderboard agree.
+ *
+ * The appended row carries its holder's TRUE rank, not a fourth-place slot, so
+ * a reader is never told the wrong position. It reuses the same row shape, so
+ * the rendered template is structurally unchanged.
+ */
+export function standingsRows(
+  ranked: readonly EmailPlayer[],
+  starUid: string | null,
+  maxRows: number = STANDINGS_ROWS,
+): StandingsRow[] {
+  const toRow = (p: EmailPlayer, rank: number): StandingsRow => ({
+    uid: p.uid,
+    rank,
+    displayName: p.displayName,
+    bingoCount: p.bingoCount,
+    squaresMarked: p.squaresMarked,
+    starred: p.uid === starUid,
+  });
+  const rows = ranked.slice(0, maxRows).map((p, i) => toRow(p, i + 1));
+  if (starUid && !rows.some((r) => r.uid === starUid)) {
+    const at = ranked.findIndex((p) => p.uid === starUid);
+    if (at >= 0) rows.push(toRow(ranked[at], at + 1));
+  }
+  return rows;
 }
 
 /** Whether a standings snapshot has anything to report: at least one Player who
@@ -385,15 +428,7 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const ranked = args.ranked ?? standingsThrough(players, day.index, tutorialDayIndexes(days));
   const played = hasPlay(ranked);
   const starUid = played ? firstBingoUid(ranked) : null;
-  const rows: StandingsRow[] = played
-    ? ranked.slice(0, 3).map((p, i) => ({
-        rank: i + 1,
-        displayName: p.displayName,
-        bingoCount: p.bingoCount,
-        squaresMarked: p.squaresMarked,
-        starred: p.uid === starUid,
-      }))
-    : [];
+  const rows: StandingsRow[] = played ? standingsRows(ranked, starUid) : [];
   const standingsHeading = played ? `Standings · through Day ${dayNumber - 1}` : `Standings · Day ${dayNumber}`;
   // Two empty states, not one. The OPENING Day has nothing to report because
   // nothing has happened yet, and says so with anticipation. A LATER Day with

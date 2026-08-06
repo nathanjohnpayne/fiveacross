@@ -17,7 +17,7 @@ Seven, in a fixed order, in both the HTML and the plain-text part. Editions chan
 
 1. **Preheader** — hidden body text clients show beside the subject. The Day plus one hook, ~85 characters, never a second sentence.
 2. **Theme header** — the Day's Theme emoji + label in display type over a two-token gradient band, with the context line (`Day N of M · weekday, date · Place`) and the Theme's five-swatch palette strip. This is the module that makes the email resemble the Day.
-3. **Standings snapshot** — the top three through YESTERDAY (today's card has only just unlocked), plus one personalized "You're #N" line. On the opening Day, or any Day nobody has played, it renders its empty state and sells the two open honors instead of showing a podium of ties — in two variants, because "the cruise starts today" is true on Day 1 and plainly false on Day 4.
+3. **Standings snapshot** — the top three through YESTERDAY (today's card has only just unlocked), plus the Event-wide First-to-BINGO holder appended when their rank has fallen outside that slice, plus one personalized "You're #N" line. On the opening Day, or any Day nobody has played, it renders its empty state and sells the two open honors instead of showing a podium of ties — in two variants, because "the cruise starts today" is true on Day 1 and plainly false on Day 4.
 4. **Participation nudge** — the greeting, the arrival line in the Edition's register, today's unlock time, and the Day's "Tonight:" line when it publishes one.
 5. **Photos + award** — the two content requirements ride together, the same module every Day, because norms are built by repetition.
 6. **Feed CTA** — one bulletproof button, "Open the Feed", deep-linking the Event's canonical host ([#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599)). The Feed, not the Card: the email's job is the social loop.
@@ -33,12 +33,15 @@ Seven, in a fixed order, in both the HTML and the plain-text part. Editions chan
 
 Ranking is `compareFinalePlayers`, so the email, the podium and the in-app Leaderboard can never disagree about who is ahead. Two subtleties carry the same parity:
 
+**The ⭐ holder is never dropped from the snapshot.** The module shows the top three, and appends the First-to-BINGO holder — carrying their true rank — when they sit below third. Without the exception an honor holder who has since slipped to 4th vanishes from the rows entirely and the email renders no ⭐ at all, while the in-app Leaderboard still shows one. `buildShareStandings` in `src/components/Leaderboard.tsx` makes the same exception for the same reason (`specs/w2-leaderboard.md`: the pin can never silently drop off the card), and this mirrors it.
+
 **Tutorial Days count for score, not for the ⭐.** A bingo on the embark Day is real play and is summed into the standings, but the Event-wide First to BINGO honor deliberately excludes Tutorial Days ([ADR 0011](../docs/adr/0011-scoring-policy-stated-not-inferred.md), mirrored in `finaleContent.ts`) — and so does the `firstBingoAt` tie-break that rides on it. Without that exclusion an embark-Day winner would take the ⭐ in the email while the in-app Leaderboard gave it to someone else.
 
 **`dayStats` is untrusted runtime shape.** `players/{uid}` is self-writable by design ([ADR 0001](../docs/adr/0001-honor-system-trust-model.md) — stats are client-authoritative), so a row carrying `{ dayStats: { 0: null } }` is reachable by any participant. It is sanitized at the read boundary (`sanitizeEmailDayStats`, the same normalization `readFinaleRoster` applies) and skipped defensively inside `standingsThrough`, because one malformed row throwing would suppress the entire Event's send.
 
 - **Given** a Tutorial Day carrying the earliest bingo **then** its score counts and its timestamp does not, so the ⭐ goes to the earliest non-Tutorial bingo. (Tests: "excludes Tutorial Days from the ⭐ and its tie-break", "carries the Event's Tutorial Days through the model".)
 - **Given** a malformed `dayStats` row **then** the snapshot is built without it rather than throwing. (Tests: "survives a malformed dayStats row", "sanitizes dayStats at the read boundary".)
+- **Given** an honor holder ranked below third **then** they are appended to the rows at their true rank and the ⭐ still renders; **given** one already in the top three **then** nothing is appended or duplicated. (Tests: "keeps the ⭐ holder in the snapshot", "does not append or duplicate", "renders the appended ⭐ holder in the email body".)
 
 ## Edition register
 
@@ -106,6 +109,8 @@ Non-negotiable, and applied before the send rather than filtered after it.
 
 The same distinction decides the endpoint's STATUS CODE. `applyOptOut` reserves `invalid` (404) for a confirmed refusal — no such document, or a token mismatch — and answers `error` (500) when the read itself failed. A 500 is retryable and a 404 is not, so answering a transient blip with 404 tells an RFC 8058 one-click client the unsubscribe is gone rather than that it should try again: the request is dropped and the reader keeps getting mail.
 
+**Verification and update are one transaction.** `applyOptOut` reads the token, compares it and writes inside a single transaction, so a token rotated or revoked between the read and the write forces a retry whose re-read sees the new token and answers `invalid`. Split across three steps, a request bearing the OLD token would still land its write on the newly-secured document — defeating the field-write revocation this module relies on.
+
 **The token back-fill is transactional**, and it returns the PERSISTED token rather than the one that call minted. A document that exists without a token gets one written inside a transaction, so two concurrent sweeps cannot each write their own and each return their own — the loser re-reads and mails the winner's token. An unconditional merge would produce an email whose `List-Unsubscribe` link carries a token the endpoint rejects: an unsubscribe that looks fine and silently does not work. The write names only the token on an existing document, so a stored opt-out survives it.
 
 - **Given** a matching token **then** the opt-out is recorded and is reversible on the same token; **given** a wrong token or an unknown uid **then** the answer is the same `invalid` and the stored state is untouched. (Tests under "applyOptOut".)
@@ -115,6 +120,7 @@ The same distinction decides the endpoint's STATUS CODE. `applyOptOut` reserves 
 - **Given** a participant whose opt-out doc can be neither read nor minted **then** no email is sent — an email whose unsubscribe cannot be honored must not go out. (Tests: "returns null rather than a token-less pref when the backend is down", plus the `shouldSendTo(null)` case.)
 - **Given** a read that FAILS while writes would succeed **then** nothing is minted and the stored opt-out is untouched. (Tests: "reports a read FAILURE separately from an absence", "NEVER resurrects an opted-out participant".)
 - **Given** a document that lands between the read and the mint **then** `create` refuses and the stored document wins. (Test: "mints with create, so a doc that appears mid-flight wins over this run".)
+- **Given** a token rotated between the read and the write **then** the stale request is refused and the stored state is untouched. (Tests: "rejects a request whose token was ROTATED between the read and the write", "still applies cleanly when nothing races the write".)
 - **Given** a concurrent sweep that back-fills a token first **then** this one returns the persisted token, so the emailed link and the endpoint agree. (Tests: "returns the PERSISTED token when a concurrent sweep back-fills first", "back-fills exactly one token when nothing else is writing".)
 - **Given** a router parameter on the endpoint URL **then** it survives into the form action and the resubscribe link. (Test: "preserves a router parameter from the endpoint URL".)
 - **Given** any client, owner or Event admin included **then** every read and write of `emailPrefs` is denied. (Tests in `tests/rules/daily-engagement-email.test.ts`.)
@@ -130,11 +136,26 @@ The Feed CTA points at `https://{canonical host}/feed`. The host comes from the 
 
 Both new triggers pin `ADMIN_SDK_SERVICE_ACCOUNT`, derived per-project as `functions/src/index.ts` documents ([ADR 0008](../docs/adr/0008-five-across-second-firebase-project.md), #593): they read Events, rosters and hostnames and write opt-out docs through the Admin SDK, which the default Gen2 compute identity cannot reach. The scheduled sender binds `RESEND_API_KEY` like the moderation notifiers.
 
+Every param above is declared in the committed template `functions/.env.example`, including the two this feature added. `EMAIL_UNSUBSCRIBE_URL` in particular is listed there with per-project guidance: a second Firebase project that leaves it unset mails unsubscribe links pointing at the FIRST project, whose `emailPrefs` collection holds no document or token for that participant — so every unsubscribe is answered "that link is no longer valid" and the recipient cannot opt out at all.
+
 `EMAIL_REPLY_TO` (`functions/src/params.ts`) is the address replies land in, applied to EVERY transactional send rather than to this feature alone — added at Nathan's request while this PR owned the email path. It defaults to empty, meaning no `Reply-To` header at all, so a project that sets nothing is byte-identical to before. It is a separate param from `EMAIL_FROM` because the two answer different questions: `EMAIL_FROM` must be an address on a Resend-verified sending domain, while replies want a mailbox a human actually reads. On the Five Across deployment those are deliberately different hosts — sent from the Resend-verified subdomain, replies to the Google-hosted apex, because the Resend receiving side is switched off. The Resend Node SDK spells the send field `replyTo` (camelCase), verified against the installed `resend@4.8.0` typings; the `reply_to` that appears elsewhere in those typings is the response shape.
 
 `EMAIL_UNSUBSCRIBE_URL` (`functions/src/params.ts`) is the endpoint's public address. A param rather than a derived string because the address is a deployment fact, not a code fact — the same source deploys to two Firebase projects and may sit behind a rewrite or custom domain. The default is the conventional Cloud Functions URL for `gaycruisebingo`; **any other project must set it in `functions/.env.<projectId>`**, or its emails will carry an unsubscribe link pointing at the wrong project.
 
-The fan-out is paced (default 550ms between sends) because Resend's default account limit is a couple of requests a second and an unpaced blast would be throttled into dropped mail; the trigger's timeout is raised to match, and a recipient cap bounds a runaway.
+The fan-out is paced (default 550ms between sends) because Resend's default account limit is a couple of requests a second and an unpaced blast would be throttled into dropped mail; the trigger's timeout is raised to match.
+
+**The runaway guard bounds EXAMINED players and the roster query itself**, not just send attempts. A cap counting only real sends does nothing for the case it exists to catch — a roster that is entirely opted out, already sent, or missing verified addresses increments nothing and runs to the end, each iteration still costing a preference read — and an unbounded roster `.get()` materializes the whole collection before any in-loop cap can apply. The query is therefore limited to the ceiling plus one (so truncation is distinguishable from landing exactly on it, and is logged as an error), and the loop counts every player it examines. Continuation for legitimate large Events is unaffected: any roster at or under the ceiling is examined in full on every sweep.
+
+- **Given** a roster that is entirely suppressed **then** the loop stops at the ceiling rather than running to the end. (Test: "bounds EXAMINED players, not just send attempts".)
+- **Given** a roster larger than the ceiling **then** the query returns at most ceiling-plus-one and the overflow is logged. (Test: "bounds the roster QUERY too".)
+
+## Why the domain shapes are local
+
+`EmailDay` / `EmailEvent` / `EmailPlayer` restate the subsets of `DayDef` / `EventDoc` / `PlayerDoc` the email reads, rather than deriving them from the canonical contract. That is the repository's established boundary, not an oversight: `functions/tsconfig.json` sets `rootDir: "src"` and `include: ["src"]`, so a functions module cannot import `../../src/types` — and should not, since it would pull the app's contract module and its transitive imports into the Functions bundle. Every functions module that needs a domain shape does the same: `unlockDay.ts` (`DayLike`/`EventLike`), `autohide.ts` (`ReportableDoc`), `notify.ts` (`ModeratedDoc`), `finaleContent.ts` (`FinalePlayer`/`FinaleDay`).
+
+Decoupling is fine; silent divergence is not, which is what `tests/functions/finale-parity.test.ts` was written after. A TEST can import both projects even though neither can import the other, so `tests/functions/daily-engagement-email-contract-parity.test.ts` closes the drift risk with type-level assertions that each local shape stays assignable from its canonical counterpart. Adding a canonical field does not fail them — the email reads a deliberate subset — but narrowing or retyping one does.
+
+- **Given** a canonical `DayDef` / `EventDoc` / `PlayerDoc` **then** it is assignable to the email's local shape, `settings.dailyEmailEnabled` included. (Tests in `daily-engagement-email-contract-parity.test.ts`.)
 
 ## Not in this change
 

@@ -291,17 +291,31 @@ export async function applyOptOut(
   optedOut: boolean,
   deps: OptOutDeps = {},
 ): Promise<OptOutResult> {
-  const read = await readEmailPrefsOutcome(db, eventId, uid);
-  if (read.status === 'error') return 'error';
-  if (read.status === 'absent') return 'invalid';
-  if (!tokenMatches(read.prefs.token, suppliedToken)) return 'invalid';
+  // VERIFY AND WRITE IN ONE TRANSACTION. Reading the token, comparing it, and
+  // then writing in three separate steps leaves a window in which the token is
+  // rotated or revoked — and a request bearing the OLD token still lands its
+  // write on the newly-secured document, defeating the field-write revocation
+  // this module documents as its revocation mechanism (Codex #623 P2). Inside
+  // a transaction a concurrent token change aborts and retries, and the retry's
+  // re-read sees the new token, so the stale request correctly returns
+  // `invalid`.
+  const now = (deps.now ?? Date.now)();
   try {
-    await db
-      .doc(emailPrefsPath(eventId, uid))
-      .set({ optedOut, updatedAt: (deps.now ?? Date.now)() }, { merge: true });
-    return 'updated';
+    return await db.runTransaction<OptOutResult>(async (tx) => {
+      const ref = db.doc(emailPrefsPath(eventId, uid));
+      const snap = await tx.get(ref);
+      if (!snap.exists) return 'invalid';
+      const data = snap.data() ?? {};
+      const token = typeof data.token === 'string' ? data.token : '';
+      if (!tokenMatches(token, suppliedToken)) return 'invalid';
+      tx.set(ref, { optedOut, updatedAt: now }, { merge: true });
+      return 'updated';
+    });
   } catch (err) {
-    console.error('applyOptOut: write failed', eventId, uid, err);
+    // A failed transaction is a FAILED READ as much as a failed write, so it
+    // keeps the retryable `error` answer rather than collapsing to `invalid`
+    // (the distinction from the previous round).
+    console.error('applyOptOut: transaction failed', eventId, uid, err);
     return 'error';
   }
 }
