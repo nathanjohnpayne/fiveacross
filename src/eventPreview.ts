@@ -142,21 +142,47 @@ export function previewMetaLine(preview: EventPreview, now: number = Date.now())
   return parts.length ? parts.join(' · ') : null;
 }
 
-/** `null` until `applyResolvedEventPreview` runs — and permanently `null` on a
- *  single-Event build, which reads no hostname document (the gcb build renders
- *  no card, exactly as it does today). */
+/** `null` until `applyResolvedEventPreview` runs. On a hostname-resolved build
+ *  the resolver installs it before mount; on an ENV-PINNED build — which reads
+ *  no routing document at resolution time, the production defect this store
+ *  went reactive for — it arrives LATER, from the cached envelope at bootstrap
+ *  and then from `watchAdultContent`'s live snapshot of the same document. */
 let currentPreview: EventPreview | null = null;
 
-/** Install the resolved preview. Call once, at startup, from
- *  `bootstrapEventResolution` alongside the other resolved-state installers. */
+const listeners = new Set<() => void>();
+
+/** Subscribe to preview changes — the `useSyncExternalStore` seam that lets
+ *  the gate re-render when the slice arrives AFTER first paint (the env-pinned
+ *  path). Mirrors `subscribeAdultContent`: one store, resolved before React
+ *  exists, read from non-component code, so it cannot live in a provider. */
+export function subscribeEventPreview(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Install the resolved preview. Called at startup by
+ *  `bootstrapEventResolution`, and again by `watchAdultContent` on every live
+ *  snapshot of the routing document — which is what makes the card reachable
+ *  on env-pinned builds at all, since their resolution never reads one.
+ *
+ *  Deep-equality gated: the watcher re-coerces a fresh object per snapshot, so
+ *  without the check every heartbeat would swap the reference and re-render
+ *  the gate for identical content. Both producers build the object through
+ *  `coerceEventPreview`, so the key order is canonical and JSON equality is
+ *  exact. */
 export function applyResolvedEventPreview(preview: EventPreview | null | undefined): void {
-  currentPreview = preview ?? null;
+  const next = preview ?? null;
+  if (JSON.stringify(next) === JSON.stringify(currentPreview)) return;
+  currentPreview = next;
+  for (const listener of [...listeners]) listener();
 }
 
 /** The resolved preview the sign-in postcard renders, or `null` for no card.
  *  Read at render time, never captured at import time — same rule as
  *  `activeEdition`, same reason: resolution runs before mount, but a
- *  module-level constant would freeze the pre-resolution state. */
+ *  module-level constant would freeze the pre-resolution state. Stable
+ *  reference between changes (see the equality gate above), as
+ *  `useSyncExternalStore`'s getSnapshot contract requires. */
 export function activeEventPreview(): EventPreview | null {
   return currentPreview;
 }

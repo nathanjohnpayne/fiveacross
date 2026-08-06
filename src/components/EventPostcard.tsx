@@ -1,5 +1,5 @@
-import { useEffect, useReducer } from 'react';
-import { activeEventPreview, previewMetaLine } from '../eventPreview';
+import { useEffect, useReducer, useSyncExternalStore } from 'react';
+import { activeEventPreview, previewMetaLine, subscribeEventPreview } from '../eventPreview';
 import { editionBrand } from '../editions';
 
 // The sign-in gate's Event-preview card (#647, wireframes § "Join—the
@@ -10,10 +10,17 @@ import { editionBrand } from '../editions';
 // Reads ONLY resolved pre-auth state. `events/{eventId}` requires `signedIn()`
 // (the same constraint that put the wordmark in `editions.ts`), so everything
 // here comes from the `preview` slice of the world-readable `hostnames/{host}`
-// document, installed by `bootstrapEventResolution` before mount. No preview —
-// a single-Event build, a document seeded before #647, a not-found path that
-// never mounts this gate at all — renders NOTHING, exactly the pre-#647
-// screen; the card must degrade to absence, never to a frame of blanks.
+// document. On a hostname-resolved build `bootstrapEventResolution` installs
+// it before mount; on an ENV-PINNED build — the deployed Bodega shape, where
+// resolution's env short-circuit reads no routing document at all — it arrives
+// from the cached envelope at bootstrap or from `watchAdultContent`'s live
+// snapshot a beat AFTER first paint, which is why this reads the store through
+// `useSyncExternalStore` rather than a plain call: the card has to appear when
+// the slice lands, not on the next unrelated render (the production defect
+// behind this wiring). No preview — a document seeded before #647, an origin
+// with no routing document, a not-found path that never mounts this gate at
+// all — renders NOTHING, exactly the pre-#647 screen; the card must degrade to
+// absence, never to a frame of blanks.
 //
 // The Day line is COMPUTED from the seeded schedule at render time
 // (`previewMetaLine` → `previewDayLine`), never stored as a display string:
@@ -25,7 +32,7 @@ import { editionBrand } from '../editions';
 // and fiveacross render the same card as a plain panel (their Join frames'
 // `.banner`).
 export default function EventPostcard() {
-  const preview = activeEventPreview();
+  const preview = useSyncExternalStore(subscribeEventPreview, activeEventPreview, activeEventPreview);
   // "Live" has to survive the gate being LEFT OPEN (Codex P2 round 1): the Day
   // line is computed from the local date, so a phone sitting on this screen
   // across midnight would otherwise keep yesterday's Day until some unrelated

@@ -177,7 +177,11 @@ export function writeCache(
   }
 }
 
-function dropCache(storage: StorageLike | null, hostname: string): void {
+/** Remove a mapping after proven evidence that this hostname is no longer
+ * servable. The live hostname watcher shares this with the bootstrap resolver:
+ * an inactive routing document must not resurrect from a prior active envelope
+ * on the next env-pinned boot. */
+export function dropCache(storage: StorageLike | null, hostname: string): void {
   try {
     storage?.removeItem?.(cacheKey(hostname));
   } catch {
