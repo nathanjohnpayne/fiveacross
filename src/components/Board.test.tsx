@@ -247,8 +247,8 @@ describe('Share Card BINGO number', () => {
 function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: `2026-07-${String(15 + overrides.index).padStart(2, '0')}`,
-    port: `Port ${overrides.index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${overrides.index}`,
+    placeEmoji: '🇭🇷',
     tonight: [],
     pool: 'main',
     tutorial: false,

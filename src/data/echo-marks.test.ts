@@ -195,8 +195,8 @@ const day = (index: number, over: Partial<DayDef> = {}): DayDef =>
   ({
     index,
     date: '2026-07-16',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     theme: 'get-sporty',
     tonight: ['A', 'B'],
     pool: 'main',

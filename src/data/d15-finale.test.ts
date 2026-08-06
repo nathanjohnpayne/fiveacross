@@ -12,8 +12,8 @@ const HOUR = 3_600_000;
 function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'pool'>): DayDef {
   return {
     date: '2026-07-16',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     theme: 'neon-playground',
     tonight: [],
     tutorial: overrides.pool !== 'main',

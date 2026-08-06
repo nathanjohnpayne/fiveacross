@@ -15,8 +15,8 @@ import type { DayDef, EventDoc, PlayerDoc } from '../types';
 const days: DayDef[] = Array.from({ length: 10 }, (_, index) => ({
   index,
   date: '2026-07-16',
-  port: index === 0 ? 'Embark' : index === 9 ? 'Farewell' : `Port ${index}`,
-  portEmoji: '🇭🇷',
+  place: index === 0 ? 'Embark' : index === 9 ? 'Farewell' : `Port ${index}`,
+  placeEmoji: '🇭🇷',
   theme: 'neon-playground',
   tonight: [],
   pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',
@@ -59,8 +59,8 @@ const champ = mkPlayer({
 
 const event: EventDoc = {
   name: 'Med 2026',
-  sailStart: '2026-07-16',
-  sailEnd: '2026-07-25',
+  startsOn: '2026-07-16',
+  endsOn: '2026-07-25',
   status: 'active',
   defaultTheme: 'neon-playground',
   claimMode: 'honor',

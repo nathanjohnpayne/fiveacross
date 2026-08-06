@@ -24,8 +24,8 @@ import type { DayDef, PlayerDoc } from '../types';
 const days: DayDef[] = Array.from({ length: 10 }, (_, index) => ({
   index,
   date: '2026-07-16',
-  port: 'Port',
-  portEmoji: '🇭🇷',
+  place: 'Port',
+  placeEmoji: '🇭🇷',
   theme: 'neon-playground',
   tonight: [],
   pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',

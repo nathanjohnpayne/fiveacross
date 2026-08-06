@@ -132,8 +132,8 @@ function mkDay(over: Partial<DayDef>): DayDef {
   return {
     index: 2,
     date: '2026-07-18',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     theme: 'neon-playground',
     tonight: [],
     pool: 'main',

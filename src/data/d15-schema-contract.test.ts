@@ -49,8 +49,8 @@ const legacyItem: Omit<ItemDoc, 'id' | 'pool'> = {
 // an Event seeded before this ticket persists (no days/timezone keys).
 const legacyEvent: Omit<EventDoc, 'days' | 'timezone'> = {
   name: 'Test Sailing',
-  sailStart: '2026-07-15',
-  sailEnd: '2026-07-25',
+  startsOn: '2026-07-15',
+  endsOn: '2026-07-25',
   status: 'active',
   defaultTheme: 'neon-playground',
   claimMode: 'honor',
@@ -91,8 +91,8 @@ describe('eventConverter (Phase 1.5 days/timezone defaults)', () => {
     const day = {
       index: 0,
       date: '2026-07-16',
-      port: 'Split',
-      portEmoji: '🇭🇷',
+      place: 'Split',
+      placeEmoji: '🇭🇷',
       theme: 'get-sporty' as const,
       pool: 'main' as const,
       tutorial: false,

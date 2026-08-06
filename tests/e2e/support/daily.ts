@@ -102,14 +102,14 @@ export async function seedDailyEvent(
     await updateDoc(doc(db, 'events', EVENT_ID), {
       ...(opts.frozenAt != null ? { frozenAt: opts.frozenAt } : {}),
       days: [
-        { index: 0, date: '2026-07-15', port: 'Trieste', portEmoji: '🚢', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: now - 100 * HOUR, snapshotItemIds: embarkSnapshotIds },
-        { index: 1, date: '2026-07-16', port: 'Split', portEmoji: '🇭🇷', theme: 'welcome-aboard', pool: 'main', tutorial: false, unlockAt: now - 50 * HOUR, snapshotItemIds: mainSnapshotIds },
-        { index: 2, date: '2026-07-17', port: 'Valletta', portEmoji: '🇲🇹', theme: 'get-sporty', pool: 'main', tutorial: false, unlockAt: now - 10 * HOUR, snapshotItemIds: mainSnapshotIds },
-        { index: 3, date: '2026-07-24', port: 'Venice', portEmoji: '🇮🇹', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: farewellUnlockAt, snapshotItemIds: farewellSnapshotIds },
+        { index: 0, date: '2026-07-15', place: 'Trieste', placeEmoji: '🚢', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: now - 100 * HOUR, snapshotItemIds: embarkSnapshotIds },
+        { index: 1, date: '2026-07-16', place: 'Split', placeEmoji: '🇭🇷', theme: 'welcome-aboard', pool: 'main', tutorial: false, unlockAt: now - 50 * HOUR, snapshotItemIds: mainSnapshotIds },
+        { index: 2, date: '2026-07-17', place: 'Valletta', placeEmoji: '🇲🇹', theme: 'get-sporty', pool: 'main', tutorial: false, unlockAt: now - 10 * HOUR, snapshotItemIds: mainSnapshotIds },
+        { index: 3, date: '2026-07-24', place: 'Venice', placeEmoji: '🇮🇹', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: farewellUnlockAt, snapshotItemIds: farewellSnapshotIds },
         // +72h, not +24h (CodeRabbit, PR #339): the locked farewell above sits
         // at +48h, and a later-index Day unlocking EARLIER than its
         // predecessor is an invalid schedule shape. Still locked either way.
-        { index: 4, date: '2026-07-25', port: 'Corfu', portEmoji: '🇬🇷', theme: 'glamiators', pool: 'main', tutorial: false, unlockAt: now + 72 * HOUR },
+        { index: 4, date: '2026-07-25', place: 'Corfu', placeEmoji: '🇬🇷', theme: 'glamiators', pool: 'main', tutorial: false, unlockAt: now + 72 * HOUR },
       ],
     });
   });

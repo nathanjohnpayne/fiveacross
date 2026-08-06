@@ -21,8 +21,8 @@ describe('email domain shapes stay assignable from the canonical contracts', () 
   it('EmailDay accepts every field it reads from a DayDef', () => {
     expectTypeOf<DayDef['index']>().toExtend<EmailDay['index']>();
     expectTypeOf<DayDef['date']>().toExtend<NonNullable<EmailDay['date']>>();
-    expectTypeOf<DayDef['port']>().toExtend<NonNullable<EmailDay['port']>>();
-    expectTypeOf<DayDef['portEmoji']>().toExtend<NonNullable<EmailDay['portEmoji']>>();
+    expectTypeOf<DayDef['place']>().toExtend<NonNullable<EmailDay['place']>>();
+    expectTypeOf<DayDef['placeEmoji']>().toExtend<NonNullable<EmailDay['placeEmoji']>>();
     expectTypeOf<DayDef['theme']>().toExtend<NonNullable<EmailDay['theme']>>();
     expectTypeOf<DayDef['tonight']>().toExtend<NonNullable<EmailDay['tonight']>>();
     expectTypeOf<DayDef['tutorial']>().toExtend<NonNullable<EmailDay['tutorial']>>();

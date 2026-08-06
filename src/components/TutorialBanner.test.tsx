@@ -10,8 +10,8 @@ import TutorialBanner, { TutorialTag } from './TutorialBanner';
 function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'pool' | 'tutorial'>): DayDef {
   return {
     date: '2026-07-15',
-    port: 'Trieste',
-    portEmoji: '🇮🇹',
+    place: 'Trieste',
+    placeEmoji: '🇮🇹',
     theme: 'welcome-aboard',
     tonight: [],
     unlockAt: 0,
@@ -25,10 +25,10 @@ const FAREWELL_DAY = day({
   pool: 'farewell',
   tutorial: true,
   theme: 'so-long-farewell',
-  port: 'Barcelona',
-  portEmoji: '🇪🇸',
+  place: 'Barcelona',
+  placeEmoji: '🇪🇸',
 });
-const MAIN_DAY = day({ index: 2, pool: 'main', tutorial: false, theme: 'get-sporty', port: 'Split' });
+const MAIN_DAY = day({ index: 2, pool: 'main', tutorial: false, theme: 'get-sporty', place: 'Split' });
 
 describe('TutorialBanner — embark banner', () => {
   it('renders all three beats + the warm-up caption on the Welcome Aboard Day', () => {

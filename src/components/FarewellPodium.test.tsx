@@ -95,8 +95,8 @@ describe('FarewellPodiumView', () => {
     const farewellDay: DayDef = {
       index: 9,
       date: '2026-07-25',
-      port: 'Venice',
-      portEmoji: '🇮🇹',
+      place: 'Venice',
+      placeEmoji: '🇮🇹',
       theme: 'so-long-farewell',
       tonight: [],
       pool: 'farewell',

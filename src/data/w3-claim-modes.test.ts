@@ -55,8 +55,8 @@ vi.mock('firebase/firestore', async (importOriginal) => {
             {
               index: 0,
               date: '2026-07-16',
-              port: 'Split',
-              portEmoji: '🇭🇷',
+              place: 'Split',
+              placeEmoji: '🇭🇷',
               theme: 'get-sporty',
               pool: 'main',
               tutorial: false,
@@ -167,8 +167,8 @@ beforeEach(() => {
         {
           index: 0,
           date: '2026-07-16',
-          port: 'Split',
-          portEmoji: '🇭🇷',
+          place: 'Split',
+          placeEmoji: '🇭🇷',
           theme: 'get-sporty',
           pool: 'main',
           tutorial: false,

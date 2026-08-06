@@ -156,8 +156,8 @@ const pendingItem = (id: string, over: Partial<ItemDoc> = {}): ItemDoc =>
 const dayDef = (over: Partial<DayDef> = {}): DayDef => ({
   index: 0,
   date: '2026-07-16',
-  port: 'Split',
-  portEmoji: '🇭🇷',
+  place: 'Split',
+  placeEmoji: '🇭🇷',
   theme: 'neon-playground',
   tonight: [],
   pool: 'main',
@@ -253,7 +253,7 @@ describe('Admin Schedule surface (specs/d15-admin-schedule.md, at /more/admin/sc
   it('shows exactly the seeded Days in order, one row per Day', () => {
     H.event = {
       ...H.event,
-      days: [dayDef({ index: 0, date: '2026-07-15', port: 'Trieste', portEmoji: '🇮🇹' }), dayDef({ index: 1 })],
+      days: [dayDef({ index: 0, date: '2026-07-15', place: 'Trieste', placeEmoji: '🇮🇹' }), dayDef({ index: 1 })],
     } as unknown as EventDoc;
     renderAdmin('/more/admin/schedule');
 

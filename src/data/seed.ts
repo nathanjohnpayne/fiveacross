@@ -176,8 +176,8 @@ export const DAYS: DayDef[] = [
   {
     index: 0,
     date: '2026-07-15',
-    port: 'Trieste',
-    portEmoji: '🇮🇹',
+    place: 'Trieste',
+    placeEmoji: '🇮🇹',
     theme: 'welcome-aboard',
     // Day 1's two signature events. "Welcome Party" is paraphrased from the
     // guide's "Atlantis Welcome Party" to keep the brand mark out of user-facing
@@ -199,8 +199,8 @@ export const DAYS: DayDef[] = [
   {
     index: 1,
     date: '2026-07-16',
-    port: 'Split',
-    portEmoji: '🇭🇷',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
     theme: 'uniforms-without-borders',
     tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'],
     pool: 'main',
@@ -210,8 +210,8 @@ export const DAYS: DayDef[] = [
   {
     index: 2,
     date: '2026-07-17',
-    port: 'Sea Day',
-    portEmoji: '🌊',
+    place: 'Sea Day',
+    placeEmoji: '🌊',
     theme: 'neon-pink-playground',
     tonight: ['💖 Seriously Pink T-Dance', '🌈 Neon Playground'],
     pool: 'main',
@@ -221,8 +221,8 @@ export const DAYS: DayDef[] = [
   {
     index: 3,
     date: '2026-07-18',
-    port: 'Valletta',
-    portEmoji: '🇲🇹',
+    place: 'Valletta',
+    placeEmoji: '🇲🇹',
     theme: 'sporty-splash',
     tonight: ['💦 Splash T-Dance', '🏋️ Get Sporty'],
     pool: 'main',
@@ -232,8 +232,8 @@ export const DAYS: DayDef[] = [
   {
     index: 4,
     date: '2026-07-19',
-    port: 'Palermo (Sicily)',
-    portEmoji: '🇮🇹',
+    place: 'Palermo (Sicily)',
+    placeEmoji: '🇮🇹',
     theme: 'under-the-stars',
     tonight: ['🎭 AirOtic', '🌌 Under the Stars'],
     pool: 'main',
@@ -243,8 +243,8 @@ export const DAYS: DayDef[] = [
   {
     index: 5,
     date: '2026-07-20',
-    port: 'Naples (Pompeii)',
-    portEmoji: '🇮🇹',
+    place: 'Naples (Pompeii)',
+    placeEmoji: '🇮🇹',
     theme: 'glamiators',
     tonight: ['🎤 Solea Pfeiffer', '🏛️ Glamiators'],
     pool: 'main',
@@ -254,8 +254,8 @@ export const DAYS: DayDef[] = [
   {
     index: 6,
     date: '2026-07-21',
-    port: 'Rome (Civitavecchia)',
-    portEmoji: '🇮🇹',
+    place: 'Rome (Civitavecchia)',
+    placeEmoji: '🇮🇹',
     theme: 'atlantis-classics',
     // "Dance Classics" paraphrases the guide's "Atlantis Classics" for the same
     // markless-copy non-goal noted on Day 1.
@@ -267,8 +267,8 @@ export const DAYS: DayDef[] = [
   {
     index: 7,
     date: '2026-07-22',
-    port: 'Villefranche (Nice)',
-    portEmoji: '🇫🇷',
+    place: 'Villefranche (Nice)',
+    placeEmoji: '🇫🇷',
     theme: 'summer-white',
     tonight: ['🎤 HAYLA', '🤍 Summer White Party'],
     pool: 'main',
@@ -278,8 +278,8 @@ export const DAYS: DayDef[] = [
   {
     index: 8,
     date: '2026-07-23',
-    port: 'Marseille',
-    portEmoji: '🇫🇷',
+    place: 'Marseille',
+    placeEmoji: '🇫🇷',
     theme: 'revival-disco',
     tonight: ['🪩 Revival! Classic Disco T-Dance', '🎉 Last Dance'],
     pool: 'main',
@@ -289,8 +289,8 @@ export const DAYS: DayDef[] = [
   {
     index: 9,
     date: '2026-07-24',
-    port: 'Barcelona',
-    portEmoji: '🇪🇸',
+    place: 'Barcelona',
+    placeEmoji: '🇪🇸',
     theme: 'so-long-farewell',
     // Editorial line — disembark morning publishes no guide events.
     tonight: ['🧳 Disembark in Barcelona', '👋 Until next year'],

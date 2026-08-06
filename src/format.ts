@@ -26,19 +26,19 @@ const MONTHS = [
  * `new Date('2026-07-15')` is parsed as UTC midnight and renders as the 14th in
  * negative-offset zones, so a naive parse would shift the displayed day.
  */
-export function formatSailRange(sailStart: string, sailEnd: string): string {
+export function formatDateRange(startsOn: string, endsOn: string): string {
   const parse = (s: string) => {
     const [y, m, d] = String(s ?? '')
       .split('-')
       .map(Number);
     return { y, m, d };
   };
-  const a = parse(sailStart);
-  const b = parse(sailEnd);
+  const a = parse(startsOn);
+  const b = parse(endsOn);
   // Degrade to no range (rather than throw / render a broken title) for a missing,
   // malformed, or impossible date, or a reversed window — a partial or hand-edited
   // Event doc must never crash the board, and the write rules don't validate
-  // sailStart/sailEnd. `Date.UTC` is used ONLY to reject impossible calendar dates
+  // startsOn/endsOn. `Date.UTC` is used ONLY to reject impossible calendar dates
   // (e.g. 2026-02-31, 2026-13-01) via a round-trip check; the range itself is still
   // formatted from the parsed integer parts so no timezone can shift a displayed day.
   const validCalendar = (p: { y: number; m: number; d: number }) => {
@@ -66,8 +66,8 @@ export function formatSailRange(sailStart: string, sailEnd: string): string {
  *     -> 'Atlantis Med—Trieste to Barcelona—July 15–24, 2026'.
  * The `.card-meta` style uppercases it for display.
  */
-export function eventTitle(name: string, sailStart: string, sailEnd: string): string {
-  const range = formatSailRange(sailStart, sailEnd);
+export function eventTitle(name: string, startsOn: string, endsOn: string): string {
+  const range = formatDateRange(startsOn, endsOn);
   return range ? `${name}—${range}` : name;
 }
 
@@ -78,7 +78,7 @@ const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
  * footer): 'Jul 15–24' within one month, 'Jul 15 – Aug 2' across months.
  * Degrades to '' on a malformed/reversed window (the footer just omits it).
  */
-export function shortSailRange(sailStart: string, sailEnd: string): string {
+export function shortDateRange(startsOn: string, endsOn: string): string {
   const parse = (v: string) => {
     const [y, m, d] = String(v ?? '').split('-').map(Number);
     if (!Number.isFinite(y) || !(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
@@ -87,8 +87,8 @@ export function shortSailRange(sailStart: string, sailEnd: string): string {
     const dt = new Date(y, m - 1, d);
     return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d ? { y, m, d } : null;
   };
-  const a = parse(sailStart);
-  const b = parse(sailEnd);
+  const a = parse(startsOn);
+  const b = parse(endsOn);
   if (!a || !b || new Date(b.y, b.m - 1, b.d) < new Date(a.y, a.m - 1, a.d)) return '';
   if (a.y === b.y && a.m === b.m && a.d === b.d) return `${SHORT_MONTHS[a.m - 1]} ${a.d}`;
   if (a.y === b.y && a.m === b.m) return `${SHORT_MONTHS[a.m - 1]} ${a.d}–${b.d}`;

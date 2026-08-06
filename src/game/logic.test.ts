@@ -237,8 +237,8 @@ describe('bingoLineEdge (#176: the celebration re-fires on each NEW line)', () =
 
 describe('standingsFrozen (#265; Codex P2 on #278 — the stale-cache belt)', () => {
   const days = [
-    { index: 0, date: '2026-07-15', port: 'Trieste', portEmoji: '', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: 0 },
-    { index: 9, date: '2026-07-24', port: 'Barcelona', portEmoji: '', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: 1000 },
+    { index: 0, date: '2026-07-15', place: 'Trieste', placeEmoji: '', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: 0 },
+    { index: 9, date: '2026-07-24', place: 'Barcelona', placeEmoji: '', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: 1000 },
   ] as import('../types').DayDef[];
 
   it('frozen once the scheduler stamp is present, regardless of the clock', () => {

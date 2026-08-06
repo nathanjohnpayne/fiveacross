@@ -17,8 +17,8 @@ function makeDays(count = 10, startUnlock = 0): DayDef[] {
   return Array.from({ length: count }, (_, index) => ({
     index,
     date: `2026-07-${String(15 + index).padStart(2, '0')}`,
-    port: `Port ${index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${index}`,
+    placeEmoji: '🇭🇷',
     theme: 'get-sporty',
     tonight: [],
     pool: index === 0 ? 'embark' : index === count - 1 ? 'farewell' : 'main',

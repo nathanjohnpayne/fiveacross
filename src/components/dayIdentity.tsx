@@ -35,7 +35,7 @@ import { defaultViewedIndex } from './DaySwitcher';
  * tests drive with `setActiveEdition` exactly as the sign-in gate's do.
  */
 export interface DayIdentity {
-  port: string;
+  place: string;
   theme: string;
 }
 
@@ -84,14 +84,14 @@ export function DayIdentityLines({ identity }: { identity: DayIdentity | null })
   if (!identity) {
     return (
       <div className="day-identity" aria-hidden="true">
-        <span className="day-identity-line day-identity-port">—</span>
+        <span className="day-identity-line day-identity-place">—</span>
         <span className="day-identity-line day-identity-theme">—</span>
       </div>
     );
   }
   return (
     <div className="day-identity">
-      <span className="day-identity-line day-identity-port">{identity.port}</span>
+      <span className="day-identity-line day-identity-place">{identity.place}</span>
       <span className="day-identity-line day-identity-theme">{identity.theme}</span>
     </div>
   );
@@ -111,13 +111,13 @@ export function headerDayIdentity(
   if (today < first.date) {
     const start = shortDate(first.date);
     return {
-      port: start ? `${editionBrand().preEventVerb} ${start}` : `${first.portEmoji} ${first.port}`.trim(),
+      place: start ? `${editionBrand().preEventVerb} ${start}` : `${first.placeEmoji} ${first.place}`.trim(),
       theme: themeLine(first.theme),
     };
   }
   if (today > last.date) {
     // Spec copy is the bare port ("Barcelona"), no flag — the cruise is over.
-    return { port: last.port, theme: '👋 Until next year' };
+    return { place: last.place, theme: '👋 Until next year' };
   }
   // Mid-cruise: name the latest UNLOCKED Day, delegating "which Day is today"
   // to the day switcher's `defaultViewedIndex` so the header and the board's
@@ -126,5 +126,5 @@ export function headerDayIdentity(
   // `defaultViewedIndex` is >= 0 here (the embark Day's `unlockAt: 0` is always
   // unlocked), so the `?? first` is only a defensive fallback.
   const current = ordered[defaultViewedIndex(ordered, now)] ?? first;
-  return { port: `${current.portEmoji} ${current.port}`.trim(), theme: themeLine(current.theme) };
+  return { place: `${current.placeEmoji} ${current.place}`.trim(), theme: themeLine(current.theme) };
 }

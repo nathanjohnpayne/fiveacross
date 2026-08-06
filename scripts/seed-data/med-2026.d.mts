@@ -3,8 +3,8 @@ import type { SeedPrompt } from '../seed.d.mts';
 
 export const EVENT_SEED: {
   name: string;
-  sailStart: string;
-  sailEnd: string;
+  startsOn: string;
+  endsOn: string;
   status: 'active';
   defaultTheme: string;
   claimMode: string;

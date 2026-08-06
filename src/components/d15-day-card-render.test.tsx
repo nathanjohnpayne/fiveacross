@@ -119,8 +119,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function day(over: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: `2026-07-${String(15 + over.index).padStart(2, '0')}`,
-    port: `Port ${over.index}`,
-    portEmoji: '🇭🇷',
+    place: `Port ${over.index}`,
+    placeEmoji: '🇭🇷',
     tonight: [],
     pool: 'main',
     tutorial: false,

@@ -141,16 +141,20 @@ export type ThemeId =
   | 'confetti-hour'
   | 'afterglow';
 
-// One Day of the cruise (daily-cards-spec § "Data model"). Ordered inside
-// `EventDoc.days` (length 10 for the July sailing, but the model assumes no
-// fixed length — a future cruise is a new EventDoc with its own days[]). Each
-// Day names a date, port, ThemeId, and item pool; the tutorial Days sit at the
-// ends but that placement is data, not a code assumption.
+// One Day of an Event (daily-cards-spec § "Data model"). Ordered inside
+// `EventDoc.days` (length 10 for the July sailing, 4 for Bodega Bay — the
+// model assumes no fixed length; a future Event is a new EventDoc with its own
+// days[]). Each Day names a date, place, ThemeId, and item pool; the tutorial
+// Days sit at the ends but that placement is data, not a code assumption.
 export interface DayDef {
   index: number;        // 0..9
   date: string;         // ISO date, e.g. '2026-07-16'
-  port: string;         // 'Split'
-  portEmoji: string;    // '🇭🇷'
+  // Where this Day happens — 'Split', 'Bodega Bay'. Docs written before the
+  // #566 rename persist `port`/`portEmoji`; `migrateDayFields`
+  // (data/converters) coerces them on read, and writes only ever emit the
+  // neutral names.
+  place: string;         // 'Split'
+  placeEmoji: string;    // '🇭🇷'
   theme: ThemeId;       // the UNIFIED day theme — drives card + chrome styling
   // The night's two signature events, shown on the card's "Tonight:" line
   // (day bar + locked-day tease). EXACTLY two display strings with emoji —
@@ -176,8 +180,11 @@ export interface DayDef {
 
 export interface EventDoc {
   name: string;
-  sailStart: string; // ISO date
-  sailEnd: string;   // ISO date
+  // The Event's date window. Docs written before the #566 rename persist
+  // `sailStart`/`sailEnd`; the eventConverter coerces them on read, and
+  // writes only ever emit the neutral names.
+  startsOn: string; // ISO date
+  endsOn: string;   // ISO date
   status: 'active' | 'archived';
   defaultTheme: ThemeId;
   claimMode: ClaimMode;
@@ -404,7 +411,7 @@ export interface BoardDoc {
 // rather than drifting in a component file. The Day subset is DERIVED from
 // `DayDef` (never re-declared) and keeps `ThemeId`, so the stored and live Day
 // contracts cannot diverge without a type error.
-export interface CardSnapshotDay extends Pick<DayDef, 'port' | 'portEmoji' | 'theme'> {
+export interface CardSnapshotDay extends Pick<DayDef, 'place' | 'placeEmoji' | 'theme'> {
   number: number; // day.index + 1 (1..10) — the 1-based label the header shows
   label: string; // resolved ThemeMeta label for the header line (themeLabel(theme))
 }

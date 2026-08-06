@@ -1366,8 +1366,8 @@ describe('Leaderboard — share affordance', () => {
         {
           index: 0,
           date: '2026-07-15',
-          port: 'Palermo',
-          portEmoji: '🇮🇹',
+          place: 'Palermo',
+          placeEmoji: '🇮🇹',
           theme: 'glamiators',
           tonight: [],
           pool: 'main',
@@ -1394,8 +1394,8 @@ describe('Leaderboard — share affordance', () => {
         {
           index: 0,
           date: '2026-07-15',
-          port: 'Palermo',
-          portEmoji: '🇮🇹',
+          place: 'Palermo',
+          placeEmoji: '🇮🇹',
           theme: 'glamiators',
           tonight: [],
           pool: 'main',
@@ -1410,8 +1410,8 @@ describe('Leaderboard — share affordance', () => {
         {
           index: 0,
           date: '2026-07-15',
-          port: 'Valletta',
-          portEmoji: '🇲🇹',
+          place: 'Valletta',
+          placeEmoji: '🇲🇹',
           theme: 'glamiators',
           tonight: [],
           pool: 'main',

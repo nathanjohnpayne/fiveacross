@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { QueryDocumentSnapshot } from 'firebase/firestore';
-import { migrateClaimMode, eventConverter } from './converters';
+import { migrateClaimMode, migrateDayFields, eventConverter } from './converters';
 import type {
   ClaimMode,
   DoubtDoc,
@@ -20,8 +20,8 @@ const snapshotOf = (data: unknown) => ({ data: () => data }) as unknown as Query
 // blackoutEnabled) also pins ADR 0004's dead-config drop at compile time.
 const baseEvent: Omit<EventDoc, 'claimMode'> = {
   name: 'Test Sailing',
-  sailStart: '2026-01-01',
-  sailEnd: '2026-01-08',
+  startsOn: '2026-01-01',
+  endsOn: '2026-01-08',
   status: 'active',
   defaultTheme: 'neon-playground',
   admins: [],
@@ -86,6 +86,95 @@ describe('eventConverter (migration applied on read)', () => {
       snapshotOf({ ...baseEvent, claimMode: 'honor', bannedUids: 'bob' }),
     );
     expect(malformed.bannedUids).toEqual([]);
+  });
+
+  // --- #566 neutral field names: sailStart/sailEnd → startsOn/endsOn, and
+  // per-Day port/portEmoji → place/placeEmoji, coerced on READ (the
+  // migrateClaimMode pattern) so the live pre-rename GCB doc keeps working
+  // with no data migration while the Bodega doc — seeded with the neutral
+  // names from day one — reads directly.
+  it('reads a pre-rename Event window (sailStart/sailEnd) as startsOn/endsOn', () => {
+    const legacy = {
+      ...baseEvent,
+      claimMode: 'honor',
+      sailStart: '2026-07-15',
+      sailEnd: '2026-07-24',
+    } as Record<string, unknown>;
+    delete legacy.startsOn;
+    delete legacy.endsOn;
+    const event = eventConverter.fromFirestore(snapshotOf(legacy));
+    expect(event.startsOn).toBe('2026-07-15');
+    expect(event.endsOn).toBe('2026-07-24');
+  });
+
+  it('prefers the neutral window names when a doc carries both (a post-rename reseed merge)', () => {
+    const both = {
+      ...baseEvent,
+      claimMode: 'honor',
+      startsOn: '2026-08-07',
+      endsOn: '2026-08-09',
+      sailStart: '2026-07-15',
+      sailEnd: '2026-07-24',
+    };
+    const event = eventConverter.fromFirestore(snapshotOf(both));
+    expect(event.startsOn).toBe('2026-08-07');
+    expect(event.endsOn).toBe('2026-08-09');
+  });
+
+  it('resolves an Event carrying neither window shape to empty strings (formatters degrade to no range)', () => {
+    const bare = { ...baseEvent, claimMode: 'honor' } as Record<string, unknown>;
+    delete bare.startsOn;
+    delete bare.endsOn;
+    const event = eventConverter.fromFirestore(snapshotOf(bare));
+    expect(event.startsOn).toBe('');
+    expect(event.endsOn).toBe('');
+  });
+
+  it('reads pre-rename Day fields (port/portEmoji) as place/placeEmoji across days[]', () => {
+    const legacyDay = {
+      index: 0,
+      date: '2026-07-16',
+      port: 'Split',
+      portEmoji: '🇭🇷',
+      theme: 'get-sporty',
+      tonight: ['a', 'b'],
+      pool: 'main',
+      tutorial: false,
+      unlockAt: 1,
+    };
+    const event = eventConverter.fromFirestore(
+      snapshotOf({ ...baseEvent, claimMode: 'honor', days: [legacyDay] }),
+    );
+    expect(event.days[0].place).toBe('Split');
+    expect(event.days[0].placeEmoji).toBe('🇭🇷');
+    // The legacy keys are stripped from the coerced object, so a consumer that
+    // serializes a converter-read Day never re-emits both shapes.
+    expect(event.days[0]).not.toHaveProperty('port');
+    expect(event.days[0]).not.toHaveProperty('portEmoji');
+    // Everything else passes through untouched.
+    expect(event.days[0].theme).toBe('get-sporty');
+    expect(event.days[0].unlockAt).toBe(1);
+  });
+});
+
+describe('migrateDayFields (#566 legacy Day field read-migration)', () => {
+  it('prefers the neutral names when a Day carries both shapes', () => {
+    const day = migrateDayFields({ place: 'Bodega Bay', placeEmoji: '🐦', port: 'Split', portEmoji: '🇭🇷' });
+    expect(day.place).toBe('Bodega Bay');
+    expect(day.placeEmoji).toBe('🐦');
+  });
+
+  it('passes a neutral-named Day through unchanged', () => {
+    const day = migrateDayFields({ index: 3, place: 'The drive home', placeEmoji: '🌫️', pool: 'farewell' });
+    expect(day.place).toBe('The drive home');
+    expect(day.placeEmoji).toBe('🌫️');
+    expect(day.index).toBe(3);
+  });
+
+  it('defaults a Day with neither shape (malformed/minimal fixture) to empty strings', () => {
+    const day = migrateDayFields({ index: 1 });
+    expect(day.place).toBe('');
+    expect(day.placeEmoji).toBe('');
   });
 });
 

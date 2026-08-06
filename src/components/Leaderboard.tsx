@@ -79,7 +79,7 @@ export function leaderboardShareCopy(
   const currentDay = unlocked.length ? unlocked[unlocked.length - 1] : days[0];
   const contextLine =
     currentDay && event?.name
-      ? `${event.name} · Day ${currentDay.index + 1} · ${currentDay.port}`
+      ? `${event.name} · Day ${currentDay.index + 1} · ${currentDay.place}`
       : undefined;
   const statLine = days.length
     ? `Through Day ${(currentDay?.index ?? days.length - 1) + 1} of ${days.length}`

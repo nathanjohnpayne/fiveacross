@@ -14,8 +14,8 @@ import { TABS } from '../components/tabs';
 
 describe('x-launch-checklist: seeded sail window (embarkation 2026-07-15)', () => {
   it('seeds the sailing as 2026-07-15 through 2026-07-24 — the exact window the runbook is scheduled against', () => {
-    expect(EVENT_SEED.sailStart).toBe('2026-07-15');
-    expect(EVENT_SEED.sailEnd).toBe('2026-07-24');
+    expect(EVENT_SEED.startsOn).toBe('2026-07-15');
+    expect(EVENT_SEED.endsOn).toBe('2026-07-24');
   });
 });
 

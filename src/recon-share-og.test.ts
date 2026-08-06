@@ -138,7 +138,7 @@ describe('recon: bare-URL unfurl keeps working with no server', () => {
     const theme = THEMES.find((t) => t.id === day.theme);
     if (!theme) throw new Error('no ThemeMeta for neon-pink-playground');
     expect(template).toContain(`Day ${day.index + 1} · ${theme.label} ${theme.emoji}`);
-    expect(template).toContain(`${day.portEmoji} ${day.port}`);
+    expect(template).toContain(`${day.placeEmoji} ${day.place}`);
   });
 });
 

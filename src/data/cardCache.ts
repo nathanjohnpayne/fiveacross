@@ -72,11 +72,27 @@ function isSnapshotDay(v: unknown): v is CardSnapshotDay | null {
   return (
     isRecord(v) &&
     isFiniteNumber(v.number) &&
-    typeof v.port === 'string' &&
-    typeof v.portEmoji === 'string' &&
+    typeof v.place === 'string' &&
+    typeof v.placeEmoji === 'string' &&
     typeof v.theme === 'string' &&
     typeof v.label === 'string'
   );
+}
+
+/**
+ * Coerce a stored Day blob written before the #566 field rename — `port`/
+ * `portEmoji` instead of `place`/`placeEmoji` — into the current shape, so a
+ * device's existing durable card survives the rename instead of reading as a
+ * miss mid-Event. Same read-coerce/write-new pattern as the converters
+ * (`migrateClaimMode`); writes only ever emit the new keys. Anything that is
+ * not a legacy-shaped record passes through untouched for `isSnapshotDay` to
+ * judge.
+ */
+function normalizeSnapshotDay(v: unknown): unknown {
+  if (!isRecord(v) || typeof v.place === 'string') return v;
+  const { port, portEmoji, ...rest } = v as Record<string, unknown>;
+  if (typeof port !== 'string' || typeof portEmoji !== 'string') return v;
+  return { ...rest, place: port, placeEmoji: portEmoji };
 }
 
 function isSnapshotCell(v: unknown): v is Cell {
@@ -119,6 +135,7 @@ function isDayIndex(v: unknown): v is number | null {
 function parseSnapshot(raw: string, uid: string, requiredDayIndex: number | null | undefined): CardSnapshot | null {
   const parsed: unknown = JSON.parse(raw);
   if (!isRecord(parsed)) return null;
+  const day = normalizeSnapshotDay(parsed.day);
   if (
     parsed.v !== SNAPSHOT_VERSION ||
     parsed.uid !== uid ||
@@ -128,7 +145,7 @@ function parseSnapshot(raw: string, uid: string, requiredDayIndex: number | null
     !isFiniteNumber(parsed.savedAt) ||
     !isFiniteNumber(parsed.bingoCount) ||
     !isSnapshotCells(parsed.cells) ||
-    !isSnapshotDay(parsed.day)
+    !isSnapshotDay(day)
   ) {
     return null;
   }
@@ -140,7 +157,7 @@ function parseSnapshot(raw: string, uid: string, requiredDayIndex: number | null
     savedAt: parsed.savedAt,
     bingoCount: parsed.bingoCount,
     cells: parsed.cells,
-    day: parsed.day,
+    day,
   };
 }
 

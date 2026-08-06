@@ -83,11 +83,11 @@ describe('DAYS — the ten-Day itinerary mapping', () => {
       ['2026-07-24', 'Barcelona', '🇪🇸', 'so-long-farewell', 'farewell', true],
     ] as const;
 
-    expected.forEach(([date, port, portEmoji, theme, pool, tutorial], i) => {
+    expected.forEach(([date, port, placeEmoji, theme, pool, tutorial], i) => {
       const day = DAYS[i];
       expect(day.date).toBe(date);
-      expect(day.port).toBe(port);
-      expect(day.portEmoji).toBe(portEmoji);
+      expect(day.place).toBe(port);
+      expect(day.placeEmoji).toBe(placeEmoji);
       expect(day.theme).toBe(theme);
       expect(day.pool).toBe(pool);
       expect(day.tutorial).toBe(tutorial);

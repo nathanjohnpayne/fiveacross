@@ -6,6 +6,7 @@ import type {
 } from 'firebase/firestore';
 import type {
   ClaimMode,
+  DayDef,
   EventDoc,
   ItemDoc,
   BoardDoc,
@@ -39,6 +40,44 @@ export function migrateClaimMode(raw: unknown): ClaimMode {
   if (raw === 'admin_confirmed' || raw === 'verified') return 'admin_confirmed';
   if (raw === 'honor' || raw === 'proof_required') return raw;
   return 'honor';
+}
+
+/**
+ * Resolve a persisted Day to the current field contract (#566). Event docs
+ * seeded before the neutral-vocabulary rename persist `port`/`portEmoji`
+ * where the contract now reads `place`/`placeEmoji`; coerce them on read —
+ * new names win when both are present — so existing docs keep working with no
+ * data migration. Writes only ever emit the new names (the admin schedule
+ * editors re-read the RAW stored `days` inside their transactions, so a
+ * theme/tonight edit preserves whatever field names the live doc holds).
+ * Mirrors `migrateClaimMode` below. Every other Day field passes through
+ * untouched.
+ */
+export function migrateDayFields(raw: unknown): DayDef {
+  const day = (raw ?? {}) as Record<string, unknown>;
+  const { port, portEmoji, ...rest } = day;
+  return {
+    ...rest,
+    place: typeof day.place === 'string' ? day.place : typeof port === 'string' ? port : '',
+    placeEmoji:
+      typeof day.placeEmoji === 'string' ? day.placeEmoji : typeof portEmoji === 'string' ? portEmoji : '',
+  } as DayDef;
+}
+
+/**
+ * Resolve a persisted Event date-window field pair to the current contract
+ * (#566): `startsOn`/`endsOn`, with the pre-rename `sailStart`/`sailEnd` read
+ * as fallbacks. A doc carrying neither (malformed/partial) resolves to '' —
+ * the date-range formatters already degrade an invalid ISO date to "no range"
+ * rather than throwing.
+ */
+function migrateEventWindow(data: Record<string, unknown>): { startsOn: string; endsOn: string } {
+  const pick = (current: unknown, legacy: unknown): string =>
+    typeof current === 'string' ? current : typeof legacy === 'string' ? legacy : '';
+  return {
+    startsOn: pick(data.startsOn, data.sailStart),
+    endsOn: pick(data.endsOn, data.sailEnd),
+  };
 }
 
 // The July sailing's zone — the default a missing or invalid `timezone` field
@@ -102,9 +141,15 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
       // the July sailing's zone) via `normalizeTimezone` so day-scheduling
       // consumers read a real schedule/zone rather than undefined and a
       // not-yet-migrated doc never throws downstream (daily-cards-spec §
-      // "Migration"). Writes only ever emit real values.
-      days: Array.isArray(data.days) ? data.days : [],
+      // "Migration"). Writes only ever emit real values. Each Day additionally
+      // reads through the #566 field migration (`migrateDayFields`) so a doc
+      // persisting the pre-rename `port`/`portEmoji` resolves to the current
+      // `place`/`placeEmoji` contract.
+      days: Array.isArray(data.days) ? data.days.map(migrateDayFields) : [],
       timezone: normalizeTimezone(data.timezone),
+      // The Event date window reads through the #566 rename too: `startsOn`/
+      // `endsOn`, with the legacy `sailStart`/`sailEnd` as read fallbacks.
+      ...migrateEventWindow(data as unknown as Record<string, unknown>),
       // `frozenAt` (the finale freeze stamp, #217) needs no default: it is
       // optional and absent until the 08:00-Day-10 scheduler run sets it, so a
       // pre-finale/legacy Event doc reads it through the spread above as

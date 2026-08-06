@@ -17,24 +17,24 @@ const IMMUTABLE_DAY_FIELDS = IMMUTABLE_FIELDS as Array<keyof LiveDay>;
 // w1-themes non-goal): "🎉 Welcome Party" (not "Atlantis Welcome Party") and
 // "🏺 Dance Classics" (not "Atlantis Classics").
 const EXPECTED = [
-  { theme: 'welcome-aboard', port: 'Trieste', portEmoji: '🇮🇹', tonight: ['⛵ Sail-Away Party', '🎉 Welcome Party'] },
-  { theme: 'uniforms-without-borders', port: 'Split', portEmoji: '🇭🇷', tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'] },
-  { theme: 'neon-pink-playground', port: 'Sea Day', portEmoji: '🌊', tonight: ['💖 Seriously Pink T-Dance', '🌈 Neon Playground'] },
-  { theme: 'sporty-splash', port: 'Valletta', portEmoji: '🇲🇹', tonight: ['💦 Splash T-Dance', '🏋️ Get Sporty'] },
-  { theme: 'under-the-stars', port: 'Palermo (Sicily)', portEmoji: '🇮🇹', tonight: ['🎭 AirOtic', '🌌 Under the Stars'] },
-  { theme: 'glamiators', port: 'Naples (Pompeii)', portEmoji: '🇮🇹', tonight: ['🎤 Solea Pfeiffer', '🏛️ Glamiators'] },
-  { theme: 'atlantis-classics', port: 'Rome (Civitavecchia)', portEmoji: '🇮🇹', tonight: ['🎭 Persephone', '🏺 Dance Classics'] },
-  { theme: 'summer-white', port: 'Villefranche (Nice)', portEmoji: '🇫🇷', tonight: ['🎤 HAYLA', '🤍 Summer White Party'] },
-  { theme: 'revival-disco', port: 'Marseille', portEmoji: '🇫🇷', tonight: ['🪩 Revival! Classic Disco T-Dance', '🎉 Last Dance'] },
-  { theme: 'so-long-farewell', port: 'Barcelona', portEmoji: '🇪🇸', tonight: ['🧳 Disembark in Barcelona', '👋 Until next year'] },
+  { theme: 'welcome-aboard', place: 'Trieste', placeEmoji: '🇮🇹', tonight: ['⛵ Sail-Away Party', '🎉 Welcome Party'] },
+  { theme: 'uniforms-without-borders', place: 'Split', placeEmoji: '🇭🇷', tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'] },
+  { theme: 'neon-pink-playground', place: 'Sea Day', placeEmoji: '🌊', tonight: ['💖 Seriously Pink T-Dance', '🌈 Neon Playground'] },
+  { theme: 'sporty-splash', place: 'Valletta', placeEmoji: '🇲🇹', tonight: ['💦 Splash T-Dance', '🏋️ Get Sporty'] },
+  { theme: 'under-the-stars', place: 'Palermo (Sicily)', placeEmoji: '🇮🇹', tonight: ['🎭 AirOtic', '🌌 Under the Stars'] },
+  { theme: 'glamiators', place: 'Naples (Pompeii)', placeEmoji: '🇮🇹', tonight: ['🎤 Solea Pfeiffer', '🏛️ Glamiators'] },
+  { theme: 'atlantis-classics', place: 'Rome (Civitavecchia)', placeEmoji: '🇮🇹', tonight: ['🎭 Persephone', '🏺 Dance Classics'] },
+  { theme: 'summer-white', place: 'Villefranche (Nice)', placeEmoji: '🇫🇷', tonight: ['🎤 HAYLA', '🤍 Summer White Party'] },
+  { theme: 'revival-disco', place: 'Marseille', placeEmoji: '🇫🇷', tonight: ['🪩 Revival! Classic Disco T-Dance', '🎉 Last Dance'] },
+  { theme: 'so-long-farewell', place: 'Barcelona', placeEmoji: '🇪🇸', tonight: ['🧳 Disembark in Barcelona', '👋 Until next year'] },
 ] as const;
 
 describe('schedule correction — corrected day → theme/port/tonight mapping (specs/schedule-correction.md)', () => {
-  it('maps every Day to its corrected theme, port, and portEmoji', () => {
+  it('maps every Day to its corrected theme, port, and placeEmoji', () => {
     EXPECTED.forEach((exp, i) => {
       expect(DAYS[i].theme).toBe(exp.theme);
-      expect(DAYS[i].port).toBe(exp.port);
-      expect(DAYS[i].portEmoji).toBe(exp.portEmoji);
+      expect(DAYS[i].place).toBe(exp.place);
+      expect(DAYS[i].placeEmoji).toBe(exp.placeEmoji);
     });
   });
 
@@ -66,22 +66,22 @@ describe('schedule correction — corrected day → theme/port/tonight mapping (
 function oldLiveDays(): LiveDay[] {
   const at = (date: string) => Date.parse(`${date}T08:00:00+02:00`);
   return [
-    { index: 0, date: '2026-07-15', port: 'Trieste', portEmoji: '🇮🇹', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: 0, freeText: 'You made it aboard', snapshotItemIds: ['e1', 'e2'] },
-    { index: 1, date: '2026-07-16', port: 'Split', portEmoji: '🇭🇷', theme: 'get-sporty', pool: 'main', tutorial: false, unlockAt: at('2026-07-16'), snapshotItemIds: ['m1', 'm2', 'm3'] },
-    { index: 2, date: '2026-07-17', port: 'Valletta', portEmoji: '🇲🇹', theme: 'duty-free', pool: 'main', tutorial: false, unlockAt: at('2026-07-17'), snapshotItemIds: ['m4', 'm5'] },
-    { index: 3, date: '2026-07-18', port: 'Palermo', portEmoji: '🇮🇹', theme: 'glamiators', pool: 'main', tutorial: false, unlockAt: at('2026-07-18') },
-    { index: 4, date: '2026-07-19', port: 'Sorrento', portEmoji: '🇮🇹', theme: 'neon-playground', pool: 'main', tutorial: false, unlockAt: at('2026-07-19') },
-    { index: 5, date: '2026-07-20', port: 'Rome (Civitavecchia)', portEmoji: '🇮🇹', theme: 'summer-white', pool: 'main', tutorial: false, unlockAt: at('2026-07-20') },
-    { index: 6, date: '2026-07-21', port: 'Nice', portEmoji: '🇫🇷', theme: 'dog-tag', pool: 'main', tutorial: false, unlockAt: at('2026-07-21') },
-    { index: 7, date: '2026-07-22', port: 'Marseille', portEmoji: '🇫🇷', theme: 'revival-disco', pool: 'main', tutorial: false, unlockAt: at('2026-07-22') },
-    { index: 8, date: '2026-07-23', port: 'Sea Day', portEmoji: '🌊', theme: 'seriously-pink', pool: 'main', tutorial: false, unlockAt: at('2026-07-23') },
-    { index: 9, date: '2026-07-24', port: 'Barcelona', portEmoji: '🇪🇸', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: at('2026-07-24'), freeText: 'We had the best damn time' },
+    { index: 0, date: '2026-07-15', place: 'Trieste', placeEmoji: '🇮🇹', theme: 'welcome-aboard', pool: 'embark', tutorial: true, unlockAt: 0, freeText: 'You made it aboard', snapshotItemIds: ['e1', 'e2'] },
+    { index: 1, date: '2026-07-16', place: 'Split', placeEmoji: '🇭🇷', theme: 'get-sporty', pool: 'main', tutorial: false, unlockAt: at('2026-07-16'), snapshotItemIds: ['m1', 'm2', 'm3'] },
+    { index: 2, date: '2026-07-17', place: 'Valletta', placeEmoji: '🇲🇹', theme: 'duty-free', pool: 'main', tutorial: false, unlockAt: at('2026-07-17'), snapshotItemIds: ['m4', 'm5'] },
+    { index: 3, date: '2026-07-18', place: 'Palermo', placeEmoji: '🇮🇹', theme: 'glamiators', pool: 'main', tutorial: false, unlockAt: at('2026-07-18') },
+    { index: 4, date: '2026-07-19', place: 'Sorrento', placeEmoji: '🇮🇹', theme: 'neon-playground', pool: 'main', tutorial: false, unlockAt: at('2026-07-19') },
+    { index: 5, date: '2026-07-20', place: 'Rome (Civitavecchia)', placeEmoji: '🇮🇹', theme: 'summer-white', pool: 'main', tutorial: false, unlockAt: at('2026-07-20') },
+    { index: 6, date: '2026-07-21', place: 'Nice', placeEmoji: '🇫🇷', theme: 'dog-tag', pool: 'main', tutorial: false, unlockAt: at('2026-07-21') },
+    { index: 7, date: '2026-07-22', place: 'Marseille', placeEmoji: '🇫🇷', theme: 'revival-disco', pool: 'main', tutorial: false, unlockAt: at('2026-07-22') },
+    { index: 8, date: '2026-07-23', place: 'Sea Day', placeEmoji: '🌊', theme: 'seriously-pink', pool: 'main', tutorial: false, unlockAt: at('2026-07-23') },
+    { index: 9, date: '2026-07-24', place: 'Barcelona', placeEmoji: '🇪🇸', theme: 'so-long-farewell', pool: 'farewell', tutorial: true, unlockAt: at('2026-07-24'), freeText: 'We had the best damn time' },
   ];
 }
 
 describe('schedule migration — planning core (specs/schedule-correction.md)', () => {
-  it('permits changing exactly theme/port/portEmoji/tonight and nothing else', () => {
-    expect([...ALLOWED_FIELDS].sort()).toEqual(['port', 'portEmoji', 'theme', 'tonight']);
+  it('permits changing exactly theme/port/placeEmoji/tonight and nothing else', () => {
+    expect([...ALLOWED_FIELDS].sort()).toEqual(['place', 'placeEmoji', 'theme', 'tonight']);
   });
 
   it('corrects the old live schedule without misalignment or any forbidden change', () => {
@@ -106,13 +106,13 @@ describe('schedule migration — planning core (specs/schedule-correction.md)', 
     }
   });
 
-  it('writes the corrected Days to match the seed (theme/port/portEmoji/tonight)', () => {
+  it('writes the corrected Days to match the seed (theme/port/placeEmoji/tonight)', () => {
     const plan = planScheduleMigration(oldLiveDays());
     const corrected = plan.corrected as LiveDay[];
     corrected.forEach((d, i) => {
       expect(d.theme).toBe(DAYS[i].theme);
-      expect(d.port).toBe(DAYS[i].port);
-      expect(d.portEmoji).toBe(DAYS[i].portEmoji);
+      expect(d.place).toBe(DAYS[i].place);
+      expect(d.placeEmoji).toBe(DAYS[i].placeEmoji);
       expect(d.tonight).toEqual(DAYS[i].tonight);
     });
   });
@@ -168,12 +168,12 @@ describe('schedule migration — planning core (specs/schedule-correction.md)', 
     const live = oldLiveDays()[2]; // Valletta 🇲🇹/duty-free → Sea Day 🌊/neon-pink-playground
     const target = DAYS[2];
     const diff = diffDay(live, target);
-    // port, portEmoji, theme, and tonight all change on this Day (plus tonight is
+    // port, placeEmoji, theme, and tonight all change on this Day (plus tonight is
     // newly added), so all four allowed fields appear.
-    expect(Object.keys(diff.allowed).sort()).toEqual(['port', 'portEmoji', 'theme', 'tonight']);
+    expect(Object.keys(diff.allowed).sort()).toEqual(['place', 'placeEmoji', 'theme', 'tonight']);
     expect(diff.allowed.theme).toEqual({ from: 'duty-free', to: 'neon-pink-playground' });
-    expect(diff.allowed.port).toEqual({ from: 'Valletta', to: 'Sea Day' });
-    expect(diff.allowed.portEmoji).toEqual({ from: '🇲🇹', to: '🌊' });
+    expect(diff.allowed.place).toEqual({ from: 'Valletta', to: 'Sea Day' });
+    expect(diff.allowed.placeEmoji).toEqual({ from: '🇲🇹', to: '🌊' });
     expect(diff.forbidden).toEqual([]);
   });
 
