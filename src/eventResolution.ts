@@ -76,6 +76,10 @@ export const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 interface CacheEnvelope {
   v: number;
   fetchedAt: number;
+  /** Written only after this build has checked the optional preview slice.
+   *  Caches from before #647 lack it and need one network attempt so a newly
+   *  seeded postcard does not stay invisible for the routing TTL. */
+  previewValidated: boolean;
   doc: HostnameDoc;
 }
 
@@ -97,6 +101,9 @@ export interface CacheRead {
   doc: HostnameDoc;
   fetchedAt: number;
   stale: boolean;
+  /** A pre-preview cache remains a routing fallback, but cannot short-circuit
+   *  its first post-upgrade network read. */
+  requiresPreviewRevalidation: boolean;
 }
 
 /** Read a cached mapping. Tolerates absent, corrupt, version-drifted and
@@ -146,6 +153,7 @@ export function readCache(
       },
       fetchedAt: env.fetchedAt,
       stale: now - env.fetchedAt > CACHE_TTL_MS,
+      requiresPreviewRevalidation: env.previewValidated !== true,
     };
   } catch {
     return null;
@@ -161,7 +169,7 @@ export function writeCache(
   now: number = Date.now(),
 ): void {
   if (!storage) return;
-  const env: CacheEnvelope = { v: CACHE_VERSION, fetchedAt: now, doc };
+  const env: CacheEnvelope = { v: CACHE_VERSION, fetchedAt: now, previewValidated: true, doc };
   try {
     storage.setItem(cacheKey(hostname), JSON.stringify(env));
   } catch {
@@ -345,7 +353,18 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   // Bingo host, and every Event that has already flipped — keeps the pure
   // offline-first cold boot ADR 0006 specifies, at no cost.
   const cacheMayUnGate = cached?.doc.adultContent === false;
-  if (cached && !cached.stale && !cacheMayUnGate && isServable(cached.doc)) {
+  // A cache written before the Event-preview slice existed must make ONE
+  // best-effort revalidation, even inside the usual TTL. It still reaches
+  // `staleOrNotFound` on failure, preserving its offline routing fallback;
+  // a successful read rewrites the envelope with `previewValidated: true`.
+  const cacheNeedsPreviewRevalidation = cached?.requiresPreviewRevalidation === true;
+  if (
+    cached &&
+    !cached.stale &&
+    !cacheMayUnGate &&
+    !cacheNeedsPreviewRevalidation &&
+    isServable(cached.doc)
+  ) {
     return asEvent(cached.doc, 'cache');
   }
 

@@ -71,6 +71,17 @@ describe('coerceEventPreview — fail-soft field-by-field read', () => {
     expect(got).toEqual({ eventName: 'Weekend in Bodega Bay', hostedBy: 'Kim' });
   });
 
+  it('drops the whole schedule when a date has ISO shape but is not a calendar day', () => {
+    for (const date of ['2026-13-01', '2026-02-31']) {
+      expect(
+        coerceEventPreview({
+          eventName: 'Weekend in Bodega Bay',
+          days: [{ date, title: 'Not a real Day' }],
+        })?.days,
+      ).toBeUndefined();
+    }
+  });
+
   it('drops an over-long schedule whole rather than truncating it', () => {
     const days = Array.from({ length: 40 }, (_, i) => ({
       date: `2026-09-${String(i + 1).padStart(2, '0')}`,

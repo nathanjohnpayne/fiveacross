@@ -35,6 +35,14 @@ const asText = (v: unknown): string | undefined => {
  *  a malformed date drops its Day rather than mis-ordering the line. */
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** The shape check above is deliberately separate from this calendar check:
+ *  JavaScript normalizes values such as 2026-02-31 into March, which would
+ *  otherwise let a nonexistent Day win the lexical next-Day lookup. */
+const isCalendarDate = (date: string): boolean => {
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+};
+
 /**
  * Read an unknown `preview` value into the contract shape, or `undefined`.
  *
@@ -72,7 +80,7 @@ export function coerceEventPreview(v: unknown): EventPreview | undefined {
       const e = entry as Record<string, unknown>;
       const date = asText(e.date);
       const title = asText(e.title);
-      if (!date || !ISO_DATE.test(date) || !title) {
+      if (!date || !ISO_DATE.test(date) || !isCalendarDate(date) || !title) {
         valid = false;
         break;
       }
