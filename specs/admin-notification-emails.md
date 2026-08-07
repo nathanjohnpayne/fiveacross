@@ -18,7 +18,7 @@ Both signals are bursty by nature. A pool import writes eighty `pending` Prompts
 So the delivery shape is a **queue plus a periodic digest**, and burst safety is structural rather than a debounce timer someone can tune wrong:
 
 - **Producers** are the two existing `events/{eventId}/{items,proofs}/{docId}` triggers. They stay cheap and synchronous—`alertsForWrite` is a PURE function of the before/after snapshots, performing no reads—and only APPEND to `events/{eventId}/adminAlerts`.
-- **The consumer** is `sendAdminDigestForEvent`, driven by the `adminAlertDigest` sweep. It reads the Event once, resolves the roster once, renders ONE email covering everything queued since the last drain, and clears the queue rows it covered.
+- **The consumer** is `sendAdminDigestForEvent`, driven by the `adminAlertDigest` sweep. It reads the Event once, resolves the roster once, renders ONE email covering everything queued since the last drain, and tombstones the queue rows it covered.
 
 Eighty seeded Prompts therefore produce one email listing eighty.
 
@@ -138,9 +138,18 @@ The daily email is opt-in engagement mail to participants and carries a visible 
 
 `sentAt: null` is written EXPLICITLY on every alert rather than left absent, because Firestore's equality filter matches a stored null but not a missing field—an alert without it would sit in the collection forever, invisible to the drain. The filter is a single-field equality with a `limit`, so it rides the automatic index and adds no composite index.
 
-`MAX_ALERTS_PER_DIGEST` is a ceiling, not a batch size: a larger backlog spans consecutive sweeps, because everything drained is removed and the next run resumes where this one stopped. It bounds a pathological queue, it does not size normal work. It is clamped to `MAX_ATOMIC_DELETES` (450), because the clean-up is one `WriteBatch` and an admin-SDK batch caps at 500 writes—a larger drain would split into several commits and reintroduce the partial-failure case the design exists to remove. Clamped rather than asserted, so a future config bump degrades to "drains less per sweep" instead of "silently non-atomic".
+`MAX_ALERTS_PER_DIGEST` is a ceiling, not a batch size: a larger backlog spans consecutive sweeps, because everything drained is removed and the next run resumes where this one stopped. It bounds a pathological queue, it does not size normal work. It is clamped to `MAX_ATOMIC_WRITES` (450), because the clean-up is one `WriteBatch` and an admin-SDK batch caps at 500 writes—a larger drain would split into several commits and reintroduce the partial-failure case the design exists to remove. Clamped rather than asserted, so a future config bump degrades to "drains less per sweep" instead of "silently non-atomic".
 
-**Delivered rows are deleted, not stamped**, and that answers two things at once. Retention: a queue row carries a copy of pending or hidden user content, and stamping it `sentAt` would keep that copy in Firestore indefinitely—outliving the moderation decision it describes, and surviving the deletion of the content itself. And unreadable or already-resolved rows are cleared on the same pass, so they stop consuming the drain limit: skipping them would leave them pending forever, and a whole page of malformed documents would then starve every valid alert behind it on every future sweep.
+**A delivered row is REPLACED by a tombstone**—`{ sentAt, expiresAt }` written without merge—and it has to be both a removal and a retention at once.
+
+The removal is the retention answer: a queue row carries a copy of pending or hidden user content, and keeping it would outlive the moderation decision it describes and even the deletion of the content itself. But deleting the document outright would destroy the deterministic-id dedup above, because `create` succeeds again on an id that no longer exists—so a redelivery arriving after a drain would queue and mail the same transition a second time. Replacing the payload with two numbers keeps the id, and the id is the whole dedup.
+
+`expiresAt` is seven days out, matching the outer bound on Cloud Functions event redelivery, so a Firestore TTL policy on that field reaps the tombstone once it can no longer do its job. That policy is a one-time per-project setup (`docs/app/phase-1-deploy.md`); without it tombstones simply accumulate, which is tolerable in a way the un-reaped ALERTS were not—a tombstone is two numbers and holds no copy of user content.
+
+Unreadable or already-resolved rows are tombstoned on the same pass, so they stop consuming the drain limit: skipping them would leave them pending forever, and a whole page of malformed documents would then starve every valid alert behind it on every future sweep.
+
+- **Given** a redelivered trigger for an already-mailed transition **then** nothing is re-queued and no second email is sent. (Test: "a REDELIVERED trigger for an already-mailed transition does not re-queue it".)
+- **Given** a delivered drain **then** the row retains only `sentAt`/`expiresAt`, and its id. (Test: "leaves a payload-free tombstone behind".)
 
 - **Given** a page that is entirely malformed **then** it is retired rather than re-read forever. (Tests: "RETIRES a malformed queue row", "clears a page that is ENTIRELY malformed".)
 
@@ -148,10 +157,16 @@ The sweep is scoped to ACTIVE Events, mirroring `runDailyEmailSweep`. An archive
 
 The trigger pins `ADMIN_SDK_SERVICE_ACCOUNT` (it reads Events, the queue, the roster and `hostnames`, and stamps alerts) and binds `RESEND_API_KEY`—it is now the only admin-notification function that sends. Per [#318](https://github.com/nathanjohnpayne/gaycruisebingo/issues/318): verify the Cloud Scheduler job exists after the deploy (`gcloud scheduler jobs list`)—the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function jobless and silently.
 
-**The idempotency key is the drained SET**: `admin-digest/{eventId}/{newestAlertId}/{count}`, and the ATOMIC clean-up is what makes it hold. There are exactly two outcomes after a send: the batch commits and those rows are gone, or it does not and every one of them is still pending—never a partial subset. A retry after the second outcome therefore rebuilds the identical set, produces the identical key, and Resend collapses the duplicate inside its 24h window. A per-document clean-up would not have that property: a single transient failure would leave a smaller set, a different count-based key, and a second email repeating what was already delivered. An alert arriving in between does change the set—a different key, which delivers, because that genuinely is new news.
+**The idempotency key is the RAW DRAINED PAGE**: `admin-digest/{eventId}/{maxAlertId}/{count}`, reduced from the queue rows the sweep read—not from the revalidated rows it rendered. Those are two different sets and only the first is stable. The ATOMIC clean-up is what makes it stable: after a send there are exactly two outcomes, the batch commits and those rows are tombstoned, or it does not and every one of them is still pending—never a partial subset. A retry after the second outcome rebuilds the identical page, produces the identical key, and Resend collapses the duplicate inside its 24h window.
 
-- **Given** a second sweep after a successful drain **then** nothing is sent and the queue is empty. (Test: "is idempotent across sweeps".)
-- **Given** a clean-up that fails **then** EVERY alert is still pending and the retry reuses the same key. (Test: "an ATOMIC clean-up keeps that set stable on retry".)
+Keying on the RENDERED rows would not survive that retry, and the failure is not exotic: if the send lands but the clean-up does not, an admin can resolve one item before the next sweep, live revalidation drops that row, and a `current`-derived key moves with it—so Resend accepts a second email repeating every row from the first that is still unresolved. The queue page cannot move that way. It is reduced order-independently (greatest id plus count) because the drain query carries no `orderBy`, so a position-sensitive reduction could shuffle between two sweeps over an identical page.
+
+An alert arriving in between does change the page—a different key, which delivers, because that genuinely is new news.
+
+- **Given** a second sweep after a successful drain **then** nothing is sent. (Test: "is idempotent across sweeps".)
+- **Given** a clean-up that fails **then** EVERY alert is still pending and the retry reuses the same key. (Test: "an ATOMIC clean-up keeps it stable on retry".)
+- **Given** a row RESOLVED between the send and the retry **then** it drops out of the email and the key does not move. (Test: "keeps the retry key stable even when a row RESOLVES".)
+- **Given** the same page in a different order **then** the key is identical. (Test: "reduces the drain key order-independently".)
 - **Given** a send that fails **then** nothing is cleared and the alerts drain on the next sweep. (Test: "leaves alerts queued when the send fails".)
 - **Given** one Event whose sweep throws **then** every other Event still drains. (Test: "one Event's failure never sinks the sweep".)
 

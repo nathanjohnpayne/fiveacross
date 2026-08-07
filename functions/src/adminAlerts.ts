@@ -68,9 +68,10 @@ interface AlertQuery {
   get(): Promise<{ docs: AlertSnapshot[] }>;
 }
 /** The minimal atomic-write surface the drain needs. An admin-SDK `WriteBatch`
- *  commits all-or-nothing, which is the whole reason the drain uses one. */
+ *  commits all-or-nothing, which is the whole reason the drain uses one. `set`
+ *  WITHOUT merge, so the tombstone REPLACES the row rather than joining it. */
 interface AlertWriteBatch {
-  delete(ref: AlertDocRef): void;
+  set(ref: AlertDocRef, data: Record<string, unknown>): void;
   commit(): Promise<unknown>;
 }
 /** The minimal surface the queue and its sweep use. */
@@ -323,7 +324,24 @@ export const MAX_ALERTS_PER_DIGEST = 200;
  * exists to remove. Clamped rather than asserted, so a future config bump
  * degrades to "drains less per sweep" instead of "silently non-atomic".
  */
-export const MAX_ATOMIC_DELETES = 450;
+export const MAX_ATOMIC_WRITES = 450;
+
+/**
+ * How long a drained row's TOMBSTONE survives.
+ *
+ * Seven days, matching the outer bound on Cloud Functions event redelivery,
+ * because the tombstone's entire job is to still be there when a delayed
+ * redelivery of an already-mailed transition arrives. `create` fails on an id
+ * that exists, so the tombstone is what keeps the deterministic-id dedup honest
+ * once the payload row itself is gone.
+ *
+ * The document carries `expiresAt` so a Firestore TTL policy on that field
+ * reaps it (a one-time per-project setup — see docs/app/phase-1-deploy.md).
+ * Without the policy the tombstones simply accumulate, which is tolerable in a
+ * way the un-reaped ALERTS were not: a tombstone is two numbers and holds no
+ * copy of user content.
+ */
+export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Minutes between digest sweeps, mirrored in `index.ts`'s cron. Stated here so
  *  the doc comment and the schedule cannot drift silently. */
@@ -338,7 +356,7 @@ export interface AdminDigestDeps extends ResolveDeps, EnqueueDeps {
    *  `APP_BASE_URL` param. */
   appBaseUrl?: string;
   /** Alerts drained per Event per run; defaults to `MAX_ALERTS_PER_DIGEST`,
-   *  clamped to `MAX_ATOMIC_DELETES`. */
+   *  clamped to `MAX_ATOMIC_WRITES`. */
   maxAlerts?: number;
 }
 
@@ -346,7 +364,7 @@ export interface AdminDigestResult {
   /** Alerts covered by a delivered email. */
   sent: number;
   /** Queue rows retired without a row in the email: resolved since they were
-   *  queued, or unreadable. Cleared either way, so they stop consuming the
+   *  queued, or unreadable. Tombstoned either way, so they stop consuming the
    *  drain limit forever. */
   retired: number;
   /** Why nothing was sent, when nothing was. */
@@ -448,17 +466,31 @@ export function currentRowFor(
  * window. A count-based key over a partially-drained subset would not have that
  * property, which is precisely the hole an atomic clean-up closes.
  *
- * DELETING rather than stamping is also the retention answer: a queue row
- * carries a copy of pending or hidden user content, and stamping it `sentAt`
- * would keep that copy in Firestore forever — outliving the moderation decision
- * and even the deletion of the content it describes.
+ * THE KEY IS DERIVED FROM THE RAW DRAINED PAGE, not from the revalidated rows.
+ * Those are different sets, and only the first one is stable: if the send lands
+ * but the clean-up does not, an admin can resolve one item before the next
+ * sweep, and live revalidation would then drop that row and change a
+ * `current`-derived key — so Resend would accept a SECOND email repeating every
+ * unresolved row from the first. The queue page cannot move that way, because
+ * the atomic clean-up leaves it byte-identical. It is reduced order-independently
+ * (max id + count) because the drain query carries no `orderBy`.
+ *
+ * WHAT THE CLEAN-UP WRITES IS A TOMBSTONE, not a delete, and it has to be both
+ * things at once. Deleting outright was the retention answer — a queue row
+ * carries a copy of pending or hidden user content, and keeping it would outlive
+ * the moderation decision and even the deletion of the content it describes —
+ * but it also destroyed the deterministic-id dedup: a redelivered trigger whose
+ * row had been deleted would `create` successfully and mail the same transition
+ * twice. So the row is REPLACED by `{ sentAt, expiresAt }`: the payload is gone,
+ * the id survives to keep failing `create`, and a Firestore TTL policy on
+ * `expiresAt` reaps it after the redelivery window.
  */
 export async function sendAdminDigestForEvent(
   db: AdminAlertFirestore,
   eventId: string,
   deps: AdminDigestDeps = {},
 ): Promise<AdminDigestResult> {
-  const maxAlerts = Math.min(deps.maxAlerts ?? MAX_ALERTS_PER_DIGEST, MAX_ATOMIC_DELETES);
+  const maxAlerts = Math.min(deps.maxAlerts ?? MAX_ALERTS_PER_DIGEST, MAX_ATOMIC_WRITES);
   const snap = await db
     .collection(`events/${eventId}/adminAlerts`)
     .where('sentAt', '==', null)
@@ -510,7 +542,7 @@ export async function sendAdminDigestForEvent(
   // than no email.
   const retireOnly = [...unreadable, ...resolved];
   if (current.length === 0) {
-    await clearAlerts(db, eventId, retireOnly);
+    await tombstoneAlerts(db, eventId, retireOnly, (deps.now ?? Date.now)());
     return { sent: 0, retired: retireOnly.length, reason: 'nothing-current' };
   }
 
@@ -533,22 +565,17 @@ export async function sendAdminDigestForEvent(
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
 
   const model = buildAdminDigestModel({ event, eventId, alerts: current, edition, origin, now });
-  // Stable for a given SET of alerts, and the atomic clean-up below is what
-  // makes "the same set" survive a failure: a retry of the same drain dedupes
-  // at Resend, while an alert arriving in between changes the set — a different
-  // key, which delivers, because that genuinely is new news.
-  const newest = current.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
   const ok = await send({
     to,
     subject: model.subject,
     html: renderAdminDigestHtml(model),
     text: renderAdminDigestText(model),
     from,
-    idempotencyKey: `admin-digest/${eventId}/${newest.id}/${current.length}`,
+    idempotencyKey: `admin-digest/${eventId}/${drainKey(snap.docs.map((d) => d.id))}`,
   });
   if (!ok) return { sent: 0, retired: 0, reason: 'send-failed' };
 
-  await clearAlerts(db, eventId, [...retireOnly, ...current.map((a) => a.id)]);
+  await tombstoneAlerts(db, eventId, [...retireOnly, ...current.map((a) => a.id)], now);
   console.log(
     `sendAdminDigestForEvent ${eventId}: sent=${current.length} retired=${retireOnly.length} to=${to.length}`,
   );
@@ -556,16 +583,48 @@ export async function sendAdminDigestForEvent(
 }
 
 /**
- * Remove drained queue rows in ONE atomic batch. All-or-nothing is the whole
- * point (see `sendAdminDigestForEvent`), so a commit failure is logged and
- * swallowed rather than retried per-document: leaving every row pending is the
- * safe, self-healing outcome, and the next sweep dedupes at Resend.
+ * The delivery identity of one drain, reduced from the RAW queue page in a way
+ * that does not depend on the order Firestore happened to return it in: the
+ * greatest document id plus the count. The drain query carries no `orderBy`
+ * (deliberately — an equality filter with a `limit` rides the automatic index),
+ * so a position-sensitive reduction could shuffle between two sweeps over an
+ * identical page and mint a different key for the same email.
  */
-async function clearAlerts(db: AdminAlertFirestore, eventId: string, ids: readonly string[]): Promise<void> {
+export function drainKey(ids: readonly string[]): string {
+  const max = [...ids].sort().pop() ?? 'empty';
+  return `${max}/${ids.length}`;
+}
+
+/**
+ * Replace drained queue rows with tombstones in ONE atomic batch.
+ *
+ * `set` without merge, so the row's payload — including its copy of unapproved
+ * or hidden user content — is REPLACED by two numbers rather than joined by
+ * them. What survives is the document ID, which is the point: it is derived
+ * from the triggering CloudEvent id, so a delayed redelivery of an
+ * already-mailed transition still fails its `create` instead of queueing the
+ * same alert a second time.
+ *
+ * All-or-nothing is the other half (see `sendAdminDigestForEvent`), so a commit
+ * failure is logged and swallowed rather than retried per-document: leaving
+ * every row pending is the safe, self-healing outcome, and the next sweep
+ * rebuilds the same key and dedupes at Resend.
+ */
+async function tombstoneAlerts(
+  db: AdminAlertFirestore,
+  eventId: string,
+  ids: readonly string[],
+  now: number,
+): Promise<void> {
   if (ids.length === 0) return;
   try {
     const batch = db.batch();
-    for (const id of ids) batch.delete(db.doc(`events/${eventId}/adminAlerts/${id}`));
+    for (const id of ids) {
+      batch.set(db.doc(`events/${eventId}/adminAlerts/${id}`), {
+        sentAt: now,
+        expiresAt: now + TOMBSTONE_TTL_MS,
+      });
+    }
     await batch.commit();
   } catch (err) {
     console.error('sendAdminDigestForEvent: queue clean-up failed (alerts stay pending)', eventId, err);

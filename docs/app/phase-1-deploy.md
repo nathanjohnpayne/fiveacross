@@ -64,6 +64,13 @@ Three things to check after the deploy:
 2. **A recipient resolves.** Recipients are the Event's `admins` roster (verified Firebase Auth emails only) unioned with `ADMIN_NOTIFY_EMAIL`. If neither resolves, alerts queue and nothing sends—which is logged, not lost, but it is silent from the outside. Populate `ADMIN_NOTIFY_EMAIL` per project unless the roster is known to resolve.
 3. **Smoke-test the DIGEST, not the triggers.** Report a Prompt in the app (or submit one as a non-admin, which lands `pending`), then wait for the next five-minute sweep. A queue row appearing under `events/{eventId}/adminAlerts` with no email inside two sweeps means the scheduler job or the recipient list is the problem, in that order.
 
+One optional one-time setup: a **Firestore TTL policy on `adminAlerts.expiresAt`**. A drained row is replaced by a payload-free tombstone (`{ sentAt, expiresAt }`) whose id is what keeps a delayed trigger redelivery from mailing the same transition twice; `expiresAt` is seven days out, matching the redelivery window. Without the policy the tombstones accumulate—two numbers each, holding no user content, so this is housekeeping rather than a correctness or privacy problem:
+
+```bash
+gcloud firestore fields ttls update expiresAt \
+  --collection-group=adminAlerts --enable-ttl --project <projectId>
+```
+
 ### 1a-i. Daily themed engagement email (#616)
 
 `dailyEngagementEmail` (an `onSchedule` trigger, `*/15 * * * *` UTC) and `emailUnsubscribe` (the HTTP unsubscribe endpoint) ship with the same `RESEND_API_KEY` secret above; no additional secret is needed. Both pin the Admin-SDK runtime identity, so no IAM change is required beyond what the existing functions already have. Full behaviour is in `specs/daily-engagement-email.md`.
