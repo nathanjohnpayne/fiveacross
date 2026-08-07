@@ -131,7 +131,21 @@ Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands
 
 The synthetic proves the app mounts; it does not prove *which* build shipped. For that, diff the asset hash before and after, and grep the new bundle for a marker unique to the change.
 
-The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. After a deploy touching `src/**`, **inspect them before rebuilding** — the Vercel account's build capacity is shared and finite, and exhausting it has previously blocked every deployment for 24 hours:
+The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: false`, so no merge to `main` builds anything on any of the three projects. Nothing rebuilds them but you.
+
+That is a deliberate trade, and it trades in the direction the failure history points. Three projects on one repository meant three production builds per merge against an account-wide cap that, when exhausted, refuses deployments for **24 hours** across the whole team — taking out the brand's own ship-network fallback on the day you need it. The stale-mirror risk that automation was covering was never actually covered: Vercel silently cancels queued builds under pressure, the host keeps serving its previous bundle at `HTTP 200`, and both mirrors were found 22h and 7h stale on 2026-08-06 *with the integration connected*. Explicit staleness you can see beats implicit staleness you cannot.
+
+### Deploying a mirror
+
+```bash
+npx vercel deploy --prod --yes --project vacaybingo
+```
+
+Likewise `fiveacross` and `gaycruisebingo`. Deploy only what you need — each invocation is one build against the shared cap.
+
+The build runs on Vercel using **that project's own Production environment variables** (`VITE_EDITION`, `VITE_EVENT_ID`, the Firebase config), which is why the project name is the only input: the same `main` source builds into a different Edition per project. `git.deploymentEnabled` governs Git-triggered deployments only — [Vercel's own wording](https://vercel.com/docs/project-configuration/git-configuration) is "branches that should not trigger a deployment upon commits" — so it never blocks this command.
+
+Then verify, because the mirror is now only as current as your last command:
 
 **The mirrors cannot be checked by commit today, and that is a known gap — do not fake it with a timestamp.** The commit-sha check above does not work on them: `appVersion()` falls back to `git rev-parse HEAD`, Vercel builds remotely without the `.git` directory, so the fallback throws and the bundle bakes `unknown`. Vercel's own metadata does not fill the gap either — a CLI-deployed build carries no Git metadata (`vercel inspect --json` reports `source: null` and no `meta.githubCommitSha`), and `vercel inspect` exposes only a `created` timestamp, which tells you when a build ran, not what was in it.
 
@@ -147,11 +161,9 @@ for H in vacaybingo.vercel.app fiveacross.vercel.app; do
 done
 ```
 
-Substitute a marker unique to whatever commit you are verifying. Redeploy only a project that comes back stale (`npx vercel deploy --prod --yes --project vacaybingo`, likewise `fiveacross`).
+Substitute a marker unique to whatever commit you are verifying.
 
-Closing the gap properly is a one-line change — `appVersion()` should also read `VERCEL_GIT_COMMIT_SHA`, which Vercel does set during its builds — tracked in [#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665).
-
-In principle the Git integration rebuilds the mirrors on a push to `main`; **do not assume it did.** On 2026-08-06 both production aliases were 22h and 7h stale while the newest builds were *canceled* branch previews, and both were serving a pre-#587 bundle with Gay Cruise Bingo share metadata.
+Closing the gap properly is a one-line change — `appVersion()` should also read `VERCEL_GIT_COMMIT_SHA`, which Vercel does set during its builds — tracked in [#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665). Note that a CLI deploy does not set it either, so #665 alone will not make manual mirror deploys commit-checkable; the content marker above stays the check that works.
 
 > **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 
