@@ -9,8 +9,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   MAX_ALERTS_PER_DIGEST,
   MAX_ATOMIC_WRITES,
+  MAX_HOLD_MS,
   QUIET_PERIOD_MS,
   flattenLabel,
+  sameRecipients,
   TOMBSTONE_TTL_MS,
   alertDocId,
   drainKey,
@@ -104,6 +106,8 @@ function fakeDb(
     const { collectionPath, id } = split(path);
     return (collections.get(collectionPath) ?? []).find((r) => r.id === id);
   };
+  // A doc seeded through `docs` (singles) still EXISTS for `create`'s check.
+  const exists = (path: string) => Boolean(singles.get(path) || findRow(path));
 
   const docRef = (path: string) => ({
     path,
@@ -126,7 +130,8 @@ function fakeDb(
     },
     // Admin-SDK `create` semantics: reject if the document already exists.
     create: async (data: Record<string, unknown>) => {
-      if (findRow(path)) {
+      if (failFreeze && path.includes('/adminAlertBatches/')) throw new Error('freeze write failed');
+      if (exists(path)) {
         const err = new Error('already exists') as Error & { code?: number };
         err.code = 6;
         throw err;
@@ -167,6 +172,7 @@ function fakeDb(
             collections.set(collectionPath, rows);
           }
           for (const path of deletes) {
+            singles.delete(path);
             const { collectionPath, id } = split(path);
             const rows = collections.get(collectionPath) ?? [];
             collections.set(
@@ -691,9 +697,25 @@ describe('planDrain', () => {
     // A burst straddling the scheduler boundary would otherwise be snapshotted
     // mid-write and split across two emails.
     expect(planDrain([row('a1', { createdAt: 9_500 })], 10_000, 1_000)).toEqual({ reason: 'settling' });
-    // Mixed: only the settled prefix is taken.
+  });
+
+  it('holds the WHOLE COHORT when any row is still settling — per-row eligibility splits bursts', () => {
+    // A one-second import straddling the cutoff has its first rows at 60.5s and
+    // its last at 59.5s. Filtering row by row would email the front of the
+    // burst now and the tail five minutes later, which is precisely the split
+    // the settling period exists to prevent.
     const plan = planDrain([row('a1', { createdAt: 0 }), row('a2', { createdAt: 9_900 })], 10_000, 1_000);
+    expect(plan).toEqual({ reason: 'settling' });
+  });
+
+  it('bounds the hold, so a steady trickle can never starve delivery outright', () => {
+    // Same shape, but the ripe row is now older than the max hold: it goes out
+    // and the straggler follows in the next batch. Delivering late beats never.
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const plan = planDrain([row('a1', { createdAt: 0 }), row('a2', { createdAt: 9_900 })], 10_000, 1_000, 5_000);
+    spy.mockRestore();
     expect(plan).toEqual({ batchId: 'a1__1', ids: ['a1'], claimNeeded: true });
+    expect(MAX_HOLD_MS).toBeGreaterThan(QUIET_PERIOD_MS);
   });
 
   it('REUSES an existing claim and ignores everything queued since', () => {
@@ -1213,7 +1235,8 @@ describe('the frozen outbound request', () => {
       // DIFFERENT email (in fact, no rows at all).
       'events/med-2026/items/i-a1': { status: 'active', reportCount: 0 },
       'events/med-2026/adminAlertBatches/a1__1': {
-        to: ['frozen@example.com'],
+        // The SAME authorized set the deps resolve, so the replay is allowed.
+        to: ['u1@example.com'],
         subject: 'Admin · frozen subject',
         html: '<p>frozen</p>',
         text: 'frozen',
@@ -1227,7 +1250,7 @@ describe('the frozen outbound request', () => {
     const arg = send.mock.calls[0][0] as Record<string, unknown>;
     expect(arg.subject).toBe('Admin · frozen subject');
     expect(arg.html).toBe('<p>frozen</p>');
-    expect(arg.to).toEqual(['frozen@example.com']);
+    expect(arg.to).toEqual(['u1@example.com']);
     expect(arg.from).toBe('frozen <f@example.com>');
     expect(arg.idempotencyKey).toBe('admin-digest/med-2026/a1__1');
     // Cleaned up: rows tombstoned, frozen request gone.
@@ -1256,6 +1279,69 @@ describe('the frozen outbound request', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
   });
 
+  it('ABANDONS a frozen batch when the authorized recipients have changed', async () => {
+    // A freeze is written BEFORE the send, so a crash in between (or a rejected
+    // send) leaves bytes that may never have been delivered. Replaying them
+    // verbatim after an admin is removed would mail pending and hidden content
+    // to somebody no longer authorized — and would keep doing so forever,
+    // because the stale address is baked into the frozen request.
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1', { batchId: 'a1__1' })], {
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['removed-admin@example.com'],
+        subject: 'Admin · stale',
+        html: '<p>stale</p>',
+        text: 'stale',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'rebatched',
+    });
+    expect(send).not.toHaveBeenCalled();
+    // The frozen request is dropped and the claim released, so the rows
+    // re-batch for whoever is authorized now — which is also what lets a
+    // corrected deployment unblock a batch its old config had wedged.
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+    const row = db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1');
+    expect(row?.batchId).toBeNull();
+    // And the very next sweep delivers it to the current roster.
+    expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
+    expect((send.mock.calls[0][0] as { to: string[] }).to).toEqual(['u1@example.com']);
+  });
+
+  it('REPLAYS the winner when it loses the freeze race, discarding its own render', async () => {
+    // The claim commits before the freeze is written, so a second invocation
+    // can see claimed rows with no frozen document and correctly rebuild (no
+    // freeze means nothing was sent). Two unconditional writes would then race
+    // and the surviving freeze might not be the request Resend accepted.
+    // `create` makes exactly one render win.
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1')], {
+      // Another invocation got there first, under the id this drain will mint.
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['u1@example.com'],
+        subject: 'Admin · the winning render',
+        html: '<p>winner</p>',
+        text: 'winner',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    spy.mockRestore();
+    expect(result.sent).toBe(1);
+    // One batch id can only ever name one request.
+    expect((send.mock.calls[0][0] as { subject: string }).subject).toBe('Admin · the winning render');
+    expect((send.mock.calls[0][0] as { html: string }).html).toBe('<p>winner</p>');
+  });
+
   it('refuses to claim a TOMBSTONE, which carries no batchId and would otherwise look free', async () => {
     // The overlapping-drain race: the other invocation finished first and
     // REPLACED the shared rows with tombstones. A claimed-only check reads a
@@ -1275,6 +1361,19 @@ describe('the frozen outbound request', () => {
     // The tombstone is untouched: not re-claimed, not re-sent.
     const tomb = db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1');
     expect(tomb?.batchId).toBeUndefined();
+  });
+});
+
+describe('sameRecipients', () => {
+  it('compares authorized sets, not resolution order or duplicates', () => {
+    expect(sameRecipients(['a@x.com', 'b@x.com'], ['b@x.com', 'a@x.com'])).toBe(true);
+    expect(sameRecipients(['A@X.com'], ['a@x.com'])).toBe(true);
+    expect(sameRecipients([' a@x.com '], ['a@x.com'])).toBe(true);
+    expect(sameRecipients(['a@x.com', 'a@x.com'], ['a@x.com'])).toBe(true);
+    // A removal and an addition both count as a change.
+    expect(sameRecipients(['a@x.com'], ['a@x.com', 'b@x.com'])).toBe(false);
+    expect(sameRecipients(['a@x.com', 'b@x.com'], ['a@x.com'])).toBe(false);
+    expect(sameRecipients([], ['a@x.com'])).toBe(false);
   });
 });
 

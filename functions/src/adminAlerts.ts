@@ -453,6 +453,20 @@ export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export const QUIET_PERIOD_MS = 60 * 1000;
 
+/**
+ * The longest the settling period may hold a cohort back.
+ *
+ * The cohort rule ("if any row is still settling, the whole page waits") is
+ * what stops a burst being cut in half — but taken alone it is a starvation
+ * bug: a steady trickle of reports keeps something inside the window on every
+ * sweep, and the queue would never drain at all. So the hold is bounded. Once
+ * the oldest eligible row passes this, the eligible cohort goes out and the
+ * stragglers follow in the next batch. Ten minutes is two sweeps' worth: long
+ * enough that no realistic import is split, short enough that a busy Event's
+ * moderation queue is never silently held.
+ */
+export const MAX_HOLD_MS = 10 * 60 * 1000;
+
 /** Minutes between digest sweeps, mirrored in `index.ts`'s cron. Stated here so
  *  the doc comment and the schedule cannot drift silently. */
 export const DIGEST_INTERVAL_MINUTES = 5;
@@ -498,7 +512,11 @@ export interface AdminDigestResult {
     | 'claim-lost'
     /** The outbound request could not be recorded, so nothing was sent: a send
      *  whose bytes were never frozen cannot be safely retried under its key. */
-    | 'freeze-failed';
+    | 'freeze-failed'
+    /** The authorized recipients changed under a frozen batch, so it was
+     *  abandoned and its rows released to re-batch for whoever is authorized
+     *  now. Never replayed to the stale set. */
+    | 'rebatched';
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -643,6 +661,29 @@ export async function sendAdminDigestForEvent(
   // has already used, and a 409 surfaces as a failed send that can never be
   // cleaned up (see `FrozenDigest`).
   if (frozen) {
+    // RECIPIENTS ARE REVALIDATED EVEN ON A REPLAY, and this is the one thing a
+    // frozen request must not simply trust. A freeze is written BEFORE the
+    // send, so a crash in between — or a definitively rejected send — leaves
+    // bytes that may never have been delivered. If an admin has since been
+    // removed from the roster, or `ADMIN_NOTIFY_EMAIL` has been corrected,
+    // replaying verbatim would mail pending and hidden content to somebody who
+    // is no longer authorized to see it, and would keep doing so forever
+    // because the stale address is baked into the frozen request.
+    //
+    // So when the authorized set has changed, the batch is ABANDONED rather
+    // than replayed: the freeze is dropped and the claim released, and the rows
+    // re-batch from scratch under a new id on the next sweep, addressed to
+    // whoever is authorized then. That can duplicate a digest if the original
+    // send did land — to a currently-authorized recipient, and only when the
+    // roster moved mid-flight, which is a strictly better outcome than mailing
+    // a revoked one. It is also what lets a corrected deployment unblock a
+    // batch its old configuration had wedged.
+    const authorized = await resolveAdminEmails(eventId, deps);
+    if (!sameRecipients(authorized, frozen.to)) {
+      console.log(`sendAdminDigestForEvent: recipients changed under batch ${batchId}; re-batching`);
+      await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
+      return { sent: 0, retired: 0, reason: 'rebatched' };
+    }
     const replayed = await (deps.send ?? (await import('./email')).sendEmail)({
       to: frozen.to,
       subject: frozen.subject,
@@ -736,23 +777,42 @@ export async function sendAdminDigestForEvent(
     from,
     alertCount: current.length,
   };
-  // FREEZE BEFORE SENDING. A send whose bytes were never recorded is one a
-  // retry can only reconstruct by guessing, and a wrong guess under the same
-  // key is the 409 that strands the batch — so if this write fails, nothing
-  // goes out.
+  // FREEZE BEFORE SENDING, and freeze with `create`, not `set`.
+  //
+  // A send whose bytes were never recorded is one a retry can only reconstruct
+  // by guessing, and a wrong guess under the same key is the 409 that strands
+  // the batch — so if this write fails, nothing goes out.
+  //
+  // CREATE-ONLY is what makes the claim and the freeze mutually exclusive. The
+  // claim commits before the freeze is written, so a second invocation can see
+  // claimed rows with no frozen document and — correctly, because no freeze
+  // means nothing was sent — rebuild. Two unconditional `set`s would then race,
+  // and the surviving freeze might not be the request Resend actually accepted.
+  // With `create` exactly one render wins; the loser discards its own bytes and
+  // replays the winner's, so one batch id can only ever name one request.
+  let outbound = payload;
   try {
-    await db.doc(batchPath(eventId, batchId)).set({ ...payload, createdAt: now });
+    await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now });
   } catch (err) {
-    console.error('sendAdminDigestForEvent: freezing the outbound request failed (nothing sent)', eventId, err);
-    return { sent: 0, retired: 0, reason: 'freeze-failed' };
+    if (!isAlreadyExists(err)) {
+      console.error('sendAdminDigestForEvent: freezing the outbound request failed (nothing sent)', eventId, err);
+      return { sent: 0, retired: 0, reason: 'freeze-failed' };
+    }
+    const winner = toFrozen((await db.doc(batchPath(eventId, batchId)).get()).data());
+    if (!winner) {
+      console.error('sendAdminDigestForEvent: lost the freeze race but could not read the winner', eventId);
+      return { sent: 0, retired: 0, reason: 'freeze-failed' };
+    }
+    console.log(`sendAdminDigestForEvent: another invocation froze ${batchId} first; replaying it`);
+    outbound = winner;
   }
 
   const ok = await send({
-    to: payload.to,
-    subject: payload.subject,
-    html: payload.html,
-    text: payload.text,
-    from: payload.from,
+    to: outbound.to,
+    subject: outbound.subject,
+    html: outbound.html,
+    text: outbound.text,
+    from: outbound.from,
     idempotencyKey: `admin-digest/${eventId}/${batchId}`,
   });
   if (!ok) return { sent: 0, retired: 0, reason: 'send-failed' };
@@ -761,7 +821,7 @@ export async function sendAdminDigestForEvent(
   console.log(
     `sendAdminDigestForEvent ${eventId}: sent=${current.length} retired=${retireOnly.length} to=${to.length}`,
   );
-  return { sent: current.length, retired: retireOnly.length };
+  return { sent: outbound.alertCount, retired: retireOnly.length };
 }
 
 /**
@@ -806,6 +866,7 @@ export function planDrain(
   rows: ReadonlyArray<{ id: string; batchId?: unknown; createdAt?: unknown }>,
   now: number,
   quietMs: number,
+  maxHoldMs: number = MAX_HOLD_MS,
 ): { batchId: string; ids: string[]; claimNeeded: boolean } | { reason: 'settling' } {
   const claimedIds = rows
     .filter((r) => typeof r.batchId === 'string' && r.batchId)
@@ -819,8 +880,24 @@ export function planDrain(
     };
   }
   const cutoff = now - quietMs;
-  const ripe = rows.filter((r) => (typeof r.createdAt === 'number' ? r.createdAt : 0) <= cutoff);
+  const at = (r: { createdAt?: unknown }) => (typeof r.createdAt === 'number' ? r.createdAt : 0);
+  const ripe = rows.filter((r) => at(r) <= cutoff);
   if (ripe.length === 0) return { reason: 'settling' };
+
+  // COHORT, not per-row. Filtering eligibility row by row defeats the guarantee
+  // it exists for: a one-second import straddling the cutoff has its first rows
+  // at 60.5s and its last at 59.5s, so the front of the burst goes out now and
+  // the tail five minutes later — exactly the split the settling period was
+  // added to prevent. If ANY row is still settling, the whole page waits.
+  if (ripe.length < rows.length) {
+    const oldest = Math.min(...ripe.map(at));
+    // ...but not forever. A continuous trickle of reports would keep something
+    // inside the window on every sweep and starve delivery outright, so the
+    // hold is bounded: once the oldest ripe row passes `maxHoldMs`, the ripe
+    // cohort goes out and the stragglers follow. Delivering late beats never.
+    if (now - oldest < maxHoldMs) return { reason: 'settling' };
+    console.log(`planDrain: max-hold reached with ${rows.length - ripe.length} row(s) still settling`);
+  }
   const ids = ripe.map((r) => r.id);
   return { batchId: drainKey(ids), ids, claimNeeded: true };
 }
@@ -941,6 +1018,39 @@ async function claimDrain(
  * every row pending is the safe, self-healing outcome, and the next sweep
  * rebuilds the same key and dedupes at Resend.
  */
+/** Recipient sets compared as sets, since neither resolution order nor
+ *  duplicates carry meaning — only who is authorized. */
+export function sameRecipients(a: readonly string[], b: readonly string[]): boolean {
+  const norm = (xs: readonly string[]) => [...new Set(xs.map((x) => x.trim().toLowerCase()))].sort();
+  const [x, y] = [norm(a), norm(b)];
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
+/**
+ * Abandon a frozen batch: drop its request and release its rows back to the
+ * pending pool, atomically. `batchId: null` rather than a field delete because
+ * the claim check is `typeof batchId === 'string'`, so a null reads as
+ * unclaimed — and expressing it as a value keeps this module free of
+ * `firebase-admin`'s `FieldValue`.
+ */
+async function releaseBatch(
+  db: AdminAlertFirestore,
+  eventId: string,
+  batchId: string,
+  ids: readonly string[],
+): Promise<void> {
+  try {
+    const batch = db.batch();
+    for (const id of ids) {
+      batch.set(db.doc(`events/${eventId}/adminAlerts/${id}`), { batchId: null }, { merge: true });
+    }
+    batch.delete(db.doc(batchPath(eventId, batchId)));
+    await batch.commit();
+  } catch (err) {
+    console.error('sendAdminDigestForEvent: releasing the batch failed (it stays claimed)', eventId, err);
+  }
+}
+
 async function finishBatch(
   db: AdminAlertFirestore,
   eventId: string,
