@@ -9,7 +9,12 @@ import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
 import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
-import { shouldNotify, notifyAdminsOfModeration, type ModeratedDoc } from './notify';
+import {
+  recordAdminAlerts,
+  runAdminAlertSweep,
+  type AdminAlertFirestore,
+  type AlertableDoc,
+} from './adminAlerts';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
 import {
@@ -167,35 +172,60 @@ export const moderateProof = VISION_ENABLED
   : undefined;
 
 /**
- * Email Event admins when a Proof/Prompt transitions INTO a moderation state
- * (issue #101). Decoupled from the writes that own the transition; reads
- * `status` only. Best-effort — a mail failure is swallowed so the moderation
- * write is never blocked (ADR 0001). Bound to the RESEND_API_KEY secret.
+ * Queue an admin alert when a Proof/Prompt write earns one (issues #101, #638).
+ * Decoupled from the writes that own the transition; reads the before/after
+ * snapshots only. Best-effort — a queue failure is swallowed so the moderation
+ * write is never blocked (ADR 0001).
+ *
+ * THESE USED TO SEND MAIL DIRECTLY (#101). They now only APPEND to
+ * `events/{eventId}/adminAlerts`, and `adminAlertDigest` below drains the queue
+ * into one Theme-styled email per Event per sweep. The reason is burst safety:
+ * a pool import writing eighty `pending` Prompts, or a report pile-on, used to
+ * mean one email per write (specs/admin-notification-emails.md). The export
+ * NAMES are unchanged on purpose — renaming an exported Function deletes the
+ * old one on the next deploy, and there is no behavioural reason to pay that.
  *
  * Uses onDocumentWritten (not onDocumentUpdated) so a proof CREATED already
  * flagged — moderateProof's merge-set can create the doc in the
- * upload-before-doc race (#101 Codex F2) — still notifies; `shouldNotify`
- * ignores create-into-active and deletes (`after` undefined). `transitionId`
- * is the CloudEvent id, threaded into the idempotency key (#101 Codex F3).
+ * upload-before-doc race (#101 Codex F2) — still alerts; `alertsForWrite`
+ * ignores create-into-active and deletes (`after` undefined). `transitionId` is
+ * the CloudEvent id, which is stable across platform retries of one delivery
+ * and unique per distinct write — it becomes the queue document's id, so a
+ * redelivered trigger is a no-op rather than a duplicate row (#101 Codex F3,
+ * carried forward).
+ *
+ * BOTH NOW PIN `ADMIN_SDK_SERVICE_ACCOUNT`, and that is a fix rather than
+ * boilerplate. They write Firestore now, which the default Gen2 compute
+ * identity cannot reach at all — but they also always READ it: `#101`'s roster
+ * lookup resolves `events/{eventId}.admins` through the Admin SDK, and
+ * `resolveAdminEmails` swallows a permission error into an empty roster. So on
+ * an unpinned deployment the `admins` half of the recipient model silently
+ * never resolved, and only `ADMIN_NOTIFY_EMAIL` ever produced a recipient.
+ * Neither writes anything under `events/{eventId}/{items,proofs}`, so neither
+ * can re-fire itself. The RESEND_API_KEY binding moved to the digest, which is
+ * now the only function here that sends.
  */
 async function handleModeration(
-  collection: 'proofs' | 'items',
+  collection: 'items' | 'proofs',
   eventId: string,
   docId: string,
   transitionId: string,
-  before: ModeratedDoc | undefined,
-  after: ModeratedDoc | undefined,
+  before: AlertableDoc | undefined,
+  after: AlertableDoc | undefined,
 ): Promise<void> {
-  try {
-    if (!after || !shouldNotify(before, after)) return;
-    await notifyAdminsOfModeration(eventId, collection, docId, after, transitionId);
-  } catch (err) {
-    console.error('notifyOnModeration failed', err);
-  }
+  await recordAdminAlerts(
+    db as unknown as AdminAlertFirestore,
+    collection,
+    eventId,
+    docId,
+    transitionId,
+    before,
+    after,
+  );
 }
 
 export const notifyProofModeration = onDocumentWritten(
-  { document: 'events/{eventId}/proofs/{proofId}', secrets: [RESEND_API_KEY] },
+  { document: 'events/{eventId}/proofs/{proofId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     handleModeration(
       'proofs',
@@ -208,7 +238,7 @@ export const notifyProofModeration = onDocumentWritten(
 );
 
 export const notifyItemModeration = onDocumentWritten(
-  { document: 'events/{eventId}/items/{itemId}', secrets: [RESEND_API_KEY] },
+  { document: 'events/{eventId}/items/{itemId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (event) =>
     handleModeration(
       'items',
@@ -498,6 +528,40 @@ export const dailyEngagementEmail = onSchedule(
     memory: '512MiB',
   },
   () => runDailyEmailSweep(db as unknown as DailyEmailFirestore),
+);
+
+// --- Admin notification digest (#638) --------------------------------------------
+
+/**
+ * Drain every active Event's admin-alert queue into ONE Theme-styled email per
+ * Event (specs/admin-notification-emails.md). The producers are the two
+ * `notify*Moderation` triggers above; everything about WHAT is queued, WHO
+ * hears about it and HOW it reads lives in `adminAlerts.ts` /
+ * `adminAlertDigest.ts`, all pure + dependency-injected.
+ *
+ * FIVE MINUTES is the whole burst guarantee, and it is a floor on batching
+ * rather than a delay budget: an import that writes eighty `pending` Prompts in
+ * one second produces eighty queued alerts and exactly one email. It is
+ * deliberately tighter than `unlockDay`'s and the daily email's quarter-hourly
+ * sweep, because those wait on a wall-clock moment in the Event's timezone
+ * while this one waits only on work existing — and moderation is the one
+ * notification where latency is a real cost. A sweep with nothing queued costs
+ * one indexed `sentAt == null` query per active Event and sends nothing.
+ *
+ * Pins `ADMIN_SDK_SERVICE_ACCOUNT` (it reads Events, the alert queue, the
+ * `admins` roster and `hostnames`, and stamps alerts, none of which the default
+ * Gen2 compute identity can reach) and binds `RESEND_API_KEY` — it is now the
+ * only admin-notification function that sends.
+ */
+export const adminAlertDigest = onSchedule(
+  {
+    schedule: '*/5 * * * *',
+    timeZone: 'Etc/UTC',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    secrets: [RESEND_API_KEY],
+    timeoutSeconds: 300,
+  },
+  () => runAdminAlertSweep(db as unknown as AdminAlertFirestore),
 );
 
 /**

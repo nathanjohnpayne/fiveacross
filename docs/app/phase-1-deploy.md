@@ -18,7 +18,7 @@ cd functions && npm install && npm run build && cd ..
 op-firebase-deploy --only functions
 ```
 
-Deploys three exports: `moderateProof` (Storage trigger → SafeSearch flag + thumbnail), and the two moderation-notification triggers `notifyProofModeration` and `notifyItemModeration` (`onDocumentWritten` on `events/{eventId}/proofs/{proofId}` and `.../items/{itemId}` → email the Event admins when a Proof/Prompt transitions into `flagged`/`hidden`; #101). Player stats are **not** server-recomputed—they stay client-authoritative by design (ADR 0001).
+Deploys `moderateProof` (Storage trigger → SafeSearch flag + thumbnail) plus the admin-notification family: the two document triggers `notifyProofModeration` and `notifyItemModeration` (`onDocumentWritten` on `events/{eventId}/proofs/{proofId}` and `.../items/{itemId}`) and the scheduled `adminAlertDigest`. **Since #638 the two document triggers no longer send mail**—they only APPEND to the server-owned `events/{eventId}/adminAlerts` queue, and `adminAlertDigest` (`*/5 * * * *` UTC) drains it into one Theme-styled email per Event per sweep. So the secret binding and the Cloud Scheduler job both belong to the DIGEST, and a delivery smoke-test must exercise the digest rather than the triggers (§ 1a-ii). Player stats are **not** server-recomputed—they stay client-authoritative by design (ADR 0001).
 
 **`moderateProof` (Cloud Vision) is gated OFF by default (issue #126).** `moderateProof` is a Storage trigger on the project's default bucket (`us-east1`) and is pinned to `region: 'us-east1'` to match it (#132)—resolving the earlier `us-central1`-vs-`us-east1` mismatch that would otherwise fail Firebase's deploy-plan validation and block the whole `functions` package. It stays deferred regardless: the `ENABLE_VISION_MODERATION` flag (in `functions/.env` / `functions/.env.<projectId>`, default `false`) controls whether `moderateProof` is exported at all: off (the default), it is not exported and Firebase never sees or validates it, so this deploy brings up the notifiers (and the #43 threshold-hide function once it lands) but **not** Cloud Vision.
 
@@ -26,7 +26,7 @@ The gate has to be honored at **deploy trigger discovery**—the step where Fire
 
 To enable Vision later (the region pin is already in place, #132): (1) enable the Cloud Vision API on the project, (2) set `ENABLE_VISION_MODERATION=true` in `functions/.env.<projectId>`, and (3) redeploy `--only functions`.
 
-**The two notifier functions need the `RESEND_API_KEY` secret set BEFORE (or they will deploy but fail to send).** See § 1a below for the one-time secret + the `EMAIL_FROM` / `ADMIN_NOTIFY_EMAIL` / `APP_BASE_URL` params; after setting the secret, (re)deploy the bound functions so the binding takes effect (`op-firebase-deploy --only functions`).
+**The sending functions—`adminAlertDigest` and `dailyEngagementEmail`—need the `RESEND_API_KEY` secret set BEFORE (or they will deploy but fail to send).** Since #638 the two `notify*Moderation` triggers are NOT among them: they enqueue only, bind no secret, and are unaffected by a missing key. See § 1a below for the one-time secret + the `EMAIL_FROM` / `ADMIN_NOTIFY_EMAIL` / `APP_BASE_URL` params; after setting the secret, (re)deploy the bound functions so the binding takes effect (`op-firebase-deploy --only functions`).
 
 **If a previously deployed project still carries `recomputeStats` and/or `share`:** this deploy is what deletes them—Firebase discovers exports removed from the source and prompts to confirm deleting each live function. Two exports have been removed since the scaffold: `recomputeStats` (#40, ADR 0001—self-writable player stats need no server recompute) and `share` (#39, ADR 0005—the crawler OG page is replaced by on-device Share Cards). A project deployed before either removal will prompt to delete whichever it still carries. The wrapper always runs `firebase deploy --non-interactive`, which stalls on that prompt, so the one-time cleanup deploy must pass the force flag through: `op-firebase-deploy --only functions --force` (extra args pass straight through to `firebase deploy`). Both deletions are expected and required; do not recreate the function in either case. Deleting `share` from Functions does **not** remove the separate Cloud Run OG renderer—that retirement is step 3 below.
 
@@ -42,7 +42,7 @@ firebase functions:secrets:set RESEND_API_KEY
 op read "op://Private/<ITEM-UDID>/<field>" | firebase functions:secrets:set RESEND_API_KEY --data-file -
 ```
 
-Binding the secret to the functions grants the runtime service account `secretmanager.secretAccessor`; `op-firebase-setup` already grants `roles/secretmanager.viewer` (see `DEPLOYMENT.md`). **After setting the secret, (re)deploy `--only functions`** so the two bound triggers pick it up, then send a live smoke-test to confirm delivery.
+Binding the secret to the functions grants the runtime service account `secretmanager.secretAccessor`; `op-firebase-setup` already grants `roles/secretmanager.viewer` (see `DEPLOYMENT.md`). **After setting the secret, (re)deploy `--only functions`** so the bound senders pick it up, then send a live smoke-test to confirm delivery.
 
 The rest of the email config is **non-secret** `firebase-functions/params` (safe defaults baked in; override only if needed). These load from the **Functions source directory**, not the repo-root `.env`: `firebase.json` sets `functions.source: "functions"`, so Functions v2 reads `functions/.env` (all environments) or `functions/.env.<projectId>` (here `functions/.env.gaycruisebingo`). Setting them in the repo-root `.env` has **no effect** on the deployed functions. A committed template lives at `functions/.env.example`:
 
@@ -53,6 +53,23 @@ The rest of the email config is **non-secret** `firebase-functions/params` (safe
 - `APP_BASE_URL`—default `https://gaycruisebingo.com`; base for the Admin-console deep link in the email body, and the fallback origin for the daily email's Feed CTA when an Event has no `hostnames` mapping.
 - `EMAIL_REPLY_TO`—default empty, meaning **no `Reply-To` header at all** (unchanged behaviour for any project that does not set it). Applies to every transactional send, not just the daily email. Separate from `EMAIL_FROM` because `EMAIL_FROM` must sit on a Resend-**verified sending domain** while replies want a mailbox a human reads—on the Five Across deployment those are different hosts (sent from the verified subdomain, replies to the Google-hosted apex, since the Resend receiving side is off). Set it in `functions/.env.<projectId>`.
 - `EMAIL_UNSUBSCRIBE_URL`—default `https://us-central1-gaycruisebingo.cloudfunctions.net/emailUnsubscribe`; the public address of the unsubscribe endpoint, used as both the visible Unsubscribe link and the `List-Unsubscribe` header target in the daily engagement email (#616). **Any project other than `gaycruisebingo` MUST set this**—the default points at this project, so leaving it would mail an unsubscribe link that cannot honor the opt-out. Set it in `functions/.env.<projectId>`.
+
+### 1a-ii. Admin notification digest (#638)
+
+`adminAlertDigest` (an `onSchedule` trigger, `*/5 * * * *` UTC) ships with the same `RESEND_API_KEY` secret above; no additional secret is needed. It pins the Admin-SDK runtime identity, as do the two `notify*Moderation` triggers now that they write the queue. Full behaviour is in `specs/admin-notification-emails.md`.
+
+Three things to check after the deploy:
+
+1. **The Cloud Scheduler job exists**—the same #318 trap as the daily email, and it bites harder here because a jobless digest means the queue fills and nothing is ever mailed: `gcloud scheduler jobs list --project <projectId>` must show a job for `adminAlertDigest` alongside `dailyEngagementEmail` and `unlockDay`.
+2. **A recipient resolves.** Recipients are the Event's `admins` roster (verified Firebase Auth emails only) unioned with `ADMIN_NOTIFY_EMAIL`. If neither resolves, alerts queue and nothing sends—which is logged, not lost, but it is silent from the outside. Populate `ADMIN_NOTIFY_EMAIL` per project unless the roster is known to resolve.
+3. **Smoke-test the DIGEST, not the triggers.** Report a Prompt in the app (or submit one as a non-admin, which lands `pending`), then wait for the next five-minute sweep. A queue row appearing under `events/{eventId}/adminAlerts` with no email inside two sweeps means the scheduler job or the recipient list is the problem, in that order.
+
+One optional one-time setup: a **Firestore TTL policy on `adminAlerts.expiresAt`**. A drained row is replaced by a payload-free tombstone (`{ sentAt, expiresAt }`) whose id is what keeps a delayed trigger redelivery from mailing the same transition twice; `expiresAt` is seven days out, matching the redelivery window. Without the policy the tombstones accumulate—two numbers each, holding no user content, so this is housekeeping rather than a correctness or privacy problem:
+
+```bash
+gcloud firestore fields ttls update expiresAt \
+  --collection-group=adminAlerts --enable-ttl --project <projectId>
+```
 
 ### 1a-i. Daily themed engagement email (#616)
 

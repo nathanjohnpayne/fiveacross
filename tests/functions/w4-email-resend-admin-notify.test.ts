@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { sendEmail, type EmailPayload } from '../../functions/src/email';
-import { shouldNotify, resolveAdminEmails, notifyAdminsOfModeration } from '../../functions/src/notify';
+import { shouldNotify, resolveAdminEmails, deriveReason } from '../../functions/src/notify';
 
 // Exercises the pure/injectable seams of the moderation-notify pipeline (#101).
 // The Resend transport, Admin-SDK roster/email lookups, and config params are
@@ -186,97 +186,29 @@ describe('sendEmail', () => {
   });
 });
 
-describe('notifyAdminsOfModeration', () => {
-  it('composes ONE send to all resolved admins with a status-scoped idempotency key', async () => {
-    const send = vi.fn(async () => true);
-    const ok = await notifyAdminsOfModeration(
-      'med-2026',
-      'proofs',
-      'proof123',
-      { status: 'flagged', visionFlag: 'violence' },
-      'evt-abc',
-      {
-        getAdminUids: async () => ['u1', 'u2'],
-        getEmailForUid: async (uid) => `${uid}@example.com`,
-        adminNotifyEmail: '',
-        appBaseUrl: 'https://example.com',
-        send,
-      },
-    );
-    expect(ok).toBe(true);
-    expect(send).toHaveBeenCalledTimes(1);
-    const arg = send.mock.calls[0][0];
-    expect(arg.to).toEqual(['u1@example.com', 'u2@example.com']);
-    expect(arg.idempotencyKey).toBe('moderation-notify/med-2026/proofs/proof123/flagged/evt-abc');
-    expect(arg.html).toContain('https://example.com/admin');
-    expect(arg.subject).toBe('[GCB moderation] Proof flagged (violence)');
-  });
-
-  it('derives the cause from doc state: threshold, manual, and Vision — never a fabricated threshold', async () => {
-    const subjects: string[] = [];
-    const base = {
-      getAdminUids: async () => ['u1'],
-      getEmailForUid: async (uid: string) => `${uid}@example.com`,
-      adminNotifyEmail: '',
-      appBaseUrl: 'https://example.com',
-      getReportHideThreshold: async () => 3,
-      send: async (a: { subject: string }) => {
-        subjects.push(a.subject);
-        return true;
-      },
-    };
+// `notifyAdminsOfModeration` was retired in #638: a moderation transition now
+// enqueues an admin alert instead of composing its own send, and the digest that
+// drains the queue is covered by `admin-notification-emails.test.ts` (the ONE-send
+// composition, the idempotency key and the empty-roster case all moved there
+// wholesale). What stayed here is the pure causal labelling the digest reuses —
+// the #101 Codex R2 F1 guarantee that a hide never claims a cause it did not have.
+describe('deriveReason', () => {
+  it('derives the cause from doc state: threshold, manual, and Vision — never a fabricated threshold', () => {
     // At/over threshold → threshold cause.
-    await notifyAdminsOfModeration('e', 'items', 'i', { status: 'hidden', reportCount: 3 }, 't1', base);
+    expect(deriveReason({ status: 'hidden', reportCount: 3 }, 3)).toBe('reports >= threshold');
     // Manual hide of an unreported/sub-threshold prompt → admin cause, NOT "reports >= threshold".
-    await notifyAdminsOfModeration('e', 'items', 'i', { status: 'hidden', reportCount: 0 }, 't2', base);
-    // Threshold unknown → no fabricated cause (neutral "hidden").
-    await notifyAdminsOfModeration('e', 'items', 'i', { status: 'hidden', reportCount: 0 }, 't3', {
-      ...base,
-      getReportHideThreshold: async () => null,
-    });
-    // Vision flag names itself.
-    await notifyAdminsOfModeration('e', 'proofs', 'p', { status: 'flagged', visionFlag: 'violence' }, 't4', base);
-    expect(subjects).toEqual([
-      '[GCB moderation] Prompt hidden (reports >= threshold)',
-      '[GCB moderation] Prompt hidden (by an admin)',
-      '[GCB moderation] Prompt hidden',
-      '[GCB moderation] Proof flagged (violence)',
-    ]);
+    expect(deriveReason({ status: 'hidden', reportCount: 0 }, 3)).toBe('by an admin');
+    // Threshold unknown → no fabricated cause at all.
+    expect(deriveReason({ status: 'hidden', reportCount: 0 }, null)).toBe('');
+    // Count unknown → likewise neutral.
+    expect(deriveReason({ status: 'hidden' }, 3)).toBe('');
+    // Vision flag names itself, whatever the counts say.
+    expect(deriveReason({ status: 'flagged', visionFlag: 'violence' }, null)).toBe('violence');
+    expect(deriveReason({ status: 'hidden', visionFlag: 'violence', reportCount: 0 }, 3)).toBe('violence');
   });
 
-  it('keys per transition: same CloudEvent id is retry-stable, distinct ids differ (even into the same status)', async () => {
-    const keys: string[] = [];
-    const deps = {
-      getAdminUids: async () => ['u1'],
-      getEmailForUid: async (uid: string) => `${uid}@example.com`,
-      adminNotifyEmail: '',
-      appBaseUrl: 'https://example.com',
-      getReportHideThreshold: async () => null,
-      send: async (a: { idempotencyKey: string }) => {
-        keys.push(a.idempotencyKey);
-        return true;
-      },
-    };
-    // A platform retry of ONE transition reuses the same CloudEvent id → same key.
-    await notifyAdminsOfModeration('e', 'items', 'i9', { status: 'hidden' }, 'evt-1', deps);
-    await notifyAdminsOfModeration('e', 'items', 'i9', { status: 'hidden' }, 'evt-1', deps);
-    // A genuine re-hide after a restore is a distinct event id → distinct key.
-    await notifyAdminsOfModeration('e', 'items', 'i9', { status: 'hidden' }, 'evt-2', deps);
-    expect(keys[0]).toBe('moderation-notify/e/items/i9/hidden/evt-1');
-    expect(keys[0]).toBe(keys[1]); // retry-stable → Resend dedupes
-    expect(keys[2]).not.toBe(keys[0]); // distinct transition → delivers
-  });
-
-  it('sends nothing and returns false when no admin email resolves', async () => {
-    const send = vi.fn(async () => true);
-    const ok = await notifyAdminsOfModeration('med-2026', 'items', 'item9', { status: 'hidden' }, 'evt-x', {
-      getAdminUids: async () => [],
-      getEmailForUid: async () => null,
-      adminNotifyEmail: '',
-      appBaseUrl: 'https://example.com',
-      send,
-    });
-    expect(ok).toBe(false);
-    expect(send).not.toHaveBeenCalled();
+  it('claims nothing for a non-hidden, unflagged status', () => {
+    expect(deriveReason({ status: 'active', reportCount: 9 }, 3)).toBe('');
+    expect(deriveReason({ status: 'pending' }, 3)).toBe('');
   });
 });

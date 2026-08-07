@@ -1,15 +1,28 @@
 /**
- * Admin moderation notifications (issue #101). A decoupled reader over the
- * `status` transitions that `moderateProof` (Vision), the threshold auto-hide
- * (#43), and manual admin hides already write: when a Proof/Prompt moves INTO a
- * moderation state it emails the Event admins. Reads `status` only — recomputes
- * no stats, gates no play (ADR 0001); a mail failure never blocks the write.
+ * Admin moderation notifications — the DECISIONS and the roster (issue #101,
+ * specs/w4-email-resend-admin-notify.md).
  *
- * The Firestore/Auth/params/`sendEmail` dependencies are lazy-loaded defaults
- * that tests replace via `deps`, so the whole flow is unit-testable without a
- * Functions runtime.
+ * A decoupled reader over the `status` transitions that `moderateProof`
+ * (Vision), the threshold auto-hide (#43), and manual admin hides already
+ * write. Reads `status` only — recomputes no stats, gates no play (ADR 0001).
+ *
+ * DELIVERY MOVED IN #638. This module used to compose and send one email per
+ * transition (`notifyAdminsOfModeration`). It no longer sends anything: a
+ * moderation transition is now one of three signals that enqueue an admin alert
+ * (`adminAlerts.ts`), drained by a periodic Theme-styled digest
+ * (`adminAlertDigest.ts`, specs/admin-notification-emails.md). The reason is
+ * burst safety — an import or a report pile-on used to mean one email per
+ * write — and format: the digest renders the wireframe's anatomy, which the old
+ * bare `<table>` body did not.
+ *
+ * What survives here is what was worth keeping and is now reused by the digest:
+ * WHEN a transition is notable (`shouldNotify`), WHAT caused it
+ * (`deriveReason`), and WHO hears about it (`resolveAdminEmails`).
+ *
+ * The Firestore/Auth/params dependencies are lazy-loaded defaults that tests
+ * replace via `deps`, so the whole flow is unit-testable without a Functions
+ * runtime.
  */
-import { sendEmail } from './email';
 
 /** The subset of a Proof/Prompt doc the notifier reads. */
 export interface ModeratedDoc {
@@ -32,10 +45,6 @@ export function shouldNotify(before: ModeratedDoc | undefined, after: ModeratedD
   const next = after?.status;
   return !!next && before?.status !== next && MODERATION_STATES.includes(next);
 }
-
-/** Escape user-supplied text before interpolating it into the HTML body. */
-const escapeHtml = (s: string): string =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 export interface ResolveDeps {
   /** Read `events/{eventId}.admins` (UID array). */
@@ -62,19 +71,17 @@ async function defaultGetEmailForUid(uid: string): Promise<string | null> {
   }
 }
 
-async function defaultGetReportHideThreshold(eventId: string): Promise<number | null> {
-  try {
-    const { getFirestore } = await import('firebase-admin/firestore');
-    const threshold = (await getFirestore().doc(`events/${eventId}`).get()).data()?.settings?.reportHideThreshold;
-    return typeof threshold === 'number' ? threshold : null;
-  } catch {
-    return null; // unknown threshold → we simply do not claim a threshold cause
-  }
-}
-
 /**
  * Resolve an Event's admin roster to a de-duped list of verified emails,
  * unioned with any ADMIN_NOTIFY_EMAIL override. Returns `[]` (never throws).
+ *
+ * BOTH SOURCES, deliberately, and #638 kept it that way rather than choosing
+ * between them. The `admins` roster is the per-Event answer and needs no deploy
+ * to change; `ADMIN_NOTIFY_EMAIL` is the deployment-level shared inbox and is
+ * the only source that still resolves when the roster does not — an admin who
+ * signed in with an unverified address, or a brand-new Event whose roster has
+ * not been filled in yet. A union costs nothing and fails soft in both
+ * directions.
  */
 export async function resolveAdminEmails(eventId: string, deps: ResolveDeps = {}): Promise<string[]> {
   const getAdminUids = deps.getAdminUids ?? defaultGetAdminUids;
@@ -105,91 +112,15 @@ export async function resolveAdminEmails(eventId: string, deps: ResolveDeps = {}
  * action; when either is unknown, make no causal claim (neutral). Previously
  * every Vision-less hide was mislabelled "reports >= threshold", which lied
  * about a manual hide of an unreported prompt.
+ *
+ * Exported since #638: the digest labels its rows with this rather than
+ * re-deriving the same three-way decision on the rendering side.
  */
-function deriveReason(after: ModeratedDoc, reportHideThreshold: number | null): string {
+export function deriveReason(after: ModeratedDoc, reportHideThreshold: number | null): string {
   if (after.visionFlag) return after.visionFlag;
   if (after.status !== 'hidden') return '';
   if (typeof after.reportCount === 'number' && typeof reportHideThreshold === 'number') {
     return after.reportCount >= reportHideThreshold ? 'reports >= threshold' : 'by an admin';
   }
   return ''; // threshold or count unknown — no fabricated cause
-}
-
-function buildMessage(
-  eventId: string,
-  collection: string,
-  docId: string,
-  after: ModeratedDoc,
-  appBaseUrl: string,
-  reportHideThreshold: number | null,
-) {
-  const entity = collection === 'proofs' ? 'Proof' : 'Prompt';
-  const status = after.status ?? 'unknown';
-  const reason = deriveReason(after, reportHideThreshold);
-  const subject = `[GCB moderation] ${entity} ${status}${reason ? ` (${reason})` : ''}`;
-  const adminLink = `${appBaseUrl}/admin`;
-
-  const rows: Array<[string, string]> = [
-    ['Event', eventId],
-    ['Item', `${collection}/${docId}`],
-    ['New status', status],
-  ];
-  if (after.visionFlag) rows.push(['Vision flag', after.visionFlag]);
-  if (typeof after.reportCount === 'number') rows.push(['Report count', String(after.reportCount)]);
-
-  const text = `${entity} moderation update.\n\n${rows.map(([k, v]) => `${k}: ${v}`).join('\n')}\n\nReview in the Admin console: ${adminLink}\n`;
-  const html =
-    `<p>${escapeHtml(entity)} moderation update.</p><table>` +
-    rows.map(([k, v]) => `<tr><td><strong>${escapeHtml(k)}</strong></td><td>${escapeHtml(v)}</td></tr>`).join('') +
-    `</table><p><a href="${escapeHtml(adminLink)}">Review in the Admin console</a></p>`;
-  return { subject, html, text };
-}
-
-export interface NotifyDeps extends ResolveDeps {
-  /** Override the send transport (defaults to `sendEmail`). */
-  send?: typeof sendEmail;
-  /** Override the Admin-console base URL (defaults to the APP_BASE_URL param). */
-  appBaseUrl?: string;
-  /** Resolve the Event's `settings.reportHideThreshold`; defaults to a doc read. */
-  getReportHideThreshold?: (eventId: string) => Promise<number | null>;
-}
-
-/**
- * Compose and send ONE email to all resolved admins for a moderation
- * transition. Sends nothing (returns `false`) when the roster is empty.
- *
- * `transitionId` is the Eventarc/CloudEvent id of the triggering write. It is
- * stable across platform retries of the SAME delivery but unique per distinct
- * write, so folding it into the idempotency key makes a retry of one transition
- * dedupe while two DISTINCT transitions into the same status (e.g. a re-hide
- * after a restore, within Resend's 24h window) each deliver (#101 Codex F3).
- */
-export async function notifyAdminsOfModeration(
-  eventId: string,
-  collection: string,
-  docId: string,
-  after: ModeratedDoc,
-  transitionId: string,
-  deps: NotifyDeps = {},
-): Promise<boolean> {
-  const to = await resolveAdminEmails(eventId, deps);
-  if (to.length === 0) {
-    console.log(`notifyAdminsOfModeration: no admin emails for event ${eventId}; skipping`);
-    return false;
-  }
-  const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
-  // Only a Vision-less hide needs the threshold, to tell a threshold hide from a
-  // manual one (#101 Codex R2 F1); skip the read otherwise.
-  const reportHideThreshold =
-    after.status === 'hidden' && !after.visionFlag
-      ? await (deps.getReportHideThreshold ?? defaultGetReportHideThreshold)(eventId)
-      : null;
-  const { subject, html, text } = buildMessage(eventId, collection, docId, after, appBaseUrl, reportHideThreshold);
-  return (deps.send ?? sendEmail)({
-    to,
-    subject,
-    html,
-    text,
-    idempotencyKey: `moderation-notify/${eventId}/${collection}/${docId}/${after.status}/${transitionId}`,
-  });
 }
