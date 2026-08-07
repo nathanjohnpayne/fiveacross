@@ -134,7 +134,7 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 | 1. Vercel project | **Done** | **Done** |
 | 2. Minted host confirmed exact | **Done** | **Done** |
 | 3. Production env vars | **Done**—nine `VITE_*`, Production scope | **Done**—same nine, own `authDomain`, `VITE_EDITION=vacay` |
-| 4. Git connected, auto-deploy OFF | **Done**—linked, `git.deploymentEnabled: false` (#676) | **Done**—same |
+| 4. Git connected, `main` auto-deploy OFF | **Done**—linked, `git.deploymentEnabled: { main: false }` (#676) | **Done**—same |
 | 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
 | 6. Google OAuth redirect URI | **Outstanding—console-only** | **Outstanding—console-only** |
 
@@ -183,7 +183,9 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
    "git": { "deploymentEnabled": false }
    ```
 
-   so no push to any branch deploys any of the three projects (#676). Deploys are the explicit command in § Operating it.
+   so a push to `main` deploys none of the three projects (#676). Deploys are the explicit command in § Operating it.
+
+   **Scoped to `main` on purpose.** A blanket `"deploymentEnabled": false` would also kill Part 2's `git push --force origin HEAD:preview` flow — the stable alias is a *Git* deployment like any other. Every other branch keeps whatever the per-project Ignored Build Step already decides, unchanged.
 
    **Do not "fix" this by re-enabling automatic deployments.** Every escalation of Vercel build volume on this repo has ended the same way, and it has now happened twice at different scales:
 
@@ -284,13 +286,9 @@ Note that steps 3–4 prove the rewrite fires and reaches Firebase Hosting, but 
 
 ### Operating it
 
-The mirror deploys **only when you deploy it** (#676)—`vercel.json` carries `git.deploymentEnabled: false`, so no push to `main` builds anything on any of the three projects:
+The mirror deploys **only when you deploy it** (#676)—`vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. The guarded command lives in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror; use it rather than a bare `npx vercel deploy`.
 
-```bash
-npx vercel deploy --prod --yes --project vacaybingo   # likewise fiveacross, gaycruisebingo
-```
-
-The build still runs on Vercel against that project's own Production env vars, so the project name is the only input. `git.deploymentEnabled` governs *Git-triggered* deployments ("branches that should not trigger a deployment upon commits"), so it never blocks this command.
+The guards are not ceremony. `vercel deploy` uploads your **current working directory**—`--project` picks the destination, not the source—so with Git deploys off this is the only production path and the only thing standing between a dirty feature checkout and a live host. `git.deploymentEnabled` governs *Git-triggered* deployments ("branches that should not trigger a deployment upon commits"), so it never blocks the command itself.
 
 This inverts the old hazard. The mirror can no longer be *ahead* of the primary; it is now reliably *behind* until you catch it up, so a deploy that matters is two commands, primary then mirror, in that order. The reason is the account-wide build cap: three projects on one repository meant three production builds per merge, and exhausting the cap refuses deployments team-wide for 24 hours—including `gaycruisebingo.vercel.app`, the brand's own ship-network fallback. The automation was not buying reliability anyway (see the cancelled-build warning in step 4), so the trade is explicit staleness you can see for implicit staleness you cannot.
 

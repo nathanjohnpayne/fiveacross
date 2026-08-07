@@ -8,6 +8,7 @@ interface HostCondition {
 
 interface VercelConfig {
   rewrites?: Array<{ source?: string; destination?: string; has?: HostCondition[] }>;
+  git?: { deploymentEnabled?: boolean | Record<string, boolean> };
 }
 
 // Every brand mirror that proxies its auth helper to the `fiveacross` Firebase
@@ -18,6 +19,28 @@ const FIVEACROSS_MIRROR_HOSTS = ['fiveacross.vercel.app', 'vacaybingo.vercel.app
 
 describe('Vercel Firebase Auth proxy', () => {
   const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as VercelConfig;
+
+  // #676: mirror currency is manual. A merge to `main` must deploy NOTHING —
+  // three projects build from this one file, so an accidental re-enable is
+  // three production builds per merge against an account-wide cap whose
+  // exhaustion refuses deployments team-wide for 24 hours, taking out the
+  // ship-network fallback exactly when the primary host is unreachable.
+  describe('manual mirror deploys (#676)', () => {
+    it('disables Git-triggered deployment of main', () => {
+      const enabled = config.git?.deploymentEnabled;
+      expect(typeof enabled).toBe('object');
+      expect((enabled as Record<string, boolean>).main).toBe(false);
+    });
+
+    // Scoped to `main` ON PURPOSE, not a blanket `false`: the stable preview
+    // alias is fed by `git push --force origin HEAD:preview`
+    // (docs/app/preview-deploys.md § Part 2), which a blanket disable would
+    // silently kill along with the production builds it is aimed at.
+    it('leaves every other branch alone, so the preview flow survives', () => {
+      const enabled = config.git?.deploymentEnabled as Record<string, boolean>;
+      expect(Object.keys(enabled)).toEqual(['main']);
+    });
+  });
   const rewrites = config.rewrites ?? [];
 
   // #585 / #625: one vercel.json serves three Vercel projects (gcb production

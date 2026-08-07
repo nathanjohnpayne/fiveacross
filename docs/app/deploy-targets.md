@@ -131,19 +131,29 @@ Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands
 
 The synthetic proves the app mounts; it does not prove *which* build shipped. For that, diff the asset hash before and after, and grep the new bundle for a marker unique to the change.
 
-The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: false`, so no merge to `main` builds anything on any of the three projects. Nothing rebuilds them but you.
+The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. Nothing rebuilds them but you.
 
 That is a deliberate trade, and it trades in the direction the failure history points. Three projects on one repository meant three production builds per merge against an account-wide cap that, when exhausted, refuses deployments for **24 hours** across the whole team — taking out the brand's own ship-network fallback on the day you need it. The stale-mirror risk that automation was covering was never actually covered: Vercel silently cancels queued builds under pressure, the host keeps serving its previous bundle at `HTTP 200`, and both mirrors were found 22h and 7h stale on 2026-08-06 *with the integration connected*. Explicit staleness you can see beats implicit staleness you cannot.
 
+Only `main` is disabled. Other branches keep whatever the per-project **Ignored Build Step** already decides, so the `preview`-branch flow in [`preview-deploys.md`](preview-deploys.md) § Part 2 is untouched by this.
+
 ### Deploying a mirror
 
+**`vercel deploy` uploads your current working directory** — `--project` chooses the destination, not the source, and `--prod` promotes whatever was uploaded. With Git deploys off for `main`, this is the *only* path to production, so it needs the same guards the Firebase deploy has. Copy the whole block; `&&` makes it fail closed:
+
 ```bash
+cd ~/GitHub/gaycruisebingo && \
+git fetch origin main && \
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ABORT: HEAD is not origin/main"; false; } && \
+[ -z "$(git status --porcelain)" ] || { echo "ABORT: worktree is dirty"; false; } && \
 npx vercel deploy --prod --yes --project vacaybingo
 ```
 
 Likewise `fiveacross` and `gaycruisebingo`. Deploy only what you need — each invocation is one build against the shared cap.
 
-The build runs on Vercel using **that project's own Production environment variables** (`VITE_EDITION`, `VITE_EVENT_ID`, the Firebase config), which is why the project name is the only input: the same `main` source builds into a different Edition per project. `git.deploymentEnabled` governs Git-triggered deployments only — [Vercel's own wording](https://vercel.com/docs/project-configuration/git-configuration) is "branches that should not trigger a deployment upon commits" — so it never blocks this command.
+Do not run the last line on its own. Without the assertions above it publishes whatever is in the directory you happen to be standing in — a feature branch, a half-finished edit — straight to a production host, with no review and no CI between you and it. That is exactly the risk `scripts/deploy.sh`'s guards exist to stop on the Firebase side, and Vercel's CLI has no equivalent of its own.
+
+The **build** then runs on Vercel using that project's own Production environment variables (`VITE_EDITION`, `VITE_EVENT_ID`, the Firebase config), which is why the same source builds into a different Edition per project — the project name selects the config, the working directory supplies the code. `git.deploymentEnabled` governs Git-triggered deployments only — [Vercel's own wording](https://vercel.com/docs/project-configuration/git-configuration) is "branches that should not trigger a deployment upon commits" — so it never blocks this command.
 
 Then verify, because the mirror is now only as current as your last command:
 
@@ -153,7 +163,9 @@ So test for the **content you expect**, which is commit-aware in effect:
 
 ```bash
 # Does the mirror contain the change you are looking for?
-for H in vacaybingo.vercel.app fiveacross.vercel.app; do
+# All THREE — gaycruisebingo.vercel.app is the ship-network fallback and is
+# now just as manual as the other two, so it needs the same check.
+for H in vacaybingo.vercel.app fiveacross.vercel.app gaycruisebingo.vercel.app; do
   A=$(curl -sS "https://$H/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
   printf '%-24s %s ' "$H" "$A"
   curl -sS "https://$H$A" | grep -qE 'try\{[A-Za-z0-9_$]+=URL\.createObjectURL' \
