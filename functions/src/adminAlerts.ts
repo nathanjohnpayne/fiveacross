@@ -74,11 +74,20 @@ interface AlertWriteBatch {
   set(ref: AlertDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
   commit(): Promise<unknown>;
 }
+/** The minimal transaction surface the exclusive claim needs. Mirrors the
+ *  admin-SDK `Transaction`: reads inside it are serialized against concurrent
+ *  writers, and the whole function re-runs on contention — which is what turns
+ *  "check then claim" into one indivisible step. */
+interface AlertTransaction {
+  get(ref: AlertDocRef): Promise<{ data(): Record<string, unknown> | undefined }>;
+  set(ref: AlertDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+}
 /** The minimal surface the queue and its sweep use. */
 export interface AdminAlertFirestore {
   doc(path: string): AlertDocRef;
   collection(path: string): AlertQuery;
   batch(): AlertWriteBatch;
+  runTransaction<T>(updateFunction: (tx: AlertTransaction) => Promise<T>): Promise<T>;
 }
 
 // --- The alert vocabulary --------------------------------------------------------
@@ -131,9 +140,30 @@ export interface AdminAlertDraft {
  *  this only ever bites on legacy or hand-seeded data. */
 export const LABEL_MAX = 80;
 
+/**
+ * Flatten a label to a single line before it is stored or rendered.
+ *
+ * HTML escaping is not enough here, because the digest also ships a plain-text
+ * part and that part has no escaping — its structure IS its punctuation. A
+ * Prompt is user-submitted and the item-create rule only requires a non-empty
+ * string of at most 80 characters, so a newline inside one lets an unapproved
+ * submission emit unprefixed lines into the text alternative that imitate a
+ * section heading or the CTA line, complete with a URL the client auto-links.
+ * The HTML consumer would still see one tidy escaped row, which is precisely
+ * what makes it easy to miss.
+ *
+ * So every C0 control character (and the DEL) collapses to a space, and runs of
+ * whitespace collapse with them. Applied at BOTH boundaries — when the producer
+ * writes the label and when the digest reads it back — so a row queued before
+ * this existed is flattened too.
+ */
+export function flattenLabel(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 function labelFor(collection: AlertedCollection, docId: string, doc: AlertableDoc): string {
-  const raw = (collection === 'items' ? doc.text : doc.itemText) ?? '';
-  const trimmed = raw.trim();
+  const trimmed = flattenLabel((collection === 'items' ? doc.text : doc.itemText) ?? '');
   if (!trimmed) return docId;
   return trimmed.length > LABEL_MAX ? `${trimmed.slice(0, LABEL_MAX - 1)}…` : trimmed;
 }
@@ -413,7 +443,10 @@ export interface AdminDigestResult {
     | 'settling'
     /** The batch identity could not be claimed, so nothing was sent: sending
      *  without one would risk a second email repeating this one. */
-    | 'claim-failed';
+    | 'claim-failed'
+    /** A concurrent drain claimed these rows first. This sweep steps aside and
+     *  finds the winner's claim on the next one. */
+    | 'claim-lost';
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -433,7 +466,9 @@ function toRecord(snap: AlertSnapshot): AdminAlertRecord | null {
     kind,
     collection,
     docId,
-    label: typeof data.label === 'string' && data.label ? data.label : '(untitled)',
+    // Flattened on the way back out too, so a row queued before `flattenLabel`
+    // existed cannot smuggle a newline into the plain-text part.
+    label: (typeof data.label === 'string' && flattenLabel(data.label)) || '(untitled)',
     status: typeof data.status === 'string' ? data.status : 'unknown',
     visionFlag: typeof data.visionFlag === 'string' && data.visionFlag ? data.visionFlag : null,
     reportCount: typeof data.reportCount === 'number' ? data.reportCount : 0,
@@ -712,7 +747,10 @@ async function claimDrain(
   docs: readonly AlertSnapshot[],
   now: number,
   quietMs: number,
-): Promise<{ batchId: string; page: AlertSnapshot[]; reason?: undefined } | { reason: 'settling' | 'claim-failed'; batchId?: undefined; page?: undefined }> {
+): Promise<
+  | { batchId: string; page: AlertSnapshot[]; reason?: undefined }
+  | { reason: 'settling' | 'claim-failed' | 'claim-lost'; batchId?: undefined; page?: undefined }
+> {
   const rows = docs.map((d) => {
     const data = d.data() ?? {};
     return { id: d.id, batchId: data.batchId, createdAt: data.createdAt };
@@ -720,19 +758,58 @@ async function claimDrain(
   const plan = planDrain(rows, now, quietMs);
   if ('reason' in plan) return { reason: plan.reason };
 
-  if (plan.claimNeeded) {
+  if (!plan.claimNeeded) {
+    // A RETRY. Re-read the batch BY ITS ID rather than trusting the page that
+    // surfaced it. The pending page is `limit`ed, so once it is full a newly
+    // queued row can displace one of the claimed rows out of it — and retrying
+    // the remainder under the original key would send a SMALLER payload that
+    // Resend then treats as the same email. The displaced rows would come back
+    // later under that same key, be suppressed as duplicates, and never be
+    // delivered at all. A single equality filter needs no composite index, and
+    // a tombstone carries no `batchId`, so this matches exactly the claimed
+    // rows still outstanding.
     try {
-      const batch = db.batch();
-      for (const id of plan.ids) {
-        // MERGE — the claim annotates the row, it must not replace the payload
-        // the digest is about to render.
-        batch.set(db.doc(`events/${eventId}/adminAlerts/${id}`), { batchId: plan.batchId }, { merge: true });
-      }
-      await batch.commit();
+      const claimed = await db
+        .collection(`events/${eventId}/adminAlerts`)
+        .where('batchId', '==', plan.batchId)
+        .limit(MAX_ATOMIC_WRITES)
+        .get();
+      const pending = claimed.docs.filter((d) => (d.data() ?? {}).sentAt === null);
+      if (pending.length > 0) return { batchId: plan.batchId, page: pending };
     } catch (err) {
-      console.error('sendAdminDigestForEvent: batch claim failed (nothing sent)', eventId, err);
+      console.error('sendAdminDigestForEvent: claimed-batch reload failed (nothing sent)', eventId, err);
       return { reason: 'claim-failed' };
     }
+  }
+
+  // A NEW batch. The claim is TRANSACTIONAL, not an unconditional merge,
+  // because two overlapping invocations (Cloud Scheduler can double-fire) would
+  // otherwise read slightly different pages, derive different batch ids, and
+  // each overwrite the other's claim on the rows they share — then send their
+  // own snapshot under their own key, so the overlap is mailed twice despite
+  // the one-digest guarantee. Claiming only rows that are still unclaimed makes
+  // "check, then claim" one indivisible step; the loser abandons this sweep and
+  // finds the winner's claim on the next one.
+  try {
+    const won = await db.runTransaction(async (tx) => {
+      const refs = plan.ids.map((id) => db.doc(`events/${eventId}/adminAlerts/${id}`));
+      const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
+      for (const snap of snaps) {
+        const data = snap.data();
+        if (!data || data.batchId) return false; // another drain got here first
+      }
+      // MERGE — the claim annotates the row, it must not replace the payload
+      // the digest is about to render.
+      for (const ref of refs) tx.set(ref, { batchId: plan.batchId }, { merge: true });
+      return true;
+    });
+    if (!won) {
+      console.log(`sendAdminDigestForEvent: another drain claimed these rows first; skipping ${eventId}`);
+      return { reason: 'claim-lost' };
+    }
+  } catch (err) {
+    console.error('sendAdminDigestForEvent: batch claim failed (nothing sent)', eventId, err);
+    return { reason: 'claim-failed' };
   }
   const wanted = new Set(plan.ids);
   return { batchId: plan.batchId, page: docs.filter((d) => wanted.has(d.id)) };

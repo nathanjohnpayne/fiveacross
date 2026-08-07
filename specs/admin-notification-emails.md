@@ -124,6 +124,10 @@ Every constraint the daily email asserts holds here, because both families rende
 
 Every interpolated string is escaped and every `href` restricted to `https:`. That matters more here than in the daily email: a row's `label` is a Prompt's own words, written by a participant, and the whole point of the alert is that nobody has approved it yet. The one string in this email most likely to contain markup is the one that arrives straight from an unreviewed user submission.
 
+**Escaping is not sufficient for the plain-text part**, because that part has no escaping—its structure IS its punctuation. The item-create rule only requires a non-empty string of at most 80 characters, so a newline inside a Prompt would let an unapproved submission emit unprefixed lines into the text alternative that imitate a section heading or the CTA, complete with a URL the client auto-links, while the HTML consumer still shows one tidy escaped row—which is exactly what makes it easy to miss. `flattenLabel` collapses every C0 control character to a space, applied at BOTH boundaries: when the producer writes the label, and when the digest reads it back, so a row queued before this existed is flattened too.
+
+- **Given** a Prompt containing newlines **then** the plain-text row stays one line. (Tests under "flattenLabel".)
+
 - **Given** a rendered digest **then** it is a 600px table with no flex/grid, contains no `var(--`, declares both color schemes, includes the VML CTA and no `<img>`. (Tests under "renderAdminDigestHtml".)
 - **Given** a Prompt whose text contains markup **then** it is escaped rather than interpolated raw. (Test: "escapes an unapproved Prompt's own words".)
 - **Given** a light Theme **then** every module still declares its own background and ink. (Test: "paints every module on a light Theme".)
@@ -166,6 +170,13 @@ Nothing derivable at send time has that property, and both directions fail. The 
 With a claim, the retry takes exactly the claimed rows, reuses their id, and Resend collapses it—and the alerts queued since simply belong to the next batch. The minted id is `drainKey`: greatest row id plus count, reduced order-independently because the drain query carries no `orderBy`, so a position-sensitive reduction could shuffle between sweeps over an identical page.
 
 **A failed claim sends nothing.** Sending under an unpersisted key would put the system back in exactly the state the claim closes.
+
+**The claim is TRANSACTIONAL, not an unconditional merge.** Cloud Scheduler can double-fire, and two overlapping invocations reading slightly different pages would derive different batch ids and each overwrite the other's claim on the rows they share—then send their own snapshot under their own key, mailing the overlap twice despite the one-digest guarantee. Claiming only rows that are still unclaimed makes "check, then claim" one indivisible step; the loser abandons its sweep and finds the winner's claim on the next one.
+
+**A retry re-reads the batch BY ITS ID, not from the pending page.** The page is `limit`ed, so once it is full a newly queued row can displace one of the claimed rows out of it. Retrying the remainder under the original key would send a SMALLER payload that Resend treats as the same email—and the displaced rows would come back later under that same key, be suppressed as duplicates, and never be delivered at all. A single equality filter needs no composite index, and a tombstone carries no `batchId`, so it matches exactly the claimed rows still outstanding.
+
+- **Given** a claimed batch partly displaced from the pending page **then** the retry still carries the whole batch. (Test: "reloads the WHOLE claimed batch".)
+- **Given** rows already claimed by another drain **then** this sweep reuses that claim rather than minting a competing one. (Test: "claims EXCLUSIVELY".)
 
 ### The settling period
 

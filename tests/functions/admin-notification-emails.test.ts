@@ -10,6 +10,7 @@ import {
   MAX_ALERTS_PER_DIGEST,
   MAX_ATOMIC_WRITES,
   QUIET_PERIOD_MS,
+  flattenLabel,
   TOMBSTONE_TTL_MS,
   alertDocId,
   drainKey,
@@ -152,6 +153,30 @@ function fakeDb(
           return undefined;
         },
       };
+    },
+    // A serial transaction: reads see current state, writes apply on return.
+    // Enough for the exclusive claim, whose whole content is read-then-set.
+    runTransaction: async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+      if (failClaim) throw new Error('transaction failed');
+      const writes: Array<[string, Record<string, unknown>, boolean]> = [];
+      const result = await fn({
+        get: async (ref: { path: string }) => {
+          const found = findRow(ref.path);
+          return { data: () => (found ? { ...found.data } : undefined) };
+        },
+        set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
+          writes.push([ref.path, data, options?.merge === true]);
+        },
+      });
+      for (const [path, data, merge] of writes) {
+        const { collectionPath, id } = split(path);
+        const rows = collections.get(collectionPath) ?? [];
+        const found = rows.find((r) => r.id === id);
+        if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
+        else rows.push({ id, data: { ...data } });
+        collections.set(collectionPath, rows);
+      }
+      return result;
     },
     /** Test-only reader. */
     rows: (path: string) => (collections.get(path) ?? []).map((r) => ({ id: r.id, ...r.data })),
@@ -334,6 +359,7 @@ describe('enqueueAdminAlerts', () => {
         create: async () => Promise.reject(new Error('firestore down')),
       }),
       batch: () => ({ set: () => undefined, commit: async () => undefined }),
+      runTransaction: async () => undefined,
     } as unknown as AdminAlertFirestore;
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(
@@ -1001,6 +1027,165 @@ describe('sendAdminDigestForEvent', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
     spy.mockRestore();
+  });
+});
+
+describe('claimed-batch retries and exclusivity', () => {
+  const deps = (send: ReturnType<typeof vi.fn>) => ({
+    send: send as never,
+    getAdminUids: async () => ['u1'],
+    getEmailForUid: async (uid: string) => `${uid}@example.com`,
+    adminNotifyEmail: '',
+    appBaseUrl: 'https://gaycruisebingo.com',
+    from: 'x <x@example.com>',
+    now: () => NOW,
+    quietMs: 0,
+  });
+
+  const alert = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    kind: 'item-created',
+    collection: 'items',
+    docId: `i-${id}`,
+    label: `Prompt ${id}`,
+    status: 'pending',
+    visionFlag: null,
+    reportCount: 0,
+    createdAt: 1,
+    sentAt: null,
+    ...over,
+  });
+
+  const withLive = (rows: Record<string, unknown>[]) => {
+    const live: Record<string, Record<string, unknown>> = { 'events/med-2026': EVENT };
+    for (const r of rows) live[`events/med-2026/items/${r.docId}`] = { status: 'pending', reportCount: 0 };
+    return live;
+  };
+
+  it('reloads the WHOLE claimed batch, even when a newcomer displaces part of it from the page', async () => {
+    // The pending page is `limit`ed. Once it is full, a newly queued row can
+    // push a claimed row out of it — and retrying the remainder under the
+    // original key would send a SMALLER payload that Resend treats as the same
+    // email, so the displaced rows are suppressed later and never delivered.
+    const send = vi.fn(async () => true);
+    const rows = [
+      alert('a1', { batchId: 'a2/2' }),
+      alert('a2', { batchId: 'a2/2' }),
+      alert('a0'), // sorts first, and with maxAlerts 2 it displaces a claimed row
+    ];
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': rows, events: [{ id: 'med-2026', status: 'active' }], hostnames: [] },
+      withLive(rows),
+    );
+    const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(send), maxAlerts: 2 });
+    // Both claimed rows go out together, under their own batch id.
+    expect(result.sent).toBe(2);
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe('admin-digest/med-2026/a2/2');
+    // The newcomer is untouched and becomes its own batch next sweep.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null).map((r) => r.id)).toEqual(['a0']);
+  });
+
+  it('claims EXCLUSIVELY, so an overlapping drain steps aside instead of mailing the overlap twice', async () => {
+    // Cloud Scheduler can double-fire. Two invocations reading slightly
+    // different pages would derive different batch ids and, under an
+    // unconditional merge, overwrite each other's claim on the rows they share.
+    const send = vi.fn(async () => true);
+    const rows = [alert('a1', { batchId: 'someone-else/1' }), alert('a2')];
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': rows, events: [{ id: 'med-2026', status: 'active' }], hostnames: [] },
+      withLive(rows),
+    );
+    // a1 is already claimed by the other drain, so THIS sweep reuses that claim
+    // rather than minting a competing one over the shared row.
+    const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    expect(result.sent).toBe(1);
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe(
+      'admin-digest/med-2026/someone-else/1',
+    );
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null).map((r) => r.id)).toEqual(['a2']);
+  });
+
+  it('sends nothing when the transactional claim itself fails', async () => {
+    const send = vi.fn(async () => true);
+    const rows = [alert('a1')];
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': rows, events: [{ id: 'med-2026', status: 'active' }], hostnames: [] },
+      withLive(rows),
+      [],
+      false,
+      true,
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'claim-failed',
+    });
+    spy.mockRestore();
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('flattenLabel', () => {
+  it('collapses newlines, so a Prompt cannot forge structure in the plain-text part', () => {
+    // The text alternative has no escaping — its structure IS its punctuation.
+    // A newline inside a Prompt would otherwise emit unprefixed lines that
+    // imitate a section heading or the CTA, complete with an auto-linked URL,
+    // while the HTML consumer still shows one tidy escaped row.
+    expect(flattenLabel('Buy a drink\n\nOPEN THE REVIEW QUEUE: https://evil.example')).toBe(
+      'Buy a drink OPEN THE REVIEW QUEUE: https://evil.example',
+    );
+    expect(flattenLabel('a\r\nb\tc')).toBe('a b c');
+    expect(flattenLabel('  padded  ')).toBe('padded');
+    expect(flattenLabel('\u0000\u007F')).toBe('');
+  });
+
+  it('flattens at BOTH boundaries — the producer and the digest read-back', async () => {
+    const db = fakeDb();
+    await enqueueAdminAlerts(
+      db,
+      'e',
+      alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending', text: 'One\nTwo' })),
+      'evt-1',
+    );
+    expect(db.rows('events/e/adminAlerts')[0].label).toBe('One Two');
+
+    // And a row queued before this existed is flattened on the way out.
+    const send = vi.fn(async () => true);
+    const legacy = fakeDb(
+      {
+        'events/med-2026/adminAlerts': [
+          {
+            id: 'old',
+            kind: 'item-created',
+            collection: 'items',
+            docId: 'i9',
+            label: 'Legacy\nInjected line',
+            status: 'pending',
+            visionFlag: null,
+            reportCount: 0,
+            createdAt: 1,
+            sentAt: null,
+          },
+        ],
+        events: [{ id: 'med-2026', status: 'active' }],
+        hostnames: [],
+      },
+      { 'events/med-2026': EVENT, 'events/med-2026/items/i9': { status: 'pending', reportCount: 0 } },
+    );
+    await sendAdminDigestForEvent(legacy, 'med-2026', {
+      send: send as never,
+      getAdminUids: async () => ['u1'],
+      getEmailForUid: async (uid: string) => `${uid}@example.com`,
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'x <x@example.com>',
+      now: () => NOW,
+      quietMs: 0,
+    });
+    const text = (send.mock.calls[0][0] as { text: string }).text;
+    expect(text).toContain('- Legacy Injected line—new Prompt · pending approval');
+    expect(text).not.toContain('\nInjected line');
   });
 });
 
