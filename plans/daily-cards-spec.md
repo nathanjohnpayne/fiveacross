@@ -271,7 +271,7 @@ Once per event, over the Player's first dealt card (naturally the opening Day's 
 
 ### Locked Day preview
 
-Full themed chrome for that Day (name, Place, palette) over a 5×5 grid of blank squares; only the free space is populated. A centered lock badge with "Unlocks 8:00 a.m. · Wed Jul 22". No countdown timer needed—the date is enough. The theme's dress-code description renders under the day name, so the locked view doubles as the party tease ("Dog Tag T-Dance—men in small uniforms; souvenir dog tags provided"). Tapping squares does nothing; a caption sells it: "24 fresh squares land at 8. Come back after coffee."—with the hour read off that Day's own `unlockAt` (the same instant, timezone, and source the badge above formats), never hardcoded, so a Day or an Edition that opens at any other hour reads correctly.
+Full themed chrome for that Day (name, Place, palette) over a 5×5 grid of blank squares; only the free space is populated. A centered lock badge with "Unlocks 8:00 a.m. · Wed Jul 22". No countdown timer needed—the date is enough. The theme's dress-code description renders under the day name, so the locked view doubles as the party tease ("Dog Tag T-Dance—men in small uniforms; souvenir dog tags provided"). Tapping squares does nothing; a caption sells it: "24 fresh squares land at 8 a.m. Come back after coffee."—with the hour and meridiem read off that Day's own `unlockAt` (the same instant, timezone, and source the badge above formats), never hardcoded, so a Day or an Edition that opens at any other hour reads correctly.
 
 ### Opening Day (tutorial) view
 
@@ -281,7 +281,7 @@ The Welcome Aboard card plus a dismissible "How this works" banner above the gri
 2. **Five in a row is BINGO.** The center is free. Blackout the card if you're ambitious.
 3. **The feed is the proof.** Attach a pic, doubt a friend, watch the Moments roll in.
 
-Caption under the banner: "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8."—where the second sentence is derived from the first main Day's own `unlockAt` rather than hardcoded, so both the day and the hour track the real schedule ("tomorrow at 6", "Saturday at 6"), and the sentence drops out once that Day has unlocked. Tutorial days show a "Warm-up" tag on the day chip and board header in place of daily-honor competitiveness.
+Caption under the banner: "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8 a.m."—where the second sentence is derived from the first main Day's own `unlockAt` rather than hardcoded, so both the day and the time track the real schedule ("tomorrow at 6 a.m.", "Saturday at 6 a.m."), and the sentence drops out once that Day has unlocked. Tutorial days show a "Warm-up" tag on the day chip and board header in place of daily-honor competitiveness.
 
 ### Closing Day view
 

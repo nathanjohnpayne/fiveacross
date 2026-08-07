@@ -33,9 +33,9 @@ describe('formatUnlockAt (the locked-Day badge)', () => {
 
 describe('unlockCaption (the locked-Day caption under that badge)', () => {
   it.each([
-    ['a morning unlock goes bare and keeps the coffee tail', '2026-08-09T06:00:00Z', '24 fresh squares land at 6. Come back after coffee.'],
-    ['an off-the-hour unlock carries its minutes', '2026-08-09T09:30:00Z', '24 fresh squares land at 9:30. Come back after coffee.'],
-    ['an evening unlock spells the meridiem and drops the coffee', '2026-08-09T20:00:00Z', '24 fresh squares land at 8 p.m. Come back then.'],
+    ['a morning unlock keeps the coffee tail and still names a.m.', '2026-08-09T06:00:00Z', '24 fresh squares land at 6 a.m. Come back after coffee.'],
+    ['an off-the-hour unlock carries its minutes', '2026-08-09T09:30:00Z', '24 fresh squares land at 9:30 a.m. Come back after coffee.'],
+    ['an evening unlock drops the coffee tail', '2026-08-09T20:00:00Z', '24 fresh squares land at 8 p.m. Come back then.'],
     ['noon is not a morning', '2026-08-09T12:00:00Z', '24 fresh squares land at 12 p.m. Come back then.'],
     // 12:xx a.m. is an `AM` day period to `Intl` but nobody's morning.
     ['midnight is not a morning either', '2026-08-09T00:00:00Z', '24 fresh squares land at 12 a.m. Come back then.'],
@@ -48,7 +48,7 @@ describe('unlockCaption (the locked-Day caption under that badge)', () => {
     // 13:00Z is 6 a.m. in Bodega Bay and 3 p.m. in Rome — same instant, two
     // different sentences, and each Event gets its own.
     expect(unlockCaption(at('2026-08-09T13:00:00Z'), 'America/Los_Angeles')).toBe(
-      '24 fresh squares land at 6. Come back after coffee.',
+      '24 fresh squares land at 6 a.m. Come back after coffee.',
     );
     expect(unlockCaption(at('2026-08-09T13:00:00Z'), 'Europe/Rome')).toBe(
       '24 fresh squares land at 3 p.m. Come back then.',
@@ -73,7 +73,7 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
   it('names the first MAIN Day’s own unlock hour, not a hardcoded 8', () => {
     // Reading it on the warm-up Day, the evening before.
     expect(chaosLine(DAYS, TZ, at('2026-08-07T20:00:00-07:00'))).toBe(
-      'The real chaos starts tomorrow at 6.',
+      'The real chaos starts tomorrow at 6 a.m.',
     );
   });
 
@@ -85,27 +85,27 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
     expect(DAYS[0].tutorial).toBe(false); // the trap, pinned
     expect(DAYS[0].unlockAt).toBe(0);
     expect(chaosLine(DAYS, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
-      'The real chaos starts tomorrow at 6.',
+      'The real chaos starts tomorrow at 6 a.m.',
     );
   });
 
   it('says "later today" for an unlock still ahead on the same calendar date', () => {
     expect(chaosLine(DAYS, TZ, at('2026-08-08T05:00:00-07:00'))).toBe(
-      'The real chaos starts later today at 6.',
+      'The real chaos starts later today at 6 a.m.',
     );
   });
 
   it('names the weekday when the unlock is further out than tomorrow', () => {
     // Two days ahead — "tomorrow" would be a lie and a bare date is colder.
     expect(chaosLine(DAYS, TZ, at('2026-08-06T09:00:00-07:00'))).toBe(
-      'The real chaos starts Saturday at 6.',
+      'The real chaos starts Saturday at 6 a.m.',
     );
   });
 
   it('falls back to a dated weekday once the weekday alone is ambiguous', () => {
     const far = [DAYS[0], day({ index: 1, pool: 'main', unlockAt: at('2026-08-15T06:00:00-07:00') })];
     expect(chaosLine(far, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
-      'The real chaos starts Sat, Aug 15 at 6.',
+      'The real chaos starts Sat, Aug 15 at 6 a.m.',
     );
   });
 
@@ -120,7 +120,7 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
     // 14 hours out, but the next calendar day in Bodega Bay — "tomorrow", not
     // "later today". The viewer's own clock never enters into it.
     expect(chaosLine(DAYS, TZ, at('2026-08-07T16:00:00-07:00'))).toBe(
-      'The real chaos starts tomorrow at 6.',
+      'The real chaos starts tomorrow at 6 a.m.',
     );
   });
 

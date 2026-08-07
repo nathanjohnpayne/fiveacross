@@ -1327,15 +1327,15 @@ describe('Locked-Day preview', () => {
     });
 
     it.each([
-      { label: 'a 6:00 a.m. unlock', at: '2026-07-18T06:00:00Z', badge: '6:00 a.m.', tail: 'land at 6. Come back after coffee.' },
-      { label: 'an 8:00 a.m. unlock', at: '2026-07-18T08:00:00Z', badge: '8:00 a.m.', tail: 'land at 8. Come back after coffee.' },
-      { label: 'an off-the-hour unlock', at: '2026-07-18T09:30:00Z', badge: '9:30 a.m.', tail: 'land at 9:30. Come back after coffee.' },
+      { label: 'a 6:00 a.m. unlock', at: '2026-07-18T06:00:00Z', badge: '6:00 a.m.', tail: 'land at 6 a.m. Come back after coffee.' },
+      { label: 'an 8:00 a.m. unlock', at: '2026-07-18T08:00:00Z', badge: '8:00 a.m.', tail: 'land at 8 a.m. Come back after coffee.' },
+      { label: 'an off-the-hour unlock', at: '2026-07-18T09:30:00Z', badge: '9:30 a.m.', tail: 'land at 9:30 a.m. Come back after coffee.' },
       // A non-morning unlock keeps the meridiem and drops the coffee tail —
       // the sentence would otherwise assert a morning the schedule lacks.
       { label: 'an evening unlock', at: '2026-07-18T20:00:00Z', badge: '8:00 p.m.', tail: 'land at 8 p.m. Come back then.' },
       { label: 'a noon unlock', at: '2026-07-18T12:00:00Z', badge: '12:00 p.m.', tail: 'land at 12 p.m. Come back then.' },
       // Midnight is an `AM` day period to `Intl` but not a morning: the bare
-      // "land at 12" would be ambiguous and the coffee tail plain wrong
+      // the coffee tail would be plain wrong
       // (Codex P2 on #669).
       { label: 'a midnight unlock', at: '2026-07-18T00:00:00Z', badge: '12:00 a.m.', tail: 'land at 12 a.m. Come back then.' },
       { label: 'a small-hours unlock', at: '2026-07-18T00:30:00Z', badge: '12:30 a.m.', tail: 'land at 12:30 a.m. Come back then.' },
@@ -1368,7 +1368,7 @@ describe('Locked-Day preview', () => {
 
       expect(document.querySelector('.day-lock-text')?.textContent).toContain('6:00 a.m.');
       expect(document.querySelector('.day-lock-caption')?.textContent).toBe(
-        '24 fresh squares land at 6. Come back after coffee.',
+        '24 fresh squares land at 6 a.m. Come back after coffee.',
       );
     });
   });
