@@ -271,7 +271,7 @@ Once per event, over the Player's first dealt card (naturally the opening Day's 
 
 ### Locked Day preview
 
-Full themed chrome for that Day (name, Place, palette) over a 5×5 grid of blank squares; only the free space is populated. A centered lock badge with "Unlocks 8:00 a.m. · Wed Jul 22". No countdown timer needed—the date is enough. The theme's dress-code description renders under the day name, so the locked view doubles as the party tease ("Dog Tag T-Dance—men in small uniforms; souvenir dog tags provided"). Tapping squares does nothing; a caption sells it: "24 fresh squares land at 8. Come back after coffee."
+Full themed chrome for that Day (name, Place, palette) over a 5×5 grid of blank squares; only the free space is populated. A centered lock badge with "Unlocks 8:00 a.m. · Wed Jul 22". No countdown timer needed—the date is enough. The theme's dress-code description renders under the day name, so the locked view doubles as the party tease ("Dog Tag T-Dance—men in small uniforms; souvenir dog tags provided"). Tapping squares does nothing; a caption sells it: "24 fresh squares land at 8. Come back after coffee."—with the hour read off that Day's own `unlockAt` (the same instant, timezone, and source the badge above formats), never hardcoded, so a Day or an Edition that opens at any other hour reads correctly.
 
 ### Opening Day (tutorial) view
 

@@ -173,6 +173,9 @@ test('structural parity — every screen against the wireframes', async ({ page 
     // The board area carries the VIEWED Day's theme (#301/#306).
     await expect(locked).toHaveAttribute('data-theme', 'glamiators');
     await expect(locked.locator('.day-lock-text')).toHaveText('Unlocks 8:00 a.m. · Sat, Jul 18');
+    // The caption's hour is DERIVED from the same `unlockAt` the badge above
+    // formats, so the two can never disagree; this fixture's 08:00-CEST Day
+    // reproduces the wireframes' "at 8" exactly.
     await expect(locked).toContainText('24 fresh squares land at 8. Come back after coffee.');
     // The theme's dress-code description doubles as the party tease.
     await expect(locked).toContainText(/toga-chic|runway excess/i);
