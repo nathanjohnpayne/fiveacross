@@ -7,14 +7,14 @@ import { chaosLine, formatUnlockAt, unlockCaption } from './unlockCopy';
 // the same bug twice: a hardcoded 8 quoting a schedule that opens at another
 // hour. These cover every branch that decides how an hour is spoken.
 
-function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'tutorial'>): DayDef {
+function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'pool'>): DayDef {
   return {
     date: '2026-08-08',
     place: 'Bodega Bay',
     placeEmoji: '🇺🇸',
     theme: 'get-sporty',
     tonight: [],
-    pool: overrides.tutorial ? 'easy' : 'main',
+    tutorial: false,
     ...overrides,
   };
 }
@@ -58,17 +58,33 @@ describe('unlockCaption (the locked-Day caption under that badge)', () => {
 
 describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
   const TZ = 'America/Los_Angeles';
-  // The Bodega Bay schedule as seeded: an open-sentinel tutorial Day, then two
-  // main Days at 06:00 PDT (scripts/seed-data/bodega-bay-2026.mjs).
+  // The Bodega Bay schedule as seeded (scripts/seed-data/bodega-bay-2026.mjs):
+  // Friday is an easy-pool Day that is NOT tutorial and carries the `unlockAt:
+  // 0` open sentinel, then two main Days at 06:00 PDT, then a ceremonial
+  // closing Day. The Friday shape is exactly what makes `!tutorial` the wrong
+  // predicate.
   const DAYS: DayDef[] = [
-    day({ index: 0, tutorial: true, unlockAt: 0, date: '2026-08-07' }),
-    day({ index: 1, tutorial: false, unlockAt: at('2026-08-08T06:00:00-07:00'), date: '2026-08-08' }),
-    day({ index: 2, tutorial: false, unlockAt: at('2026-08-09T06:00:00-07:00'), date: '2026-08-09' }),
+    day({ index: 0, pool: 'easy', unlockAt: 0, date: '2026-08-07' }),
+    day({ index: 1, pool: 'main', unlockAt: at('2026-08-08T06:00:00-07:00'), date: '2026-08-08' }),
+    day({ index: 2, pool: 'main', unlockAt: at('2026-08-09T06:00:00-07:00'), date: '2026-08-09' }),
+    day({ index: 3, pool: 'closing', tutorial: true, unlockAt: at('2026-08-09T11:00:00-07:00'), date: '2026-08-09' }),
   ];
 
   it('names the first MAIN Day’s own unlock hour, not a hardcoded 8', () => {
     // Reading it on the warm-up Day, the evening before.
     expect(chaosLine(DAYS, TZ, at('2026-08-07T20:00:00-07:00'))).toBe(
+      'The real chaos starts tomorrow at 6.',
+    );
+  });
+
+  // Codex P1 on #670: `!tutorial` would select Friday — a competitive EASY
+  // card, not tutorial, holding the `unlockAt: 0` open sentinel — read it as
+  // long unlocked, and drop the sentence entirely on the one live Edition this
+  // whole fix was written for.
+  it('skips a non-tutorial easy Day carrying the open sentinel', () => {
+    expect(DAYS[0].tutorial).toBe(false); // the trap, pinned
+    expect(DAYS[0].unlockAt).toBe(0);
+    expect(chaosLine(DAYS, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
       'The real chaos starts tomorrow at 6.',
     );
   });
@@ -87,14 +103,14 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
   });
 
   it('falls back to a dated weekday once the weekday alone is ambiguous', () => {
-    const far = [DAYS[0], day({ index: 1, tutorial: false, unlockAt: at('2026-08-15T06:00:00-07:00') })];
+    const far = [DAYS[0], day({ index: 1, pool: 'main', unlockAt: at('2026-08-15T06:00:00-07:00') })];
     expect(chaosLine(far, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
       'The real chaos starts Sat, Aug 15 at 6.',
     );
   });
 
   it('keeps the meridiem for a non-morning unlock without doubling the period', () => {
-    const evening = [DAYS[0], day({ index: 1, tutorial: false, unlockAt: at('2026-08-08T20:00:00-07:00') })];
+    const evening = [DAYS[0], day({ index: 1, pool: 'main', unlockAt: at('2026-08-08T20:00:00-07:00') })];
     expect(chaosLine(evening, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
       'The real chaos starts tomorrow at 8 p.m.',
     );
@@ -116,11 +132,11 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
   it('drops the sentence when there is no schedule or no main Day to promise', () => {
     expect(chaosLine(undefined, TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
     expect(chaosLine([], TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
-    expect(chaosLine([DAYS[0]], TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+    expect(chaosLine([DAYS[0], DAYS[3]], TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
   });
 
   it('drops the sentence rather than rendering a malformed unlockAt', () => {
-    const broken = [DAYS[0], day({ index: 1, tutorial: false, unlockAt: Number.NaN })];
+    const broken = [DAYS[0], day({ index: 1, pool: 'main', unlockAt: Number.NaN })];
     expect(chaosLine(broken, TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
   });
 });

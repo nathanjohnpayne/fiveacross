@@ -134,8 +134,17 @@ function relativeDay(unlockAt: number, timezone: string | undefined, now: number
 
 /**
  * The warm-up banner's second sentence — "The real chaos starts tomorrow at 6."
- * — pointed at the first NON-tutorial Day in the schedule, which is the Day the
- * sentence has always been about.
+ * — pointed at the first `main`-POOL Day, which is what "the real chaos" has
+ * always meant: the competitive deal, as opposed to the easy warm-up card.
+ *
+ * Selected on `pool`, never re-derived as `!tutorial` (Codex P1 on #670).
+ * They are not the same set: the Bodega Bay schedule opens with a
+ * `pool: 'embark'`, `tutorial: false` Day — a competitive EASY card — carrying
+ * the `unlockAt: 0` open sentinel, so a `!tutorial` predicate picks that Day,
+ * reads it as long unlocked, and silently drops the sentence on the very
+ * Edition this fix was written for. `'main'` is also the one pool id the
+ * pre-#565 vocabulary spells identically, so a live doc written either way
+ * matches without going through `migratePool`.
  *
  * Returns `null` (drop the sentence) when there is nothing to promise: no
  * schedule yet, no main Day in it, or — the case the walkthrough replay hits
@@ -148,7 +157,7 @@ export function chaosLine(
   timezone: string | undefined,
   now: number,
 ): string | null {
-  const first = days?.find((d) => !d.tutorial);
+  const first = days?.find((d) => d.pool === 'main');
   if (!first || !Number.isFinite(first.unlockAt) || first.unlockAt <= now) return null;
   const clock = unlockClock(first.unlockAt, timezone);
   return endSentence(
