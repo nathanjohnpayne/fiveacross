@@ -5,6 +5,8 @@ status: accepted
 
 # Phase 1 email: Resend integration + admin moderation notifications (#101)
 
+> **Superseded in part by [#638](https://github.com/nathanjohnpayne/gaycruisebingo/issues/638) (`admin-notification-emails.md`).** The reusable send wrapper (§ "The reusable email wrapper"), the transition predicate (§ "When a notification fires") and the recipient model (§ "Who is notified") are all still current and are reused unchanged. What moved is DELIVERY: `notifyAdminsOfModeration` and its composed `<table>` body are gone, and a moderation transition is now one of three signals that enqueue an admin alert, drained by a periodic Theme-styled digest. Read § "The composed notification" below as history — where the two files disagree about how a notification is delivered, `admin-notification-emails.md` wins.
+
 Phase 1's server-authoritative moderation backend ([ADR 0004](../docs/adr/0004-reactive-moderation.md)) changes state silently—an admin only learns a Proof was flagged by Cloud Vision, or auto-hidden at `reportHideThreshold`, by opening the Admin console. This adds transactional email via [Resend](https://resend.com) and its first consumer: a decoupled Firestore trigger that emails Event admins when a Proof or Prompt transitions into a moderation state, with a deep link to the Admin console. The honor system stays intact ([ADR 0001](../docs/adr/0001-honor-system-trust-model.md))—this is an out-of-band notification only: it recomputes no stats, gates no play, and a mail failure never blocks the moderation write.
 
 ## The reusable email wrapper

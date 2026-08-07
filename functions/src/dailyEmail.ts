@@ -68,12 +68,21 @@ interface Query {
   limit(count: number): Query;
   get(): Promise<{ docs: Snapshot[] }>;
 }
+/**
+ * The narrowest surface `resolveEventOrigin` needs — a collection it can filter
+ * and read. Stated separately from `DailyEmailFirestore` so the admin digest
+ * (#638), whose Firestore surface has no `emailPrefs` doc shape at all, can
+ * reuse the hostname resolution instead of carrying a second copy of the
+ * canonical-host preference order. `DailyEmailFirestore` satisfies it
+ * structurally, so no existing caller changes.
+ */
+export interface HostnameSource {
+  collection(path: string): Query;
+}
 /** The minimal surface the daily email uses: the opt-out doc surface
  *  (`EmailPrefsFirestore`, inherited whole — including its `create`) plus the
  *  roster and hostname queries. */
-export interface DailyEmailFirestore extends EmailPrefsFirestore {
-  collection(path: string): Query;
-}
+export interface DailyEmailFirestore extends EmailPrefsFirestore, HostnameSource {}
 
 // --- Pure decisions -------------------------------------------------------------
 
@@ -229,7 +238,7 @@ export async function readEmailRoster(
  * which has no entry-point origin).
  */
 export async function resolveEventOrigin(
-  db: DailyEmailFirestore,
+  db: HostnameSource,
   eventId: string,
   fallbackOrigin: string,
 ): Promise<{ origin: string; edition: string | null }> {

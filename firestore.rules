@@ -538,6 +538,38 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Admin notification alerts (#638, specs/admin-notification-emails.md).
+    //
+    // `events/{eventId}/adminAlerts/{alertId}` — the server-owned queue the
+    // moderation triggers append to and the digest sweep drains. One document
+    // per notable write: a community Prompt landing `pending`, a report bump,
+    // or a `status` transition into flagged/hidden.
+    //
+    // FULLY DENIED TO CLIENTS, both directions, and each direction for its own
+    // reason:
+    //
+    //   NO WRITE, because the queue is what an admin's inbox is built from. A
+    //   client write path would let any signed-in Player mint arbitrary alerts
+    //   — flooding the digest with rows naming content that was never reported,
+    //   which is both a spam vector against the admins and a way to bury a real
+    //   report under noise. Every legitimate producer is a Cloud Function
+    //   writing through the Admin SDK, which bypasses rules.
+    //
+    //   NO READ, because an alert carries the pre-moderation `label` (a
+    //   Prompt's own words) for content that may be `pending` or `hidden` —
+    //   states whose whole purpose is that non-admins cannot see them. Leaving
+    //   the queue readable would route around the item/proof visibility rules
+    //   via a second copy of the same text. Admins read this content through
+    //   the Review queue, which reads the items and proofs themselves.
+    //
+    // Written out rather than left to the default-deny so the intent is stated
+    // where the next person editing this file will read it. It nests inside no
+    // other match block, so no wildcard above can widen it.
+    match /events/{eventId}/adminAlerts/{alertId} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     match /events/{eventId} {
       allow read: if signedIn();
       // Only admins can change event config (theme default, claimMode, admins,
