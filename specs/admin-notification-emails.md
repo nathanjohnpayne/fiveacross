@@ -18,7 +18,7 @@ Both signals are bursty by nature. A pool import writes eighty `pending` Prompts
 So the delivery shape is a **queue plus a periodic digest**, and burst safety is structural rather than a debounce timer someone can tune wrong:
 
 - **Producers** are the two existing `events/{eventId}/{items,proofs}/{docId}` triggers. They stay cheap and synchronous—`alertsForWrite` is a PURE function of the before/after snapshots, performing no reads—and only APPEND to `events/{eventId}/adminAlerts`.
-- **The consumer** is `sendAdminDigestForEvent`, driven by the `adminAlertDigest` sweep. It reads the Event once, resolves the roster once, renders ONE email covering everything queued since the last drain, and stamps each alert `sentAt`.
+- **The consumer** is `sendAdminDigestForEvent`, driven by the `adminAlertDigest` sweep. It reads the Event once, resolves the roster once, renders ONE email covering everything queued since the last drain, and clears the queue rows it covered.
 
 Eighty seeded Prompts therefore produce one email listing eighty.
 
@@ -26,6 +26,11 @@ Eighty seeded Prompts therefore produce one email listing eighty.
 
 - **Given** a burst of writes inside one sweep window **then** exactly one email is sent, listing every alert. (Test: "sends ONE digest for a burst of eighty pending Prompts".)
 - **Given** a queue write that fails **then** the triggering moderation write is unaffected and nothing throws. (Test: "never throws when the queue write fails".)
+
+**The enqueue is idempotent under trigger redelivery.** Firestore redelivers a document-write event on retry, and the retry carries the SAME CloudEvent id, so the queue document's id is derived from it (`{transitionId}-{kind}`) and the write is a `create` rather than a `set`. A random id would mint a second alert for one transition: a duplicate row before a drain, and — if the redelivery lands after one — a whole second email whose set, and therefore whose Resend key, differs from the first. This is the guarantee [#101](https://github.com/nathanjohnpayne/gaycruisebingo/issues/101) bought by folding the CloudEvent id into its idempotency key, carried forward. `create` rather than `set` matters for exactly that late-redelivery case: `set` would re-create a row the digest had already cleared. The kind is part of the id because one write can earn more than one alert.
+
+- **Given** the same CloudEvent id twice **then** one alert exists, not two; **given** a distinct id **then** a second alert is queued. (Test: "is idempotent under trigger REDELIVERY".)
+- **Given** one write earning two alerts **then** their ids differ. (Test: "gives one write's two alerts distinct ids".)
 
 ## What earns an alert
 
@@ -50,10 +55,10 @@ A delete (`after` undefined) earns nothing: there is nothing left to review.
 
 **The roster half only ever worked on paper before this change.** `resolveAdminEmails` reads `events/{eventId}.admins` through the Admin SDK, but the `notifyProofModeration`/`notifyItemModeration` triggers did not pin `ADMIN_SDK_SERVICE_ACCOUNT`, and the project's default Gen2 compute identity has no Firestore data-plane access ([ADR 0008](../docs/adr/0008-five-across-second-firebase-project.md)). The roster read therefore failed, `resolveAdminEmails` swallowed it into an empty set by design, and only `ADMIN_NOTIFY_EMAIL` ever produced a recipient—which is why an empty `ADMIN_NOTIFY_EMAIL` on the Five Across deploy meant nothing sent at all. Both triggers now pin the identity.
 
-**An unresolvable roster queues rather than drops.** When nothing resolves, the digest logs and returns without stamping, so the alerts stay pending and drain on the first sweep after a recipient exists. Notifications about content nobody can currently be told about are not thrown away.
+**An unresolvable roster queues rather than drops.** When nothing resolves, the digest logs and returns without clearing anything, so the alerts stay pending and drain on the first sweep after a recipient exists. Notifications about content nobody can currently be told about are not thrown away.
 
 - **Given** an `admins` roster and an override **then** both union, duplicates collapse, and UIDs without a verified email drop. (Tests under "resolveAdminEmails".)
-- **Given** no resolvable recipient **then** nothing is sent AND nothing is stamped. (Test: "leaves alerts queued when no admin email resolves".)
+- **Given** no resolvable recipient **then** nothing is sent AND nothing is cleared. (Test: "leaves alerts queued when no admin email resolves".)
 
 ## The digest
 
@@ -66,7 +71,22 @@ Six modules, in the wireframe's fixed order. An empty module is OMITTED rather t
 5. **Primary CTA**—one bulletproof button, "Open the Review queue".
 6. **Footer**—brand line, why-you-got-this, and the batching note.
 
-**The review module is keyed by content, not by alert.** A report that trips the auto-hide produces two queued alerts—the `reportCount` rise, then the server's `status → hidden` write—and both are true. Rendering them as two rows would tell an admin that two things happened to two things. They collapse to the LATEST alert for that document, which is also the most informative: the hide supersedes the report that caused it and carries the same count. Approvals are not collapsed, because each `pending` Prompt is genuinely its own piece of work.
+**The review module is keyed by content, not by alert.** A report that trips the auto-hide produces two queued alerts—the `reportCount` rise, then the server's `status → hidden` write—and both are true. Rendering them as two rows would tell an admin that two things happened to two things. They collapse to one row per document. Approvals are not collapsed, because each `pending` Prompt is genuinely its own piece of work.
+
+### Every row is rendered from live state
+
+An alert records what a write looked like; the email claims what is in the review queue NOW, and up to a whole sweep separates the two. So the sender re-reads each referenced document—once per document, however many alerts point at it—and `currentRowFor` decides what the row says, or whether there is a row at all. An approval alert survives only while its Prompt is still `pending`; a report or moderation alert survives only while its content is in a moderation state or still carries reports. Anything else has been handled, and is cleared without a row.
+
+Without this, an admin who approved a Prompt two minutes after it landed would still be mailed "pending approval" for it, and a Prompt reported and then hidden inside one window could appear in both sections at once.
+
+It also removes an ordering hazard rather than papering over it. The report write and the auto-hide write reach two independent trigger invocations whose handler wall-clocks can interleave, so a late report enqueue can carry a NEWER `createdAt` than the hide it preceded—and "latest alert wins" would then render hidden content as merely reported. The document itself cannot be out of order: whatever it says now is what the row says, and the row's KIND follows it. The collapse's moderation-outranks-report precedence remains as the second line, for the fail-open path below.
+
+**A failed re-read is not a resolution.** The stored facts are kept and the row renders from them, because for an admin notification the safe direction is to over-report: a dropped moderation alert is a piece of flagged content nobody is told about.
+
+- **Given** a Prompt approved inside the batching window **then** it is not mailed as pending, and its row is cleared. (Test: "does NOT mail a Prompt that was approved inside the batching window".)
+- **Given** every queued alert resolved **then** nothing is sent and the queue is still cleared. (Test: "sends nothing at all when every queued alert was resolved".)
+- **Given** a report alert whose content is now hidden **then** the row reads as the hide, whatever the alert ordering said. (Test: "takes the KIND from the live document".)
+- **Given** a re-read that FAILS **then** the row survives on its stored facts. (Tests: "FAILS OPEN on a read error", "keeps a row on a FAILED content re-read".)
 
 **The Theme is the most recently unlocked Day's**, so a mid-cruise digest carries the palette of the app the admin is about to open. It falls back to the first Day before the Event starts, and for an Event with no schedule `emailThemeTokens` degrades to that EDITION's default Theme—never to grey, and never to another product's identity ([#623](https://github.com/nathanjohnpayne/gaycruisebingo/issues/623) P2). `unlockAt <= 0` is the live-pre-event sentinel ([#289](https://github.com/nathanjohnpayne/gaycruisebingo/issues/289)), not a real instant, so it never counts as unlocked.
 
@@ -118,16 +138,21 @@ The daily email is opt-in engagement mail to participants and carries a visible 
 
 `sentAt: null` is written EXPLICITLY on every alert rather than left absent, because Firestore's equality filter matches a stored null but not a missing field—an alert without it would sit in the collection forever, invisible to the drain. The filter is a single-field equality with a `limit`, so it rides the automatic index and adds no composite index.
 
-`MAX_ALERTS_PER_DIGEST` is a ceiling, not a batch size: a larger backlog spans consecutive sweeps, because everything drained is stamped and the next run resumes where this one stopped. It bounds a pathological queue, it does not size normal work.
+`MAX_ALERTS_PER_DIGEST` is a ceiling, not a batch size: a larger backlog spans consecutive sweeps, because everything drained is removed and the next run resumes where this one stopped. It bounds a pathological queue, it does not size normal work. It is clamped to `MAX_ATOMIC_DELETES` (450), because the clean-up is one `WriteBatch` and an admin-SDK batch caps at 500 writes—a larger drain would split into several commits and reintroduce the partial-failure case the design exists to remove. Clamped rather than asserted, so a future config bump degrades to "drains less per sweep" instead of "silently non-atomic".
+
+**Delivered rows are deleted, not stamped**, and that answers two things at once. Retention: a queue row carries a copy of pending or hidden user content, and stamping it `sentAt` would keep that copy in Firestore indefinitely—outliving the moderation decision it describes, and surviving the deletion of the content itself. And unreadable or already-resolved rows are cleared on the same pass, so they stop consuming the drain limit: skipping them would leave them pending forever, and a whole page of malformed documents would then starve every valid alert behind it on every future sweep.
+
+- **Given** a page that is entirely malformed **then** it is retired rather than re-read forever. (Tests: "RETIRES a malformed queue row", "clears a page that is ENTIRELY malformed".)
 
 The sweep is scoped to ACTIVE Events, mirroring `runDailyEmailSweep`. An archived Event has no live surface to moderate, and its queue drains the moment it is reactivated rather than being lost.
 
 The trigger pins `ADMIN_SDK_SERVICE_ACCOUNT` (it reads Events, the queue, the roster and `hostnames`, and stamps alerts) and binds `RESEND_API_KEY`—it is now the only admin-notification function that sends. Per [#318](https://github.com/nathanjohnpayne/gaycruisebingo/issues/318): verify the Cloud Scheduler job exists after the deploy (`gcloud scheduler jobs list`)—the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function jobless and silently.
 
-**The idempotency key is the drained SET**: `admin-digest/{eventId}/{newestAlertId}/{count}`. A run that sends but fails to stamp leaves the same alerts pending, so the next run rebuilds the same set, produces the same key, and Resend collapses the duplicate inside its 24h window. An alert arriving in between changes the set—a different key, which delivers, because that genuinely is new news.
+**The idempotency key is the drained SET**: `admin-digest/{eventId}/{newestAlertId}/{count}`, and the ATOMIC clean-up is what makes it hold. There are exactly two outcomes after a send: the batch commits and those rows are gone, or it does not and every one of them is still pending—never a partial subset. A retry after the second outcome therefore rebuilds the identical set, produces the identical key, and Resend collapses the duplicate inside its 24h window. A per-document clean-up would not have that property: a single transient failure would leave a smaller set, a different count-based key, and a second email repeating what was already delivered. An alert arriving in between does change the set—a different key, which delivers, because that genuinely is new news.
 
-- **Given** a second sweep after a successful drain **then** nothing is sent. (Test: "is idempotent across sweeps".)
-- **Given** a send that fails **then** nothing is stamped and the alerts drain on the next sweep. (Test: "leaves alerts queued when the send fails".)
+- **Given** a second sweep after a successful drain **then** nothing is sent and the queue is empty. (Test: "is idempotent across sweeps".)
+- **Given** a clean-up that fails **then** EVERY alert is still pending and the retry reuses the same key. (Test: "an ATOMIC clean-up keeps that set stable on retry".)
+- **Given** a send that fails **then** nothing is cleared and the alerts drain on the next sweep. (Test: "leaves alerts queued when the send fails".)
 - **Given** one Event whose sweep throws **then** every other Event still drains. (Test: "one Event's failure never sinks the sweep".)
 
 ## The queue is server-owned

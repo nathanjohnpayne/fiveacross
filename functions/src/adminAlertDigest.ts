@@ -203,10 +203,17 @@ export interface BuildAdminDigestArgs {
  * auto-hide produces two queued alerts — the `reportCount` rise, then the
  * server's `status → hidden` write — and both are true. Rendering them as two
  * rows would tell an admin that two things happened to two things. They are
- * collapsed to the LATEST alert for that document, which is also the most
- * informative one: the hide supersedes the report that caused it, and carries
- * the same count. Approvals are not collapsed, because each `pending` Prompt is
- * genuinely its own piece of work.
+ * collapsed to one row per document. Approvals are not collapsed, because each
+ * `pending` Prompt is genuinely its own piece of work.
+ *
+ * THE MODERATION STATE WINS THE COLLAPSE, ahead of `createdAt`. The two writes
+ * reach two independent trigger invocations whose handler wall-clocks can
+ * interleave, so a late report enqueue can carry a NEWER `createdAt` than the
+ * hide it preceded — and "latest wins" would then render hidden content as
+ * merely reported. The sender re-reads the document and stamps every row with
+ * its live state before this runs, so in practice both candidates already agree;
+ * this ordering is the second line, for the fail-open path where that re-read
+ * failed and only the stored facts are available.
  */
 export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestModel {
   const { event, alerts, origin, now } = args;
@@ -225,13 +232,19 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
     .filter((a) => a.kind === 'item-created')
     .map((a) => ({ label: a.label, detail: 'new Prompt · pending approval' }));
 
-  // ④ Reported & hidden — one row per piece of CONTENT, latest alert wins.
-  const latestByDoc = new Map<string, AdminAlertRecord>();
+  // ④ Reported & hidden — one row per piece of CONTENT. Moderation outranks a
+  // report; among equals the later alert wins. Map insertion order is preserved
+  // on overwrite, so a document keeps the position of its FIRST alert and the
+  // module still reads in the order things started happening.
+  const bestByDoc = new Map<string, AdminAlertRecord>();
   for (const alert of ordered) {
     if (alert.kind === 'item-created') continue;
-    latestByDoc.set(`${alert.collection}/${alert.docId}`, alert);
+    const key = `${alert.collection}/${alert.docId}`;
+    const held = bestByDoc.get(key);
+    if (held && held.kind === 'moderation' && alert.kind !== 'moderation') continue;
+    bestByDoc.set(key, alert);
   }
-  const review: DigestRow[] = [...latestByDoc.values()].map((a) => ({
+  const review: DigestRow[] = [...bestByDoc.values()].map((a) => ({
     label: `${a.collection === 'items' ? 'Prompt' : 'Proof'}: ${a.label}`,
     detail: reviewDetail(a, threshold),
   }));

@@ -56,20 +56,28 @@ interface AlertSnapshot {
 }
 interface AlertDocRef {
   get(): Promise<{ data(): Record<string, unknown> | undefined }>;
-  set(data: Record<string, unknown>, options?: { merge?: boolean }): Promise<unknown>;
+  /** Admin-SDK `DocumentReference.create` — writes ONLY if the document does
+   *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing: it is
+   *  what makes the enqueue idempotent under trigger redelivery (see
+   *  `enqueueAdminAlerts`). Mirrors `emailOptOut.ts`'s use of the same call. */
+  create(data: Record<string, unknown>): Promise<unknown>;
 }
 interface AlertQuery {
   where(field: string, op: string, value: unknown): AlertQuery;
   limit(count: number): AlertQuery;
   get(): Promise<{ docs: AlertSnapshot[] }>;
 }
-interface AlertCollectionRef extends AlertQuery {
-  add(data: Record<string, unknown>): Promise<{ id: string }>;
+/** The minimal atomic-write surface the drain needs. An admin-SDK `WriteBatch`
+ *  commits all-or-nothing, which is the whole reason the drain uses one. */
+interface AlertWriteBatch {
+  delete(ref: AlertDocRef): void;
+  commit(): Promise<unknown>;
 }
 /** The minimal surface the queue and its sweep use. */
 export interface AdminAlertFirestore {
   doc(path: string): AlertDocRef;
-  collection(path: string): AlertCollectionRef;
+  collection(path: string): AlertQuery;
+  batch(): AlertWriteBatch;
 }
 
 // --- The alert vocabulary --------------------------------------------------------
@@ -197,10 +205,34 @@ export interface EnqueueDeps {
 }
 
 /**
+ * A queue document id derived from the triggering write, NOT a random one.
+ *
+ * Firestore redelivers a document-write event on retry, and the retry carries
+ * the SAME CloudEvent id. A random-id `add` would therefore mint a second alert
+ * for one transition — appearing as a duplicate row before a drain, and, if the
+ * redelivery lands after one, as a whole second email whose set (and therefore
+ * whose Resend key) differs from the first. That is the same guarantee #101
+ * bought by folding the CloudEvent id into its idempotency key, kept here.
+ *
+ * The kind is part of the id because one write can legitimately earn more than
+ * one alert. The sanitizer is belt-and-braces: real CloudEvent ids are already
+ * id-safe, but a `/` reaching a document id would silently reparent the write.
+ */
+export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
+  const safe = (transitionId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 200);
+  return `${safe}-${kind}`;
+}
+
+/**
  * Append this write's alerts to the Event's queue. Best-effort and NEVER throws
  * (ADR 0001): a queue write failing must not fail the moderation write that
  * triggered it, exactly as the #101 notifier's mail failure never did. Returns
  * how many alerts it wrote.
+ *
+ * `create` rather than `set`, and a deterministic id rather than a random one,
+ * so a redelivered trigger is a no-op. `set` would be wrong in the one case
+ * that matters: a redelivery arriving after the digest drained would re-create
+ * the alert and mail it a second time.
  *
  * `sentAt: null` is written EXPLICITLY rather than left absent, because the
  * sweep finds work with `where('sentAt', '==', null)` and Firestore's equality
@@ -211,35 +243,60 @@ export async function enqueueAdminAlerts(
   db: AdminAlertFirestore,
   eventId: string,
   drafts: readonly AdminAlertDraft[],
+  transitionId: string,
   deps: EnqueueDeps = {},
 ): Promise<number> {
   if (drafts.length === 0) return 0;
   const createdAt = (deps.now ?? Date.now)();
   let written = 0;
   for (const draft of drafts) {
+    const id = alertDocId(transitionId, draft.kind);
     try {
-      await db.collection(`events/${eventId}/adminAlerts`).add({ ...draft, createdAt, sentAt: null });
+      await db
+        .doc(`events/${eventId}/adminAlerts/${id}`)
+        .create({ ...draft, createdAt, sentAt: null });
       written++;
     } catch (err) {
+      // ALREADY_EXISTS is the redelivery path and is a SUCCESS: the alert this
+      // call would have written is already queued. Anything else is a real
+      // failure, logged and swallowed.
+      if (isAlreadyExists(err)) continue;
       console.error('enqueueAdminAlerts: write failed', eventId, draft.kind, draft.docId, err);
     }
   }
   return written;
 }
 
+/** Firestore surfaces ALREADY_EXISTS as gRPC status 6; the emulator and some
+ *  SDK versions only carry it in the message, so both are checked. */
+function isAlreadyExists(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === 6 || code === 'already-exists') return true;
+  return /already exists/i.test((err as { message?: string } | null)?.message ?? '');
+}
+
 /** The whole producer side in one call — the shape `index.ts`'s trigger seams
- *  use, so the seam stays three lines and the decision stays testable here. */
+ *  use, so the seam stays three lines and the decision stays testable here.
+ *  `transitionId` is the triggering write's CloudEvent id (#101 Codex F3),
+ *  which makes a redelivered trigger idempotent rather than duplicative. */
 export async function recordAdminAlerts(
   db: AdminAlertFirestore,
   collection: AlertedCollection,
   eventId: string,
   docId: string,
+  transitionId: string,
   before: AlertableDoc | undefined,
   after: AlertableDoc | undefined,
   deps: EnqueueDeps = {},
 ): Promise<number> {
   try {
-    return await enqueueAdminAlerts(db, eventId, alertsForWrite(collection, docId, before, after), deps);
+    return await enqueueAdminAlerts(
+      db,
+      eventId,
+      alertsForWrite(collection, docId, before, after),
+      transitionId,
+      deps,
+    );
   } catch (err) {
     console.error('recordAdminAlerts failed', eventId, collection, docId, err);
     return 0;
@@ -251,13 +308,25 @@ export async function recordAdminAlerts(
 /**
  * Alerts drained per Event per sweep. A ceiling, not a batch size: a bigger
  * backlog simply spans consecutive sweeps, because everything drained is
- * stamped `sentAt` and the next run picks up where this one stopped. It exists
- * to bound a pathological queue (a runaway import), not to size normal work.
+ * removed from the queue and the next run picks up where this one stopped. It
+ * exists to bound a pathological queue (a runaway import), not to size normal
+ * work.
  */
 export const MAX_ALERTS_PER_DIGEST = 200;
 
-/** Milliseconds between digest sweeps, mirrored in `index.ts`'s cron. Stated
- *  here so the doc comment and the schedule cannot drift silently. */
+/**
+ * The drain's hard ceiling, and it is not decorative. The clean-up is ONE
+ * atomic `WriteBatch`, which is what makes a failed clean-up leave the queue
+ * exactly as it found it — the property the idempotency key relies on. An
+ * admin-SDK batch caps at 500 writes, so a `maxAlerts` above that would split
+ * into several commits and reintroduce the partial-failure case this design
+ * exists to remove. Clamped rather than asserted, so a future config bump
+ * degrades to "drains less per sweep" instead of "silently non-atomic".
+ */
+export const MAX_ATOMIC_DELETES = 450;
+
+/** Minutes between digest sweeps, mirrored in `index.ts`'s cron. Stated here so
+ *  the doc comment and the schedule cannot drift silently. */
 export const DIGEST_INTERVAL_MINUTES = 5;
 
 export interface AdminDigestDeps extends ResolveDeps, EnqueueDeps {
@@ -268,15 +337,20 @@ export interface AdminDigestDeps extends ResolveDeps, EnqueueDeps {
   /** Fallback origin when the Event has no hostname documents; defaults to the
    *  `APP_BASE_URL` param. */
   appBaseUrl?: string;
-  /** Alerts drained per Event per run; defaults to `MAX_ALERTS_PER_DIGEST`. */
+  /** Alerts drained per Event per run; defaults to `MAX_ALERTS_PER_DIGEST`,
+   *  clamped to `MAX_ATOMIC_DELETES`. */
   maxAlerts?: number;
 }
 
 export interface AdminDigestResult {
   /** Alerts covered by a delivered email. */
   sent: number;
+  /** Queue rows retired without a row in the email: resolved since they were
+   *  queued, or unreadable. Cleared either way, so they stop consuming the
+   *  drain limit forever. */
+  retired: number;
   /** Why nothing was sent, when nothing was. */
-  reason?: 'no-alerts' | 'no-event' | 'no-recipients' | 'send-failed';
+  reason?: 'no-alerts' | 'no-event' | 'no-recipients' | 'send-failed' | 'nothing-current';
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -289,11 +363,13 @@ function toRecord(snap: AlertSnapshot): AdminAlertRecord | null {
   const collection = data.collection;
   if (kind !== 'item-created' && kind !== 'content-reported' && kind !== 'moderation') return null;
   if (collection !== 'items' && collection !== 'proofs') return null;
+  const docId = typeof data.docId === 'string' ? data.docId : '';
+  if (!docId) return null;
   return {
     id: snap.id,
     kind,
     collection,
-    docId: typeof data.docId === 'string' ? data.docId : '',
+    docId,
     label: typeof data.label === 'string' && data.label ? data.label : '(untitled)',
     status: typeof data.status === 'string' ? data.status : 'unknown',
     visionFlag: typeof data.visionFlag === 'string' && data.visionFlag ? data.visionFlag : null,
@@ -302,36 +378,149 @@ function toRecord(snap: AlertSnapshot): AdminAlertRecord | null {
   };
 }
 
+const MODERATION_STATES_LIVE = ['flagged', 'hidden'];
+
 /**
- * Drain one Event's queue into a single digest. Idempotent in the way that
- * matters: a run that sends but fails to stamp leaves the same alerts pending,
- * and the next run rebuilds the same set — which produces the same idempotency
- * key, so Resend collapses the duplicate inside its 24h window.
+ * Re-read the content an alert is about, and answer with the row the digest
+ * should actually render — or `null` when there is nothing left to say.
+ *
+ * WHY THE QUEUE IS NOT THE SOURCE OF TRUTH AT SEND TIME. An alert records what
+ * a write looked like; the email claims what is in the review queue NOW, and up
+ * to a whole sweep separates the two. An admin who approves a Prompt two
+ * minutes after it lands would otherwise still be mailed "pending approval" for
+ * it, and a Prompt reported and then hidden inside one window could appear in
+ * both sections at once.
+ *
+ * Rendering from live state also resolves the ordering hazard for free. The
+ * report write and the auto-hide write reach two independent trigger
+ * invocations whose handler wall-clocks can interleave, so `createdAt` cannot
+ * be trusted to say which state is newer. The doc itself can: whatever it says
+ * NOW is what the row says, whichever alert queued first.
+ *
+ * A FAILED read is not a resolution. The stored facts are kept and the row is
+ * rendered from them, because for an admin notification the safe direction is
+ * to over-report: a dropped moderation alert is a piece of flagged content
+ * nobody is told about.
+ */
+export function currentRowFor(
+  alert: AdminAlertRecord,
+  live: AlertableDoc | undefined,
+  readFailed: boolean,
+): AdminAlertRecord | null {
+  if (readFailed) return alert; // fail-open: keep the stored facts rather than lose the alert
+  if (!live) return null; // deleted since it was queued — nothing left to review
+  const status = typeof live.status === 'string' ? live.status : 'unknown';
+  const reportCount = typeof live.reportCount === 'number' ? live.reportCount : 0;
+  const visionFlag = typeof live.visionFlag === 'string' && live.visionFlag ? live.visionFlag : null;
+  const label = alert.label;
+
+  if (alert.kind === 'item-created') {
+    // Approved, rejected or hidden since it was queued — the approval work is
+    // done, whoever did it.
+    return status === 'pending' ? { ...alert, status, reportCount, visionFlag, label } : null;
+  }
+  // A report or a moderation transition still needs eyes while the content is
+  // in a moderation state OR still carries reports. A restore that also cleared
+  // the reports is the admin having handled it.
+  if (!MODERATION_STATES_LIVE.includes(status) && reportCount <= 0) return null;
+  return {
+    ...alert,
+    // The KIND follows the live document, not the queued alert: content that is
+    // now hidden reads as hidden even if the alert that survived the collapse
+    // was the earlier report.
+    kind: MODERATION_STATES_LIVE.includes(status) ? 'moderation' : 'content-reported',
+    status,
+    reportCount,
+    visionFlag,
+    label,
+  };
+}
+
+/**
+ * Drain one Event's queue into a single digest.
+ *
+ * IDEMPOTENCY, precisely. The queue rows covered by a delivered email are
+ * removed in ONE atomic `WriteBatch` after the send. So there are exactly two
+ * outcomes: the batch commits and those alerts are gone, or it does not and
+ * every one of them is still pending — never a partial subset. A retry after
+ * the second outcome therefore rebuilds the IDENTICAL set, produces the
+ * identical idempotency key, and Resend collapses the duplicate inside its 24h
+ * window. A count-based key over a partially-drained subset would not have that
+ * property, which is precisely the hole an atomic clean-up closes.
+ *
+ * DELETING rather than stamping is also the retention answer: a queue row
+ * carries a copy of pending or hidden user content, and stamping it `sentAt`
+ * would keep that copy in Firestore forever — outliving the moderation decision
+ * and even the deletion of the content it describes.
  */
 export async function sendAdminDigestForEvent(
   db: AdminAlertFirestore,
   eventId: string,
   deps: AdminDigestDeps = {},
 ): Promise<AdminDigestResult> {
-  const maxAlerts = deps.maxAlerts ?? MAX_ALERTS_PER_DIGEST;
+  const maxAlerts = Math.min(deps.maxAlerts ?? MAX_ALERTS_PER_DIGEST, MAX_ATOMIC_DELETES);
   const snap = await db
     .collection(`events/${eventId}/adminAlerts`)
     .where('sentAt', '==', null)
     .limit(maxAlerts)
     .get();
-  const alerts = snap.docs.map(toRecord).filter((a): a is AdminAlertRecord => a !== null);
-  if (alerts.length === 0) return { sent: 0, reason: 'no-alerts' };
+  if (snap.docs.length === 0) return { sent: 0, retired: 0, reason: 'no-alerts' };
+
+  // Unreadable rows are RETIRED, not merely skipped. Skipping them leaves them
+  // pending forever, and a page of malformed documents would then occupy the
+  // whole drain limit on every sweep — starving valid alerts behind it
+  // indefinitely. They are cleared alongside whatever is delivered.
+  const unreadable: string[] = [];
+  const alerts: AdminAlertRecord[] = [];
+  for (const doc of snap.docs) {
+    const record = toRecord(doc);
+    if (record) alerts.push(record);
+    else unreadable.push(doc.id);
+  }
+  if (unreadable.length > 0) {
+    console.error(`sendAdminDigestForEvent: retiring ${unreadable.length} unreadable alert(s)`, eventId);
+  }
 
   const event = (await db.doc(`events/${eventId}`).get()).data() as DigestEvent | undefined;
-  if (!event) return { sent: 0, reason: 'no-event' };
+  if (!event) return { sent: 0, retired: 0, reason: 'no-event' };
+
+  // Re-read each piece of content ONCE, however many alerts point at it, then
+  // render every row from what the document says now.
+  const live = new Map<string, { doc: AlertableDoc | undefined; failed: boolean }>();
+  for (const key of new Set(alerts.map((a) => `${a.collection}/${a.docId}`))) {
+    try {
+      live.set(key, { doc: (await db.doc(`events/${eventId}/${key}`).get()).data() as AlertableDoc | undefined, failed: false });
+    } catch (err) {
+      console.error('sendAdminDigestForEvent: content re-read failed', eventId, key, err);
+      live.set(key, { doc: undefined, failed: true });
+    }
+  }
+  const current: AdminAlertRecord[] = [];
+  const resolved: string[] = [];
+  for (const alert of alerts) {
+    const state = live.get(`${alert.collection}/${alert.docId}`) ?? { doc: undefined, failed: true };
+    const row = currentRowFor(alert, state.doc, state.failed);
+    if (row) current.push(row);
+    else resolved.push(alert.id);
+  }
+
+  // Everything queued has been handled since. Clear the rows — they are answered
+  // work, and leaving them would re-cost a re-read on every sweep — and send
+  // nothing, because an email claiming a review queue that is empty is worse
+  // than no email.
+  const retireOnly = [...unreadable, ...resolved];
+  if (current.length === 0) {
+    await clearAlerts(db, eventId, retireOnly);
+    return { sent: 0, retired: retireOnly.length, reason: 'nothing-current' };
+  }
 
   // The roster resolves from the Event's `admins` UIDs unioned with the
   // ADMIN_NOTIFY_EMAIL override — one lookup for the whole digest rather than
   // one per alert, which is the other half of why this is batched.
   const to = await resolveAdminEmails(eventId, deps);
   if (to.length === 0) {
-    console.log(`sendAdminDigestForEvent: no admin emails for event ${eventId}; leaving ${alerts.length} queued`);
-    return { sent: 0, reason: 'no-recipients' };
+    console.log(`sendAdminDigestForEvent: no admin emails for event ${eventId}; leaving ${current.length} queued`);
+    return { sent: 0, retired: 0, reason: 'no-recipients' };
   }
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
@@ -343,33 +532,44 @@ export async function sendAdminDigestForEvent(
   // digest. Let the sweep boundary log and skip; the next run retries safely.
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
 
-  const model = buildAdminDigestModel({ event, eventId, alerts, edition, origin, now });
-  // Stable for a given SET of alerts: a retry of the same drain dedupes at
-  // Resend, while an alert arriving in between changes the set — a different
+  const model = buildAdminDigestModel({ event, eventId, alerts: current, edition, origin, now });
+  // Stable for a given SET of alerts, and the atomic clean-up below is what
+  // makes "the same set" survive a failure: a retry of the same drain dedupes
+  // at Resend, while an alert arriving in between changes the set — a different
   // key, which delivers, because that genuinely is new news.
-  const newest = alerts.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+  const newest = current.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
   const ok = await send({
     to,
     subject: model.subject,
     html: renderAdminDigestHtml(model),
     text: renderAdminDigestText(model),
     from,
-    idempotencyKey: `admin-digest/${eventId}/${newest.id}/${alerts.length}`,
+    idempotencyKey: `admin-digest/${eventId}/${newest.id}/${current.length}`,
   });
-  if (!ok) return { sent: 0, reason: 'send-failed' };
+  if (!ok) return { sent: 0, retired: 0, reason: 'send-failed' };
 
-  // Stamped only AFTER a clean send. Each stamp is independently caught so one
-  // failure cannot strand the rest — the worst case is a repeat of an already
-  // delivered row, which the idempotency key above already collapses.
-  for (const alert of alerts) {
-    try {
-      await db.doc(`events/${eventId}/adminAlerts/${alert.id}`).set({ sentAt: now }, { merge: true });
-    } catch (err) {
-      console.error('sendAdminDigestForEvent: stamp failed', eventId, alert.id, err);
-    }
+  await clearAlerts(db, eventId, [...retireOnly, ...current.map((a) => a.id)]);
+  console.log(
+    `sendAdminDigestForEvent ${eventId}: sent=${current.length} retired=${retireOnly.length} to=${to.length}`,
+  );
+  return { sent: current.length, retired: retireOnly.length };
+}
+
+/**
+ * Remove drained queue rows in ONE atomic batch. All-or-nothing is the whole
+ * point (see `sendAdminDigestForEvent`), so a commit failure is logged and
+ * swallowed rather than retried per-document: leaving every row pending is the
+ * safe, self-healing outcome, and the next sweep dedupes at Resend.
+ */
+async function clearAlerts(db: AdminAlertFirestore, eventId: string, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    const batch = db.batch();
+    for (const id of ids) batch.delete(db.doc(`events/${eventId}/adminAlerts/${id}`));
+    await batch.commit();
+  } catch (err) {
+    console.error('sendAdminDigestForEvent: queue clean-up failed (alerts stay pending)', eventId, err);
   }
-  console.log(`sendAdminDigestForEvent ${eventId}: sent=${alerts.length} to=${to.length}`);
-  return { sent: alerts.length };
 }
 
 /**

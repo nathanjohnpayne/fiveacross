@@ -188,7 +188,11 @@ export const moderateProof = VISION_ENABLED
  * Uses onDocumentWritten (not onDocumentUpdated) so a proof CREATED already
  * flagged — moderateProof's merge-set can create the doc in the
  * upload-before-doc race (#101 Codex F2) — still alerts; `alertsForWrite`
- * ignores create-into-active and deletes (`after` undefined).
+ * ignores create-into-active and deletes (`after` undefined). `transitionId` is
+ * the CloudEvent id, which is stable across platform retries of one delivery
+ * and unique per distinct write — it becomes the queue document's id, so a
+ * redelivered trigger is a no-op rather than a duplicate row (#101 Codex F3,
+ * carried forward).
  *
  * BOTH NOW PIN `ADMIN_SDK_SERVICE_ACCOUNT`, and that is a fix rather than
  * boilerplate. They write Firestore now, which the default Gen2 compute
@@ -205,10 +209,19 @@ async function handleModeration(
   collection: 'items' | 'proofs',
   eventId: string,
   docId: string,
+  transitionId: string,
   before: AlertableDoc | undefined,
   after: AlertableDoc | undefined,
 ): Promise<void> {
-  await recordAdminAlerts(db as unknown as AdminAlertFirestore, collection, eventId, docId, before, after);
+  await recordAdminAlerts(
+    db as unknown as AdminAlertFirestore,
+    collection,
+    eventId,
+    docId,
+    transitionId,
+    before,
+    after,
+  );
 }
 
 export const notifyProofModeration = onDocumentWritten(
@@ -218,6 +231,7 @@ export const notifyProofModeration = onDocumentWritten(
       'proofs',
       event.params.eventId,
       event.params.proofId,
+      event.id,
       event.data?.before.data(),
       event.data?.after.data(),
     ),
@@ -230,6 +244,7 @@ export const notifyItemModeration = onDocumentWritten(
       'items',
       event.params.eventId,
       event.params.itemId,
+      event.id,
       event.data?.before.data(),
       event.data?.after.data(),
     ),

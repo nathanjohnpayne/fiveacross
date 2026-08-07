@@ -8,7 +8,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   MAX_ALERTS_PER_DIGEST,
+  MAX_ATOMIC_DELETES,
+  alertDocId,
   alertsForWrite,
+  currentRowFor,
   enqueueAdminAlerts,
   recordAdminAlerts,
   runAdminAlertSweep,
@@ -29,10 +32,11 @@ import { EMAIL_THEME_TOKENS } from '../../functions/src/dailyEmailTheme';
 
 // --- A minimal in-memory Firestore ----------------------------------------------
 //
-// Only the operations the queue and its sweep use: `collection(path).add`, an
-// equality-filtered `.limit().get()`, `doc(path).get()` and a merging
-// `doc(path).set()`. Paths are flat string keys, which is all the module needs —
-// it never walks a hierarchy.
+// Only the operations the queue and its sweep use: an equality-filtered
+// `.limit().get()`, `doc(path).get()`, admin-SDK `doc(path).create()` (which
+// rejects when the document exists — the enqueue's idempotency) and an
+// all-or-nothing `batch()`. Paths are flat string keys, which is all the module
+// needs — it never walks a hierarchy.
 
 interface FakeDoc {
   id: string;
@@ -42,8 +46,11 @@ interface FakeDoc {
 function fakeDb(
   seed: Record<string, Record<string, unknown>[]> = {},
   docs: Record<string, Record<string, unknown>> = {},
-  /** Collection paths whose `.get()` rejects — the injectable backend failure. */
+  /** Collection or document paths whose `.get()` rejects — the injectable
+   *  backend failure. */
   throwOn: readonly string[] = [],
+  /** When true, every batch commit rejects — the atomic-clean-up failure. */
+  failCommit = false,
 ) {
   const collections = new Map<string, FakeDoc[]>();
   let autoId = 0;
@@ -80,30 +87,64 @@ function fakeDb(
     return query;
   };
 
+  const split = (path: string) => {
+    const slash = path.lastIndexOf('/');
+    return { collectionPath: path.slice(0, slash), id: path.slice(slash + 1) };
+  };
+  const findRow = (path: string) => {
+    const { collectionPath, id } = split(path);
+    return (collections.get(collectionPath) ?? []).find((r) => r.id === id);
+  };
+
+  const docRef = (path: string) => ({
+    path,
+    get: async () => {
+      if (throwOn.includes(path)) throw new Error(`backend unavailable: ${path}`);
+      const single = singles.get(path);
+      if (single) return { data: () => ({ ...single }) };
+      const found = findRow(path);
+      return { data: () => (found ? { ...found.data } : undefined) };
+    },
+    // Admin-SDK `create` semantics: reject if the document already exists.
+    create: async (data: Record<string, unknown>) => {
+      if (findRow(path)) {
+        const err = new Error('already exists') as Error & { code?: number };
+        err.code = 6;
+        throw err;
+      }
+      const { collectionPath, id } = split(path);
+      const rows = collections.get(collectionPath) ?? [];
+      rows.push({ id, data: { ...data } });
+      collections.set(collectionPath, rows);
+      return undefined;
+    },
+  });
+
   const db = {
     collection: (path: string) => makeQuery(path, [], null),
-    doc: (path: string) => ({
-      get: async () => {
-        const single = singles.get(path);
-        if (single) return { data: () => ({ ...single }) };
-        // A document inside a seeded collection, addressed directly.
-        const slash = path.lastIndexOf('/');
-        const rows = collections.get(path.slice(0, slash)) ?? [];
-        const found = rows.find((r) => r.id === path.slice(slash + 1));
-        return { data: () => (found ? { ...found.data } : undefined) };
-      },
-      set: async (data: Record<string, unknown>, options?: { merge?: boolean }) => {
-        const slash = path.lastIndexOf('/');
-        const collectionPath = path.slice(0, slash);
-        const id = path.slice(slash + 1);
-        const rows = collections.get(collectionPath) ?? [];
-        const found = rows.find((r) => r.id === id);
-        if (found) found.data = options?.merge ? { ...found.data, ...data } : { ...data };
-        else rows.push({ id, data: { ...data } });
-        collections.set(collectionPath, rows);
-        return undefined;
-      },
-    }),
+    doc: docRef,
+    // An all-or-nothing WriteBatch: writes are staged and applied only on a
+    // clean commit, exactly like the admin SDK's.
+    batch: () => {
+      const staged: string[] = [];
+      return {
+        delete: (ref: { path: string }) => {
+          staged.push(ref.path);
+        },
+        commit: async () => {
+          if (failCommit) throw new Error('batch commit failed');
+          for (const path of staged) {
+            const { collectionPath, id } = split(path);
+            const rows = collections.get(collectionPath) ?? [];
+            collections.set(
+              collectionPath,
+              rows.filter((r) => r.id !== id),
+            );
+          }
+          return undefined;
+        },
+      };
+    },
     /** Test-only reader. */
     rows: (path: string) => (collections.get(path) ?? []).map((r) => ({ id: r.id, ...r.data })),
   };
@@ -224,9 +265,13 @@ describe('alertsForWrite', () => {
 describe('enqueueAdminAlerts', () => {
   it('writes sentAt: null EXPLICITLY, so the drain query can find the alert at all', async () => {
     const db = fakeDb();
-    await enqueueAdminAlerts(db, 'med-2026', alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' })), {
-      now: () => 42,
-    });
+    await enqueueAdminAlerts(
+      db,
+      'med-2026',
+      alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' })),
+      'evt-1',
+      { now: () => 42 },
+    );
     const [row] = db.rows('events/med-2026/adminAlerts');
     // Firestore's equality filter matches a stored null but NOT a missing field.
     expect(row.sentAt).toBeNull();
@@ -235,22 +280,108 @@ describe('enqueueAdminAlerts', () => {
     expect(row.kind).toBe('item-created');
   });
 
+  it('is idempotent under trigger REDELIVERY — the same CloudEvent id is one alert, not two', async () => {
+    // Firestore redelivers a document-write event on retry with the SAME
+    // CloudEvent id. A random-id `add` would mint a second alert for one
+    // transition — a duplicate row before a drain, and a whole second email if
+    // the redelivery lands after one.
+    const db = fakeDb();
+    const drafts = alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' }));
+    expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-1')).toBe(1);
+    expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-1')).toBe(0); // redelivery: no-op
+    expect(db.rows('events/e/adminAlerts')).toHaveLength(1);
+    // A genuinely DISTINCT write carries a distinct id and does queue.
+    expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-2')).toBe(1);
+    expect(db.rows('events/e/adminAlerts')).toHaveLength(2);
+  });
+
+  it('gives one write’s two alerts distinct ids, so neither collides with the other', async () => {
+    const db = fakeDb();
+    const drafts = alertsForWrite(
+      'items',
+      'i1',
+      ITEM({ status: 'active', reportCount: 3 }),
+      ITEM({ status: 'hidden', reportCount: 4 }),
+    );
+    expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-1')).toBe(2);
+    expect(db.rows('events/e/adminAlerts').map((r) => r.id).sort()).toEqual([
+      'evt-1-content-reported',
+      'evt-1-moderation',
+    ]);
+  });
+
+  it('sanitizes a document id so a stray slash cannot reparent the write', () => {
+    // `/` would reparent, and `.`/`..` are reserved document ids in Firestore —
+    // both are collapsed to underscores.
+    expect(alertDocId('evt/../other', 'moderation')).toBe('evt____other-moderation');
+    expect(alertDocId('', 'moderation')).toBe('unknown-moderation');
+    expect(alertDocId('x'.repeat(400), 'moderation').length).toBeLessThanOrEqual(211);
+  });
+
   it('never throws when the queue write fails — a mail concern must not fail a moderation write', async () => {
     const db = {
-      collection: () => ({ add: async () => Promise.reject(new Error('firestore down')) }),
-      doc: () => ({ get: async () => ({ data: () => undefined }), set: async () => undefined }),
+      collection: () => ({ get: async () => ({ docs: [] }) }),
+      doc: () => ({
+        get: async () => ({ data: () => undefined }),
+        create: async () => Promise.reject(new Error('firestore down')),
+      }),
+      batch: () => ({ delete: () => undefined, commit: async () => undefined }),
     } as unknown as AdminAlertFirestore;
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(
-      recordAdminAlerts(db, 'items', 'e', 'i1', undefined, ITEM({ status: 'pending' })),
+      recordAdminAlerts(db, 'items', 'e', 'i1', 'evt-1', undefined, ITEM({ status: 'pending' })),
     ).resolves.toBe(0);
     spy.mockRestore();
   });
 
   it('writes nothing at all for a write that earns nothing', async () => {
     const db = fakeDb();
-    expect(await recordAdminAlerts(db, 'items', 'e', 'i1', ITEM(), ITEM())).toBe(0);
+    expect(await recordAdminAlerts(db, 'items', 'e', 'i1', 'evt-1', ITEM(), ITEM())).toBe(0);
     expect(db.rows('events/e/adminAlerts')).toEqual([]);
+  });
+});
+
+// --- Revalidation at send time ---------------------------------------------------
+
+describe('currentRowFor', () => {
+  it('drops an approval alert whose Prompt is no longer pending', () => {
+    const alert = ALERT({ kind: 'item-created', status: 'pending' });
+    // Approved, rejected or hidden inside the batching window — the work is done.
+    expect(currentRowFor(alert, ITEM({ status: 'active' }), false)).toBeNull();
+    expect(currentRowFor(alert, ITEM({ status: 'rejected' }), false)).toBeNull();
+    expect(currentRowFor(alert, ITEM({ status: 'pending' }), false)?.kind).toBe('item-created');
+  });
+
+  it('drops a report alert once the content is restored AND the reports are cleared', () => {
+    const alert = ALERT({ kind: 'content-reported', reportCount: 3 });
+    expect(currentRowFor(alert, ITEM({ status: 'active', reportCount: 0 }), false)).toBeNull();
+    // A restore that left the count alone is still live work.
+    expect(currentRowFor(alert, ITEM({ status: 'active', reportCount: 3 }), false)?.kind).toBe('content-reported');
+  });
+
+  it('drops any alert whose content was deleted', () => {
+    expect(currentRowFor(ALERT(), undefined, false)).toBeNull();
+    expect(currentRowFor(ALERT({ kind: 'item-created', status: 'pending' }), undefined, false)).toBeNull();
+  });
+
+  it('takes the KIND from the live document, which is what fixes the out-of-order collapse', () => {
+    // The report write and the auto-hide write reach two independent trigger
+    // invocations whose handler wall-clocks can interleave, so `createdAt`
+    // cannot say which state is newer. The document can.
+    const staleReport = ALERT({ kind: 'content-reported', reportCount: 4, createdAt: 9_999 });
+    const row = currentRowFor(staleReport, ITEM({ status: 'hidden', reportCount: 4 }), false);
+    expect(row?.kind).toBe('moderation');
+    expect(row?.status).toBe('hidden');
+  });
+
+  it('refreshes the counts, so the email never states a stale report total', () => {
+    const row = currentRowFor(ALERT({ reportCount: 1 }), ITEM({ status: 'active', reportCount: 6 }), false);
+    expect(row?.reportCount).toBe(6);
+  });
+
+  it('FAILS OPEN on a read error — an unreported moderation alert is worse than a stale one', () => {
+    const alert = ALERT({ kind: 'moderation', status: 'hidden' });
+    expect(currentRowFor(alert, undefined, true)).toEqual(alert);
   });
 });
 
@@ -501,12 +632,6 @@ describe('sendAdminDigestForEvent', () => {
     now: () => NOW,
   });
 
-  const seeded = (alerts: Record<string, unknown>[], hostnames: Record<string, unknown>[] = []) =>
-    fakeDb(
-      { 'events/med-2026/adminAlerts': alerts, hostnames, events: [{ id: 'med-2026', status: 'active' }] },
-      { 'events/med-2026': EVENT },
-    );
-
   const pendingAlert = (id: string, over: Record<string, unknown> = {}) => ({
     id,
     kind: 'item-created',
@@ -521,13 +646,34 @@ describe('sendAdminDigestForEvent', () => {
     ...over,
   });
 
+  /** Seed a queue AND the live content each alert points at, since the drain
+   *  re-reads every referenced document before it renders a row. */
+  const seeded = (
+    alerts: Record<string, unknown>[],
+    hostnames: Record<string, unknown>[] = [],
+    liveOver: Record<string, Record<string, unknown>> = {},
+    opts: { throwOn?: string[]; failCommit?: boolean } = {},
+  ) => {
+    const live: Record<string, Record<string, unknown>> = { 'events/med-2026': EVENT };
+    for (const a of alerts) {
+      const path = `events/med-2026/${a.collection}/${a.docId}`;
+      live[path] = { status: a.status, reportCount: a.reportCount ?? 0, visionFlag: a.visionFlag ?? null };
+    }
+    return fakeDb(
+      { 'events/med-2026/adminAlerts': alerts, hostnames, events: [{ id: 'med-2026', status: 'active' }] },
+      { ...live, ...liveOver },
+      opts.throwOn ?? [],
+      opts.failCommit ?? false,
+    );
+  };
+
   it('sends ONE digest for a burst of eighty pending Prompts', async () => {
     // The acceptance criterion in its most literal form: a pool import writes
     // eighty rows in a second and the admins get one email.
     const send = vi.fn(async () => true);
     const db = seeded(Array.from({ length: 80 }, (_, i) => pendingAlert(`a${i + 1}`)));
     const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
-    expect(result).toEqual({ sent: 80 });
+    expect(result).toEqual({ sent: 80, retired: 0 });
     expect(send).toHaveBeenCalledTimes(1);
     const arg = send.mock.calls[0][0] as { subject: string; to: string[]; html: string };
     expect(arg.subject).toBe('Admin · Trieste → Barcelona—80 to approve');
@@ -535,29 +681,44 @@ describe('sendAdminDigestForEvent', () => {
     expect(arg.html).toContain(`+${80 - ROWS_PER_SECTION} more in the Review queue`);
   });
 
-  it('is idempotent across sweeps: a second run after a clean drain sends nothing', async () => {
+  it('is idempotent across sweeps: a delivered drain leaves an empty queue', async () => {
     const send = vi.fn(async () => true);
     const db = seeded([pendingAlert('a1'), pendingAlert('a2')]);
     expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(2);
-    expect(db.rows('events/med-2026/adminAlerts').every((r) => r.sentAt === NOW)).toBe(true);
-    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({ sent: 0, reason: 'no-alerts' });
+    // DELETED, not stamped: a queue row carries a copy of pending content, and
+    // keeping it would outlive the moderation decision it describes.
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'no-alerts',
+    });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it('keys the send by the drained SET, so a stamp failure retries as the same email', async () => {
+  it('keys the send by the drained SET, and an ATOMIC clean-up keeps that set stable on retry', async () => {
     const send = vi.fn(async () => true);
-    const db = seeded([pendingAlert('a1'), pendingAlert('a2')]);
+    const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {}, { failCommit: true });
     await sendAdminDigestForEvent(db, 'med-2026', deps(send));
     const key = (send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey;
-    // newest alert id + count — stable for a given set, different once one more arrives.
     expect(key).toBe('admin-digest/med-2026/a2/2');
+    // The clean-up failed, so EVERY alert is still pending — never a subset.
+    // That is what makes the retry rebuild the identical set and hit the same
+    // key, which is what lets Resend collapse the duplicate.
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(2);
+    await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    expect((send.mock.calls[1][0] as { idempotencyKey: string }).idempotencyKey).toBe(key);
   });
 
   it('leaves alerts queued when the send fails, so nothing is silently dropped', async () => {
     const send = vi.fn(async () => false);
     const db = seeded([pendingAlert('a1')]);
-    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({ sent: 0, reason: 'send-failed' });
-    expect(db.rows('events/med-2026/adminAlerts')[0].sentAt).toBeNull();
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'send-failed',
+    });
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(1);
   });
 
   it('leaves alerts queued when no admin email resolves', async () => {
@@ -568,10 +729,40 @@ describe('sendAdminDigestForEvent', () => {
       getAdminUids: async () => [],
       getEmailForUid: async () => null,
     });
-    expect(result).toEqual({ sent: 0, reason: 'no-recipients' });
+    expect(result).toEqual({ sent: 0, retired: 0, reason: 'no-recipients' });
     expect(send).not.toHaveBeenCalled();
     // They drain on the first sweep after a recipient exists, rather than being lost.
-    expect(db.rows('events/med-2026/adminAlerts')[0].sentAt).toBeNull();
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(1);
+  });
+
+  it('does NOT mail a Prompt that was approved inside the batching window', async () => {
+    // The subject and preheader claim these items are in the review queue NOW.
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {
+      // a1's Prompt was approved two minutes after it landed.
+      'events/med-2026/items/i-a1': { status: 'active', reportCount: 0 },
+    });
+    const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    expect(result).toEqual({ sent: 1, retired: 1 });
+    expect((send.mock.calls[0][0] as { subject: string }).subject).toBe('Admin · Trieste → Barcelona—1 to approve');
+    // The resolved row is cleared too — it is answered work, not pending work.
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('sends nothing at all when every queued alert was resolved, and still clears the queue', async () => {
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1')], [], {
+      'events/med-2026/items/i-a1': { status: 'active', reportCount: 0 },
+    });
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 1,
+      reason: 'nothing-current',
+    });
+    // An email claiming a review queue that is empty is worse than no email.
+    expect(send).not.toHaveBeenCalled();
+    // Cleared anyway, so they stop costing a re-read on every future sweep.
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
   });
 
   it('prefers the Event’s canonical host for the deep link, falling back to APP_BASE_URL', async () => {
@@ -590,48 +781,86 @@ describe('sendAdminDigestForEvent', () => {
     );
   });
 
-  it('skips a malformed queue row instead of letting it suppress the whole Event’s digest', async () => {
+  it('RETIRES a malformed queue row rather than letting it occupy the drain limit forever', async () => {
+    // Skipping an unreadable row leaves it pending, so a page of them would
+    // starve every valid alert behind it on every future sweep.
     const send = vi.fn(async () => true);
     const db = seeded([
-      { id: 'bad', kind: 'not-a-kind', collection: 'items', sentAt: null, createdAt: 1 },
+      { id: 'bad', kind: 'not-a-kind', collection: 'items', docId: 'x', sentAt: null, createdAt: 1 },
       pendingAlert('a2'),
     ]);
-    expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({ sent: 1, retired: 1 });
+    spy.mockRestore();
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
   });
 
-  it('bounds the drain query rather than materialising a runaway queue', async () => {
+  it('clears a page that is ENTIRELY malformed, so valid alerts behind it are reachable', async () => {
+    const send = vi.fn(async () => true);
+    const db = seeded([
+      { id: 'bad1', kind: 'nope', collection: 'items', docId: 'x', sentAt: null, createdAt: 1 },
+      { id: 'bad2', kind: 'nope', collection: 'items', docId: 'y', sentAt: null, createdAt: 2 },
+    ]);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 2,
+      reason: 'nothing-current',
+    });
+    spy.mockRestore();
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('bounds the drain query, and clamps it to what one atomic batch can clear', async () => {
     const send = vi.fn(async () => true);
     const db = seeded(Array.from({ length: 12 }, (_, i) => pendingAlert(`a${i + 1}`)));
     await sendAdminDigestForEvent(db, 'med-2026', { ...deps(send), maxAlerts: 5 });
     expect((send.mock.calls[0][0] as { subject: string }).subject).toContain('5 to approve');
     // The rest are untouched and drain on the next sweep.
-    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(7);
-    expect(MAX_ALERTS_PER_DIGEST).toBeGreaterThan(5);
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(7);
+    // A config bump past the batch limit degrades to "drains less", never to a
+    // non-atomic multi-commit clean-up.
+    expect(MAX_ALERTS_PER_DIGEST).toBeLessThanOrEqual(MAX_ATOMIC_DELETES);
+    const big = seeded(Array.from({ length: 3 }, (_, i) => pendingAlert(`b${i + 1}`)));
+    await sendAdminDigestForEvent(big, 'med-2026', { ...deps(send), maxAlerts: 10_000 });
+    expect(big.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('keeps a row on a FAILED content re-read rather than losing a moderation alert', async () => {
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1')], [], {}, { throwOn: ['events/med-2026/items/i-a1'] });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
+    spy.mockRestore();
   });
 });
 
 describe('runAdminAlertSweep', () => {
   it('one Event’s failure never sinks the sweep', async () => {
     const send = vi.fn(async () => true);
+    const alert = {
+      id: 'a1',
+      kind: 'item-created',
+      collection: 'items',
+      docId: 'i1',
+      label: 'Prompt',
+      status: 'pending',
+      visionFlag: null,
+      reportCount: 0,
+      createdAt: 1,
+      sentAt: null,
+    };
     const db = fakeDb(
       {
         events: [{ id: 'broken', status: 'active' }, { id: 'med-2026', status: 'active' }],
-        'events/med-2026/adminAlerts': [
-          {
-            id: 'a1',
-            kind: 'item-created',
-            collection: 'items',
-            docId: 'i1',
-            label: 'Prompt',
-            status: 'pending',
-            visionFlag: null,
-            reportCount: 0,
-            createdAt: 1,
-            sentAt: null,
-          },
-        ],
+        'events/med-2026/adminAlerts': [alert],
+        'events/broken/adminAlerts': [{ ...alert, id: 'b1' }],
       },
-      { 'events/med-2026': EVENT, 'events/broken': EVENT },
+      {
+        'events/med-2026': EVENT,
+        'events/broken': EVENT,
+        'events/med-2026/items/i1': { status: 'pending', reportCount: 0 },
+      },
       // The first Event's drain throws outright; the second must still send.
       ['events/broken/adminAlerts'],
     );
@@ -647,6 +876,8 @@ describe('runAdminAlertSweep', () => {
     });
     spy.mockRestore();
     expect(send).toHaveBeenCalledTimes(1);
-    expect(db.rows('events/med-2026/adminAlerts')[0].sentAt).toBe(NOW);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    // The broken Event keeps its work for the next sweep.
+    expect(db.rows('events/broken/adminAlerts')).toHaveLength(1);
   });
 });
