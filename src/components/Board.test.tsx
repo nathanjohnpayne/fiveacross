@@ -1309,6 +1309,63 @@ describe('Locked-Day preview', () => {
     fireEvent.click(lockedCells[12]);
     expect(H.setMark).not.toHaveBeenCalled();
   });
+
+  // The caption's hour is DERIVED from the viewed Day's `unlockAt`, not the
+  // fixed "8" the copy shipped with — an Edition or a Day that opens at any
+  // other hour used to contradict the badge sitting directly above it.
+  describe('caption hour tracks unlockAt', () => {
+    // Only `Date` is faked (never the timer queue, which Board's deal effects
+    // and the auto-fit guard run on): the assertions below name absolute
+    // clock times, so "now" has to sit at a fixed instant BEFORE them or the
+    // Days would classify as unlocked rather than locked.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.parse('2026-07-01T12:00:00Z'));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it.each([
+      { label: 'a 6:00 a.m. unlock', at: '2026-07-18T06:00:00Z', badge: '6:00 a.m.', tail: 'land at 6. Come back after coffee.' },
+      { label: 'an 8:00 a.m. unlock', at: '2026-07-18T08:00:00Z', badge: '8:00 a.m.', tail: 'land at 8. Come back after coffee.' },
+      { label: 'an off-the-hour unlock', at: '2026-07-18T09:30:00Z', badge: '9:30 a.m.', tail: 'land at 9:30. Come back after coffee.' },
+      // A non-morning unlock keeps the meridiem and drops the coffee tail —
+      // the sentence would otherwise assert a morning the schedule lacks.
+      { label: 'an evening unlock', at: '2026-07-18T20:00:00Z', badge: '8:00 p.m.', tail: 'land at 8 p.m. Come back then.' },
+    ])('captions $label to match the badge', ({ at, badge, tail }) => {
+      H.event = {
+        claimMode: 'honor',
+        timezone: 'UTC',
+        days: [day({ index: 0, theme: 'get-sporty', unlockAt: Date.parse(at) })],
+      } as unknown as EventDoc;
+      H.board = null;
+
+      render(<Board />);
+
+      expect(document.querySelector('.day-lock-text')?.textContent).toContain(badge);
+      expect(document.querySelector('.day-lock-caption')?.textContent).toBe(`24 fresh squares ${tail}`);
+    });
+
+    // The hour is read in the EVENT's timezone — the same zone the badge
+    // formats in — never the viewer's local one.
+    it('reads the caption hour in the Event timezone, not the browser’s', () => {
+      H.event = {
+        claimMode: 'honor',
+        timezone: 'Europe/Rome',
+        // 04:00Z on 2026-07-18 is 06:00 in Rome (CEST, UTC+2).
+        days: [day({ index: 0, theme: 'get-sporty', unlockAt: Date.parse('2026-07-18T04:00:00Z') })],
+      } as unknown as EventDoc;
+      H.board = null;
+
+      render(<Board />);
+
+      expect(document.querySelector('.day-lock-text')?.textContent).toContain('6:00 a.m.');
+      expect(document.querySelector('.day-lock-caption')?.textContent).toBe(
+        '24 fresh squares land at 6. Come back after coffee.',
+      );
+    });
+  });
 });
 
 // specs/d15-tutorial-banners.md + #260: Board mounts the tutorial banner

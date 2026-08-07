@@ -465,6 +465,32 @@ function formatUnlockAt(unlockAt: number, timezone: string | undefined): string 
 }
 
 /**
+ * The locked-preview caption — "24 fresh squares land at 6. Come back after
+ * coffee." The hour is the SAME instant the badge above spells out in full,
+ * trimmed to bare copy ("8", "6", "8:30") so the sentence reads like a sentence
+ * rather than a second timestamp; minutes appear only when the Day doesn't
+ * unlock on the hour. DERIVED, never hardcoded: `unlockAt` is per-Day and
+ * per-Edition, so the fixed "land at 8" this copy shipped with contradicted the
+ * badge on every schedule that doesn't open at 08:00. A non-morning unlock
+ * keeps the meridiem (the bare number would read as a.m.) and drops the coffee
+ * tail, which would otherwise assert a morning the schedule doesn't have.
+ */
+function unlockCaption(unlockAt: number, timezone: string | undefined): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: timezone || 'UTC',
+  }).formatToParts(new Date(unlockAt));
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const minute = part('minute');
+  const hour = `${part('hour')}${minute === '00' ? '' : `:${minute}`}`;
+  return part('dayPeriod').toUpperCase().startsWith('P')
+    ? `24 fresh squares land at ${hour} p.m. Come back then.`
+    : `24 fresh squares land at ${hour}. Come back after coffee.`;
+}
+
+/**
  * The viewed Day's board header (#260 — the wireframes' daybar, rendered on
  * BOTH the dealt Board and the locked preview so the two can't drift):
  * "Day N · Theme label" plus the tutorial tag on the left, the port on the
@@ -638,7 +664,7 @@ function LockedDayPreview({
       <p className="day-lock-caption muted">
         {waking
           ? 'Today’s card is being dealt. Give it a moment, then come back.'
-          : '24 fresh squares land at 8. Come back after coffee.'}
+          : unlockCaption(day.unlockAt, timezone)}
       </p>
     </div>
   );
