@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
-import type { DayDef } from '../types';
-import TutorialBanner, { TutorialTag } from './TutorialBanner';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import type { DayDef, EventDoc } from '../types';
+import TutorialBanner, { TutorialTag, WalkthroughContent } from './TutorialBanner';
 
 // Covers specs/d15-tutorial-banners.md: the embark "How this works" banner,
 // the farewell goodbye banner, and the "Warm-up" tag (daily-cards-spec §§
@@ -30,6 +30,22 @@ const FAREWELL_DAY = day({
 });
 const MAIN_DAY = day({ index: 2, pool: 'main', tutorial: false, theme: 'get-sporty', place: 'Split' });
 
+// A schedule whose first MAIN Day opens at 06:00 event time — the shape that
+// caught the hardcoded "tomorrow at 8" (#670).
+const SIX_AM_SCHEDULE = {
+  timezone: 'America/Los_Angeles',
+  days: [
+    EMBARK_DAY,
+    day({
+      index: 1,
+      pool: 'main',
+      tutorial: false,
+      theme: 'get-sporty',
+      unlockAt: Date.parse('2026-08-08T06:00:00-07:00'),
+    }),
+  ],
+} as unknown as Pick<EventDoc, 'days' | 'timezone'>;
+
 describe('TutorialBanner — embark banner', () => {
   it('renders all three beats + the warm-up caption on the Welcome Aboard Day', () => {
     render(<TutorialBanner day={EMBARK_DAY} />);
@@ -44,10 +60,10 @@ describe('TutorialBanner — embark banner', () => {
     expect(
       screen.getByText('The feed is the proof. Attach a pic, doubt a friend, watch the Moments roll in.'),
     ).toBeInTheDocument();
+    // The Edition owns the flavor clause; the schedule sentence is derived and
+    // absent here because this render was given no schedule (#670).
     expect(
-      screen.getByText(
-        "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.",
-      ),
+      screen.getByText("This one's a warm-up—easy squares, all on the ship."),
     ).toBeInTheDocument();
   });
 
@@ -86,6 +102,119 @@ describe('TutorialBanner — embark banner', () => {
     render(<TutorialBanner day={MAIN_DAY} />);
     expect(screen.queryByText(/mark what happens/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /how this works/i })).not.toBeInTheDocument();
+  });
+});
+
+// #670: the warm-up caption's second sentence names the first MAIN Day's own
+// unlock — both the day and the hour — instead of the "tomorrow at 8" the copy
+// hardcoded, which contradicted every schedule that doesn't open at 08:00.
+describe('TutorialBanner — the derived warm-up schedule sentence', () => {
+  beforeEach(() => {
+    // Only `Date` is faked, never the timer queue: the schedule below names
+    // absolute stamps, so "now" has to sit at a fixed instant relative to them.
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('names the real unlock day and hour on the warm-up Day', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T20:00:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
+      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 6.",
+    );
+  });
+
+  it('drops the sentence once the first main Day has unlocked', () => {
+    vi.setSystemTime(Date.parse('2026-08-08T09:00:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    const caption = document.querySelector('.tutorial-banner-caption')?.textContent;
+    expect(caption).toBe("This one's a warm-up—easy squares, all on the ship.");
+    expect(caption).not.toMatch(/real chaos/);
+  });
+
+  it('renders the flavor line alone when no schedule has loaded yet', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T20:00:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} />);
+    expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
+      "This one's a warm-up—easy squares, all on the ship.",
+    );
+  });
+
+  // More → How to play replays this same caption (#270), so it takes the
+  // schedule too — otherwise the replay is the one surface left quoting a
+  // hardcoded hour.
+  it('carries the same derived sentence into the walkthrough replay', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T20:00:00-07:00'));
+    render(<WalkthroughContent event={SIX_AM_SCHEDULE} />);
+    expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
+      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 6.",
+    );
+  });
+
+  it('drops it from a mid-event walkthrough replay, where chaos already started', () => {
+    vi.setSystemTime(Date.parse('2026-08-09T12:00:00-07:00'));
+    render(<WalkthroughContent event={SIX_AM_SCHEDULE} />);
+    expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
+      "This one's a warm-up—easy squares, all on the ship.",
+    );
+  });
+});
+
+// Codex P2 on #670: both mount points get LEFT OPEN — a card sitting on the
+// warm-up Day overnight, a How-to-play panel open across the unlock — so the
+// sentence has to move on its own rather than wait for an unrelated render.
+describe('TutorialBanner — the schedule sentence stays live while mounted', () => {
+  const caption = () => document.querySelector('.tutorial-banner-caption')?.textContent;
+
+  beforeEach(() => {
+    // Timers AND Date here: these advance the clock deliberately.
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('turns "tomorrow" into "later today" when Event-zone midnight passes', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T23:59:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(caption()).toContain('The real chaos starts tomorrow at 6.');
+
+    act(() => {
+      vi.advanceTimersByTime(2 * 60 * 1000); // past midnight + the arm slack
+    });
+    expect(caption()).toContain('The real chaos starts later today at 6.');
+  });
+
+  it('retires the sentence when the unlock passes under an open panel', () => {
+    vi.setSystemTime(Date.parse('2026-08-08T05:59:00-07:00'));
+    render(<WalkthroughContent event={SIX_AM_SCHEDULE} />);
+    expect(caption()).toContain('The real chaos starts later today at 6.');
+
+    act(() => {
+      vi.advanceTimersByTime(2 * 60 * 1000);
+    });
+    expect(caption()).toBe("This one's a warm-up—easy squares, all on the ship.");
+  });
+
+  it('catches up on tab resume, where a backgrounded timer may never have fired', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T23:59:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(caption()).toContain('tomorrow at 6');
+
+    // The clock moves while the tab is asleep; no timer runs.
+    vi.setSystemTime(Date.parse('2026-08-08T05:00:00-07:00'));
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(caption()).toContain('The real chaos starts later today at 6.');
+  });
+
+  it('arms no timer once there is nothing left to refresh', () => {
+    vi.setSystemTime(Date.parse('2026-08-09T12:00:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

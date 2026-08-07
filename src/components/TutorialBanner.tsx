@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import type { DayDef } from '../types';
+import { useEffect, useReducer, useState } from 'react';
+import type { DayDef, EventDoc } from '../types';
 import { editionBrand } from '../editions';
+import { chaosLine, nextChaosBoundary } from '../unlockCopy';
 
 /**
  * The embark/farewell tutorial banners (daily-cards-spec §§ "Embark
@@ -25,9 +26,61 @@ const EMBARK_BEATS: readonly string[] = [
   'The feed is the proof. Attach a pic, doubt a friend, watch the Moments roll in.',
 ];
 
+/**
+ * The Event fields the warm-up line needs. Passed DOWN from whichever surface
+ * already holds the Event doc (Board, More) rather than re-subscribed here —
+ * the same props-not-listeners rule FarewellPodium documents (Codex P2 on PR
+ * #450): a second `useEventDoc()` listener starts at `data: null` and would
+ * pop the schedule sentence in a frame late.
+ */
+export type WarmupSchedule = Pick<EventDoc, 'days' | 'timezone'>;
+
 // Whole-string per Edition (#608), not a token: "all on the ship" has no
-// occasion-neutral skeleton — "all on the event" is not English.
+// occasion-neutral skeleton — "all on the event" is not English. Its schedule
+// sentence, though, was identical across all three Editions AND hardcoded an
+// 08:00 unlock ("the real chaos starts tomorrow at 8") that contradicted any
+// other schedule — the vacaybingo Edition opens at 06:00 — so it moved out of
+// the Edition string and into `chaosLine`, derived from the first main Day's
+// own `unlockAt` (#670, the warm-up half of #669's locked-card fix).
 const embarkCaption = (): string => editionBrand().tutorialWarmupNote;
+
+function EmbarkCaption({ event }: { event?: WarmupSchedule | null }) {
+  // The sentence has to survive the surface being LEFT OPEN (Codex P2 on
+  // #670), which is the ordinary state of both mount points: a card sitting on
+  // the warm-up Day overnight, or a How-to-play panel open across the unlock.
+  // Two boundaries move it — Event-zone midnight turns "tomorrow" into "later
+  // today", and the unlock itself retires it — so re-render at whichever comes
+  // first and re-arm from there. `visibilitychange` covers the case a timer
+  // cannot: a backgrounded tab whose timeout fires late or not at all.
+  const [tick, boundaryTick] = useReducer((n: number) => n + 1, 0);
+  const days = event?.days;
+  const timezone = event?.timezone;
+  useEffect(() => {
+    const boundary = nextChaosBoundary(days, timezone, Date.now());
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') boundaryTick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    // No boundary left (no schedule, or chaos already started) — nothing to
+    // keep fresh, so no timer at all.
+    if (boundary == null) return () => document.removeEventListener('visibilitychange', onVisible);
+    // +250ms lands the tick safely PAST the boundary rather than on it, where
+    // rounding could still read the old side.
+    const timer = setTimeout(boundaryTick, Math.max(boundary - Date.now(), 0) + 250);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+    // `tick` re-arms the effect for the NEXT boundary after each one passes.
+  }, [tick, days, timezone]);
+  const chaos = chaosLine(days, timezone, Date.now());
+  return (
+    <p className="tutorial-banner-caption">
+      {embarkCaption()}
+      {chaos ? ` ${chaos}` : ''}
+    </p>
+  );
+}
 
 const FAREWELL_COPY = 'Last one. Mark your goodbyes—then go book next year.';
 
@@ -47,7 +100,7 @@ const FAREWELL_COPY = 'Last one. Mark your goodbyes—then go book next year.';
  * would replace them with just the button's `aria-label` for assistive
  * tech, hiding the very copy the banner exists to convey.
  */
-function EmbarkBanner({ onDismiss }: { onDismiss: () => void }) {
+function EmbarkBanner({ onDismiss, event }: { onDismiss: () => void; event?: WarmupSchedule | null }) {
   return (
     <div className="tutorial-banner tutorial-banner-embark">
       <button
@@ -64,7 +117,7 @@ function EmbarkBanner({ onDismiss }: { onDismiss: () => void }) {
           <li key={beat}>{beat}</li>
         ))}
       </ol>
-      <p className="tutorial-banner-caption">{embarkCaption()}</p>
+      <EmbarkCaption event={event} />
     </div>
   );
 }
@@ -90,7 +143,7 @@ function FarewellBanner() {
  * coach overlay only decodes the notation. Same beats/caption constants as
  * the embark banner, no dismiss chrome.
  */
-export function WalkthroughContent() {
+export function WalkthroughContent({ event }: { event?: WarmupSchedule | null }) {
   return (
     <div className="walkthrough-content">
       <p className="tutorial-banner-title">How this works</p>
@@ -99,12 +152,12 @@ export function WalkthroughContent() {
           <li key={beat}>{beat}</li>
         ))}
       </ol>
-      <p className="tutorial-banner-caption">{embarkCaption()}</p>
+      <EmbarkCaption event={event} />
     </div>
   );
 }
 
-export default function TutorialBanner({ day }: { day: DayDef }) {
+export default function TutorialBanner({ day, event }: { day: DayDef; event?: WarmupSchedule | null }) {
   // Owned here (not in EmbarkBanner) so the dismissal survives the Day
   // switcher moving away from and back to the Welcome Aboard Day within
   // the same session — Board mounts this component at a stable JSX
@@ -114,7 +167,7 @@ export default function TutorialBanner({ day }: { day: DayDef }) {
   if (!day.tutorial) return null;
   if (day.pool === 'easy') {
     if (embarkDismissed) return null;
-    return <EmbarkBanner onDismiss={() => setEmbarkDismissed(true)} />;
+    return <EmbarkBanner onDismiss={() => setEmbarkDismissed(true)} event={event} />;
   }
   if (day.pool === 'closing') return <FarewellBanner />;
   return null;
