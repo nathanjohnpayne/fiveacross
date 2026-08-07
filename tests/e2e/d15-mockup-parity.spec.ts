@@ -154,7 +154,13 @@ test('structural parity — every screen against the wireframes', async ({ page 
     await expect(embark.locator('.tutorial-banner-embark')).toContainText('Mark what happens. Tap a square when you see it, do it, or survive it.');
     await expect(embark.locator('.tutorial-banner-embark')).toContainText("Five in a row is BINGO. The center is free. Blackout the card if you're ambitious.");
     await expect(embark.locator('.tutorial-banner-embark')).toContainText('The feed is the proof. Attach a pic, doubt a friend, watch the Moments roll in.');
-    await expect(embark.locator('.tutorial-banner-embark')).toContainText("This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.");
+    // The Edition's flavor clause. Its schedule sentence ("The real chaos
+    // starts <day> at <hour>") is derived from the first MAIN Day's own
+    // `unlockAt` now (#670) and is deliberately ABSENT here: this fixture is a
+    // mid-cruise frame whose Days 1–3 have already unlocked, so there is no
+    // chaos left to promise.
+    await expect(embark.locator('.tutorial-banner-embark')).toContainText("This one's a warm-up—easy squares, all on the ship.");
+    await expect(embark.locator('.tutorial-banner-embark')).not.toContainText('The real chaos starts');
     await expect(embark.locator('.grid .cell').nth(12)).toContainText('You made it aboard');
 
     await page.getByRole('tab').nth(PARITY_FAREWELL_INDEX).click();

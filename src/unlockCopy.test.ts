@@ -1,0 +1,126 @@
+import { describe, it, expect } from 'vitest';
+import type { DayDef } from './types';
+import { chaosLine, formatUnlockAt, unlockCaption } from './unlockCopy';
+
+// src/unlockCopy.ts — the one module that renders a Day's `unlockAt` as player-
+// facing copy. #669 (the locked-Day caption) and #670 (the warm-up banner) were
+// the same bug twice: a hardcoded 8 quoting a schedule that opens at another
+// hour. These cover every branch that decides how an hour is spoken.
+
+function day(overrides: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'tutorial'>): DayDef {
+  return {
+    date: '2026-08-08',
+    place: 'Bodega Bay',
+    placeEmoji: '🇺🇸',
+    theme: 'get-sporty',
+    tonight: [],
+    pool: overrides.tutorial ? 'easy' : 'main',
+    ...overrides,
+  };
+}
+
+const at = (iso: string) => Date.parse(iso);
+
+describe('formatUnlockAt (the locked-Day badge)', () => {
+  it('spells the instant out in the Event timezone with a lowercased meridiem', () => {
+    expect(formatUnlockAt(at('2026-08-09T13:00:00Z'), 'America/Los_Angeles')).toBe('6:00 a.m. · Sun, Aug 9');
+  });
+
+  it('falls back to UTC before the Event doc resolves', () => {
+    expect(formatUnlockAt(at('2026-08-09T13:00:00Z'), undefined)).toBe('1:00 p.m. · Sun, Aug 9');
+  });
+});
+
+describe('unlockCaption (the locked-Day caption under that badge)', () => {
+  it.each([
+    ['a morning unlock goes bare and keeps the coffee tail', '2026-08-09T06:00:00Z', '24 fresh squares land at 6. Come back after coffee.'],
+    ['an off-the-hour unlock carries its minutes', '2026-08-09T09:30:00Z', '24 fresh squares land at 9:30. Come back after coffee.'],
+    ['an evening unlock spells the meridiem and drops the coffee', '2026-08-09T20:00:00Z', '24 fresh squares land at 8 p.m. Come back then.'],
+    ['noon is not a morning', '2026-08-09T12:00:00Z', '24 fresh squares land at 12 p.m. Come back then.'],
+    // 12:xx a.m. is an `AM` day period to `Intl` but nobody's morning.
+    ['midnight is not a morning either', '2026-08-09T00:00:00Z', '24 fresh squares land at 12 a.m. Come back then.'],
+    ['the small hours keep their minutes and meridiem', '2026-08-09T00:30:00Z', '24 fresh squares land at 12:30 a.m. Come back then.'],
+  ])('%s', (_label, iso, expected) => {
+    expect(unlockCaption(at(iso), 'UTC')).toBe(expected);
+  });
+
+  it('reads the hour in the Event timezone, never the viewer’s', () => {
+    // 13:00Z is 6 a.m. in Bodega Bay and 3 p.m. in Rome — same instant, two
+    // different sentences, and each Event gets its own.
+    expect(unlockCaption(at('2026-08-09T13:00:00Z'), 'America/Los_Angeles')).toBe(
+      '24 fresh squares land at 6. Come back after coffee.',
+    );
+    expect(unlockCaption(at('2026-08-09T13:00:00Z'), 'Europe/Rome')).toBe(
+      '24 fresh squares land at 3 p.m. Come back then.',
+    );
+  });
+});
+
+describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
+  const TZ = 'America/Los_Angeles';
+  // The Bodega Bay schedule as seeded: an open-sentinel tutorial Day, then two
+  // main Days at 06:00 PDT (scripts/seed-data/bodega-bay-2026.mjs).
+  const DAYS: DayDef[] = [
+    day({ index: 0, tutorial: true, unlockAt: 0, date: '2026-08-07' }),
+    day({ index: 1, tutorial: false, unlockAt: at('2026-08-08T06:00:00-07:00'), date: '2026-08-08' }),
+    day({ index: 2, tutorial: false, unlockAt: at('2026-08-09T06:00:00-07:00'), date: '2026-08-09' }),
+  ];
+
+  it('names the first MAIN Day’s own unlock hour, not a hardcoded 8', () => {
+    // Reading it on the warm-up Day, the evening before.
+    expect(chaosLine(DAYS, TZ, at('2026-08-07T20:00:00-07:00'))).toBe(
+      'The real chaos starts tomorrow at 6.',
+    );
+  });
+
+  it('says "later today" for an unlock still ahead on the same calendar date', () => {
+    expect(chaosLine(DAYS, TZ, at('2026-08-08T05:00:00-07:00'))).toBe(
+      'The real chaos starts later today at 6.',
+    );
+  });
+
+  it('names the weekday when the unlock is further out than tomorrow', () => {
+    // Two days ahead — "tomorrow" would be a lie and a bare date is colder.
+    expect(chaosLine(DAYS, TZ, at('2026-08-06T09:00:00-07:00'))).toBe(
+      'The real chaos starts Saturday at 6.',
+    );
+  });
+
+  it('falls back to a dated weekday once the weekday alone is ambiguous', () => {
+    const far = [DAYS[0], day({ index: 1, tutorial: false, unlockAt: at('2026-08-15T06:00:00-07:00') })];
+    expect(chaosLine(far, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
+      'The real chaos starts Sat, Aug 15 at 6.',
+    );
+  });
+
+  it('keeps the meridiem for a non-morning unlock without doubling the period', () => {
+    const evening = [DAYS[0], day({ index: 1, tutorial: false, unlockAt: at('2026-08-08T20:00:00-07:00') })];
+    expect(chaosLine(evening, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
+      'The real chaos starts tomorrow at 8 p.m.',
+    );
+  });
+
+  it('measures "tomorrow" by CALENDAR date in the Event zone, not by elapsed hours', () => {
+    // 14 hours out, but the next calendar day in Bodega Bay — "tomorrow", not
+    // "later today". The viewer's own clock never enters into it.
+    expect(chaosLine(DAYS, TZ, at('2026-08-07T16:00:00-07:00'))).toBe(
+      'The real chaos starts tomorrow at 6.',
+    );
+  });
+
+  it('drops the sentence once the first main Day has unlocked (the mid-event walkthrough replay)', () => {
+    expect(chaosLine(DAYS, TZ, at('2026-08-08T06:00:01-07:00'))).toBeNull();
+    expect(chaosLine(DAYS, TZ, at('2026-08-09T12:00:00-07:00'))).toBeNull();
+  });
+
+  it('drops the sentence when there is no schedule or no main Day to promise', () => {
+    expect(chaosLine(undefined, TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+    expect(chaosLine([], TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+    expect(chaosLine([DAYS[0]], TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+  });
+
+  it('drops the sentence rather than rendering a malformed unlockAt', () => {
+    const broken = [DAYS[0], day({ index: 1, tutorial: false, unlockAt: Number.NaN })];
+    expect(chaosLine(broken, TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+  });
+});

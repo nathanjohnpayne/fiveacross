@@ -54,6 +54,7 @@ import type { Cell, ClaimMode, DayDef, PlayerDoc, ProofDoc, TallyEntry } from '.
 import LoadingState from './LoadingState';
 import DaySwitcher, { defaultViewedIndex } from './DaySwitcher';
 import TutorialBanner, { TutorialTag } from './TutorialBanner';
+import { formatUnlockAt, unlockCaption } from '../unlockCopy';
 import FarewellPodium from './FarewellPodium';
 import { farewellPinIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
@@ -439,60 +440,6 @@ function themeLabel(themeId: string): string {
 
 function themeDescription(themeId: string): string {
   return THEMES.find((t) => t.id === themeId)?.description ?? '';
-}
-
-/** "Unlocks 8:00 a.m. · Wed Jul 22" — event-timezone formatted, falling back
- * to UTC if the Event doc hasn't resolved yet. The meridiem is lowercased
- * with periods ("a.m."), matching the spec's locked-preview copy (#260)
- * rather than Intl's "AM". */
-function formatUnlockAt(unlockAt: number, timezone: string | undefined): string {
-  const tz = timezone || 'UTC';
-  const when = new Date(unlockAt);
-  const time = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZone: tz,
-  })
-    .format(when)
-    .replace(/\s?([AP])M\b/, (_m, p: string) => ` ${p.toLowerCase()}.m.`);
-  const date = new Intl.DateTimeFormat('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    timeZone: tz,
-  }).format(when);
-  return `${time} · ${date}`;
-}
-
-/**
- * The locked-preview caption — "24 fresh squares land at 6. Come back after
- * coffee." The hour is the SAME instant the badge above spells out in full,
- * trimmed to bare copy ("8", "6", "8:30") so the sentence reads like a sentence
- * rather than a second timestamp; minutes appear only when the Day doesn't
- * unlock on the hour. DERIVED, never hardcoded: `unlockAt` is per-Day and
- * per-Edition, so the fixed "land at 8" this copy shipped with contradicted the
- * badge on every schedule that doesn't open at 08:00. Only a genuine morning
- * hour goes bare and keeps the coffee tail; anything else spells the meridiem
- * out (the bare number would read as a.m.) and takes a neutral tail, which is
- * the midnight hour's case too — 12:xx a.m. is an `AM` day period to `Intl` but
- * not a morning anyone drinks coffee in (Codex P2 on #669).
- */
-function unlockCaption(unlockAt: number, timezone: string | undefined): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-    timeZone: timezone || 'UTC',
-  }).formatToParts(new Date(unlockAt));
-  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
-  const minute = part('minute');
-  const clockHour = part('hour');
-  const hour = `${clockHour}${minute === '00' ? '' : `:${minute}`}`;
-  // "a.m."/"p.m." already carry their own terminal period — never append one.
-  const meridiem = part('dayPeriod').toUpperCase().startsWith('P') ? 'p.m.' : 'a.m.';
-  return meridiem === 'a.m.' && clockHour !== '12'
-    ? `24 fresh squares land at ${hour}. Come back after coffee.`
-    : `24 fresh squares land at ${hour} ${meridiem} Come back then.`;
 }
 
 /**
@@ -2340,7 +2287,7 @@ export default function Board() {
             event={event}
           />
         )}
-        {viewedDay && <TutorialBanner day={viewedDay} />}
+        {viewedDay && <TutorialBanner day={viewedDay} event={event} />}
         {/* Keyed + gated like the grid below (Codex P3 on #421 round 3): the
             header letters cascade once per board identity — replaying for a
             genuinely new card (Day switch, reshuffle) and mounting landed on

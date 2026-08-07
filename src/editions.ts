@@ -68,7 +68,7 @@ const BRANDS: Record<string, EditionBrand> = {
     walkthroughReplaySub: 'Replay the Welcome Aboard walkthrough',
     promptDeadlineNote:
       "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
-    tutorialWarmupNote: "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares, all on the ship.",
     championRole: 'Cruise champion',
     podiumLabel: 'Cruise podium',
     reviewQueueAllClear: 'All clear. Go enjoy the boat.',
@@ -129,7 +129,7 @@ const BRANDS: Record<string, EditionBrand> = {
     walkthroughReplaySub: 'Replay the welcome walkthrough',
     promptDeadlineNote:
       "Get your prompts in before we set off—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
-    tutorialWarmupNote: "This one's a warm-up—easy squares, close to home. The real chaos starts tomorrow at 8.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares, close to home.",
     championRole: 'Trip champion',
     podiumLabel: 'Trip podium',
     reviewQueueAllClear: 'All clear. Go enjoy the trip.',
@@ -185,7 +185,7 @@ const BRANDS: Record<string, EditionBrand> = {
     walkthroughReplaySub: 'Replay the welcome walkthrough',
     promptDeadlineNote:
       "Get your prompts in before the first card is dealt—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
-    tutorialWarmupNote: "This one's a warm-up—easy squares to warm up. The real chaos starts tomorrow at 8.",
+    tutorialWarmupNote: "This one's a warm-up—easy squares to warm up.",
     championRole: 'Champion',
     podiumLabel: 'Final podium',
     reviewQueueAllClear: 'All clear. Go enjoy yourself.',

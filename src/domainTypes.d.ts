@@ -87,6 +87,14 @@ export interface EditionBrand {
   scheduleSub: string;
   walkthroughReplaySub: string;
   promptDeadlineNote: string;
+  /**
+   * The warm-up Day's flavor line ONLY — "This one's a warm-up—easy squares,
+   * close to home." The schedule sentence that used to close it ("The real
+   * chaos starts tomorrow at 8") moved to `chaosLine` in `src/unlockCopy.ts`
+   * (#670): it was identical across every Edition and hardcoded an 08:00
+   * unlock, so it contradicted any schedule opening at another hour. Editions
+   * own the flavor; the app owns the clock.
+   */
   tutorialWarmupNote: string;
   championRole: string;
   podiumLabel: string;

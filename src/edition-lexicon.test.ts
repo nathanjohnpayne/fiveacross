@@ -158,10 +158,9 @@ describe('Gay Cruise Bingo is byte-identical to what shipped', () => {
       'promptDeadlineNote',
       "Get your prompts in before we sail—once your card is dealt it's frozen, so a prompt added after that joins the pool for a future card, not yours.",
     ],
-    [
-      'tutorialWarmupNote',
-      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8.",
-    ],
+    // The flavor clause ONLY — the schedule sentence that used to close this
+    // line is derived from the first main Day's `unlockAt` now (#670).
+    ['tutorialWarmupNote', "This one's a warm-up—easy squares, all on the ship."],
     ['championRole', 'Cruise champion'],
     ['podiumLabel', 'Cruise podium'],
     ['reviewQueueAllClear', 'All clear. Go enjoy the boat.'],

@@ -208,7 +208,11 @@ export default function More() {
         // coach overlay one tap further — the two complement rather than
         // repeat (spec § "First-open coach overlay").
         <MorePanel title="How to play" onClose={closePanel}>
-          <WalkthroughContent />
+          {/* The already-loaded Event, passed down so the walkthrough's
+              warm-up line can name the first main Day's real unlock (#670)
+              instead of a hardcoded hour — and drop that sentence entirely
+              once chaos has started, which is the usual case for a replay. */}
+          <WalkthroughContent event={event} />
           <button type="button" className="btn" onClick={() => setPanel('coach')}>
             Show the badge legend
           </button>
