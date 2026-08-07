@@ -17,8 +17,8 @@
  *
  *   The CONSUMER is `sendAdminDigestForEvent`, driven by a scheduled sweep. It
  *   reads the Event once, resolves the admin roster once, renders ONE email
- *   covering everything queued since the last drain, and stamps each alert
- *   `sentAt`.
+ *   covering everything queued since the last drain, and replaces each drained
+ *   row with a payload-free tombstone.
  *
  * So eighty seeded Prompts produce one email listing eighty, and the acceptance
  * criterion "seeding/imports produce at most one digest" holds structurally
@@ -338,8 +338,14 @@ export const MAX_ATOMIC_WRITES = 450;
  * The document carries `expiresAt` so a Firestore TTL policy on that field
  * reaps it (a one-time per-project setup — see docs/app/phase-1-deploy.md).
  * Without the policy the tombstones simply accumulate, which is tolerable in a
- * way the un-reaped ALERTS were not: a tombstone is two numbers and holds no
- * copy of user content.
+ * way the un-reaped ALERTS were not: a tombstone holds no copy of user content.
+ *
+ * `expiresAt` MUST be written as a `Date`, never as epoch milliseconds.
+ * Firestore's TTL service only considers a field whose value is a timestamp; a
+ * number is silently ineligible, so a numeric deadline would leave the operator
+ * with a configured policy that reaps nothing and a spec that says otherwise.
+ * The admin SDK converts a JS `Date` to a `Timestamp` on write, which is how
+ * this module states a timestamp without importing `firebase-admin`.
  */
 export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -603,7 +609,8 @@ export function drainKey(ids: readonly string[]): string {
  * them. What survives is the document ID, which is the point: it is derived
  * from the triggering CloudEvent id, so a delayed redelivery of an
  * already-mailed transition still fails its `create` instead of queueing the
- * same alert a second time.
+ * same alert a second time. `expiresAt` is a `Date` so the documented TTL
+ * policy can actually reap it (see `TOMBSTONE_TTL_MS`).
  *
  * All-or-nothing is the other half (see `sendAdminDigestForEvent`), so a commit
  * failure is logged and swallowed rather than retried per-document: leaving
@@ -622,7 +629,9 @@ async function tombstoneAlerts(
     for (const id of ids) {
       batch.set(db.doc(`events/${eventId}/adminAlerts/${id}`), {
         sentAt: now,
-        expiresAt: now + TOMBSTONE_TTL_MS,
+        // A Date, NOT epoch millis: Firestore's TTL service only considers a
+        // timestamp-typed field, and the admin SDK converts a Date on write.
+        expiresAt: new Date(now + TOMBSTONE_TTL_MS),
       });
     }
     await batch.commit();

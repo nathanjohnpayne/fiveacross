@@ -695,7 +695,11 @@ describe('sendAdminDigestForEvent', () => {
       ['expiresAt', 'id', 'sentAt'],
       ['expiresAt', 'id', 'sentAt'],
     ]);
-    expect(rows[0].expiresAt).toBe(NOW + TOMBSTONE_TTL_MS);
+    // A Date, NOT epoch millis: Firestore's TTL service only considers a
+    // timestamp-typed field, so a number would leave the documented policy
+    // configured and reaping nothing.
+    expect(rows[0].expiresAt).toBeInstanceOf(Date);
+    expect((rows[0].expiresAt as Date).getTime()).toBe(NOW + TOMBSTONE_TTL_MS);
     // ...but the ID survives, which is what keeps the redelivery dedup honest.
     expect(rows.map((r) => r.id)).toEqual(['a1', 'a2']);
     expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
