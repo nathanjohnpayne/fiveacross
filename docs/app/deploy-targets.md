@@ -14,7 +14,19 @@ This repo ships to **two** Firebase projects from one codebase, but its deploy c
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the `bodega-deploy` worktree |
 
-Both are **single-Event builds**: a non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup, so the Event and the Edition are frozen at build time. See `README.md` § Event id.
+### Which host to verify against, and why it is not the canonical one
+
+`bodega-bay.fiveacross.app` is the canonical host per [#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599) as amended, and `docs/agents/repository-overview.md` records it that way. Every verification command on this page nonetheless targets `bodega-bay.vacaybingo.com`, which looks inconsistent and is deliberate: the Event was launched on that host, and the shipped bundle bakes it as `VITE_FIREBASE_AUTH_DOMAIN`, so it is the origin whose configuration a deploy can actually break. Both hosts serve the same release from the same Firebase project.
+
+Making `bodega-bay.fiveacross.app` first-class is [#600](https://github.com/nathanjohnpayne/gaycruisebingo/issues/600), still open. **When it lands, move the verification targets on this page with it** — otherwise this runbook will keep proving the health of an alternate while the canonical entry point goes unchecked.
+
+### Both targets are single-Event builds
+
+A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup, so the Event and the Edition are frozen at build time. The live Five Across `.env.local` sets `VITE_EVENT_ID=bodega-bay-2026`.
+
+This **contradicts `README.md` § Event id**, which says a Five Across build "MUST leave it empty". That instruction is scoped to the wildcard-router design — the multi-Event build every `*.fiveacross.app` host would share once the Worker router ([#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545)) exists. Today's hosts are exact Firebase Hosting custom domains, one Event each, and the single-Event build is the deliberate choice: `preview-deploys.md` records the reasoning, which is that a hostname-resolved build must complete a Firestore `getDocFromServer` before first paint and `shouldMountOnBootstrapFailure` fails **closed** to the `unreachable` screen if that read fails.
+
+Reconstructing `.env.local` from the README alone would therefore produce a build that behaves differently from what is deployed. Copy the deployed values; do not infer them.
 
 ## Why Five Across needs its own worktree
 
@@ -71,15 +83,30 @@ The mechanism is worth understanding, because nothing about the build would look
 
 `bodega-bay.vacaybingo.com` is **not** in `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts`) — it appears in that file only in a comment. So `resolveAuthDomain` returns the *configured* `authDomain` verbatim on that host. Today that value is the host itself, which is what makes sign-in same-origin. Ship `fiveacross.firebaseapp.com` instead and the auth helper becomes cross-origin, which is exactly the arrangement Safari's storage partitioning breaks — the failure the exact-host pinning was built to prevent.
 
-Verify what actually shipped by grepping the served bundle — as a **negative** check:
+Verify what actually shipped by reading the app's own inlined Firebase config out of the served bundle. This **prints the deployed values** rather than asserting a count, so it cannot pass by accident:
 
 ```bash
-curl -sS https://bodega-bay.vacaybingo.com/ | grep -oE '/assets/index-[^"]*\.js'
-curl -sS "https://bodega-bay.vacaybingo.com/assets/index-<hash>.js" \
-  | grep -c 'fiveacross\.firebaseapp\.com'   # must be 0
+HOST=https://bodega-bay.vacaybingo.com
+ASSET=$(curl -sS "$HOST/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
+curl -sS "$HOST$ASSET" \
+  | grep -oE 'authDomain:[A-Za-z0-9_$]+\("[^"]+"|projectId:"[^"]+"' | sort -u
 ```
 
-The obvious positive check — grepping for `bodega-bay.vacaybingo.com` — **does not work**, and it is worth knowing why before trusting one. The Vacay Edition's `ogUrl` in `src/editions.ts` is that same hostname, so every Vacay build contains the string regardless of which `authDomain` was baked in. A bundle built from the broken worktree still matches, and the check reports safe while sign-in is broken. The absence of `fiveacross.firebaseapp.com` is the signal that actually discriminates, because that string only reaches the bundle as the wrong `authDomain`.
+Expected for a correct Five Across deploy — compare both lines, not just one:
+
+```
+authDomain:MH("bodega-bay.vacaybingo.com"
+projectId:"fiveacross"
+```
+
+`VITE_FIREBASE_AUTH_DOMAIN` is inlined by Vite as the first argument to `resolveAuthDomain(...)` (`src/firebase.ts:18`), so that match is the configured auth domain itself. The minified function name (`MH` above) changes every build — do not pin it.
+
+Two weaker checks to avoid, both of which pass on bundles that are wrong:
+
+- **Grepping for `bodega-bay.vacaybingo.com`.** The Vacay Edition's `ogUrl` in `src/editions.ts` is that same hostname, so every Vacay build matches regardless of which `authDomain` was baked in — including one built from the broken worktree.
+- **Asserting `fiveacross.firebaseapp.com` is absent.** A Gay Cruise Bingo bundle, or a build with a missing or differently-wrong auth domain, also produces zero. Absence of one wrong value is not presence of the right one.
+
+The `projectId` line is what makes this a real Edition check too: a Gay Cruise Bingo build reports `projectId:"gaycruisebingo"` and fails the comparison immediately.
 
 Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands, treat `fiveacross-deploy` as reference material for the mirror hosts, not a deploy source.
 
