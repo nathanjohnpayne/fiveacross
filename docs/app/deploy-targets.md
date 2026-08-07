@@ -8,8 +8,8 @@ This repo ships to **two** Firebase projects from one codebase, but its deploy c
 |---|---|---|
 | Firebase project | `gaycruisebingo` | `fiveacross` |
 | Event | `med-2026` | `bodega-bay-2026` |
-| Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.vacaybingo.com`, `fiveacross.app` |
-| Backup mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` |
+| Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.fiveacross.app` (canonical), `bodega-bay.vacaybingo.com`, `fiveacross.app` |
+| Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
 | Baked `VITE_EDITION` | `gcb` (default) | `vacay` |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the `bodega-deploy` worktree |
@@ -40,13 +40,14 @@ npm run deploy:hosting
 cd ~/GitHub/.gaycruisebingo-worktrees/bodega-deploy
 git fetch origin main && git checkout --detach origin/main
 SYNTHETIC_URL=https://bodega-bay.vacaybingo.com/ \
-  scripts/deploy.sh --force -- fiveacross --only hosting
+  scripts/deploy.sh --force --skip-cf-purge -- fiveacross --only hosting
 ```
 
-Four things in that command are load-bearing:
+Five things in that command are load-bearing:
 
 - **`fiveacross` after the `--`** — `op-firebase-deploy` takes the project as a positional argument and otherwise falls back to `.firebaserc`'s default, which would deploy this build to the *Gay Cruise Bingo* project.
 - **`--force`** — clears the not-on-`main` guard for the detached HEAD. See the checklist below before using it.
+- **`--skip-cf-purge`** — `CF_ZONE_ID` defaults to a hard-coded Gay Cruise Bingo zone (`scripts/deploy.sh:225`). If a preflight has loaded `CF_API_TOKEN`, an unguarded Five Across deploy purges *that* zone: the wrong site's cache is cleared, Bodega's is not, and the mount-only synthetic still passes. Skipping is correct today because the Bodega host is DNS-only — responses carry no `cf-ray`, so there is no Cloudflare cache in front of it to purge. If a Five Across host is ever put behind the orange cloud, pass `CF_ZONE_ID=<five-across-zone>` instead of skipping.
 - **`SYNTHETIC_URL`** — the post-deploy synthetic defaults to `https://gaycruisebingo.com/`, which would assert the wrong site mounted and tell you nothing about the deploy you just made.
 - **the worktree** — it holds the only correct Five Across `.env.local` on this machine.
 
@@ -70,13 +71,15 @@ The mechanism is worth understanding, because nothing about the build would look
 
 `bodega-bay.vacaybingo.com` is **not** in `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts`) — it appears in that file only in a comment. So `resolveAuthDomain` returns the *configured* `authDomain` verbatim on that host. Today that value is the host itself, which is what makes sign-in same-origin. Ship `fiveacross.firebaseapp.com` instead and the auth helper becomes cross-origin, which is exactly the arrangement Safari's storage partitioning breaks — the failure the exact-host pinning was built to prevent.
 
-Verify what actually shipped by grepping the served bundle:
+Verify what actually shipped by grepping the served bundle — as a **negative** check:
 
 ```bash
 curl -sS https://bodega-bay.vacaybingo.com/ | grep -oE '/assets/index-[^"]*\.js'
 curl -sS "https://bodega-bay.vacaybingo.com/assets/index-<hash>.js" \
-  | grep -c 'bodega-bay\.vacaybingo\.com'   # must be ≥ 1
+  | grep -c 'fiveacross\.firebaseapp\.com'   # must be 0
 ```
+
+The obvious positive check — grepping for `bodega-bay.vacaybingo.com` — **does not work**, and it is worth knowing why before trusting one. The Vacay Edition's `ogUrl` in `src/editions.ts` is that same hostname, so every Vacay build contains the string regardless of which `authDomain` was baked in. A bundle built from the broken worktree still matches, and the check reports safe while sign-in is broken. The absence of `fiveacross.firebaseapp.com` is the signal that actually discriminates, because that string only reaches the bundle as the wrong `authDomain`.
 
 Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands, treat `fiveacross-deploy` as reference material for the mirror hosts, not a deploy source.
 
@@ -86,7 +89,16 @@ Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands
 
 The synthetic proves the app mounts; it does not prove *which* build shipped. For that, diff the asset hash before and after, and grep the new bundle for a marker unique to the change.
 
-The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. After any deploy touching `src/**`, redeploy them too (`npx vercel deploy --prod --yes --project vacaybingo`, likewise `fiveacross`) and confirm they carry the same markers — see `preview-deploys.md`.
+The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. After a deploy touching `src/**`, **inspect them before rebuilding** — the Vercel account's build capacity is shared and finite, and exhausting it has previously blocked every deployment for 24 hours:
+
+```bash
+npx vercel inspect vacaybingo.vercel.app    # target: production, and how old?
+curl -sS https://vacaybingo.vercel.app/ | grep -oE '/assets/index-[^"]*\.js'
+```
+
+Redeploy only a project whose production alias is stale (`npx vercel deploy --prod --yes --project vacaybingo`, likewise `fiveacross`). In principle the Git integration rebuilds them on a push to `main`; do not assume it did. On 2026-08-06 both production aliases were 22h and 7h stale while the newest builds were *canceled* branch previews, and both mirrors were serving a pre-#587 bundle with Gay Cruise Bingo share metadata.
+
+> **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 
 ## Unwinding this
 
