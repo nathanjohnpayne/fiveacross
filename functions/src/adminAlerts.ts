@@ -84,6 +84,7 @@ interface AlertWriteBatch {
 interface AlertTransaction {
   get(ref: AlertDocRef): Promise<{ data(): Record<string, unknown> | undefined }>;
   set(ref: AlertDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+  delete(ref: AlertDocRef): void;
 }
 /** The minimal surface the queue and its sweep use. */
 export interface AdminAlertFirestore {
@@ -681,8 +682,12 @@ export async function sendAdminDigestForEvent(
     const authorized = await resolveAdminEmails(eventId, deps);
     if (!sameRecipients(authorized, frozen.to)) {
       console.log(`sendAdminDigestForEvent: recipients changed under batch ${batchId}; re-batching`);
-      await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
-      return { sent: 0, retired: 0, reason: 'rebatched' };
+      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
+      if (release === 'released') return { sent: 0, retired: 0, reason: 'rebatched' };
+      // Another invocation settled or re-batched this work first; do not let a
+      // stale replay overwrite its newer claim. A failed transaction likewise
+      // leaves the original frozen batch intact for a later safe retry.
+      return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
     }
     const replayed = await (deps.send ?? (await import('./email')).sendEmail)({
       to: frozen.to,
@@ -832,11 +837,17 @@ export async function sendAdminDigestForEvent(
  * so a position-sensitive reduction could shuffle between two sweeps over an
  * identical page and mint a different key for the same email.
  */
-export function drainKey(ids: readonly string[]): string {
+export function drainKey(ids: readonly string[], requeueGeneration = 0): string {
   const max = [...ids].sort().pop() ?? 'empty';
   // `__` rather than `/`: the batch id is also a DOCUMENT ID (the frozen
   // outbound request is stored under it), and a slash would reparent it.
-  return `${max}__${ids.length}`;
+  // A cohort released after recipient revalidation has to mint a NEW delivery
+  // identity even when its rows have not changed. Reusing the old key with a
+  // new recipient set would make Resend reject the different request as
+  // `invalid_idempotent_request` (or suppress a genuinely fresh delivery).
+  // Initial cohorts retain their compact historical form; only a released one
+  // carries its persisted generation suffix.
+  return `${max}__${ids.length}${requeueGeneration > 0 ? `__${requeueGeneration}` : ''}`;
 }
 
 /**
@@ -863,7 +874,7 @@ export function drainKey(ids: readonly string[]): string {
  * choice is deterministic across sweeps rather than order-dependent.
  */
 export function planDrain(
-  rows: ReadonlyArray<{ id: string; batchId?: unknown; createdAt?: unknown }>,
+  rows: ReadonlyArray<{ id: string; batchId?: unknown; createdAt?: unknown; requeueGeneration?: unknown }>,
   now: number,
   quietMs: number,
   maxHoldMs: number = MAX_HOLD_MS,
@@ -899,7 +910,15 @@ export function planDrain(
     console.log(`planDrain: max-hold reached with ${rows.length - ripe.length} row(s) still settling`);
   }
   const ids = ripe.map((r) => r.id);
-  return { batchId: drainKey(ids), ids, claimNeeded: true };
+  const generation = Math.max(
+    0,
+    ...ripe.map((r) =>
+      typeof r.requeueGeneration === 'number' && Number.isInteger(r.requeueGeneration) && r.requeueGeneration > 0
+        ? r.requeueGeneration
+        : 0,
+    ),
+  );
+  return { batchId: drainKey(ids, generation), ids, claimNeeded: true };
 }
 
 /**
@@ -928,7 +947,12 @@ async function claimDrain(
 > {
   const rows = docs.map((d) => {
     const data = d.data() ?? {};
-    return { id: d.id, batchId: data.batchId, createdAt: data.createdAt };
+    return {
+      id: d.id,
+      batchId: data.batchId,
+      createdAt: data.createdAt,
+      requeueGeneration: data.requeueGeneration,
+    };
   });
   const plan = planDrain(rows, now, quietMs);
   if ('reason' in plan) return { reason: plan.reason };
@@ -1038,16 +1062,40 @@ async function releaseBatch(
   eventId: string,
   batchId: string,
   ids: readonly string[],
-): Promise<void> {
+): Promise<'released' | 'stale' | 'failed'> {
   try {
-    const batch = db.batch();
-    for (const id of ids) {
-      batch.set(db.doc(`events/${eventId}/adminAlerts/${id}`), { batchId: null }, { merge: true });
+    const released = await db.runTransaction(async (tx) => {
+      const refs = ids.map((id) => db.doc(`events/${eventId}/adminAlerts/${id}`));
+      const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
+      const generations: number[] = [];
+      for (const snap of snaps) {
+        const data = snap.data();
+        // A second retry can be running beside this one. Never erase a newer
+        // claim (or a tombstone) after the first retry has settled or re-batched
+        // these rows; ownership is the exact batch id, while `sentAt === null`
+        // prevents a stale abandon from resurrecting delivered work.
+        if (!data || data.batchId !== batchId || data.sentAt !== null) return false;
+        generations.push(
+          typeof data.requeueGeneration === 'number' && Number.isInteger(data.requeueGeneration)
+            ? data.requeueGeneration
+            : 0,
+        );
+      }
+      const nextGeneration = Math.max(0, ...generations) + 1;
+      for (const ref of refs) {
+        tx.set(ref, { batchId: null, requeueGeneration: nextGeneration }, { merge: true });
+      }
+      tx.delete(db.doc(batchPath(eventId, batchId)));
+      return true;
+    });
+    if (!released) {
+      console.log(`sendAdminDigestForEvent: batch ${batchId} changed before it could be released`, eventId);
+      return 'stale';
     }
-    batch.delete(db.doc(batchPath(eventId, batchId)));
-    await batch.commit();
+    return 'released';
   } catch (err) {
     console.error('sendAdminDigestForEvent: releasing the batch failed (it stays claimed)', eventId, err);
+    return 'failed';
   }
 }
 

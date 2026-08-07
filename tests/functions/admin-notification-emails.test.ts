@@ -189,6 +189,7 @@ function fakeDb(
     runTransaction: async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
       if (failClaim) throw new Error('transaction failed');
       const writes: Array<[string, Record<string, unknown>, boolean]> = [];
+      const deletes: string[] = [];
       const result = await fn({
         get: async (ref: { path: string }) => {
           const found = findRow(ref.path);
@@ -196,6 +197,9 @@ function fakeDb(
         },
         set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
           writes.push([ref.path, data, options?.merge === true]);
+        },
+        delete: (ref: { path: string }) => {
+          deletes.push(ref.path);
         },
       });
       for (const [path, data, merge] of writes) {
@@ -205,6 +209,15 @@ function fakeDb(
         if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
         else rows.push({ id, data: { ...data } });
         collections.set(collectionPath, rows);
+      }
+      for (const path of deletes) {
+        singles.delete(path);
+        const { collectionPath, id } = split(path);
+        const rows = collections.get(collectionPath) ?? [];
+        collections.set(
+          collectionPath,
+          rows.filter((r) => r.id !== id),
+        );
       }
       return result;
     },
@@ -691,6 +704,15 @@ describe('planDrain', () => {
   it('claims the settled rows as a new batch when nothing is claimed yet', () => {
     const plan = planDrain([row('a1'), row('a2')], 10_000, 1_000);
     expect(plan).toEqual({ batchId: 'a2__2', ids: ['a1', 'a2'], claimNeeded: true });
+  });
+
+  it('gives a released cohort a fresh delivery identity, even when its rows are unchanged', () => {
+    const plan = planDrain(
+      [row('a1', { requeueGeneration: 1 }), row('a2', { requeueGeneration: 1 })],
+      10_000,
+      1_000,
+    );
+    expect(plan).toEqual({ batchId: 'a2__2__1', ids: ['a1', 'a2'], claimNeeded: true });
   });
 
   it('leaves rows still inside the settling period for the next sweep', () => {
@@ -1312,6 +1334,11 @@ describe('the frozen outbound request', () => {
     // And the very next sweep delivers it to the current roster.
     expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
     expect((send.mock.calls[0][0] as { to: string[] }).to).toEqual(['u1@example.com']);
+    // The live roster makes this a NEW request, so it cannot reuse the frozen
+    // batch's Resend key and 409 against its different recipient set.
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe(
+      'admin-digest/med-2026/a1__1__1',
+    );
   });
 
   it('REPLAYS the winner when it loses the freeze race, discarding its own render', async () => {
