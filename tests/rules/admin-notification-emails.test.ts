@@ -117,6 +117,19 @@ describe('events/{eventId}/adminAlerts/{alertId} is server-owned', () => {
     );
   });
 
+  it('denies the frozen outbound request too — it is the whole queue, fully rendered', async () => {
+    // `adminAlertBatches/{batchId}` holds the rendered email for one claimed
+    // batch, so a readable copy would disclose the words of every pending and
+    // hidden item in it at once, and a writable one would let a client dictate
+    // the bytes a later retry sends to the admins.
+    const batch = `events/${EVENT}/adminAlertBatches/a2__2`;
+    await assertFails(getDoc(doc(db(ALICE), batch)));
+    await assertFails(getDoc(doc(db(ADMIN), batch)));
+    await assertFails(getDocs(collection(db(ADMIN), `events/${EVENT}/adminAlertBatches`)));
+    await assertFails(setDoc(doc(db(ALICE), batch), { subject: 'forged', html: '<b>x</b>' }));
+    await assertFails(deleteDoc(doc(db(ADMIN), batch)));
+  });
+
   it('leaves the rest of the Event schema reachable — the deny is scoped to this collection', async () => {
     // A guard against a future edit that denies more than it means to: the
     // sibling reads a signed-in Player depends on still work.

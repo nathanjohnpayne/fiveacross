@@ -570,6 +570,24 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // The frozen outbound request for one admin digest (#638).
+    //
+    // `events/{eventId}/adminAlertBatches/{batchId}` — the exact email a
+    // claimed batch was sent as, kept only until that delivery is cleaned up,
+    // so a retry replays identical bytes rather than a fresh render (which
+    // would 409 against the idempotency key it already used).
+    //
+    // DENIED IN BOTH DIRECTIONS for the same reasons as `adminAlerts`, and one
+    // sharper: the document holds the FULLY RENDERED email, so a readable copy
+    // would disclose the words of every `pending` and `hidden` item in the
+    // batch at once — the entire moderation queue in a single document — and a
+    // writable one would let a client dictate the bytes a later retry sends to
+    // the admins.
+    match /events/{eventId}/adminAlertBatches/{batchId} {
+      allow read: if false;
+      allow write: if false;
+    }
+
     match /events/{eventId} {
       allow read: if signedIn();
       // Only admins can change event config (theme default, claimMode, admins,

@@ -58,6 +58,8 @@ function fakeDb(
   failCommit = false,
   /** When true, the CLAIM batch rejects — the pre-send identity failure. */
   failClaim = false,
+  /** When true, freezing the outbound request rejects. */
+  failFreeze = false,
 ) {
   const collections = new Map<string, FakeDoc[]>();
   let autoId = 0;
@@ -112,6 +114,16 @@ function fakeDb(
       const found = findRow(path);
       return { data: () => (found ? { ...found.data } : undefined) };
     },
+    set: async (data: Record<string, unknown>) => {
+      if (failFreeze) throw new Error('freeze write failed');
+      const { collectionPath, id } = split(path);
+      const rows = collections.get(collectionPath) ?? [];
+      const found = rows.find((r) => r.id === id);
+      if (found) found.data = { ...data };
+      else rows.push({ id, data: { ...data } });
+      collections.set(collectionPath, rows);
+      return undefined;
+    },
     // Admin-SDK `create` semantics: reject if the document already exists.
     create: async (data: Record<string, unknown>) => {
       if (findRow(path)) {
@@ -135,9 +147,13 @@ function fakeDb(
     // which is what turns a drained row into a payload-free tombstone.
     batch: () => {
       const staged: Array<[string, Record<string, unknown>, boolean]> = [];
+      const deletes: string[] = [];
       return {
         set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
           staged.push([ref.path, data, options?.merge === true]);
+        },
+        delete: (ref: { path: string }) => {
+          deletes.push(ref.path);
         },
         commit: async () => {
           if (failCommit && !staged.every(([, , merge]) => merge)) throw new Error('batch commit failed');
@@ -149,6 +165,14 @@ function fakeDb(
             if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
             else rows.push({ id, data: { ...data } });
             collections.set(collectionPath, rows);
+          }
+          for (const path of deletes) {
+            const { collectionPath, id } = split(path);
+            const rows = collections.get(collectionPath) ?? [];
+            collections.set(
+              collectionPath,
+              rows.filter((r) => r.id !== id),
+            );
           }
           return undefined;
         },
@@ -358,7 +382,7 @@ describe('enqueueAdminAlerts', () => {
         get: async () => ({ data: () => undefined }),
         create: async () => Promise.reject(new Error('firestore down')),
       }),
-      batch: () => ({ set: () => undefined, commit: async () => undefined }),
+      batch: () => ({ set: () => undefined, delete: () => undefined, commit: async () => undefined }),
       runTransaction: async () => undefined,
     } as unknown as AdminAlertFirestore;
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -660,7 +684,7 @@ describe('planDrain', () => {
 
   it('claims the settled rows as a new batch when nothing is claimed yet', () => {
     const plan = planDrain([row('a1'), row('a2')], 10_000, 1_000);
-    expect(plan).toEqual({ batchId: 'a2/2', ids: ['a1', 'a2'], claimNeeded: true });
+    expect(plan).toEqual({ batchId: 'a2__2', ids: ['a1', 'a2'], claimNeeded: true });
   });
 
   it('leaves rows still inside the settling period for the next sweep', () => {
@@ -669,7 +693,7 @@ describe('planDrain', () => {
     expect(planDrain([row('a1', { createdAt: 9_500 })], 10_000, 1_000)).toEqual({ reason: 'settling' });
     // Mixed: only the settled prefix is taken.
     const plan = planDrain([row('a1', { createdAt: 0 }), row('a2', { createdAt: 9_900 })], 10_000, 1_000);
-    expect(plan).toEqual({ batchId: 'a1/1', ids: ['a1'], claimNeeded: true });
+    expect(plan).toEqual({ batchId: 'a1__1', ids: ['a1'], claimNeeded: true });
   });
 
   it('REUSES an existing claim and ignores everything queued since', () => {
@@ -729,7 +753,7 @@ describe('sendAdminDigestForEvent', () => {
     alerts: Record<string, unknown>[],
     hostnames: Record<string, unknown>[] = [],
     liveOver: Record<string, Record<string, unknown>> = {},
-    opts: { throwOn?: string[]; failCommit?: boolean; failClaim?: boolean } = {},
+    opts: { throwOn?: string[]; failCommit?: boolean; failClaim?: boolean; failFreeze?: boolean } = {},
   ) => {
     const live: Record<string, Record<string, unknown>> = { 'events/med-2026': EVENT };
     for (const a of alerts) {
@@ -742,6 +766,7 @@ describe('sendAdminDigestForEvent', () => {
       opts.throwOn ?? [],
       opts.failCommit ?? false,
       opts.failClaim ?? false,
+      opts.failFreeze ?? false,
     );
   };
 
@@ -807,7 +832,7 @@ describe('sendAdminDigestForEvent', () => {
     const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {}, { failCommit: true });
     await sendAdminDigestForEvent(db, 'med-2026', deps(send));
     const key = (send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey;
-    expect(key).toBe('admin-digest/med-2026/a2/2');
+    expect(key).toBe('admin-digest/med-2026/a2__2');
     // The clean-up failed, so EVERY alert is still pending — never a subset.
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(2);
     await sendAdminDigestForEvent(db, 'med-2026', deps(send));
@@ -819,12 +844,12 @@ describe('sendAdminDigestForEvent', () => {
     const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {}, { failCommit: true });
     await sendAdminDigestForEvent(db, 'med-2026', deps(send));
     const key = (send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey;
-    expect(key).toBe('admin-digest/med-2026/a2/2');
+    expect(key).toBe('admin-digest/med-2026/a2__2');
     // The clean-up failed, so every row is still pending — and every one of
     // them carries the batch id the email went out under.
     const pending = db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null);
     expect(pending).toHaveLength(2);
-    expect(pending.map((r) => r.batchId)).toEqual(['a2/2', 'a2/2']);
+    expect(pending.map((r) => r.batchId)).toEqual(['a2__2', 'a2__2']);
     // The claim MERGES: the payload the digest renders must survive it.
     expect(pending[0].label).toBe('Prompt a1');
   });
@@ -838,7 +863,7 @@ describe('sendAdminDigestForEvent', () => {
     // An admin approves one of the two Prompts before the retry. A key derived
     // from the RENDERED rows would move with it and Resend would accept a
     // second email repeating everything still unresolved.
-    const resolved = seeded([pendingAlert('a1', { batchId: 'a2/2' }), pendingAlert('a2', { batchId: 'a2/2' })], [], {
+    const resolved = seeded([pendingAlert('a1', { batchId: 'a2__2' }), pendingAlert('a2', { batchId: 'a2__2' })], [], {
       'events/med-2026/items/i-a1': { status: 'active', reportCount: 0 },
     });
     const result = await sendAdminDigestForEvent(resolved, 'med-2026', deps(send));
@@ -857,8 +882,8 @@ describe('sendAdminDigestForEvent', () => {
 
     const grown = seeded(
       [
-        pendingAlert('a1', { batchId: 'a2/2' }),
-        pendingAlert('a2', { batchId: 'a2/2' }),
+        pendingAlert('a1', { batchId: 'a2__2' }),
+        pendingAlert('a2', { batchId: 'a2__2' }),
         pendingAlert('a3'), // queued after the failed clean-up
       ],
       [],
@@ -900,9 +925,11 @@ describe('sendAdminDigestForEvent', () => {
   });
 
   it('reduces the drain key order-independently — the query carries no orderBy', () => {
-    expect(drainKey(['a1', 'a2', 'b0'])).toBe('b0/3');
-    expect(drainKey(['b0', 'a2', 'a1'])).toBe('b0/3');
-    expect(drainKey([])).toBe('empty/0');
+    expect(drainKey(['a1', 'a2', 'b0'])).toBe('b0__3');
+    expect(drainKey(['b0', 'a2', 'a1'])).toBe('b0__3');
+    expect(drainKey([])).toBe('empty__0');
+    // `__` rather than `/`, because the batch id is also a document id.
+    expect(drainKey(['a1'])).not.toContain('/');
   });
 
   it('leaves alerts queued when the send fails, so nothing is silently dropped', async () => {
@@ -1069,8 +1096,8 @@ describe('claimed-batch retries and exclusivity', () => {
     // email, so the displaced rows are suppressed later and never delivered.
     const send = vi.fn(async () => true);
     const rows = [
-      alert('a1', { batchId: 'a2/2' }),
-      alert('a2', { batchId: 'a2/2' }),
+      alert('a1', { batchId: 'a2__2' }),
+      alert('a2', { batchId: 'a2__2' }),
       alert('a0'), // sorts first, and with maxAlerts 2 it displaces a claimed row
     ];
     const db = fakeDb(
@@ -1080,7 +1107,7 @@ describe('claimed-batch retries and exclusivity', () => {
     const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(send), maxAlerts: 2 });
     // Both claimed rows go out together, under their own batch id.
     expect(result.sent).toBe(2);
-    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe('admin-digest/med-2026/a2/2');
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe('admin-digest/med-2026/a2__2');
     // The newcomer is untouched and becomes its own batch next sweep.
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null).map((r) => r.id)).toEqual(['a0']);
   });
@@ -1123,6 +1150,131 @@ describe('claimed-batch retries and exclusivity', () => {
     });
     spy.mockRestore();
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('the frozen outbound request', () => {
+  const deps = (send: ReturnType<typeof vi.fn>) => ({
+    send: send as never,
+    getAdminUids: async () => ['u1'],
+    getEmailForUid: async (uid: string) => `${uid}@example.com`,
+    adminNotifyEmail: '',
+    appBaseUrl: 'https://gaycruisebingo.com',
+    from: 'x <x@example.com>',
+    now: () => NOW,
+    quietMs: 0,
+  });
+
+  const alert = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    kind: 'item-created',
+    collection: 'items',
+    docId: `i-${id}`,
+    label: `Prompt ${id}`,
+    status: 'pending',
+    visionFlag: null,
+    reportCount: 0,
+    createdAt: 1,
+    sentAt: null,
+    ...over,
+  });
+
+  const build = (rows: Record<string, unknown>[], live: Record<string, Record<string, unknown>> = {}, opts: Parameters<typeof fakeDb>[3] extends never ? never : { failFreeze?: boolean } = {}) => {
+    const base: Record<string, Record<string, unknown>> = { 'events/med-2026': EVENT };
+    for (const r of rows) base[`events/med-2026/items/${r.docId}`] = { status: 'pending', reportCount: 0 };
+    return fakeDb(
+      { 'events/med-2026/adminAlerts': rows, events: [{ id: 'med-2026', status: 'active' }], hostnames: [] },
+      { ...base, ...live },
+      [],
+      false,
+      false,
+      opts.failFreeze ?? false,
+    );
+  };
+
+  it('freezes the request before sending, and drops it with the batch afterwards', async () => {
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1')]);
+    await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    // Delivered and cleaned up in one commit, so no rendered copy of
+    // unapproved content outlives the delivery it existed for.
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+  });
+
+  it('REPLAYS the frozen bytes on a retry, even when the live state has moved', async () => {
+    // Resend's idempotency is a promise about the REQUEST, not just the key:
+    // replaying a key with a different body is a 409, not a dedupe. A rebuilt
+    // retry differs by construction here — this digest renders from live state
+    // — so it would 409, `sendEmail` would report false, the claimed rows could
+    // never be cleaned up, and the batch would sit stuck until the key expired.
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1', { batchId: 'a1__1' })], {
+      // An approval landed between the two attempts: a rebuild would render a
+      // DIFFERENT email (in fact, no rows at all).
+      'events/med-2026/items/i-a1': { status: 'active', reportCount: 0 },
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['frozen@example.com'],
+        subject: 'Admin · frozen subject',
+        html: '<p>frozen</p>',
+        text: 'frozen',
+        from: 'frozen <f@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    expect(result).toEqual({ sent: 1, retired: 0 });
+    const arg = send.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg.subject).toBe('Admin · frozen subject');
+    expect(arg.html).toBe('<p>frozen</p>');
+    expect(arg.to).toEqual(['frozen@example.com']);
+    expect(arg.from).toBe('frozen <f@example.com>');
+    expect(arg.idempotencyKey).toBe('admin-digest/med-2026/a1__1');
+    // Cleaned up: rows tombstoned, frozen request gone.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+  });
+
+  it('rebuilds when the claim exists but nothing was frozen — nothing went out under that key', async () => {
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1', { batchId: 'a1__1' })]);
+    expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
+    expect((send.mock.calls[0][0] as { subject: string }).subject).toContain('1 to approve');
+  });
+
+  it('sends NOTHING when the freeze itself fails — unrecorded bytes cannot be retried', async () => {
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1')], {}, { failFreeze: true });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'freeze-failed',
+    });
+    spy.mockRestore();
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
+  });
+
+  it('refuses to claim a TOMBSTONE, which carries no batchId and would otherwise look free', async () => {
+    // The overlapping-drain race: the other invocation finished first and
+    // REPLACED the shared rows with tombstones. A claimed-only check reads a
+    // tombstone as unclaimed, merges a new batch id onto it, and mails the
+    // stale pre-tombstone snapshot a second time.
+    const send = vi.fn(async () => true);
+    const rows = [alert('a1', { sentAt: NOW - 1, expiresAt: new Date(NOW) }), alert('a2')];
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': rows, events: [{ id: 'med-2026', status: 'active' }], hostnames: [] },
+      { 'events/med-2026': EVENT, 'events/med-2026/items/i-a2': { status: 'pending', reportCount: 0 } },
+    );
+    // The pending query already excludes the tombstone, so the claim covers a2
+    // alone — and the transaction would refuse it even if it did not.
+    const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    expect(result.sent).toBe(1);
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe('admin-digest/med-2026/a2__1');
+    // The tombstone is untouched: not re-claimed, not re-sent.
+    const tomb = db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1');
+    expect(tomb?.batchId).toBeUndefined();
   });
 });
 

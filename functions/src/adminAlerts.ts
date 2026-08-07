@@ -56,6 +56,8 @@ interface AlertSnapshot {
 }
 interface AlertDocRef {
   get(): Promise<{ data(): Record<string, unknown> | undefined }>;
+  /** Unconditional write — used only to FREEZE a batch's outbound request. */
+  set(data: Record<string, unknown>): Promise<unknown>;
   /** Admin-SDK `DocumentReference.create` — writes ONLY if the document does
    *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing: it is
    *  what makes the enqueue idempotent under trigger redelivery (see
@@ -72,6 +74,7 @@ interface AlertQuery {
  *  WITHOUT merge, so the tombstone REPLACES the row rather than joining it. */
 interface AlertWriteBatch {
   set(ref: AlertDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
+  delete(ref: AlertDocRef): void;
   commit(): Promise<unknown>;
 }
 /** The minimal transaction surface the exclusive claim needs. Mirrors the
@@ -337,6 +340,52 @@ export async function recordAdminAlerts(
 // --- Consuming (the digest sweep) ------------------------------------------------
 
 /**
+ * The exact outbound request a claimed batch was FROZEN as.
+ *
+ * This exists because Resend's idempotency is a promise about the request, not
+ * just the key: replaying a key with a DIFFERENT body is rejected
+ * (`409 invalid_idempotent_request`), not deduplicated. And a re-rendered
+ * retry is different by construction — this digest deliberately renders from
+ * live state, so any approval, report, roster change or hostname change between
+ * the two attempts moves the bytes. Without freezing, the retry would 409,
+ * `sendEmail` would surface that as `false`, the claimed rows could never be
+ * cleaned up, and the batch would sit stuck until the key expired and then mail
+ * a duplicate. So a claim does not merely reserve an identity: it reserves an
+ * EMAIL. Live revalidation belongs to building a new batch; a retry re-sends
+ * bytes that were already decided.
+ */
+export interface FrozenDigest {
+  to: string[];
+  subject: string;
+  html: string;
+  text: string;
+  from: string;
+  /** How many alerts the frozen email covers — the `sent` count on a retry. */
+  alertCount: number;
+}
+
+const batchPath = (eventId: string, batchId: string) => `events/${eventId}/adminAlertBatches/${batchId}`;
+
+/** Read back a frozen request, or `null` when there is none / it is unusable.
+ *  A partial document is treated as absent: re-rendering is recoverable, while
+ *  sending half a payload is not. */
+function toFrozen(data: Record<string, unknown> | undefined): FrozenDigest | null {
+  if (!data) return null;
+  const { to, subject, html, text, from, alertCount } = data;
+  if (!Array.isArray(to) || to.length === 0) return null;
+  if (typeof subject !== 'string' || typeof html !== 'string' || typeof text !== 'string') return null;
+  if (typeof from !== 'string') return null;
+  return {
+    to: to.filter((v): v is string => typeof v === 'string'),
+    subject,
+    html,
+    text,
+    from,
+    alertCount: typeof alertCount === 'number' ? alertCount : to.length,
+  };
+}
+
+/**
  * Alerts drained per Event per sweep. A ceiling, not a batch size: a bigger
  * backlog simply spans consecutive sweeps, because everything drained is
  * removed from the queue and the next run picks up where this one stopped. It
@@ -446,7 +495,10 @@ export interface AdminDigestResult {
     | 'claim-failed'
     /** A concurrent drain claimed these rows first. This sweep steps aside and
      *  finds the winner's claim on the next one. */
-    | 'claim-lost';
+    | 'claim-lost'
+    /** The outbound request could not be recorded, so nothing was sent: a send
+     *  whose bytes were never frozen cannot be safely retried under its key. */
+    | 'freeze-failed';
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -583,7 +635,32 @@ export async function sendAdminDigestForEvent(
 
   const claim = await claimDrain(db, eventId, snap.docs, now, quietMs);
   if (claim.reason) return { sent: 0, retired: 0, reason: claim.reason };
-  const { batchId, page } = claim;
+  const { batchId, page, frozen } = claim;
+
+  // A RETRY of a batch that was already sent: replay the frozen bytes and clean
+  // up. NOTHING here is re-derived — not the recipients, not the origin, not the
+  // rows — because any difference at all would 409 against the key this batch
+  // has already used, and a 409 surfaces as a failed send that can never be
+  // cleaned up (see `FrozenDigest`).
+  if (frozen) {
+    const replayed = await (deps.send ?? (await import('./email')).sendEmail)({
+      to: frozen.to,
+      subject: frozen.subject,
+      html: frozen.html,
+      text: frozen.text,
+      from: frozen.from,
+      idempotencyKey: `admin-digest/${eventId}/${batchId}`,
+    });
+    if (!replayed) return { sent: 0, retired: 0, reason: 'send-failed' };
+    await finishBatch(
+      db,
+      eventId,
+      batchId,
+      page.map((d) => d.id),
+      now,
+    );
+    return { sent: frozen.alertCount, retired: 0 };
+  }
 
   // Unreadable rows are RETIRED, not merely skipped. Skipping them leaves them
   // pending forever, and a page of malformed documents would then occupy the
@@ -629,7 +706,7 @@ export async function sendAdminDigestForEvent(
   // than no email.
   const retireOnly = [...unreadable, ...resolved];
   if (current.length === 0) {
-    await tombstoneAlerts(db, eventId, retireOnly, now);
+    await finishBatch(db, eventId, batchId, retireOnly, now);
     return { sent: 0, retired: retireOnly.length, reason: 'nothing-current' };
   }
 
@@ -651,17 +728,36 @@ export async function sendAdminDigestForEvent(
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
 
   const model = buildAdminDigestModel({ event, eventId, alerts: current, edition, origin, now });
-  const ok = await send({
+  const payload: FrozenDigest = {
     to,
     subject: model.subject,
     html: renderAdminDigestHtml(model),
     text: renderAdminDigestText(model),
     from,
+    alertCount: current.length,
+  };
+  // FREEZE BEFORE SENDING. A send whose bytes were never recorded is one a
+  // retry can only reconstruct by guessing, and a wrong guess under the same
+  // key is the 409 that strands the batch — so if this write fails, nothing
+  // goes out.
+  try {
+    await db.doc(batchPath(eventId, batchId)).set({ ...payload, createdAt: now });
+  } catch (err) {
+    console.error('sendAdminDigestForEvent: freezing the outbound request failed (nothing sent)', eventId, err);
+    return { sent: 0, retired: 0, reason: 'freeze-failed' };
+  }
+
+  const ok = await send({
+    to: payload.to,
+    subject: payload.subject,
+    html: payload.html,
+    text: payload.text,
+    from: payload.from,
     idempotencyKey: `admin-digest/${eventId}/${batchId}`,
   });
   if (!ok) return { sent: 0, retired: 0, reason: 'send-failed' };
 
-  await tombstoneAlerts(db, eventId, [...retireOnly, ...current.map((a) => a.id)], now);
+  await finishBatch(db, eventId, batchId, [...retireOnly, ...current.map((a) => a.id)], now);
   console.log(
     `sendAdminDigestForEvent ${eventId}: sent=${current.length} retired=${retireOnly.length} to=${to.length}`,
   );
@@ -678,7 +774,9 @@ export async function sendAdminDigestForEvent(
  */
 export function drainKey(ids: readonly string[]): string {
   const max = [...ids].sort().pop() ?? 'empty';
-  return `${max}/${ids.length}`;
+  // `__` rather than `/`: the batch id is also a DOCUMENT ID (the frozen
+  // outbound request is stored under it), and a slash would reparent it.
+  return `${max}__${ids.length}`;
 }
 
 /**
@@ -748,8 +846,8 @@ async function claimDrain(
   now: number,
   quietMs: number,
 ): Promise<
-  | { batchId: string; page: AlertSnapshot[]; reason?: undefined }
-  | { reason: 'settling' | 'claim-failed' | 'claim-lost'; batchId?: undefined; page?: undefined }
+  | { batchId: string; page: AlertSnapshot[]; frozen: FrozenDigest | null; reason?: undefined }
+  | { reason: 'settling' | 'claim-failed' | 'claim-lost'; batchId?: undefined; page?: undefined; frozen?: undefined }
 > {
   const rows = docs.map((d) => {
     const data = d.data() ?? {};
@@ -775,7 +873,14 @@ async function claimDrain(
         .limit(MAX_ATOMIC_WRITES)
         .get();
       const pending = claimed.docs.filter((d) => (d.data() ?? {}).sentAt === null);
-      if (pending.length > 0) return { batchId: plan.batchId, page: pending };
+      if (pending.length > 0) {
+        // Re-send the bytes this batch was frozen as, never a fresh render —
+        // see `FrozenDigest`. A missing freeze (a crash between the claim and
+        // the persist) falls through to a rebuild, which is safe precisely
+        // because nothing was sent under that key yet.
+        const frozen = toFrozen((await db.doc(batchPath(eventId, plan.batchId)).get()).data());
+        return { batchId: plan.batchId, page: pending, frozen };
+      }
     } catch (err) {
       console.error('sendAdminDigestForEvent: claimed-batch reload failed (nothing sent)', eventId, err);
       return { reason: 'claim-failed' };
@@ -796,7 +901,12 @@ async function claimDrain(
       const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
       for (const snap of snaps) {
         const data = snap.data();
-        if (!data || data.batchId) return false; // another drain got here first
+        // Unclaimed AND still pending. `sentAt === null` is not redundant: an
+        // overlapping drain that finished first REPLACED its rows with
+        // tombstones, and a tombstone carries no `batchId` — so a
+        // claimed-only check would read it as free, merge a new batch id onto
+        // it, and mail the stale pre-tombstone snapshot a second time.
+        if (!data || data.batchId || data.sentAt !== null) return false;
       }
       // MERGE — the claim annotates the row, it must not replace the payload
       // the digest is about to render.
@@ -812,7 +922,7 @@ async function claimDrain(
     return { reason: 'claim-failed' };
   }
   const wanted = new Set(plan.ids);
-  return { batchId: plan.batchId, page: docs.filter((d) => wanted.has(d.id)) };
+  return { batchId: plan.batchId, page: docs.filter((d) => wanted.has(d.id)), frozen: null };
 }
 
 /**
@@ -831,13 +941,13 @@ async function claimDrain(
  * every row pending is the safe, self-healing outcome, and the next sweep
  * rebuilds the same key and dedupes at Resend.
  */
-async function tombstoneAlerts(
+async function finishBatch(
   db: AdminAlertFirestore,
   eventId: string,
+  batchId: string,
   ids: readonly string[],
   now: number,
 ): Promise<void> {
-  if (ids.length === 0) return;
   try {
     const batch = db.batch();
     for (const id of ids) {
@@ -848,6 +958,11 @@ async function tombstoneAlerts(
         expiresAt: new Date(now + TOMBSTONE_TTL_MS),
       });
     }
+    // The frozen request dies WITH the batch, in the same commit. It holds a
+    // rendered copy of unapproved content, so it must not outlive the delivery
+    // it existed for — and it must not be released BEFORE the rows, or a retry
+    // would find claimed rows with no frozen bytes and rebuild them.
+    batch.delete(db.doc(batchPath(eventId, batchId)));
     await batch.commit();
   } catch (err) {
     console.error('sendAdminDigestForEvent: queue clean-up failed (alerts stay pending)', eventId, err);
