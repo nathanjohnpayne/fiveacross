@@ -180,12 +180,12 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 4. **Connect Git, and leave auto-deploy off.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. The link is what gives the project a repo to build from; it is **not** what triggers builds. `vercel.json` on `main` carries
 
    ```json
-   "git": { "deploymentEnabled": false }
+   "git": { "deploymentEnabled": { "main": false } }
    ```
 
    so a push to `main` deploys none of the three projects (#676). Deploys are the explicit command in § Operating it.
 
-   **Scoped to `main` on purpose.** A blanket `"deploymentEnabled": false` would also kill Part 2's `git push --force origin HEAD:preview` flow — the stable alias is a *Git* deployment like any other. Every other branch keeps whatever the per-project Ignored Build Step already decides, unchanged.
+   **Branch-scoped on purpose — do not simplify it to a bare `false`.** A blanket `"deploymentEnabled": false` would also kill Part 2's `git push --force origin HEAD:preview` flow, because the stable alias is a *Git* deployment like any other. Every other branch is left exactly as it was.
 
    **Do not "fix" this by re-enabling automatic deployments.** Every escalation of Vercel build volume on this repo has ended the same way, and it has now happened twice at different scales:
 
@@ -194,20 +194,20 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    Those preview builds were pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so every one of them fails the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests. That is also why the three `Vercel – *` contexts on a PR read *"Canceled by Ignored Build Step"* rather than passing on merit.
 
-   The per-project Ignored Build Step is now redundant with `git.deploymentEnabled` and is left in place as belt-and-braces; if you ever re-enable Git deploys, it is the thing still standing between you and the first incident. **Do not reach for it as the manual-deploy switch**—Vercel does not document whether that step also runs for CLI deployments, so setting it to always-skip risks silently cancelling the deploy you just typed. `git.deploymentEnabled` is scoped to commits by definition and has no such ambiguity.
+   **The two controls are complementary, and both are load-bearing.** They cover different branches, and neither substitutes for the other:
 
-   **Never assume a merge reached the mirrors.** This is the real lesson, and it holds with the ignore step in place: Vercel cancels queued deployments under build pressure, which leaves no visible mark on the running site—the host keeps serving its previous build at `HTTP 200` with correct branding. After any merge that matters, check the latest **production** deployment's state *and its commit*:
+   | Control | Covers | Stops |
+   |---|---|---|
+   | `git.deploymentEnabled: { "main": false }` (`vercel.json`) | `main` only | three production builds per merge |
+   | Ignored Build Step `[ "$VERCEL_ENV" != "production" ]` (per project) | every other branch | the preview builds that caused the first incident |
 
-   ```bash
-   TOKEN=$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/Library/Application Support/com.vercel.cli/auth.json')))['token'])")
-   for p in fiveacross vacaybingo; do
-     curl -s -H "Authorization: Bearer $TOKEN" \
-       "https://api.vercel.com/v6/deployments?app=$p&target=production&limit=1&teamId=<teamId>" \
-     | python3 -c "import json,sys;d=json.loads(sys.stdin.read(),strict=False)['deployments'][0];print(p, d['state'], (d.get('meta') or {}).get('githubCommitSha','?')[:12])"
-   done
-   ```
+   Because the disable is scoped to `main`, every feature and PR branch is still Git-deploy-eligible, so the Ignored Build Step is the **only** thing skipping those Preview builds. Removing it recreates the rate-limit incident described immediately above. Do not treat it as redundant.
 
-   It has to be the API. Neither `vercel ls` nor `vercel inspect` reports the Git SHA—they show `Ready` / `Production` and nothing that distinguishes current from stale, which is precisely the confusion this check exists to resolve.
+   **And do not reach for the Ignored Build Step as the manual-deploy switch**—Vercel does not document whether that step also runs for CLI deployments, so setting it to always-skip risks silently cancelling the deploy you just typed. `git.deploymentEnabled` is scoped to commits by definition and has no such ambiguity.
+
+   **Never assume a mirror is current**—the reason has simply moved. It used to be that Vercel cancels queued deployments under build pressure, leaving no visible mark: the host keeps serving its previous build at `HTTP 200` with correct branding. Now it is more direct: nothing publishes a mirror but you.
+
+   **The Git-SHA check that used to answer this no longer works, and fails misleadingly.** It read `meta.githubCommitSha` off the latest production deployment, which only exists on *Git* deployments—a CLI deploy carries no Git metadata at all, so the moment a mirror is published the way this page now prescribes, that query prints `?` and cannot tell current from stale. Use the **content-marker** check in [`deploy-targets.md`](deploy-targets.md) § Post-deploy verification instead: it greps the served bundle for something unique to the commit you are verifying, which works regardless of how the deployment was created.
 
 5. **Firebase Auth authorized domains on `fiveacross`.** Console: **Firebase console (fiveacross project) → Authentication → Settings → Authorized domains → Add domain** → `fiveacross.vercel.app`. Scriptable, with a deploy credential for `fiveacross` active—read, append, write back:
 
