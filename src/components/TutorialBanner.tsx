@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useReducer, useState } from 'react';
 import type { DayDef, EventDoc } from '../types';
 import { editionBrand } from '../editions';
-import { chaosLine } from '../unlockCopy';
+import { chaosLine, nextChaosBoundary } from '../unlockCopy';
 
 /**
  * The embark/farewell tutorial banners (daily-cards-spec §§ "Embark
@@ -45,10 +45,35 @@ export type WarmupSchedule = Pick<EventDoc, 'days' | 'timezone'>;
 const embarkCaption = (): string => editionBrand().tutorialWarmupNote;
 
 function EmbarkCaption({ event }: { event?: WarmupSchedule | null }) {
-  // `Date.now()` at render, not state: the banner is a static read, and the
-  // only boundary that would change this sentence — the first main Day
-  // unlocking — retires it entirely rather than editing it in place.
-  const chaos = chaosLine(event?.days, event?.timezone, Date.now());
+  // The sentence has to survive the surface being LEFT OPEN (Codex P2 on
+  // #670), which is the ordinary state of both mount points: a card sitting on
+  // the warm-up Day overnight, or a How-to-play panel open across the unlock.
+  // Two boundaries move it — Event-zone midnight turns "tomorrow" into "later
+  // today", and the unlock itself retires it — so re-render at whichever comes
+  // first and re-arm from there. `visibilitychange` covers the case a timer
+  // cannot: a backgrounded tab whose timeout fires late or not at all.
+  const [tick, boundaryTick] = useReducer((n: number) => n + 1, 0);
+  const days = event?.days;
+  const timezone = event?.timezone;
+  useEffect(() => {
+    const boundary = nextChaosBoundary(days, timezone, Date.now());
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') boundaryTick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    // No boundary left (no schedule, or chaos already started) — nothing to
+    // keep fresh, so no timer at all.
+    if (boundary == null) return () => document.removeEventListener('visibilitychange', onVisible);
+    // +250ms lands the tick safely PAST the boundary rather than on it, where
+    // rounding could still read the old side.
+    const timer = setTimeout(boundaryTick, Math.max(boundary - Date.now(), 0) + 250);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+    // `tick` re-arms the effect for the NEXT boundary after each one passes.
+  }, [tick, days, timezone]);
+  const chaos = chaosLine(days, timezone, Date.now());
   return (
     <p className="tutorial-banner-caption">
       {embarkCaption()}

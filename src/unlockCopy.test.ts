@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { DayDef } from './types';
-import { chaosLine, formatUnlockAt, unlockCaption } from './unlockCopy';
+import { chaosLine, formatUnlockAt, nextChaosBoundary, unlockCaption } from './unlockCopy';
 
 // src/unlockCopy.ts — the one module that renders a Day's `unlockAt` as player-
 // facing copy. #669 (the locked-Day caption) and #670 (the warm-up banner) were
@@ -138,5 +138,47 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
   it('drops the sentence rather than rendering a malformed unlockAt', () => {
     const broken = [DAYS[0], day({ index: 1, pool: 'main', unlockAt: Number.NaN })];
     expect(chaosLine(broken, TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+  });
+
+  // Codex P2 on #670: a banner left open goes stale at two boundaries, so it
+  // needs to know when the next one is.
+  describe('nextChaosBoundary', () => {
+    it('lands on the Event zone’s next midnight while that comes first', () => {
+      // Friday morning: midnight tonight turns "tomorrow" into "later today",
+      // and it arrives before Saturday's 6 a.m. unlock.
+      expect(nextChaosBoundary(DAYS, TZ, at('2026-08-07T09:00:00-07:00'))).toBe(
+        at('2026-08-08T00:00:00-07:00'),
+      );
+    });
+
+    it('lands on the unlock itself once midnight is already behind it', () => {
+      // Saturday at 05:00 — the next midnight is a day away; the unlock is an
+      // hour off, and it is what retires the sentence.
+      expect(nextChaosBoundary(DAYS, TZ, at('2026-08-08T05:00:00-07:00'))).toBe(
+        at('2026-08-08T06:00:00-07:00'),
+      );
+    });
+
+    it('reads midnight in the EVENT zone, not the runner’s', () => {
+      // 23:00 in Bodega Bay is already 06:00 the next day in Rome — an
+      // Event-zone boundary an hour out, not 23 hours.
+      const now = at('2026-08-07T23:00:00-07:00');
+      expect(nextChaosBoundary(DAYS, TZ, now)).toBe(at('2026-08-08T00:00:00-07:00'));
+    });
+
+    it('is null once there is no sentence left to keep fresh', () => {
+      expect(nextChaosBoundary(DAYS, TZ, at('2026-08-08T07:00:00-07:00'))).toBeNull();
+      expect(nextChaosBoundary(undefined, TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+      expect(nextChaosBoundary([DAYS[0]], TZ, at('2026-08-07T09:00:00-07:00'))).toBeNull();
+    });
+
+    it('always returns an instant strictly ahead of now, so a re-arm cannot spin', () => {
+      for (const iso of ['2026-08-07T00:00:00-07:00', '2026-08-07T23:59:59-07:00', '2026-08-08T05:59:59-07:00']) {
+        const now = at(iso);
+        const boundary = nextChaosBoundary(DAYS, TZ, now);
+        expect(boundary).not.toBeNull();
+        expect(boundary as number).toBeGreaterThan(now);
+      }
+    });
   });
 });

@@ -157,10 +157,60 @@ export function chaosLine(
   timezone: string | undefined,
   now: number,
 ): string | null {
-  const first = days?.find((d) => d.pool === 'main');
-  if (!first || !Number.isFinite(first.unlockAt) || first.unlockAt <= now) return null;
+  const first = firstChaosDay(days);
+  if (!first || first.unlockAt <= now) return null;
   const clock = unlockClock(first.unlockAt, timezone);
   return endSentence(
     `The real chaos starts ${relativeDay(first.unlockAt, timezone, now)} at ${spokenHour(clock)}`,
   );
+}
+
+function firstChaosDay(days: readonly DayDef[] | undefined): DayDef | undefined {
+  const first = days?.find((d) => d.pool === 'main');
+  return first && Number.isFinite(first.unlockAt) ? first : undefined;
+}
+
+/** The Event zone's offset from UTC at a given instant, in ms. */
+function zoneOffsetMs(at: number, timezone: string | undefined): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone || 'UTC',
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(at));
+  const num = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
+  // `hour: '2-digit'` with hour12:false renders midnight as "24" in some ICU
+  // builds; Date.UTC absorbs the rollover either way.
+  const wallClock = Date.UTC(num('year'), num('month') - 1, num('day'), num('hour'), num('minute'), num('second'));
+  return wallClock - Math.floor(at / 1000) * 1000;
+}
+
+/**
+ * The next instant at which `chaosLine` could say something different, so a
+ * mounted banner can re-render exactly then instead of going stale (Codex P2 on
+ * #670): either the unlock itself — after which the sentence retires — or the
+ * Event zone's next midnight, which is what turns "tomorrow" into "later
+ * today". `null` once there is no sentence left to maintain.
+ *
+ * Across a DST transition the computed midnight can land an hour early or late,
+ * since the offset is sampled at `now` rather than at the boundary. The caller
+ * re-arms after every tick, so the worst case is one extra wake-up (early) or a
+ * caption an hour stale on one night a year (late) — not worth an exact-zone
+ * arithmetic library for a banner.
+ */
+export function nextChaosBoundary(
+  days: readonly DayDef[] | undefined,
+  timezone: string | undefined,
+  now: number,
+): number | null {
+  const first = firstChaosDay(days);
+  if (!first || first.unlockAt <= now) return null;
+  const offset = zoneOffsetMs(now, timezone);
+  const dayMs = 86_400_000;
+  const nextMidnight = (Math.floor((now + offset) / dayMs) + 1) * dayMs - offset;
+  return Math.min(first.unlockAt, nextMidnight);
 }

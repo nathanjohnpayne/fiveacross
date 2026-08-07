@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import type { DayDef, EventDoc } from '../types';
 import TutorialBanner, { TutorialTag, WalkthroughContent } from './TutorialBanner';
 
@@ -159,6 +159,62 @@ describe('TutorialBanner — the derived warm-up schedule sentence', () => {
     expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
       "This one's a warm-up—easy squares, all on the ship.",
     );
+  });
+});
+
+// Codex P2 on #670: both mount points get LEFT OPEN — a card sitting on the
+// warm-up Day overnight, a How-to-play panel open across the unlock — so the
+// sentence has to move on its own rather than wait for an unrelated render.
+describe('TutorialBanner — the schedule sentence stays live while mounted', () => {
+  const caption = () => document.querySelector('.tutorial-banner-caption')?.textContent;
+
+  beforeEach(() => {
+    // Timers AND Date here: these advance the clock deliberately.
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('turns "tomorrow" into "later today" when Event-zone midnight passes', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T23:59:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(caption()).toContain('The real chaos starts tomorrow at 6.');
+
+    act(() => {
+      vi.advanceTimersByTime(2 * 60 * 1000); // past midnight + the arm slack
+    });
+    expect(caption()).toContain('The real chaos starts later today at 6.');
+  });
+
+  it('retires the sentence when the unlock passes under an open panel', () => {
+    vi.setSystemTime(Date.parse('2026-08-08T05:59:00-07:00'));
+    render(<WalkthroughContent event={SIX_AM_SCHEDULE} />);
+    expect(caption()).toContain('The real chaos starts later today at 6.');
+
+    act(() => {
+      vi.advanceTimersByTime(2 * 60 * 1000);
+    });
+    expect(caption()).toBe("This one's a warm-up—easy squares, all on the ship.");
+  });
+
+  it('catches up on tab resume, where a backgrounded timer may never have fired', () => {
+    vi.setSystemTime(Date.parse('2026-08-07T23:59:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(caption()).toContain('tomorrow at 6');
+
+    // The clock moves while the tab is asleep; no timer runs.
+    vi.setSystemTime(Date.parse('2026-08-08T05:00:00-07:00'));
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(caption()).toContain('The real chaos starts later today at 6.');
+  });
+
+  it('arms no timer once there is nothing left to refresh', () => {
+    vi.setSystemTime(Date.parse('2026-08-09T12:00:00-07:00'));
+    render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
