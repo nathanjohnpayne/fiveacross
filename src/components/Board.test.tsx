@@ -1333,6 +1333,12 @@ describe('Locked-Day preview', () => {
       // A non-morning unlock keeps the meridiem and drops the coffee tail —
       // the sentence would otherwise assert a morning the schedule lacks.
       { label: 'an evening unlock', at: '2026-07-18T20:00:00Z', badge: '8:00 p.m.', tail: 'land at 8 p.m. Come back then.' },
+      { label: 'a noon unlock', at: '2026-07-18T12:00:00Z', badge: '12:00 p.m.', tail: 'land at 12 p.m. Come back then.' },
+      // Midnight is an `AM` day period to `Intl` but not a morning: the bare
+      // "land at 12" would be ambiguous and the coffee tail plain wrong
+      // (Codex P2 on #669).
+      { label: 'a midnight unlock', at: '2026-07-18T00:00:00Z', badge: '12:00 a.m.', tail: 'land at 12 a.m. Come back then.' },
+      { label: 'a small-hours unlock', at: '2026-07-18T00:30:00Z', badge: '12:30 a.m.', tail: 'land at 12:30 a.m. Come back then.' },
     ])('captions $label to match the badge', ({ at, badge, tail }) => {
       H.event = {
         claimMode: 'honor',

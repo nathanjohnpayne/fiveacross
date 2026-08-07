@@ -471,9 +471,11 @@ function formatUnlockAt(unlockAt: number, timezone: string | undefined): string 
  * rather than a second timestamp; minutes appear only when the Day doesn't
  * unlock on the hour. DERIVED, never hardcoded: `unlockAt` is per-Day and
  * per-Edition, so the fixed "land at 8" this copy shipped with contradicted the
- * badge on every schedule that doesn't open at 08:00. A non-morning unlock
- * keeps the meridiem (the bare number would read as a.m.) and drops the coffee
- * tail, which would otherwise assert a morning the schedule doesn't have.
+ * badge on every schedule that doesn't open at 08:00. Only a genuine morning
+ * hour goes bare and keeps the coffee tail; anything else spells the meridiem
+ * out (the bare number would read as a.m.) and takes a neutral tail, which is
+ * the midnight hour's case too — 12:xx a.m. is an `AM` day period to `Intl` but
+ * not a morning anyone drinks coffee in (Codex P2 on #669).
  */
 function unlockCaption(unlockAt: number, timezone: string | undefined): string {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -484,10 +486,13 @@ function unlockCaption(unlockAt: number, timezone: string | undefined): string {
   }).formatToParts(new Date(unlockAt));
   const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
   const minute = part('minute');
-  const hour = `${part('hour')}${minute === '00' ? '' : `:${minute}`}`;
-  return part('dayPeriod').toUpperCase().startsWith('P')
-    ? `24 fresh squares land at ${hour} p.m. Come back then.`
-    : `24 fresh squares land at ${hour}. Come back after coffee.`;
+  const clockHour = part('hour');
+  const hour = `${clockHour}${minute === '00' ? '' : `:${minute}`}`;
+  // "a.m."/"p.m." already carry their own terminal period — never append one.
+  const meridiem = part('dayPeriod').toUpperCase().startsWith('P') ? 'p.m.' : 'a.m.';
+  return meridiem === 'a.m.' && clockHour !== '12'
+    ? `24 fresh squares land at ${hour}. Come back after coffee.`
+    : `24 fresh squares land at ${hour} ${meridiem} Come back then.`;
 }
 
 /**
