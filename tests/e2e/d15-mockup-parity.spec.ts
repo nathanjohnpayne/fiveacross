@@ -182,7 +182,7 @@ test('structural parity — every screen against the wireframes', async ({ page 
     // The caption's hour is DERIVED from the same `unlockAt` the badge above
     // formats, so the two can never disagree; this fixture's 08:00-CEST Day
     // reproduces the wireframes' "at 8" exactly.
-    await expect(locked).toContainText('24 fresh squares land at 8. Come back after coffee.');
+    await expect(locked).toContainText('24 fresh squares land at 8 a.m. Come back after coffee.');
     // The theme's dress-code description doubles as the party tease.
     await expect(locked).toContainText(/toga-chic|runway excess/i);
     // Only the free centre is populated; squares deal nothing.

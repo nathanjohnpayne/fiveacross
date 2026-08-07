@@ -122,7 +122,7 @@ describe('TutorialBanner — the derived warm-up schedule sentence', () => {
     vi.setSystemTime(Date.parse('2026-08-07T20:00:00-07:00'));
     render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
     expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
-      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 6.",
+      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 6 a.m.",
     );
   });
 
@@ -149,7 +149,7 @@ describe('TutorialBanner — the derived warm-up schedule sentence', () => {
     vi.setSystemTime(Date.parse('2026-08-07T20:00:00-07:00'));
     render(<WalkthroughContent event={SIX_AM_SCHEDULE} />);
     expect(document.querySelector('.tutorial-banner-caption')?.textContent).toBe(
-      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 6.",
+      "This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 6 a.m.",
     );
   });
 
@@ -179,18 +179,18 @@ describe('TutorialBanner — the schedule sentence stays live while mounted', ()
   it('turns "tomorrow" into "later today" when Event-zone midnight passes', () => {
     vi.setSystemTime(Date.parse('2026-08-07T23:59:00-07:00'));
     render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
-    expect(caption()).toContain('The real chaos starts tomorrow at 6.');
+    expect(caption()).toContain('The real chaos starts tomorrow at 6 a.m.');
 
     act(() => {
       vi.advanceTimersByTime(2 * 60 * 1000); // past midnight + the arm slack
     });
-    expect(caption()).toContain('The real chaos starts later today at 6.');
+    expect(caption()).toContain('The real chaos starts later today at 6 a.m.');
   });
 
   it('retires the sentence when the unlock passes under an open panel', () => {
     vi.setSystemTime(Date.parse('2026-08-08T05:59:00-07:00'));
     render(<WalkthroughContent event={SIX_AM_SCHEDULE} />);
-    expect(caption()).toContain('The real chaos starts later today at 6.');
+    expect(caption()).toContain('The real chaos starts later today at 6 a.m.');
 
     act(() => {
       vi.advanceTimersByTime(2 * 60 * 1000);
@@ -201,14 +201,14 @@ describe('TutorialBanner — the schedule sentence stays live while mounted', ()
   it('catches up on tab resume, where a backgrounded timer may never have fired', () => {
     vi.setSystemTime(Date.parse('2026-08-07T23:59:00-07:00'));
     render(<TutorialBanner day={EMBARK_DAY} event={SIX_AM_SCHEDULE} />);
-    expect(caption()).toContain('tomorrow at 6');
+    expect(caption()).toContain('tomorrow at 6 a.m.');
 
     // The clock moves while the tab is asleep; no timer runs.
     vi.setSystemTime(Date.parse('2026-08-08T05:00:00-07:00'));
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
-    expect(caption()).toContain('The real chaos starts later today at 6.');
+    expect(caption()).toContain('The real chaos starts later today at 6 a.m.');
   });
 
   it('arms no timer once there is nothing left to refresh', () => {

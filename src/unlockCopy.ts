@@ -23,10 +23,10 @@ interface UnlockClock {
   /** Always with periods, never Intl's "AM": "a.m." / "p.m.". */
   meridiem: 'a.m.' | 'p.m.';
   /**
-   * A morning anyone would call a morning. Deliberately NOT the raw `AM` day
-   * period: 12:xx a.m. is `AM` to `Intl` but is midnight, where a bare "12"
-   * reads as noon and "come back after coffee" is plainly wrong (Codex P2 on
-   * #669).
+   * A morning anyone would call a morning — which decides the caption's TAIL
+   * only, never whether the meridiem is printed (#675). Deliberately NOT the
+   * raw `AM` day period: 12:xx a.m. is `AM` to `Intl` but is midnight, where
+   * "come back after coffee" is plainly wrong (Codex P2 on #669).
    */
   morning: boolean;
 }
@@ -50,17 +50,14 @@ function unlockClock(unlockAt: number, timezone: string | undefined): UnlockCloc
 }
 
 /**
- * The hour as running copy: bare inside a morning ("6", "9:30"), meridiem
- * spelled out otherwise ("8 p.m.", "12 a.m."), because a bare number in a
- * sentence reads as a.m. by default.
+ * The hour as running copy, ALWAYS with its meridiem: "6 a.m.", "9:30 a.m.",
+ * "8 p.m.". A bare hour was ambiguous even inside a morning — "land at 6" reads
+ * as 6 p.m. to anyone who doesn't already know the schedule, which is exactly
+ * the reader this copy is written for (operator call, #675). The surrounding
+ * sentence never adds a period after it: "a.m."/"p.m." carry their own.
  */
 function spokenHour(clock: UnlockClock): string {
-  return clock.morning ? clock.hour : `${clock.hour} ${clock.meridiem}`;
-}
-
-/** A sentence ending in "a.m."/"p.m." already has its terminal period. */
-function endSentence(text: string): string {
-  return text.endsWith('.') ? text : `${text}.`;
+  return `${clock.hour} ${clock.meridiem}`;
 }
 
 /** "Unlocks 8:00 a.m. · Wed Jul 22" — the locked-Day badge (#260). */
@@ -84,15 +81,16 @@ export function formatUnlockAt(unlockAt: number, timezone: string | undefined): 
 }
 
 /**
- * The locked-Day caption under that badge — "24 fresh squares land at 6. Come
- * back after coffee." A non-morning unlock takes a neutral tail instead, which
- * would otherwise assert a morning the schedule doesn't have.
+ * The locked-Day caption under that badge — "24 fresh squares land at 6 a.m.
+ * Come back after coffee." The `morning` flag now decides only the TAIL: a
+ * non-morning unlock takes a neutral one, which would otherwise assert a
+ * morning the schedule doesn't have. The hour itself always carries its
+ * meridiem, in both branches.
  */
 export function unlockCaption(unlockAt: number, timezone: string | undefined): string {
   const clock = unlockClock(unlockAt, timezone);
-  return clock.morning
-    ? `24 fresh squares land at ${clock.hour}. Come back after coffee.`
-    : endSentence(`24 fresh squares land at ${spokenHour(clock)} Come back then.`);
+  const tail = clock.morning ? 'Come back after coffee.' : 'Come back then.';
+  return `24 fresh squares land at ${spokenHour(clock)} ${tail}`;
 }
 
 /** The calendar date an instant falls on in `timezone`, as "2026-08-09". */
@@ -160,9 +158,9 @@ export function chaosLine(
   const first = firstChaosDay(days);
   if (!first || first.unlockAt <= now) return null;
   const clock = unlockClock(first.unlockAt, timezone);
-  return endSentence(
-    `The real chaos starts ${relativeDay(first.unlockAt, timezone, now)} at ${spokenHour(clock)}`,
-  );
+  // No trailing period: `spokenHour` ends in "a.m."/"p.m.", which carries the
+  // sentence's own terminal period.
+  return `The real chaos starts ${relativeDay(first.unlockAt, timezone, now)} at ${spokenHour(clock)}`;
 }
 
 function firstChaosDay(days: readonly DayDef[] | undefined): DayDef | undefined {
