@@ -71,7 +71,7 @@ interface AlertQuery {
  *  commits all-or-nothing, which is the whole reason the drain uses one. `set`
  *  WITHOUT merge, so the tombstone REPLACES the row rather than joining it. */
 interface AlertWriteBatch {
-  set(ref: AlertDocRef, data: Record<string, unknown>): void;
+  set(ref: AlertDocRef, data: Record<string, unknown>, options?: { merge?: boolean }): void;
   commit(): Promise<unknown>;
 }
 /** The minimal surface the queue and its sweep use. */
@@ -349,6 +349,31 @@ export const MAX_ATOMIC_WRITES = 450;
  */
 export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * How long an alert must sit still before it is eligible to be drained.
+ *
+ * The queue makes a burst cost ONE email; this is what stops the scheduler
+ * boundary from splitting that email in two. A pool import or a report pile-on
+ * that straddles a sweep would otherwise be snapshotted mid-write: the rows
+ * already enqueued go out now, the rows written a second later go out five
+ * minutes later, and the acceptance criterion ("seeding/imports produce at most
+ * one digest") quietly fails on exactly the case it was written for.
+ *
+ * Sixty seconds is a settling period, not the batching mechanism — that
+ * distinction matters, because a debounce is the thing this design deliberately
+ * is NOT. The queue is what makes eighty writes one email; this only ensures
+ * the eighty are all visible before the drain looks. It is bounded rather than
+ * a true "wait for quiet", so a continuous stream of reports can never starve
+ * delivery: an import that runs for longer than the settling period will still
+ * split across sweeps, which is the honest limit of a poller.
+ *
+ * Applied in memory rather than as a query filter. A `createdAt <=` range
+ * alongside the `sentAt ==` equality would need a composite index, and the
+ * whole point of the drain query is that it rides the automatic single-field
+ * one.
+ */
+export const QUIET_PERIOD_MS = 60 * 1000;
+
 /** Minutes between digest sweeps, mirrored in `index.ts`'s cron. Stated here so
  *  the doc comment and the schedule cannot drift silently. */
 export const DIGEST_INTERVAL_MINUTES = 5;
@@ -364,6 +389,9 @@ export interface AdminDigestDeps extends ResolveDeps, EnqueueDeps {
   /** Alerts drained per Event per run; defaults to `MAX_ALERTS_PER_DIGEST`,
    *  clamped to `MAX_ATOMIC_WRITES`. */
   maxAlerts?: number;
+  /** Settling period before an alert may be drained; defaults to
+   *  `QUIET_PERIOD_MS`. Set to 0 in tests that are not about it. */
+  quietMs?: number;
 }
 
 export interface AdminDigestResult {
@@ -374,7 +402,18 @@ export interface AdminDigestResult {
    *  drain limit forever. */
   retired: number;
   /** Why nothing was sent, when nothing was. */
-  reason?: 'no-alerts' | 'no-event' | 'no-recipients' | 'send-failed' | 'nothing-current';
+  reason?:
+    | 'no-alerts'
+    | 'no-event'
+    | 'no-recipients'
+    | 'send-failed'
+    | 'nothing-current'
+    /** Everything queued is still inside its settling period — a burst may
+     *  still be being written. It drains whole on the next sweep. */
+    | 'settling'
+    /** The batch identity could not be claimed, so nothing was sent: sending
+     *  without one would risk a second email repeating this one. */
+    | 'claim-failed';
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -472,14 +511,15 @@ export function currentRowFor(
  * window. A count-based key over a partially-drained subset would not have that
  * property, which is precisely the hole an atomic clean-up closes.
  *
- * THE KEY IS DERIVED FROM THE RAW DRAINED PAGE, not from the revalidated rows.
- * Those are different sets, and only the first one is stable: if the send lands
- * but the clean-up does not, an admin can resolve one item before the next
- * sweep, and live revalidation would then drop that row and change a
- * `current`-derived key — so Resend would accept a SECOND email repeating every
- * unresolved row from the first. The queue page cannot move that way, because
- * the atomic clean-up leaves it byte-identical. It is reduced order-independently
- * (max id + count) because the drain query carries no `orderBy`.
+ * THE KEY IS PERSISTED BEFORE THE SEND, not derived at send time. `claimDrain`
+ * stamps the drained rows with a `batchId` and the email is keyed on that, so
+ * the delivery identity is immutable from the moment it goes out. Nothing
+ * derivable at send time has that property: the rendered rows shrink as admins
+ * resolve items, and the raw pending page GROWS as new alerts arrive, so a
+ * retry after a failed clean-up would compute a different key either way and
+ * Resend would accept a second email repeating what it already delivered. With
+ * a claim, the retry takes exactly the claimed rows, reuses their id, dedupes —
+ * and the alerts queued since simply belong to the next batch.
  *
  * WHAT THE CLEAN-UP WRITES IS A TOMBSTONE, not a delete, and it has to be both
  * things at once. Deleting outright was the retention answer — a queue row
@@ -497,6 +537,8 @@ export async function sendAdminDigestForEvent(
   deps: AdminDigestDeps = {},
 ): Promise<AdminDigestResult> {
   const maxAlerts = Math.min(deps.maxAlerts ?? MAX_ALERTS_PER_DIGEST, MAX_ATOMIC_WRITES);
+  const quietMs = deps.quietMs ?? QUIET_PERIOD_MS;
+  const now = (deps.now ?? Date.now)();
   const snap = await db
     .collection(`events/${eventId}/adminAlerts`)
     .where('sentAt', '==', null)
@@ -504,13 +546,17 @@ export async function sendAdminDigestForEvent(
     .get();
   if (snap.docs.length === 0) return { sent: 0, retired: 0, reason: 'no-alerts' };
 
+  const claim = await claimDrain(db, eventId, snap.docs, now, quietMs);
+  if (claim.reason) return { sent: 0, retired: 0, reason: claim.reason };
+  const { batchId, page } = claim;
+
   // Unreadable rows are RETIRED, not merely skipped. Skipping them leaves them
   // pending forever, and a page of malformed documents would then occupy the
   // whole drain limit on every sweep — starving valid alerts behind it
   // indefinitely. They are cleared alongside whatever is delivered.
   const unreadable: string[] = [];
   const alerts: AdminAlertRecord[] = [];
-  for (const doc of snap.docs) {
+  for (const doc of page) {
     const record = toRecord(doc);
     if (record) alerts.push(record);
     else unreadable.push(doc.id);
@@ -548,7 +594,7 @@ export async function sendAdminDigestForEvent(
   // than no email.
   const retireOnly = [...unreadable, ...resolved];
   if (current.length === 0) {
-    await tombstoneAlerts(db, eventId, retireOnly, (deps.now ?? Date.now)());
+    await tombstoneAlerts(db, eventId, retireOnly, now);
     return { sent: 0, retired: retireOnly.length, reason: 'nothing-current' };
   }
 
@@ -564,7 +610,6 @@ export async function sendAdminDigestForEvent(
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
   const from = deps.from ?? (await import('./params')).EMAIL_FROM.value();
   const send = deps.send ?? (await import('./email')).sendEmail;
-  const now = (deps.now ?? Date.now)();
   // A FAILED hostname read is not a confirmed absence: falling back would erase
   // the Event's Edition and put the legacy brand line on a Vacay/Five Across
   // digest. Let the sweep boundary log and skip; the next run retries safely.
@@ -577,7 +622,7 @@ export async function sendAdminDigestForEvent(
     html: renderAdminDigestHtml(model),
     text: renderAdminDigestText(model),
     from,
-    idempotencyKey: `admin-digest/${eventId}/${drainKey(snap.docs.map((d) => d.id))}`,
+    idempotencyKey: `admin-digest/${eventId}/${batchId}`,
   });
   if (!ok) return { sent: 0, retired: 0, reason: 'send-failed' };
 
@@ -589,9 +634,9 @@ export async function sendAdminDigestForEvent(
 }
 
 /**
- * The delivery identity of one drain, reduced from the RAW queue page in a way
- * that does not depend on the order Firestore happened to return it in: the
- * greatest document id plus the count. The drain query carries no `orderBy`
+ * The delivery identity of one drain, reduced from a set of queue-row ids in a
+ * way that does not depend on the order Firestore happened to return them in:
+ * the greatest id plus the count. The drain query carries no `orderBy`
  * (deliberately — an equality filter with a `limit` rides the automatic index),
  * so a position-sensitive reduction could shuffle between two sweeps over an
  * identical page and mint a different key for the same email.
@@ -599,6 +644,98 @@ export async function sendAdminDigestForEvent(
 export function drainKey(ids: readonly string[]): string {
   const max = [...ids].sort().pop() ?? 'empty';
   return `${max}/${ids.length}`;
+}
+
+/**
+ * Pure: split a pending page into the rows a drain may take, and the identity
+ * that drain should carry. Exported for its own tests — this is the whole
+ * once-and-only-once decision, and it is worth exercising without a Firestore.
+ *
+ * TWO CASES, and the first is the one that makes retries safe.
+ *
+ * A PRIOR CLAIM EXISTS. Some rows carry a `batchId`, which means an earlier
+ * sweep already sent an email for exactly those rows and failed to clean up
+ * after itself. The drain takes ONLY those rows, and reuses their batch id — so
+ * the retry re-sends the identical email under the identical key and Resend
+ * collapses it. Crucially, work queued SINCE that attempt is left out: without
+ * this, the growing page would mint a new key and Resend would accept a second
+ * email repeating everything already delivered alongside the new alert.
+ *
+ * NO PRIOR CLAIM. The rows outside their settling period are claimed as a new
+ * batch. Rows still settling are left for the next sweep, because a burst that
+ * straddles the scheduler boundary would otherwise be snapshotted mid-write and
+ * split across two emails.
+ *
+ * The lowest batch id wins when several are somehow present, purely so the
+ * choice is deterministic across sweeps rather than order-dependent.
+ */
+export function planDrain(
+  rows: ReadonlyArray<{ id: string; batchId?: unknown; createdAt?: unknown }>,
+  now: number,
+  quietMs: number,
+): { batchId: string; ids: string[]; claimNeeded: boolean } | { reason: 'settling' } {
+  const claimedIds = rows
+    .filter((r) => typeof r.batchId === 'string' && r.batchId)
+    .map((r) => String(r.batchId));
+  if (claimedIds.length > 0) {
+    const batchId = [...claimedIds].sort()[0];
+    return {
+      batchId,
+      ids: rows.filter((r) => r.batchId === batchId).map((r) => r.id),
+      claimNeeded: false,
+    };
+  }
+  const cutoff = now - quietMs;
+  const ripe = rows.filter((r) => (typeof r.createdAt === 'number' ? r.createdAt : 0) <= cutoff);
+  if (ripe.length === 0) return { reason: 'settling' };
+  const ids = ripe.map((r) => r.id);
+  return { batchId: drainKey(ids), ids, claimNeeded: true };
+}
+
+/**
+ * Resolve the page a drain may take, claiming a batch identity FIRST when there
+ * is not already one.
+ *
+ * The claim is written before the send, and that ordering is the point: the
+ * delivery key has to be immutable from the moment the email goes out, and the
+ * only way to make it immutable is to persist it. Deriving it from the page at
+ * send time cannot work, because the page is not stable across a failed
+ * clean-up — it shrinks as rows resolve and grows as new alerts arrive.
+ *
+ * A failed claim sends NOTHING. Sending under an unpersisted key would put the
+ * system back in exactly the state this closes: a retry that cannot recognise
+ * its own previous delivery.
+ */
+async function claimDrain(
+  db: AdminAlertFirestore,
+  eventId: string,
+  docs: readonly AlertSnapshot[],
+  now: number,
+  quietMs: number,
+): Promise<{ batchId: string; page: AlertSnapshot[]; reason?: undefined } | { reason: 'settling' | 'claim-failed'; batchId?: undefined; page?: undefined }> {
+  const rows = docs.map((d) => {
+    const data = d.data() ?? {};
+    return { id: d.id, batchId: data.batchId, createdAt: data.createdAt };
+  });
+  const plan = planDrain(rows, now, quietMs);
+  if ('reason' in plan) return { reason: plan.reason };
+
+  if (plan.claimNeeded) {
+    try {
+      const batch = db.batch();
+      for (const id of plan.ids) {
+        // MERGE — the claim annotates the row, it must not replace the payload
+        // the digest is about to render.
+        batch.set(db.doc(`events/${eventId}/adminAlerts/${id}`), { batchId: plan.batchId }, { merge: true });
+      }
+      await batch.commit();
+    } catch (err) {
+      console.error('sendAdminDigestForEvent: batch claim failed (nothing sent)', eventId, err);
+      return { reason: 'claim-failed' };
+    }
+  }
+  const wanted = new Set(plan.ids);
+  return { batchId: plan.batchId, page: docs.filter((d) => wanted.has(d.id)) };
 }
 
 /**

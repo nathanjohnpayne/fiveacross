@@ -9,9 +9,11 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   MAX_ALERTS_PER_DIGEST,
   MAX_ATOMIC_WRITES,
+  QUIET_PERIOD_MS,
   TOMBSTONE_TTL_MS,
   alertDocId,
   drainKey,
+  planDrain,
   alertsForWrite,
   currentRowFor,
   enqueueAdminAlerts,
@@ -51,8 +53,10 @@ function fakeDb(
   /** Collection or document paths whose `.get()` rejects — the injectable
    *  backend failure. */
   throwOn: readonly string[] = [],
-  /** When true, every batch commit rejects — the atomic-clean-up failure. */
+  /** When true, the tombstone batch rejects — the atomic-clean-up failure. */
   failCommit = false,
+  /** When true, the CLAIM batch rejects — the pre-send identity failure. */
+  failClaim = false,
 ) {
   const collections = new Map<string, FakeDoc[]>();
   let autoId = 0;
@@ -129,18 +133,19 @@ function fakeDb(
     // clean commit, exactly like the admin SDK's. `set` REPLACES the document,
     // which is what turns a drained row into a payload-free tombstone.
     batch: () => {
-      const staged: Array<[string, Record<string, unknown>]> = [];
+      const staged: Array<[string, Record<string, unknown>, boolean]> = [];
       return {
-        set: (ref: { path: string }, data: Record<string, unknown>) => {
-          staged.push([ref.path, data]);
+        set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
+          staged.push([ref.path, data, options?.merge === true]);
         },
         commit: async () => {
-          if (failCommit) throw new Error('batch commit failed');
-          for (const [path, data] of staged) {
+          if (failCommit && !staged.every(([, , merge]) => merge)) throw new Error('batch commit failed');
+          if (failClaim && staged.every(([, , merge]) => merge)) throw new Error('batch claim failed');
+          for (const [path, data, merge] of staged) {
             const { collectionPath, id } = split(path);
             const rows = collections.get(collectionPath) ?? [];
             const found = rows.find((r) => r.id === id);
-            if (found) found.data = { ...data };
+            if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
             else rows.push({ id, data: { ...data } });
             collections.set(collectionPath, rows);
           }
@@ -624,6 +629,46 @@ describe('renderAdminDigestText', () => {
 
 // --- Delivery --------------------------------------------------------------------
 
+describe('planDrain', () => {
+  const row = (id: string, over: Record<string, unknown> = {}) => ({ id, createdAt: 0, ...over });
+
+  it('claims the settled rows as a new batch when nothing is claimed yet', () => {
+    const plan = planDrain([row('a1'), row('a2')], 10_000, 1_000);
+    expect(plan).toEqual({ batchId: 'a2/2', ids: ['a1', 'a2'], claimNeeded: true });
+  });
+
+  it('leaves rows still inside the settling period for the next sweep', () => {
+    // A burst straddling the scheduler boundary would otherwise be snapshotted
+    // mid-write and split across two emails.
+    expect(planDrain([row('a1', { createdAt: 9_500 })], 10_000, 1_000)).toEqual({ reason: 'settling' });
+    // Mixed: only the settled prefix is taken.
+    const plan = planDrain([row('a1', { createdAt: 0 }), row('a2', { createdAt: 9_900 })], 10_000, 1_000);
+    expect(plan).toEqual({ batchId: 'a1/1', ids: ['a1'], claimNeeded: true });
+  });
+
+  it('REUSES an existing claim and ignores everything queued since', () => {
+    // The retry case. Taking the newcomer too would mint a different key and
+    // re-deliver every row the first attempt already sent.
+    const plan = planDrain(
+      [row('a1', { batchId: 'b/2' }), row('a2', { batchId: 'b/2' }), row('a3')],
+      10_000,
+      1_000,
+    );
+    expect(plan).toEqual({ batchId: 'b/2', ids: ['a1', 'a2'], claimNeeded: false });
+  });
+
+  it('takes a claimed batch even while it would still be settling', () => {
+    // It has already been mailed once; waiting again would only delay the retry.
+    const plan = planDrain([row('a1', { batchId: 'b/1', createdAt: 9_999 })], 10_000, 1_000);
+    expect(plan).toEqual({ batchId: 'b/1', ids: ['a1'], claimNeeded: false });
+  });
+
+  it('picks the lowest batch id deterministically when several are present', () => {
+    const plan = planDrain([row('a1', { batchId: 'z/1' }), row('a2', { batchId: 'b/1' })], 10_000, 1_000);
+    expect(plan).toEqual({ batchId: 'b/1', ids: ['a2'], claimNeeded: false });
+  });
+});
+
 describe('sendAdminDigestForEvent', () => {
   const deps = (send: ReturnType<typeof vi.fn>) => ({
     send: send as never,
@@ -633,6 +678,9 @@ describe('sendAdminDigestForEvent', () => {
     appBaseUrl: 'https://gaycruisebingo.com',
     from: 'Gay Cruise Bingo <bingo@example.com>',
     now: () => NOW,
+    // The settling period has its own tests; everywhere else the fixture rows
+    // are already old, so this only keeps the intent explicit.
+    quietMs: 0,
   });
 
   const pendingAlert = (id: string, over: Record<string, unknown> = {}) => ({
@@ -655,7 +703,7 @@ describe('sendAdminDigestForEvent', () => {
     alerts: Record<string, unknown>[],
     hostnames: Record<string, unknown>[] = [],
     liveOver: Record<string, Record<string, unknown>> = {},
-    opts: { throwOn?: string[]; failCommit?: boolean } = {},
+    opts: { throwOn?: string[]; failCommit?: boolean; failClaim?: boolean } = {},
   ) => {
     const live: Record<string, Record<string, unknown>> = { 'events/med-2026': EVENT };
     for (const a of alerts) {
@@ -667,6 +715,7 @@ describe('sendAdminDigestForEvent', () => {
       { ...live, ...liveOver },
       opts.throwOn ?? [],
       opts.failCommit ?? false,
+      opts.failClaim ?? false,
     );
   };
 
@@ -739,25 +788,89 @@ describe('sendAdminDigestForEvent', () => {
     expect((send.mock.calls[1][0] as { idempotencyKey: string }).idempotencyKey).toBe(key);
   });
 
-  it('keeps the retry key stable even when a row RESOLVES between the send and the retry', async () => {
-    // The narrower hole: atomic deletion keeps the raw queue stable, but a key
-    // derived from the REVALIDATED rows still moves when an admin handles one
-    // item before the next sweep — and Resend would then accept a second email
-    // repeating everything still unresolved.
+  it('CLAIMS the delivery identity before sending, and persists it on every drained row', async () => {
     const send = vi.fn(async () => true);
-    const live: Record<string, Record<string, unknown>> = {};
-    const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], live, { failCommit: true });
+    const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {}, { failCommit: true });
+    await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    const key = (send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey;
+    expect(key).toBe('admin-digest/med-2026/a2/2');
+    // The clean-up failed, so every row is still pending — and every one of
+    // them carries the batch id the email went out under.
+    const pending = db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null);
+    expect(pending).toHaveLength(2);
+    expect(pending.map((r) => r.batchId)).toEqual(['a2/2', 'a2/2']);
+    // The claim MERGES: the payload the digest renders must survive it.
+    expect(pending[0].label).toBe('Prompt a1');
+  });
+
+  it('keeps the retry key stable when a row RESOLVES between the send and the retry', async () => {
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {}, { failCommit: true });
     await sendAdminDigestForEvent(db, 'med-2026', deps(send));
     const key = (send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey;
 
-    // An admin approves one of the two Prompts before the retry.
-    const resolvedDb = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {
+    // An admin approves one of the two Prompts before the retry. A key derived
+    // from the RENDERED rows would move with it and Resend would accept a
+    // second email repeating everything still unresolved.
+    const resolved = seeded([pendingAlert('a1', { batchId: 'a2/2' }), pendingAlert('a2', { batchId: 'a2/2' })], [], {
       'events/med-2026/items/i-a1': { status: 'active', reportCount: 0 },
     });
-    const result = await sendAdminDigestForEvent(resolvedDb, 'med-2026', deps(send));
+    const result = await sendAdminDigestForEvent(resolved, 'med-2026', deps(send));
     expect(result.sent).toBe(1); // one row genuinely dropped out of the email...
-    // ...and the delivery key did NOT move with it, so Resend still collapses it.
     expect((send.mock.calls[1][0] as { idempotencyKey: string }).idempotencyKey).toBe(key);
+  });
+
+  it('keeps the retry key stable when a NEW alert ARRIVES between the send and the retry', async () => {
+    // The mirror hole: atomic clean-up preserves the old rows but cannot stop
+    // the queue growing, so a page-derived key would move and Resend would
+    // accept a second email repeating every delivered row beside the new one.
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1'), pendingAlert('a2')], [], {}, { failCommit: true });
+    await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    const key = (send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey;
+
+    const grown = seeded(
+      [
+        pendingAlert('a1', { batchId: 'a2/2' }),
+        pendingAlert('a2', { batchId: 'a2/2' }),
+        pendingAlert('a3'), // queued after the failed clean-up
+      ],
+      [],
+    );
+    const result = await sendAdminDigestForEvent(grown, 'med-2026', deps(send));
+    expect(result.sent).toBe(2); // the CLAIMED rows only — a3 is not in this batch
+    expect((send.mock.calls[1][0] as { idempotencyKey: string }).idempotencyKey).toBe(key);
+    // The newcomer waits, and goes out as its own batch on the next sweep.
+    expect(grown.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null).map((r) => r.id)).toEqual([
+      'a3',
+    ]);
+  });
+
+  it('sends NOTHING when the claim itself fails — an unpersisted key is worse than a delay', async () => {
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1')], [], {}, { failClaim: true });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'claim-failed',
+    });
+    spy.mockRestore();
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
+  });
+
+  it('waits out the settling period, so a burst straddling the sweep is not split in two', async () => {
+    const send = vi.fn(async () => true);
+    // Written 10s ago — a burst may still be in flight.
+    const db = seeded([pendingAlert('a1', { createdAt: NOW - 10_000 })]);
+    expect(
+      await sendAdminDigestForEvent(db, 'med-2026', { ...deps(send), quietMs: QUIET_PERIOD_MS }),
+    ).toEqual({ sent: 0, retired: 0, reason: 'settling' });
+    expect(send).not.toHaveBeenCalled();
+    // The whole burst goes out together on a later sweep.
+    const later = { ...deps(send), quietMs: QUIET_PERIOD_MS, now: () => NOW + QUIET_PERIOD_MS };
+    expect((await sendAdminDigestForEvent(db, 'med-2026', later)).sent).toBe(1);
   });
 
   it('reduces the drain key order-independently — the query carries no orderBy', () => {
@@ -929,6 +1042,7 @@ describe('runAdminAlertSweep', () => {
       appBaseUrl: 'https://gaycruisebingo.com',
       from: 'x <x@example.com>',
       now: () => NOW,
+      quietMs: 0,
     });
     spy.mockRestore();
     expect(send).toHaveBeenCalledTimes(1);

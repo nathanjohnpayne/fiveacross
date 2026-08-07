@@ -20,7 +20,7 @@ So the delivery shape is a **queue plus a periodic digest**, and burst safety is
 - **Producers** are the two existing `events/{eventId}/{items,proofs}/{docId}` triggers. They stay cheap and synchronous—`alertsForWrite` is a PURE function of the before/after snapshots, performing no reads—and only APPEND to `events/{eventId}/adminAlerts`.
 - **The consumer** is `sendAdminDigestForEvent`, driven by the `adminAlertDigest` sweep. It reads the Event once, resolves the roster once, renders ONE email covering everything queued since the last drain, and tombstones the queue rows it covered.
 
-Eighty seeded Prompts therefore produce one email listing eighty.
+Eighty seeded Prompts therefore produce one email listing eighty—structurally, and with a 60-second settling period so the scheduler boundary cannot split the burst (see § The settling period).
 
 **Alerts store raw facts, not rendered sentences.** An alert carries the doc's `status`, `visionFlag` and `reportCount`. Labelling a hide `reports >= threshold` versus `by an admin` needs the Event's `settings.reportHideThreshold`, and reading it in the trigger would cost one Firestore read per moderated write for a string nobody sees until the digest goes out. The digest reads the Event once and calls `deriveReason` there.
 
@@ -157,15 +157,30 @@ The sweep is scoped to ACTIVE Events, mirroring `runDailyEmailSweep`. An archive
 
 The trigger pins `ADMIN_SDK_SERVICE_ACCOUNT` (it reads Events, the queue, the roster and `hostnames`, and stamps alerts) and binds `RESEND_API_KEY`—it is now the only admin-notification function that sends. Per [#318](https://github.com/nathanjohnpayne/gaycruisebingo/issues/318): verify the Cloud Scheduler job exists after the deploy (`gcloud scheduler jobs list`)—the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function jobless and silently.
 
-**The idempotency key is the RAW DRAINED PAGE**: `admin-digest/{eventId}/{maxAlertId}/{count}`, reduced from the queue rows the sweep read—not from the revalidated rows it rendered. Those are two different sets and only the first is stable. The ATOMIC clean-up is what makes it stable: after a send there are exactly two outcomes, the batch commits and those rows are tombstoned, or it does not and every one of them is still pending—never a partial subset. A retry after the second outcome rebuilds the identical page, produces the identical key, and Resend collapses the duplicate inside its 24h window.
+### The delivery identity is claimed, not derived
 
-Keying on the RENDERED rows would not survive that retry, and the failure is not exotic: if the send lands but the clean-up does not, an admin can resolve one item before the next sweep, live revalidation drops that row, and a `current`-derived key moves with it—so Resend accepts a second email repeating every row from the first that is still unresolved. The queue page cannot move that way. It is reduced order-independently (greatest id plus count) because the drain query carries no `orderBy`, so a position-sensitive reduction could shuffle between two sweeps over an identical page.
+**The idempotency key is PERSISTED before the send.** `claimDrain` stamps every row it is about to drain with a `batchId`, and the email is keyed `admin-digest/{eventId}/{batchId}`. So the delivery identity is immutable from the moment the email goes out, and a retry after a failed clean-up recognises its own previous delivery.
 
-An alert arriving in between does change the page—a different key, which delivers, because that genuinely is new news.
+Nothing derivable at send time has that property, and both directions fail. The RENDERED rows shrink: if the send lands but the clean-up does not, an admin can resolve one item before the next sweep, live revalidation drops that row, and the key moves with it—so Resend accepts a second email repeating every row from the first that is still unresolved. The raw pending PAGE grows: a new alert arriving before the retry joins the still-pending rows, and a page-derived key moves the other way, producing a second email that repeats every delivered row alongside the newcomer. Atomic clean-up keeps the old rows in place; it cannot stop the queue changing around them.
+
+With a claim, the retry takes exactly the claimed rows, reuses their id, and Resend collapses it—and the alerts queued since simply belong to the next batch. The minted id is `drainKey`: greatest row id plus count, reduced order-independently because the drain query carries no `orderBy`, so a position-sensitive reduction could shuffle between sweeps over an identical page.
+
+**A failed claim sends nothing.** Sending under an unpersisted key would put the system back in exactly the state the claim closes.
+
+### The settling period
+
+The queue is what makes a burst cost one email; the settling period is what stops the scheduler boundary from splitting that email in two. A pool import or a report pile-on that straddles a sweep would otherwise be snapshotted mid-write: the rows already enqueued go out now, the rows written a second later go out five minutes later, and the acceptance criterion fails on precisely the case it was written for. So a row is eligible only once `QUIET_PERIOD_MS` (60s) has passed since it was queued.
+
+It is a settling period, not the batching mechanism—the distinction matters, because a debounce is what this design deliberately is not. It is bounded rather than a true wait-for-quiet, so a continuous stream of reports can never starve delivery; an import running longer than 60 seconds will still split across sweeps, which is the honest limit of a poller. A row that is already CLAIMED bypasses it: it has been mailed once, and waiting again would only delay the retry.
+
+Applied in memory rather than as a query filter, because a `createdAt <=` range alongside the `sentAt ==` equality would need a composite index and the drain query's whole virtue is that it rides the automatic single-field one.
 
 - **Given** a second sweep after a successful drain **then** nothing is sent. (Test: "is idempotent across sweeps".)
-- **Given** a clean-up that fails **then** EVERY alert is still pending and the retry reuses the same key. (Test: "an ATOMIC clean-up keeps it stable on retry".)
-- **Given** a row RESOLVED between the send and the retry **then** it drops out of the email and the key does not move. (Test: "keeps the retry key stable even when a row RESOLVES".)
+- **Given** a clean-up that fails **then** every alert is still pending, each carrying the batch id the email went out under, and the payload survives the merge. (Test: "CLAIMS the delivery identity before sending".)
+- **Given** a row RESOLVED between the send and the retry **then** it drops out of the email and the key does not move. (Test: "keeps the retry key stable when a row RESOLVES".)
+- **Given** a new alert ARRIVING between the send and the retry **then** the retry re-sends only the claimed rows under the same key, and the newcomer waits for its own batch. (Test: "keeps the retry key stable when a NEW alert ARRIVES".)
+- **Given** a claim that fails **then** nothing is sent and nothing is cleared. (Test: "sends NOTHING when the claim itself fails".)
+- **Given** rows still inside the settling period **then** nothing is drained, and the whole burst goes out together on a later sweep. (Tests: "waits out the settling period", and the cases under "planDrain".)
 - **Given** the same page in a different order **then** the key is identical. (Test: "reduces the drain key order-independently".)
 - **Given** a send that fails **then** nothing is cleared and the alerts drain on the next sweep. (Test: "leaves alerts queued when the send fails".)
 - **Given** one Event whose sweep throws **then** every other Event still drains. (Test: "one Event's failure never sinks the sweep".)
