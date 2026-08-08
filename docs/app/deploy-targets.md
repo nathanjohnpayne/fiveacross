@@ -154,10 +154,12 @@ npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacay
 
 **Each mirror advances only after ITS OWN Firebase primary has.** A mirror is a second front end for the same backend, so publishing it first points a new client at an old backend — and the two primaries deploy independently (§ Deploying Gay Cruise Bingo, § Deploying Five Across / Vacay), so "deploy all three mirrors" after a *single*-target rollout is exactly how that happens:
 
-| Mirror | Only after this primary is on the same commit |
+| Mirror | Only after this project has shipped **every part** the change needs |
 |---|---|
-| `gaycruisebingo.vercel.app` | `gaycruisebingo` — `npm run deploy:hosting` |
-| `vacaybingo.vercel.app`, `fiveacross.vercel.app` | `fiveacross` — the Five Across block above |
+| `gaycruisebingo.vercel.app` | `gaycruisebingo` |
+| `vacaybingo.vercel.app`, `fiveacross.vercel.app` | `fiveacross` |
+
+**"Primary" means the whole backend, not just Hosting.** Both commands on this page are hosting-only — `npm run deploy:hosting`, and the Five Across block's `--only hosting` — so a client that needs new Cloud Functions, `firestore.rules`, or a Firestore index is *not* unblocked by running them. Deploy those targets first (`--only functions`, `--only firestore:rules`, `--only firestore:indexes`), then Hosting, then that project's mirrors. Otherwise the ordering rule below is satisfied on paper while the backend the new bundle calls is still the old one.
 
 It bites hardest when the change needs a backend that only one project has: new Cloud Functions, new `firestore.rules`, a new Firestore field the client expects. A Five Across-only rollout that also advances `gaycruisebingo.vercel.app` breaks the ship-network fallback against a backend that has not moved — the one host whose whole job is to work when the primary does not.
 
@@ -178,13 +180,19 @@ Then verify, because the mirror is now only as current as your last command.
 **A mirror deployed with the block above is checkable by commit**, exactly like the Firebase hosts — `--build-env GITHUB_SHA=...` makes `appVersion()` bake the real 40-hex stamp, so the same `grep -oE '"[0-9a-f]{40}"'` works and answers *which commit is this host serving*:
 
 ```bash
-for H in vacaybingo.vercel.app fiveacross.vercel.app gaycruisebingo.vercel.app; do
+# Only the mirrors THIS rollout advanced. After a Five Across-only deploy
+# that is the two brand hosts; gaycruisebingo.vercel.app is meant to stay on
+# its older commit until its own primary moves, and checking it here would
+# report a correct partial rollout as a failure.
+for H in vacaybingo.vercel.app fiveacross.vercel.app; do
   A=$(curl -sS "https://$H/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
   printf '%-24s ' "$H"
   curl -sS "https://$H$A" | grep -oE '"[0-9a-f]{40}"' | head -1
 done
 # each must equal: git rev-parse origin/main
 ```
+
+For a Gay Cruise Bingo rollout the list is `gaycruisebingo.vercel.app`; for a change going to both projects it is all three.
 
 **Anything deployed without that flag bakes `unknown` instead**, and no Vercel metadata fills the gap — a CLI deployment reports `source: null` and no `meta.githubCommitSha`, and `vercel inspect` exposes only a `created` timestamp, which says when a build ran, not what was in it. **Do not fake it with that timestamp.** That covers every mirror built before [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676), and any deploy where the flag was dropped. For those, test for the **content you expect**, which is commit-aware in effect:
 
