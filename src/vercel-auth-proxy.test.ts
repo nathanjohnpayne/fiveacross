@@ -20,25 +20,38 @@ const FIVEACROSS_MIRROR_HOSTS = ['fiveacross.vercel.app', 'vacaybingo.vercel.app
 describe('Vercel Firebase Auth proxy', () => {
   const config = JSON.parse(readFileSync('vercel.json', 'utf8')) as VercelConfig;
 
-  // #676: mirror currency is manual. A merge to `main` must deploy NOTHING —
-  // three projects build from this one file, so an accidental re-enable is
-  // three production builds per merge against an account-wide cap whose
-  // exhaustion refuses deployments team-wide for 24 hours, taking out the
-  // ship-network fallback exactly when the primary host is unreachable.
-  describe('manual mirror deploys (#676)', () => {
-    it('disables Git-triggered deployment of main', () => {
-      const enabled = config.git?.deploymentEnabled;
-      expect(typeof enabled).toBe('object');
-      expect((enabled as Record<string, boolean>).main).toBe(false);
+  // #676/#680: NO branch deploys any of the three projects except `preview`.
+  // Three projects build from this one file, and the account-wide cap is 100
+  // deployments per day — every branch push costs three of them, so an
+  // accidental re-widening exhausts the quota and refuses deployments
+  // team-wide for 24 hours, taking out the ship-network fallback exactly when
+  // the primary host is unreachable. #680 is the day that happened.
+  describe('manual mirror deploys (#676, widened in #680)', () => {
+    const patterns = () => config.git?.deploymentEnabled as Record<string, boolean>;
+
+    it('denies every branch by default', () => {
+      expect(typeof patterns()).toBe('object');
+      expect(patterns()['**']).toBe(false);
     });
 
-    // Scoped to `main` ON PURPOSE, not a blanket `false`: the stable preview
-    // alias is fed by `git push --force origin HEAD:preview`
-    // (docs/app/preview-deploys.md § Part 2), which a blanket disable would
-    // silently kill along with the production builds it is aimed at.
-    it('leaves every other branch alone, so the preview flow survives', () => {
-      const enabled = config.git?.deploymentEnabled as Record<string, boolean>;
-      expect(Object.keys(enabled)).toEqual(['main']);
+    // `**`, NOT `*`. Vercel matches these with minimatch, where `*` does not
+    // cross a `/` — and every working branch here is `claude/...`, so a `*`
+    // rule silently misses all of them and leaves the quota burning (#680).
+    it('uses the slash-crossing wildcard, not the single-segment one', () => {
+      expect(Object.keys(patterns())).toContain('**');
+      expect(Object.keys(patterns())).not.toContain('*');
+    });
+
+    // The one exception, and the reason this is not a blanket `false`: the
+    // stable sign-in alias is fed by `git push --force origin HEAD:preview`
+    // (docs/app/preview-deploys.md § Part 2). `preview` matches both rules,
+    // and Vercel deploys when ANY matched rule is true.
+    it('keeps the preview-branch flow alive', () => {
+      expect(patterns().preview).toBe(true);
+    });
+
+    it('grants no other exception', () => {
+      expect(Object.entries(patterns()).filter(([, v]) => v === true).map(([k]) => k)).toEqual(['preview']);
     });
   });
   const rewrites = config.rewrites ?? [];
