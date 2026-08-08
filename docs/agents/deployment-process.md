@@ -9,7 +9,11 @@ See `DEPLOYMENT.md` for all build and deployment steps.
 - **Two Firebase primaries.** One repo, two projects (`gaycruisebingo` and `fiveacross`), and a single-project `.firebaserc`. Deploying Five Across needs a specific worktree, a positional project argument, `--force`, and a `SYNTHETIC_URL` override; three of those four fail *quietly* if omitted, and one of them ships to the wrong project.
 - **Three Vercel mirrors**, none of which deploy themselves. `vercel.json` sets `git.deploymentEnabled: { "main": false }` (#676), so merging changes nothing on `vacaybingo.vercel.app`, `fiveacross.vercel.app`, or `gaycruisebingo.vercel.app`. Each is published by an explicit, **guarded** `npx vercel deploy --prod --project <name>` — guarded because `vercel deploy` uploads your working directory, not `main`.
 
-**A deploy is not finished when the primary is live.** The mirrors are the fallback hosts players are pointed at when a primary is unreachable — `gaycruisebingo.vercel.app` exists for the ship-network block — so leaving them stale silently disarms the thing they exist for. After any deploy touching `src/**`, publish and verify each mirror per [`../app/deploy-targets.md`](../app/deploy-targets.md) § Deploying a mirror.
+**A deploy is not finished when the primary is live.** The mirrors are the fallback hosts players are pointed at when a primary is unreachable — `gaycruisebingo.vercel.app` exists for the ship-network block — so leaving them stale silently disarms the thing they exist for.
+
+The trigger is **anything that changes what a browser receives**, not a single directory. `src/**` is the common case but far from the only one: `public/**`, `index.html`, `vite.config.ts`, `package.json`/`package-lock.json`, and `vercel.json` itself all change the served result, and the last is the sharpest — a fix to the auth rewrites reaches a mirror *only* by deploying that mirror, so a change whose entire purpose is fixing a mirror can otherwise ship everywhere except the host it was written for. When in doubt, deploy: a mirror build costs one slot against the shared cap, and a stale fallback costs the outage it exists to cover.
+
+Publish and verify each affected mirror per [`../app/deploy-targets.md`](../app/deploy-targets.md) § Deploying a mirror.
 
 If the project uses Firebase or Google Cloud, prefer the canonical `scripts/gcloud/gcloud`, `scripts/firebase/op-firebase-setup`, and `scripts/firebase/op-firebase-deploy` flow:
 

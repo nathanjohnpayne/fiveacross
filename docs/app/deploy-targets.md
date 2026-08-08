@@ -131,7 +131,7 @@ Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands
 
 The synthetic proves the app mounts; it does not prove *which* build shipped. For that, diff the asset hash before and after, and grep the new bundle for a marker unique to the change.
 
-The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. Nothing rebuilds them but you.
+The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. They need publishing after any change that alters what a browser receives — `src/**`, `public/**`, `index.html`, `vite.config.ts`, dependencies, or `vercel.json` itself. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. Nothing rebuilds them but you.
 
 That is a deliberate trade, and it trades in the direction the failure history points. Three projects on one repository meant three production builds per merge against an account-wide cap that, when exhausted, refuses deployments for **24 hours** across the whole team — taking out the brand's own ship-network fallback on the day you need it. The stale-mirror risk that automation was covering was never actually covered: Vercel silently cancels queued builds under pressure, the host keeps serving its previous bundle at `HTTP 200`, and both mirrors were found 22h and 7h stale on 2026-08-06 *with the integration connected*. Explicit staleness you can see beats implicit staleness you cannot.
 
@@ -146,10 +146,13 @@ cd ~/GitHub/gaycruisebingo && \
 git fetch origin main && \
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ABORT: HEAD is not origin/main"; false; } && \
 [ -z "$(git status --porcelain)" ] || { echo "ABORT: worktree is dirty"; false; } && \
-npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacaybingo
+npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacaybingo \
+  --build-env GITHUB_SHA="$(git rev-parse HEAD)"
 ```
 
 Likewise `fiveacross` and `gaycruisebingo`. Deploy only what you need — each invocation is one build against the shared cap.
+
+`--build-env GITHUB_SHA=...` is what makes the deployed build identifiable. `appVersion()` (`vite.config.ts`) reads `GITHUB_SHA` first and falls back to `git rev-parse HEAD`, which throws on Vercel because the remote build has no `.git` — so without this the bundle bakes `__APP_VERSION__ = 'unknown'`. That value is not cosmetic: it is shown in More → About and attached to **every bug report** (`src/data/bugReports.ts`), so an unstamped mirror produces reports that cannot name the code they came from. The guarded block already knows the exact commit, so it passes it.
 
 `--scope` pins the team the project name resolves in. Without it the CLI uses whatever scope is currently active, and `--yes` suppresses the prompt that would otherwise catch the mismatch — so an operator whose last `vercel switch` went elsewhere either fails to refresh the intended mirror or, worse, resolves a same-named project in another scope. There is no `.vercel/project.json` to supply it here, deliberately (below).
 
@@ -179,7 +182,7 @@ done
 
 Substitute a marker unique to whatever commit you are verifying.
 
-Closing the gap properly is a one-line change — `appVersion()` should also read `VERCEL_GIT_COMMIT_SHA`, which Vercel does set during its builds — tracked in [#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665). Note that a CLI deploy does not set it either, so #665 alone will not make manual mirror deploys commit-checkable; the content marker above stays the check that works.
+**A mirror deployed with the `--build-env GITHUB_SHA=...` above is checkable by commit**, because the bundle then carries the real 40-hex stamp and the same `grep -oE '"[0-9a-f]{40}"'` used for the Firebase hosts works. The content-marker check above remains the fallback for any deployment made without it — including every mirror built before #676. ([#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665) would close the same gap for *Git*-triggered builds via `VERCEL_GIT_COMMIT_SHA`; it is unrelated to the CLI path.)
 
 > **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 
