@@ -162,11 +162,20 @@ Do not run the last line on its own. Without the assertions above it publishes w
 
 The **build** then runs on Vercel using that project's own Production environment variables (`VITE_EDITION`, `VITE_EVENT_ID`, the Firebase config), which is why the same source builds into a different Edition per project — the project name selects the config, the working directory supplies the code. `git.deploymentEnabled` governs Git-triggered deployments only — [Vercel's own wording](https://vercel.com/docs/project-configuration/git-configuration) is "branches that should not trigger a deployment upon commits" — so it never blocks this command.
 
-Then verify, because the mirror is now only as current as your last command:
+Then verify, because the mirror is now only as current as your last command.
 
-**The mirrors cannot be checked by commit today, and that is a known gap — do not fake it with a timestamp.** The commit-sha check above does not work on them: `appVersion()` falls back to `git rev-parse HEAD`, Vercel builds remotely without the `.git` directory, so the fallback throws and the bundle bakes `unknown`. Vercel's own metadata does not fill the gap either — a CLI-deployed build carries no Git metadata (`vercel inspect --json` reports `source: null` and no `meta.githubCommitSha`), and `vercel inspect` exposes only a `created` timestamp, which tells you when a build ran, not what was in it.
+**A mirror deployed with the block above is checkable by commit**, exactly like the Firebase hosts — `--build-env GITHUB_SHA=...` makes `appVersion()` bake the real 40-hex stamp, so the same `grep -oE '"[0-9a-f]{40}"'` works and answers *which commit is this host serving*:
 
-So test for the **content you expect**, which is commit-aware in effect:
+```bash
+for H in vacaybingo.vercel.app fiveacross.vercel.app gaycruisebingo.vercel.app; do
+  A=$(curl -sS "https://$H/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
+  printf '%-24s ' "$H"
+  curl -sS "https://$H$A" | grep -oE '"[0-9a-f]{40}"' | head -1
+done
+# each must equal: git rev-parse origin/main
+```
+
+**Anything deployed without that flag bakes `unknown` instead**, and no Vercel metadata fills the gap — a CLI deployment reports `source: null` and no `meta.githubCommitSha`, and `vercel inspect` exposes only a `created` timestamp, which says when a build ran, not what was in it. **Do not fake it with that timestamp.** That covers every mirror built before [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676), and any deploy where the flag was dropped. For those, test for the **content you expect**, which is commit-aware in effect:
 
 ```bash
 # Does the mirror contain the change you are looking for?
@@ -180,9 +189,7 @@ for H in vacaybingo.vercel.app fiveacross.vercel.app gaycruisebingo.vercel.app; 
 done
 ```
 
-Substitute a marker unique to whatever commit you are verifying.
-
-**A mirror deployed with the `--build-env GITHUB_SHA=...` above is checkable by commit**, because the bundle then carries the real 40-hex stamp and the same `grep -oE '"[0-9a-f]{40}"'` used for the Firebase hosts works. The content-marker check above remains the fallback for any deployment made without it — including every mirror built before #676. ([#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665) would close the same gap for *Git*-triggered builds via `VERCEL_GIT_COMMIT_SHA`; it is unrelated to the CLI path.)
+Substitute a marker unique to whatever commit you are verifying. A bare `unknown` where you expected a sha is itself the finding: that host was published without the flag, so re-deploy it with the guarded block rather than hunting for a marker. ([#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665) would close the same gap for *Git*-triggered builds via `VERCEL_GIT_COMMIT_SHA`; it is unrelated to the CLI path this page now prescribes.)
 
 > **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 
