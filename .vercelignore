@@ -1,0 +1,36 @@
+# What Vercel may upload (#677). ALLOWLIST — deny everything, then re-admit
+# only the client build's inputs.
+#
+# The CLI does not read `.gitignore`, so without this file `vercel deploy`
+# walks the whole checkout: `node_modules/` (731 MB) plus `.claude/`, the agent
+# worktrees and their own `node_modules/` (44 GB). The first manual mirror
+# deploy failed on it — "`files` should NOT have more than 15000 items,
+# received 48318".
+#
+# It is an allowlist rather than a list of exclusions ON PURPOSE (Codex P1/P2
+# on #677). A denylist uploads whatever it forgot to name, and the things it
+# forgets are exactly the dangerous ones: gitignored local secrets that the
+# clean-worktree guard cannot see because git does not track them
+# (`serviceAccountKey.json`, `.env.local`), plus every future build artifact
+# (`coverage/`, `playwright-report/`, `test-results/`, `.venv/`, `dist/`).
+# Denying by default makes a new secret or artifact excluded until someone
+# deliberately admits it.
+#
+# The build runs `npm run build` (Vite) on Vercel and installs its own
+# dependencies, so this is the complete set of inputs. Adding a root-level
+# build input means adding a `!` line here, and the deploy will fail loudly
+# if you forget rather than shipping something wrong.
+
+# Deny everything at the repo root, recursively.
+/*
+
+# Re-admit the client build's inputs, and nothing else.
+!/index.html
+!/package.json
+!/package-lock.json
+!/vite.config.ts
+!/tsconfig.json
+!/tsconfig.sw.json
+!/vercel.json
+!/src
+!/public
