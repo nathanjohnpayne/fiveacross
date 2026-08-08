@@ -13,7 +13,7 @@ See `DEPLOYMENT.md` for all build and deployment steps.
 
 The trigger is **anything that changes what a browser receives**, not a single directory. `src/**` is the common case but far from the only one: `public/**`, `index.html`, `vite.config.ts`, `package.json`/`package-lock.json`, and `vercel.json` itself all change the served result, and the last is the sharpest — a fix to the auth rewrites reaches a mirror *only* by deploying that mirror, so a change whose entire purpose is fixing a mirror can otherwise ship everywhere except the host it was written for. When in doubt, deploy: a mirror build costs one slot against the shared cap, and a stale fallback costs the outage it exists to cover.
 
-Publish and verify each affected mirror per [`../app/deploy-targets.md`](../app/deploy-targets.md) § Deploying a mirror.
+Publish and verify each affected mirror per [`../app/deploy-targets.md`](../app/deploy-targets.md) § Deploying a mirror — **after** its own Firebase primary, never before. A mirror is a second front end for the same backend, and the two primaries deploy independently, so advancing a mirror whose primary has not moved points a new client at an old backend. `gaycruisebingo.vercel.app` follows the `gaycruisebingo` project; both brand mirrors follow `fiveacross`.
 
 If the project uses Firebase or Google Cloud, prefer the canonical `scripts/gcloud/gcloud`, `scripts/firebase/op-firebase-setup`, and `scripts/firebase/op-firebase-deploy` flow:
 

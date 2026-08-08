@@ -150,7 +150,18 @@ npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacay
   --build-env GITHUB_SHA="$(git rev-parse HEAD)"
 ```
 
-**Repeat it for every affected mirror** — `fiveacross` and `gaycruisebingo` too. A browser-facing change is shared by all three builds, so normally that means all three, and the verification loop below expects all three to serve `origin/main`. Each invocation is one build against the shared cap; skip a mirror only when you can say why that host is unaffected, not to save a slot.
+**Repeat it for every affected mirror** — `fiveacross` and `gaycruisebingo` too. A browser-facing change is shared by all three builds, so normally that means all three, and the verification loop below expects every mirror you advance to serve `origin/main`. Each invocation is one build against the shared cap; skip a mirror only when you can say why that host is unaffected, not to save a slot.
+
+**Each mirror advances only after ITS OWN Firebase primary has.** A mirror is a second front end for the same backend, so publishing it first points a new client at an old backend — and the two primaries deploy independently (§ Deploying Gay Cruise Bingo, § Deploying Five Across / Vacay), so "deploy all three mirrors" after a *single*-target rollout is exactly how that happens:
+
+| Mirror | Only after this primary is on the same commit |
+|---|---|
+| `gaycruisebingo.vercel.app` | `gaycruisebingo` — `npm run deploy:hosting` |
+| `vacaybingo.vercel.app`, `fiveacross.vercel.app` | `fiveacross` — the Five Across block above |
+
+It bites hardest when the change needs a backend that only one project has: new Cloud Functions, new `firestore.rules`, a new Firestore field the client expects. A Five Across-only rollout that also advances `gaycruisebingo.vercel.app` breaks the ship-network fallback against a backend that has not moved — the one host whose whole job is to work when the primary does not.
+
+The safe general shape is therefore **primary, then its mirrors** — and if a change is going to both projects, deploy both primaries before any mirror.
 
 `--build-env GITHUB_SHA=...` is what makes the deployed build identifiable. `appVersion()` (`vite.config.ts`) reads `GITHUB_SHA` first and falls back to `git rev-parse HEAD`, which throws on Vercel because the remote build has no `.git` — so without this the bundle bakes `__APP_VERSION__ = 'unknown'`. That value is not cosmetic: it is shown in More → About and attached to **every bug report** (`src/data/bugReports.ts`), so an unstamped mirror produces reports that cannot name the code they came from. The guarded block already knows the exact commit, so it passes it.
 
