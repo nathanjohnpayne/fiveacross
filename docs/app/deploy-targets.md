@@ -131,15 +131,76 @@ Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands
 
 The synthetic proves the app mounts; it does not prove *which* build shipped. For that, diff the asset hash before and after, and grep the new bundle for a marker unique to the change.
 
-The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. After a deploy touching `src/**`, **inspect them before rebuilding** — the Vercel account's build capacity is shared and finite, and exhausting it has previously blocked every deployment for 24 hours:
+The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. They need publishing after any change that alters what a browser receives — `src/**`, `public/**`, `index.html`, `vite.config.ts`, dependencies, or `vercel.json` itself. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. Nothing rebuilds them but you.
 
-**The mirrors cannot be checked by commit today, and that is a known gap — do not fake it with a timestamp.** The commit-sha check above does not work on them: `appVersion()` falls back to `git rev-parse HEAD`, Vercel builds remotely without the `.git` directory, so the fallback throws and the bundle bakes `unknown`. Vercel's own metadata does not fill the gap either — a CLI-deployed build carries no Git metadata (`vercel inspect --json` reports `source: null` and no `meta.githubCommitSha`), and `vercel inspect` exposes only a `created` timestamp, which tells you when a build ran, not what was in it.
+That is a deliberate trade, and it trades in the direction the failure history points. Three projects on one repository meant three production builds per merge against an account-wide cap that, when exhausted, refuses deployments for **24 hours** across the whole team — taking out the brand's own ship-network fallback on the day you need it. The stale-mirror risk that automation was covering was never actually covered: Vercel silently cancels queued builds under pressure, the host keeps serving its previous bundle at `HTTP 200`, and both mirrors were found 22h and 7h stale on 2026-08-06 *with the integration connected*. Explicit staleness you can see beats implicit staleness you cannot.
 
-So test for the **content you expect**, which is commit-aware in effect:
+Only `main` is disabled. Other branches keep whatever the per-project **Ignored Build Step** already decides, so the `preview`-branch flow in [`preview-deploys.md`](preview-deploys.md) § Part 2 is untouched by this.
+
+### Deploying a mirror
+
+**`vercel deploy` uploads your current working directory** — `--project` chooses the destination, not the source, and `--prod` promotes whatever was uploaded. With Git deploys off for `main`, this is the *only* path to production, so it needs the same guards the Firebase deploy has. Copy the whole block; `&&` makes it fail closed:
+
+```bash
+cd ~/GitHub/gaycruisebingo && \
+git fetch origin main && \
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ABORT: HEAD is not origin/main"; false; } && \
+[ -z "$(git status --porcelain)" ] || { echo "ABORT: worktree is dirty"; false; } && \
+npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacaybingo \
+  --build-env GITHUB_SHA="$(git rev-parse HEAD)"
+```
+
+**Repeat it for every affected mirror** — `fiveacross` and `gaycruisebingo` too. A browser-facing change is shared by all three builds, so normally that means all three, and the verification loop below expects every mirror you advance to serve `origin/main`. Each invocation is one build against the shared cap; skip a mirror only when you can say why that host is unaffected, not to save a slot.
+
+**Each mirror advances only after ITS OWN Firebase primary has.** A mirror is a second front end for the same backend, so publishing it first points a new client at an old backend — and the two primaries deploy independently (§ Deploying Gay Cruise Bingo, § Deploying Five Across / Vacay), so "deploy all three mirrors" after a *single*-target rollout is exactly how that happens:
+
+| Mirror | Only after this project has shipped **every part** the change needs |
+|---|---|
+| `gaycruisebingo.vercel.app` | `gaycruisebingo` |
+| `vacaybingo.vercel.app`, `fiveacross.vercel.app` | `fiveacross` |
+
+**"Primary" means the whole backend, not just Hosting.** Both commands on this page are hosting-only — `npm run deploy:hosting`, and the Five Across block's `--only hosting` — so a client that needs new Cloud Functions, `firestore.rules`, or a Firestore index is *not* unblocked by running them. Deploy those targets first (`--only functions`, `--only firestore:rules`, `--only firestore:indexes`), then Hosting, then that project's mirrors. Otherwise the ordering rule below is satisfied on paper while the backend the new bundle calls is still the old one.
+
+It bites hardest when the change needs a backend that only one project has: new Cloud Functions, new `firestore.rules`, a new Firestore field the client expects. A Five Across-only rollout that also advances `gaycruisebingo.vercel.app` breaks the ship-network fallback against a backend that has not moved — the one host whose whole job is to work when the primary does not.
+
+The safe general shape is therefore **primary, then its mirrors** — and if a change is going to both projects, deploy both primaries before any mirror.
+
+`--build-env GITHUB_SHA=...` is what makes the deployed build identifiable. `appVersion()` (`vite.config.ts`) reads `GITHUB_SHA` first and falls back to `git rev-parse HEAD`, which throws on Vercel because the remote build has no `.git` — so without this the bundle bakes `__APP_VERSION__ = 'unknown'`. That value is not cosmetic: it is shown in More → About and attached to **every bug report** (`src/data/bugReports.ts`), so an unstamped mirror produces reports that cannot name the code they came from. The guarded block already knows the exact commit, so it passes it.
+
+`--scope` pins the team the project name resolves in. Without it the CLI uses whatever scope is currently active, and `--yes` suppresses the prompt that would otherwise catch the mismatch — so an operator whose last `vercel switch` went elsewhere either fails to refresh the intended mirror or, worse, resolves a same-named project in another scope. There is no `.vercel/project.json` to supply it here, deliberately (below).
+
+`--project <NAME_OR_ID>` is a real flag on `vercel deploy` ("Project name or ID (defaults to the linked project)" — `npx vercel deploy --help`, CLI 58.8.0), and it is used here **instead of** `vercel link` on purpose. Linking writes a `.vercel` directory and a `.env.local` into the checkout and appends both to `.gitignore` — which is tracked in this repo and already covers what it needs to ([`preview-deploys.md`](preview-deploys.md) § step 1). Three projects would mean three link states fighting over one working tree, in a repo where the *wrong* project is a live host serving the wrong Edition. Naming the project per invocation keeps that choice explicit at the call site and leaves nothing behind.
+
+Do not run the last line on its own. Without the assertions above it publishes whatever is in the directory you happen to be standing in — a feature branch, a half-finished edit — straight to a production host, with no review and no CI between you and it. That is exactly the risk `scripts/deploy.sh`'s guards exist to stop on the Firebase side, and Vercel's CLI has no equivalent of its own.
+
+The **build** then runs on Vercel using that project's own Production environment variables (`VITE_EDITION`, `VITE_EVENT_ID`, the Firebase config), which is why the same source builds into a different Edition per project — the project name selects the config, the working directory supplies the code. `git.deploymentEnabled` governs Git-triggered deployments only — [Vercel's own wording](https://vercel.com/docs/project-configuration/git-configuration) is "branches that should not trigger a deployment upon commits" — so it never blocks this command.
+
+Then verify, because the mirror is now only as current as your last command.
+
+**A mirror deployed with the block above is checkable by commit**, exactly like the Firebase hosts — `--build-env GITHUB_SHA=...` makes `appVersion()` bake the real 40-hex stamp, so the same `grep -oE '"[0-9a-f]{40}"'` works and answers *which commit is this host serving*:
+
+```bash
+# Only the mirrors THIS rollout advanced. After a Five Across-only deploy
+# that is the two brand hosts; gaycruisebingo.vercel.app is meant to stay on
+# its older commit until its own primary moves, and checking it here would
+# report a correct partial rollout as a failure.
+for H in vacaybingo.vercel.app fiveacross.vercel.app; do
+  A=$(curl -sS "https://$H/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
+  printf '%-24s ' "$H"
+  curl -sS "https://$H$A" | grep -oE '"[0-9a-f]{40}"' | head -1
+done
+# each must equal: git rev-parse origin/main
+```
+
+For a Gay Cruise Bingo rollout the list is `gaycruisebingo.vercel.app`; for a change going to both projects it is all three.
+
+**Anything deployed without that flag bakes `unknown` instead**, and no Vercel metadata fills the gap — a CLI deployment reports `source: null` and no `meta.githubCommitSha`, and `vercel inspect` exposes only a `created` timestamp, which says when a build ran, not what was in it. **Do not fake it with that timestamp.** That covers every mirror built before [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676), and any deploy where the flag was dropped. For those, test for the **content you expect**, which is commit-aware in effect:
 
 ```bash
 # Does the mirror contain the change you are looking for?
-for H in vacaybingo.vercel.app fiveacross.vercel.app; do
+# All THREE — gaycruisebingo.vercel.app is the ship-network fallback and is
+# now just as manual as the other two, so it needs the same check.
+for H in vacaybingo.vercel.app fiveacross.vercel.app gaycruisebingo.vercel.app; do
   A=$(curl -sS "https://$H/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
   printf '%-24s %s ' "$H" "$A"
   curl -sS "https://$H$A" | grep -qE 'try\{[A-Za-z0-9_$]+=URL\.createObjectURL' \
@@ -147,11 +208,7 @@ for H in vacaybingo.vercel.app fiveacross.vercel.app; do
 done
 ```
 
-Substitute a marker unique to whatever commit you are verifying. Redeploy only a project that comes back stale (`npx vercel deploy --prod --yes --project vacaybingo`, likewise `fiveacross`).
-
-Closing the gap properly is a one-line change — `appVersion()` should also read `VERCEL_GIT_COMMIT_SHA`, which Vercel does set during its builds — tracked in [#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665).
-
-In principle the Git integration rebuilds the mirrors on a push to `main`; **do not assume it did.** On 2026-08-06 both production aliases were 22h and 7h stale while the newest builds were *canceled* branch previews, and both were serving a pre-#587 bundle with Gay Cruise Bingo share metadata.
+Substitute a marker unique to whatever commit you are verifying. A bare `unknown` where you expected a sha is itself the finding: that host was published without the flag, so re-deploy it with the guarded block rather than hunting for a marker. ([#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665) would close the same gap for *Git*-triggered builds via `VERCEL_GIT_COMMIT_SHA`; it is unrelated to the CLI path this page now prescribes.)
 
 > **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 

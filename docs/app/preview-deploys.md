@@ -134,13 +134,13 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 | 1. Vercel project | **Done** | **Done** |
 | 2. Minted host confirmed exact | **Done** | **Done** |
 | 3. Production env vars | **Done**—nine `VITE_*`, Production scope | **Done**—same nine, own `authDomain`, `VITE_EDITION=vacay` |
-| 4. Git connected + Ignored Build Step | **Done**—production branch `main` | **Done**—production branch `main` |
+| 4. Git connected, `main` auto-deploy OFF | **Done**—linked, `git.deploymentEnabled: { main: false }` (#676) | **Done**—same |
 | 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
 | 6. Google OAuth redirect URI | **Outstanding—console-only** | **Outstanding—console-only** |
 
 Step 0 is not optional and not merely cosmetic. A mirror host whose `vercel.json` rule is missing falls through to the **Gay Cruise Bingo** rule, so its OAuth helper runs against the wrong Firebase project—a failure that survives both console registrations and reads as an inexplicable auth bug. Never provision a mirror host before its rule is on `main`.
 
-Both mirrors are live, serve the Bodega Event with Vacay branding, and rebuild automatically on a merge to `main`. **Neither can complete sign-in yet**—step 6 is outstanding on both.
+Both mirrors are live and serve the Bodega Event with Vacay branding. Since #676 they **do not rebuild on a merge**—see § Operating it. **Neither can complete sign-in yet**—step 6 is outstanding on both.
 
 > **Do not advertise either mirror URL until step 6 is done for that host.** This is the one thing on this page that can burn a player.
 >
@@ -177,30 +177,39 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and never consults the `hostnames/{host}` lookup, which is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build**—a mismatch ships the backup host under different branding and chrome than the host it is backing up.
 
-4. **Connect Git, then set the Ignored Build Step.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. Then Settings → Git → **Ignored Build Step**:
+4. **Connect Git, and leave auto-deploy off.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. The link is what gives the project a repo to build from; it is **not** what triggers builds. `vercel.json` on `main` carries
 
-   ```bash
-   [ "$VERCEL_ENV" != "production" ]
+   ```json
+   "git": { "deploymentEnabled": { "main": false } }
    ```
 
-   **The exit codes are inverted from the intuitive reading.** Vercel *skips* the build on exit `0` and *proceeds* on any non-zero exit, so the command above exits `0` (skip) on a preview and non-zero (build) on production. Getting it backwards disables production builds instead of preview ones.
+   so a push to `main` deploys none of the three projects (#676). Deploys are the explicit command in § Operating it.
 
-   **This is load-bearing, not an optimisation, and it was proven the hard way.** It was briefly removed from both mirrors on the theory that skipping builds risked a silently stale backup host. Within minutes, preview builds from the two mirror projects—on top of the existing `gaycruisebingo` project, all three now building on every branch push—exhausted the **account-wide build rate limit**, and Vercel began refusing deployments across the whole team with *"Deployment rate limited—retry in 24 hours."* That takes out the ability to deploy `gaycruisebingo.vercel.app`, the brand's own ship-network fallback, for a day. Three projects on one repository is enough build volume that unbounded preview builds are not affordable.
+   **Branch-scoped on purpose — do not simplify it to a bare `false`.** A blanket `"deploymentEnabled": false` would also kill Part 2's `git push --force origin HEAD:preview` flow, because the stable alias is a *Git* deployment like any other. Every other branch is left exactly as it was.
 
-   Those preview builds are pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so every one of them fails the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests.
+   **Do not "fix" this by re-enabling automatic deployments.** Every escalation of Vercel build volume on this repo has ended the same way, and it has now happened twice at different scales:
 
-   **Never assume a merge reached the mirrors.** This is the real lesson, and it holds with the ignore step in place: Vercel cancels queued deployments under build pressure, which leaves no visible mark on the running site—the host keeps serving its previous build at `HTTP 200` with correct branding. After any merge that matters, check the latest **production** deployment's state *and its commit*:
+   - **Previews (the first incident).** A per-project Ignored Build Step (`[ "$VERCEL_ENV" != "production" ]`) was briefly removed from both mirrors on the theory that skipping builds risked a silently stale backup host. Within minutes, preview builds from the two mirror projects—on top of `gaycruisebingo`, all three now building on every branch push—exhausted the **account-wide build rate limit**, and Vercel began refusing deployments across the whole team with *"Deployment rate limited—retry in 24 hours."* That takes out `gaycruisebingo.vercel.app`, the brand's own ship-network fallback, for a day.
+   - **Production merges (why #676 went further).** Even with previews skipped, three projects × every merge to `main` is three builds nobody asked for, most of them rebuilding a mirror whose content did not change.
 
-   ```bash
-   TOKEN=$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/Library/Application Support/com.vercel.cli/auth.json')))['token'])")
-   for p in fiveacross vacaybingo; do
-     curl -s -H "Authorization: Bearer $TOKEN" \
-       "https://api.vercel.com/v6/deployments?app=$p&target=production&limit=1&teamId=<teamId>" \
-     | python3 -c "import json,sys;d=json.loads(sys.stdin.read(),strict=False)['deployments'][0];print(p, d['state'], (d.get('meta') or {}).get('githubCommitSha','?')[:12])"
-   done
-   ```
+   Those preview builds were pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so every one of them fails the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests. That is also why the three `Vercel – *` contexts on a PR read *"Canceled by Ignored Build Step"* rather than passing on merit.
 
-   It has to be the API. Neither `vercel ls` nor `vercel inspect` reports the Git SHA—they show `Ready` / `Production` and nothing that distinguishes current from stale, which is precisely the confusion this check exists to resolve.
+   **The two controls are complementary, and both are load-bearing.** They cover different branches, and neither substitutes for the other:
+
+   | Control | Covers | Stops |
+   |---|---|---|
+   | `git.deploymentEnabled: { "main": false }` (`vercel.json`) | `main` only | three production builds per merge |
+   | Ignored Build Step `[ "$VERCEL_ENV" != "production" ]` (per project) | every other branch | the preview builds that caused the first incident |
+
+   Because the disable is scoped to `main`, every feature and PR branch is still Git-deploy-eligible, so the Ignored Build Step is the **only** thing skipping those Preview builds. Removing it recreates the rate-limit incident described immediately above. Do not treat it as redundant.
+
+   **And do not reach for the Ignored Build Step as the manual-deploy switch**—Vercel does not document whether that step also runs for CLI deployments, so setting it to always-skip risks silently cancelling the deploy you just typed. `git.deploymentEnabled` is scoped to commits by definition and has no such ambiguity.
+
+   **Never assume a mirror is current**—the reason has simply moved. It used to be that Vercel cancels queued deployments under build pressure, leaving no visible mark: the host keeps serving its previous build at `HTTP 200` with correct branding. Now it is more direct: nothing publishes a mirror but you.
+
+   **The old Git-SHA check no longer answers this, and fails misleadingly.** It read `meta.githubCommitSha` off the latest production deployment, which exists only on *Git* deployments—a CLI deploy carries no Git metadata at all, so that query now prints `?` and cannot tell current from stale.
+
+   What replaces it is not weaker. The guarded command in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror passes `--build-env GITHUB_SHA=...`, so the **served bundle** carries the exact commit and can be grepped for it, exactly as the Firebase hosts are (§ Post-deploy verification). Distinguish the two: Vercel's *deployment metadata* is unusable on this path, the *bundle stamp* is authoritative. The content-marker check is the fallback for mirrors published before #676, or any deploy where the flag was dropped—a bare `unknown` where a sha was expected means exactly that.
 
 5. **Firebase Auth authorized domains on `fiveacross`.** Console: **Firebase console (fiveacross project) → Authentication → Settings → Authorized domains → Add domain** → `fiveacross.vercel.app`. Scriptable, with a deploy credential for `fiveacross` active—read, append, write back:
 
@@ -279,9 +288,13 @@ Note that steps 3–4 prove the rewrite fires and reaches Firebase Hosting, but 
 
 ### Operating it
 
-Once Git is connected, the mirror deploys **automatically on every push to `main`**; the primary Firebase Hosting deploy is manual (`scripts/deploy.sh`). So the mirror can be *ahead* of the primary, serving merged-but-not-yet-deployed code. That is usually harmless and occasionally not—before an event, deploy the primary first and treat the mirror as already current.
+The mirror deploys **only when you deploy it** (#676)—`vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. The guarded command lives in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror; use it rather than a bare `npx vercel deploy` — it pins the source (`origin/main`, clean tree), the team scope, and the project, none of which the CLI infers safely on its own here.
 
-Add the mirror to the post-deploy check for Five Across: after any deploy that touches `src/**`, load `https://fiveacross.vercel.app/` once and confirm the app mounts, alongside the `SYNTHETIC_URL` check the primary host gets from `scripts/deploy.sh`. The mirror is not covered by that synthetic—it is a different deploy pipeline entirely.
+The guards are not ceremony. `vercel deploy` uploads your **current working directory**—`--project` picks the destination, not the source—so with Git deploys off this is the only production path and the only thing standing between a dirty feature checkout and a live host. `git.deploymentEnabled` governs *Git-triggered* deployments ("branches that should not trigger a deployment upon commits"), so it never blocks the command itself.
+
+This inverts the old hazard. The mirror can no longer be *ahead* of the primary; it is now reliably *behind* until you catch it up, so a deploy that matters is two commands, primary then mirror, in that order. The reason is the account-wide build cap: three projects on one repository meant three production builds per merge, and exhausting the cap refuses deployments team-wide for 24 hours—including `gaycruisebingo.vercel.app`, the brand's own ship-network fallback. The automation was not buying reliability anyway (see the cancelled-build warning in step 4), so the trade is explicit staleness you can see for implicit staleness you cannot.
+
+Add the mirrors to the post-deploy check. After any deploy that changes what a browser receives—`src/**`, `public/**`, `index.html`, `vite.config.ts`, dependencies, or `vercel.json` itself, the same trigger [`../agents/deployment-process.md`](../agents/deployment-process.md) names—publish each affected mirror **after its own Firebase primary has been deployed** — `gaycruisebingo.vercel.app` follows the `gaycruisebingo` project, `vacaybingo.vercel.app` and `fiveacross.vercel.app` follow `fiveacross` — then load each once and confirm it mounts, alongside the `SYNTHETIC_URL` check the primary host gets from `scripts/deploy.sh`. Publishing a mirror whose primary has not moved points a new client at an old backend; the mapping and the reasoning are in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror. The mirrors are not covered by that synthetic—they are a different deploy pipeline entirely, and since #676 nothing publishes them but you.
 
 Handing a mirror to players is a manual decision: it is a backup URL to give out when the primary host is unreachable, not a second address to advertise. And not before that host’s OAuth registration is done—see the warning under Current state.
 
