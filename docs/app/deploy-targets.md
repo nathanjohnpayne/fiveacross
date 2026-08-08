@@ -131,11 +131,11 @@ Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands
 
 The synthetic proves the app mounts; it does not prove *which* build shipped. For that, diff the asset hash before and after, and grep the new bundle for a marker unique to the change.
 
-The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. They need publishing after any change that alters what a browser receives — `src/**`, `public/**`, `index.html`, `vite.config.ts`, dependencies, or `vercel.json` itself. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. Nothing rebuilds them but you.
+The Vercel mirrors are a **separate pipeline** and are not covered by this deploy or its synthetic. They need publishing after any change that alters what a browser receives — `src/**`, `public/**`, `index.html`, `vite.config.ts`, dependencies, or `vercel.json` itself. Since [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676) they are **manual, like the Firebase primaries** — `vercel.json` carries `git.deploymentEnabled: { "**": false, "preview": true }`, so neither a merge nor a branch push builds anything on any of the three projects. Nothing rebuilds them but you.
 
 That is a deliberate trade, and it trades in the direction the failure history points. Three projects on one repository meant three production builds per merge against an account-wide cap that, when exhausted, refuses deployments for **24 hours** across the whole team — taking out the brand's own ship-network fallback on the day you need it. The stale-mirror risk that automation was covering was never actually covered: Vercel silently cancels queued builds under pressure, the host keeps serving its previous bundle at `HTTP 200`, and both mirrors were found 22h and 7h stale on 2026-08-06 *with the integration connected*. Explicit staleness you can see beats implicit staleness you cannot.
 
-Only `main` is disabled. Other branches keep whatever the per-project **Ignored Build Step** already decides, so the `preview`-branch flow in [`preview-deploys.md`](preview-deploys.md) § Part 2 is untouched by this.
+Every branch is denied except `preview`, which is exempted so the stable sign-in alias survives. Note that the alias is separately out of service until the per-project Ignored Build Step is narrowed — see [`preview-deploys.md`](preview-deploys.md) § step 4.
 
 ### Deploying a mirror
 

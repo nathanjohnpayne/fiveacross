@@ -134,7 +134,7 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 | 1. Vercel project | **Done** | **Done** |
 | 2. Minted host confirmed exact | **Done** | **Done** |
 | 3. Production env vars | **Done**—nine `VITE_*`, Production scope | **Done**—same nine, own `authDomain`, `VITE_EDITION=vacay` |
-| 4. Git connected, `main` auto-deploy OFF | **Done**—linked, `git.deploymentEnabled: { main: false }` (#676) | **Done**—same |
+| 4. Git connected, branch auto-deploy OFF | **Done**—linked, `git.deploymentEnabled: { "**": false, "preview": true }` (#676/#680) | **Done**—same |
 | 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
 | 6. Google OAuth redirect URI | **Outstanding—console-only** | **Outstanding—console-only** |
 
@@ -180,12 +180,14 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 4. **Connect Git, and leave auto-deploy off.** Settings → Git → connect `nathanjohnpayne/gaycruisebingo`, production branch `main`. The link is what gives the project a repo to build from; it is **not** what triggers builds. `vercel.json` on `main` carries
 
    ```json
-   "git": { "deploymentEnabled": { "main": false } }
+   "git": { "deploymentEnabled": { "**": false, "preview": true } }
    ```
 
-   so a push to `main` deploys none of the three projects (#676). Deploys are the explicit command in § Operating it.
+   so **no branch deploys any of the three projects except `preview`** (#676, widened in #680). Deploys are the explicit command in § Operating it.
 
-   **Branch-scoped on purpose — do not simplify it to a bare `false`.** A blanket `"deploymentEnabled": false` would also kill Part 2's `git push --force origin HEAD:preview` flow, because the stable alias is a *Git* deployment like any other. Every other branch is left exactly as it was.
+   **`**`, not `*`.** Vercel matches these with [minimatch](https://github.com/isaacs/minimatch), where `*` does not cross a `/` — and every working branch here is `claude/…`, so a `*` rule matches none of them and the setting would look applied while changing nothing. Verified twice: against minimatch 10.2.5 locally, then against Vercel itself — with `**` in place a branch push creates **no deployment record at all**, where the same branch shape created three (one per project) an hour earlier.
+
+   **`preview: true` is the one exception**, because the stable alias is a *Git* deployment like any other and a blanket `false` would kill Part 2. Vercel's documented precedence is that a branch matching several rules deploys if **any** matched rule is `true`.
 
    **Do not "fix" this by re-enabling automatic deployments.** Every escalation of Vercel build volume on this repo has ended the same way, and it has now happened twice at different scales:
 
@@ -194,14 +196,17 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    Those preview builds were pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so every one of them fails the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests. That is also why the three `Vercel – *` contexts on a PR read *"Canceled by Ignored Build Step"* rather than passing on merit.
 
-   **The two controls are complementary, and both are load-bearing.** They cover different branches, and neither substitutes for the other:
+   **⚠️ The per-project Ignored Build Step now cancels the `preview` flow, and has since 2026-08-06.** A live defect, independent of #680 — recorded rather than fixed here, because it is a per-project console setting and not a repo file.
 
-   | Control | Covers | Stops |
-   |---|---|---|
-   | `git.deploymentEnabled: { "main": false }` (`vercel.json`) | `main` only | three production builds per merge |
-   | Ignored Build Step `[ "$VERCEL_ENV" != "production" ]` (per project) | every other branch | the preview builds that caused the first incident |
+   `[ "$VERCEL_ENV" != "production" ]` exits `0` (skip) for **any** non-production deployment, and a `preview`-branch build is `VERCEL_ENV=preview`. The deployment history dates the changeover precisely: branch deployments were `READY` up to 2026-08-05 23:50Z, and every one from 2026-08-06 01:29Z onward is `CANCELED`. Nobody noticed because there have been **zero** `preview`-branch pushes in that window.
 
-   Because the disable is scoped to `main`, every feature and PR branch is still Git-deploy-eligible, so the Ignored Build Step is the **only** thing skipping those Preview builds. Removing it recreates the rate-limit incident described immediately above. Do not treat it as redundant.
+   So `preview: true` above restores the *deployment*; the ignore step still cancels its *build*. **Part 2's device-testing flow does not work until that setting changes too.** Either remove it — with `**: false` in place it has no preview builds left to stop, because those branches never create a deployment at all — or narrow it to spare the alias:
+
+   ```bash
+   [ "$VERCEL_ENV" != "production" ] && [ "$VERCEL_GIT_COMMIT_REF" != "preview" ]
+   ```
+
+   Until one of those lands, treat the preview alias as out of service.
 
    **And do not reach for the Ignored Build Step as the manual-deploy switch**—Vercel does not document whether that step also runs for CLI deployments, so setting it to always-skip risks silently cancelling the deploy you just typed. `git.deploymentEnabled` is scoped to commits by definition and has no such ambiguity.
 
@@ -288,7 +293,7 @@ Note that steps 3–4 prove the rewrite fires and reaches Firebase Hosting, but 
 
 ### Operating it
 
-The mirror deploys **only when you deploy it** (#676)—`vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. The guarded command lives in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror; use it rather than a bare `npx vercel deploy` — it pins the source (`origin/main`, clean tree), the team scope, and the project, none of which the CLI infers safely on its own here.
+The mirror deploys **only when you deploy it** (#676/#680)—`vercel.json` carries `git.deploymentEnabled: { "**": false, "preview": true }`, so neither a merge nor a branch push builds anything on any of the three projects. The guarded command lives in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror; use it rather than a bare `npx vercel deploy` — it pins the source (`origin/main`, clean tree), the team scope, and the project, none of which the CLI infers safely on its own here.
 
 The guards are not ceremony. `vercel deploy` uploads your **current working directory**—`--project` picks the destination, not the source—so with Git deploys off this is the only production path and the only thing standing between a dirty feature checkout and a live host. `git.deploymentEnabled` governs *Git-triggered* deployments ("branches that should not trigger a deployment upon commits"), so it never blocks the command itself.
 
