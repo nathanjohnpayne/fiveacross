@@ -58,12 +58,12 @@ describe('the registers say what the wording tables say', () => {
       place: 'stop',
       placePlural: 'Stops',
       offlineWhy: 'wherever you land',
-      shareMark: '🗺️',
+      shareMark: '🧳',
       fileSlug: 'vacay-bingo',
     });
     expect(brand.scheduleTitle).toBe('Trip schedule');
     expect(brand.championRole).toBe('Trip champion');
-    expect(brand.blackoutShareText).toBe('BLACKOUT. I win the trip. 🗺️');
+    expect(brand.blackoutShareText).toBe('BLACKOUT. I win the trip. 🧳');
   });
 
   it('speaks occasion-neutral on fiveacross, and spends no camp', () => {

@@ -800,20 +800,20 @@
 </head>
 <body>
 <h1 id="sec-intro">Five Across—tri-brand wireframes (Daily Cards)</h1>
-<p class="sub">One platform, three identities, every surface labeled. <b>Five Across</b> (<code>fiveacross.app</code>, general register, minimal camp, share mark ✳️) is the platform; <b>Gay Cruise Bingo</b> (<code>gaycruisebingo.com</code>, cruise register, full camp, 🚢) and <b>Vacay Bingo</b> (<code>vacaybingo.com</code>, trip register, moderate camp, 🗺️) are Editions of it. Every frame opens with a <b>brand chip</b> naming the identity it renders and carries a stable anchor of the form <code>#fx-&lt;surface&gt;-&lt;brand&gt;</code>; pre-rename ids from earlier revisions of this doc still resolve as aliases. Wording follows the signed-off Edition lexicon (#608)—registers, wordmarks, share marks and per-surface tables are binding; the Five Across palette is <b>proposed</b>.</p>
+<p class="sub">One platform, three identities, every surface labeled. <b>Five Across</b> (<code>fiveacross.app</code>, general register, minimal camp, share mark ✳️) is the platform; <b>Gay Cruise Bingo</b> (<code>gaycruisebingo.com</code>, cruise register, full camp, 🚢) and <b>Vacay Bingo</b> (<code>vacaybingo.com</code>, trip register, moderate camp, 🧳) are Editions of it. Every frame opens with a <b>brand chip</b> naming the identity it renders and carries a stable anchor of the form <code>#fx-&lt;surface&gt;-&lt;brand&gt;</code>; pre-rename ids from earlier revisions of this doc still resolve as aliases. Wording follows the signed-off Edition lexicon (#608)—registers, wordmarks, share marks and per-surface tables are binding; the Five Across palette is <b>proposed</b>.</p>
 <p class="sub">Canvas: <b>iPhone 15 Pro—393×852 pt (19.5:9), Safari baseline</b>, with Dynamic Island and home indicator. Installed-PWA frames run standalone (no browser chrome); the install-nudge frame shows Safari’s bottom bar, since that’s the only moment players see it. Every frame is painted with the <b>actual theme tokens from <code>src/theme/themes.css</code></b> (the two tutorial themes, the three Bodega day themes and <code>fiveacross-slate</code> use the palettes proposed in the specs). Marked squares use the app’s real <code>linear-gradient(--primary, --secondary)</code> fill with <code>--on-gradient</code> text. The header always shows <i>today’s</i> port and theme on two lines; the board area retints to the <i>viewed</i> Day.</p>
 
 <nav class="toc" id="toc">
 <p class="tt">Contents</p>
 <ol>
 <li><a href="#sec-brands">The three identities—one platform, two Editions</a>
-<span class="vars"><a href="#fx-lockup-gcb">🚢 fx-lockup-gcb</a><a href="#fx-lockup-vacay">🗺️ fx-lockup-vacay</a><a href="#fx-lockup-fa">✳ fx-lockup-fa</a></span>
+<span class="vars"><a href="#fx-lockup-gcb">🚢 fx-lockup-gcb</a><a href="#fx-lockup-vacay">🧳 fx-lockup-vacay</a><a href="#fx-lockup-fa">✳ fx-lockup-fa</a></span>
 </li>
 <li><a href="#sec-entry">Join &amp; event entry—one gate, three identities</a>
-<span class="vars"><a href="#fx-join-gcb">🚢 fx-join-gcb</a><a href="#fx-join-vacay">🗺️ fx-join-vacay</a><a href="#fx-join-fa">✳ fx-join-fa</a></span>
+<span class="vars"><a href="#fx-join-gcb">🚢 fx-join-gcb</a><a href="#fx-join-vacay">🧳 fx-join-vacay</a><a href="#fx-join-fa">✳ fx-join-fa</a></span>
 </li>
 <li><a href="#sec-onboarding">First open—the coach overlay on three Editions</a>
-<span class="vars"><a href="#fx-coach-gcb">🚢 fx-coach-gcb</a><a href="#fx-coach-vacay">🗺️ fx-coach-vacay</a><a href="#fx-coach-fa">✳ fx-coach-fa</a></span>
+<span class="vars"><a href="#fx-coach-gcb">🚢 fx-coach-gcb</a><a href="#fx-coach-vacay">🧳 fx-coach-vacay</a><a href="#fx-coach-fa">✳ fx-coach-fa</a></span>
 </li>
 <li><a href="#sec-card">The card—active, locked, claiming, proving, notified</a>
 <ol>
@@ -821,16 +821,16 @@
 <span class="vars"><a href="#fx-card-fa">✳ fx-card-fa</a></span>
 </li>
 <li><a href="#sec-card-locked">Locked future card</a>
-<span class="vars"><a href="#fx-locked-gcb">🚢 fx-locked-gcb</a><a href="#fx-locked-vacay">🗺️ fx-locked-vacay</a><a href="#fx-locked-fa">✳ fx-locked-fa</a></span>
+<span class="vars"><a href="#fx-locked-gcb">🚢 fx-locked-gcb</a><a href="#fx-locked-vacay">🧳 fx-locked-vacay</a><a href="#fx-locked-fa">✳ fx-locked-fa</a></span>
 </li>
 <li><a href="#sec-card-claim">Claim sheet—the square tap</a>
-<span class="vars"><a href="#fx-claim-gcb">🚢 fx-claim-gcb</a><a href="#fx-claim-vacay">🗺️ fx-claim-vacay</a><a href="#fx-claim-fa">✳ fx-claim-fa</a></span>
+<span class="vars"><a href="#fx-claim-gcb">🚢 fx-claim-gcb</a><a href="#fx-claim-vacay">🧳 fx-claim-vacay</a><a href="#fx-claim-fa">✳ fx-claim-fa</a></span>
 </li>
 <li><a href="#sec-card-proof">Add proof—the ＋ on a square you already marked</a>
-<span class="vars"><a href="#fx-add-proof-gcb">🚢 fx-add-proof-gcb</a><a href="#fx-add-proof-vacay">🗺️ fx-add-proof-vacay</a><a href="#fx-add-proof-fa">✳ fx-add-proof-fa</a></span>
+<span class="vars"><a href="#fx-add-proof-gcb">🚢 fx-add-proof-gcb</a><a href="#fx-add-proof-vacay">🧳 fx-add-proof-vacay</a><a href="#fx-add-proof-fa">✳ fx-add-proof-fa</a></span>
 </li>
 <li><a href="#sec-card-notice">Admin Notice on the Card screen</a>
-<span class="vars"><a href="#fx-notice-card-gcb">🚢 fx-notice-card-gcb</a><a href="#fx-notice-card-vacay">🗺️ fx-notice-card-vacay</a><a href="#fx-notice-card-fa">✳ fx-notice-card-fa</a></span>
+<span class="vars"><a href="#fx-notice-card-gcb">🚢 fx-notice-card-gcb</a><a href="#fx-notice-card-vacay">🧳 fx-notice-card-vacay</a><a href="#fx-notice-card-fa">✳ fx-notice-card-fa</a></span>
 </li></ol>
 </li>
 <li><a href="#sec-invariant">Brand-invariant mechanics—drawn once</a>
@@ -839,32 +839,32 @@
 <li><a href="#sec-social">The social surfaces—Feed, Notice, Ranks, More</a>
 <ol>
 <li><a href="#sec-social-feed">Feed—tally cards, proofs, Moments, hearts</a>
-<span class="vars"><a href="#fx-feed-gcb">🚢 fx-feed-gcb</a><a href="#fx-feed-vacay">🗺️ fx-feed-vacay</a><a href="#fx-feed-fa">✳ fx-feed-fa</a></span>
+<span class="vars"><a href="#fx-feed-gcb">🚢 fx-feed-gcb</a><a href="#fx-feed-vacay">🧳 fx-feed-vacay</a><a href="#fx-feed-fa">✳ fx-feed-fa</a></span>
 </li>
 <li><a href="#sec-social-notice">The pinned Notice, as players see it</a>
-<span class="vars"><a href="#fx-notice-gcb">🚢 fx-notice-gcb</a><a href="#fx-notice-vacay">🗺️ fx-notice-vacay</a><a href="#fx-notice-fa">✳ fx-notice-fa</a></span>
+<span class="vars"><a href="#fx-notice-gcb">🚢 fx-notice-gcb</a><a href="#fx-notice-vacay">🧳 fx-notice-vacay</a><a href="#fx-notice-fa">✳ fx-notice-fa</a></span>
 </li>
 <li><a href="#sec-social-ranks">Ranks—overall leaderboard + daily honors</a>
-<span class="vars"><a href="#fx-ranks-gcb">🚢 fx-ranks-gcb</a><a href="#fx-ranks-vacay">🗺️ fx-ranks-vacay</a><a href="#fx-ranks-fa">✳ fx-ranks-fa</a></span>
+<span class="vars"><a href="#fx-ranks-gcb">🚢 fx-ranks-gcb</a><a href="#fx-ranks-vacay">🧳 fx-ranks-vacay</a><a href="#fx-ranks-fa">✳ fx-ranks-fa</a></span>
 </li>
 <li><a href="#sec-social-more">More / profile</a>
-<span class="vars"><a href="#fx-more-gcb">🚢 fx-more-gcb</a><a href="#fx-more-vacay">🗺️ fx-more-vacay</a><a href="#fx-more-fa">✳ fx-more-fa</a></span>
+<span class="vars"><a href="#fx-more-gcb">🚢 fx-more-gcb</a><a href="#fx-more-vacay">🧳 fx-more-vacay</a><a href="#fx-more-fa">✳ fx-more-fa</a></span>
 </li></ol>
 </li>
 <li><a href="#sec-system">Five Across · System surfaces—install, update, utility states</a>
 <ol>
 <li><a href="#sec-system-install">Install nudge—three Editions, three offline promises</a>
-<span class="vars"><a href="#fx-install-gcb">🚢 fx-install-gcb</a><a href="#fx-install-vacay">🗺️ fx-install-vacay</a><a href="#fx-install-fa">✳ fx-install-fa</a></span>
+<span class="vars"><a href="#fx-install-gcb">🚢 fx-install-gcb</a><a href="#fx-install-vacay">🧳 fx-install-vacay</a><a href="#fx-install-fa">✳ fx-install-fa</a></span>
 </li>
 <li><a href="#sec-system-update">Update banner—three lead-ins, one mechanism</a>
-<span class="vars"><a href="#fx-update-gcb">🚢 fx-update-gcb</a><a href="#fx-update-vacay">🗺️ fx-update-vacay</a><a href="#fx-update-fa">✳ fx-update-fa</a></span>
+<span class="vars"><a href="#fx-update-gcb">🚢 fx-update-gcb</a><a href="#fx-update-vacay">🧳 fx-update-vacay</a><a href="#fx-update-fa">✳ fx-update-fa</a></span>
 </li></ol>
 </li>
 <li><a href="#sec-gcb-gallery">Gay Cruise Bingo · Day-by-day gallery—one card per Day, Trieste → Barcelona</a>
 <span class="vars"><a href="#fx-day-1-gcb">🚢 fx-day-1-gcb</a><a href="#fx-day-2-gcb">🚢 fx-day-2-gcb</a><a href="#fx-day-3-gcb">🚢 fx-day-3-gcb</a><a href="#fx-day-4-gcb">🚢 fx-day-4-gcb</a><a href="#fx-day-5-gcb">🚢 fx-day-5-gcb</a><a href="#fx-day-6-gcb">🚢 fx-day-6-gcb</a><a href="#fx-day-7-gcb">🚢 fx-day-7-gcb</a><a href="#fx-day-8-gcb">🚢 fx-day-8-gcb</a><a href="#fx-day-9-gcb">🚢 fx-day-9-gcb</a><a href="#fx-day-10-gcb">🚢 fx-day-10-gcb</a></span>
 </li>
 <li><a href="#sec-vacay">Vacay Bingo · Weekend in Bodega Bay—the trip Edition</a>
-<span class="vars"><a href="#fx-day-1-vacay">🗺️ fx-day-1-vacay</a><a href="#fx-card-vacay">🗺️ fx-card-vacay</a><a href="#fx-day-3-vacay">🗺️ fx-day-3-vacay</a><a href="#fx-podium-vacay">🗺️ fx-podium-vacay</a></span>
+<span class="vars"><a href="#fx-day-1-vacay">🧳 fx-day-1-vacay</a><a href="#fx-card-vacay">🧳 fx-card-vacay</a><a href="#fx-day-3-vacay">🧳 fx-day-3-vacay</a><a href="#fx-podium-vacay">🧳 fx-podium-vacay</a></span>
 </li>
 <li><a href="#sec-fa-gallery">Five Across · A two-Day Event—the platform with no Edition on top</a>
 <span class="vars"><a href="#fx-day-1-fa">✳ fx-day-1-fa</a><a href="#fx-day-2-fa">✳ fx-day-2-fa</a></span>
@@ -883,17 +883,17 @@
 </li></ol>
 </li>
 <li><a href="#sec-share">Share surfaces—one renderer, three identities</a>
-<span class="vars"><a href="#fx-share-bingo-gcb">🚢 fx-share-bingo-gcb</a><a href="#fx-share-bingo-vacay">🗺️ fx-share-bingo-vacay</a><a href="#fx-share-bingo-fa">✳ fx-share-bingo-fa</a><a href="#fx-share-blackout-gcb">🚢 fx-share-blackout-gcb</a><a href="#fx-share-blackout-vacay">🗺️ fx-share-blackout-vacay</a><a href="#fx-share-blackout-fa">✳ fx-share-blackout-fa</a><a href="#fx-share-ranks-gcb">🚢 fx-share-ranks-gcb</a><a href="#fx-share-ranks-vacay">🗺️ fx-share-ranks-vacay</a><a href="#fx-share-ranks-fa">✳ fx-share-ranks-fa</a><a href="#fx-share-final-gcb">🚢 fx-share-final-gcb</a><a href="#fx-share-final-vacay">🗺️ fx-share-final-vacay</a><a href="#fx-share-final-fa">✳ fx-share-final-fa</a><a href="#fx-share-final-photo-gcb">🚢 fx-share-final-photo-gcb</a><a href="#fx-share-final-photo-vacay">🗺️ fx-share-final-photo-vacay</a><a href="#fx-share-final-photo-fa">✳ fx-share-final-photo-fa</a></span>
+<span class="vars"><a href="#fx-share-bingo-gcb">🚢 fx-share-bingo-gcb</a><a href="#fx-share-bingo-vacay">🧳 fx-share-bingo-vacay</a><a href="#fx-share-bingo-fa">✳ fx-share-bingo-fa</a><a href="#fx-share-blackout-gcb">🚢 fx-share-blackout-gcb</a><a href="#fx-share-blackout-vacay">🧳 fx-share-blackout-vacay</a><a href="#fx-share-blackout-fa">✳ fx-share-blackout-fa</a><a href="#fx-share-ranks-gcb">🚢 fx-share-ranks-gcb</a><a href="#fx-share-ranks-vacay">🧳 fx-share-ranks-vacay</a><a href="#fx-share-ranks-fa">✳ fx-share-ranks-fa</a><a href="#fx-share-final-gcb">🚢 fx-share-final-gcb</a><a href="#fx-share-final-vacay">🧳 fx-share-final-vacay</a><a href="#fx-share-final-fa">✳ fx-share-final-fa</a><a href="#fx-share-final-photo-gcb">🚢 fx-share-final-photo-gcb</a><a href="#fx-share-final-photo-vacay">🧳 fx-share-final-photo-vacay</a><a href="#fx-share-final-photo-fa">✳ fx-share-final-photo-fa</a></span>
 </li>
 <li><a href="#sec-og">Link unfurls—the rendered OG assets</a>
-<span class="vars"><a href="#fx-og-png-gcb">🚢 fx-og-png-gcb</a><a href="#fx-og-png-vacay">🗺️ fx-og-png-vacay</a><a href="#fx-og-png-fa">✳ fx-og-png-fa</a></span>
+<span class="vars"><a href="#fx-og-png-gcb">🚢 fx-og-png-gcb</a><a href="#fx-og-png-vacay">🧳 fx-og-png-vacay</a><a href="#fx-og-png-fa">✳ fx-og-png-fa</a></span>
 <ol>
 <li><a href="#sec-og-wireframes">The artboards</a>
-<span class="vars"><a href="#fx-og-gcb">🚢 fx-og-gcb</a><a href="#fx-og-vacay">🗺️ fx-og-vacay</a><a href="#fx-og-fa">✳ fx-og-fa</a></span>
+<span class="vars"><a href="#fx-og-gcb">🚢 fx-og-gcb</a><a href="#fx-og-vacay">🧳 fx-og-vacay</a><a href="#fx-og-fa">✳ fx-og-fa</a></span>
 </li></ol>
 </li>
 <li><a href="#sec-email">Daily engagement email—the Day’s Theme in the inbox</a>
-<span class="vars"><a href="#fx-email-anatomy">✳ fx-email-anatomy</a><a href="#fx-email-vacay">🗺️ fx-email-vacay</a><a href="#fx-email-gcb">🚢 fx-email-gcb</a><a href="#fx-email-registers-tri">○ fx-email-registers-tri</a></span>
+<span class="vars"><a href="#fx-email-anatomy">✳ fx-email-anatomy</a><a href="#fx-email-vacay">🧳 fx-email-vacay</a><a href="#fx-email-gcb">🚢 fx-email-gcb</a><a href="#fx-email-registers-tri">○ fx-email-registers-tri</a></span>
 </li>
 </ol>
 </nav>
@@ -921,7 +921,7 @@
   </div>
 
   <div class="unit" id="fx-lockup-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="bcard" data-theme="bodega-side-quests">
       <div class="lock"><div class="vlock"><div class="vb">VACAY BINGO</div><div class="by">by Five Across</div></div>
         <div class="tagline">Take the detour. <span style="opacity:.75">For the story.</span></div>
@@ -930,7 +930,7 @@
       <div class="rule"></div>
         <div class="brow"><div class="k">Domain</div><div class="v">vacaybingo.com</div></div>
         <div class="brow"><div class="k">Register</div><div class="v">Trip · <em>Days are Stops · the crowd is the group · offline holds up wherever you land</em></div></div>
-        <div class="brow"><div class="k">Share mark</div><div class="v"><span class="mark">🗺️</span> · file slug <code>vacay-bingo-*</code></div></div>
+        <div class="brow"><div class="k">Share mark</div><div class="v"><span class="mark">🧳</span> · file slug <code>vacay-bingo-*</code></div></div>
         <div class="brow"><div class="k">Voice</div><div class="v">Moderate camp — the spontaneous friend who suggests the detour. No decorative lead-ins.</div></div>
         <div class="brow"><div class="k">Palette</div><div class="v">Sonoma Coast, deliberately non-tropical; reference <code>bodega-side-quests</code>.</div></div>
         <div class="brow"><div class="k">18+</div><div class="v">Dynamic — Bodega derives <code>adultContent: false</code>, so no gate is drawn.</div></div>
@@ -988,7 +988,7 @@
   <!-- ---------- Join · Vacay Bingo (absorbs #frame-vacay-join) ---------- -->
   <div class="unit" id="fx-join-vacay">
     <a class="alias" id="frame-vacay-join"></a>
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="birds-group-chat">
       <div class="board" style="gap:10px;justify-content:center">
         <div class="vlock"><div class="vb">VACAY BINGO</div><div class="by">by Five Across</div><div class="tag">Take the detour. <span style="opacity:.75">For the story.</span></div></div>
@@ -1072,7 +1072,7 @@
 
   <!-- ---------- Coach · Vacay Bingo ---------- -->
   <div class="unit" id="fx-coach-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="birds-group-chat">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
@@ -1273,7 +1273,7 @@
   </div>
 
   <div class="unit" id="fx-locked-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="fog-froth-farewells">
       <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Saturday · Bodega Bay</div><div class="theme">Side Quests</div></div></div>
       <div class="strip"><div class="chip">✓ Fri 🐦</div><div class="chip">Sat 🌊</div><div class="chip lock now">🔒 Sun 🌫️</div></div>
@@ -1357,7 +1357,7 @@
   </div>
 
   <div class="unit" id="fx-claim-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Saturday · Bodega Bay</div><div class="theme">Side Quests</div></div></div>
       <div class="board" style="padding-bottom:0">
@@ -1432,7 +1432,7 @@
   </div>
 
   <div class="unit" id="fx-add-proof-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Saturday · Bodega Bay</div><div class="theme">Side Quests</div></div></div>
       <div class="board" style="padding-bottom:0">
@@ -1499,7 +1499,7 @@
   </div>
 
   <div class="unit" id="fx-notice-card-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Saturday · Bodega Bay</div><div class="theme">Side Quests</div></div></div>
       <div class="strip"><div class="chip">✓ Fri 🐦</div><div class="chip now">Sat 🌊</div><div class="chip lock">🔒 Sun 🌫️</div></div>
@@ -1700,7 +1700,7 @@
 
   <!-- Feed · Vacay Bingo -->
   <div class="unit" id="fx-feed-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="birds-group-chat">
       <div class="hdr">
         <div class="title vc-title">VACAY <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
@@ -1839,14 +1839,14 @@
 
   <!-- Pinned Notice · Vacay Bingo -->
   <div class="unit" id="fx-notice-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr">
         <div class="title vc-title">VACAY <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">📍 Bodega Bay</div><div class="theme">🌫️ Fog, Froth &amp; Farewells</div></div>
       </div>
       <div class="board" style="gap:8px">
-        <div class="noticecard"><span class="dx">✕</span><b>Last morning</b>Every card you've unlocked is still in play. Once a thing has happened, it's happened — if it's on two of your cards, that's two squares. Scroll back through the weekend, light up everything you've earned, and stack those bingos before we drive home. 🗺️<span class="who">📌 Kim · Day 3</span></div>
+        <div class="noticecard"><span class="dx">✕</span><b>Last morning</b>Every card you've unlocked is still in play. Once a thing has happened, it's happened — if it's on two of your cards, that's two squares. Scroll back through the weekend, light up everything you've earned, and stack those bingos before we drive home. 🧳<span class="who">📌 Kim · Day 3</span></div>
         <div class="row"><div class="grow">📷 Rae marked "Fog rolls in mid-photo"<span class="who">Day 3 · 4m ago · 1 doubt</span></div></div>
         <div class="row"><div class="grow">🏆 BINGO — Dev<span class="who">Day 3 · Fog, Froth &amp; Farewells · 18m ago</span></div></div>
         <div class="row"><div class="grow">✍️ Sam marked "Someone buys a sweatshirt they did not plan on"<span class="who">Day 3 · 25m ago</span></div></div>
@@ -1858,7 +1858,7 @@
         <div class="tab"><span>⋯</span>More</div>
       </div>
     </div>
-    <p class="cap"><b>Pinned Notice—trip register</b>Same accent-bordered card, same pin/attribution convention, same non-dismissible Feed copy. Every cruise noun is gone: <i>at sea</i> → the weekend, <i>before we dock in Barcelona</i> → before we drive home, and the sign-off mark is 🗺️. The decorative headline lead-in (GCB's 🏁) drops out—moderate camp keeps functional and Theme emoji, not flourishes. Palette is the Vacay reference theme <code>bodega-side-quests</code> (Pacific blue, sea-glass, buoy orange).</p>
+    <p class="cap"><b>Pinned Notice—trip register</b>Same accent-bordered card, same pin/attribution convention, same non-dismissible Feed copy. Every cruise noun is gone: <i>at sea</i> → the weekend, <i>before we dock in Barcelona</i> → before we drive home, and the sign-off mark is 🧳. The decorative headline lead-in (GCB's 🏁) drops out—moderate camp keeps functional and Theme emoji, not flourishes. Palette is the Vacay reference theme <code>bodega-side-quests</code> (Pacific blue, sea-glass, buoy orange).</p>
   </div>
 
   <!-- Pinned Notice · Five Across -->
@@ -1931,7 +1931,7 @@
 
   <!-- Ranks · Vacay Bingo -->
   <div class="unit" id="fx-ranks-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr">
         <div class="title vc-title">VACAY <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
@@ -2049,7 +2049,7 @@
 
   <!-- More · Vacay Bingo -->
   <div class="unit" id="fx-more-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr">
         <div class="title vc-title">VACAY <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
@@ -2072,7 +2072,7 @@
         <div class="menurow"><span class="mi"><svg data-lucide="bug" class="lucide lucide-bug" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M12 20v-9" /> <path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z" /> <path d="M14.12 3.88 16 2" /> <path d="M21 21a4 4 0 0 0-3.81-4" /> <path d="M21 5a4 4 0 0 1-3.55 3.97" /> <path d="M22 13h-4" /> <path d="M3 21a4 4 0 0 1 3.81-4" /> <path d="M3 5a4 4 0 0 0 3.55 3.97" /> <path d="M6 13H2" /> <path d="m8 2 1.88 1.88" /> <path d="M9 7.13V6a3 3 0 1 1 6 0v1.13" /> </svg></span><div class="grow">Report a bug<span class="who">Tell us what broke; we're also on vacation</span></div><span class="chev"><svg data-lucide="chevron-right" class="lucide lucide-chevron-right" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="m9 18 6-6-6-6" /> </svg></span></div>
         <div class="menurow"><span class="mi"><svg data-lucide="shield-alert" class="lucide lucide-shield-alert" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /> <path d="M12 8v4" /> <path d="M12 16h.01" /> </svg></span><div class="grow">Community guidelines<span class="who">Honor system, be kind—nothing you would not want the whole group to see</span></div><span class="chev"><svg data-lucide="chevron-right" class="lucide lucide-chevron-right" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="m9 18 6-6-6-6" /> </svg></span></div>
         <div class="menurow signout"><span class="mi"><svg data-lucide="log-out" class="lucide lucide-log-out" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="m16 17 5-5-5-5" /> <path d="M21 12H9" /> <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /> </svg></span><div class="grow">Sign out</div></div>
-        <div class="note">v2.0 · Bodega Bay · Aug 7–9 · 🗺️</div>
+        <div class="note">v2.0 · Bodega Bay · Aug 7–9 · 🧳</div>
       </div>
       <div class="tabs">
         <div class="tab"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div>
@@ -2081,7 +2081,7 @@
         <div class="tab on"><span><i class="tabavatar"></i></span>More</div>
       </div>
     </div>
-    <p class="cap"><b>More—trip register</b>Row by row against GCB: <i>Trip schedule / Stops, parties, unlock times</i>, <i>Replay the welcome walkthrough</i> (the Welcome Aboard proper noun is GCB-scoped), <i>works offline wherever you land</i>. The Support advisory reads <i>Community guidelines</i> because Bodega's pool holds no spicy Prompts—the label follows <code>hostnames/{host}.adultContent</code>, not the Edition, so a Vacay Event with a spicy pool would read “18+ &amp; acceptable use” here instead. No Admin section: this is a guest's view, and the console it would open is Five Across chrome on every Edition. Version footer swaps the route for the trip and the 🍑 for 🗺️.</p>
+    <p class="cap"><b>More—trip register</b>Row by row against GCB: <i>Trip schedule / Stops, parties, unlock times</i>, <i>Replay the welcome walkthrough</i> (the Welcome Aboard proper noun is GCB-scoped), <i>works offline wherever you land</i>. The Support advisory reads <i>Community guidelines</i> because Bodega's pool holds no spicy Prompts—the label follows <code>hostnames/{host}.adultContent</code>, not the Edition, so a Vacay Event with a spicy pool would read “18+ &amp; acceptable use” here instead. No Admin section: this is a guest's view, and the console it would open is Five Across chrome on every Edition. Version footer swaps the route for the trip and the 🍑 for 🧳.</p>
   </div>
 
   <!-- More · Five Across -->
@@ -2167,7 +2167,7 @@
   </div>
 
   <div class="unit" id="fx-install-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="minisys" data-theme="bodega-side-quests">
       <div class="cropboard">
         <div class="grid">
@@ -2271,7 +2271,7 @@
   </div>
 
   <div class="unit" id="fx-update-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="minisys" data-theme="birds-group-chat">
       <div class="cropboard">
         <div class="grid">
@@ -2288,7 +2288,7 @@
         </div>
       </div>
       <div class="systoast">
-        <span class="toasticon">🗺️</span>
+        <span class="toasticon">🧳</span>
         <div class="grow">A fresh build just landed<span class="who">Your marks are safe&mdash;reload takes two seconds</span></div>
         <span class="btn ok">Reload</span><span class="btn">Not now</span>
       </div>
@@ -2299,7 +2299,7 @@
         <div class="tab"><span><i class="tabavatar"></i></span>More</div>
       </div>
     </div>
-    <p class="cap"><b>Update · Vacay Bingo</b>The same banner with the Edition's lead-in and verb: 🗺️ and <i>landed</i>. Vacay drops decorative lead-ins as a rule, but a toast lead-in is the one place the rule holds an exception—the icon slot exists whether or not it carries camp, so the choice is <i>which</i> mark, not whether to have one. The second line stays byte-identical on all three Editions: it carries no occasion noun, so the lexicon sweep leaves it alone.</p>
+    <p class="cap"><b>Update · Vacay Bingo</b>The same banner with the Edition's lead-in and verb: 🧳 and <i>landed</i>. Vacay drops decorative lead-ins as a rule, but a toast lead-in is the one place the rule holds an exception—the icon slot exists whether or not it carries camp, so the choice is <i>which</i> mark, not whether to have one. The second line stays byte-identical on all three Editions: it carries no occasion noun, so the lexicon sweep leaves it alone.</p>
   </div>
 
   <div class="unit" id="fx-update-fa">
@@ -2341,11 +2341,11 @@
 <div class="frames" id="gallery"></div>
 
 <h2 id="sec-vacay">Vacay Bingo · Weekend in Bodega Bay—the trip Edition</h2>
-<p class="sub">Same Five Across system, new emotional layer. <b>Trip register at moderate camp</b>: Days are <i>Stops</i>, the crowd is <i>the group</i>, offline holds up <i>wherever you land</i>. One-identity rule—every frame shows <b>VACAY BINGO</b> over the small-caps <b>BY FIVE ACROSS</b> endorsement, never two competing brands, regardless of which hostname the player entered through. Vacay owns colors, imagery, prompt language and recap treatment; the grid, marking, tally and navigation are untouched platform mechanics. Bodega is deliberately non-tropical—fog silver, sea-glass green, Pacific blue, weathered red, postcard cream: a Sonoma Coast weekend preserved in a scrapbook. Share mark 🗺️, file slug <code>vacay-bingo-*</code>, domain <code>vacaybingo.com</code>. Voice: the spontaneous friend who suggests the detour. The sign-in gate for this trip is <a href="#fx-join-vacay">fx-join-vacay</a>, drawn beside its two siblings in §3.</p>
+<p class="sub">Same Five Across system, new emotional layer. <b>Trip register at moderate camp</b>: Days are <i>Stops</i>, the crowd is <i>the group</i>, offline holds up <i>wherever you land</i>. One-identity rule—every frame shows <b>VACAY BINGO</b> over the small-caps <b>BY FIVE ACROSS</b> endorsement, never two competing brands, regardless of which hostname the player entered through. Vacay owns colors, imagery, prompt language and recap treatment; the grid, marking, tally and navigation are untouched platform mechanics. Bodega is deliberately non-tropical—fog silver, sea-glass green, Pacific blue, weathered red, postcard cream: a Sonoma Coast weekend preserved in a scrapbook. Share mark 🧳, file slug <code>vacay-bingo-*</code>, domain <code>vacaybingo.com</code>. Voice: the spontaneous friend who suggests the detour. The sign-in gate for this trip is <a href="#fx-join-vacay">fx-join-vacay</a>, drawn beside its two siblings in §3.</p>
 <div class="frames">
 
   <div class="unit" id="fx-day-1-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="birds-group-chat">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
@@ -2404,7 +2404,7 @@
 
   <div class="unit" id="fx-card-vacay">
     <a class="alias" id="frame-vacay-card-sidequests"></a>
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="bodega-side-quests">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
@@ -2433,7 +2433,7 @@
   </div>
 
   <div class="unit" id="fx-day-3-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="fog-froth-farewells">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
@@ -2491,7 +2491,7 @@
 
   <div class="unit" id="fx-podium-vacay">
     <a class="alias" id="frame-vacay-finale"></a>
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="fog-froth-farewells">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
@@ -2515,7 +2515,7 @@
         <div class="tab"><span><i class="tabavatar"></i></span>More</div>
       </div>
     </div>
-    <p class="cap"><b>Finale—scrapbook, not scoreboard</b>The trip's closing surface, in trip register: <b>🏆 Trip champion</b> and the ⭐ trip-wide First to BINGO. Most-Loved Photo leads (frozen at the standings freeze; ties share the honor; if no photo earned a heart, this block becomes plain photo highlights), then the podium and Daily Honors. Hearts never touch bingo scoring. Sharing this podium produces a <code>vacay-bingo-*.png</code> footed <b>Vacay Bingo 🗺️</b>. If the finale is descoped for launch (PRD descope ladder), this frame minus the Most-Loved block is the shipping state. <span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span><span class="sw" style="background:#efece4"></span></p>
+    <p class="cap"><b>Finale—scrapbook, not scoreboard</b>The trip's closing surface, in trip register: <b>🏆 Trip champion</b> and the ⭐ trip-wide First to BINGO. Most-Loved Photo leads (frozen at the standings freeze; ties share the honor; if no photo earned a heart, this block becomes plain photo highlights), then the podium and Daily Honors. Hearts never touch bingo scoring. Sharing this podium produces a <code>vacay-bingo-*.png</code> footed <b>Vacay Bingo 🧳</b>. If the finale is descoped for launch (PRD descope ladder), this frame minus the Most-Loved block is the shipping state. <span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span><span class="sw" style="background:#efece4"></span></p>
   </div>
 
 </div>
@@ -2811,7 +2811,7 @@
         </div>
       </div>
       <div class="cmpcol">
-        <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+        <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
           <div class="evctx"><div class="grow">Weekend in Bodega Bay · Aug 7–9<span class="who">bodega-bay.vacaybingo.com · Trip register</span></div><span class="edn">vacay</span></div>
           <div class="menurow"><div class="grow">Schedule<span class="who">3 Stops · next unlock Sat 6:00</span></div></div>
@@ -2845,7 +2845,7 @@
         </div>
       </div>
       <div class="cmpcol">
-        <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+        <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
           <div class="secthead">Audience</div>
           <div class="menurow"><div class="grow">Adults-only posture<span class="who">Off — no active spicy Prompts</span></div><span class="pill">18+ off</span></div>
@@ -2883,7 +2883,7 @@
         </div>
       </div>
       <div class="cmpcol">
-        <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+        <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
           <div class="secthead">Stops · 3</div>
           <div class="schedrow">Fri 7 · Bodega Bay <span class="pill">tutorial</span><span class="dd dis">🐦 Birds / Group Chat</span></div>
@@ -2920,11 +2920,11 @@
         </div>
       </div>
       <div class="cmpcol">
-        <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+        <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
           <div class="secthead">New message</div>
           <div class="msgbox">Last morning</div>
-          <div class="msgbox tall">Fog until ten, then coffee at the harbour. Every card you've unlocked is still live—scroll back, mark what you actually did, and take the long way home. 🗺️</div>
+          <div class="msgbox tall">Fog until ten, then coffee at the harbour. Every card you've unlocked is still live—scroll back, mark what you actually did, and take the long way home. 🧳</div>
           <div class="note">Moderate camp · one mark, no lead-in</div>
         </div>
       </div>
@@ -2938,7 +2938,7 @@
         </div>
       </div>
     </div>
-    <p class="cap"><b>Message composition—identical composer, three registers</b>The only strip where nothing in the interface differs at all: same two fields, same placeholders ("Title", "What does everyone need to know?"), same pin toggle, same Post button, same broadcast semantics. What differs is the emoji budget and the voice, and it is worth drawing because it is the difference an organizer will actually feel. Gay Cruise Bingo spends decorative emoji freely; Vacay keeps the functional set plus its 🗺️ and drops the lead-ins; Five Across writes in sentence case with functional emoji only, and treats offline as a headline capability rather than a footnote—a packed venue drops signal more reliably than a ship does.</p>
+    <p class="cap"><b>Message composition—identical composer, three registers</b>The only strip where nothing in the interface differs at all: same two fields, same placeholders ("Title", "What does everyone need to know?"), same pin toggle, same Post button, same broadcast semantics. What differs is the emoji budget and the voice, and it is worth drawing because it is the difference an organizer will actually feel. Gay Cruise Bingo spends decorative emoji freely; Vacay keeps the functional set plus its 🧳 and drops the lead-ins; Five Across writes in sentence case with functional emoji only, and treats offline as a headline capability rather than a footnote—a packed venue drops signal more reliably than a ship does.</p>
   </div>
 
   <!-- Comparison 5: share-asset previews -->
@@ -2966,7 +2966,7 @@
         <p class="cmpmeta"><code>gay-cruise-bingo-bingo.png</code><br>"I got BINGO on the high seas 🚢"</p>
       </div>
       <div class="cmpcol">
-        <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+        <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
         <div class="cmpshc">
           <div class="shc" data-theme="bodega-side-quests">
             <div class="ev">Vacay Bingo · Day 2 · Bodega Head</div>
@@ -2980,10 +2980,10 @@
               <div class="sq on">Bodega Head viewpoint</div><div class="sq"></div><div class="sq"></div><div class="sq"></div><div class="sq on line">Oysters before noon</div>
             </div>
             <div class="stat">Bingo #1 · 11 squares · 🌊 Side Quests</div>
-            <div class="foot">Vacay Bingo 🗺️</div>
+            <div class="foot">Vacay Bingo 🧳</div>
           </div>
         </div>
-        <p class="cmpmeta"><code>vacay-bingo-bingo.png</code><br>"I got BINGO on this trip 🗺️"</p>
+        <p class="cmpmeta"><code>vacay-bingo-bingo.png</code><br>"I got BINGO on this trip 🧳"</p>
       </div>
       <div class="cmpcol">
         <span class="brand-chip brand-fa">✳ Five Across</span>
@@ -3006,7 +3006,7 @@
         <p class="cmpmeta"><code>five-across-bingo.png</code><br>"I got BINGO. ✳️"</p>
       </div>
     </div>
-    <p class="cap"><b>Share-asset previews—the console's proof that the mark follows the Event</b>Same 600×750 canvas, same on-device html-to-image render, same composition (the word, the name, the line); drawn here at 86% of the doc's half-scale artboard so three fit the strip. Four things are Edition-resolved and all four are visible: the context line's app name, the theme tokens the card renders in, the footer mark (🚢 / 🗺️ / ✳️ from <code>lexicon.shareMark</code>) and the download slug (<code>lexicon.fileSlug</code>). The celebration text beneath each is a whole-string override, not a token swap—"I got BINGO on the high {occasion}" is exactly the sentence that breaks under interpolation. Live bug this strip documents: all three share surfaces currently pass <code>canonicalOrigin()</code>, so a Bodega guest's link still unfurls as Gay Cruise Bingo today.</p>
+    <p class="cap"><b>Share-asset previews—the console's proof that the mark follows the Event</b>Same 600×750 canvas, same on-device html-to-image render, same composition (the word, the name, the line); drawn here at 86% of the doc's half-scale artboard so three fit the strip. Four things are Edition-resolved and all four are visible: the context line's app name, the theme tokens the card renders in, the footer mark (🚢 / 🧳 / ✳️ from <code>lexicon.shareMark</code>) and the download slug (<code>lexicon.fileSlug</code>). The celebration text beneath each is a whole-string override, not a token swap—"I got BINGO on the high {occasion}" is exactly the sentence that breaks under interpolation. Live bug this strip documents: all three share surfaces currently pass <code>canonicalOrigin()</code>, so a Bodega guest's link still unfurls as Gay Cruise Bingo today.</p>
   </div>
 
 </div>
@@ -3267,7 +3267,7 @@
     <tr>
       <td>Update banner</td><td><code>fx-update-*</code></td>
       <td>Toast lead-in emoji</td>
-      <td>🚢</td><td>🗺️</td><td>⬆️</td>
+      <td>🚢</td><td>🧳</td><td>⬆️</td>
       <td>token (<code>shareMark</code>-adjacent)</td>
     </tr>
     <tr>
@@ -3368,7 +3368,7 @@
 </table>
 
 <h2 id="sec-share">Share surfaces—one renderer, three identities</h2>
-<p class="sub">The five outbound surfaces, drawn three times each: <b>Gay Cruise Bingo</b> (cruise register, full camp, share mark 🚢, <code>gaycruisebingo.com</code>), <b>Vacay Bingo</b> (trip register, moderate camp, 🗺️, <code>vacaybingo.com</code>), and <b>Five Across</b> (general register, minimal camp, ✳️, <code>fiveacross.app</code>). Everything structural is the same shared renderer—<code>ShareCard.tsx</code>'s 600×750 canvas, the same podium and honoree blocks, the same on-device <code>html-to-image</code> raster (ADR 0005)—so what differs frame to frame is exactly what the Edition lexicon (#608) owns: the theme tokens, the occasion nouns, the footer share mark, the celebration text, and the download slug. The GCB frames are byte-identical to what ships today; that is the point, since <code>gcb</code> is the fallback Edition and any drift there is a bug. Share cards are drawn at half scale; the OG artboards at 1/8. Footer marks and celebration strings below are quoted verbatim from the signed-off lexicon.</p>
+<p class="sub">The five outbound surfaces, drawn three times each: <b>Gay Cruise Bingo</b> (cruise register, full camp, share mark 🚢, <code>gaycruisebingo.com</code>), <b>Vacay Bingo</b> (trip register, moderate camp, 🧳, <code>vacaybingo.com</code>), and <b>Five Across</b> (general register, minimal camp, ✳️, <code>fiveacross.app</code>). Everything structural is the same shared renderer—<code>ShareCard.tsx</code>'s 600×750 canvas, the same podium and honoree blocks, the same on-device <code>html-to-image</code> raster (ADR 0005)—so what differs frame to frame is exactly what the Edition lexicon (#608) owns: the theme tokens, the occasion nouns, the footer share mark, the celebration text, and the download slug. The GCB frames are byte-identical to what ships today; that is the point, since <code>gcb</code> is the fallback Edition and any drift there is a bug. Share cards are drawn at half scale; the OG artboards at 1/8. Footer marks and celebration strings below are quoted verbatim from the signed-off lexicon.</p>
 
 <p class="sub"><b>1 · BINGO card</b>—the word, the name, the line. Marked squares carry their prompt text (issue #444) so the card doubles as receipts on pinch-to-zoom; unmarked squares stay blank so the board reads as shape at iMessage-bubble size. Only the context line, stat line, footer mark and celebration text move between Editions.</p>
 <div class="frames">
@@ -3394,7 +3394,7 @@
   </div>
 
   <div class="unit" id="fx-share-bingo-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="shc" data-theme="bodega-side-quests">
       <div class="ev">Vacay Bingo · Day 2 · Bodega Bay</div>
       <div class="big">BINGO!</div>
@@ -3407,9 +3407,9 @@
         <div class="sq"></div><div class="sq"></div><div class="sq on">Pull over for the view</div><div class="sq"></div><div class="sq on line">Windblown group selfie</div>
       </div>
       <div class="stat">Bingo #1 · 11 squares · 🌊 Side Quests</div>
-      <div class="foot">Vacay Bingo 🗺️</div>
+      <div class="foot">Vacay Bingo 🧳</div>
     </div>
-    <p class="cap"><b>Trip register—stop, group, moderate camp</b>Same composition, Pacific blue over sea-glass with the buoy-orange free centre. Context line names the Day and its <i>Stop</i>; the Theme emoji survives the register cut (Themes are Edition-scoped data) while decorative lead-ins do not. Share text <i>"I got BINGO on this trip 🗺️"</i>; file <code>vacay-bingo-bingo.png</code>. Prompts read as invitations, not chores.</p>
+    <p class="cap"><b>Trip register—stop, group, moderate camp</b>Same composition, Pacific blue over sea-glass with the buoy-orange free centre. Context line names the Day and its <i>Stop</i>; the Theme emoji survives the register cut (Themes are Edition-scoped data) while decorative lead-ins do not. Share text <i>"I got BINGO on this trip 🧳"</i>; file <code>vacay-bingo-bingo.png</code>. Prompts read as invitations, not chores.</p>
   </div>
 
   <div class="unit" id="fx-share-bingo-fa">
@@ -3457,7 +3457,7 @@
   </div>
 
   <div class="unit" id="fx-share-blackout-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="shc" data-theme="birds-group-chat">
       <div class="ev">Vacay Bingo · Day 1 · Bodega Bay</div>
       <div class="big">BLACKOUT</div>
@@ -3470,9 +3470,9 @@
         <div class="sq on">Second breakfast</div><div class="sq on">Playlist argument in the car</div><div class="sq on">Everyone naps at four</div><div class="sq on">Harbor seal sighting</div><div class="sq on">Last-night bonfire</div>
       </div>
       <div class="stat">All 24 squares · 🐦 The Birds Have Entered the Chat</div>
-      <div class="foot">Vacay Bingo 🗺️</div>
+      <div class="foot">Vacay Bingo 🧳</div>
     </div>
-    <p class="cap"><b>Sonoma Coast, not tropical</b>Weathered red over sea-glass green—the same wall of gradient, a completely different weekend. Celebration text <i>"BLACKOUT. I win the trip. 🗺️"</i>; file <code>vacay-bingo-blackout.png</code>. Bodega's pool holds nothing spicy, so this Event derives <code>adultContent: false</code>—no gate, no 🔞, same card.</p>
+    <p class="cap"><b>Sonoma Coast, not tropical</b>Weathered red over sea-glass green—the same wall of gradient, a completely different weekend. Celebration text <i>"BLACKOUT. I win the trip. 🧳"</i>; file <code>vacay-bingo-blackout.png</code>. Bodega's pool holds nothing spicy, so this Event derives <code>adultContent: false</code>—no gate, no 🔞, same card.</p>
   </div>
 
   <div class="unit" id="fx-share-blackout-fa">
@@ -3524,7 +3524,7 @@
   </div>
 
   <div class="unit" id="fx-share-ranks-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="shc" data-theme="bodega-side-quests">
       <div class="ev">Vacay Bingo · Day 2 · Bodega Bay</div>
       <div class="big mid">LEADERBOARD</div>
@@ -3537,7 +3537,7 @@
       <div class="lrow"><b>5</b> Dev <span style="margin-left:auto">2 bingos · 38 sq</span></div>
       <div class="lrow"><b>6</b> Ana <span style="margin-left:auto">1 bingo · 29 sq</span></div>
       <div class="stat">Through Day 2 of 3</div>
-      <div class="foot">Vacay Bingo 🗺️</div>
+      <div class="foot">Vacay Bingo 🧳</div>
     </div>
     <p class="cap"><b>Six players, three Days—the cap never binds</b>The top-ten cap is a ceiling, not a target: a weekend group renders six rows and the frame still reads. ★ pins the <i>trip-wide</i> First to BINGO. Share text <i>"Check out the Vacay Bingo leaderboard 🏆"</i>; file <code>vacay-bingo-leaderboard.png</code>.</p>
   </div>
@@ -3601,7 +3601,7 @@
   </div>
 
   <div class="unit" id="fx-share-final-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="shc" data-theme="fog-froth-farewells">
       <div class="ev">Vacay Bingo · Day 3 · Bodega Bay</div>
       <div class="big sm">FINAL STANDINGS</div>
@@ -3617,7 +3617,7 @@
         <div class="hrow"><span class="hd">Day 3 · Fog, Froth &amp; Farewells 🌫️</span><span class="hn">Priya</span></div>
       </div>
       <div class="stat">Final standings · 3 days</div>
-      <div class="foot">Vacay Bingo 🗺️</div>
+      <div class="foot">Vacay Bingo 🧳</div>
     </div>
     <p class="cap"><b>"🏆 Trip champion" · podium aria "Trip podium"</b>Drawn in the light postcard-cream theme to prove the token contract survives a light palette—the one card in the set that is not dark-first. Days are named vignettes, not Ports, and the label column is the widest text on any of these frames: a real test of the ellipsize order. Share text <i>"Final standings from Vacay Bingo 🏆"</i>; file <code>vacay-bingo-final-standings.png</code>. On a three-day weekend the champion and the First to BINGO can be the same person; both blocks still render.</p>
   </div>
@@ -3672,7 +3672,7 @@
   </div>
 
   <div class="unit" id="fx-share-final-photo-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="shc" data-theme="fog-froth-farewells">
       <div class="ev">Vacay Bingo · Day 3 · Bodega Bay</div>
       <div class="big sm">FINAL STANDINGS</div>
@@ -3685,7 +3685,7 @@
         <div class="mlrow"><span class="r">👑</span><b>Maya</b><span class="mlrole">First to BINGO</span><span class="s">Day 1, 4:12 p.m.</span></div>
       </div>
       <div class="stat">Final standings · 3 days</div>
-      <div class="foot">Vacay Bingo 🗺️</div>
+      <div class="foot">Vacay Bingo 🧳</div>
     </div>
     <p class="cap"><b>Scrapbook first—the finale that leads with the photo</b>The trip Edition is where this card is the point: the Vacay finale is a scrapbook, not a scoreboard, and nine Hearts on a weekend of six players is a landslide. Postcard-cream <code>fog-froth-farewells</code> proves the hero box, badge and heart chip survive the light palette. The winner here matches <a href="#fx-podium-vacay">fx-podium-vacay</a>'s Most-Loved block—one frozen award, two surfaces. Share text <i>"Final standings from Vacay Bingo 🏆"</i>; file <code>vacay-bingo-final-standings.png</code>.</p>
     <img class="shpimg" src="og-images/share-final-photo-vacay.png" alt="Vacay Bingo final standings share card with the Most-Loved Photo as centerpiece" width="600" height="750">
@@ -3726,7 +3726,7 @@
   </div>
 
   <div class="unit" id="fx-og-png-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <img class="ogimg" src="og-images/vacay-bingo-og.png" alt="Vacay Bingo—a marked-up live multiplayer bingo card for the trip" width="2400" height="1260">
     <p class="ogmeta"><b>file</b> plans/og-images/vacay-bingo-og.png · 2400×1260<br><b>og:site_name</b> Vacay Bingo<br><b>og:title</b> Vacay Bingo<br><b>description</b> Live multiplayer bingo for the trip.</p>
   </div>
@@ -3764,7 +3764,7 @@
   </div>
 
   <div class="unit" id="fx-og-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="ogc" data-theme="bodega-side-quests">
       <div class="ogl">
         <div class="ogmark">VACAY<br>BINGO</div>
@@ -3855,7 +3855,7 @@
   </div>
 
   <div class="unit" id="fx-email-vacay">
-    <span class="brand-chip brand-vacay">🗺️ Vacay Bingo</span>
+    <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="eml" data-theme="birds-group-chat">
       <div class="epre">Day 1 on the coast—your card unlocks at 8:00. 🐦</div>
       <div class="ehead">
@@ -3922,7 +3922,7 @@
 <h3 class="subhead" id="fx-email-registers-tri">Per-brand register strip—the fa variant as annotations</h3>
 <p class="sub">Five Across gets no third full render: the platform email <i>is</i> the anatomy frame above, and drawing it again in slate would document nothing the table below does not say more honestly. Every row is the #608 lexicon applied to one email module; rows marked <span style="color:#77777f">brand-invariant</span> never change.</p>
 <table class="btable">
-  <tr><th>Module</th><th>🚢 Gay Cruise Bingo</th><th>🗺️ Vacay Bingo</th><th>✳ Five Across</th></tr>
+  <tr><th>Module</th><th>🚢 Gay Cruise Bingo</th><th>🧳 Vacay Bingo</th><th>✳ Five Across</th></tr>
   <tr><td>Sender (<code>EMAIL_FROM</code>, #554)</td><td>Gay Cruise Bingo &lt;…@gaycruisebingo.com&gt;</td><td>Vacay Bingo &lt;…@vacaybingo.com&gt; · by Five Across</td><td>Five Across &lt;…@fiveacross.app&gt;</td></tr>
   <tr><td>Subject shape</td><td>Day 4 · Sporty Splash 💦 — standings + tonight</td><td>Day 1 · The Birds Have Entered the Chat 🐦 — your card is live</td><td>Day 2 · Rehearsal — standings + today's card</td></tr>
   <tr><td>Context-line noun</td><td>the port, with flag (🇲🇹 Valletta)</td><td>the Stop (Bodega Bay · hosted by Kim)</td><td>the Place (The Barn at Green Valley)</td></tr>

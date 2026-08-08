@@ -107,7 +107,7 @@ const REGISTERS: Record<string, EditionRegister> = {
     photosRest: 'Post a pic with every claim—the boat wants receipts.',
     whyYouGotThis: (eventName) => `You're getting this because you're sailing ${eventName}.`,
   },
-  // 🗺️ Vacay Bingo — trip register at moderate camp.
+  // 🧳 Vacay Bingo — trip register at moderate camp.
   vacay: {
     brandLine: 'Vacay Bingo · by Five Across',
     occasion: 'trip',
