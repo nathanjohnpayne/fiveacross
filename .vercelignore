@@ -1,0 +1,57 @@
+# What NOT to upload to Vercel (#677).
+#
+# The CLI does NOT read `.gitignore` — without this file `vercel deploy` walks
+# the whole checkout, which here means `node_modules/` (731 MB) plus `.claude/`
+# (44 GB of agent worktrees, each with its own `node_modules/`). The first real
+# manual mirror deploy failed on it: "`files` should NOT have more than 15000
+# items, received 48318".
+#
+# The Vercel build runs `npm run build` (Vite) remotely and installs its own
+# dependencies, so it needs only the client build's inputs: index.html, src/,
+# public/, vite.config.ts, tsconfig*.json, package*.json, and vercel.json.
+# Everything below is either rebuilt there, irrelevant to the client bundle, or
+# must never leave this machine.
+
+# Never upload — local secrets. `.env.local` holds the live Firebase config;
+# Vercel supplies its own via the project's Environment Variables.
+.env.local
+.env.*.local
+
+# Rebuilt or reinstalled on Vercel
+node_modules
+dist
+dev-dist
+
+# Agent worktrees and tooling state — the 44 GB that broke the first deploy
+.claude
+.codex
+.cursor
+.mergepath
+.firebase
+.git
+
+# Backend and infra: deployed to Firebase, not served by Vercel
+functions
+firestore.rules
+firestore.indexes.json
+storage.rules
+firebase.json
+.firebaserc
+rules
+scripts
+
+# Tests, fixtures, and their configs — not part of the served bundle
+tests
+playwright.config.ts
+playwright.synthetic.config.ts
+vitest.functions.config.ts
+vitest.offline.config.ts
+vitest.rules.config.ts
+
+# Prose and design artifacts
+docs
+specs
+plans
+artifacts
+examples
+*.md
