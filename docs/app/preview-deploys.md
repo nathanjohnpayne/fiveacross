@@ -200,13 +200,15 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    `[ "$VERCEL_ENV" != "production" ]` exits `0` (skip) for **any** non-production deployment, and a `preview`-branch build is `VERCEL_ENV=preview`. The deployment history dates the changeover precisely: branch deployments were `READY` up to 2026-08-05 23:50Z, and every one from 2026-08-06 01:29Z onward is `CANCELED`. Nobody noticed because there have been **zero** `preview`-branch pushes in that window.
 
-   So `preview: true` above restores the *deployment*; the ignore step still cancels its *build*. **Part 2's device-testing flow does not work until that setting changes too.** Either remove it — with `**: false` in place it has no preview builds left to stop, because those branches never create a deployment at all — or narrow it to spare the alias:
+   So `preview: true` above restores the *deployment*; the ignore step still cancels its *build*. **Part 2's device-testing flow does not work until that setting changes — on the `gaycruisebingo` project only:**
 
    ```bash
    [ "$VERCEL_ENV" != "production" ] && [ "$VERCEL_GIT_COMMIT_REF" != "preview" ]
    ```
 
-   Until one of those lands, treat the preview alias as out of service.
+   **Leave the two mirror projects' ignore step exactly as it is**, and do not remove it anywhere. `vercel.json` is shared, so `preview: true` enables a `preview` deployment on all three projects — but the alias is a `gaycruisebingo` concept, and the mirrors have no `VITE_*` values on their Preview environment, so a mirror preview build fails the Vite blank-key guard and lands a red `Vercel – <project>` check on unrelated pull requests. On the mirrors the ignore step is the only thing stopping that, which makes it load-bearing there and obsolete only on `gaycruisebingo`.
+
+   Until that one setting changes, treat the preview alias as out of service.
 
    **And do not reach for the Ignored Build Step as the manual-deploy switch**—Vercel does not document whether that step also runs for CLI deployments, so setting it to always-skip risks silently cancelling the deploy you just typed. `git.deploymentEnabled` is scoped to commits by definition and has no such ambiguity.
 
