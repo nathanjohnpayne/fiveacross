@@ -150,7 +150,7 @@ npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacay
   --build-env GITHUB_SHA="$(git rev-parse HEAD)"
 ```
 
-Likewise `fiveacross` and `gaycruisebingo`. Deploy only what you need — each invocation is one build against the shared cap.
+**Repeat it for every affected mirror** — `fiveacross` and `gaycruisebingo` too. A browser-facing change is shared by all three builds, so normally that means all three, and the verification loop below expects all three to serve `origin/main`. Each invocation is one build against the shared cap; skip a mirror only when you can say why that host is unaffected, not to save a slot.
 
 `--build-env GITHUB_SHA=...` is what makes the deployed build identifiable. `appVersion()` (`vite.config.ts`) reads `GITHUB_SHA` first and falls back to `git rev-parse HEAD`, which throws on Vercel because the remote build has no `.git` — so without this the bundle bakes `__APP_VERSION__ = 'unknown'`. That value is not cosmetic: it is shown in More → About and attached to **every bug report** (`src/data/bugReports.ts`), so an unstamped mirror produces reports that cannot name the code they came from. The guarded block already knows the exact commit, so it passes it.
 
