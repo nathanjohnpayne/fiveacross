@@ -146,10 +146,12 @@ cd ~/GitHub/gaycruisebingo && \
 git fetch origin main && \
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ABORT: HEAD is not origin/main"; false; } && \
 [ -z "$(git status --porcelain)" ] || { echo "ABORT: worktree is dirty"; false; } && \
-npx vercel deploy --prod --yes --project vacaybingo
+npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacaybingo
 ```
 
 Likewise `fiveacross` and `gaycruisebingo`. Deploy only what you need — each invocation is one build against the shared cap.
+
+`--scope` pins the team the project name resolves in. Without it the CLI uses whatever scope is currently active, and `--yes` suppresses the prompt that would otherwise catch the mismatch — so an operator whose last `vercel switch` went elsewhere either fails to refresh the intended mirror or, worse, resolves a same-named project in another scope. There is no `.vercel/project.json` to supply it here, deliberately (below).
 
 `--project <NAME_OR_ID>` is a real flag on `vercel deploy` ("Project name or ID (defaults to the linked project)" — `npx vercel deploy --help`, CLI 58.8.0), and it is used here **instead of** `vercel link` on purpose. Linking writes a `.vercel` directory and a `.env.local` into the checkout and appends both to `.gitignore` — which is tracked in this repo and already covers what it needs to ([`preview-deploys.md`](preview-deploys.md) § step 1). Three projects would mean three link states fighting over one working tree, in a repo where the *wrong* project is a live host serving the wrong Edition. Naming the project per invocation keeps that choice explicit at the call site and leaves nothing behind.
 

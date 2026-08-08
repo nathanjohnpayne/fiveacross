@@ -286,7 +286,7 @@ Note that steps 3–4 prove the rewrite fires and reaches Firebase Hosting, but 
 
 ### Operating it
 
-The mirror deploys **only when you deploy it** (#676)—`vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. The guarded command lives in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror; use it rather than a bare `npx vercel deploy`.
+The mirror deploys **only when you deploy it** (#676)—`vercel.json` carries `git.deploymentEnabled: { "main": false }`, so a merge builds nothing on any of the three projects. The guarded command lives in [`deploy-targets.md`](deploy-targets.md) § Deploying a mirror; use it rather than a bare `npx vercel deploy` — it pins the source (`origin/main`, clean tree), the team scope, and the project, none of which the CLI infers safely on its own here.
 
 The guards are not ceremony. `vercel deploy` uploads your **current working directory**—`--project` picks the destination, not the source—so with Git deploys off this is the only production path and the only thing standing between a dirty feature checkout and a live host. `git.deploymentEnabled` governs *Git-triggered* deployments ("branches that should not trigger a deployment upon commits"), so it never blocks the command itself.
 
