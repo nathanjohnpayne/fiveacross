@@ -71,7 +71,12 @@ export interface StandingsRow {
  * which is how the invariance is enforced rather than merely asserted.
  */
 export interface EditionRegister {
-  /** Footer brand line. Vacay carries the endorsement (one-identity rule). */
+  /** Footer brand line. Every Edition OF the platform carries the `· by Five
+   *  Across` endorsement — Vacay from #616, Gay Cruise Bingo from #698 —
+   *  matching the in-app lockups (#647, #688). Only `fiveacross` goes without:
+   *  it IS the platform, so endorsing itself would be noise. The separator is
+   *  a `·` rather than the lockup's stacked micro-line because this renders as
+   *  one inline sign-off, not as display type. */
   brandLine: string;
   /** The occasion noun: "cruise" / "trip" / "event". */
   occasion: string;
@@ -96,7 +101,7 @@ export interface EditionRegister {
 const REGISTERS: Record<string, EditionRegister> = {
   // 🚢 Gay Cruise Bingo — cruise register at full camp.
   gcb: {
-    brandLine: 'Gay Cruise Bingo',
+    brandLine: 'Gay Cruise Bingo · by Five Across',
     occasion: 'cruise',
     occasionWide: 'cruise-wide',
     subjectTail: 'standings + tonight',

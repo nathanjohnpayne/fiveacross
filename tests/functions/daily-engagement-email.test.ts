@@ -369,15 +369,20 @@ describe('Edition registers (#608 lexicon)', () => {
   });
 
   it('carries the endorsement line on Vacay only (the one-identity rule)', () => {
+    // Every Edition OF the platform signs off with the endorsement — vacay
+    // from #616, gcb from #698 — and only the platform itself goes without.
+    // Asserted as the same partition the in-app byline uses (src/editions.test.ts)
+    // so the email and the lockup cannot drift apart on which Editions carry it.
     expect(registerFor('vacay').brandLine).toBe('Vacay Bingo · by Five Across');
-    expect(registerFor('gcb').brandLine).toBe('Gay Cruise Bingo');
+    expect(registerFor('gcb').brandLine).toBe('Gay Cruise Bingo · by Five Across');
     expect(registerFor('fiveacross').brandLine).toBe('Five Across');
+    expect(registerFor('fiveacross').brandLine).not.toMatch(/by Five Across/);
   });
 
   it('degrades an unknown or inherited Edition key to the legacy Edition', () => {
-    expect(registerFor('nope').brandLine).toBe('Gay Cruise Bingo');
-    expect(registerFor(null).brandLine).toBe('Gay Cruise Bingo');
-    expect(registerFor('constructor').brandLine).toBe('Gay Cruise Bingo');
+    expect(registerFor('nope').brandLine).toBe('Gay Cruise Bingo · by Five Across');
+    expect(registerFor(null).brandLine).toBe('Gay Cruise Bingo · by Five Across');
+    expect(registerFor('constructor').brandLine).toBe('Gay Cruise Bingo · by Five Across');
   });
 });
 

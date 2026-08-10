@@ -590,6 +590,16 @@ describe('buildAdminDigestModel', () => {
     expect(model.theme).toEqual(EMAIL_THEME_TOKENS['sporty-splash']);
     expect(model.contextLine).toBe('Trieste → Barcelona · Day 2 of 3 · 💦 Sporty Splash');
   });
+
+  // #698 gave the cruise register the endorsement too, and the digest composes
+  // its own line from the SAME `brandLine` — so the change reaches an internal
+  // surface as well as the player-facing one. Pinned here because that
+  // consequence is easy to miss from the daily-email suite alone.
+  it('carries the endorsement into the cruise Edition’s admin line too', () => {
+    const model = build([ALERT()], { edition: 'gcb' });
+    expect(model.brandLine).toBe('Gay Cruise Bingo · by Five Across · Admin');
+    expect(model.footerBrandLine).toBe('Gay Cruise Bingo · by Five Across');
+  });
 });
 
 // --- Rendering -------------------------------------------------------------------

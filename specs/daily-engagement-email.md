@@ -50,7 +50,7 @@ Ranking is `compareFinalePlayers`, so the email, the podium and the in-app Leade
 
 Per-brand copy is a table in `functions/src/dailyEmailContent.ts`, one field per row of the wireframe's register strip. The modules the strip marks brand-invariant—Theme header, standings structure, CTA, unsubscribe—carry no field at all, which is how the invariance is enforced rather than merely asserted. An unknown or absent Edition degrades to the legacy Edition (`gcb`), the same direction `setActiveEdition` degrades in the app, and the lookup is an own-property check so an inherited `Object.prototype` key can never pass as a register ([#597](https://github.com/nathanjohnpayne/gaycruisebingo/issues/597)).
 
-- **Given** each Edition **then** the occasion noun, subject tail, arrival line, photos nudge, award line and why-you-got-this line follow the #608 lexicon, and only Vacay carries the `· by Five Across` endorsement. (Tests under "Edition registers".)
+- **Given** each Edition **then** the occasion noun, subject tail, arrival line, photos nudge, award line and why-you-got-this line follow the #608 lexicon, and every Edition **of** the platform carries the `· by Five Across` endorsement in its footer brand line — Vacay from #616, Gay Cruise Bingo from #698 — while `fiveacross` goes without, being the platform itself. That is the same partition the in-app lockup uses (`wordmarkByline`, specs/event-resolution.md), so the sign-off and the header cannot disagree about which Editions the platform endorses. (Tests under "Edition registers".)
 
 ## Day-Theme tokens
 
