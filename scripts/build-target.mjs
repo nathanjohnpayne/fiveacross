@@ -19,6 +19,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_EDITION: 'gcb',
       VITE_ADULT_CONTENT: 'true',
     }),
+    syntheticUrl: 'https://gaycruisebingo.com/',
   }),
   fiveacross: Object.freeze({
     envFile: '.env.fiveacross',
@@ -84,7 +85,15 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
   const nonViteInheritedEnv = Object.fromEntries(
     Object.entries(inheritedEnv).filter(([key]) => !key.startsWith('VITE_')),
   );
-  return { ...nonViteInheritedEnv, ...parsedTargetEnv };
+  // `vite build` normally reloads root env files after this wrapper has
+  // started it. `DEPLOY_TARGET_BUILD` tells vite.config.ts to use only this
+  // selected environment and to disable that second env-file load.
+  return {
+    ...nonViteInheritedEnv,
+    ...parsedTargetEnv,
+    NODE_ENV: 'production',
+    DEPLOY_TARGET_BUILD: '1',
+  };
 }
 
 function usage() {

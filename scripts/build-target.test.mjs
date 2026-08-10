@@ -51,7 +51,8 @@ describe('build target selection', () => {
         VITE_EDITION: 'gcb',
         VITE_RECAPTCHA_SITE_KEY: 'gcb-recaptcha-key',
         VITE_FUTURE_VALUE: 'must-not-leak',
-        NODE_ENV: 'production',
+        NODE_ENV: 'development',
+        DEPLOY_TARGET_BUILD: '0',
       },
       REQUIRED_VITE_KEYS,
     );
@@ -65,6 +66,7 @@ describe('build target selection', () => {
       VITE_ADULT_CONTENT: 'false',
       VITE_RECAPTCHA_SITE_KEY: '',
       NODE_ENV: 'production',
+      DEPLOY_TARGET_BUILD: '1',
     });
     expect(environment.VITE_FUTURE_VALUE).toBeUndefined();
   });

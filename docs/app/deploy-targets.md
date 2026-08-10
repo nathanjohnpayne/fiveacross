@@ -10,8 +10,9 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Event | `med-2026` | `bodega-bay-2026` |
 | Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.fiveacross.app` (canonical), `bodega-bay.vacaybingo.com`, `fiveacross.app` |
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
-| Baked `VITE_EDITION` | `gcb` | `vacay` |
+| Baked `VITE_EDITION` | `gcb` (explicit) | `vacay` (explicit) |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
+| Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
 ### Which hosts to verify
@@ -28,7 +29,7 @@ Reconstructing the target env from the README alone would therefore produce a bu
 
 ## Target environment files
 
-`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event, Edition, and adult-content seed before it builds. Both targets name their Edition and audience posture explicitly (`gcb`/`true` or `vacay`/`false`); neither relies on an application default. It also removes ambient `VITE_*` values, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event, Edition, and adult-content seed before it builds. Both targets name their Edition and audience posture explicitly (`gcb`/`true` or `vacay`/`false`); neither relies on an application default. The wrapper removes ambient `VITE_*` values and disables Vite's subsequent root env-file load, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 

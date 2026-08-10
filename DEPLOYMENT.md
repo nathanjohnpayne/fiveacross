@@ -500,7 +500,7 @@ scripts/deploy.sh --force -- gaycruisebingo
 The guards (see [mergepath#77](https://github.com/nathanjohnpayne/mergepath/issues/77) for the incident that motivated them; the dirty-tree guard was added in [mergepath#286](https://github.com/nathanjohnpayne/mergepath/issues/286) after a closed-review backlog sweep):
 
 1. **Current branch must be `main`.** Deploys should ship the reviewed, merged state of the project, not a worktree's in-progress branch.
-2. **Local `main` must not be behind `origin/main`.** After `git fetch`, `git rev-list --count HEAD..origin/main` must be 0. Otherwise the deploy refuses.
+2. **Local `main` must exactly equal `origin/main`.** After `git fetch`, the two commit IDs must be equal. This rejects both a stale local checkout and an unpushed local commit, so the deploy is exactly the reviewed, merged state.
 3. **Working tree must be clean.** `git status --porcelain` must return empty — no modified, staged, or untracked paths. A dirty tree means the deploy would ship whatever the in-progress edits compile to, which diverges from the merged-on-main state reviewers signed off on (same failure class as #77).
 
 Guards 1 and 2 are bypassed with `--force`. Guard 3 is bypassed by the dedicated env var `DEPLOY_ALLOW_DIRTY=1` — kept separate from `--force` so the override is deliberate, audit-greppable, and `--force` doesn't accidentally subsume the dirty-tree check:

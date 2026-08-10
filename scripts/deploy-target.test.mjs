@@ -31,11 +31,13 @@ describe('deploy target selection', () => {
     });
   });
 
-  it('keeps Gay Cruise Bingo project and build choices explicit', () => {
+  it('keeps Gay Cruise Bingo project, build, and synthetic choices explicit', () => {
     const invocation = deployInvocation('gaycruisebingo', ['--only', 'hosting'], {});
 
     expect(invocation.args).toEqual(['--', 'gaycruisebingo', '--only', 'hosting']);
-    expect(invocation.environment).toMatchObject({ BUILD_CMD: 'npm run build:gaycruisebingo' });
-    expect(invocation.environment.SYNTHETIC_URL).toBeUndefined();
+    expect(invocation.environment).toMatchObject({
+      BUILD_CMD: 'npm run build:gaycruisebingo',
+      SYNTHETIC_URL: 'https://gaycruisebingo.com/',
+    });
   });
 });
