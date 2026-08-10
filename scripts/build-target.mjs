@@ -17,7 +17,11 @@ export function envFileForTarget(target, root = process.cwd()) {
   return resolve(root, envFile);
 }
 
-export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process.env) {
+export function requiredViteKeys(templateEnv) {
+  return Object.keys(templateEnv).filter((key) => key.startsWith('VITE_'));
+}
+
+export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process.env, requiredKeys = []) {
   if (parsedTargetEnv.VITE_FIREBASE_PROJECT_ID !== target) {
     throw new Error(
       `Refusing to build ${target}: VITE_FIREBASE_PROJECT_ID must be "${target}", ` +
@@ -25,10 +29,21 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
     );
   }
 
-  // Vite gives existing process variables priority over .env.local. Apply the
-  // selected target last so a developer's normal local config cannot bake the
-  // other Firebase project into a production bundle.
-  return { ...inheritedEnv, ...parsedTargetEnv };
+  const missingKeys = requiredKeys.filter((key) => !Object.hasOwn(parsedTargetEnv, key));
+  if (missingKeys.length > 0) {
+    throw new Error(
+      `Refusing to build ${target}: its target env file must define every VITE_* key from .env.example. ` +
+        `Missing: ${missingKeys.join(', ')}.`,
+    );
+  }
+
+  // Vite gives existing process variables priority over .env.local. Remove all
+  // ambient Vite values, then provide a complete selected target. An incomplete
+  // target could otherwise inherit another project's Firebase or Event config.
+  const nonViteInheritedEnv = Object.fromEntries(
+    Object.entries(inheritedEnv).filter(([key]) => !key.startsWith('VITE_')),
+  );
+  return { ...nonViteInheritedEnv, ...parsedTargetEnv };
 }
 
 function usage() {
@@ -59,9 +74,21 @@ function main() {
     return;
   }
 
+  const templateFile = resolve(process.cwd(), '.env.example');
+  if (!existsSync(templateFile)) {
+    console.error(`Missing ${templateFile}; cannot verify the ${target} target env file is complete.`);
+    process.exitCode = 1;
+    return;
+  }
+
   let environment;
   try {
-    environment = buildEnvironment(target, parse(readFileSync(envFile)), process.env);
+    environment = buildEnvironment(
+      target,
+      parse(readFileSync(envFile)),
+      process.env,
+      requiredViteKeys(parse(readFileSync(templateFile))),
+    );
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
