@@ -19,7 +19,7 @@ export function assertDeployFirebaseApiKey({ command, mode, githubActions, apiKe
 
   const envFile = projectId ? `.env.${projectId}` : 'the selected target env file';
   throw new Error(
-    'Refusing to build: VITE_FIREBASE_API_KEY is empty, which would ship a ' +
+    'Refusing to build: VITE_FIREBASE_API_KEY is empty, which would publish an ' +
       'blank Firebase config and crash the app on load with `auth/invalid-api-key`. ' +
       `Populate ${envFile} before building or deploying. ` +
       '(These web identifiers are client-safe, not secret.)',
