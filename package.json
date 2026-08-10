@@ -10,6 +10,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:gaycruisebingo": "node scripts/build-target.mjs gaycruisebingo",
+    "build:fiveacross": "node scripts/build-target.mjs fiveacross",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.sw.json",
     "test": "vitest run",
@@ -27,8 +29,12 @@
     "bugs:pull": "node scripts/bug-reports.mjs pull",
     "bugs:archive": "node scripts/bug-reports.mjs archive",
     "bugs:disposition": "node scripts/bug-reports.mjs disposition",
-    "deploy": "scripts/deploy.sh",
-    "deploy:hosting": "scripts/deploy.sh --only hosting",
+    "deploy": "npm run deploy:gaycruisebingo",
+    "deploy:hosting": "npm run deploy:gaycruisebingo:hosting",
+    "deploy:gaycruisebingo": "BUILD_CMD='npm run build:gaycruisebingo' scripts/deploy.sh -- gaycruisebingo",
+    "deploy:gaycruisebingo:hosting": "BUILD_CMD='npm run build:gaycruisebingo' scripts/deploy.sh -- gaycruisebingo --only hosting",
+    "deploy:fiveacross": "BUILD_CMD='npm run build:fiveacross' SYNTHETIC_URL=https://bodega-bay.fiveacross.app/ scripts/deploy.sh --skip-cf-purge -- fiveacross",
+    "deploy:fiveacross:hosting": "BUILD_CMD='npm run build:fiveacross' SYNTHETIC_URL=https://bodega-bay.fiveacross.app/ scripts/deploy.sh --skip-cf-purge -- fiveacross --only hosting",
     "pretest:e2e": "playwright install chromium"
   },
   "dependencies": {
@@ -55,6 +61,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^4.7.0",
+    "dotenv": "^16.6.1",
     "fake-indexeddb": "^6.2.5",
     "firebase-admin": "^12.7.0",
     "firebase-tools": "^15.26.0",

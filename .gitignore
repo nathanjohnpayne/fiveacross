@@ -9,6 +9,8 @@ build/
 .env
 .env.local
 .env.*.local
+.env.gaycruisebingo
+.env.fiveacross
 *.pem
 *.key
 

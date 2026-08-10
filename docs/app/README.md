@@ -4,7 +4,7 @@
 
 Live, multiplayer bingo PWA. React (Vite) + TypeScript + Firebase. Ships the MVP the PRD scoped for before the Event opens: Google sign-in, a randomized card from a community-editable prompt pool, honor-system marking, BINGO/blackout detection, a leaderboard, all eight party themes, PWA install, GA4, and a static share image. The printed PDFs are the offline fallback.
 
-Phase 1 backend features land as live updates during the Event without reworking this—see [`phase-1-deploy.md`](phase-1-deploy.md). The private bug-report intake and manual LLM export workflow are documented in [`bug-reports.md`](bug-reports.md). PostHog error-tracking rate limits and the alerts that file GitHub issues for new exceptions are documented in [`error-tracking.md`](error-tracking.md). This repo ships to **two** Firebase projects (`gaycruisebingo` and `fiveacross`) from one codebase; which command deploys which, why Five Across needs its own worktree and `--force`, and which worktree must never be deployed from are documented in [`deploy-targets.md`](deploy-targets.md). The per-Edition link-unfurl PNGs are committed assets with their own generator—how to change what they say, re-render them, and prove a re-render moved only what you meant it to are documented in [`og-artwork.md`](og-artwork.md).
+Phase 1 backend features land as live updates during the Event without reworking this—see [`phase-1-deploy.md`](phase-1-deploy.md). The private bug-report intake and manual LLM export workflow are documented in [`bug-reports.md`](bug-reports.md). PostHog error-tracking rate limits and the alerts that file GitHub issues for new exceptions are documented in [`error-tracking.md`](error-tracking.md). This repo ships to **two** Firebase projects (`gaycruisebingo` and `fiveacross`) from one codebase; target-specific commands build and deploy each from the main checkout without `--force`. See [`deploy-targets.md`](deploy-targets.md). The per-Edition link-unfurl PNGs are committed assets with their own generator—how to change what they say, re-render them, and prove a re-render moved only what you meant it to are documented in [`og-artwork.md`](og-artwork.md).
 
 > **Live:** Hosting, Firestore and Storage rules, and selected Cloud Functions are deployed at **https://gaycruisebingo.web.app**. The event `events/med-2026` is seeded (honor mode, `neon-playground` theme, 80 prompts), and `gaycruisebingo.com` is registered with Hosting. See [`phase-1-deploy.md`](phase-1-deploy.md) for gated backend features and [`bug-reports.md`](bug-reports.md) for private report intake. Sections 1–6 below are the runbook to reproduce or re-run any of this.
 
@@ -27,17 +27,9 @@ These one-time steps are complete on the `gaycruisebingo` project; recorded here
 
 ## 2. Local env
 
-`.env.local` holds the Firebase web-app config. These are **non-secret client identifiers**—they are baked into the client bundle by design, and security is enforced by the Firestore/Storage rules + Auth, not by hiding them. It is gitignored. Regenerate it any time from the registered web app instead of copying values by hand:
+`.env.local` remains the generic local-development config. Production deploys select `.env.gaycruisebingo` or `.env.fiveacross` instead, so the main checkout can build either Firebase project safely. These files contain **non-secret client identifiers**—they are baked into the client bundle by design, and security is enforced by the Firestore/Storage rules + Auth, not by hiding them. They are gitignored. Copy `.env.example` into each target file and regenerate its values from that project's registered web app in Firebase Console rather than copying values from another project.
 
-```bash
-cp .env.example .env.local
-
-# Fetch the live config (needs a deploy credential — see §5 for the SA key):
-GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcb-sa.json \
-  firebase apps:sdkconfig WEB --project gaycruisebingo --non-interactive
-```
-
-Map the JSON fields into `.env.local`: `apiKey`→`VITE_FIREBASE_API_KEY`, `authDomain`→`VITE_FIREBASE_AUTH_DOMAIN` (**do not copy verbatim—override, see below**), `projectId`→`VITE_FIREBASE_PROJECT_ID`, `storageBucket`→`VITE_FIREBASE_STORAGE_BUCKET`, `messagingSenderId`→`VITE_FIREBASE_MESSAGING_SENDER_ID`, `appId`→`VITE_FIREBASE_APP_ID`, `measurementId`→`VITE_FIREBASE_MEASUREMENT_ID`. `VITE_EVENT_ID` is a build-mode switch, not a default: a non-empty value (the legacy deployment uses `med-2026`) marks a single-Event build that never consults the `hostnames/{host}` lookup, while leaving it empty produces a hostname-resolved multi-Event build (ADR 0009)—see § Event id below. `VITE_EDITION` (`gcb`, the default; `vacay`; or `fiveacross`) brands the pre-auth sign-in shell of a single-Event build, and is baked into its document title and PWA identity at build time (`src/editions.ts`); it is that build's only Edition signal, so a single-Event deployment of any non-`gcb` Edition must set it alongside `VITE_EVENT_ID` or it ships Gay Cruise Bingo sign-in copy and installs itself as Gay Cruise Bingo—hostname-resolved builds take the Edition from `hostnames/{host}.edition` instead and can leave it empty. `VITE_RECAPTCHA_SITE_KEY` is Phase-1 (App Check)—leave it blank for Phase 0.
+Map the JSON fields into the matching target file: `apiKey`→`VITE_FIREBASE_API_KEY`, `authDomain`→`VITE_FIREBASE_AUTH_DOMAIN` (**do not copy verbatim—override, see below**), `projectId`→`VITE_FIREBASE_PROJECT_ID`, `storageBucket`→`VITE_FIREBASE_STORAGE_BUCKET`, `messagingSenderId`→`VITE_FIREBASE_MESSAGING_SENDER_ID`, `appId`→`VITE_FIREBASE_APP_ID`, `measurementId`→`VITE_FIREBASE_MEASUREMENT_ID`. `VITE_EVENT_ID` is a build-mode switch, not a default: a non-empty value (the legacy deployment uses `med-2026`) marks a single-Event build that never consults the `hostnames/{host}` lookup, while leaving it empty produces a hostname-resolved multi-Event build (ADR 0009)—see § Event id below. `VITE_EDITION` (`gcb`, the default; `vacay`; or `fiveacross`) brands the pre-auth sign-in shell of a single-Event build, and is baked into its document title and PWA identity at build time (`src/editions.ts`); it is that build's only Edition signal, so a single-Event deployment of any non-`gcb` Edition must set it alongside `VITE_EVENT_ID` or it ships Gay Cruise Bingo sign-in copy and installs itself as Gay Cruise Bingo—hostname-resolved builds take the Edition from `hostnames/{host}.edition` instead and can leave it empty. `VITE_RECAPTCHA_SITE_KEY` is Phase-1 (App Check)—leave it blank for Phase 0.
 
 **`VITE_FIREBASE_AUTH_DOMAIN` must be a bare hostname (no `https://`): `gaycruisebingo.com` for the Firebase build and `gaycruisebingo.vercel.app` for the Vercel build.** At runtime the app pins known production hosts (`.com`, `.vercel.app`, and `.firebaseapp.com`) to their own first-party handler regardless of a stale build variable. A signed-out `.web.app` visitor is moved once to the same-project `.firebaseapp.com` app before sign-in because that Google callback is already authorized. Firebase serves the OAuth helper at `<authDomain>/__/auth/handler`; keeping it first-party prevents storage-partitioned browsers from losing the sign-in state. Mobile browser tabs and installed desktop PWAs use top-level redirect rather than a popup tab/window, which avoids iOS private-browsing window loss and desktop standalone windows where OAuth popups can be blocked or hidden. Installed mobile PWAs retain popup sign-in because their standalone app window has a stable opener.
 
@@ -93,7 +85,7 @@ This creates `events/med-2026` (honor claim-mode, `neon-playground` default them
 
 ## 5. Deploy
 
-Deploys go through `op-firebase-deploy` (1Password-backed—it resolves the project's Firebase-vault SA key and impersonates the deployer SA; never `firebase login` / `firebase deploy` directly). See the root `DEPLOYMENT.md`.
+Deploys go through `op-firebase-deploy` (1Password-backed—it resolves the selected project's Firebase-vault SA key and impersonates the deployer SA; never `firebase login` / `firebase deploy` directly). Use a target command for every Hosting deploy so the build config, Firebase project, cache behavior, and synthetic URL stay aligned. See [`deploy-targets.md`](deploy-targets.md) and the root `DEPLOYMENT.md`.
 
 ```bash
 # 1. Security rules + indexes + Storage rules FIRST, so access is locked
@@ -101,19 +93,19 @@ Deploys go through `op-firebase-deploy` (1Password-backed—it resolves the proj
 #    rule fails this step, not at runtime.)
 op-firebase-deploy --only firestore:rules,firestore:indexes,storage
 
-# 2. The app (build + hosting):
-npm run deploy:hosting    # = vite build + op-firebase-deploy --only hosting
+# 2. The app (target build + hosting):
+npm run deploy:gaycruisebingo:hosting
+npm run deploy:fiveacross:hosting
 ```
 
-`op-firebase-deploy` re-resolves the SA key from 1Password on each run (a biometric prompt). To run several commands in one session without re-prompting—e.g. `apps:sdkconfig` in §2, then both deploys—materialize the key once and pass it explicitly (it is honored as the rank-1 credential):
+Every Firebase project uses the same standard deploy credential: its own `firebase-deployer` service-account key, stored as `op://Firebase/{project-id} — Firebase Deployer SA Key`. For a project that has not been provisioned yet, create the standard entry once:
 
 ```bash
-op document get "gaycruisebingo — Firebase Deployer SA Key" \
-  --vault Firebase --out-file /tmp/gcb-sa.json
-GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcb-sa.json op-firebase-deploy --only firestore:rules,firestore:indexes,storage
-GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcb-sa.json op-firebase-deploy --only hosting
-rm -f /tmp/gcb-sa.json    # wipe the key when done
+op-firebase-setup gaycruisebingo --provision-sa-key
+op-firebase-setup fiveacross --provision-sa-key
 ```
+
+`op-firebase-deploy` fetches the selected project's entry itself; do not manually extract a key to disk for ordinary deploys. See the root [`DEPLOYMENT.md`](../../DEPLOYMENT.md#deploy-credential-precedence-canonical) for credential precedence and rotation.
 
 Phase 0 deploys rules/indexes/storage + hosting only. The Phase-1 backend (`functions`) deploys separately once Blaze features are live—see [`phase-1-deploy.md`](phase-1-deploy.md).
 

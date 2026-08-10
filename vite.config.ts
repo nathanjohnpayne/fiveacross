@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
+import { assertDeployFirebaseApiKey } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
 // restating four strings here is the whole point: a second copy is how the
@@ -74,19 +75,13 @@ export default defineConfig(({ command, mode }) => {
   // a deploy shell would silently disable the guard, whereas GITHUB_ACTIONS is
   // set only by the runner and never by `npm run deploy` / `deploy:hosting`. What
   // remains is the local/agent production build — exactly the outage vector.
-  if (command === 'build' && mode === 'production' && !process.env.GITHUB_ACTIONS) {
-    // `.trim()` so a whitespace-only or leftover-placeholder key is rejected too
-    // — it is just as broken as an empty one (still `auth/invalid-api-key`).
-    if (!env.VITE_FIREBASE_API_KEY?.trim()) {
-      throw new Error(
-        'Refusing to build: VITE_FIREBASE_API_KEY is empty, which would ship a ' +
-          'blank Firebase config and crash the app on load with ' +
-          '`auth/invalid-api-key`. Populate .env.local (regenerate with ' +
-          '`firebase apps:sdkconfig WEB --project gaycruisebingo`) before building ' +
-          'or deploying. (These web identifiers are client-safe, not secret.)',
-      );
-    }
-  }
+  assertDeployFirebaseApiKey({
+    command,
+    mode,
+    githubActions: process.env.GITHUB_ACTIONS,
+    apiKey: env.VITE_FIREBASE_API_KEY,
+    projectId: env.VITE_FIREBASE_PROJECT_ID,
+  });
 
   return {
     define: {
@@ -186,7 +181,7 @@ export default defineConfig(({ command, mode }) => {
     test: {
       globals: true,
       environment: 'jsdom',
-      include: ['src/**/*.test.{ts,tsx}'],
+      include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.mjs'],
       setupFiles: ['./src/test/setup.ts']
     }
   };
