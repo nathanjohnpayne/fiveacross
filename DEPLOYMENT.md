@@ -483,18 +483,18 @@ npm run deploy:fiveacross
 npm run deploy:gaycruisebingo -- --only hosting
 npm run deploy:fiveacross -- --only firestore:rules
 
-# Direct-wrapper break-glass options still name the Firebase project.
-# Skip the build step (assume dist/ is already current)
-scripts/deploy.sh --skip-build -- gaycruisebingo
-
-# Skip the Cloudflare purge (no CF env vars set, or purge separately)
-scripts/deploy.sh --skip-cf-purge -- gaycruisebingo
+# Deploy-wrapper controls still go through the named target. Put them before
+# the second `--`; Firebase options go after it.
+npm run deploy:gaycruisebingo -- --skip-build --
+npm run deploy:gaycruisebingo -- --skip-cf-purge --
 
 # Skip the post-deploy app-mount synthetic (see Post-Deployment Verification)
-scripts/deploy.sh --skip-synthetic -- gaycruisebingo
+# while scoping Firebase itself to Hosting.
+npm run deploy:gaycruisebingo -- --skip-synthetic -- --only hosting
 
 # Break-glass: bypass the main-only / must-be-current-with-origin guards
-scripts/deploy.sh --force -- gaycruisebingo
+# without falling back to an ambient browser environment.
+npm run deploy:gaycruisebingo -- --force --
 ```
 
 The guards (see [mergepath#77](https://github.com/nathanjohnpayne/mergepath/issues/77) for the incident that motivated them; the dirty-tree guard was added in [mergepath#286](https://github.com/nathanjohnpayne/mergepath/issues/286) after a closed-review backlog sweep):

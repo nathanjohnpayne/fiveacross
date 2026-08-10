@@ -3,28 +3,52 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
 
+export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
+  '--force',
+  '--skip-build',
+  '--skip-cf-purge',
+  '--skip-synthetic',
+]);
+
+function deployArguments(args) {
+  const separator = args.indexOf('--');
+  if (separator === -1) return { wrapperArgs: [], deployArgs: args };
+
+  const wrapperArgs = args.slice(0, separator);
+  const unsupported = wrapperArgs.filter((argument) => !DEPLOY_WRAPPER_FLAGS.includes(argument));
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Before the deploy-wrapper separator, expected only: ${DEPLOY_WRAPPER_FLAGS.join(', ')}. ` +
+        `Unexpected: ${unsupported.join(', ')}.`,
+    );
+  }
+  return { wrapperArgs, deployArgs: args.slice(separator + 1) };
+}
+
 export function deployRequest(argv) {
   const args = [...argv];
   const hostingOnly = args[0] === '--hosting';
   if (hostingOnly) args.shift();
 
-  const [target, ...deployArgs] = args;
+  const [target, ...targetArgs] = args;
   if (!target) {
     throw new Error(
       `A deploy target is required. Choose one of: ${Object.keys(DEPLOY_TARGETS).join(', ')}.`,
     );
   }
 
+  const { wrapperArgs, deployArgs } = deployArguments(targetArgs);
   return {
     target,
+    wrapperArgs,
     deployArgs: hostingOnly ? ['--only', 'hosting', ...deployArgs] : deployArgs,
   };
 }
 
-export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env) {
+export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env, wrapperArgs = []) {
   const config = configForTarget(target);
-  const args = [];
-  if (config.skipCloudflarePurge) args.push('--skip-cf-purge');
+  const args = [...wrapperArgs];
+  if (config.skipCloudflarePurge && !args.includes('--skip-cf-purge')) args.push('--skip-cf-purge');
   args.push('--', config.firebaseProject, ...deployArgs);
 
   const environment = {
@@ -44,6 +68,7 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
 function usage() {
   console.error(`Usage: npm run deploy -- <${Object.keys(DEPLOY_TARGETS).join('|')}> [Firebase deploy options]`);
   console.error(`       npm run deploy:hosting -- <${Object.keys(DEPLOY_TARGETS).join('|')}>`);
+  console.error('       npm run deploy:<target> -- [deploy-wrapper flags] -- [Firebase deploy options]');
 }
 
 function main() {
@@ -58,7 +83,7 @@ function main() {
     return;
   }
 
-  const invocation = deployInvocation(request.target, request.deployArgs);
+  const invocation = deployInvocation(request.target, request.deployArgs, process.env, request.wrapperArgs);
   const result = spawnSync(invocation.command, invocation.args, {
     env: invocation.environment,
     stdio: 'inherit',

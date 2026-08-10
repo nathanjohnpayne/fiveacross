@@ -22,6 +22,7 @@ const FIVEACROSS_TARGET_ENV = {
   VITE_EVENT_ID: 'bodega-bay-2026',
   VITE_EDITION: 'vacay',
   VITE_ADULT_CONTENT: 'false',
+  VITE_POSTHOG_HOST: '',
   VITE_RECAPTCHA_SITE_KEY: '',
 };
 
@@ -36,6 +37,7 @@ const GAY_CRUISE_BINGO_TARGET_ENV = {
   VITE_EVENT_ID: 'med-2026',
   VITE_EDITION: 'gcb',
   VITE_ADULT_CONTENT: 'true',
+  VITE_POSTHOG_HOST: '',
   VITE_RECAPTCHA_SITE_KEY: '',
 };
 
@@ -163,6 +165,20 @@ describe('build target selection', () => {
         REQUIRED_VITE_KEYS,
       ),
     ).toThrow('VITE_FIREBASE_MEASUREMENT_ID="G-42N7WYDYT5"');
+  });
+
+  it('rejects a production PostHog host override', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          ...FIVEACROSS_TARGET_ENV,
+          VITE_POSTHOG_HOST: 'https://us.i.posthog.com',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_POSTHOG_HOST=""');
   });
 
   it('ignores future target files without hiding the committed template', () => {

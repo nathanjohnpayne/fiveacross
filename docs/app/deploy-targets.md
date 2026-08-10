@@ -13,6 +13,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Baked `VITE_EDITION` | `gcb` (explicit) | `vacay` (explicit) |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
 | Baked `VITE_FIREBASE_MEASUREMENT_ID` | `G-42N7WYDYT5` | `G-42N7WYDYT5` |
+| Baked `VITE_POSTHOG_HOST` | blank (explicit) | blank (explicit) |
 | Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
 | Cache purge | Gay Cruise Bingo zone `8066dd2b105ad564c45bb8c898859343` | explicitly skipped (no Five Across zone configured) |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
@@ -56,6 +57,17 @@ npm run deploy:fiveacross:hosting
 Use `npm run deploy:fiveacross` to deploy every configured Firebase surface. The command builds from `.env.fiveacross`, passes `fiveacross` explicitly, skips the Gay Cruise Bingo Cloudflare zone, and verifies the canonical Five Across host.
 
 The existing deploy guards require `main`, an exact `HEAD == origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`.
+
+### Deploy-wrapper controls
+
+Even a break-glass control must keep the selected target environment. Place deploy-wrapper flags before a second `--`, and Firebase options after it:
+
+```bash
+npm run deploy:gaycruisebingo -- --skip-synthetic -- --only hosting
+npm run deploy:fiveacross -- --force --
+```
+
+The named target still supplies the Firebase project, target build command, cache decision, and synthetic URL. A Firebase-specific `--force` belongs after the second separator, for example `npm run deploy:fiveacross -- -- --only functions --force`.
 
 ### Registering a future target
 
