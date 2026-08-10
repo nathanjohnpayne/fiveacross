@@ -108,9 +108,13 @@ function loadEditions() {
 
 const { editionBrand } = loadEditions();
 
-/** The share mark, stripped of an emoji variation selector where the design
- *  wants the flat text glyph (Five Across's ✳︎) rather than a colour emoji. */
-const textGlyph = (mark) => mark.replace(/️/g, '');
+/** The share mark with U+FE0F (VARIATION SELECTOR-16) removed, for the design
+ *  that wants the flat TEXT glyph rather than a colour emoji — Five Across's
+ *  mark is a tinted asterisk, not Apple's multicolour sparkle. Written as an
+ *  escape on purpose: a literal U+FE0F here is invisible in a diff,
+ *  unsearchable, and one editor normalisation away from silently becoming a
+ *  no-op that ships the wrong glyph. */
+const textGlyph = (mark) => mark.replace(/\uFE0F/g, '');
 
 const ART = {
   gcb: {

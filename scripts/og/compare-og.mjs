@@ -20,7 +20,8 @@
 // the working tree, which is what you want once you have already overwritten
 // public/og-*.png in place.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -40,7 +41,10 @@ if (!newDir) {
 }
 const ref = argOf('--ref');
 const only = argOf('--edition');
-const outDir = argOf('--sheet') ?? join(repo, 'scripts', 'og', 'compare-out');
+// Scratch (the materialised --ref blobs) goes OUTSIDE the repo by default: a
+// review aid must not be able to dirty the tree it is auditing. Pass --sheet
+// to put it somewhere you can browse.
+const outDir = argOf('--sheet') ?? mkdtempSync(join(tmpdir(), 'og-compare-'));
 
 const FILES = {
   gcb: 'og-gcb.png',

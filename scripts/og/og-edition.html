@@ -375,9 +375,6 @@
     if (c.board.gap != null) board.style.gap = c.board.gap + 'px';
     if (c.board.pad != null) board.style.padding = c.board.pad + 'px';
     if (c.board.radius != null) board.style.borderRadius = c.board.radius + 'px';
-    if (c.board.cellRadius != null) {
-      document.documentElement.style.setProperty('--cellradius', c.board.cellRadius + 'px');
-    }
     for (const row of c.board.pattern) {
       for (const ch of row) {
         const sq = document.createElement('div');
