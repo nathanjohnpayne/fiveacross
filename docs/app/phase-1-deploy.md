@@ -98,7 +98,7 @@ GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/backfill-hide.mjs <eventId> # o
 
 1. Google Cloud console → reCAPTCHA Enterprise → create a **Website** key for `gaycruisebingo.com` (+ `localhost` for dev).
 2. Firebase console → App Check → register the web app with that site key.
-3. Set `VITE_RECAPTCHA_SITE_KEY` in `.env.local`, rebuild, redeploy hosting.
+3. Set `VITE_RECAPTCHA_SITE_KEY` in each affected target file (`.env.gaycruisebingo` or `.env.fiveacross`), rebuild, and redeploy that target's hosting. Named production builds deliberately ignore `.env.local`.
 4. In App Check, **enforce** on Cloud Firestore and Cloud Storage once traffic looks healthy.
 
 ## 3. Retire the old Cloud Run OG renderer (one-time, only if you deployed it before)
