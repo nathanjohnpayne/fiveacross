@@ -585,12 +585,23 @@
   /* Five Across wordmark: the .title convention minus the glow — set type, no camp */
   .fa-title{text-shadow:none;letter-spacing:.12em}
 
-  /* Vacay in-app header lockup: wordmark at 19px over the BY FIVE ACROSS
-     endorsement micro-line (brand-direction § 2 — the one-identity rule).
-     Scoped to .hdr so it never collides with the sign-in .vlock .by. */
+  /* In-app header lockup: the wordmark over the BY FIVE ACROSS endorsement
+     micro-line (brand-direction § 2 — the one-identity rule). Carried by both
+     Editions of the platform — Vacay since #647, GCB since #688; only FIVE
+     ACROSS goes bare, being the platform itself. `.vc-title` is a Vacay-only
+     size bump: its 11-character wordmark has room the 16-character GCB one
+     does not. Scoped to .hdr so it never collides with the gate lockups'
+     `.vlock .by` / `.gate-by`. */
   .vc-title{font-size:19px}
   .hdr .by{display:block;font-size:9px;font-weight:400;letter-spacing:.18em;
     color:var(--dim);margin-top:4px;text-shadow:none;font-style:normal}
+
+  /* The same endorsement on a SIGN-IN gate, where it sits under display type
+     rather than 15px chrome — wider tracking, no glow of its own (matches
+     `.signin .brand-byline` in src/index.css). GCB's gate keeps its own glowing
+     `.title` treatment, so it needs this instead of Vacay's `.vlock .by`. */
+  .gate-by{display:block;font-size:10px;font-weight:400;letter-spacing:.26em;
+    color:var(--dim);margin-top:5px;text-shadow:none;font-style:normal}
 
   /* ---------- doc chrome: contents, brand-foundation cards, legacy anchors ---------- */
   .toc{max-width:1180px;margin:0 0 10px;padding:16px 20px 14px;border:1px solid #c9c9d0;
@@ -905,7 +916,7 @@
   <div class="unit" id="fx-lockup-gcb">
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="bcard" data-theme="neon-playground">
-      <div class="lock"><div class="title" style="font-size:23px">GAY CRUISE <b>BINGO</b></div>
+      <div class="lock"><div class="title" style="font-size:23px">GAY CRUISE <b>BINGO</b><i class="gate-by">BY FIVE ACROSS</i></div>
         <div class="tagline">Trieste → Barcelona · July 2026. Sign in, get your card, mark it if you see it.</div>
       </div>
       <div class="swrow"><span class="swbig" style="background:#ff2d95"></span><span class="swbig" style="background:#00e6ff"></span><span class="swbig" style="background:#ffd23f"></span><span class="swbig" style="background:#07060d"></span></div>
@@ -968,7 +979,7 @@
     <div class="mini" data-theme="welcome-aboard">
       <div class="board" style="gap:12px;justify-content:center">
         <div style="text-align:center">
-          <div class="title" style="font-size:27px;line-height:1.15">GAY CRUISE <b>BINGO</b></div>
+          <div class="title" style="font-size:27px;line-height:1.15">GAY CRUISE <b>BINGO</b><i class="gate-by">BY FIVE ACROSS</i></div>
         </div>
         <div class="desc" style="text-align:center;margin-top:0;font-size:12px">Trieste → Barcelona · July 2026. Sign in, get your card, mark it if you see it.</div>
         <div class="banner" style="border-style:solid;border-color:var(--border)">
@@ -982,7 +993,7 @@
         <div class="note">Lost signal at sea? The printed cards and PDF still work.</div>
       </div>
     </div>
-    <p class="cap"><b>Join—the 18+ gate, drawn</b>Full camp: the wordmark keeps its soft glow, the tagline is the shipped <code>gcb</code> string, and the sailing sits in a plain panel rather than Vacay's postcard—GCB predates the platform and carries no "by Five Across" endorsement line. The attestation is shown because this Event's pool holds active spicy Prompts, so <code>adultContent</code> derives <code>true</code>; sign-in stays disabled (40% here) until the box is ticked, and ticking it persists the attestation through <code>signIn → attest</code>. Splash before this frame reads "Checking your cruise pass…"; the advisory row in More reads "18+ &amp; acceptable use", and the sheet behind it opens "This is an 18+ space for one sailing's friend group."</p>
+    <p class="cap"><b>Join—the 18+ gate, drawn</b>Full camp: the wordmark keeps its soft glow, the tagline is the shipped <code>gcb</code> string, and the sailing sits in a plain panel rather than Vacay's postcard. <b>New in #688—the <code>BY FIVE ACROSS</code> endorsement line.</b> GCB predates the platform but is now an Edition of it, so it wears the platform's signature exactly as Vacay does, in the same slot: a sibling of the h1, never inside it. <b>An endorsement, not a rename.</b> The wordmark, the cruise register, the adult posture, <code>gaycruisebingo.com</code> and the legacy Firebase project are all untouched—and what GCB still does <i>not</i> take from Vacay is the Join <i>voice</i>: no tagline chip, no invite note, no postcard stamp, because those are separate brand-table fields. At iPhone widths the 16-character wordmark stacks to two lines and the byline centres under it (measured, not eyeballed: <code>scripts/verify-wordmark-one-line.mjs</code> for the header, both iPhone viewports). The attestation is shown because this Event's pool holds active spicy Prompts, so <code>adultContent</code> derives <code>true</code>; sign-in stays disabled (40% here) until the box is ticked, and ticking it persists the attestation through <code>signIn → attest</code>. Splash before this frame reads "Checking your cruise pass…"; the advisory row in More reads "18+ &amp; acceptable use", and the sheet behind it opens "This is an 18+ space for one sailing's friend group."</p>
   </div>
 
   <!-- ---------- Join · Vacay Bingo (absorbs #frame-vacay-join) ---------- -->
@@ -1035,7 +1046,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="welcome-aboard">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">Sails Jul 15</div><div class="theme">🛳️ Welcome Aboard</div></div>
       </div>
       <div class="board">
@@ -1237,7 +1248,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="sporty-splash">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🌊 Sea Day</div><div class="theme">💖 Neon Pink Playground</div></div>
       </div>
       <div class="strip">
@@ -1326,7 +1337,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="uniforms-without-borders">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🇭🇷 Split</div><div class="theme">🌍 Uniforms Without Borders</div></div>
       </div>
       <div class="board" style="padding-bottom:0">
@@ -1411,7 +1422,7 @@
   <div class="unit" id="fx-add-proof-gcb">
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="uniforms-without-borders">
-      <div class="hdr"><div class="title">GAY CRUISE <b>BINGO</b></div><div class="today"><div class="port">🇭🇷 Split</div><div class="theme">🌍 Uniforms Without Borders</div></div></div>
+      <div class="hdr"><div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div><div class="today"><div class="port">🇭🇷 Split</div><div class="theme">🌍 Uniforms Without Borders</div></div></div>
       <div class="board" style="padding-bottom:0">
         <div class="daybar"><div class="dayname">Day 2 · Uniforms Without Borders</div><div class="daymeta">🇭🇷 Split</div></div>
         <div style="height:280px;overflow:hidden"><div class="grid" style="opacity:.3"><div class="cell">Lost passport</div><div class="cell">Matching Speedos</div><div class="cell">Eat carbs</div><div class="cell">Cruise boyfriend</div><div class="cell">Sunset selfie</div><div class="cell">Late-night pizza</div><div class="cell">Karaoke “Fergalicious”</div><div class="cell">Lost bracelet</div><div class="cell">Mirror-hall selfie</div><div class="cell">Breakfast in sunglasses</div><div class="cell">Emergency fan deployment</div><div class="cell">Overpacked toiletries</div><div class="cell free">FREE<br>Complain about circuit music</div><div class="cell">Pool-chair territory dispute</div><div class="cell">Selfie with HAYLA</div><div class="cell">Poolside caftan moment</div><div class="cell">Too many group chats</div><div class="cell">Get lost on the ship</div><div class="cell">Matching tank tops</div><div class="cell">Dramatic outfit change before dinner</div><div class="cell">New best friend from another city</div><div class="cell">Elevator outfit compliment</div><div class="cell">Nap through the main event</div><div class="cell">Drink three dirty martinis</div><div class="cell">Become ship-famous</div></div></div>
@@ -1486,7 +1497,7 @@
   <div class="unit" id="fx-notice-card-gcb">
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="neon-pink-playground">
-      <div class="hdr"><div class="title">GAY CRUISE <b>BINGO</b></div><div class="today"><div class="port">🌊 Sea Day</div><div class="theme">💖 Neon Pink Playground</div></div></div>
+      <div class="hdr"><div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div><div class="today"><div class="port">🌊 Sea Day</div><div class="theme">💖 Neon Pink Playground</div></div></div>
       <div class="strip"><div class="chip">✓ Wed 🛳️</div><div class="chip">✓ Thu 🌍</div><div class="chip now">Fri 🌊 💖</div><div class="chip lock">🔒 Sat 💦</div><div class="fade">›</div></div>
       <div class="board" style="gap:9px">
         <div class="noticecard"><span class="dx">✕</span><b>🚢 Splash T-Dance moved to 4</b>Pool deck opens an hour earlier than the printed schedule—tell the boat before someone naps through it.<span class="who">📌 Nathan · Day 3</span></div>
@@ -1538,7 +1549,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="uniforms-without-borders">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🇭🇷 Split</div><div class="theme">🌍 Uniforms Without Borders</div></div>
       </div>
       <div class="board" style="padding-bottom:0">
@@ -1573,7 +1584,7 @@
     <a class="alias" id="frame-reshuffle"></a><span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="sporty-splash">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🇲🇹 Valletta</div><div class="theme">💦 Sporty Splash</div></div>
       </div>
       <div class="board" style="padding-bottom:0">
@@ -1605,7 +1616,7 @@
     <a class="alias" id="frame-launch-intro"></a><span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="welcome-aboard">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🇮🇹 Trieste</div><div class="theme">🛳️ Welcome Aboard</div></div>
       </div>
       <div class="board">
@@ -1649,7 +1660,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="neon-pink-playground">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🌊 Sea Day</div><div class="theme">💖 Neon Pink Playground</div></div>
       </div>
       <div class="board" style="gap:8px">
@@ -1818,7 +1829,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="neon-playground">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🇪🇸 Barcelona −2</div><div class="theme">🪩 Revival Disco</div></div>
       </div>
       <div class="board" style="gap:8px">
@@ -1895,7 +1906,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="neon-playground">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🇮🇹 Naples</div><div class="theme">🏛️ Glamiators</div></div>
       </div>
       <div class="board" style="gap:7px">
@@ -2013,7 +2024,7 @@
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
     <div class="mini" data-theme="neon-pink-playground">
       <div class="hdr">
-        <div class="title">GAY CRUISE <b>BINGO</b></div>
+        <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
         <div class="today"><div class="port">🌊 Sea Day</div><div class="theme">💖 Neon Pink Playground</div></div>
       </div>
       <div class="board" style="gap:7px">
@@ -3302,9 +3313,9 @@
       <td>Crash panel</td><td><code>fx-util-crash-fa</code></td>
       <td>Wordmark</td>
       <td>GAY CRUISE BINGO<br><span class="inv">glow, 15px, 300/800</span></td>
-      <td>VACAY BINGO<br><span class="inv">+ BY FIVE ACROSS</span></td>
+      <td>VACAY BINGO<br><span class="inv">weathered red, no glow</span></td>
       <td>FIVE ACROSS<br><span class="inv">no glow, .12em</span></td>
-      <td>override (#602)</td>
+      <td>override (#602) — wordmark only: <span class="inv">no endorsement byline on ANY Edition here. The recovery panels draw the wordmark and the offline note and nothing else, because their contract is to depend on as little as possible. The byline belongs to the two full-lockup surfaces (gate + in-app header). This row carried a <code>+ BY FIVE ACROSS</code> note on Vacay from #647 that the code never matched; corrected in #688 rather than propagated.</span></td>
     </tr>
     <tr>
       <td>Crash panel<br>+ DealError</td><td><code>fx-util-crash-fa</code></td>
@@ -3748,6 +3759,7 @@
     <div class="ogc" data-theme="neon-playground">
       <div class="ogl">
         <div class="ogmark">GAY CRUISE<br>BINGO</div>
+        <div class="ogby">by Five Across</div>
         <div class="ogdesc">Sign in, get your card, mark it if you see it.</div>
         <div class="ogdom">gaycruisebingo.com</div>
       </div>
@@ -3760,7 +3772,7 @@
       </div>
     </div>
     <p class="ogmeta"><b>og:site_name</b> Gay Cruise Bingo<br><b>og:title</b> Gay Cruise Bingo<br><b>description</b> Live multiplayer bingo for the high seas. Trieste to Barcelona, July 2026.<br><b>og:image:alt</b> Gay Cruise Bingo—a marked-up live multiplayer bingo card for the July 2026 sailing, Trieste to Barcelona</p>
-    <p class="cap"><b>The flagship unfurl—no endorsement line</b>Bebas wordmark stacked over the tagline, the marked board as the picture, the default <code>neon-playground</code> palette. GCB predates the platform and stands alone, so no "by Five Across" appears in its chrome—the parent relationship is stated in docs, not here. This is the one identity whose OG image already ships (from the always-healthy <code>web.app</code> host, because the apex TLS-resets for link crawlers—#340).</p>
+    <p class="cap"><b>The flagship unfurl—endorsed</b>Bebas wordmark stacked over the tagline, the marked board as the picture, the default <code>neon-playground</code> palette. #688 gives GCB the <code>by Five Across</code> line here too, in exactly the slot <a href="#fx-og-vacay"><code>fx-og-vacay</code></a> uses—wordmark, endorsement, rule, tagline—so the two Editions unfurl as one family. <b>This artboard is a schematic; the shipped asset is generated.</b> <code>public/og-gcb.png</code> (mirrored byte-identical at <code>plans/og-images/gay-cruise-bingo-og.png</code>) is rendered from <code>scripts/og/og-edition.html</code> by <code>scripts/og/render-og-editions.mjs</code>, which reads its wordmark, endorsement line and share mark straight from <code>src/editions.ts</code>—so a copy change is a brand-table edit plus a re-render, not a pixel edit. The runbook is <code>docs/app/og-artwork.md</code>. Before #688 there was no generator and this caption told you to expect one; that is what changed. This is also the one identity whose OG image already ships (from the always-healthy <code>web.app</code> host, because the apex TLS-resets for link crawlers—#340).</p>
   </div>
 
   <div class="unit" id="fx-og-vacay">
@@ -3781,7 +3793,7 @@
       </div>
     </div>
     <p class="ogmeta"><b>og:site_name</b> Vacay Bingo<br><b>og:title</b> Vacay Bingo<br><b>description</b> Live multiplayer bingo for the trip.<br><b>og:image:alt</b> Vacay Bingo—a marked-up live multiplayer bingo card for the trip</p>
-    <p class="cap"><b>The endorsed unfurl—one identity, plus its parent</b>The only frame in this section that carries the <code>BY FIVE ACROSS</code> small-caps line, because Vacay is the Edition that needs it: the one-identity rule says a Vacay player never sees two competing brands, and the endorsement is a signature, not a second lockup. Pacific blue and sea-glass; deliberately non-tropical. The <code>og:url</code> stays the canonical Vacay origin—the live bug is that it currently unfurls as Gay Cruise Bingo.</p>
+    <p class="cap"><b>The endorsed unfurl—one identity, plus its parent</b>The <code>BY FIVE ACROSS</code> small-caps line, in the slot <a href="#fx-og-gcb"><code>fx-og-gcb</code></a> now mirrors since #688: the one-identity rule says a Vacay player never sees two competing brands, and the endorsement is a signature, not a second lockup. Only <a href="#fx-og-fa"><code>fx-og-fa</code></a> goes without, being the platform itself. Both Editions' rasters carry it, and both come off the same generator (<code>scripts/og/render-og-editions.mjs</code>). Pacific blue and sea-glass; deliberately non-tropical. The <code>og:url</code> stays the canonical Vacay origin—the live bug is that it currently unfurls as Gay Cruise Bingo.</p>
   </div>
 
   <div class="unit" id="fx-og-fa">
@@ -4060,7 +4072,7 @@ DAYS.forEach(d=>{
   unit.innerHTML=
   '<span class="brand-chip brand-gcb">\uD83D\uDEA2 Gay Cruise Bingo</span>'+
   '<div class="mini" data-theme="'+d.theme+'">'+
-    '<div class="hdr"><div class="title">GAY CRUISE <b>BINGO</b></div>'+
+    '<div class="hdr"><div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>'+
       '<div class="today"><div class="port">'+(d.headPort? d.headPort : d.flag+' '+d.port)+'</div>'+
       '<div class="theme">'+d.emoji+' '+d.label+'</div></div></div>'+
     '<div class="strip">'+stripHTML(d)+'</div>'+

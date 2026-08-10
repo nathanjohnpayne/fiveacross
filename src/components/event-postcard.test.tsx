@@ -127,13 +127,31 @@ describe('SignIn — the Join frame around the card', () => {
     expect(screen.getByText('Weekend in Bodega Bay')).toBeTruthy();
   });
 
-  it('keeps the byline OUT of the h1 the brand tests and synthetic assert on', () => {
-    setActiveEdition('vacay');
+  // #688: GCB wears the endorsement too, but ONLY the endorsement — the
+  // cruise register keeps its plain tagline, and gets neither vacay's voice
+  // chip nor its invite note. The byline and the Join-frame voice are separate
+  // brand-table fields, and this is the pairing that proves it.
+  it('draws the gcb lockup: byline over the cruise wordmark, plain tagline, no chip', () => {
+    setActiveEdition('gcb');
+    applyResolvedEventPreview(PREVIEW);
+    setActiveAdultContent(false);
     render(<SignIn />);
-    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('VACAY BINGO');
+    expect(screen.getByText('BY FIVE ACROSS')).toBeTruthy();
+    expect(screen.getByText('Sign in, get your card, mark it if you see it.')).toBeTruthy();
+    expect(screen.queryByText('Take the detour. For the story.')).toBeNull();
+    expect(screen.queryByText(/Prompts are invitations/)).toBeNull();
   });
 
-  it('leaves the other registers chipless: plain tagline, no byline, no invite note', () => {
+  it.each([
+    ['vacay', 'VACAY BINGO'],
+    ['gcb', 'GAY CRUISE BINGO'],
+  ])('keeps the %s byline OUT of the h1 the brand tests and synthetic assert on', (edition, wordmark) => {
+    setActiveEdition(edition);
+    render(<SignIn />);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(wordmark);
+  });
+
+  it('leaves the platform Edition chipless: plain tagline, no byline, no invite note', () => {
     setActiveEdition('fiveacross');
     applyResolvedEventPreview(PREVIEW);
     setActiveAdultContent(false);

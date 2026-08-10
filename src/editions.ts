@@ -34,6 +34,14 @@ const BRANDS: Record<string, EditionBrand> = {
   gcb: {
     wordmark: 'GAY CRUISE BINGO',
     wordmarkBold: 'BINGO',
+    // The platform endorsement line, carried here since #688. It is an
+    // ENDORSEMENT, not a rename: the wordmark, the cruise vocabulary, the
+    // adult posture, gaycruisebingo.com and the legacy Firebase project are
+    // all unchanged — GCB is simply one Edition of Five Across now, on the
+    // same engine as Vacay, and under the Phase 7 native plan the store
+    // binary a GCB player installs is literally named Five Across. See the
+    // scoping note on `wordmarkByline` in the vacay row below.
+    wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Sails',
     tagline: 'Sign in, get your card, mark it if you see it.',
     offlineNote: 'Lost signal at sea? The printed cards and PDF still work.',
@@ -82,8 +90,10 @@ const BRANDS: Record<string, EditionBrand> = {
     wordmark: 'VACAY BINGO',
     wordmarkBold: 'BINGO',
     // The platform endorsement line the wireframes draw under every in-app
-    // Vacay wordmark (plans/daily-cards-wireframes.html, .hdr lockup). Only
-    // vacay carries it: gcb predates the platform, fiveacross IS the platform.
+    // Edition wordmark (plans/daily-cards-wireframes.html, .hdr lockup). Every
+    // Edition OF the platform carries it — vacay from #647, gcb from #688.
+    // Only `fiveacross` goes without: it IS the platform, so endorsing itself
+    // would be noise.
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',

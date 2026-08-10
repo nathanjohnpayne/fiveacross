@@ -187,9 +187,9 @@ a {
 }
 /* The platform endorsement micro-line under the wordmark ("BY FIVE ACROSS")
    — wireframes' .hdr .by: tiny, tracked wide, dim, no glow. Rendered only
-   when the Edition's brand table carries `wordmarkByline` (vacay does; gcb
-   and fiveacross don't). Body font, not Bebas: it is an annotation, not
-   display type. */
+   when the Edition's brand table carries `wordmarkByline` (vacay and gcb do;
+   fiveacross, being the platform itself, doesn't). Body font, not Bebas: it
+   is an annotation, not display type. */
 .brand-byline {
   display: block;
   font-size: 9px;

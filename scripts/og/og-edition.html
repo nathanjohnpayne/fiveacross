@@ -1,0 +1,427 @@
+<!doctype html>
+<!--
+  Design source for the PER-EDITION link-unfurl artwork:
+  public/og-gcb.png, public/og-vacay.png, public/og-fiveacross.png (1200x630).
+
+  Read scripts/og/render-og-editions.mjs and docs/app/og-artwork.md before
+  editing. The short version:
+
+  - This file is a TEMPLATE, not a finished artboard. It renders whatever
+    config `window.__OG_RENDER__(config)` is handed; the renderer owns the
+    per-Edition art direction and pulls the COPY (wordmark, byline, share
+    mark, description, domain) straight out of `src/editions.ts`. So changing
+    a wordmark, an endorsement line or a share-mark emoji is a brand-table
+    edit plus a re-render, never a pixel edit — which is the whole point.
+  - The three Editions share one skeleton: an eyebrow, the wordmark, an
+    optional platform endorsement line, a short gradient rule, a description,
+    a domain, and a 5x5 board to the right under a BINGO caption. What varies
+    is palette, wordmark treatment, board pattern, and the ornaments (Vacay's
+    dashed passport frame and TAKE THE DETOUR stamp).
+
+  The original 1200x630 renders (#609, landed via #642) were committed as
+  binaries with no source, so the first change to them was an archaeology
+  pass. This file exists so that never happens again; the geometry below was
+  measured off those renders, and scripts/og/compare-og.mjs scores a fresh
+  render against the committed asset so a re-render can prove it changed only
+  what it meant to.
+
+  Render: node scripts/og/render-og-editions.mjs [--edition gcb|vacay|fiveacross]
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>og-edition design source</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Oswald:wght@300;400;500;600;700&display=block" rel="stylesheet" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+
+  /* The body copy is the host's neo-grotesque, matching the #609 renders:
+     they were produced on macOS, where this stack resolves to Helvetica Neue.
+     Rendering anywhere else changes the body type — see the platform note in
+     docs/app/og-artwork.md. The DISPLAY face is a real webfont (Anton), so
+     the wordmark is stable everywhere. */
+  body {
+    position: relative;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #bg { position: absolute; inset: 0; }
+  /* Optional second background layer: the platform artboard rules its ground
+     with a faint grid, the one ornament an otherwise unornamented identity
+     allows itself. */
+  #bggrid { position: absolute; inset: 0; display: none; }
+
+  /* Vacay's passport frame. Drawn as its own layer so the dashes sit under
+     the content and above the background wash. */
+  #frame { position: absolute; display: none; }
+
+  #stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* ---------- left column: the lockup ---------- */
+  #left {
+    position: absolute;
+    left: 78px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  #eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.20em;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  #eyebrow .mark { font-size: 24px; line-height: 1; letter-spacing: 0; }
+  /* The platform's mark is a TEXT asterisk tinted with the brand hue, not a
+     colour emoji — `text` presentation keeps the glyph from rasterising as
+     Apple's multicolour sparkle. */
+  #eyebrow .mark.glyph { font-size: 21px; color: var(--primary); font-weight: 700; }
+
+  #wordmark {
+    font-family: 'Anton', 'Arial Narrow', sans-serif;
+    font-weight: 400;
+    color: var(--ink);
+    text-transform: uppercase;
+    white-space: pre-line;
+  }
+  /* The bold half of the wordmark carries the Edition's two-hue gradient —
+     the same primary→secondary pair the app's marked cells use. */
+  #wordmark .grad {
+    background: linear-gradient(95deg, var(--primary) 0%, var(--secondary) 100%);
+    -webkit-background-clip: text;
+            background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  /* Five Across sets its wordmark rather than stacking it: one line, the
+     platform's restraint — light lead, heavy second word, no glow. */
+  #wordmark.set {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+  #wordmark.set .lead { font-weight: 200; }
+  #wordmark.set .bold { font-weight: 700; }
+
+  #byline {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.185em;
+    text-transform: uppercase;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+
+  #rule { height: 3px; border-radius: 2px; }
+
+  #desc {
+    font-size: 27px;
+    font-weight: 400;
+    line-height: 1.34;
+    color: var(--ink);
+    white-space: pre-line;
+  }
+
+  #domain {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.215em;
+    text-transform: uppercase;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  #domain::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: 0 0 auto;
+  }
+
+  /* ---------- right: the board ---------- */
+  #boardwrap { position: absolute; display: flex; flex-direction: column; align-items: center; }
+  #board {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    grid-template-rows: repeat(5, 1fr);
+    gap: 9px;
+    border-radius: 26px;
+    border: 1px solid var(--boardline);
+    background: var(--boardbg, transparent);
+    box-shadow: var(--boardshadow, none);
+    padding: 15px;
+  }
+  .sq {
+    border-radius: 13px;
+    border: 1px solid var(--sqline);
+    background: var(--sqbg);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 9px;
+    padding: 0 13px;
+  }
+  /* The two rules inside a square stand in for prompt text at a size where
+     real words would be unreadable noise. Their LENGTHS vary per square, and
+     that variation is data, not decoration: a board of identically-ruled
+     squares reads as a placeholder grid rather than as a card of prompts, and
+     normalising them meant a copy-only re-render rewrote all 25 squares
+     instead of the one line that changed (Codex P2 on #697). Widths come from
+     the config as inline styles; these are only the shared shape. */
+  .sq i { display: block; height: 6px; border-radius: 3px; background: var(--barbg); }
+  /* The marked-square fill is the app's own two-hue cell gradient. Which hue
+     leads is per-Edition art direction (`--ongrad`): the cruise board runs hot
+     pink into cyan, the trip board runs sea glass into Pacific blue. */
+  .sq.on {
+    background: var(--ongrad);
+    border-color: transparent;
+    box-shadow: 0 0 22px var(--onglow);
+  }
+  .sq.on i { background: var(--onbar); }
+  .sq.free {
+    background: var(--accent);
+    border-color: var(--accent);
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .sq.free b {
+    font-family: 'Oswald', 'Helvetica Neue', sans-serif;
+    font-weight: 700;
+    font-size: 21px;
+    letter-spacing: 0.06em;
+    color: var(--freeink);
+  }
+  .sq.free i { display: none; }
+
+  #caption {
+    margin-top: 22px;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.34em;
+    color: var(--accent);
+  }
+
+  /* Vacay's dashed stamp box, the postcard tell. It sits OVER the board's
+     upper-right corner — the board is not moved out of its way — and carries a
+     scrim so the squares beneath it recede rather than compete with the
+     stamp's own type. Without the scrim a marked square reads straight through
+     the box and the stamp stops looking like a stamp; solved off the #609
+     render, where a square measures (26,56,75) inside the box and (72,148,175)
+     immediately below it, i.e. the page ground at ~0.70. */
+  #stamp {
+    position: absolute;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border: 2px dashed var(--accent);
+    border-radius: 8px;
+    background: var(--stampscrim, transparent);
+    text-align: center;
+  }
+  #stamp .mark { font-size: 37px; line-height: 1; }
+  #stamp .txt {
+    font-family: 'Oswald', 'Helvetica Neue', sans-serif;
+    font-weight: 700;
+    font-size: 12px;
+    line-height: 1.4;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+</style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="bggrid"></div>
+  <div id="frame"></div>
+  <div id="stage">
+    <div id="left">
+      <div id="eyebrow"><span class="mark"></span><span class="txt"></span></div>
+      <div id="wordmark"></div>
+      <div id="byline"></div>
+      <div id="rule"></div>
+      <div id="desc"></div>
+      <div id="domain"></div>
+    </div>
+    <div id="boardwrap">
+      <div id="board"></div>
+      <div id="caption"></div>
+    </div>
+  </div>
+  <div id="stamp"><span class="mark"></span><span class="txt"></span></div>
+
+  <!-- Font probe. CSS font loading is lazy: a face no element uses is never
+       fetched, so `document.fonts.check` would report it missing and the
+       renderer's fail-closed guard would fire on an Edition that simply does
+       not draw that face (Five Across sets its wordmark in the body stack and
+       has no FREE label). Rendering both faces off-canvas keeps them loaded
+       for every Edition, so the guard tests the network rather than the
+       art direction. -->
+  <div id="fontprobe" aria-hidden="true"
+       style="position:absolute;left:-9999px;top:0;opacity:0;pointer-events:none">
+    <span style="font-family:'Anton';font-weight:400">probe</span>
+    <span style="font-family:'Oswald';font-weight:700">probe</span>
+  </div>
+
+<script>
+  // The renderer calls this once with a fully-resolved config. Everything the
+  // artwork says comes in through it; nothing about a specific Edition is
+  // hard-coded above.
+  window.__OG_RENDER__ = function (c) {
+    const root = document.documentElement.style;
+    for (const [k, v] of Object.entries(c.palette)) root.setProperty('--' + k, v);
+
+    document.getElementById('bg').style.background = c.background;
+    if (c.backgroundGrid) {
+      const g = document.getElementById('bggrid');
+      g.style.display = 'block';
+      g.style.background = c.backgroundGrid;
+    }
+
+    // --- optional passport frame (vacay) ---
+    const frame = document.getElementById('frame');
+    if (c.frame) {
+      frame.style.display = 'block';
+      frame.style.inset = c.frame.inset + 'px';
+      frame.style.border = c.frame.width + 'px dashed ' + c.frame.color;
+      frame.style.borderRadius = c.frame.radius + 'px';
+    }
+
+    // --- eyebrow ---
+    const mark = document.querySelector('#eyebrow .mark');
+    mark.textContent = c.eyebrow.mark;
+    if (c.eyebrow.markStyle === 'glyph') mark.classList.add('glyph');
+    document.querySelector('#eyebrow .txt').textContent = c.eyebrow.text;
+
+    // --- wordmark ---
+    const wm = document.getElementById('wordmark');
+    const w = c.wordmark;
+    wm.style.fontSize = w.size + 'px';
+    wm.style.lineHeight = w.lineHeight;
+    if (w.letterSpacing) wm.style.letterSpacing = w.letterSpacing;
+    if (w.glow) wm.style.textShadow = w.glow;
+    if (w.style === 'set') {
+      wm.classList.add('set');
+      wm.innerHTML = '<span class="lead"></span><span class="bold"></span>';
+      // The word space is part of the lead run: `wordmark` is "FIVE ACROSS"
+      // and `wordmarkBold` is "ACROSS", so the two spans butt together and
+      // would read FIVEACROSS without it.
+      wm.querySelector('.lead').textContent = w.lead + ' ';
+      wm.querySelector('.bold').textContent = w.bold;
+    } else {
+      // Stacked: the lead words sit on line one, the bold word on line two in
+      // the Edition's gradient. Text nodes, not innerHTML — the copy comes
+      // from the brand table and is never markup.
+      const l1 = document.createElement('span');
+      l1.textContent = w.lead;
+      const br = document.createElement('br');
+      const l2 = document.createElement('span');
+      l2.className = 'grad';
+      l2.textContent = w.bold;
+      wm.append(l1, br, l2);
+    }
+
+    // --- endorsement byline (absent on the platform Edition) ---
+    const by = document.getElementById('byline');
+    if (c.byline) by.textContent = c.byline;
+    else by.style.display = 'none';
+
+    // --- rule / description / domain ---
+    const rule = document.getElementById('rule');
+    rule.style.width = c.rule.width + 'px';
+    rule.style.background = c.rule.background;
+    const desc = document.getElementById('desc');
+    desc.textContent = c.desc.text;
+    if (c.desc.size) desc.style.fontSize = c.desc.size + 'px';
+    document.getElementById('domain').append(document.createTextNode(c.domain));
+
+    // --- left column geometry ---
+    const left = document.getElementById('left');
+    left.style.top = c.left.top + 'px';
+    if (c.left.left) left.style.left = c.left.left + 'px';
+    // Per-gap control: the stack's rhythm is measured, not uniform.
+    const order = ['eyebrow', 'wordmark', 'byline', 'rule', 'desc', 'domain'];
+    order.forEach((id, i) => {
+      if (i === 0) return;
+      const el = document.getElementById(id);
+      if (el.style.display === 'none') return;
+      el.style.marginTop = c.left.gaps[id] + 'px';
+    });
+
+    // --- board ---
+    const board = document.getElementById('board');
+    board.style.width = c.board.size + 'px';
+    board.style.height = c.board.size + 'px';
+    if (c.board.gap != null) board.style.gap = c.board.gap + 'px';
+    if (c.board.pad != null) board.style.padding = c.board.pad + 'px';
+    if (c.board.radius != null) board.style.borderRadius = c.board.radius + 'px';
+    for (let r = 0; r < c.board.pattern.length; r++) {
+      const row = c.board.pattern[r];
+      for (let ci = 0; ci < row.length; ci++) {
+        const ch = row[ci];
+        const sq = document.createElement('div');
+        sq.className = 'sq' + (ch === 'x' ? ' on' : ch === 'F' ? ' free' : '');
+        if (c.board.cellRadius != null) sq.style.borderRadius = c.board.cellRadius + 'px';
+        if (ch === 'F') {
+          const b = document.createElement('b');
+          b.textContent = c.board.freeLabel;
+          sq.append(b);
+        } else {
+          // Two rules, each SHORT or LONG per this square's entry in the bar
+          // map — see `.sq i` above for why the variation is load-bearing.
+          const spec = c.board.bars?.[r]?.[ci] ?? 'sl';
+          for (const ch of spec) {
+            const bar = document.createElement('i');
+            bar.style.width = (ch === 'l' ? c.board.barLong : c.board.barShort) + '%';
+            sq.append(bar);
+          }
+        }
+        board.append(sq);
+      }
+    }
+    const wrap = document.getElementById('boardwrap');
+    wrap.style.left = c.board.x + 'px';
+    wrap.style.top = c.board.y + 'px';
+    if (c.board.rotate) wrap.style.transform = 'rotate(' + c.board.rotate + 'deg)';
+    document.getElementById('caption').textContent = c.caption;
+
+    // --- optional stamp (vacay) ---
+    if (c.stamp) {
+      const s = document.getElementById('stamp');
+      s.style.display = 'flex';
+      s.style.left = c.stamp.x + 'px';
+      s.style.top = c.stamp.y + 'px';
+      s.style.width = c.stamp.w + 'px';
+      s.style.height = c.stamp.h + 'px';
+      s.querySelector('.mark').textContent = c.stamp.mark;
+      s.querySelector('.txt').textContent = c.stamp.text;
+    }
+
+    document.body.dataset.ogReady = '1';
+  };
+</script>
+</body>
+</html>

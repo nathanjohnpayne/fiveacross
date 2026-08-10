@@ -54,9 +54,12 @@ const CASES = [
     theme: 'The Birds Have Entered the Chat',
   },
   {
+    // The tightest case in the app since #688: the longest wordmark (16 chars
+    // against vacay's 11) now also carries the byline, so this is where the
+    // brand column is widest AND tallest at once.
     name: 'gcb (longest wordmark)',
     brand: 'GAY CRUISE <b>BINGO</b>',
-    byline: null,
+    byline: 'BY FIVE ACROSS',
     port: '🇭🇷 Split',
     theme: '🌍 Uniforms Without Borders',
   },
@@ -101,19 +104,25 @@ try {
     });
     for (const c of CASES) {
       await page.setContent(pageHtml(c), { waitUntil: 'load' });
-      const m = await page.evaluate(() => {
-        const el = document.querySelector('.brand-wordmark');
-        const style = getComputedStyle(el);
+      const { m, b } = await page.evaluate(() => {
         // A block-level element that wraps grows in height; one rendered line
         // means clientHeight stays under 2 line-boxes. The overflow check
         // proves nowrap isn't hiding a wordmark wider than its column.
+        const measure = (el) => {
+          if (!el) return null;
+          const style = getComputedStyle(el);
+          return {
+            clientHeight: el.clientHeight,
+            fontSize: parseFloat(style.fontSize),
+            lineHeight: parseFloat(style.lineHeight) || parseFloat(style.fontSize),
+            scrollWidth: el.scrollWidth,
+            clientWidth: el.clientWidth,
+            rects: el.getClientRects().length,
+          };
+        };
         return {
-          clientHeight: el.clientHeight,
-          fontSize: parseFloat(style.fontSize),
-          lineHeight: parseFloat(style.lineHeight) || parseFloat(style.fontSize),
-          scrollWidth: el.scrollWidth,
-          clientWidth: el.clientWidth,
-          rects: el.getClientRects().length,
+          m: measure(document.querySelector('.brand-wordmark')),
+          b: measure(document.querySelector('.brand-byline')),
         };
       });
       // Vacuous-pass guard: the production stylesheet sets 26px display type,
@@ -129,13 +138,33 @@ try {
       }
       const oneLine = m.clientHeight < 2 * m.lineHeight;
       const noOverflow = m.scrollWidth <= m.clientWidth + 1; // ±1px rounding
-      const ok = oneLine && noOverflow;
+      let ok = oneLine && noOverflow;
       if (!ok) failed = true;
       console.log(
         `${ok ? 'PASS' : 'FAIL'}  ${vp.width}x${vp.height} (${vp.label})  ${c.name}: ` +
           `height=${m.clientHeight}px lineHeight=${m.lineHeight}px ` +
           `scrollWidth=${m.scrollWidth}px clientWidth=${m.clientWidth}px` +
           (ok ? '' : `  — ${oneLine ? 'wordmark overflows its column' : 'wordmark wrapped to two lines'}`),
+      );
+      // The byline is the other half of the lockup (#688 gave it to gcb, whose
+      // 16-character wordmark is the widest column in the app). It is nowrap
+      // too, so the same pair of questions applies: did it stay on one line,
+      // and is nowrap hiding an overflow rather than preventing one?
+      if (!c.byline) continue;
+      if (!b) {
+        console.error(`FAIL  ${vp.width}x${vp.height}  ${c.name}: no .brand-byline rendered`);
+        failed = true;
+        continue;
+      }
+      const byOneLine = b.clientHeight < 2 * b.lineHeight;
+      const byNoOverflow = b.scrollWidth <= b.clientWidth + 1;
+      ok = byOneLine && byNoOverflow;
+      if (!ok) failed = true;
+      console.log(
+        `${ok ? 'PASS' : 'FAIL'}  ${vp.width}x${vp.height} (${vp.label})  ${c.name} byline: ` +
+          `height=${b.clientHeight}px lineHeight=${b.lineHeight}px ` +
+          `scrollWidth=${b.scrollWidth}px clientWidth=${b.clientWidth}px` +
+          (ok ? '' : `  — ${byOneLine ? 'byline overflows its column' : 'byline wrapped to two lines'}`),
       );
     }
     await page.close();
