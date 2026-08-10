@@ -32,11 +32,11 @@
     "pretest:e2e": "playwright install chromium"
   },
   "dependencies": {
-    "firebase": "^12.17.0",
+    "firebase": "^12.17.1",
     "html-to-image": "^1.11.13",
     "html2canvas": "^1.4.1",
-    "lucide-react": "^1.28.0",
-    "posthog-js": "^1.409.5",
+    "lucide-react": "^1.29.0",
+    "posthog-js": "^1.413.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.3.0",
