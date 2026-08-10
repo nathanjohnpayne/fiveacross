@@ -14,6 +14,7 @@ export const DEPLOY_TARGETS = Object.freeze({
     envFile: '.env.gaycruisebingo',
     firebaseProject: 'gaycruisebingo',
     identity: Object.freeze({
+      VITE_FIREBASE_API_KEY: 'AIzaSyDlFSLJD2NVqiheppZBAOvTNAasigJYLoc',
       VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
       VITE_FIREBASE_AUTH_DOMAIN: 'gaycruisebingo.com',
       VITE_FIREBASE_STORAGE_BUCKET: 'gaycruisebingo.firebasestorage.app',
@@ -33,6 +34,7 @@ export const DEPLOY_TARGETS = Object.freeze({
     envFile: '.env.fiveacross',
     firebaseProject: 'fiveacross',
     identity: Object.freeze({
+      VITE_FIREBASE_API_KEY: 'AIzaSyA-JHRrQOmxXzD2rK4FcpyYz_fRMHQdhMQ',
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
       VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',

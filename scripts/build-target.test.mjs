@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
   buildEnvironment,
+  DEPLOY_TARGETS,
   envFileForTarget,
   requiredViteKeys,
   validateTargetOperationalMetadata,
@@ -23,7 +24,7 @@ const FIVEACROSS_TARGET_ENV = {
   VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
   VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
   VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
-  VITE_FIREBASE_API_KEY: 'fiveacross-web-key',
+  VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY,
   VITE_EVENT_ID: 'bodega-bay-2026',
   VITE_EDITION: 'vacay',
   VITE_ADULT_CONTENT: 'false',
@@ -39,7 +40,7 @@ const GAY_CRUISE_BINGO_TARGET_ENV = {
   VITE_FIREBASE_MESSAGING_SENDER_ID: '849798007162',
   VITE_FIREBASE_APP_ID: '1:849798007162:web:70dffafa77cc65a8306ec3',
   VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
-  VITE_FIREBASE_API_KEY: 'gcb-web-key',
+  VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.gaycruisebingo.identity.VITE_FIREBASE_API_KEY,
   VITE_EVENT_ID: 'med-2026',
   VITE_EDITION: 'gcb',
   VITE_ADULT_CONTENT: 'true',
@@ -56,7 +57,7 @@ describe('build target selection', () => {
       {
         VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
         VITE_FIREBASE_AUTH_DOMAIN: 'gaycruisebingo.com',
-        VITE_FIREBASE_API_KEY: 'gcb-web-key',
+        VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.gaycruisebingo.identity.VITE_FIREBASE_API_KEY,
         VITE_EVENT_ID: 'med-2026',
         VITE_EDITION: 'gcb',
         VITE_RECAPTCHA_SITE_KEY: 'gcb-recaptcha-key',
@@ -70,7 +71,7 @@ describe('build target selection', () => {
     expect(environment).toMatchObject({
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
-      VITE_FIREBASE_API_KEY: 'fiveacross-web-key',
+      VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY,
       VITE_EVENT_ID: 'bodega-bay-2026',
       VITE_EDITION: 'vacay',
       VITE_ADULT_CONTENT: 'false',
@@ -160,6 +161,20 @@ describe('build target selection', () => {
     );
   });
 
+  it('rejects an API key copied from the other Firebase project', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          ...FIVEACROSS_TARGET_ENV,
+          VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.gaycruisebingo.identity.VITE_FIREBASE_API_KEY,
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow(`VITE_FIREBASE_API_KEY=${JSON.stringify(DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY)}`);
+  });
+
   it('requires Five Across to name the shared GA4 stream explicitly', () => {
     expect(() =>
       buildEnvironment(
@@ -217,6 +232,7 @@ describe('build target selection', () => {
   it('ignores future target files without hiding the committed template', () => {
     expect(spawnSync('git', ['check-ignore', '--quiet', '.env.future-event']).status).toBe(0);
     expect(spawnSync('git', ['check-ignore', '--quiet', '.env.example']).status).toBe(1);
+    expect(spawnSync('git', ['check-ignore', '--quiet', '.env.tpl']).status).toBe(1);
   });
 
   it('derives the complete Vite-key set from the target template', () => {
