@@ -11,8 +11,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
       VITE_FIREBASE_AUTH_DOMAIN: 'gaycruisebingo.com',
       VITE_EVENT_ID: 'med-2026',
-      // The app maps this intentionally blank value to its gcb default.
-      VITE_EDITION: '',
+      VITE_EDITION: 'gcb',
     }),
   }),
   fiveacross: Object.freeze({

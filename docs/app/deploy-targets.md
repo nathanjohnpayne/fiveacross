@@ -10,7 +10,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Event | `med-2026` | `bodega-bay-2026` |
 | Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.fiveacross.app` (canonical), `bodega-bay.vacaybingo.com`, `fiveacross.app` |
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
-| Baked `VITE_EDITION` | empty (`gcb` default) | `vacay` |
+| Baked `VITE_EDITION` | `gcb` | `vacay` |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
@@ -28,7 +28,7 @@ Reconstructing the target env from the README alone would therefore produce a bu
 
 ## Target environment files
 
-`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the project's Firebase project, auth domain, Event, and Edition tuple before it builds. It also removes ambient `VITE_*` values, so a developer's `.env.local` cannot override or fill in part of a production target.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the project's Firebase project, auth domain, Event, and Edition tuple before it builds. Both targets name their Edition explicitly (`gcb` or `vacay`); neither relies on an application default. It also removes ambient `VITE_*` values, so a developer's `.env.local` cannot override or fill in part of a production target.
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 

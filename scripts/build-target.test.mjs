@@ -99,6 +99,23 @@ describe('build target selection', () => {
     ).toThrow('VITE_EVENT_ID="bodega-bay-2026", VITE_EDITION="vacay"');
   });
 
+  it('requires Gay Cruise Bingo to name its Edition explicitly', () => {
+    expect(() =>
+      buildEnvironment(
+        'gaycruisebingo',
+        {
+          VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
+          VITE_FIREBASE_AUTH_DOMAIN: 'gaycruisebingo.com',
+          VITE_FIREBASE_API_KEY: 'gcb-web-key',
+          VITE_EVENT_ID: 'med-2026',
+          VITE_EDITION: '',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_EDITION="gcb"');
+  });
+
   it('derives the complete Vite-key set from the target template', () => {
     expect(requiredViteKeys({ VITE_ONE: '', NOT_VITE: '', VITE_TWO: '' })).toEqual(['VITE_ONE', 'VITE_TWO']);
   });
