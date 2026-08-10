@@ -124,17 +124,29 @@ async function pixels(page, pngPath) {
   }, fileUrl);
 }
 
-/** Does this region contain anything but flat ground? Used to catch a band
- *  table that has drifted away from the render it is meant to describe. */
+/** Does this region contain FOREGROUND — type, a rule, a square — as opposed
+ *  to background? Used to catch a band table that has drifted away from the
+ *  render it is meant to describe.
+ *
+ *  It tests LOCAL contrast, not variation from a corner pixel. The obvious
+ *  version compares every pixel to one reference and calls any difference ink,
+ *  which is wrong on exactly the artwork this tool exists for: both Editions
+ *  lay a radial wash under the left column, and the wash alone clears any
+ *  fixed threshold — so an empty band reported ink, the drift warning never
+ *  fired, and the tool went back to reporting a reassuring clean region for a
+ *  band pointing at nothing (Codex P2 on #697). A smooth wash changes by ~1 per
+ *  few pixels; a glyph edge changes by tens, so the local step separates them
+ *  regardless of what the background is doing underneath. */
 function hasInk(img, [x0, y0, x1, y1]) {
   const at = (x, y) => {
     const i = (y * img.w + x) * 4;
     return img.data[i] + img.data[i + 1] + img.data[i + 2];
   };
-  const base = at(x0 + 1, y0 + 1);
+  const STEP = 3;
+  const EDGE = 60; // summed over three channels
   for (let y = y0; y < y1; y += 2) {
-    for (let x = x0; x < x1; x += 2) {
-      if (Math.abs(at(x, y) - base) > 60) return true;
+    for (let x = x0 + STEP; x < x1; x += 2) {
+      if (Math.abs(at(x, y) - at(x - STEP, y)) > EDGE) return true;
     }
   }
   return false;
