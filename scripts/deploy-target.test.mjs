@@ -32,11 +32,14 @@ describe('deploy target selection', () => {
   });
 
   it('keeps Gay Cruise Bingo project, build, and synthetic choices explicit', () => {
-    const invocation = deployInvocation('gaycruisebingo', ['--only', 'hosting'], {});
+    const invocation = deployInvocation('gaycruisebingo', ['--only', 'hosting'], {
+      CF_ZONE_ID: 'an-unrelated-zone',
+    });
 
     expect(invocation.args).toEqual(['--', 'gaycruisebingo', '--only', 'hosting']);
     expect(invocation.environment).toMatchObject({
       BUILD_CMD: 'npm run build:gaycruisebingo',
+      CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
       SYNTHETIC_URL: 'https://gaycruisebingo.com/',
     });
   });

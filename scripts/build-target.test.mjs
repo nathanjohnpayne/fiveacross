@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { buildEnvironment, envFileForTarget, requiredViteKeys } from './build-target.mjs';
 
 const REQUIRED_VITE_KEYS = [
@@ -16,7 +17,7 @@ const FIVEACROSS_TARGET_ENV = {
   VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
   VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
   VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
-  VITE_FIREBASE_MEASUREMENT_ID: '',
+  VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
   VITE_FIREBASE_API_KEY: 'fiveacross-web-key',
   VITE_EVENT_ID: 'bodega-bay-2026',
   VITE_EDITION: 'vacay',
@@ -148,6 +149,25 @@ describe('build target selection', () => {
     ).toThrow(
       'VITE_FIREBASE_STORAGE_BUCKET="fiveacross.firebasestorage.app", VITE_FIREBASE_APP_ID="1:5297095641:web:aff3537cf7c95dec220fc8"',
     );
+  });
+
+  it('requires Five Across to name the shared GA4 stream explicitly', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          ...FIVEACROSS_TARGET_ENV,
+          VITE_FIREBASE_MEASUREMENT_ID: '',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_FIREBASE_MEASUREMENT_ID="G-42N7WYDYT5"');
+  });
+
+  it('ignores future target files without hiding the committed template', () => {
+    expect(spawnSync('git', ['check-ignore', '--quiet', '.env.future-event']).status).toBe(0);
+    expect(spawnSync('git', ['check-ignore', '--quiet', '.env.example']).status).toBe(1);
   });
 
   it('derives the complete Vite-key set from the target template', () => {

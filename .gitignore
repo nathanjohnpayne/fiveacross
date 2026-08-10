@@ -9,8 +9,10 @@ build/
 .env
 .env.local
 .env.*.local
-.env.gaycruisebingo
-.env.fiveacross
+# Named Firebase target environments are local operational config. The
+# exception keeps the committed target template visible to new checkouts.
+/.env.*
+!/.env.example
 *.pem
 *.key
 

@@ -31,6 +31,7 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
     ...inheritedEnv,
     BUILD_CMD: `npm run build:${target}`,
   };
+  if (config.cloudflareZoneId) environment.CF_ZONE_ID = config.cloudflareZoneId;
   if (config.syntheticUrl) environment.SYNTHETIC_URL = config.syntheticUrl;
 
   return {

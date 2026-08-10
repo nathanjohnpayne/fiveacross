@@ -12,7 +12,9 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
 | Baked `VITE_EDITION` | `gcb` (explicit) | `vacay` (explicit) |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
+| Baked `VITE_FIREBASE_MEASUREMENT_ID` | `G-42N7WYDYT5` | `G-42N7WYDYT5` |
 | Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
+| Cache purge | Gay Cruise Bingo zone `8066dd2b105ad564c45bb8c898859343` | explicitly skipped (no Five Across zone configured) |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
 ### Which hosts to verify

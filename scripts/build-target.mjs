@@ -19,6 +19,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_EDITION: 'gcb',
       VITE_ADULT_CONTENT: 'true',
     }),
+    cloudflareZoneId: '8066dd2b105ad564c45bb8c898859343',
     syntheticUrl: 'https://gaycruisebingo.com/',
   }),
   fiveacross: Object.freeze({
@@ -30,7 +31,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
       VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
       VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
-      VITE_FIREBASE_MEASUREMENT_ID: '',
+      VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
       VITE_EVENT_ID: 'bodega-bay-2026',
       VITE_EDITION: 'vacay',
       VITE_ADULT_CONTENT: 'false',
