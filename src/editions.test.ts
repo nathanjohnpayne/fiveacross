@@ -71,6 +71,37 @@ describe('editions — the pre-auth brand', () => {
     }
   });
 
+  // #688: the endorsement byline is the platform's signature on an Edition, so
+  // its presence is a per-Edition FACT worth pinning in the table itself, not
+  // just in the two components that render it. The rule is "Editions of the
+  // platform carry it; the platform does not endorse itself" — asserted here
+  // as an exhaustive partition over EDITIONS so adding a fourth Edition
+  // without deciding its side of that line fails.
+  it('signs every Edition OF the platform, and only those, with the endorsement byline', () => {
+    const endorsed = EDITIONS.filter((e) => editionBrand(e).wordmarkByline !== undefined);
+    expect(endorsed).toEqual(['gcb', 'vacay']);
+    for (const edition of endorsed) {
+      expect(editionBrand(edition).wordmarkByline).toBe('BY FIVE ACROSS');
+    }
+    // Five Across IS the platform; an endorsement of itself would be noise.
+    expect(editionBrand('fiveacross').wordmarkByline).toBeUndefined();
+  });
+
+  // The byline is an endorsement, not a rename (#688). On an ENDORSED Edition,
+  // every place the product NAME is the payload — the tab title, the installed
+  // app's name and short name, the h1 the production synthetic waits on — must
+  // be untouched by it. (`fiveacross` is excluded because there the platform's
+  // name IS the product name, which is the whole reason it carries no byline.)
+  it('keeps the endorsement out of the product name on every endorsed Edition', () => {
+    for (const edition of ['gcb', 'vacay']) {
+      const brand = editionBrand(edition);
+      for (const field of ['wordmark', 'documentTitle', 'appName', 'appShortName'] as const) {
+        expect(brand[field], `${edition}.${field}`).not.toMatch(/five across/i);
+      }
+    }
+    expect(editionBrand('gcb').wordmark).toBe('GAY CRUISE BINGO');
+  });
+
   it('keeps the cruise itinerary OUT of every non-cruise Edition', () => {
     for (const edition of ['vacay', 'fiveacross']) {
       const brand = editionBrand(edition);

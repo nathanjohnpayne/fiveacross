@@ -46,7 +46,8 @@ export default function Nav() {
   // wordmark on ONE line — `.brand-wordmark` enforces that with nowrap, so a
   // long Day identity can never squeeze "VACAY BINGO" into a two-line stack —
   // with the Edition's endorsement micro-line ("BY FIVE ACROSS") underneath
-  // when the brand table carries one. Only vacay does; see `wordmarkByline`.
+  // when the brand table carries one. Every Edition OF the platform does —
+  // vacay and gcb; only `fiveacross` goes without. See `wordmarkByline`.
   const { lead, bold } = wordmarkSegments();
   const { wordmarkByline } = editionBrand();
 

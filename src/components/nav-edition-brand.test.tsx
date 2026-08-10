@@ -59,19 +59,30 @@ describe('Nav — the header wears the resolved Edition (#602)', () => {
 });
 
 // The endorsement micro-line under the wordmark (daily-cards-wireframes §
-// in-app header lockup): the wireframes give it ONLY to Vacay — GCB predates
-// the platform, and Five Across IS the platform. The header must follow the
-// brand table's `wordmarkByline`, not hardcode either the line or the set of
-// Editions that carry it.
+// in-app header lockup): every Edition OF the platform wears it — Vacay from
+// #647, GCB from #688 — and only Five Across goes without, because it IS the
+// platform. The header must follow the brand table's `wordmarkByline`, not
+// hardcode either the line or the set of Editions that carry it.
 describe('Nav — the platform endorsement byline', () => {
-  it('draws BY FIVE ACROSS under the Vacay wordmark', () => {
-    setActiveEdition('vacay');
+  it.each(['vacay', 'gcb'])('draws BY FIVE ACROSS under the %s wordmark', (edition) => {
+    setActiveEdition(edition);
     const brand = renderBrand();
     expect(brand.querySelector('.brand-byline')?.textContent).toBe('BY FIVE ACROSS');
   });
 
-  it.each(['gcb', 'fiveacross'])('draws no byline for %s', (edition) => {
-    setActiveEdition(edition);
+  // The endorsement is a byline, not a rename: it must sit in its own element
+  // BELOW the wordmark, never inside it. `.brand-wordmark` is what the header
+  // brand tests above read brand-for-brand, and what `white-space: nowrap`
+  // holds to one line — smuggling four more words into it would both break
+  // that assertion and put "GAY CRUISE BINGO BY FIVE ACROSS" on one line.
+  it('keeps the byline OUT of the gcb wordmark', () => {
+    setActiveEdition('gcb');
+    const brand = renderBrand();
+    expect(brand.querySelector('.brand-wordmark')?.textContent).toBe('GAY CRUISE BINGO');
+  });
+
+  it('draws no byline for fiveacross, which IS the platform', () => {
+    setActiveEdition('fiveacross');
     const brand = renderBrand();
     expect(brand.querySelector('.brand-byline')).toBeNull();
   });

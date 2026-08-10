@@ -65,9 +65,10 @@ export default function SignIn() {
     // must never be load-bearing for uptime again.
     <div className="signin" data-testid="signin-gate">
       <h1>{brand.wordmark}</h1>
-      {/* The platform endorsement line under the wordmark (#647) — the Join
-          frames' lockup carries it wherever the brand table does (vacay only;
-          see `wordmarkByline`). A SIBLING of the h1, not inside it: the
+      {/* The platform endorsement line under the wordmark (#647, gcb from
+          #688) — the Join frames' lockup carries it wherever the brand table
+          does (every Edition of the platform; see `wordmarkByline`). It is a
+          SIBLING of the h1, not inside it: the
           heading's textContent is asserted brand-for-brand by
           signin-edition-brand.test.tsx and must stay exactly the wordmark. */}
       {brand.wordmarkByline && <span className="brand-byline">{brand.wordmarkByline}</span>}

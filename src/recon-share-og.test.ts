@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DAYS } from './data/seed';
+import { editionBrand } from './editions';
 import { THEMES } from './theme/themes';
 
 // Reconciliation guard for ADR 0005 (issue #39), not an app unit test: it
@@ -139,6 +140,76 @@ describe('recon: bare-URL unfurl keeps working with no server', () => {
     if (!theme) throw new Error('no ThemeMeta for neon-pink-playground');
     expect(template).toContain(`Day ${day.index + 1} · ${theme.label} ${theme.emoji}`);
     expect(template).toContain(`${day.placeEmoji} ${day.place}`);
+  });
+});
+
+// #688 / #681. The three per-Edition renders (#609, landed via #642) shipped
+// as binaries with NO generator — `render-og-default.mjs` builds og-default.png
+// and nothing else — so the first two content changes to them each opened with
+// an archaeology pass over a PNG. These guards keep the replacement honest:
+// the source exists, the wireframes' reference copies cannot drift from the
+// shipped ones, and the artwork's words keep coming from the brand table
+// rather than being retyped into the generator.
+describe('recon: the per-Edition unfurl artwork is regenerable and table-driven (#688)', () => {
+  const EDITION_ASSETS = [
+    { edition: 'gcb', shipped: 'og-gcb.png', mirror: 'gay-cruise-bingo-og.png' },
+    { edition: 'vacay', shipped: 'og-vacay.png', mirror: 'vacay-bingo-og.png' },
+    { edition: 'fiveacross', shipped: 'og-fiveacross.png', mirror: 'five-across-og.png' },
+  ];
+
+  it('ships a design source and a renderer for the per-Edition artwork', () => {
+    for (const file of ['og-edition.html', 'render-og-editions.mjs', 'compare-og.mjs']) {
+      expect(existsSync(resolve(`../scripts/og/${file}`)), file).toBe(true);
+    }
+    // The reference share cards' brand footer has its own refresher, because
+    // those PNGs are pictures of a live component (ShareCard.tsx) rather than
+    // artwork with a design source (#681).
+    expect(existsSync(resolve('../scripts/og/render-share-footer.mjs'))).toBe(true);
+  });
+
+  it.each(EDITION_ASSETS)(
+    'keeps plans/og-images/$mirror byte-identical to public/$shipped',
+    ({ shipped, mirror }) => {
+      // The wireframes doc states these are the same render committed twice —
+      // one as the shipped asset, one as the doc's reference copy — and #681
+      // makes it an acceptance criterion. The renderer writes both from one
+      // screenshot, so a mismatch means someone hand-edited one of them.
+      const a = readFileSync(resolve(`../public/${shipped}`));
+      const b = readFileSync(resolve(`../plans/og-images/${mirror}`));
+      expect(a.equals(b)).toBe(true);
+    },
+  );
+
+  it.each(EDITION_ASSETS)('renders $shipped at the 1200x630 the meta block promises', ({ shipped }) => {
+    // og:image:width/height are asserted above as MARKUP; this asserts the
+    // pixels agree with them. A re-render at the wrong size unfurls letterboxed
+    // on every platform and nothing else would catch it.
+    const png = readFileSync(resolve(`../public/${shipped}`));
+    // PNG: 8-byte signature, then a length+type header, then IHDR's width and
+    // height as big-endian uint32s at offsets 16 and 20.
+    expect(png.subarray(12, 16).toString('ascii')).toBe('IHDR');
+    expect(png.readUInt32BE(16)).toBe(1200);
+    expect(png.readUInt32BE(20)).toBe(630);
+  });
+
+  it('never retypes brand-table copy into the generator', () => {
+    // The whole point of the generator is that a wordmark, an endorsement line
+    // or a share mark changes in `src/editions.ts` and the artwork follows. A
+    // literal copy of any of those strings in the renderer's CODE is the drift
+    // this replaces, so it fails here. Comments are stripped first: the header
+    // legitimately narrates #681's 🗺️ → 🧳 move and #688's endorsement.
+    const code = read('../scripts/og/render-og-editions.mjs')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    for (const edition of ['gcb', 'vacay', 'fiveacross']) {
+      const brand = editionBrand(edition);
+      for (const owned of [brand.wordmark, brand.appName, brand.lexicon.shareMark]) {
+        expect(code, `${edition}: "${owned}" belongs to the brand table`).not.toContain(owned);
+      }
+      if (brand.wordmarkByline) {
+        expect(code, `${edition} byline`).not.toContain(brand.wordmarkByline);
+      }
+    }
   });
 });
 
