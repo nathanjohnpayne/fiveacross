@@ -45,9 +45,20 @@ describe('build target selection', () => {
   });
 
   it('rejects a config file for the wrong Firebase project', () => {
-    expect(() => buildEnvironment('fiveacross', { VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo' })).toThrow(
-      'VITE_FIREBASE_PROJECT_ID must be "fiveacross"',
-    );
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
+          VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+          VITE_FIREBASE_API_KEY: 'fiveacross-web-key',
+          VITE_EVENT_ID: 'bodega-bay-2026',
+          VITE_EDITION: 'vacay',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_FIREBASE_PROJECT_ID="fiveacross"');
   });
 
   it('maps each supported target to its dedicated env file', () => {
@@ -69,6 +80,23 @@ describe('build target selection', () => {
         REQUIRED_VITE_KEYS,
       ),
     ).toThrow('Missing: VITE_EVENT_ID');
+  });
+
+  it('rejects a copied target file with the other Event or Edition', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          VITE_FIREBASE_PROJECT_ID: 'fiveacross',
+          VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+          VITE_FIREBASE_API_KEY: 'fiveacross-web-key',
+          VITE_EVENT_ID: 'med-2026',
+          VITE_EDITION: '',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_EVENT_ID="bodega-bay-2026", VITE_EDITION="vacay"');
   });
 
   it('derives the complete Vite-key set from the target template', () => {

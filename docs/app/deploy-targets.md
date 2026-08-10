@@ -10,7 +10,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Event | `med-2026` | `bodega-bay-2026` |
 | Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.fiveacross.app` (canonical), `bodega-bay.vacaybingo.com`, `fiveacross.app` |
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
-| Baked `VITE_EDITION` | `gcb` (default) | `vacay` |
+| Baked `VITE_EDITION` | empty (`gcb` default) | `vacay` |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
@@ -28,7 +28,7 @@ Reconstructing the target env from the README alone would therefore produce a bu
 
 ## Target environment files
 
-`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` loads the selected file into the build process after the ambient environment, so a developer's `.env.local` cannot override the production target.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the project's Firebase project, auth domain, Event, and Edition tuple before it builds. It also removes ambient `VITE_*` values, so a developer's `.env.local` cannot override or fill in part of a production target.
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
@@ -56,13 +56,19 @@ The existing deploy guards still require `main`, a current `origin/main`, and a 
 
 ### Verify the deployed target
 
-The synthetic proves the application mounted. For an independent target check, verify both serving hosts contain a Five Across bundle:
+The synthetic proves the application mounted. For an independent target check, verify both serving hosts contain the Five Across project **and the exact commit that was deployed**. Run this from the clean `main` checkout used for deployment; the target deploy commands ensure its `HEAD` equals `origin/main`.
 
 ```bash
+EXPECTED_SHA="$(git rev-parse HEAD)"
 for HOST in https://bodega-bay.fiveacross.app https://bodega-bay.vacaybingo.com; do
   ASSET=$(curl -sS "$HOST/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
   printf '%s ' "$HOST"
-  curl -sS "$HOST$ASSET" | grep -q 'projectId:"fiveacross"' && echo fiveacross || echo WRONG-TARGET
+  if curl -sS "$HOST$ASSET" | grep -q 'projectId:"fiveacross"' && \
+     curl -sS "$HOST$ASSET" | grep -q "\"$EXPECTED_SHA\""; then
+    echo "fiveacross $EXPECTED_SHA"
+  else
+    echo WRONG-TARGET-OR-STALE-COMMIT
+  fi
 done
 ```
 

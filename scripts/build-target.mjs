@@ -5,16 +5,37 @@ import { spawnSync } from 'node:child_process';
 import { parse } from 'dotenv';
 
 export const DEPLOY_TARGETS = Object.freeze({
-  gaycruisebingo: '.env.gaycruisebingo',
-  fiveacross: '.env.fiveacross',
+  gaycruisebingo: Object.freeze({
+    envFile: '.env.gaycruisebingo',
+    identity: Object.freeze({
+      VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
+      VITE_FIREBASE_AUTH_DOMAIN: 'gaycruisebingo.com',
+      VITE_EVENT_ID: 'med-2026',
+      // The app maps this intentionally blank value to its gcb default.
+      VITE_EDITION: '',
+    }),
+  }),
+  fiveacross: Object.freeze({
+    envFile: '.env.fiveacross',
+    identity: Object.freeze({
+      VITE_FIREBASE_PROJECT_ID: 'fiveacross',
+      VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+      VITE_EVENT_ID: 'bodega-bay-2026',
+      VITE_EDITION: 'vacay',
+    }),
+  }),
 });
 
-export function envFileForTarget(target, root = process.cwd()) {
-  const envFile = DEPLOY_TARGETS[target];
-  if (!envFile) {
+export function configForTarget(target) {
+  const config = DEPLOY_TARGETS[target];
+  if (!config) {
     throw new Error(`Unknown deploy target "${target}". Expected one of: ${Object.keys(DEPLOY_TARGETS).join(', ')}.`);
   }
-  return resolve(root, envFile);
+  return config;
+}
+
+export function envFileForTarget(target, root = process.cwd()) {
+  return resolve(root, configForTarget(target).envFile);
 }
 
 export function requiredViteKeys(templateEnv) {
@@ -22,18 +43,25 @@ export function requiredViteKeys(templateEnv) {
 }
 
 export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process.env, requiredKeys = []) {
-  if (parsedTargetEnv.VITE_FIREBASE_PROJECT_ID !== target) {
-    throw new Error(
-      `Refusing to build ${target}: VITE_FIREBASE_PROJECT_ID must be "${target}", ` +
-        `not "${parsedTargetEnv.VITE_FIREBASE_PROJECT_ID ?? ''}".`,
-    );
-  }
-
   const missingKeys = requiredKeys.filter((key) => !Object.hasOwn(parsedTargetEnv, key));
   if (missingKeys.length > 0) {
     throw new Error(
       `Refusing to build ${target}: its target env file must define every VITE_* key from .env.example. ` +
         `Missing: ${missingKeys.join(', ')}.`,
+    );
+  }
+
+  const { identity } = configForTarget(target);
+  const mismatchedIdentity = Object.entries(identity).filter(
+    ([key, expectedValue]) => parsedTargetEnv[key] !== expectedValue,
+  );
+  if (mismatchedIdentity.length > 0) {
+    const incorrectKeys = mismatchedIdentity
+      .map(([key, expectedValue]) => `${key}=${JSON.stringify(expectedValue)}`)
+      .join(', ');
+    throw new Error(
+      `Refusing to build ${target}: its Firebase project, auth domain, Event, and Edition must match this target. ` +
+        `Set: ${incorrectKeys}.`,
     );
   }
 
