@@ -28,7 +28,7 @@ Reconstructing the target env from the README alone would therefore produce a bu
 
 ## Target environment files
 
-`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the project's Firebase project, auth domain, Event, and Edition tuple before it builds. Both targets name their Edition explicitly (`gcb` or `vacay`); neither relies on an application default. It also removes ambient `VITE_*` values, so a developer's `.env.local` cannot override or fill in part of a production target.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event, Edition, and adult-content seed before it builds. Both targets name their Edition and audience posture explicitly (`gcb`/`true` or `vacay`/`false`); neither relies on an application default. It also removes ambient `VITE_*` values, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
@@ -52,7 +52,11 @@ npm run deploy:fiveacross:hosting
 
 Use `npm run deploy:fiveacross` to deploy every configured Firebase surface. The command builds from `.env.fiveacross`, passes `fiveacross` explicitly, skips the Gay Cruise Bingo Cloudflare zone, and verifies the canonical Five Across host.
 
-The existing deploy guards still require `main`, a current `origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`.
+The existing deploy guards require `main`, an exact `HEAD == origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`.
+
+### Registering a future target
+
+There is intentionally no ambient “new Event” deploy. Register a named target in a reviewed change: add its complete identity to `scripts/build-target.mjs`, create its ignored `.env.<target>` from `.env.example` with every value filled or explicitly blank, and add the matching `build:<target>` / `deploy:<target>` package commands. Only then use `npm run deploy -- <target>` (or `npm run deploy:hosting -- <target>`). This keeps a future Event from silently rebuilding and publishing an existing target.
 
 ### Verify the deployed target
 
@@ -106,7 +110,7 @@ npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacay
 | `gaycruisebingo.vercel.app` | `gaycruisebingo` |
 | `vacaybingo.vercel.app`, `fiveacross.vercel.app` | `fiveacross` |
 
-**"Primary" means the whole backend, not just Hosting.** Both commands on this page are hosting-only — `npm run deploy:hosting`, and the Five Across block's `--only hosting` — so a client that needs new Cloud Functions, `firestore.rules`, or a Firestore index is *not* unblocked by running them. Deploy those targets first (`--only functions`, `--only firestore:rules`, `--only firestore:indexes`), then Hosting, then that project's mirrors. Otherwise the ordering rule below is satisfied on paper while the backend the new bundle calls is still the old one.
+**"Primary" means the whole backend, not just Hosting.** Both target commands above are hosting-only, so a client that needs new Cloud Functions, `firestore.rules`, or a Firestore index is *not* unblocked by running them. Deploy the backend to its named project first (for example, `npm run deploy:fiveacross -- --only functions,firestore:rules,firestore:indexes`), then Hosting, then that project's mirrors. Otherwise the ordering rule below is satisfied on paper while the backend the new bundle calls is still the old one.
 
 It bites hardest when the change needs a backend that only one project has: new Cloud Functions, new `firestore.rules`, a new Firestore field the client expects. A Five Across-only rollout that also advances `gaycruisebingo.vercel.app` breaks the ship-network fallback against a backend that has not moved — the one host whose whole job is to work when the primary does not.
 

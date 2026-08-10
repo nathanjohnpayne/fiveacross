@@ -7,21 +7,35 @@ import { parse } from 'dotenv';
 export const DEPLOY_TARGETS = Object.freeze({
   gaycruisebingo: Object.freeze({
     envFile: '.env.gaycruisebingo',
+    firebaseProject: 'gaycruisebingo',
     identity: Object.freeze({
       VITE_FIREBASE_PROJECT_ID: 'gaycruisebingo',
       VITE_FIREBASE_AUTH_DOMAIN: 'gaycruisebingo.com',
+      VITE_FIREBASE_STORAGE_BUCKET: 'gaycruisebingo.firebasestorage.app',
+      VITE_FIREBASE_MESSAGING_SENDER_ID: '849798007162',
+      VITE_FIREBASE_APP_ID: '1:849798007162:web:70dffafa77cc65a8306ec3',
+      VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
       VITE_EVENT_ID: 'med-2026',
       VITE_EDITION: 'gcb',
+      VITE_ADULT_CONTENT: 'true',
     }),
   }),
   fiveacross: Object.freeze({
     envFile: '.env.fiveacross',
+    firebaseProject: 'fiveacross',
     identity: Object.freeze({
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+      VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
+      VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
+      VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
+      VITE_FIREBASE_MEASUREMENT_ID: '',
       VITE_EVENT_ID: 'bodega-bay-2026',
       VITE_EDITION: 'vacay',
+      VITE_ADULT_CONTENT: 'false',
     }),
+    syntheticUrl: 'https://bodega-bay.fiveacross.app/',
+    skipCloudflarePurge: true,
   }),
 });
 
@@ -59,7 +73,7 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
       .map(([key, expectedValue]) => `${key}=${JSON.stringify(expectedValue)}`)
       .join(', ');
     throw new Error(
-      `Refusing to build ${target}: its Firebase project, auth domain, Event, and Edition must match this target. ` +
+      `Refusing to build ${target}: its registered Firebase web app, Event, Edition, and audience seed must match this target. ` +
         `Set: ${incorrectKeys}.`,
     );
   }
