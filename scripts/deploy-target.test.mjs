@@ -23,6 +23,11 @@ describe('deploy target selection', () => {
     });
   });
 
+  it('rejects skipping a named target build', () => {
+    expect(() => deployRequest(['gaycruisebingo', '--skip-build', '--'])).toThrow('--skip-build');
+    expect(() => deployInvocation('gaycruisebingo', [], {}, ['--skip-build'])).toThrow('--skip-build');
+  });
+
   it('keeps Five Across project, build, synthetic, and cache choices together', () => {
     const invocation = deployInvocation('fiveacross', ['--only', 'firestore:rules'], { NODE_ENV: 'production' });
 
@@ -36,6 +41,7 @@ describe('deploy target selection', () => {
     expect(invocation.environment).toMatchObject({
       NODE_ENV: 'production',
       BUILD_CMD: 'npm run build:fiveacross',
+      CF_ZONE_ID: '',
       SYNTHETIC_URL: 'https://bodega-bay.fiveacross.app/',
     });
   });

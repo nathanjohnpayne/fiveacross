@@ -5,12 +5,14 @@ import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
-  '--skip-build',
   '--skip-cf-purge',
   '--skip-synthetic',
 ]);
 
 function deployArguments(args) {
+  if (args.includes('--skip-build')) {
+    throw new Error('A named target deploy always rebuilds its selected target; --skip-build is not allowed.');
+  }
   const separator = args.indexOf('--');
   if (separator === -1) return { wrapperArgs: [], deployArgs: args };
 
@@ -46,6 +48,9 @@ export function deployRequest(argv) {
 }
 
 export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env, wrapperArgs = []) {
+  if (wrapperArgs.includes('--skip-build')) {
+    throw new Error('A named target deploy always rebuilds its selected target; --skip-build is not allowed.');
+  }
   const config = configForTarget(target);
   const args = [...wrapperArgs];
   if (config.skipCloudflarePurge && !args.includes('--skip-cf-purge')) args.push('--skip-cf-purge');
@@ -55,8 +60,8 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
     ...inheritedEnv,
     BUILD_CMD: `npm run build:${target}`,
   };
-  if (config.cloudflareZoneId) environment.CF_ZONE_ID = config.cloudflareZoneId;
-  if (config.syntheticUrl) environment.SYNTHETIC_URL = config.syntheticUrl;
+  environment.CF_ZONE_ID = config.cloudflareZoneId ?? '';
+  environment.SYNTHETIC_URL = config.syntheticUrl;
 
   return {
     command: resolve(process.cwd(), 'scripts', 'deploy.sh'),

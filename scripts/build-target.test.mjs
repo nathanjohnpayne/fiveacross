@@ -1,7 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { buildEnvironment, envFileForTarget, requiredViteKeys } from './build-target.mjs';
+import {
+  buildEnvironment,
+  envFileForTarget,
+  requiredViteKeys,
+  validateTargetOperationalMetadata,
+} from './build-target.mjs';
 
 const REQUIRED_VITE_KEYS = [
   'VITE_FIREBASE_API_KEY',
@@ -22,6 +27,7 @@ const FIVEACROSS_TARGET_ENV = {
   VITE_EVENT_ID: 'bodega-bay-2026',
   VITE_EDITION: 'vacay',
   VITE_ADULT_CONTENT: 'false',
+  VITE_POSTHOG_KEY: 'shared-production-posthog-key',
   VITE_POSTHOG_HOST: '',
   VITE_RECAPTCHA_SITE_KEY: '',
 };
@@ -37,6 +43,7 @@ const GAY_CRUISE_BINGO_TARGET_ENV = {
   VITE_EVENT_ID: 'med-2026',
   VITE_EDITION: 'gcb',
   VITE_ADULT_CONTENT: 'true',
+  VITE_POSTHOG_KEY: 'shared-production-posthog-key',
   VITE_POSTHOG_HOST: '',
   VITE_RECAPTCHA_SITE_KEY: '',
 };
@@ -179,6 +186,32 @@ describe('build target selection', () => {
         REQUIRED_VITE_KEYS,
       ),
     ).toThrow('VITE_POSTHOG_HOST=""');
+  });
+
+  it('requires a production PostHog key for every named target', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          ...FIVEACROSS_TARGET_ENV,
+          VITE_POSTHOG_KEY: '',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_POSTHOG_KEY');
+  });
+
+  it('requires every registered target to name its synthetic and purge choice', () => {
+    expect(() =>
+      validateTargetOperationalMetadata('future', { skipCloudflarePurge: true }),
+    ).toThrow('syntheticUrl');
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: false,
+      }),
+    ).toThrow('cloudflareZoneId');
   });
 
   it('ignores future target files without hiding the committed template', () => {

@@ -484,8 +484,8 @@ npm run deploy:gaycruisebingo -- --only hosting
 npm run deploy:fiveacross -- --only firestore:rules
 
 # Deploy-wrapper controls still go through the named target. Put them before
-# the second `--`; Firebase options go after it.
-npm run deploy:gaycruisebingo -- --skip-build --
+# the second `--`; Firebase options go after it. Named targets always rebuild;
+# they reject --skip-build rather than risk publishing another target's dist/.
 npm run deploy:gaycruisebingo -- --skip-cf-purge --
 
 # Skip the post-deploy app-mount synthetic (see Post-Deployment Verification)
@@ -507,7 +507,7 @@ Guards 1 and 2 are bypassed with `--force`. Guard 3 is bypassed by the dedicated
 
 ```bash
 # Break-glass: deploy with uncommitted changes (NEVER for routine deploys)
-DEPLOY_ALLOW_DIRTY=1 scripts/deploy.sh -- gaycruisebingo
+DEPLOY_ALLOW_DIRTY=1 npm run deploy:gaycruisebingo
 ```
 
 When the override is used, the script logs the dirty paths to stderr under a `⚠️  DEPLOY_ALLOW_DIRTY=1` banner so the deviation is visible in the deploy transcript. Never use `--force` or `DEPLOY_ALLOW_DIRTY=1` during routine deploys.

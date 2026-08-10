@@ -4,6 +4,11 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'dotenv';
 
+export const REQUIRED_NONBLANK_PRODUCTION_VITE_KEYS = Object.freeze([
+  'VITE_FIREBASE_API_KEY',
+  'VITE_POSTHOG_KEY',
+]);
+
 export const DEPLOY_TARGETS = Object.freeze({
   gaycruisebingo: Object.freeze({
     envFile: '.env.gaycruisebingo',
@@ -21,6 +26,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_POSTHOG_HOST: '',
     }),
     cloudflareZoneId: '8066dd2b105ad564c45bb8c898859343',
+    skipCloudflarePurge: false,
     syntheticUrl: 'https://gaycruisebingo.com/',
   }),
   fiveacross: Object.freeze({
@@ -43,11 +49,30 @@ export const DEPLOY_TARGETS = Object.freeze({
   }),
 });
 
+export function validateTargetOperationalMetadata(target, config) {
+  if (typeof config.syntheticUrl !== 'string' || !config.syntheticUrl.trim()) {
+    throw new Error(`Refusing target ${target}: register a nonblank syntheticUrl.`);
+  }
+  if (typeof config.skipCloudflarePurge !== 'boolean') {
+    throw new Error(`Refusing target ${target}: register skipCloudflarePurge as an explicit boolean.`);
+  }
+  if (config.skipCloudflarePurge) {
+    if (config.cloudflareZoneId !== undefined) {
+      throw new Error(`Refusing target ${target}: a skipped Cloudflare purge must not carry a cloudflareZoneId.`);
+    }
+    return;
+  }
+  if (typeof config.cloudflareZoneId !== 'string' || !config.cloudflareZoneId.trim()) {
+    throw new Error(`Refusing target ${target}: an enabled Cloudflare purge requires cloudflareZoneId.`);
+  }
+}
+
 export function configForTarget(target) {
   const config = DEPLOY_TARGETS[target];
   if (!config) {
     throw new Error(`Unknown deploy target "${target}". Expected one of: ${Object.keys(DEPLOY_TARGETS).join(', ')}.`);
   }
+  validateTargetOperationalMetadata(target, config);
   return config;
 }
 
@@ -65,6 +90,15 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
     throw new Error(
       `Refusing to build ${target}: its target env file must define every VITE_* key from .env.example. ` +
         `Missing: ${missingKeys.join(', ')}.`,
+    );
+  }
+
+  const blankProductionKeys = REQUIRED_NONBLANK_PRODUCTION_VITE_KEYS.filter(
+    (key) => !parsedTargetEnv[key]?.trim(),
+  );
+  if (blankProductionKeys.length > 0) {
+    throw new Error(
+      `Refusing to build ${target}: its production target env file must set nonblank ${blankProductionKeys.join(', ')}.`,
     );
   }
 

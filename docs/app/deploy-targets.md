@@ -56,7 +56,7 @@ npm run deploy:fiveacross:hosting
 
 Use `npm run deploy:fiveacross` to deploy every configured Firebase surface. The command builds from `.env.fiveacross`, passes `fiveacross` explicitly, skips the Gay Cruise Bingo Cloudflare zone, and verifies the canonical Five Across host.
 
-The existing deploy guards require `main`, an exact `HEAD == origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`.
+The existing deploy guards require `main`, an exact `HEAD == origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`. Every named target rebuilds its own `dist/`; `--skip-build` is intentionally unavailable because a bundle built for another target would be unsafe to deploy.
 
 ### Deploy-wrapper controls
 
@@ -71,7 +71,7 @@ The named target still supplies the Firebase project, target build command, cach
 
 ### Registering a future target
 
-There is intentionally no ambient “new Event” deploy. Register a named target in a reviewed change: add its complete identity to `scripts/build-target.mjs`, create its ignored `.env.<target>` from `.env.example` with every value filled or explicitly blank, and add the matching `build:<target>` / `deploy:<target>` package commands. Only then use `npm run deploy -- <target>` (or `npm run deploy:hosting -- <target>`). This keeps a future Event from silently rebuilding and publishing an existing target.
+There is intentionally no ambient “new Event” deploy. Register a named target in a reviewed change: add its complete identity, a nonblank `syntheticUrl`, and an explicit `skipCloudflarePurge` choice (a zone id is required when false) to `scripts/build-target.mjs`; create its ignored `.env.<target>` from `.env.example`; and add the matching `build:<target>` / `deploy:<target>` package commands. The Firebase API and production PostHog keys must be nonblank; the PostHog host override must be explicitly blank. Only then use `npm run deploy -- <target>` (or `npm run deploy:hosting -- <target>`). This keeps a future Event from silently rebuilding and publishing an existing target.
 
 ### Verify the deployed target
 

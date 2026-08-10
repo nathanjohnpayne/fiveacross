@@ -28,7 +28,9 @@ export function assertDeployFirebaseApiKey({
   if (command !== 'build' || mode !== 'production' || (githubActions && !targetBuild)) return;
   if (apiKey?.trim()) return;
 
-  const envFile = projectId ? `.env.${projectId}` : 'the selected target env file';
+  const envFile = targetBuild
+    ? projectId ? `.env.${projectId}` : 'the selected target env file'
+    : '.env.local';
   throw new Error(
     'Refusing to build: VITE_FIREBASE_API_KEY is empty, which would publish a ' +
       'blank Firebase config and crash the app on load with `auth/invalid-api-key`. ' +
