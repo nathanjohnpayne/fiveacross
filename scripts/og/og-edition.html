@@ -181,11 +181,14 @@
     gap: 9px;
     padding: 0 13px;
   }
-  /* The two grey rules inside an unmarked square stand in for prompt text at
-     a size where real words would be unreadable noise. */
+  /* The two rules inside a square stand in for prompt text at a size where
+     real words would be unreadable noise. Their LENGTHS vary per square, and
+     that variation is data, not decoration: a board of identically-ruled
+     squares reads as a placeholder grid rather than as a card of prompts, and
+     normalising them meant a copy-only re-render rewrote all 25 squares
+     instead of the one line that changed (Codex P2 on #697). Widths come from
+     the config as inline styles; these are only the shared shape. */
   .sq i { display: block; height: 6px; border-radius: 3px; background: var(--barbg); }
-  .sq i:first-child { width: 74%; }
-  .sq i:last-child { width: 92%; }
   /* The marked-square fill is the app's own two-hue cell gradient. Which hue
      leads is per-Edition art direction (`--ongrad`): the cruise board runs hot
      pink into cyan, the trip board runs sea glass into Pacific blue. */
@@ -375,8 +378,10 @@
     if (c.board.gap != null) board.style.gap = c.board.gap + 'px';
     if (c.board.pad != null) board.style.padding = c.board.pad + 'px';
     if (c.board.radius != null) board.style.borderRadius = c.board.radius + 'px';
-    for (const row of c.board.pattern) {
-      for (const ch of row) {
+    for (let r = 0; r < c.board.pattern.length; r++) {
+      const row = c.board.pattern[r];
+      for (let ci = 0; ci < row.length; ci++) {
+        const ch = row[ci];
         const sq = document.createElement('div');
         sq.className = 'sq' + (ch === 'x' ? ' on' : ch === 'F' ? ' free' : '');
         if (c.board.cellRadius != null) sq.style.borderRadius = c.board.cellRadius + 'px';
@@ -385,7 +390,14 @@
           b.textContent = c.board.freeLabel;
           sq.append(b);
         } else {
-          sq.append(document.createElement('i'), document.createElement('i'));
+          // Two rules, each SHORT or LONG per this square's entry in the bar
+          // map — see `.sq i` above for why the variation is load-bearing.
+          const spec = c.board.bars?.[r]?.[ci] ?? 'sl';
+          for (const ch of spec) {
+            const bar = document.createElement('i');
+            bar.style.width = (ch === 'l' ? c.board.barLong : c.board.barShort) + '%';
+            sq.append(bar);
+          }
         }
         board.append(sq);
       }

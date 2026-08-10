@@ -51,6 +51,7 @@ Requirements:
 
 - `npm install` (uses the repo's playwright and esbuild) and `npx playwright install chromium`
 - network at render time — Anton and Oswald come from Google Fonts, and the renderer **refuses to write a degraded PNG** if the stylesheet or a face fails to load, because a system-fallback wordmark looks almost right
+- **Do not suppress the output.** The renderer fails closed on a bad config or a degraded font load, and a `>/dev/null 2>&1` turns that into a silent no-op that leaves the previous PNG in place — which reads downstream as "the change had no effect" rather than as "the render never ran". This bit during #697.
 - **macOS.** The body copy resolves to Helvetica Neue and the share marks rasterise as Apple Color Emoji, which is what the committed assets use. The script refuses to run elsewhere unless you pass `--allow-foreign-platform`, because rendering on another host restyles every word rather than only the ones you meant to change.
 
 ## Proving you changed only what you meant to

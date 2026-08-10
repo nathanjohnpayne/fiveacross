@@ -46,8 +46,10 @@
 //     Rendering elsewhere silently restyles both — the script refuses to run
 //     off-darwin unless --allow-foreign-platform is passed.
 //
-// After rendering, prove you changed only what you meant to:
-//   node scripts/og/compare-og.mjs
+// After rendering, prove you changed only what you meant to — render to a
+// scratch directory first, then point the comparison at it:
+//   node scripts/og/render-og-editions.mjs --edition vacay --out /tmp/og
+//   node scripts/og/compare-og.mjs --new /tmp/og --edition vacay
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -106,7 +108,7 @@ function loadEditions() {
   return module.exports;
 }
 
-const { editionBrand } = loadEditions();
+const { editionBrand, wordmarkSegments } = loadEditions();
 
 /** The share mark with U+FE0F (VARIATION SELECTOR-16) removed, for the design
  *  that wants the flat TEXT glyph rather than a colour emoji — Five Across's
@@ -173,6 +175,18 @@ const ART = {
       cellRadius: 13,
       freeLabel: 'FREE',
       pattern: ['x..x.', '.x..x', 'xxFxx', '.x...', 'x..x.'],
+      // Prompt-rule lengths, per square, read off the #609 render: the long
+      // rule fills the square's interior (~42px) and the short one runs ~69%
+      // of it (~29px). `s`/`l` per rule, top then bottom.
+      barShort: 69,
+      barLong: 100,
+      bars: [
+        ['ls', 'sl', 'ls', 'ss', 'll'],
+        ['sl', 'ls', 'ss', 'll', 'sl'],
+        ['ls', 'sl', '..', 'll', 'ss'],
+        ['ll', 'ss', 'ls', 'sl', 'ls'],
+        ['sl', 'ls', 'ss', 'll', 'sl'],
+      ],
     },
     caption: 'BINGO',
   },
@@ -243,6 +257,20 @@ const ART = {
       rotate: -2,
       freeLabel: 'FREE',
       pattern: ['.x..x', 'x..x.', 'xxFxx', '..x..', 'x...x'],
+      // Same two lengths as the cruise board. Unlike gcb's, this map is CHOSEN
+      // rather than measured: the board is rotated, so de-rotating to read each
+      // square's rules back costs more resampling error than the numbers are
+      // worth. What matters for the comparison workflow is that the variation
+      // is real and STABLE — a copy-only re-render reproduces it exactly.
+      barShort: 69,
+      barLong: 100,
+      bars: [
+        ['sl', 'll', 'ls', 'ss', 'ls'],
+        ['ll', 'sl', 'ss', 'ls', 'sl'],
+        ['ls', 'ss', '..', 'sl', 'll'],
+        ['ss', 'ls', 'll', 'sl', 'ls'],
+        ['sl', 'll', 'ls', 'ss', 'ls'],
+      ],
     },
     // The dashed stamp box over the board's shoulder. Its glyph is the same
     // share mark as the eyebrow, which is what made #681 a one-line change.
@@ -298,6 +326,18 @@ const ART = {
       // two Editions' spell FREE — resolved from the brand table below.
       freeLabel: null,
       pattern: ['.....', '.....', 'xxFxx', '.....', '.....'],
+      // The platform's board is quieter than the Editions': its rules sit
+      // shorter and closer in length, which is the same restraint the set
+      // wordmark and unglowing type carry.
+      barShort: 62,
+      barLong: 78,
+      bars: [
+        ['ls', 'sl', 'ls', 'sl', 'ls'],
+        ['sl', 'ls', 'sl', 'ls', 'sl'],
+        ['ll', 'll', '..', 'll', 'll'],
+        ['ls', 'sl', 'ls', 'sl', 'ls'],
+        ['sl', 'ls', 'sl', 'ls', 'sl'],
+      ],
     },
     caption: 'BINGO',
   },
@@ -322,7 +362,12 @@ const EXPECTED_FACES = [
 function configFor(id) {
   const art = ART[id];
   const brand = editionBrand(id);
-  const lead = brand.wordmark.slice(0, brand.wordmark.length - brand.wordmarkBold.length).trim();
+  // The canonical splitter, not a second copy of it. `wordmarkSegments` is
+  // what the app header uses and what `editions.test.ts` pins — including its
+  // degrade-to-unbolded behaviour when the bold segment is not a suffix. A
+  // private reimplementation here would let the app and the unfurl split the
+  // same Edition differently while both kept running (Codex P1 on #697).
+  const { lead, bold } = wordmarkSegments(brand);
   // Default to the og:url host — for gcb and fiveacross that IS the brand's
   // apex. An Edition whose og:url is Event-scoped overrides it (see vacay).
   const domain = art.domain ?? new URL(brand.ogUrl).hostname.replace(/^www\./, '');
@@ -335,7 +380,7 @@ function configFor(id) {
     backgroundGrid: art.backgroundGrid ?? null,
     frame: art.frame ?? null,
     eyebrow: { mark: shareMark, text: art.eyebrow.text, markStyle: art.eyebrow.markStyle ?? 'emoji' },
-    wordmark: { ...art.wordmark, lead, bold: brand.wordmarkBold },
+    wordmark: { ...art.wordmark, lead: lead.trimEnd(), bold },
     // The endorsement line the brand table carries, verbatim. gcb and vacay do;
     // fiveacross IS the platform, so it has none and the row collapses.
     byline: brand.wordmarkByline ?? null,
