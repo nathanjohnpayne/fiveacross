@@ -62,7 +62,7 @@ node scripts/og/render-og-editions.mjs --edition vacay --out /tmp/og
 node scripts/og/compare-og.mjs --new /tmp/og --edition vacay
 ```
 
-It prints a per-band difference score — eyebrow, wordmark, byline/rule, description, domain, board, caption, full frame — so a change reads as "the eyebrow moved" rather than as one number. It is a review aid, not a gate: a legitimate change makes some bands differ, and the point is being able to name which ones and why. Use `--ref HEAD` to compare against the committed revision once you have already overwritten the files in place.
+It prints a per-band difference score — eyebrow, wordmark, byline/rule, description, domain, board, caption, full frame — so a change reads as "the eyebrow moved" rather than as one number, and writes a `compare-<edition>.png` sheet stacking the committed render, the fresh one, and an amplified difference map, so a score you cannot explain has somewhere to be looked at. The bands are per-Edition, because the platform centres a one-line lockup where the two Editions stack a two-line one; a band that lands empty in both images is reported as drifted rather than silently scoring 0.0. It is a review aid, not a gate: a legitimate change makes some bands differ, and the point is being able to name which ones and why. Use `--ref HEAD` to compare against the committed revision once you have already overwritten the files in place.
 
 ## Share cards
 
@@ -75,6 +75,8 @@ node scripts/og/render-share-footer.mjs --edition vacay
 ```
 
 It repaints the footer band with the card's own background — sampled from the asset, so it works on Vacay's cream ground and the other two Editions' dark ones — and redraws the line from the brand table. It changes 32 rows of pixels and nothing else.
+
+The clear is done row by row, walking in from each edge until the pixel already matches the interior ground, rather than filling the row's full width. The obvious version is a full-width `fillRect`, and it is wrong: these cards carry a rounded outer border, so it paints over the card's own outline and leaves a 32-row gap in it on both sides. Deriving the interior span per row keeps that correct through the corner curvature and on any border width or colour. Verify with `--no-crush`, which skips the `pngquant` pass — quantisation perturbs pixels everywhere, so it is impossible to prove the redraw stayed inside the band from a crushed file.
 
 Unlike the unfurl artwork, these **are** quantised: they are soft-focus reference pictures in `plans/`, not brand assets crawlers serve, and the canvas re-encode hands back a lossless PNG that is larger than the original. Quantising takes Vacay's card from 244 KB to 40 KB at a measured mean channel difference of 0.68/255 with no visible banding — a smaller file than the one it replaces.
 

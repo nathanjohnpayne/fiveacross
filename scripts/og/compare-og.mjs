@@ -53,17 +53,50 @@ const FILES = {
 };
 
 // The composition's regions, so a difference can be reported as "the eyebrow
-// moved" rather than as one number for the whole frame.
-const BANDS = [
-  { name: 'eyebrow', box: [60, 90, 640, 140] },
-  { name: 'wordmark', box: [60, 140, 660, 340] },
-  { name: 'byline/rule', box: [60, 340, 660, 415] },
-  { name: 'description', box: [60, 395, 660, 480] },
-  { name: 'domain', box: [60, 490, 660, 545] },
+// moved" rather than as one number for the whole frame. These are ATTRIBUTION
+// BUCKETS, not assertions — they only have to contain the thing they name.
+//
+// They are per-Edition because the three lockups do not share a vertical
+// rhythm: the two Editions stack a two-line wordmark from y~90, while the
+// platform sets its wordmark on one line and centres the whole column, putting
+// its eyebrow at y~180 — below where the Editions' wordmark has already
+// finished. One shared table reported a Five Across copy change under the
+// wrong region name, which defeats the point of the tool (Codex P2 on #697).
+//
+// Keep these in step with `left.top` / `left.gaps` in render-og-editions.mjs;
+// the run warns if a band lands empty in BOTH images, which is what a drifted
+// table looks like.
+const COMMON_BANDS = [
   { name: 'board', box: [690, 40, 1160, 500] },
   { name: 'caption', box: [690, 500, 1160, 560] },
   { name: 'FULL FRAME', box: [0, 0, 1200, 630] },
 ];
+const BANDS = {
+  gcb: [
+    { name: 'eyebrow', box: [60, 75, 660, 120] },
+    { name: 'wordmark', box: [60, 120, 660, 330] },
+    { name: 'byline/rule', box: [60, 330, 660, 405] },
+    { name: 'description', box: [60, 405, 660, 505] },
+    { name: 'domain', box: [60, 505, 660, 560] },
+    ...COMMON_BANDS,
+  ],
+  vacay: [
+    { name: 'eyebrow', box: [60, 95, 660, 140] },
+    { name: 'wordmark', box: [60, 140, 660, 340] },
+    { name: 'byline/rule', box: [60, 340, 660, 415] },
+    { name: 'description', box: [60, 415, 660, 480] },
+    { name: 'domain', box: [60, 480, 660, 530] },
+    ...COMMON_BANDS,
+  ],
+  fiveacross: [
+    { name: 'eyebrow', box: [60, 165, 660, 205] },
+    { name: 'wordmark', box: [60, 205, 660, 300] },
+    { name: 'rule', box: [60, 300, 660, 345] },
+    { name: 'description', box: [60, 345, 660, 405] },
+    { name: 'domain', box: [60, 405, 660, 465] },
+    ...COMMON_BANDS,
+  ],
+};
 
 const ids = only ? [only] : Object.keys(FILES);
 mkdirSync(outDir, { recursive: true });
@@ -89,6 +122,22 @@ async function pixels(page, pngPath) {
     const d = ctx.getImageData(0, 0, c.width, c.height).data;
     return { w: c.width, h: c.height, data: Array.from(d) };
   }, fileUrl);
+}
+
+/** Does this region contain anything but flat ground? Used to catch a band
+ *  table that has drifted away from the render it is meant to describe. */
+function hasInk(img, [x0, y0, x1, y1]) {
+  const at = (x, y) => {
+    const i = (y * img.w + x) * 4;
+    return img.data[i] + img.data[i + 1] + img.data[i + 2];
+  };
+  const base = at(x0 + 1, y0 + 1);
+  for (let y = y0; y < y1; y += 2) {
+    for (let x = x0; x < x1; x += 2) {
+      if (Math.abs(at(x, y) - base) > 60) return true;
+    }
+  }
+  return false;
 }
 
 const browser = await chromium.launch();
@@ -124,7 +173,59 @@ try {
     }
 
     console.log(`\n== ${id}  (${a.w}x${a.h})`);
-    for (const band of BANDS) {
+
+    // The sheet the header promises: committed above, fresh below, and an
+    // amplified difference map under both, so a score you cannot explain has
+    // somewhere to be looked at.
+    const sheet = await page.evaluate(
+      ({ ref, fresh }) => {
+        const draw = (px) => {
+          const c = document.createElement('canvas');
+          c.width = px.w;
+          c.height = px.h;
+          c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.data), px.w, px.h), 0, 0);
+          return c;
+        };
+        const A = draw(ref);
+        const B = draw(fresh);
+        const diff = document.createElement('canvas');
+        diff.width = ref.w;
+        diff.height = ref.h;
+        const dctx = diff.getContext('2d');
+        const out = dctx.createImageData(ref.w, ref.h);
+        for (let i = 0; i < ref.data.length; i += 4) {
+          // x6 so a difference that matters is visible without hunting.
+          const d = Math.min(
+            255,
+            (Math.abs(ref.data[i] - fresh.data[i]) +
+              Math.abs(ref.data[i + 1] - fresh.data[i + 1]) +
+              Math.abs(ref.data[i + 2] - fresh.data[i + 2])) *
+              2,
+          );
+          out.data[i] = d;
+          out.data[i + 1] = d * 0.35;
+          out.data[i + 2] = d * 0.6;
+          out.data[i + 3] = 255;
+        }
+        dctx.putImageData(out, 0, 0);
+        const gap = 12;
+        const sheetC = document.createElement('canvas');
+        sheetC.width = ref.w;
+        sheetC.height = ref.h * 3 + gap * 2;
+        const sctx = sheetC.getContext('2d');
+        sctx.fillStyle = '#101014';
+        sctx.fillRect(0, 0, sheetC.width, sheetC.height);
+        sctx.drawImage(A, 0, 0);
+        sctx.drawImage(B, 0, ref.h + gap);
+        sctx.drawImage(diff, 0, (ref.h + gap) * 2);
+        return sheetC.toDataURL('image/png');
+      },
+      { ref: a, fresh: b },
+    );
+    const sheetPath = join(outDir, `compare-${id}.png`);
+    writeFileSync(sheetPath, Buffer.from(sheet.split(',')[1], 'base64'));
+    console.log(`   sheet: ${sheetPath}  (committed / fresh / amplified difference)`);
+    for (const band of BANDS[id]) {
       const [x0, y0, x1, y1] = band.box;
       let sum = 0;
       let changed = 0;
@@ -142,8 +243,12 @@ try {
         }
       }
       const pct = ((changed / n) * 100).toFixed(1);
+      // A band with no ink in EITHER image is a drifted table, not a clean
+      // region: it silently reports 0.0 and hides whatever really moved.
+      const empty = band.name !== 'FULL FRAME' && !hasInk(a, band.box) && !hasInk(b, band.box);
       console.log(
-        `   ${band.name.padEnd(13)} mean|Δ| ${(sum / n / 3).toFixed(1).padStart(6)}   pixels>24: ${pct.padStart(5)}%`,
+        `   ${band.name.padEnd(13)} mean|Δ| ${(sum / n / 3).toFixed(1).padStart(6)}   pixels>24: ${pct.padStart(5)}%` +
+          (empty ? '   <- EMPTY in both: this band no longer covers its element' : ''),
       );
     }
   }

@@ -203,7 +203,12 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
       .replace(/^\s*\/\/.*$/gm, '');
     for (const edition of ['gcb', 'vacay', 'fiveacross']) {
       const brand = editionBrand(edition);
-      for (const owned of [brand.wordmark, brand.appName, brand.lexicon.shareMark]) {
+      // appDescription is on this list because it was the one that got away:
+      // the artwork's description line was retyped into the ART table until
+      // Codex caught it on #697. It is the same sentence the manifest and the
+      // share block carry, so a copy edit that skipped the artwork would have
+      // shipped two different descriptions of the same product.
+      for (const owned of [brand.wordmark, brand.appName, brand.appDescription, brand.lexicon.shareMark]) {
         expect(code, `${edition}: "${owned}" belongs to the brand table`).not.toContain(owned);
       }
       if (brand.wordmarkByline) {

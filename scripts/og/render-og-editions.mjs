@@ -116,6 +116,13 @@ const { editionBrand } = loadEditions();
  *  no-op that ships the wrong glyph. */
 const textGlyph = (mark) => mark.replace(/\uFE0F/g, '');
 
+/** Break a sentence into two lines after the Nth word. The template renders
+ *  `white-space: pre-line`, so a newline here is the line break. */
+const wrapAfter = (text, words) => {
+  const parts = text.split(' ');
+  return parts.slice(0, words).join(' ') + '\n' + parts.slice(words).join(' ');
+};
+
 const ART = {
   gcb: {
     file: 'og-gcb.png',
@@ -148,7 +155,10 @@ const ART = {
     // render rather than guessed: cap height 81px, "GAY CRUISE" 422px wide.
     wordmark: { size: 93, lineHeight: 1.032, letterSpacing: '0.05em', glow: '0 0 42px rgba(255,45,149,0.28)' },
     rule: { width: 104, background: 'linear-gradient(90deg,#ff2d95,#00e6ff)' },
-    desc: { text: 'Live multiplayer bingo\nfor the high seas.' },
+    // The words are the brand table's `appDescription`; the only thing art
+    // direction owns is WHERE the line breaks, so the two-line block sits
+    // square under the rule instead of running past the board.
+    desc: { wrapAfterWords: 3 },
     // The endorsement row (#688) adds ~45px to a stack that used to fill the
     // frame symmetrically, so the whole lockup rides up to keep the top and
     // bottom margins even. Gaps otherwise mirror Vacay's rhythm — one family.
@@ -205,7 +215,7 @@ const ART = {
     // the #609 render the same way gcb's pair was.
     wordmark: { size: 90, lineHeight: 1.044, letterSpacing: '0.055em' },
     rule: { width: 100, background: 'linear-gradient(90deg,#2e7fa8,#8fd0c3)' },
-    desc: { text: 'Live multiplayer bingo for the trip.', size: 26 },
+    desc: { size: 26 },
     // The artwork names the Edition's own apex, NOT `ogUrl`'s hostname. Vacay
     // is the one Edition whose og:url is Event-scoped
     // (bodega-bay.vacaybingo.com) until the #546 Worker rewrites it per
@@ -274,7 +284,7 @@ const ART = {
     // which is most of what makes it read as set type rather than display.
     wordmark: { style: 'set', size: 71, lineHeight: 1, letterSpacing: '0.14em' },
     rule: { width: 73, background: '#3f66f0' },
-    desc: { text: 'Live multiplayer bingo for your group.' },
+    desc: {},
     left: { top: 177, gaps: { wordmark: 24, byline: 0, rule: 31, desc: 27, domain: 41 } },
     board: {
       x: 708,
@@ -322,6 +332,7 @@ function configFor(id) {
     id,
     palette: art.palette,
     background: art.background,
+    backgroundGrid: art.backgroundGrid ?? null,
     frame: art.frame ?? null,
     eyebrow: { mark: shareMark, text: art.eyebrow.text, markStyle: art.eyebrow.markStyle ?? 'emoji' },
     wordmark: { ...art.wordmark, lead, bold: brand.wordmarkBold },
@@ -329,7 +340,15 @@ function configFor(id) {
     // fiveacross IS the platform, so it has none and the row collapses.
     byline: brand.wordmarkByline ?? null,
     rule: art.rule,
-    desc: art.desc,
+    // Brand-table copy, wrapped where the art direction asks. `appDescription`
+    // is the same sentence the manifest and the share block carry — retyping it
+    // here is exactly the drift this generator exists to stop.
+    desc: {
+      ...art.desc,
+      text: art.desc.wrapAfterWords
+        ? wrapAfter(brand.appDescription, art.desc.wrapAfterWords)
+        : brand.appDescription,
+    },
     domain,
     left: art.left,
     // The platform draws its share mark in the free square instead of the

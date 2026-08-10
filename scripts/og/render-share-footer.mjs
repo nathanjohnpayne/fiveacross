@@ -50,6 +50,10 @@ const argOf = (f) => {
 const only = argOf('--edition');
 const all = args.includes('--all');
 const checkOnly = args.includes('--check');
+// Skip the pngquant pass. Quantisation perturbs pixels everywhere, which makes
+// it impossible to prove the redraw stayed inside the footer band; verify with
+// this, then re-run without it to write the committed (crushed) file.
+const noCrush = args.includes('--no-crush');
 if (!only && !all) {
   console.error(
     'render-share-footer.mjs: pass --edition <id> (or --all). See the header for why there is no default.',
@@ -118,7 +122,26 @@ try {
         const [r, g, bl] = ctx.getImageData(band.sampleX, band.y + Math.floor(band.h / 2), 1, 1).data;
         const bg = `rgb(${r},${g},${bl})`;
         ctx.fillStyle = bg;
-        ctx.fillRect(0, band.y, cardW, band.h);
+        // Clear the OLD line row by row, walking in from each edge until the
+        // pixel already matches the card's interior ground. A full-width
+        // fillRect is the obvious version and it is wrong: these cards carry a
+        // rounded outer border, so it painted over the card's own outline and
+        // left a 32-row gap in it on both sides. Deriving the interior span per
+        // row instead of hardcoding an inset keeps that true through the
+        // corner curvature, and on any Edition's border width or colour.
+        const rows = ctx.getImageData(0, band.y, cardW, band.h);
+        const matches = (i) =>
+          Math.abs(rows.data[i] - r) <= 2 &&
+          Math.abs(rows.data[i + 1] - g) <= 2 &&
+          Math.abs(rows.data[i + 2] - bl) <= 2;
+        for (let row = 0; row < band.h; row++) {
+          const base = row * cardW * 4;
+          let left = 0;
+          while (left < cardW && !matches(base + left * 4)) left++;
+          let right = cardW - 1;
+          while (right > left && !matches(base + right * 4)) right--;
+          if (right > left) ctx.fillRect(left, band.y + row, right - left + 1, 1);
+        }
         // Letter-spaced uppercase, matching the committed cards' footer.
         ctx.letterSpacing = '3px';
         ctx.font = '400 16px "Helvetica Neue", Helvetica, Arial, sans-serif';
@@ -140,6 +163,7 @@ try {
       // PNG, so skipping this step grows a 150 KB reference asset to 240 KB for
       // a one-emoji change — a bigger diff than the change itself.
       try {
+        if (noCrush) throw new Error('skipped');
         execFileSync(
           'pngquant',
           ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${path}.quant`, path],
