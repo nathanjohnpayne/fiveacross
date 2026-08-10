@@ -2,6 +2,7 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
+import { assertDeployFirebaseApiKey } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
 // restating four strings here is the whole point: a second copy is how the
@@ -45,11 +46,12 @@ function editionHtmlIdentity(brand: EditionBrand): Plugin {
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
-  // Resolved for EVERY command and mode, dev server included, because both
-  // index.html and the PWA manifest below are branded from it. `loadEnv` rather
-  // than `process.env`: VITE_EDITION normally lives in the gitignored
-  // .env.local, which nothing has read into the process at this point.
-  const env = loadEnv(mode, process.cwd(), 'VITE_');
+  const targetBuild = process.env.DEPLOY_TARGET_BUILD === '1';
+  // Normal local builds load their development VITE_* values from env files.
+  // A named deploy target instead receives its complete VITE_* environment
+  // from scripts/build-target.mjs. It must not reload .env, .env.local, or a
+  // mode-specific root file after that wrapper has removed ambient values.
+  const env = targetBuild ? process.env : loadEnv(mode, process.cwd(), 'VITE_');
   // `buildTimeEdition` decides whether this build may bake an Edition at all —
   // a hostname-resolved bundle defers to the lookup and takes the default, so a
   // stale VITE_EDITION cannot brand a bundle every Event shares. Always an
@@ -67,28 +69,24 @@ export default defineConfig(({ command, mode }) => {
   // and deployed it silently. Fail loudly here instead.
   //
   // Scope: only the real deploy build. The emulator e2e build runs `--mode e2e`
-  // (mode !== 'production') and legitimately has no key; app-ci's build step runs
-  // without one on purpose (it verifies compilation, never deploys). We key the
-  // CI exemption off GITHUB_ACTIONS, not the generic `CI` var: `CI` is set by
-  // many tools and a stray `CI=<anything>` (even `CI=false`, a truthy string) in
-  // a deploy shell would silently disable the guard, whereas GITHUB_ACTIONS is
-  // set only by the runner and never by `npm run deploy` / `deploy:hosting`. What
-  // remains is the local/agent production build — exactly the outage vector.
-  if (command === 'build' && mode === 'production' && !process.env.GITHUB_ACTIONS) {
-    // `.trim()` so a whitespace-only or leftover-placeholder key is rejected too
-    // — it is just as broken as an empty one (still `auth/invalid-api-key`).
-    if (!env.VITE_FIREBASE_API_KEY?.trim()) {
-      throw new Error(
-        'Refusing to build: VITE_FIREBASE_API_KEY is empty, which would ship a ' +
-          'blank Firebase config and crash the app on load with ' +
-          '`auth/invalid-api-key`. Populate .env.local (regenerate with ' +
-          '`firebase apps:sdkconfig WEB --project gaycruisebingo`) before building ' +
-          'or deploying. (These web identifiers are client-safe, not secret.)',
-      );
-    }
-  }
+  // (mode !== 'production') and legitimately has no key; app-ci's ordinary build
+  // runs without one on purpose (it verifies compilation, never deploys). A
+  // named target build is always a deploy-shaped production build, even when an
+  // operator starts it in GitHub Actions, so it never receives that CI exemption.
+  assertDeployFirebaseApiKey({
+    command,
+    mode,
+    githubActions: process.env.GITHUB_ACTIONS,
+    targetBuild,
+    apiKey: env.VITE_FIREBASE_API_KEY,
+    projectId: env.VITE_FIREBASE_PROJECT_ID,
+  });
 
   return {
+    // Disable Vite's automatic env-file reload for a named target. The target
+    // wrapper supplied every VITE_* value above; allowing another load here
+    // could reintroduce stale local Firebase, Event, or Edition values.
+    ...(targetBuild ? { envDir: false } : {}),
     define: {
       __APP_VERSION__: JSON.stringify(appVersion()),
       // Ordered build stamp for the remote force-reload floor (#342): git SHAs
@@ -186,7 +184,7 @@ export default defineConfig(({ command, mode }) => {
     test: {
       globals: true,
       environment: 'jsdom',
-      include: ['src/**/*.test.{ts,tsx}'],
+      include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.mjs'],
       setupFiles: ['./src/test/setup.ts']
     }
   };

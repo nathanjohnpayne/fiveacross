@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Enforces three guards before calling the deploy chain:
 #   1. Current branch is `main`.
-#   2. Local `main` is not behind `origin/main`.
+#   2. Local `main` exactly matches `origin/main`.
 #   3. The working tree is clean (no modified or staged paths).
 #
 # These three guards together prevent the stale-worktree class of deploy
@@ -86,7 +86,7 @@ EOF
   fi
 fi
 
-# Guard 2: must not be behind origin/main
+# Guard 2: must exactly match origin/main
 # Fail closed on fetch failure — stale origin/main metadata would
 # silently defeat the freshness check and re-open the exact class
 # of failure #77 closes.
@@ -106,16 +106,33 @@ EOF
   fi
 fi
 
-if git rev-parse --verify --quiet origin/main >/dev/null; then
-  BEHIND="$(git rev-list --count HEAD..origin/main)"
-  if [[ "$BEHIND" -gt 0 ]]; then
+if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+  if [[ "$FORCE" == "true" ]]; then
+    echo "⚠️  --force: origin/main is unavailable after fetch; skipping exact-match verification" >&2
+  else
+    cat >&2 <<EOF
+Refusing to deploy: origin/main is unavailable after fetch, so the exact
+merged commit cannot be verified.
+
+To override (break-glass only): scripts/deploy.sh --force
+EOF
+    exit 1
+  fi
+else
+  LOCAL_HEAD="$(git rev-parse HEAD)"
+  ORIGIN_HEAD="$(git rev-parse origin/main)"
+  if [[ "$LOCAL_HEAD" != "$ORIGIN_HEAD" ]]; then
+    BEHIND="$(git rev-list --count HEAD..origin/main)"
+    AHEAD="$(git rev-list --count origin/main..HEAD)"
     if [[ "$FORCE" == "true" ]]; then
-      echo "⚠️  --force: deploying despite $BEHIND commit(s) behind origin/main" >&2
+      echo "⚠️  --force: deploying local main that differs from origin/main ($AHEAD ahead, $BEHIND behind)" >&2
     else
       cat >&2 <<EOF
-Refusing to deploy: local HEAD is $BEHIND commit(s) behind origin/main.
+Refusing to deploy: local main does not exactly match origin/main
+($AHEAD commit(s) ahead, $BEHIND commit(s) behind).
 
-Run: git pull --ff-only && scripts/deploy.sh
+Deploys must ship the reviewed, merged origin/main commit. Push or discard
+local-only commits, then run: git pull --ff-only && scripts/deploy.sh
 
 To override (break-glass only): scripts/deploy.sh --force
 EOF

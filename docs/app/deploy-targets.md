@@ -1,6 +1,6 @@
 # Deploy targets — one repo, two Firebase projects
 
-This repo ships to **two** Firebase projects from one codebase, but its deploy configuration is single-project: `.firebaserc` names exactly one default, and the client build reads exactly one untracked `.env.local`. Everything awkward about deploying Five Across follows from that one mismatch, including the dedicated worktree and the `--force` flag. This page records why the current arrangement exists, how to run each target correctly today, and what to fix so the workarounds can be retired ([#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663)).
+This repo ships to **two** Firebase projects from one codebase. The target commands select the local client environment, pass the Firebase project explicitly, and use the matching post-deploy verification origin. Deploy either target from the clean, current `main` checkout; neither requires `--force` or a dedicated worktree.
 
 ## The two targets
 
@@ -10,120 +10,86 @@ This repo ships to **two** Firebase projects from one codebase, but its deploy c
 | Event | `med-2026` | `bodega-bay-2026` |
 | Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.fiveacross.app` (canonical), `bodega-bay.vacaybingo.com`, `fiveacross.app` |
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
-| Baked `VITE_EDITION` | `gcb` (default) | `vacay` |
+| Baked `VITE_EDITION` | `gcb` (explicit) | `vacay` (explicit) |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
-| Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the `bodega-deploy` worktree |
+| Baked `VITE_FIREBASE_MEASUREMENT_ID` | `G-42N7WYDYT5` | `G-42N7WYDYT5` |
+| Baked `VITE_POSTHOG_HOST` | blank (explicit) | blank (explicit) |
+| Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
+| Cache purge | Gay Cruise Bingo zone `8066dd2b105ad564c45bb8c898859343` | explicitly skipped (no Five Across zone configured) |
+| Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
-### Which host to verify against, and why it is not the canonical one
+### Which hosts to verify
 
-`bodega-bay.fiveacross.app` is the canonical host per [#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599) as amended, and `docs/agents/repository-overview.md` records it that way. Every verification command on this page nonetheless targets `bodega-bay.vacaybingo.com`, which looks inconsistent and is deliberate: the Event was launched on that host, and the shipped bundle bakes it as `VITE_FIREBASE_AUTH_DOMAIN`, so it is the origin whose configuration a deploy can actually break. Both hosts serve the same release from the same Firebase project.
-
-Making `bodega-bay.fiveacross.app` first-class is [#600](https://github.com/nathanjohnpayne/gaycruisebingo/issues/600), still open. **When it lands, move the verification targets on this page with it** — otherwise this runbook will keep proving the health of an alternate while the canonical entry point goes unchecked.
+`bodega-bay.fiveacross.app` is the canonical host. The target deploy command runs its synthetic there. Verify `bodega-bay.vacaybingo.com` as well after significant changes: both are live serving hosts for the same Firebase release.
 
 ### Both targets are single-Event builds
 
-A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup, so the Event and the Edition are frozen at build time. The live Five Across `.env.local` sets `VITE_EVENT_ID=bodega-bay-2026`.
+A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup, so the Event and the Edition are frozen at build time. The Five Across target config sets `VITE_EVENT_ID=bodega-bay-2026`.
 
 This **contradicts `README.md` § Event id**, which says a Five Across build "MUST leave it empty". That instruction is scoped to the wildcard-router design — the multi-Event build every `*.fiveacross.app` host would share once the Worker router ([#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545)) exists. Today's hosts are exact Firebase Hosting custom domains, one Event each, and the single-Event build is the deliberate choice: `preview-deploys.md` records the reasoning, which is that a hostname-resolved build must complete a Firestore `getDocFromServer` before first paint and `shouldMountOnBootstrapFailure` fails **closed** to the `unreachable` screen if that read fails.
 
-Reconstructing `.env.local` from the README alone would therefore produce a build that behaves differently from what is deployed. Copy the deployed values; do not infer them.
+Reconstructing the target env from the README alone would therefore produce a build that behaves differently from what is deployed. Copy the registered web-app values; do not infer them.
 
-## Why Five Across needs its own worktree
+## Target environment files
 
-`.env.local` is a single gitignored file at the repo root, and Vite loads it for every build. Two projects therefore need two copies of that file, and two copies need two working directories — a git worktree is the cheapest way to have both on disk at once.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event, Edition, and adult-content seed before it builds. Both targets name their Edition and audience posture explicitly (`gcb`/`true` or `vacay`/`false`); neither relies on an application default. The wrapper removes ambient `VITE_*` values and disables Vite's subsequent root env-file load, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
 
-That has a knock-on effect. Only one worktree can have `main` checked out, and the main checkout holds it, so `bodega-deploy` sits on a **detached HEAD** pinned to the same commit. `scripts/deploy.sh`'s first guard refuses any branch that is not `main`, which is why every Five Across deploy passes `--force`.
-
-The functions side already solved this problem the right way: `functions/.env.gaycruisebingo` and `functions/.env.fiveacross` sit side by side in one directory, selected by project id, gitignored via `functions/.gitignore`. The client build simply never adopted the same convention.
+The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
 ## Deploying Gay Cruise Bingo
 
 Ordinary path — from `main` in the main checkout, no flags:
 
 ```bash
-npm run deploy:hosting
+npm run deploy:gaycruisebingo:hosting
 ```
 
-`.firebaserc`'s default (`gaycruisebingo`) selects the project and `.env.local` supplies the build config.
+Use `npm run deploy:gaycruisebingo` to deploy every configured Firebase surface. The target command builds from `.env.gaycruisebingo` and passes `gaycruisebingo` explicitly.
 
 ## Deploying Five Across / Vacay
 
-Copy the whole block. The assertions are part of the command chain on purpose — `--force` switches off two of the script's own guards, so this re-asserts them *before* reaching the line that bypasses them, and `&&` makes the chain fail closed:
+From the clean, current `main` checkout:
 
 ```bash
-cd ~/GitHub/.gaycruisebingo-worktrees/bodega-deploy && \
-git fetch origin main && \
-git checkout --detach origin/main && \
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "ABORT: HEAD is not origin/main"; false; } && \
-[ -z "$(git status --porcelain)" ] || { echo "ABORT: worktree is dirty"; false; } && \
-SYNTHETIC_URL=https://bodega-bay.vacaybingo.com/ \
-  scripts/deploy.sh --force --skip-cf-purge -- fiveacross --only hosting
+npm run deploy:fiveacross:hosting
 ```
 
-Do not run the last line on its own. `--force` bypasses the *branch* and *behind-origin/main* guards, so an isolated invocation deploys whatever commit the worktree happens to be pinned at — which is the failure the guards exist to stop, and it is silent.
+Use `npm run deploy:fiveacross` to deploy every configured Firebase surface. The command builds from `.env.fiveacross`, passes `fiveacross` explicitly, skips the Gay Cruise Bingo Cloudflare zone, and verifies the canonical Five Across host.
 
-The clean-tree guard is a separate matter and worth knowing precisely: `--force` does **not** subsume it. `scripts/deploy.sh` documents that explicitly and gates it on its own `DEPLOY_ALLOW_DIRTY=1` env var, so a dirty worktree is refused by the script whether or not you pass `--force`. The `git status` assertion above is therefore belt-and-braces — it fails earlier and more legibly, rather than being the only thing standing between a dirty tree and production.
+The existing deploy guards require `main`, an exact `HEAD == origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`. Every named target rebuilds its own `dist/`; `--skip-build` is intentionally unavailable because a bundle built for another target would be unsafe to deploy.
 
-Five things in that command are load-bearing:
+### Deploy-wrapper controls
 
-- **`fiveacross` after the `--`** — `op-firebase-deploy` takes the project as a positional argument and otherwise falls back to `.firebaserc`'s default, which would deploy this build to the *Gay Cruise Bingo* project.
-- **`--force`** — clears the not-on-`main` guard for the detached HEAD. See the checklist below before using it.
-- **`--skip-cf-purge`** — `CF_ZONE_ID` defaults to a hard-coded Gay Cruise Bingo zone (`scripts/deploy.sh:225`). If a preflight has loaded `CF_API_TOKEN`, an unguarded Five Across deploy purges *that* zone: the wrong site's cache is cleared, Bodega's is not, and the mount-only synthetic still passes. Skipping is correct today because the Bodega host is DNS-only — responses carry no `cf-ray`, so there is no Cloudflare cache in front of it to purge. If a Five Across host is ever put behind the orange cloud, pass `CF_ZONE_ID=<five-across-zone>` instead of skipping.
-- **`SYNTHETIC_URL`** — the post-deploy synthetic defaults to `https://gaycruisebingo.com/`, which would assert the wrong site mounted and tell you nothing about the deploy you just made.
-- **the worktree** — it holds the only correct Five Across `.env.local` on this machine.
-
-### Before passing `--force`
-
-The guard exists to stop a stale or dirty tree from shipping something reviewers never saw ([mergepath#77](https://github.com/nathanjohnpayne/mergepath/issues/77)). Bypassing it is only safe when that specific risk is absent, so confirm all three:
+Even a break-glass control must keep the selected target environment. Place deploy-wrapper flags before a second `--`, and Firebase options after it:
 
 ```bash
-git rev-parse HEAD                 # must equal origin/main
-git rev-parse origin/main
-git status --porcelain             # must be empty
+npm run deploy:gaycruisebingo -- --skip-synthetic -- --only hosting
+npm run deploy:fiveacross -- --force --
 ```
 
-If HEAD is not `origin/main`, you are about to ship something other than main's state and the guard is right. `--force` is the correct tool **only** for the detached-HEAD mechanics described above, never for "the guard is in my way".
+The named target still supplies the Firebase project, target build command, cache decision, and synthetic URL. A Firebase-specific `--force` belongs after the second separator, for example `npm run deploy:fiveacross -- -- --only functions --force`.
 
-## ⚠️ Do not deploy from the `fiveacross-deploy` worktree
+### Registering a future target
 
-A second worktree, `~/GitHub/.gaycruisebingo-worktrees/fiveacross-deploy`, also carries a Five Across `.env.local`. Its `VITE_FIREBASE_AUTH_DOMAIN` is **`fiveacross.firebaseapp.com`**, and deploying it to the live Bodega host would break sign-in.
+There is intentionally no ambient “new Event” deploy. Register a named target in a reviewed change: add its complete identity, a nonblank `syntheticUrl`, and an explicit `skipCloudflarePurge` choice (a zone id is required when false) to `scripts/build-target.mjs`; create its ignored `.env.<target>` from `.env.example`; and add the matching `build:<target>` / `deploy:<target>` package commands. The Firebase API and production PostHog keys must be nonblank; the PostHog host override must be explicitly blank. Only then use `npm run deploy -- <target>` (or `npm run deploy:hosting -- <target>`). This keeps a future Event from silently rebuilding and publishing an existing target.
 
-The mechanism is worth understanding, because nothing about the build would look wrong:
+### Verify the deployed target
 
-`bodega-bay.vacaybingo.com` is **not** in `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts`) — it appears in that file only in a comment. So `resolveAuthDomain` returns the *configured* `authDomain` verbatim on that host. Today that value is the host itself, which is what makes sign-in same-origin. Ship `fiveacross.firebaseapp.com` instead and the auth helper becomes cross-origin, which is exactly the arrangement Safari's storage partitioning breaks — the failure the exact-host pinning was built to prevent.
-
-Verify what actually shipped by reading the app's own inlined Firebase config out of the served bundle. This **prints the deployed values** rather than asserting a count, so it cannot pass by accident:
-
-Check **both** serving hosts, not just one. They are separate Hosting custom domains and a release can reach one and not the other:
+The synthetic proves the application mounted. For an independent target check, verify both serving hosts contain the Five Across project **and the exact commit that was deployed**. Run this from the clean `main` checkout used for deployment; the target deploy commands ensure its `HEAD` equals `origin/main`.
 
 ```bash
-for HOST in https://bodega-bay.vacaybingo.com https://bodega-bay.fiveacross.app; do
+EXPECTED_SHA="$(git rev-parse HEAD)"
+for HOST in https://bodega-bay.fiveacross.app https://bodega-bay.vacaybingo.com; do
   ASSET=$(curl -sS "$HOST/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
-  echo "== $HOST ($ASSET)"
-  curl -sS "$HOST$ASSET" | grep -oE 'authDomain:[A-Za-z0-9_$]+\("[^"]+"|projectId:"[^"]+"|"[0-9a-f]{40}"' | sort -u
+  printf '%s ' "$HOST"
+  if curl -sS "$HOST$ASSET" | grep -q 'projectId:"fiveacross"' && \
+     curl -sS "$HOST$ASSET" | grep -q "\"$EXPECTED_SHA\""; then
+    echo "fiveacross $EXPECTED_SHA"
+  else
+    echo WRONG-TARGET-OR-STALE-COMMIT
+  fi
 done
 ```
-
-Expected on each host — all three lines, and the sha must equal `git rev-parse origin/main`:
-
-```
-"33966aa1238132569c937d71f40938463cb70d2c"
-authDomain:MH("bodega-bay.vacaybingo.com"
-projectId:"fiveacross"
-```
-
-The 40-hex string is the build's commit, baked by `appVersion()` in `vite.config.ts` from `GITHUB_SHA` or `git rev-parse HEAD`. That makes this check **commit-aware**: it answers "which commit is this host serving", not merely "does it look right".
-
-`VITE_FIREBASE_AUTH_DOMAIN` is inlined by Vite as the first argument to `resolveAuthDomain(...)` (`src/firebase.ts:18`), so that match is the configured auth domain itself. The minified function name (`MH` above) changes every build — do not pin it.
-
-Two weaker checks to avoid, both of which pass on bundles that are wrong:
-
-- **Grepping for `bodega-bay.vacaybingo.com`.** The Vacay Edition's `ogUrl` in `src/editions.ts` is that same hostname, so every Vacay build matches regardless of which `authDomain` was baked in — including one built from the broken worktree.
-- **Asserting `fiveacross.firebaseapp.com` is absent.** A Gay Cruise Bingo bundle, or a build with a missing or differently-wrong auth domain, also produces zero. Absence of one wrong value is not presence of the right one.
-
-The `projectId` line is what makes this a real Edition check too: a Gay Cruise Bingo build reports `projectId:"gaycruisebingo"` and fails the comparison immediately.
-
-Until [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663) lands, treat `fiveacross-deploy` as reference material for the mirror hosts, not a deploy source.
 
 ## Post-deploy verification
 
@@ -159,7 +125,7 @@ npx vercel deploy --prod --yes --scope nathanjohnpaynes-projects --project vacay
 | `gaycruisebingo.vercel.app` | `gaycruisebingo` |
 | `vacaybingo.vercel.app`, `fiveacross.vercel.app` | `fiveacross` |
 
-**"Primary" means the whole backend, not just Hosting.** Both commands on this page are hosting-only — `npm run deploy:hosting`, and the Five Across block's `--only hosting` — so a client that needs new Cloud Functions, `firestore.rules`, or a Firestore index is *not* unblocked by running them. Deploy those targets first (`--only functions`, `--only firestore:rules`, `--only firestore:indexes`), then Hosting, then that project's mirrors. Otherwise the ordering rule below is satisfied on paper while the backend the new bundle calls is still the old one.
+**"Primary" means the whole backend, not just Hosting.** Both target commands above are hosting-only, so a client that needs new Cloud Functions, `firestore.rules`, or a Firestore index is *not* unblocked by running them. Deploy the backend to its named project first (for example, `npm run deploy:fiveacross -- --only functions,firestore:rules,firestore:indexes`), then Hosting, then that project's mirrors. Otherwise the ordering rule below is satisfied on paper while the backend the new bundle calls is still the old one.
 
 It bites hardest when the change needs a backend that only one project has: new Cloud Functions, new `firestore.rules`, a new Firestore field the client expects. A Five Across-only rollout that also advances `gaycruisebingo.vercel.app` breaks the ship-network fallback against a backend that has not moved — the one host whose whole job is to work when the primary does not.
 
@@ -216,6 +182,6 @@ Substitute a marker unique to whatever commit you are verifying. A bare `unknown
 
 > **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 
-## Unwinding this
+## Implementation note
 
-The whole arrangement collapses once the client build can select an env file per project, the way `functions/` already does. The plan and its one non-obvious hazard — Vite's blank-key guard is keyed to `mode === 'production'`, so a naive `--mode fiveacross` would silently disable the guard that exists to prevent blank-config outages — are in [#663](https://github.com/nathanjohnpayne/gaycruisebingo/issues/663).
+Target selection is separate from Vite's build mode: both target commands run `vite build --mode production`. That deliberately keeps the blank-Firebase-key guard active for both projects; using a target name as the Vite mode would bypass that guard.

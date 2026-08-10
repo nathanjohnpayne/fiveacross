@@ -48,23 +48,27 @@ npm run typecheck              # tsc --noEmit, app + service worker
 
 `app-ci` gates every merge: typecheck, unit and component tests, build, the functions suite (`test:functions`—scheduler unlocks, finale computation and client/functions parity, easy-mix snapshots, bug-report validation, the Vision gate, server-authoritative auto-hide, and adult-posture derivation/reconciliation), and the emulator-backed rules and offline-durability suites (`test:rules`, `test:offline`). Playwright e2e (`test:e2e`) is a local smoke layer and is deliberately not run in CI. See [`docs/agents/testing-requirements.md`](docs/agents/testing-requirements.md).
 
-Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (1Password-backed service-account impersonation; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards.
+Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (the 1Password-backed project deploy credential; never `firebase login` / `firebase deploy` directly) and enforces the main-branch, freshness and clean-tree guards.
 
-**A multi-Edition deploy has three independent knobs, and the script defaults all three to Gay Cruise Bingo.** Getting one right does not get the others right:
+**A multi-Edition deploy has three independent knobs.** The target commands below set all three together; do not invoke `scripts/deploy.sh` directly for Five Across.
 
-1. **The build env.** `scripts/deploy.sh` builds before it deploys, from the ambient Vite env (`.env.local` / exported `VITE_*`). Passing a different Firebase target does not change what got baked—a Gay Cruise Bingo shell can publish a `med-2026` bundle straight to the `fiveacross` project.
-2. **The Firebase target.** `.firebaserc`'s default is `gaycruisebingo`, so a Five Across deploy that omits the project ships to the wrong one (ADR [0008](docs/adr/0008-five-across-second-firebase-project.md) § Consequences).
-3. **The cache zone.** `CF_ZONE_ID` falls back to a hardcoded Gay Cruise Bingo zone, so an unset value purges the wrong zone and leaves the Edition you just deployed stale. Set it to that Edition's zone, or pass `--skip-cf-purge` when the canonical host is not Cloudflare-proxied.
+1. **The build env.** `build:gaycruisebingo` and `build:fiveacross` load `.env.gaycruisebingo` and `.env.fiveacross` respectively, overriding a developer's ambient `.env.local` so the selected project is what gets baked.
+2. **The Firebase target.** Each deploy command passes its project ID explicitly; `.firebaserc`'s Gay Cruise Bingo default is never used for a Five Across deploy.
+3. **The cache zone.** Gay Cruise Bingo uses its default Cloudflare zone. Five Across is DNS-only, so its deploy command skips a purge rather than touching the Gay Cruise Bingo zone.
 
 Within the build environment, `VITE_ADULT_CONTENT` is a single-Event posture seed, not a permanent switch: only the literal value `false` hides the initial gate, and the deployed origin must also have a `hostnames/{host}` document because the live watcher re-proves that opt-out and observes a later server-side raise. Hostname-resolved builds ignore this seed and use the routing document directly (ADR 0012; app guide § Event id).
 
 ```bash
-# Five Across — with the Five Across .env.local in place, not Gay Cruise Bingo's
-CF_ZONE_ID=<five-across-zone> SYNTHETIC_URL=https://<five-across-host>/ \
-  scripts/deploy.sh -- fiveacross --only hosting
+# Full project deploys
+npm run deploy:gaycruisebingo
+npm run deploy:fiveacross
+
+# Hosting-only deploys
+npm run deploy:gaycruisebingo:hosting
+npm run deploy:fiveacross:hosting
 ```
 
-What is documented: the deploy flow itself in app guide §5 and [`DEPLOYMENT.md`](DEPLOYMENT.md), and the build-time knobs a Five Across bundle needs—`VITE_EVENT_ID` (leave it **empty** so the build resolves its Event from the hostname), `VITE_EDITION`, and—for Bodega-style hosts using the same-origin auth escape hatch—`VITE_FIREBASE_AUTH_DOMAIN` pinned to the serving host (the auth gate refuses to offer sign-in otherwise)—in app guide §8. What is **not** documented anywhere yet: the Five Across Cloudflare zone id, and the concrete current Bodega invocation. `CF_ZONE_ID` is only described generically as per-repo. Until [#541](https://github.com/nathanjohnpayne/gaycruisebingo/issues/541) lands that env durably, get those two values from whoever last deployed rather than inferring them—do not adapt the Gay Cruise Bingo command by hand.
+The target files are local and ignored because they contain the client configuration for each Firebase web app. They are not secrets, but keeping them out of the repository prevents an outdated deployed configuration from becoming source of truth. See [`docs/app/deploy-targets.md`](docs/app/deploy-targets.md) for setup and verification.
 
 ## Documentation
 

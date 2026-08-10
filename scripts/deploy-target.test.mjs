@@ -1,0 +1,83 @@
+// @vitest-environment node
+import { describe, expect, it } from 'vitest';
+import { deployInvocation, deployRequest } from './deploy-target.mjs';
+
+describe('deploy target selection', () => {
+  it('requires an explicit deploy target', () => {
+    expect(() => deployRequest([])).toThrow('A deploy target is required');
+  });
+
+  it('turns the generic hosting entry point into an explicit target deployment', () => {
+    expect(deployRequest(['--hosting', 'fiveacross'])).toEqual({
+      target: 'fiveacross',
+      wrapperArgs: [],
+      deployArgs: ['--only', 'hosting'],
+    });
+  });
+
+  it('keeps deploy-wrapper flags before Firebase options', () => {
+    expect(deployRequest(['gaycruisebingo', '--skip-synthetic', '--', '--only', 'hosting'])).toEqual({
+      target: 'gaycruisebingo',
+      wrapperArgs: ['--skip-synthetic'],
+      deployArgs: ['--only', 'hosting'],
+    });
+  });
+
+  it('rejects skipping a named target build', () => {
+    expect(() => deployRequest(['gaycruisebingo', '--skip-build', '--'])).toThrow('--skip-build');
+    expect(() => deployInvocation('gaycruisebingo', [], {}, ['--skip-build'])).toThrow('--skip-build');
+  });
+
+  it('keeps Five Across project, build, synthetic, and cache choices together', () => {
+    const invocation = deployInvocation('fiveacross', ['--only', 'firestore:rules'], { NODE_ENV: 'production' });
+
+    expect(invocation.args).toEqual([
+      '--skip-cf-purge',
+      '--',
+      'fiveacross',
+      '--only',
+      'firestore:rules',
+    ]);
+    expect(invocation.environment).toMatchObject({
+      NODE_ENV: 'production',
+      BUILD_CMD: 'npm run build:fiveacross',
+      CF_ZONE_ID: '',
+      SYNTHETIC_URL: 'https://bodega-bay.fiveacross.app/',
+    });
+  });
+
+  it('keeps Gay Cruise Bingo project, build, and synthetic choices explicit', () => {
+    const invocation = deployInvocation('gaycruisebingo', ['--only', 'hosting'], {
+      CF_ZONE_ID: 'an-unrelated-zone',
+    });
+
+    expect(invocation.args).toEqual(['--', 'gaycruisebingo', '--only', 'hosting']);
+    expect(invocation.environment).toMatchObject({
+      BUILD_CMD: 'npm run build:gaycruisebingo',
+      CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
+      SYNTHETIC_URL: 'https://gaycruisebingo.com/',
+    });
+  });
+
+  it('preserves the target environment when a wrapper flag is needed', () => {
+    const invocation = deployInvocation(
+      'gaycruisebingo',
+      ['--only', 'hosting'],
+      {},
+      ['--skip-synthetic'],
+    );
+
+    expect(invocation.args).toEqual([
+      '--skip-synthetic',
+      '--',
+      'gaycruisebingo',
+      '--only',
+      'hosting',
+    ]);
+    expect(invocation.environment).toMatchObject({
+      BUILD_CMD: 'npm run build:gaycruisebingo',
+      CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
+      SYNTHETIC_URL: 'https://gaycruisebingo.com/',
+    });
+  });
+});

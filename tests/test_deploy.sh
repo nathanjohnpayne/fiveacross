@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/test_deploy.sh
 #
-# Unit tests for scripts/deploy.sh. Covers the two guards added /
+# Unit tests for scripts/deploy.sh. Covers the guards added /
 # tightened by mergepath#286:
 #
 #   1. Strict-bash BUILD_CMD invocation.
@@ -12,7 +12,10 @@
 #      the strict form aborts on `false`. We assert non-zero exit AND
 #      that the second segment never wrote its stdout.
 #
-#   2. Clean-working-tree guard.
+#   2. Exact-main guard.
+#      A local `main` commit that has not reached `origin/main` must not deploy.
+#
+#   3. Clean-working-tree guard.
 #      With a dirty fixture worktree, the script must exit non-zero,
 #      print the dirty-tree diagnostic, and list the modified path.
 #      With DEPLOY_ALLOW_DIRTY=1, the same dirty fixture must allow
@@ -110,6 +113,28 @@ init_fixture_repo() {
     echo "initial" > README.md
     git add README.md
     git commit --quiet -m "initial"
+  )
+}
+
+# Build a clean main checkout with a real origin/main, then let a caller add
+# local-only commits. deploy.sh fetches before it compares exact commit ids, so
+# this must be a real remote rather than a synthetic local ref.
+init_main_fixture_with_origin() {
+  local repo="$1"
+  local remote="$2"
+  git init --quiet --bare "$remote"
+  mkdir -p "$repo"
+  (
+    cd "$repo"
+    git init --quiet -b main
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    echo "initial" > README.md
+    git add README.md
+    git commit --quiet -m "initial"
+    git remote add origin "$remote"
+    git push --quiet -u origin main
   )
 }
 
@@ -271,7 +296,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 5 (#142): the post-deploy synthetic runs by default and the deploy
+# Case 5: Exact-main guard rejects a clean local main that is ahead of
+# origin/main. A behind-only check would wrongly deploy this unreviewed commit.
+# ---------------------------------------------------------------------------
+REPO5="$WORKDIR/case5-local-main-ahead"
+REMOTE5="$WORKDIR/case5-origin.git"
+init_main_fixture_with_origin "$REPO5" "$REMOTE5"
+(
+  cd "$REPO5"
+  echo "local only" >> README.md
+  git add README.md
+  git commit --quiet -m "local-only"
+)
+
+OUT5="$WORKDIR/case5.out"
+ERR5="$WORKDIR/case5.err"
+: >"$WORKDIR/ofd-calls-5.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-5.log" \
+  bash -c "cd '$REPO5' && bash '$SCRIPT' --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT5" 2>"$ERR5"
+RC5=$?
+set -e
+
+if [[ $RC5 -eq 0 ]]; then
+  fail "exact-main: deploy.sh accepted a local main ahead of origin/main."
+elif ! grep -q 'does not exactly match origin/main' "$ERR5"; then
+  fail "exact-main: deploy.sh rejected the local-only commit but did not explain the exact-match guard. stderr was:"
+  cat "$ERR5" >&2
+elif grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-5.log"; then
+  fail "exact-main: deploy.sh reached op-firebase-deploy despite local main being ahead of origin/main."
+else
+  pass "exact-main: local-only main commit is rejected before deploy."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 6 (#142): the post-deploy synthetic runs by default and the deploy
 # completes when it passes. The `npm` stub records `run … test:synthetic`.
 # ---------------------------------------------------------------------------
 REPO5="$WORKDIR/case5-synthetic-runs"

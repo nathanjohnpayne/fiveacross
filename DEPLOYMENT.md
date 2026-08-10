@@ -472,40 +472,42 @@ Build output goes to `dist/`. Never edit `dist/` directly.
 
 ## Deployment Steps
 
-The canonical deploy entry point is **`scripts/deploy.sh`**. It wraps `op-firebase-deploy` with two safety guards and the Cloudflare cache purge step so a single `scripts/deploy.sh` (or `npm run deploy`) is the complete, safe deploy surface.
+The canonical deploy entry point is **`scripts/deploy.sh`**. It wraps `op-firebase-deploy` with exact-main, clean-worktree, and cache-purge safeguards. In this multi-project repo, invoke it through a named target command (or provide a target explicitly to `npm run deploy`) so the Firebase project and browser config are never defaults.
 
 ```bash
-# Full deploy (build + deploy + cache purge)
-scripts/deploy.sh
+# Full target deploy (build + deploy + matching cache behavior)
+npm run deploy:gaycruisebingo
+npm run deploy:fiveacross
 
-# Scope the deploy to a single Firebase target
-scripts/deploy.sh -- --only hosting
-scripts/deploy.sh -- --only firestore:rules
+# Scope an explicit target to one Firebase surface
+npm run deploy:gaycruisebingo -- --only hosting
+npm run deploy:fiveacross -- --only firestore:rules
 
-# Skip the build step (assume dist/ is already current)
-scripts/deploy.sh --skip-build
-
-# Skip the Cloudflare purge (no CF env vars set, or purge separately)
-scripts/deploy.sh --skip-cf-purge
+# Deploy-wrapper controls still go through the named target. Put them before
+# the second `--`; Firebase options go after it. Named targets always rebuild;
+# they reject --skip-build rather than risk publishing another target's dist/.
+npm run deploy:gaycruisebingo -- --skip-cf-purge --
 
 # Skip the post-deploy app-mount synthetic (see Post-Deployment Verification)
-scripts/deploy.sh --skip-synthetic
+# while scoping Firebase itself to Hosting.
+npm run deploy:gaycruisebingo -- --skip-synthetic -- --only hosting
 
 # Break-glass: bypass the main-only / must-be-current-with-origin guards
-scripts/deploy.sh --force
+# without falling back to an ambient browser environment.
+npm run deploy:gaycruisebingo -- --force --
 ```
 
 The guards (see [mergepath#77](https://github.com/nathanjohnpayne/mergepath/issues/77) for the incident that motivated them; the dirty-tree guard was added in [mergepath#286](https://github.com/nathanjohnpayne/mergepath/issues/286) after a closed-review backlog sweep):
 
 1. **Current branch must be `main`.** Deploys should ship the reviewed, merged state of the project, not a worktree's in-progress branch.
-2. **Local `main` must not be behind `origin/main`.** After `git fetch`, `git rev-list --count HEAD..origin/main` must be 0. Otherwise the deploy refuses.
+2. **Local `main` must exactly equal `origin/main`.** After `git fetch`, the two commit IDs must be equal. This rejects both a stale local checkout and an unpushed local commit, so the deploy is exactly the reviewed, merged state.
 3. **Working tree must be clean.** `git status --porcelain` must return empty — no modified, staged, or untracked paths. A dirty tree means the deploy would ship whatever the in-progress edits compile to, which diverges from the merged-on-main state reviewers signed off on (same failure class as #77).
 
 Guards 1 and 2 are bypassed with `--force`. Guard 3 is bypassed by the dedicated env var `DEPLOY_ALLOW_DIRTY=1` — kept separate from `--force` so the override is deliberate, audit-greppable, and `--force` doesn't accidentally subsume the dirty-tree check:
 
 ```bash
 # Break-glass: deploy with uncommitted changes (NEVER for routine deploys)
-DEPLOY_ALLOW_DIRTY=1 scripts/deploy.sh
+DEPLOY_ALLOW_DIRTY=1 npm run deploy:gaycruisebingo
 ```
 
 When the override is used, the script logs the dirty paths to stderr under a `⚠️  DEPLOY_ALLOW_DIRTY=1` banner so the deviation is visible in the deploy transcript. Never use `--force` or `DEPLOY_ALLOW_DIRTY=1` during routine deploys.
@@ -521,10 +523,10 @@ Because deploy preflight exports the selected credential through `GOOGLE_APPLICA
 Under the hood, `scripts/deploy.sh` delegates to `op-firebase-deploy` with any arguments after `--`:
 
 ```bash
-op-firebase-deploy              # full deploy
-op-firebase-deploy --only hosting
-op-firebase-deploy --only firestore:rules
-op-firebase-deploy --only functions
+op-firebase-deploy <project-id> # full deploy
+op-firebase-deploy <project-id> --only hosting
+op-firebase-deploy <project-id> --only firestore:rules
+op-firebase-deploy <project-id> --only functions
 ```
 
 `op-firebase-deploy`:
@@ -604,7 +606,7 @@ $EDITOR public/build-floor.json
 
 # 2. Deploy. The new sw.js differs byte-wise, so every client installs it, and
 #    that install reads the floor you just armed.
-npm run deploy:hosting
+npm run deploy:gaycruisebingo:hosting
 ```
 
 Why the order matters. A client stranded on a broken shell is controlled by an **old** service worker — one built before the rescue existed, so it has no floor logic of its own. The only code that can rescue it is a *newly installing* worker, and a worker reads the floor exactly once, during `install`. So:
@@ -654,7 +656,7 @@ op document get "{project-id} — Firebase Deployer SA Key" \
   --vault Firebase --out-file ~/firebase-keys/{project-id}-sa-key.json
 
 # Deploy with the SA key (no impersonation, no 1Password needed at deploy time)
-GOOGLE_APPLICATION_CREDENTIALS=~/firebase-keys/{project-id}-sa-key.json npm run deploy
+GOOGLE_APPLICATION_CREDENTIALS=~/firebase-keys/{project-id}-sa-key.json npm run deploy -- gaycruisebingo
 ```
 
 When the source credential is a `service_account` key matching the target deployer SA, `op-firebase-deploy` skips the impersonation wrapper and uses the key directly.
@@ -745,7 +747,7 @@ op-firebase-setup {project-id} --provision-sa-key
 # Verify: a routine deploy should now log
 # "[op-firebase-deploy] source credential: project Firebase-vault SA key (...)"
 # and run without prompting for firebase login --reauth.
-op-firebase-deploy --only hosting   # or whatever target
+op-firebase-deploy <project-id> --only hosting   # or whatever target
 ```
 
 The flag is opt-in (preserves the prior impersonation-only setup behavior for callers who want it), refuses to overwrite an existing 1Password item with the canonical title (rotate via the [§ Rotating a Firebase deploy SA key](#rotating-a-firebase-deploy-sa-key) procedure instead), and short-circuits early with a clear error if the 1Password CLI is not on PATH.
@@ -778,7 +780,7 @@ rm -f "$KEY_PATH"
 # 4. Verify: a routine deploy should now log
 #    "[op-firebase-deploy] source credential: project Firebase-vault
 #    SA key (...)" and run without prompting for firebase login --reauth.
-op-firebase-deploy --only hosting   # or whatever target
+op-firebase-deploy <project-id> --only hosting   # or whatever target
 ```
 
 ### Rotating a Firebase deploy SA key
@@ -825,7 +827,7 @@ rm -f "$KEY_PATH"
 #    through to a different source, the new key isn't being read
 #    (mistyped item title, vault permissions, etc.) and rolling
 #    forward could leave the project on stale auth.
-op-firebase-deploy --only hosting   # or any low-risk target
+op-firebase-deploy <project-id> --only hosting   # or any low-risk target
 
 # 6. Once the new-key deploy succeeds, revoke the old key in GCP.
 #    Doing this AFTER step 5 ensures we never leave the project

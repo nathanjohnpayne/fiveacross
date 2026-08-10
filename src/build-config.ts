@@ -1,0 +1,40 @@
+export type FirebaseDeployBuild = {
+  command: string;
+  mode: string;
+  githubActions?: string;
+  targetBuild?: boolean;
+  apiKey?: string;
+  projectId?: string;
+};
+
+/**
+ * Refuse a local production build with an empty Firebase web config.
+ *
+ * The target build wrapper always invokes Vite in `production` mode, whether it
+ * loads `.env.gaycruisebingo` or `.env.fiveacross`. Keeping this check here
+ * protects both deploy paths from the `auth/invalid-api-key` blank-page outage.
+ */
+export function assertDeployFirebaseApiKey({
+  command,
+  mode,
+  githubActions,
+  targetBuild,
+  apiKey,
+  projectId,
+}: FirebaseDeployBuild): void {
+  // GitHub's generic compile-only build intentionally has no Firebase config.
+  // A named target build does, however, publish deploy-shaped output, so it
+  // must fail closed on an empty web key even when started by Actions.
+  if (command !== 'build' || mode !== 'production' || (githubActions && !targetBuild)) return;
+  if (apiKey?.trim()) return;
+
+  const envFile = targetBuild
+    ? projectId ? `.env.${projectId}` : 'the selected target env file'
+    : '.env.local';
+  throw new Error(
+    'Refusing to build: VITE_FIREBASE_API_KEY is empty, which would publish a ' +
+      'blank Firebase config and crash the app on load with `auth/invalid-api-key`. ' +
+      `Populate ${envFile} before building or deploying. ` +
+      '(These web identifiers are client-safe, not secret.)',
+  );
+}

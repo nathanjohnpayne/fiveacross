@@ -15,7 +15,7 @@ Build the functions package, then deploy through the wrapper:
 
 ```bash
 cd functions && npm install && npm run build && cd ..
-op-firebase-deploy --only functions
+npm run deploy:<target> -- --only functions
 ```
 
 Deploys `moderateProof` (Storage trigger → SafeSearch flag + thumbnail) plus the admin-notification family: the two document triggers `notifyProofModeration` and `notifyItemModeration` (`onDocumentWritten` on `events/{eventId}/proofs/{proofId}` and `.../items/{itemId}`) and the scheduled `adminAlertDigest`. **Since #638 the two document triggers no longer send mail**—they only APPEND to the server-owned `events/{eventId}/adminAlerts` queue, and `adminAlertDigest` (`*/5 * * * *` UTC) drains it into one Theme-styled email per Event per sweep. So the secret binding and the Cloud Scheduler job both belong to the DIGEST, and a delivery smoke-test must exercise the digest rather than the triggers (§ 1a-ii). Player stats are **not** server-recomputed—they stay client-authoritative by design (ADR 0001).
@@ -26,9 +26,9 @@ The gate has to be honored at **deploy trigger discovery**—the step where Fire
 
 To enable Vision later (the region pin is already in place, #132): (1) enable the Cloud Vision API on the project, (2) set `ENABLE_VISION_MODERATION=true` in `functions/.env.<projectId>`, and (3) redeploy `--only functions`.
 
-**The sending functions—`adminAlertDigest` and `dailyEngagementEmail`—need the `RESEND_API_KEY` secret set BEFORE (or they will deploy but fail to send).** Since #638 the two `notify*Moderation` triggers are NOT among them: they enqueue only, bind no secret, and are unaffected by a missing key. See § 1a below for the one-time secret + the `EMAIL_FROM` / `ADMIN_NOTIFY_EMAIL` / `APP_BASE_URL` params; after setting the secret, (re)deploy the bound functions so the binding takes effect (`op-firebase-deploy --only functions`).
+**The sending functions—`adminAlertDigest` and `dailyEngagementEmail`—need the `RESEND_API_KEY` secret set BEFORE (or they will deploy but fail to send).** Since #638 the two `notify*Moderation` triggers are NOT among them: they enqueue only, bind no secret, and are unaffected by a missing key. See § 1a below for the one-time secret + the `EMAIL_FROM` / `ADMIN_NOTIFY_EMAIL` / `APP_BASE_URL` params; after setting the secret, (re)deploy the bound functions so the binding takes effect (`npm run deploy:<target> -- --only functions`).
 
-**If a previously deployed project still carries `recomputeStats` and/or `share`:** this deploy is what deletes them—Firebase discovers exports removed from the source and prompts to confirm deleting each live function. Two exports have been removed since the scaffold: `recomputeStats` (#40, ADR 0001—self-writable player stats need no server recompute) and `share` (#39, ADR 0005—the crawler OG page is replaced by on-device Share Cards). A project deployed before either removal will prompt to delete whichever it still carries. The wrapper always runs `firebase deploy --non-interactive`, which stalls on that prompt, so the one-time cleanup deploy must pass the force flag through: `op-firebase-deploy --only functions --force` (extra args pass straight through to `firebase deploy`). Both deletions are expected and required; do not recreate the function in either case. Deleting `share` from Functions does **not** remove the separate Cloud Run OG renderer—that retirement is step 3 below.
+**If a previously deployed project still carries `recomputeStats` and/or `share`:** this deploy is what deletes them—Firebase discovers exports removed from the source and prompts to confirm deleting each live function. Two exports have been removed since the scaffold: `recomputeStats` (#40, ADR 0001—self-writable player stats need no server recompute) and `share` (#39, ADR 0005—the crawler OG page is replaced by on-device Share Cards). A project deployed before either removal will prompt to delete whichever it still carries. The wrapper always runs `firebase deploy --non-interactive`, which stalls on that prompt, so the one-time cleanup deploy must pass the force flag through: `npm run deploy:<target> -- --only functions --force` (extra args pass straight through to `firebase deploy`). Both deletions are expected and required; do not recreate the function in either case. Deleting `share` from Functions does **not** remove the separate Cloud Run OG renderer—that retirement is step 3 below.
 
 **Moderation note:** SafeSearch is tuned to flag only extreme/violent content, **not** raciness (raciness is expected here). It cannot detect minors—user reporting + the admin console remain the primary control. Flagged proofs appear in **Admin → Flagged**.
 
@@ -98,7 +98,7 @@ GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/backfill-hide.mjs <eventId> # o
 
 1. Google Cloud console → reCAPTCHA Enterprise → create a **Website** key for `gaycruisebingo.com` (+ `localhost` for dev).
 2. Firebase console → App Check → register the web app with that site key.
-3. Set `VITE_RECAPTCHA_SITE_KEY` in `.env.local`, rebuild, redeploy hosting.
+3. Set `VITE_RECAPTCHA_SITE_KEY` in each affected target file (`.env.gaycruisebingo` or `.env.fiveacross`), rebuild, and redeploy that target's hosting. Named production builds deliberately ignore `.env.local`.
 4. In App Check, **enforce** on Cloud Firestore and Cloud Storage once traffic looks healthy.
 
 ## 3. Retire the old Cloud Run OG renderer (one-time, only if you deployed it before)
@@ -124,7 +124,7 @@ This is a one-time retirement step for anyone who previously stood the renderer 
 `storage.rules` already restricts proof/avatar uploads by owner, MIME type, and size. Deploy:
 
 ```bash
-op-firebase-deploy --only storage,firestore:rules,firestore:indexes
+npm run deploy:<target> -- --only storage,firestore:rules,firestore:indexes
 ```
 
 **Do not lock player-stat writes—they stay client-authoritative by design (ADR 0001).** The honor system makes `players/{uid}` self-writable: each Player owns its own `bingoCount`, `squaresMarked`, `firstBingoAt`, and `blackout`. There is no server-side stat recompute to make those fields authoritative, so there is nothing to "harden" toward—do **not** tighten the `players/{uid}` rule to profile-fields-only / admins-only. Such a lock has nothing backing it and would break the client stat writes in `joinAndDeal` and `setMark` (`src/data/api.ts`) and in `attachProof` (`src/data/proofs.ts`), making joins and marks **fail** with a permission error.

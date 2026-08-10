@@ -27,7 +27,7 @@ scripts/smoke-bug-report-callable.sh
 
 It sends a single load-and-assert request (no auth ⇒ no side effect) and fails loudly if the callable returns HTTP 403—the signal that the request was blocked at the Cloud Run invoker layer and the invoker configuration has regressed. This is the check that would have flagged the original outage class.
 
-**Functions runtime.** The Functions package targets the Node.js 22 runtime (`functions/package.json` `engines.node`). Node.js 20 is deprecated on Cloud Functions with a 2026-10-30 decommission date; the runtime bump takes effect on the next `op-firebase-deploy --only functions`.
+**Functions runtime.** The Functions package targets the Node.js 22 runtime (`functions/package.json` `engines.node`). Node.js 20 is deprecated on Cloud Functions with a 2026-10-30 decommission date; the runtime bump takes effect on the next `npm run deploy:<target> -- --only functions`.
 
 ## Pull reports locally
 
@@ -71,7 +71,7 @@ set -a; source "$HOME/.cache/mergepath/op-preflight-<agent>.env"; set +a
 
 Never run `op-preflight … --mode deploy` bare (unwrapped): it echoes `export CF_API_TOKEN=…` and the SA-key path to stdout, leaking the Cloudflare token into the terminal or the scheduled-task log. Always `eval "$(…)"` it, and `source` the cache file (also silent) in later steps.
 
-Bucket gotcha: there is normally **no** `.env.local` in a fresh checkout/worktree, and `.env.example` lists the stale legacy value `gaycruisebingo.appspot.com`. The real enabled bucket (per `docs/app/README.md`) is `gaycruisebingo.firebasestorage.app`—the reports' screenshots live there. Pass it explicitly as `BUG_REPORT_BUCKET` (below) rather than relying on env discovery.
+Bucket gotcha: there is normally **no** `.env.local` in a fresh checkout/worktree. `.env.example` now names the enabled `gaycruisebingo.firebasestorage.app` bucket, where the reports' screenshots live. Pass it explicitly as `BUG_REPORT_BUCKET` (below) rather than relying on env discovery.
 
 ### 2. Pull
 
