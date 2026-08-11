@@ -22,7 +22,9 @@ describe('scratchPathFor (#713)', () => {
   });
 
   it('stays adjacent to, and derived from, the destination path', () => {
-    expect(scratchPathFor('/repo/public/og-gcb.png')).toBe('/repo/public/og-gcb.png.render-tmp.png');
+    expect(scratchPathFor('/repo/public/og-gcb.png')).toMatch(
+      /^\/repo\/public\/og-gcb\.png\.render-tmp\.[^/]+\.png$/,
+    );
   });
 
   it('is unique per edition file so concurrent stages cannot collide', () => {
@@ -30,11 +32,32 @@ describe('scratchPathFor (#713)', () => {
     const b = scratchPathFor('/repo/public/og-vacay.png');
     expect(a).not.toBe(b);
   });
+
+  // Round 3 (#713): a deterministic scratch path collided whenever two
+  // render invocations targeted the SAME Edition in the SAME checkout at
+  // once — a manual preview overlapping an `--all` run, say. Either
+  // screenshot could overwrite the other's staged bytes, and the first
+  // process's rename in `commitStaged` could remove the file out from under
+  // the second process while it still expected to stat or commit it.
+  it('is unique per call even for the SAME destination — the concurrent-invocation case', () => {
+    const calls = Array.from({ length: 50 }, () => scratchPathFor('/repo/public/og-gcb.png'));
+    expect(new Set(calls).size).toBe(calls.length);
+  });
+
+  it('mixes in this process\'s pid, so two separate processes racing on the same dest cannot land on the same token by construction', () => {
+    expect(scratchPathFor('/repo/public/og-gcb.png')).toContain(`.render-tmp.${process.pid}-`);
+  });
 });
 
 describe('screenshotOptionsFor (#713)', () => {
+  // screenshotOptionsFor now takes the ALREADY-COMPUTED scratch path, not
+  // `dest` — see the module header. `scratchPathFor` is no longer pure, so a
+  // caller that (re)computed it a second time via `screenshotOptionsFor`
+  // would get a different path than the one it recorded for later stat/
+  // commit/discard calls. Passing the same value through removes that trap.
   it('passes the scratch path through unchanged', () => {
-    expect(screenshotOptionsFor('/repo/public/og-gcb.png').path).toBe(scratchPathFor('/repo/public/og-gcb.png'));
+    const scratch = scratchPathFor('/repo/public/og-gcb.png');
+    expect(screenshotOptionsFor(scratch).path).toBe(scratch);
   });
 
   it('explicitly passes type: "png" — belt-and-braces alongside the extension', () => {
@@ -42,6 +65,7 @@ describe('screenshotOptionsFor (#713)', () => {
     // throws for anything it does not recognise, UNLESS `type` overrides it.
     // Pinning this means the render survives even a future edit that
     // reintroduces an extension-less or misnamed scratch path.
-    expect(screenshotOptionsFor('/repo/public/og-gcb.png').type).toBe('png');
+    const scratch = scratchPathFor('/repo/public/og-gcb.png');
+    expect(screenshotOptionsFor(scratch).type).toBe('png');
   });
 });

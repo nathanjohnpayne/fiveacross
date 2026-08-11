@@ -434,6 +434,7 @@ const browser = await chromium.launch();
 // even been checked, so a late failure left a partially-updated render set
 // contradicting the fail-before-overwrite behaviour this file exists for.
 const staged = [];
+let written;
 try {
   for (const id of targets) {
     const config = configFor(id);
@@ -494,8 +495,12 @@ try {
     // a scratch suffix without a recognised image extension fails the
     // screenshot itself, before the hard-cap guard it was meant to protect
     // ever runs.
+    // Computed once and reused for both the screenshot write and every later
+    // reference (stage bookkeeping, size checks, commit) — `scratchPathFor`
+    // mints a fresh random token per call (#713 round 3), so calling it
+    // twice for the "same" file would silently produce two different paths.
     const scratch = scratchPathFor(dest);
-    await page.screenshot(screenshotOptionsFor(dest));
+    await page.screenshot(screenshotOptionsFor(scratch));
     await page.close();
 
     // Crush ONLY if the lossless render misses the size budget. og-default.png
@@ -546,23 +551,34 @@ try {
       : join(repo, 'plans', 'og-images', ART[id].mirror);
     staged.push({ id, scratch, dest, mirror, bytes: finalBytes });
   }
+
+  // Every targeted edition cleared the hard cap — commit them all now, in
+  // one pass, so a run either updates every targeted destination or (per
+  // the catch below) none of them. This runs INSIDE the same try as the
+  // render loop (#713 round 3): `commitStaged` has its own internal
+  // rollback for a failure mid-commit (a mirror going unwritable, the disk
+  // filling), but that rollback only restores destinations/mirrors — it
+  // does not know about scratch files still on disk for editions this call
+  // never reached. Staying inside this try means a commit-phase failure
+  // reaches the same `catch` as a render-phase one, so `discardStaged`
+  // still runs and sweeps those up.
+  written = commitStaged(staged).map((w) => ({ ...w, bytes: statSync(w.dest).size }));
 } catch (err) {
-  // A later edition failed its hard cap (or a font/render problem threw
-  // first). Every earlier edition in this run already passed its own guard
-  // and is sitting in a scratch file, not yet committed — clean those up so
-  // a failed `--all` doesn't leave stray `*.render-tmp.png` files behind,
-  // and rethrow so the process still exits nonzero and `public/` (and the
-  // mirror) stay exactly as they were before this run started.
+  // Either a later edition failed its hard cap (or a font/render problem
+  // threw first) — every earlier edition in this run already passed its own
+  // guard and is sitting in a scratch file, not yet committed — or
+  // `commitStaged` itself failed partway and already rolled every
+  // destination/mirror it touched back to its pre-commit bytes. Either way,
+  // sweep up whatever scratch files remain (this tolerates the ones
+  // `commitStaged` already consumed) so a failed run doesn't leave stray
+  // `*.render-tmp.*.png` files behind, and rethrow so the process still
+  // exits nonzero and `public/` (and the mirror) stay exactly as they were
+  // before this run started.
   discardStaged(staged);
   throw err;
 } finally {
   await browser.close();
 }
-
-// Every targeted edition cleared the hard cap — commit them all now, in one
-// pass, so a run either updates every targeted destination or (per the catch
-// above) none of them.
-const written = commitStaged(staged).map((w) => ({ ...w, bytes: statSync(w.dest).size }));
 
 // Every entry here already cleared HARD_CAP_BYTES — a render that didn't
 // threw above and never reached `written`, so there is nothing left to warn

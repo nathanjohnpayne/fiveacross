@@ -1,13 +1,15 @@
 // @vitest-environment node
 //
 // Exercises the actual commit/discard primitives `render-og-editions.mjs`
-// calls (#713 round 2), against a real filesystem in a temp directory — not
-// a reimplementation of the atomicity contract, so a regression to the
-// production code fails this test rather than a parallel copy of it.
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+// calls (#713 round 2 + round 3), against a real filesystem in a temp
+// directory — not a reimplementation of the atomicity contract, so a
+// regression to the production code fails this test rather than a parallel
+// copy of it.
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { scratchPathFor } from './og-scratch-path.mjs';
 import { commitStaged, discardStaged } from './og-stage-commit.mjs';
 
 let dir;
@@ -20,15 +22,22 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Write a scratch file and a pre-existing committed destination, mirroring
- *  the shape `render-og-editions.mjs` stages: `{ id, scratch, dest, mirror }`
- *  plus whatever bytes are already sitting at `dest` before this run. */
-function seedEdition(id, { existingDestBytes } = {}) {
-  const scratch = join(dir, `og-${id}.png.render-tmp.png`);
+/** Write a scratch file and a pre-existing committed destination (and
+ *  mirror), mirroring the shape `render-og-editions.mjs` stages:
+ *  `{ id, scratch, dest, mirror }` plus whatever bytes are already sitting
+ *  at `dest`/`mirror` before this run. `mirrorDir` lets a test point the
+ *  mirror somewhere other than `dir` itself — used to sabotage ONE entry's
+ *  mirror directory without touching the others. */
+function seedEdition(id, { existingDestBytes, existingMirrorBytes, mirrorDir = dir } = {}) {
+  const scratch = join(dir, `og-${id}.png.render-tmp.${process.pid}-seed${id}.png`);
   const dest = join(dir, `og-${id}.png`);
-  const mirror = join(dir, `${id}-mirror.png`);
+  const mirror = join(mirrorDir, `${id}-mirror.png`);
   writeFileSync(scratch, `new-${id}-bytes`);
   if (existingDestBytes !== undefined) writeFileSync(dest, existingDestBytes);
+  if (existingMirrorBytes !== undefined) {
+    mkdirSync(mirrorDir, { recursive: true });
+    writeFileSync(mirror, existingMirrorBytes);
+  }
   return { id, scratch, dest, mirror };
 }
 
@@ -79,5 +88,91 @@ describe('discardStaged (#713 — the partial-`--all`-failure case)', () => {
   it('is a no-op on an empty staged list', () => {
     expect(() => discardStaged([])).not.toThrow();
     expect(commitStaged([])).toEqual([]);
+  });
+});
+
+describe('commitStaged rollback on a mid-commit failure (id 3762436072, #713 round 3)', () => {
+  it('restores every already-committed destination and mirror to their pre-commit bytes when a later entry fails', () => {
+    const gcb = seedEdition('gcb', { existingDestBytes: 'old-gcb-bytes', existingMirrorBytes: 'old-gcb-mirror-bytes' });
+    const blockedMirrorDir = join(dir, 'blocked-mirror-dir');
+    // Sabotage vacay's mirror directory: a FILE sits where commitStaged
+    // needs to `mkdirSync` a directory, so its commit step throws partway
+    // through the overall commit phase — the "mirror is unwritable" example
+    // Codex named. gcb, staged before vacay, must already be durable by the
+    // time this throws — that is exactly the partially-committed state the
+    // finding is about.
+    writeFileSync(blockedMirrorDir, 'not a directory');
+    const vacay = seedEdition('vacay', { existingDestBytes: 'old-vacay-bytes', mirrorDir: blockedMirrorDir });
+    const staged = [gcb, vacay];
+
+    expect(() => commitStaged(staged)).toThrow();
+
+    // gcb committed successfully before vacay's mkdir failed — without
+    // rollback its destination/mirror would be left at the NEW bytes even
+    // though the run as a whole failed. With rollback they must be
+    // byte-identical to what was there before this call.
+    expect(readFileSync(gcb.dest, 'utf8')).toBe('old-gcb-bytes');
+    expect(readFileSync(gcb.mirror, 'utf8')).toBe('old-gcb-mirror-bytes');
+    // No rollback backup files left behind on disk.
+    expect(existsSync(`${gcb.dest}.rollback-tmp`)).toBe(false);
+    expect(existsSync(`${gcb.mirror}.rollback-tmp`)).toBe(false);
+
+    // vacay's mkdir failed before its destination/mirror were ever touched.
+    expect(readFileSync(vacay.dest, 'utf8')).toBe('old-vacay-bytes');
+    expect(existsSync(vacay.mirror)).toBe(false);
+    // vacay's scratch file was never consumed — it is still on disk for the
+    // caller's `discardStaged` sweep (render-og-editions.mjs calls it from
+    // the same catch block on this failure).
+    expect(existsSync(vacay.scratch)).toBe(true);
+    discardStaged(staged);
+    expect(existsSync(vacay.scratch)).toBe(false);
+  });
+
+  it('removes a newly-created destination and mirror that had no prior version, rather than leaving them behind', () => {
+    // gcb has no pre-existing dest/mirror at all (a first-ever render of a
+    // new Edition) — rollback must DELETE what it created, not merely
+    // "restore" the (nonexistent) original.
+    const gcb = seedEdition('gcb');
+    const blockedMirrorDir = join(dir, 'blocked-mirror-dir');
+    writeFileSync(blockedMirrorDir, 'not a directory');
+    const vacay = seedEdition('vacay', { mirrorDir: blockedMirrorDir });
+
+    expect(() => commitStaged([gcb, vacay])).toThrow();
+
+    expect(existsSync(gcb.dest)).toBe(false);
+    expect(existsSync(gcb.mirror)).toBe(false);
+  });
+});
+
+describe('concurrent invocations of the same Edition do not clobber each other (id 3762436077, #713 round 3)', () => {
+  it('keeps two invocations\' staged bytes independent even though both target the same dest', () => {
+    const dest = join(dir, 'og-gcb.png');
+    const mirror = join(dir, 'gcb-mirror.png');
+
+    // Two separate "processes" — a manual preview overlapping an `--all`
+    // run — call `scratchPathFor(dest)` independently for the SAME
+    // Edition. Before #713 round 3 this produced the identical path for
+    // both, so one invocation's rename-during-commit could delete the file
+    // the other still expected to stat or commit.
+    const scratchA = scratchPathFor(dest);
+    const scratchB = scratchPathFor(dest);
+    expect(scratchA).not.toBe(scratchB);
+
+    writeFileSync(scratchA, 'invocation-a-bytes');
+    writeFileSync(scratchB, 'invocation-b-bytes');
+
+    // Invocation A commits first.
+    commitStaged([{ id: 'gcb', scratch: scratchA, dest, mirror }]);
+    expect(readFileSync(dest, 'utf8')).toBe('invocation-a-bytes');
+    // Invocation B's staged bytes are untouched by A's commit. With a
+    // deterministic scratch path this assertion is exactly what fails: A's
+    // rename would have consumed the one shared file, and B's write (or
+    // commit) would race it.
+    expect(readFileSync(scratchB, 'utf8')).toBe('invocation-b-bytes');
+
+    // Invocation B commits second — ordinary last-commit-wins, not a crash
+    // from a missing or clobbered scratch file.
+    commitStaged([{ id: 'gcb', scratch: scratchB, dest, mirror }]);
+    expect(readFileSync(dest, 'utf8')).toBe('invocation-b-bytes');
   });
 });
