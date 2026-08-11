@@ -497,23 +497,41 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   return card;
 }
 
+/** How long `img.decode()` may take before the render falls back to the
+ *  photo-less composition (#661) — mirrors `HERO_PHOTO_FETCH_TIMEOUT_MS` in
+ *  FarewellPodium.tsx: the fetch that produces the hero's object URL is
+ *  already bounded, but a stalled decode of an already-fetched image would
+ *  otherwise hang this await forever, wedging both the warmed promise and a
+ *  tapped share action behind an unresolvable render. */
+const HERO_IMAGE_DECODE_TIMEOUT_MS = 8000;
+
 /**
  * The farewell podium as a Share Card (issue #449) — same pipeline, third card
  * kind. #534/#561: with `data.mostLoved` set the node is the photo-hero
  * composition, and the hero image is DECODED before rasterization —
  * html-to-image walks the DOM synchronously, so an undecoded image would
  * raster as an empty box. `decode()` is feature-guarded (jsdom has none), and
- * a decode failure falls back to the photo-less composition rather than ever
- * sharing a broken hero.
+ * a decode failure OR a decode that stalls past the bound (#661) falls back
+ * to the photo-less composition rather than ever sharing a broken hero — or
+ * hanging the share action indefinitely.
  */
 export async function renderFarewellShareCard(data: FarewellShareCardData): Promise<Blob> {
   const node = buildFarewellCardNode(data);
   const img = node.querySelector<HTMLImageElement>('.share-card-ml-img');
   if (img && typeof img.decode === 'function') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('hero image decode timed out')),
+        HERO_IMAGE_DECODE_TIMEOUT_MS,
+      );
+    });
     try {
-      await img.decode();
+      await Promise.race([img.decode(), timeout]);
     } catch {
       return rasterize(buildFarewellCardNode({ ...data, mostLoved: null }));
+    } finally {
+      clearTimeout(timer);
     }
   }
   return rasterize(node);

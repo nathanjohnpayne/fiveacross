@@ -249,17 +249,36 @@ function toFarewellCardData(
 
 /** The hero's fully composed credit line (wireframes `fx-share-final-photo-*`):
  *  name · “prompt” · day label, plus the tie suffix naming the RECORDED
- *  co-winners (a recorded co-winner is a winner, hidden-later or not). */
+ *  co-winners (a recorded co-winner is a winner, hidden-later or not).
+ *
+ *  `winners` is the persisted, deliberately bounded prefix (first 100
+ *  co-winners — src/domainTypes.d.ts); `winnerCount` is the true tied
+ *  cardinality, which can exceed that prefix (#659). Names are only safe to
+ *  read from `winners` when the complete tie fits inside the prefix — i.e.
+ *  every co-winner is actually present in the array — otherwise the suffix
+ *  falls back to the persisted total so a 101-way tie says "100 others"
+ *  instead of undercounting from the truncated array. `winnerCount` is
+ *  optional (absent on records written before the bounded format), so it
+ *  falls back to `winners.length`, matching the pre-#659 behavior exactly. */
 function mostLovedShareCreditLine(
   hero: MostLovedPhotoWinner,
   winners: readonly MostLovedPhotoWinner[],
+  winnerCount: number | undefined,
   dayLabel: (dayIndex: number) => string,
 ): string {
   let line = `${hero.displayName} · “${hero.promptText}”`;
   if (hero.dayIndex != null) line += ` · ${dayLabel(hero.dayIndex)}`;
-  const others = winners.filter((w) => w.proofId !== hero.proofId);
-  if (others.length === 1) line += ` · shared with ${others[0].displayName}`;
-  else if (others.length > 1) line += ` · shared with ${others.length} others`;
+  const totalWinners = winnerCount ?? winners.length;
+  if (winners.length >= totalWinners) {
+    const others = winners.filter((w) => w.proofId !== hero.proofId);
+    if (others.length === 1) line += ` · shared with ${others[0].displayName}`;
+    else if (others.length > 1) line += ` · shared with ${others.length} others`;
+  } else {
+    // The prefix was truncated — the true tie is bigger than what's
+    // persisted, so name lookups can't be trusted. Report the real count.
+    const othersCount = totalWinners - 1;
+    if (othersCount > 0) line += ` · shared with ${othersCount} others`;
+  }
   return line;
 }
 
@@ -475,7 +494,12 @@ function FarewellPodiumInner({
         ? {
             proofId: hero.winner.proofId,
             heartCount: award.heartCount,
-            creditLine: mostLovedShareCreditLine(hero.winner, award.winners, dayLabel),
+            creditLine: mostLovedShareCreditLine(
+              hero.winner,
+              award.winners,
+              award.winnerCount,
+              dayLabel,
+            ),
           }
         : null;
     const key = JSON.stringify({ ...base, mostLoved: heroMeta });

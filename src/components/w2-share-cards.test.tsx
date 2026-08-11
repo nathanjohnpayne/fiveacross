@@ -930,6 +930,30 @@ describe('ShareCard — renderFarewellShareCard photo-hero composition (#534/#56
     expect(node.querySelectorAll('.share-card-honor-row')).toHaveLength(1);
   });
 
+  it('a stalled decode() falls back to the photo-less composition after the bound — never hangs the share action (#661)', async () => {
+    vi.useFakeTimers();
+    try {
+      // A decode() that never settles — the exact stall #661 describes.
+      stubImageDecode(() => new Promise<void>(() => {}));
+      const pending = renderFarewellShareCard(heroData);
+      let settled = false;
+      pending.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(7999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const blob = await pending;
+      expect(blob.size).toBeGreaterThan(0);
+      expect(toBlobMock).toHaveBeenCalledTimes(1);
+      const node = toBlobNode();
+      expect(node.querySelector('.share-card-ml-hero')).toBeNull();
+      expect(node.querySelectorAll('.share-card-honoree')).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a photoUrl the safeMediaUrl sink guard rejects renders photo-less (PR #95 barrier holds)', async () => {
     stubImageDecode(() => Promise.resolve());
     await renderFarewellShareCard({
@@ -2009,5 +2033,28 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(latestToBlobNode().querySelector('.share-card-ml-hero')).toBeNull();
+  });
+
+  it('a tie bigger than the persisted 100-winner prefix reports the true count, not the truncated array (#659)', async () => {
+    // The persisted `winners` prefix still only has the same two co-winners
+    // the fixture always ships, but `winnerCount` records a 101-way tie that
+    // overflowed the bounded prefix — the exact shape a real truncated
+    // record has (src/domainTypes.d.ts `winners`/`winnerCount`).
+    const truncatedAward: MostLovedPhotoAward = { ...AWARD, winnerCount: 101 };
+    const truncatedEvent = { name: 'Allure of the Seas', mostLovedPhoto: truncatedAward } as EventDoc;
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    const user = userEvent.setup();
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={truncatedEvent} />);
+    await user.click(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
+
+    // 101 true co-winners minus the hero = 100 others, not the 1 the
+    // truncated two-entry `winners` array would otherwise imply.
+    expect(latestToBlobNode().querySelector('.share-card-ml-by')?.textContent).toBe(
+      'Ana · “Sunset over the bay” · Day 2 · shared with 100 others',
+    );
   });
 });
