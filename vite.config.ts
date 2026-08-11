@@ -2,7 +2,7 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
-import { assertDeployFirebaseApiKey } from './src/build-config';
+import { assertDeployFirebaseApiKey, resolveAppVersion } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
 // restating four strings here is the whole point: a second copy is how the
@@ -12,12 +12,7 @@ import { assertDeployFirebaseApiKey } from './src/build-config';
 import { brandHtmlIdentity, buildTimeEdition, editionBrand, type EditionBrand } from './src/editions';
 
 function appVersion(): string {
-  if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA.slice(0, 40);
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  } catch {
-    return 'unknown';
-  }
+  return resolveAppVersion(process.env, () => execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }));
 }
 
 /**

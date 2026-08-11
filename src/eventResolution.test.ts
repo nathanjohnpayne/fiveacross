@@ -77,6 +77,16 @@ describe('eventResolution — cache envelope', () => {
     expect(readCache(s, HOST, T0 + CACHE_TTL_MS + 1)?.stale).toBe(true);
   });
 
+  it('treats a materially-future fetchedAt as stale, not fresh — a clock rollback cannot extend the TTL', () => {
+    // Codex P3 on #582: `now - fetchedAt` goes negative when a device clock
+    // rolls back after the entry was written, and a naive `> CACHE_TTL_MS`
+    // check reads that as fresh, letting the rollback extend the 12-hour
+    // bound by however far the clock moved.
+    const s = fakeStorage({ [cacheKey(HOST)]: envelope(DOC, T0) });
+    expect(readCache(s, HOST, T0 - 1)?.stale).toBe(false); // ordinary skew tolerance
+    expect(readCache(s, HOST, T0 - CACHE_TTL_MS)?.stale).toBe(true);
+  });
+
   it('treats a version-drifted envelope as a MISS, never coerces it', () => {
     const s = fakeStorage({
       [cacheKey(HOST)]: JSON.stringify({ v: CACHE_VERSION + 1, fetchedAt: T0, doc: DOC }),
