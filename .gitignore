@@ -13,6 +13,11 @@ build/
 # exception keeps the committed target template visible to new checkouts.
 /.env.*
 !/.env.example
+# .env.tpl is the committed op:// template consumed by the (currently
+# disabled) INJECT_FILES workflow in scripts/bootstrap-config.sh — keep this
+# negation even though no .env.tpl exists yet, or a fresh checkout can't
+# stage the template once that workflow is turned on.
+!/.env.tpl
 *.pem
 *.key
 

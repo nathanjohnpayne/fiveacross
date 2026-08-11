@@ -232,6 +232,7 @@ describe('build target selection', () => {
   it('ignores future target files without hiding the committed template', () => {
     expect(spawnSync('git', ['check-ignore', '--quiet', '.env.future-event']).status).toBe(0);
     expect(spawnSync('git', ['check-ignore', '--quiet', '.env.example']).status).toBe(1);
+    expect(spawnSync('git', ['check-ignore', '--quiet', '.env.tpl']).status).toBe(1);
   });
 
   it('derives the complete Vite-key set from the target template', () => {
