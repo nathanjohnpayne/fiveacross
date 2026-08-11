@@ -92,7 +92,8 @@ let ctxSignIn: (acknowledgedAdultContent: boolean) => Promise<void> = async () =
 let ctxRetryDeal: () => void = () => {};
 let ctxAttest: () => Promise<void> = async () => {};
 function Probe() {
-  const { user, loading, dealError, dealing, signIn, retryDeal, attest } = useAuth();
+  const { user, loading, dealError, dealing, signIn, retryDeal, attest, canRenderEventContent } =
+    useAuth();
   ctxSignIn = signIn;
   ctxRetryDeal = retryDeal;
   ctxAttest = attest;
@@ -103,6 +104,7 @@ function Probe() {
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="board">board</span>
+      <span data-testid="authority">{canRenderEventContent ? 'may-render' : 'withheld'}</span>
     </div>
   );
 }
@@ -114,6 +116,10 @@ const boardRendered = () => screen.getByTestId('loading').textContent === 'ready
 // App.tsx renders the DealError panel over the Board whenever dealError is set, so
 // a stale error observed here means the Board would NOT render (round 4).
 const dealErrorShown = () => screen.queryByRole('alert') !== null;
+// `canRenderEventContent` is the App.tsx authority boundary (#521): App.tsx
+// returns the full-screen DealError and withholds the whole Event — including
+// any durable cached card — whenever this is false, regardless of dealError.
+const mayRenderEventContent = () => screen.getByTestId('authority').textContent === 'may-render';
 // `dealing` drives the DealError Retry button's disabled/"Dealing…" state — stuck
 // true would leave Retry unusable through a supersede (round 5, finding B).
 const dealingActive = () => screen.getByTestId('dealing').textContent === 'dealing';
@@ -795,5 +801,57 @@ describe('offline cold boot (#115)', () => {
 
     // The server-confirmed User is NOT rolled back to a re-prompt.
     expect(rePromptShown()).toBe(false);
+  });
+
+  it('#521: an ONLINE bootstrap whose authority reads both FAIL (navigator.onLine lied — captive/ship-Wi-Fi) falls back to the cached attestation so the durable card can paint, but grants no deal authority', async () => {
+    // navigator.onLine says true, but the authority read never lands — the
+    // effectively-offline-with-a-lying-probe case. Neither committedSticky nor
+    // optimisticSticky applies (no in-session attest), so the pre-fix code left
+    // `attested` UNKNOWN forever and App withheld the whole Event, including the
+    // #434 durable card this device already holds. The cache fallback (#521)
+    // proves 18+ from the SAME cached stamp the OFFLINE branch trusts.
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
+    mocks.readAdultAttestationFromServer.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
+
+    mount();
+    await coldBoot(RETURNING_USER);
+
+    // The failed bootstrap still surfaces the retryable error…
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    // …but the cache-first fallback lifts the render gate PROVISIONALLY, so the
+    // durable card can paint instead of the full-screen DealError.
+    await waitFor(() => expect(mayRenderEventContent()).toBe(true));
+    // Render-only: no re-prompt (attested is not `false`) and no deal (authority
+    // was never established — attestedAuthoritative stays false).
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521: the same double-failure with a cache MISS never lifts the render gate — the age gate does not fail open', async () => {
+    // Identical failure shape, but this device has no cached attestation at all
+    // (e.g. a brand-new device on the ship's captive Wi-Fi). This is the
+    // important case: it proves the #521 fallback cannot be used to bypass 18+
+    // verification — a miss leaves `canRenderEventContent` false, exactly like
+    // before the fix.
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
+    mocks.ensureUserProfile.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
+    mocks.readAdultAttestationFromServer.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
+
+    mount();
+    await coldBoot(RETURNING_USER);
+
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    // Wait for the fallback's cache read to actually resolve (a miss) before
+    // asserting the negative — otherwise a passing assertion could just mean the
+    // fire-and-forget read hadn't settled yet.
+    await waitFor(() =>
+      expect(mocks.readAdultAttestationFromCache).toHaveBeenCalledWith(RETURNING_USER.uid),
+    );
+    expect(mayRenderEventContent()).toBe(false);
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
   });
 });

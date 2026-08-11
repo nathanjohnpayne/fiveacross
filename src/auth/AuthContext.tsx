@@ -644,6 +644,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
       } else {
         failDeal(bootstrapFailure.err);
+        // …and fall back to the SAME cache-first proof the OFFLINE branch uses
+        // (#521). `navigator.onLine` said true, but the authority read never
+        // landed — which IS the captive/ship-Wi-Fi case this file already
+        // bounds a timeout for: effectively offline, with a lying probe. A
+        // failed read is not evidence about the stamp, so leaving `attested`
+        // UNKNOWN keeps `canRenderEventContent` false, and App then withholds
+        // the whole Event — including the #434 durable card this device
+        // already holds. That is the ADR 0006 promise inverted: the one
+        // moment the saved card exists for is the one moment it cannot paint.
+        // A cached `attestedAdultAt` is the same proof of 18+ the offline
+        // branch accepts, so it lifts RENDER here too — PROVISIONALLY: never
+        // `attestedAuthoritative`, so no deal fires and no durable rows are
+        // created for a User the server has not confirmed, and a later
+        // definite server-null still downgrades to the re-prompt. A cache MISS
+        // changes nothing: the gate stays up (it never fails open).
+        // Fire-and-forget so the loading release below is not delayed;
+        // guarded on the attempt like every other settle here.
+        void readAdultAttestationFromCache(u.uid)
+          .then((stamp) => {
+            if (profileAttemptRef.current === attempt && stamp !== null) setAttested(true);
+          })
+          .catch(() => {});
       }
     } else {
       // Authoritative read SETTLED. UI: the server stamp, or an optimistic attest
