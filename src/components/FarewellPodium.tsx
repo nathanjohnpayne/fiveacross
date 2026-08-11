@@ -288,6 +288,48 @@ function mostLovedShareCreditLine(
 const HERO_PHOTO_FETCH_TIMEOUT_MS = 8000;
 
 /**
+ * How long a TAP may wait for the farewell card before sharing without it
+ * (Codex P1, PR #712 round 2).
+ *
+ * `navigator.share` only runs under transient user activation, and browsers
+ * expire that activation ~5s after the gesture. The hero pipeline's own
+ * bounds are per-stage and generous by design — an 8s fetch followed by an 8s
+ * decode — so a cold tap on a stalled hero could sit here for 16s and reach
+ * the share sheet with the activation long dead: a delayed no-op, which is
+ * the residual `specs/w2-share-cards.md` § Eager pre-render already names for
+ * the cold/stale warm-on-intent path and #661's decode bound alone did not
+ * close. 4s is deliberately just inside the activation window: a render that
+ * would have made it under the old code still makes it, and one that would
+ * NOT have made it now shares the link inside the window instead of doing
+ * nothing. The card promise is cached, so it keeps rasterizing and a second
+ * tap gets the image.
+ */
+const SHARE_ACTIVATION_BUDGET_MS = 4000;
+
+/**
+ * Resolve the warmed card, or `null` once the activation budget runs out —
+ * whichever comes first. `card` never rejects (`warmShareCard` folds every
+ * failure into `.catch(() => null)`), so this only ever races a resolution
+ * against the clock; a `null` here means "share without the image", exactly
+ * what a failed render already means downstream.
+ */
+function withinActivationBudget(card: Promise<Blob | null>): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), SHARE_ACTIVATION_BUDGET_MS);
+    void card.then(
+      (blob) => {
+        clearTimeout(timer);
+        resolve(blob);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
+}
+
+/**
  * Fetch the winning photo's bytes for the share card. A plain `<img>` load of
  * proof media elsewhere is opaque/no-cors (`data/proofMediaCache.ts`), which
  * html-to-image cannot read pixels from — so the hero goes fetch → blob →
@@ -551,7 +593,9 @@ function FarewellPodiumInner({
   };
 
   const shareFinalStandings = async () => {
-    const blob = await warmShareCard();
+    // Bounded by the activation budget, never by the render: a hero that is
+    // still fetching/decoding costs the image, not the share (#712 round 2).
+    const blob = await withinActivationBudget(warmShareCard());
     try {
       await shareCardBlob({
         blob,

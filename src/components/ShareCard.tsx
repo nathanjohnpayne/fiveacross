@@ -605,6 +605,31 @@ function isUserCancelledShare(err: unknown): boolean {
 }
 
 /**
+ * Whether the document still holds the transient user activation that BOTH
+ * `navigator.share` legs require (Codex P1, PR #712 round 2).
+ *
+ * The classifier above deliberately reads a `NotAllowedError` as a dismissal
+ * and stops the chain, which is right when the sheet actually opened — but it
+ * is exactly wrong when the activation window expired before `share()` ran:
+ * the Player saw no sheet, declined nothing, and the tap becomes a silent
+ * no-op with no clipboard or download fallback. `navigator.userActivation`
+ * turns that ambiguity into a fact BEFORE the call: with `isActive === false`
+ * the share is guaranteed to reject, so the chain skips straight to the
+ * clipboard/download legs (neither needs activation) and the Player still
+ * ends up with something they can act on — the ADR 0005 promise.
+ *
+ * Must be read ONCE, before any share is attempted: `navigator.share`
+ * CONSUMES the activation, so a post-hoc check cannot tell an expiry apart
+ * from a share that ran normally. Absent on browsers without the User
+ * Activation API, where `true` (assume alive, let the attempt decide) keeps
+ * the pre-existing behavior exactly.
+ */
+function shareActivationAlive(): boolean {
+  const activation = navigator.userActivation as UserActivation | undefined;
+  return activation ? activation.isActive : true;
+}
+
+/**
  * Hands a rendered Share Card to the OS share sheet when the platform can
  * take image files (`navigator.canShare({ files })`); otherwise degrades —
  * in order — through a text/URL share, the clipboard, then a direct
@@ -622,7 +647,13 @@ function isUserCancelledShare(err: unknown): boolean {
  * below); the text/URL leg distinguishes cancellation from a genuine
  * failure via `isUserCancelledShare` (Codex P2, PR #111 finding 3) — a
  * non-cancellation rejection there still falls through to the clipboard and
- * download legs. Either way, callers (`Celebration.tsx`, `Leaderboard.tsx`)
+ * download legs.
+ *
+ * BOTH share legs are skipped outright when `navigator.userActivation` says
+ * the transient activation is already gone (Codex P1, PR #712 round 2): there
+ * is no dismissal to respect when no sheet can open, so the chain degrades to
+ * the clipboard/download legs rather than returning a fallback-less
+ * `'cancelled'`. Either way, callers (`Celebration.tsx`, `Leaderboard.tsx`)
  * fire `share_click` unconditionally from their own `finally`, once per tap,
  * regardless of this function's return value — a cancelled share still
  * counts as a tap; the return value is what distinguishes outcomes for a
@@ -637,7 +668,15 @@ export async function shareCardBlob(opts: {
 }): Promise<ShareOutcome> {
   const { blob, filename, title, text, url } = opts;
 
-  if (blob) {
+  // Read the activation state ONCE, before either share leg runs (see
+  // `shareActivationAlive`). When it is definitively gone, both legs would
+  // reject `NotAllowedError` and the file leg's any-rejection-is-a-dismissal
+  // rule would return 'cancelled' with no fallback — a delayed no-op.
+  // Skipping them lands the Player on the clipboard/download legs instead,
+  // which need no activation.
+  const activationAlive = shareActivationAlive();
+
+  if (blob && activationAlive) {
     const file = new File([blob], filename, { type: blob.type || 'image/png' });
     if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
       try {
@@ -652,7 +691,7 @@ export async function shareCardBlob(opts: {
     }
   }
 
-  if (navigator.share) {
+  if (navigator.share && activationAlive) {
     try {
       await navigator.share({ title, text, url });
       return 'text';

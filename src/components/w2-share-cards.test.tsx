@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { readFileSync } from 'node:fs';
@@ -1143,6 +1143,85 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     const outcome = await shareCardBlob({ blob: null, filename: 'card.png', title: 'T', text: 'body' });
     expect(outcome).toBe('none');
   });
+
+  // Codex P1, PR #712 round 2. Both `navigator.share` legs need transient
+  // user activation. When a slow tap-time render has already burned it, the
+  // file leg's any-rejection-is-a-dismissal rule turned the tap into a
+  // fallback-less 'cancelled' — no sheet, no clipboard, no download, i.e. a
+  // delayed no-op. `navigator.userActivation` makes that case a FACT rather
+  // than an ambiguous rejection, so the chain skips both share legs.
+  function stubUserActivation(isActive: boolean) {
+    Object.defineProperty(window.navigator, 'userActivation', {
+      value: { isActive, hasBeenActive: true },
+      configurable: true,
+    });
+  }
+
+  it('skips both share legs and reaches the clipboard when transient activation is already gone', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    const clipboardMock = vi.fn().mockResolvedValue(undefined);
+    stubNavigator({ canShare: () => true, share: shareMock, clipboard: { writeText: clipboardMock } });
+    stubUserActivation(false);
+
+    try {
+      const outcome = await shareCardBlob({
+        blob,
+        filename: 'card.png',
+        title: 'T',
+        text: 'body',
+        url: 'https://x.test',
+      });
+
+      expect(outcome).toBe('clipboard');
+      expect(shareMock).not.toHaveBeenCalled();
+      expect(clipboardMock).toHaveBeenCalledWith('https://x.test');
+    } finally {
+      Reflect.deleteProperty(window.navigator, 'userActivation');
+    }
+  });
+
+  it('downloads the image when activation is gone and there is no URL to copy', async () => {
+    (globalThis.URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:mock';
+    (globalThis.URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    stubNavigator({ canShare: () => true, share: shareMock });
+    stubUserActivation(false);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      const outcome = await shareCardBlob({ blob, filename: 'card.png', title: 'T', text: 'body' });
+
+      expect(outcome).toBe('download');
+      expect(shareMock).not.toHaveBeenCalled();
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      clickSpy.mockRestore();
+      Reflect.deleteProperty(window.navigator, 'userActivation');
+    }
+  });
+
+  it('still takes the file leg when activation is alive — the guard costs the normal path nothing', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    const clipboardMock = vi.fn().mockResolvedValue(undefined);
+    stubNavigator({ canShare: () => true, share: shareMock, clipboard: { writeText: clipboardMock } });
+    stubUserActivation(true);
+
+    try {
+      const outcome = await shareCardBlob({
+        blob,
+        filename: 'card.png',
+        title: 'T',
+        text: 'body',
+        url: 'https://x.test',
+      });
+
+      expect(outcome).toBe('files');
+      expect(shareMock).toHaveBeenCalledTimes(1);
+      expect(clipboardMock).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(window.navigator, 'userActivation');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2056,5 +2135,42 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     expect(latestToBlobNode().querySelector('.share-card-ml-by')?.textContent).toBe(
       'Ana · “Sunset over the bay” · Day 2 · shared with 100 others',
     );
+  });
+
+  // Codex P1, PR #712 round 2: bounding the decode stopped the HANG but not
+  // the no-op. A cold tap on a stalled hero used to await the whole per-stage
+  // budget (8s fetch + 8s decode) before calling navigator.share, by which
+  // point the transient activation was long gone — the file share rejects,
+  // shareCardBlob reports 'cancelled', and the Player gets nothing at all.
+  // The tap now gives up on the image after SHARE_ACTIVATION_BUDGET_MS and
+  // shares the link INSIDE the activation window instead.
+  it('a tap whose hero render outlives the activation budget still shares — link leg, not a silent no-op (#712)', async () => {
+    vi.useFakeTimers();
+    try {
+      // A fetch that never settles: the warmed card promise cannot resolve.
+      fetchMock.mockReturnValue(new Promise(() => {}));
+      const shareMock = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+      Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+
+      render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(shareMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(shareMock).toHaveBeenCalledTimes(1);
+      // No image (the render never produced one) — but a real share sheet
+      // carrying the title/text/URL, which is the documented degrade.
+      const shareArg = shareMock.mock.calls[0][0];
+      expect(shareArg.files).toBeUndefined();
+      expect(shareArg.title).toBe('Gay Cruise Bingo—Final standings');
+      expect(shareArg.url).toBeTruthy();
+      // The image was never rasterized, so nothing stale reached the sheet.
+      expect(toBlobMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
