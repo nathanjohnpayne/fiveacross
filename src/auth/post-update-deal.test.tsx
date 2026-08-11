@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AuthProvider, useAuth } from './AuthContext';
-import { resetPostUpdateDealGraceForTest } from '../postUpdateDeal';
+import { resetPostUpdateDealGraceForTest, watchPostUpdateReload } from '../postUpdateDeal';
 
 // Covers the #519 post-update deal grace: a service-worker update reload lands on a
 // document whose auth/Firestore handshake is still in flight, the first deal fails
@@ -11,9 +13,19 @@ import { resetPostUpdateDealGraceForTest } from '../postUpdateDeal';
 // DealError on the first render after a controller change" — is a property of the wired
 // deal path, not of any one function: it holds only if `dealError` is never SET, which
 // no post-hoc retry watcher could achieve.
+//
+// The reload loses a startup race that has TWO halves, and the Player cannot tell them
+// apart: the profile/attestation bootstrap can fail before `runDeal` is ever entered,
+// and it surfaces the same connection-worded DealError with the same instantly-
+// succeeding Retry (Codex P2 on #719). Both halves are covered here, and so is the fact
+// that they share ONE grace.
 
 const CONN_ERR = 'network request failed'; // classified 'connection' → transient
 const POOL_ERR = 'dealBoard needs at least 24 prompts, received 5.'; // isPoolShortfall
+// A rules/schema failure: permanent, so it must surface on the first attempt whatever
+// the grace says.
+const permanentError = () =>
+  Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
 
 const mocks = vi.hoisted(() => ({
   onAuthStateChanged: vi.fn(),
@@ -89,12 +101,24 @@ function setNavigatorOnline(v: boolean) {
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: v });
 }
 
+/** Stands in for what `main.tsx` does at module scope: arm the grace for this document
+ *  from OUTSIDE the auth tree (Codex P2 on #719 — `ErrorBoundary` can unmount
+ *  `AuthProvider` while `UpdatePrompt` lives on to offer the very update reload this
+ *  has to survive). Each call is a new document; the previous one's listener goes with
+ *  its document. */
+let stopWatching: () => void = () => {};
+function startDocument() {
+  stopWatching();
+  stopWatching = watchPostUpdateReload();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   emitAuth = () => {};
   sawDealError = false;
   resetPostUpdateDealGraceForTest();
   installServiceWorkerContainer();
+  startDocument();
   setNavigatorOnline(true);
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
     emitAuth = cb;
@@ -112,6 +136,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stopWatching();
+  stopWatching = () => {};
   setNavigatorOnline(true);
   Reflect.deleteProperty(navigator, 'serviceWorker');
 });
@@ -151,6 +177,7 @@ describe('post-update deal grace (#519)', () => {
     // Document 2 is a fresh module registry — sessionStorage is the only thing that
     // crosses, which is exactly what the marker is for.
     resetPostUpdateDealGraceForTest();
+    startDocument();
     mount();
     await signInUser();
 
@@ -201,5 +228,97 @@ describe('post-update deal grace (#519)', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/24 a card needs/);
     expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The bootstrap half of the same race (Codex P2 on #719). `ensureUserProfile` and the
+// server-only attestation read run BEFORE `runDeal` is entered and fail straight to
+// `failDeal`, so a grace consulted only inside `runDeal` would leave #519's reported
+// symptom — the connection-worded DealError seconds after the reload, cleared by a Retry
+// that works first tap — fully intact on this path.
+describe('post-update BOOTSTRAP grace (#519, Codex P2 on #719)', () => {
+  it('never renders DealError when the bootstrap loses the race after a controller change', async () => {
+    mocks.ensureUserProfile.mockRejectedValueOnce(new Error(CONN_ERR));
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUser();
+
+    // The bootstrap repeated itself and then dealt — no error frame in between, which is
+    // the property the deal-side tests above assert for their own half.
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(2);
+    expect(sawDealError).toBe(false);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('surfaces the same bootstrap failure immediately when no controller change preceded it', async () => {
+    mocks.ensureUserProfile.mockRejectedValueOnce(new Error(CONN_ERR));
+    mount();
+    await signInUser();
+
+    // The control for the case above: unarmed, the bootstrap failure is the player's to
+    // see on the first attempt, and no deal is authorized off a failed bootstrap.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Check your connection/);
+    expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(1);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('spends the ONE grace on whichever half fails first — the bootstrap leaves none for the deal', async () => {
+    mocks.ensureUserProfile.mockRejectedValueOnce(new Error(CONN_ERR));
+    mocks.joinAndDeal.mockRejectedValue(new Error(CONN_ERR));
+    mount();
+    await controllerChange();
+    await signInUser();
+
+    // Bootstrap: fails, claims the grace, repeats, succeeds. Deal: fails with the grace
+    // already spent, so it surfaces rather than buying a second silent attempt.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Check your connection/);
+    expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(2);
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not spend the grace on a bootstrap failure that is really offline', async () => {
+    mocks.ensureUserProfile.mockImplementationOnce(() => {
+      setNavigatorOnline(false);
+      return Promise.reject(new Error(CONN_ERR));
+    });
+    mount();
+    await controllerChange();
+    await signInUser();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Check your connection/);
+    expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not spend the grace on a PERMANENT bootstrap failure', async () => {
+    // A rules/permission failure is not a startup race, and repeating it would only
+    // delay the honest retry surface by another round-trip.
+    mocks.ensureUserProfile.mockRejectedValueOnce(permanentError());
+    mount();
+    await controllerChange();
+    await signInUser();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Check your connection/);
+    expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(1);
+  });
+});
+
+const readRepoFile = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+
+describe('where the #519 watcher is mounted (Codex P2 on #719)', () => {
+  it('arms the grace at module scope in main.tsx, outside the crashable auth tree', () => {
+    // `ErrorBoundary` wraps ONLY `AuthProvider` on purpose (src/main.tsx, src/components/
+    // ErrorBoundary.tsx): a crash must not take `UpdatePrompt` down with it, because that
+    // component is the only in-app caller of `updateServiceWorker(true)` — the only way a
+    // client moves off a broken build. So a player CAN take the update with the auth tree
+    // unmounted, and a watcher living in that tree would already be gone: no marker
+    // written, no grace in the incoming document, the recovery reload uncovered. This is a
+    // static scan because the failure is structural — no render can exhibit a listener
+    // that was never registered.
+    const main = readRepoFile('../main.tsx');
+    expect(main).toMatch(/^watchPostUpdateReload\(\);$/m);
+    expect(main.indexOf('watchPostUpdateReload();')).toBeLessThan(main.indexOf('<ErrorBoundary>'));
+    expect(readRepoFile('./AuthContext.tsx')).not.toMatch(/watchPostUpdateReload/);
   });
 });
