@@ -39,6 +39,14 @@ export const FORCED_FLAG_URL = '/__gcb-forced-activation';
 /** Synthetic key holding when the ACTIVE worker last re-read the floor. */
 export const FLOOR_CHECKED_URL = '/__gcb-floor-checked-at';
 
+/** Synthetic key holding what each OPEN WINDOW is EXECUTING (#516) — a
+ *  `clientId -> build stamp` map. Same cache as the records above, so it
+ *  survives the worker teardown the lifecycle permits between events. */
+export const CLIENT_STAMPS_URL = '/__gcb-client-builds';
+
+/** `clientId -> __BUILD_STAMP__` for every window that has named itself. */
+export type ClientStamps = Record<string, string>;
+
 /** How rarely the active worker re-reads the floor. It wakes on ordinary
  *  navigations, so this is the throttle that keeps an emergency lever from
  *  becoming a request on every page load. */
@@ -127,6 +135,9 @@ export function shouldForceActivate(input: {
   floor: unknown;
   /** False when there is no existing worker at all — a FIRST install. */
   hasActiveWorker?: boolean;
+  /** What the open windows are EXECUTING (#516), which is not the same thing
+   *  as the shell being SERVED — see below. */
+  clientStamps?: readonly string[];
 }): boolean {
   // A first install has no shell to rescue (Phase 4b P2 on #515). Without this,
   // `readActiveStamp()` returning null on a brand-new registration is
@@ -136,9 +147,102 @@ export function shouldForceActivate(input: {
   // precache was still installing, sign-in included.
   if (input.hasActiveWorker === false) return false;
   const active = input.activeStamp ?? UNKNOWN_ACTIVE_STAMP;
-  if (!buildBelowFloor(active, input.floor)) return false;
+  // Decide against the OLDEST of the served shell and every registered client
+  // (#516). `gcb-shell-meta` records the build that most recently ACTIVATED, so
+  // two tabs on build A, one of which reloads onto B, leave the record saying
+  // B — and a floor set between A and B would then read "the shell is fine" and
+  // never rescue the tab still executing A. A set is below the floor exactly
+  // when its minimum is, so `some` IS the oldest test.
+  if (![active, ...(input.clientStamps ?? [])].some((stamp) => buildBelowFloor(stamp, input.floor))) return false;
   if (buildBelowFloor(input.ownStamp, input.floor)) return false;
   return true;
+}
+
+/**
+ * Whether a forced activation should re-navigate THIS window (#516). Only the
+ * clients actually below the floor are targeted: reloading a tab that is
+ * already running a build the floor accepts discards whatever the player was
+ * doing there and rescues nobody.
+ *
+ * An unregistered client navigates. It is either a page running a build from
+ * before this registry existed or one that died before its module scope ran —
+ * i.e. precisely the stranded cohort the rescue exists for — so "unknown" has
+ * to read as "condemned", the same way `UNKNOWN_ACTIVE_STAMP` does. A floor
+ * that is missing or malformed likewise navigates everything, because there is
+ * then nothing to filter by and the `shouldForceActivate` decision that got us
+ * here was made on other evidence.
+ */
+export function shouldNavigateClient(stamp: string | undefined, floor: unknown): boolean {
+  if (stamp === undefined) return true;
+  if (typeof floor !== 'string' || floor.trim() === '') return true;
+  return buildBelowFloor(stamp, floor);
+}
+
+/** The registry as stored, with non-string entries dropped. Never throws — the
+ *  empty map is the safe reading, since an unregistered client navigates. */
+export async function readClientStamps(cacheStorage: CacheStorage): Promise<ClientStamps> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    const hit = await cache.match(CLIENT_STAMPS_URL);
+    if (!hit) return {};
+    const body: unknown = await hit.json();
+    if (typeof body !== 'object' || body === null) return {};
+    const clean: ClientStamps = {};
+    for (const [id, stamp] of Object.entries(body as Record<string, unknown>)) {
+      if (typeof stamp === 'string' && stamp !== '') clean[id] = stamp;
+    }
+    return clean;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Drops entries whose window is gone, so a tab closed weeks ago cannot keep
+ * reading as an ancient client and force-activate the fleet forever.
+ *
+ * `liveIds` of null means the live set could not be read at all. Keeping every
+ * entry is the safe answer there: forgetting a tab that is still open costs the
+ * rescue its evidence, while remembering a dead one costs at most one
+ * force-activation that then navigates nobody (`shouldNavigateClient`).
+ */
+export function retainLiveClients(stamps: ClientStamps, liveIds: readonly string[] | null): ClientStamps {
+  if (!liveIds) return stamps;
+  const live = new Set(liveIds);
+  return Object.fromEntries(Object.entries(stamps).filter(([id]) => live.has(id)));
+}
+
+async function putClientStamps(cacheStorage: CacheStorage, stamps: ClientStamps): Promise<void> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    await cache.put(CLIENT_STAMPS_URL, new Response(JSON.stringify(stamps)));
+  } catch {
+    /* storage refused — the client reads as unregistered, i.e. as condemned */
+  }
+}
+
+/** Records what one window is executing, evicting dead windows in the same
+ *  write. Called on every `CLIENT_BUILD`, which is once per page load, so the
+ *  registry is swept about as often as it grows. */
+export async function recordClientStamp(
+  cacheStorage: CacheStorage,
+  clientId: string,
+  stamp: string,
+  liveIds: readonly string[] | null,
+): Promise<void> {
+  const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
+  stamps[clientId] = stamp;
+  await putClientStamps(cacheStorage, stamps);
+}
+
+/** Sweeps the registry and returns what survived. */
+export async function pruneClientStamps(
+  cacheStorage: CacheStorage,
+  liveIds: readonly string[] | null,
+): Promise<ClientStamps> {
+  const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
+  await putClientStamps(cacheStorage, stamps);
+  return stamps;
 }
 
 /**
@@ -203,10 +307,18 @@ export async function writeActiveStamp(cacheStorage: CacheStorage, stamp: string
  * shell — so a stranded player sees the blank screen again and has to reload a
  * second time, which is precisely the dead end they were stuck in.
  */
-export async function markForcedActivation(cacheStorage: CacheStorage, ownStamp: string): Promise<void> {
+export async function markForcedActivation(
+  cacheStorage: CacheStorage,
+  ownStamp: string,
+  // The floor that justified the force, carried alongside the decision (#516)
+  // so `activate` can target the clients it actually condemns. `activate` has
+  // no way to re-read it: the probe is a network call, and by then the worker
+  // is committed either way.
+  floor: string | null = null,
+): Promise<void> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
-    await cache.put(FORCED_FLAG_URL, new Response(JSON.stringify({ stamp: ownStamp })));
+    await cache.put(FORCED_FLAG_URL, new Response(JSON.stringify({ stamp: ownStamp, floor })));
   } catch {
     /* storage refused — the caller's in-memory flag is the remaining fallback */
   }
@@ -248,16 +360,21 @@ export async function clearForcedActivation(cacheStorage: CacheStorage): Promise
  * deliberate: an orphaned marker is garbage, and leaving it would let it
  * ambush a different worker later.
  */
-export async function takeForcedActivation(cacheStorage: CacheStorage, ownStamp: string): Promise<boolean> {
+export async function takeForcedActivation(
+  cacheStorage: CacheStorage,
+  ownStamp: string,
+): Promise<{ forced: boolean; floor: string | null }> {
+  const none = { forced: false, floor: null };
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
     const hit = await cache.match(FORCED_FLAG_URL);
-    if (!hit) return false;
+    if (!hit) return none;
     await cache.delete(FORCED_FLAG_URL);
-    const body: unknown = await hit.json();
-    return (body as { stamp?: unknown } | null)?.stamp === ownStamp;
+    const body = (await hit.json()) as { stamp?: unknown; floor?: unknown } | null;
+    if (body?.stamp !== ownStamp) return none;
+    return { forced: true, floor: typeof body.floor === 'string' ? body.floor : null };
   } catch {
-    return false;
+    return none;
   }
 }
 

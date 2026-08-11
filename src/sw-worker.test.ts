@@ -27,6 +27,7 @@ vi.mock('workbox-cacheable-response', () => ({ CacheableResponsePlugin: vi.fn() 
 const ARMED_FLOOR = '2026-07-24T00:00:00.000Z'; // the cells-map migration deploy
 const FLOOR_PAST_THIS_BUILD = '2099-01-01T00:00:00.000Z';
 const INERT_FLOOR = '1970-01-01T00:00:00.000Z';
+const OLD_SHELL = '2026-07-20T14:17:04.539Z'; // below ARMED_FLOOR — the bundle that crashed
 
 type Handlers = Record<string, (event: unknown) => void>;
 
@@ -34,7 +35,10 @@ type Handlers = Record<string, (event: unknown) => void>;
 function installFakeWorker() {
   const handlers: Handlers = {};
   const navigated: string[] = [];
-  const clients = [{ url: 'https://gaycruisebingo.com/more', navigate: vi.fn(async (u: string) => navigated.push(u) )}];
+  // `id` is what the #516 registry keys on — the browser's own client id.
+  const clients = [
+    { url: 'https://gaycruisebingo.com/more', id: 'tab-1', navigate: vi.fn(async (u: string) => navigated.push(u)) },
+  ];
   const self = {
     // A vi.fn so its `invocationCallOrder` can be compared against the workbox
     // registrations — that ordering is load-bearing, see the #517 test below.
@@ -100,10 +104,12 @@ function stubFloor(floor: string | null) {
   );
 }
 
-/** Fires a lifecycle handler and awaits whatever it passed to waitUntil. */
-async function fire(handlers: Handlers, type: string, data?: unknown) {
+/** Fires a lifecycle handler and awaits whatever it passed to waitUntil.
+ *  `extra` carries event fields only some handlers read — `source` for the
+ *  #516 `CLIENT_BUILD` message, which is how the worker learns the client id. */
+async function fire(handlers: Handlers, type: string, data?: unknown, extra?: Record<string, unknown>) {
   const pending: Promise<unknown>[] = [];
-  handlers[type]?.({ waitUntil: (p: Promise<unknown>) => pending.push(p), data });
+  handlers[type]?.({ waitUntil: (p: Promise<unknown>) => pending.push(p), data, ...extra });
   await Promise.all(pending);
 }
 
@@ -354,6 +360,60 @@ describe('the rescue (#514)', () => {
     await fire(w.handlers, 'install');
     await expect(fire(w.handlers, 'activate')).resolves.toBeUndefined();
     expect(w.self.clients.claim).toHaveBeenCalledOnce();
+  });
+});
+
+describe('the rescue tracks what each tab EXECUTES, not just the served shell (#516)', () => {
+  /** Two tabs, the served shell already current: tab-1 is still running a build
+   *  the floor condemns, tab-2 has already reloaded onto this one. */
+  function twoTabsOnDifferentBuilds() {
+    const w = installFakeWorker();
+    w.clients.push({
+      url: 'https://gaycruisebingo.com/board',
+      id: 'tab-2',
+      navigate: vi.fn(async (u: string) => w.navigated.push(u)),
+    });
+    // The shell being SERVED is current — which is exactly why the pre-#516
+    // decision declined to rescue anyone.
+    w.cacheStore.set('/__gcb-active-build-stamp', new Response(JSON.stringify({ stamp: __BUILD_STAMP__ })));
+    return w;
+  }
+
+  async function nameBuilds(w: ReturnType<typeof twoTabsOnDifferentBuilds>) {
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: OLD_SHELL }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+  }
+
+  it('forces, and navigates ONLY the tab below the floor', async () => {
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await nameBuilds(w);
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('leaves both tabs alone when neither is below the floor', async () => {
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('ignores a CLIENT_BUILD with no client id or no stamp', async () => {
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: OLD_SHELL }, { source: null });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD' }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'install');
+    // Nothing was registered, and the served shell is current, so no rescue.
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
   });
 });
 

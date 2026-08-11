@@ -17,6 +17,7 @@ import EventNotFound from './components/EventNotFound';
 import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
+import { armUncontrolledUpdateReload, postClientBuild } from './swClientBridge';
 import { bootstrapEventResolution } from './data/hostnames';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { isSignInReachableOnHost } from './auth-domain';
@@ -62,6 +63,17 @@ function startPostHogAfterResolution(): void {
 // by a one-attempt-per-tab guard so a misconfigured floor cannot reload-loop.
 // Skipped for the uptime synthetic (#142) so a probe run is never a reload.
 if (!isSyntheticProbe()) void enforceBuildFloor(__BUILD_STAMP__);
+
+// The other two out-of-tree halves of the update story (src/swClientBridge.ts),
+// here at module scope for the same reason: #516 needs this page to have named
+// the build it is EXECUTING even if it goes on to crash during render, and #621
+// needs a tab that was uncontrolled at registration to notice a deploy that
+// lands in its own lifetime. Skipped for the uptime synthetic (#142), matching
+// the floor check above — a probe run is never a reload.
+if (!isSyntheticProbe()) {
+  postClientBuild(__BUILD_STAMP__);
+  void armUncontrolledUpdateReload();
+}
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('root element missing');

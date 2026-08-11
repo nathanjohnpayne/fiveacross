@@ -36,9 +36,12 @@ import {
   fetchFloorWithRetry,
   recordFloorCheck,
   markForcedActivation,
+  pruneClientStamps,
   readActiveStamp,
+  recordClientStamp,
   shouldActiveWorkerEvict,
   shouldForceActivate,
+  shouldNavigateClient,
   takeForcedActivation,
   writeActiveStamp,
 } from './sw-rescue';
@@ -152,15 +155,49 @@ registerRoute(
 // the worker is a SEPARATE typecheck program — `tsconfig.sw.json`, `WebWorker`
 // lib, no `localStorage` — so importing that module would drag DOM-only globals
 // into a program that cannot type them. `sw-worker.test.ts` pins both names.
+//
+// #516 adds the third message, in the other direction: a page names the build
+// it is EXECUTING, at module scope, before it renders anything. The record this
+// keeps is what lets the rescue tell the served shell apart from what each tab
+// is actually running — see `shouldForceActivate`. Same spelled-out-name
+// convention as above; the page half is `src/swClientBridge.ts`.
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
-  const type = (event.data as { type?: unknown } | null)?.type;
+  const data = event.data as { type?: unknown; stamp?: unknown } | null;
+  const type = data?.type;
   if (type === 'SKIP_WAITING') void self.skipWaiting();
   else if (type === 'GET_BUILD_STAMP') {
     // Best-effort: a caller that sent no port gets no answer, which the page
     // reads as "unidentifiable" and treats as fail-open (src/updateDismissal.ts).
     event.ports?.[0]?.postMessage({ type: 'BUILD_STAMP', stamp: __BUILD_STAMP__ });
+  } else if (type === 'CLIENT_BUILD') {
+    const source = event.source;
+    const id = source && 'id' in source ? source.id : null;
+    const stamp = data?.stamp;
+    if (!id || typeof stamp !== 'string' || stamp === '') return;
+    event.waitUntil(registerClientBuild(id, stamp));
   }
 });
+
+async function registerClientBuild(clientId: string, stamp: string): Promise<void> {
+  try {
+    await recordClientStamp(caches, clientId, stamp, await liveWindowIds());
+  } catch {
+    /* an unrecorded client reads as condemned, which is the safe direction */
+  }
+}
+
+/** Every open window's id, or null when the list cannot be read at all —
+ *  `retainLiveClients` treats those two very differently. `includeUncontrolled`
+ *  because an installing worker controls nothing yet, and the whole point of
+ *  this registry is the tabs it does not yet own. */
+async function liveWindowIds(): Promise<string[] | null> {
+  try {
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    return windows.map((client) => client.id);
+  } catch {
+    return null;
+  }
+}
 
 // --- The rescue (#514) ------------------------------------------------------
 //
@@ -172,7 +209,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
 // the stranded player has to reload a second time. That is the dead end this
 // whole PR exists to end, so the decision is persisted in `gcb-shell-meta` and
 // this flag only covers the case where storage refused the write.
-let forcedActivation = false;
+let forcedActivation: { forced: boolean; floor: string | null } = { forced: false, floor: null };
 
 self.addEventListener('install', (event: ExtendableEvent) => {
   event.waitUntil(
@@ -186,21 +223,32 @@ self.addEventListener('install', (event: ExtendableEvent) => {
         // earlier marker — turning an ordinary activation into a forced
         // claim-and-navigation of every open tab. Each attempt re-earns it.
         await clearForcedActivation(caches);
-        const [floor, activeStamp] = await Promise.all([
+        const [floor, activeStamp, clientStamps] = await Promise.all([
           // Retried: this worker gets exactly one `install`, and a waiting
           // worker never gets another (Phase 4b P1 on #515).
           fetchFloorWithRetry(fetch, () => Date.now()),
           readActiveStamp(caches),
+          // Swept here too, so a tab closed long ago cannot keep the decision
+          // anchored to a build nothing is running any more (#516).
+          liveWindowIds().then((ids) => pruneClientStamps(caches, ids)),
         ]);
         // `registration.active` is null only on a FIRST install, where there
         // is no shell to rescue — without this a fresh client would claim and
         // re-navigate a page already running the current build (Phase 4b P2).
         const hasActiveWorker = self.registration.active !== null;
-        if (!shouldForceActivate({ activeStamp, ownStamp: __BUILD_STAMP__, floor, hasActiveWorker })) return;
-        forcedActivation = true;
+        const force = shouldForceActivate({
+          activeStamp,
+          ownStamp: __BUILD_STAMP__,
+          floor,
+          hasActiveWorker,
+          clientStamps: Object.values(clientStamps),
+        });
+        if (!force) return;
+        forcedActivation = { forced: true, floor };
         // Persist BEFORE promoting: once `skipWaiting()` resolves, `activate`
-        // can be entered by a worker instance that never ran this handler.
-        await markForcedActivation(caches, __BUILD_STAMP__);
+        // can be entered by a worker instance that never ran this handler. The
+        // floor rides along so `activate` can tell which windows it condemns.
+        await markForcedActivation(caches, __BUILD_STAMP__, floor);
         await self.skipWaiting();
       } catch {
         // Install must never fail on account of the rescue: a worker that
@@ -217,12 +265,13 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
       // a worker teardown, and consuming it clears the flag so a later ordinary
       // activation cannot inherit a stale force and re-navigate the player's
       // windows. The module flag is only a fallback for storage refusing us.
-      const forced = (await takeForcedActivation(caches, __BUILD_STAMP__)) || forcedActivation;
+      const persisted = await takeForcedActivation(caches, __BUILD_STAMP__);
+      const decision = persisted.forced ? persisted : forcedActivation;
       // Record what is now in charge, so the NEXT worker can tell whether the
       // shell it is replacing is below a future floor. Written on every
       // activation, not just forced ones — an unrecorded stamp reads as ancient.
       await writeActiveStamp(caches, __BUILD_STAMP__);
-      if (!forced) return;
+      if (!decision.forced) return;
       try {
         await self.clients.claim();
         // Drive the reload from HERE. The whole point is that the page cannot
@@ -230,8 +279,16 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
         // React tree already torn down, which is precisely how clients got
         // stranded in the first place.
         const windows = await self.clients.matchAll({ type: 'window' });
+        // Only the windows the floor actually condemns (#516). A tab that has
+        // already reloaded onto an accepted build is left alone: navigating it
+        // would discard whatever the player is doing there and rescue nobody.
+        const stamps = await pruneClientStamps(
+          caches,
+          windows.map((client) => client.id),
+        );
+        const targets = windows.filter((client) => shouldNavigateClient(stamps[client.id], decision.floor));
         await Promise.all(
-          windows.map(async (client) => {
+          targets.map(async (client) => {
             try {
               await (client as WindowClient).navigate(client.url);
             } catch {

@@ -9,8 +9,13 @@ import {
   fetchFloorWithRetry,
   recordFloorCheck,
   markForcedActivation,
+  pruneClientStamps,
   readActiveStamp,
+  readClientStamps,
+  recordClientStamp,
+  retainLiveClients,
   shouldForceActivate,
+  shouldNavigateClient,
   takeForcedActivation,
   writeActiveStamp,
 } from './sw-rescue';
@@ -270,14 +275,14 @@ describe('the forced-activation marker', () => {
   it('is honoured by the worker that wrote it', async () => {
     const cs = fakeCacheStorage();
     await markForcedActivation(cs, A);
-    await expect(takeForcedActivation(cs, A)).resolves.toBe(true);
+    await expect(takeForcedActivation(cs, A)).resolves.toMatchObject({ forced: true });
   });
 
   it('is consumed on read, so a later activation cannot inherit it', async () => {
     const cs = fakeCacheStorage();
     await markForcedActivation(cs, A);
     await takeForcedActivation(cs, A);
-    await expect(takeForcedActivation(cs, A)).resolves.toBe(false);
+    await expect(takeForcedActivation(cs, A)).resolves.toMatchObject({ forced: false });
   });
 
   it('is IGNORED by a different worker — an orphaned marker cannot ambush one', async () => {
@@ -288,25 +293,108 @@ describe('the forced-activation marker', () => {
     // navigate every open tab — possibly long after the floor was disarmed.
     const cs = fakeCacheStorage();
     await markForcedActivation(cs, A);
-    await expect(takeForcedActivation(cs, B)).resolves.toBe(false);
+    await expect(takeForcedActivation(cs, B)).resolves.toMatchObject({ forced: false });
   });
 
   it('CLEARS an orphaned marker rather than leaving it to ambush a later worker', async () => {
     const cs = fakeCacheStorage();
     await markForcedActivation(cs, A);
     await takeForcedActivation(cs, B); // wrong worker; still clears
-    await expect(takeForcedActivation(cs, A)).resolves.toBe(false);
+    await expect(takeForcedActivation(cs, A)).resolves.toMatchObject({ forced: false });
   });
 
   it('reports false with no marker, and never throws when storage refuses', async () => {
-    await expect(takeForcedActivation(fakeCacheStorage(), A)).resolves.toBe(false);
+    await expect(takeForcedActivation(fakeCacheStorage(), A)).resolves.toMatchObject({ forced: false });
     const broken = { open: async () => Promise.reject(new Error('blocked')) } as unknown as CacheStorage;
-    await expect(takeForcedActivation(broken, A)).resolves.toBe(false);
+    await expect(takeForcedActivation(broken, A)).resolves.toMatchObject({ forced: false });
     await expect(markForcedActivation(broken, A)).resolves.toBeUndefined();
   });
 
   it('uses its own key, distinct from the active-stamp record', () => {
     expect(FORCED_FLAG_URL).not.toBe(ACTIVE_STAMP_URL);
+  });
+
+  it('carries the floor that justified the force (#516)', async () => {
+    // `activate` cannot re-read it — the probe is a network call and by then
+    // the worker is committed — so without this it could only navigate every
+    // window, including tabs the floor accepts.
+    const cs = fakeCacheStorage();
+    await markForcedActivation(cs, A, ARMED_FLOOR);
+    await expect(takeForcedActivation(cs, A)).resolves.toEqual({ forced: true, floor: ARMED_FLOOR });
+  });
+});
+
+// #516. The served shell is not what every tab is EXECUTING: two tabs open on
+// build A, one of which reloads onto B, leave `gcb-shell-meta` recording B, so
+// a floor set between A and B reads "the active shell is fine" and abandons the
+// tab still running A.
+describe('the client build registry (#516)', () => {
+  it('records what a window is running and reads it back', async () => {
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
+    await recordClientStamp(cs, 'tab-2', NEW_SHELL, ['tab-1', 'tab-2']);
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL });
+  });
+
+  it('evicts windows that are gone, so a closed tab cannot condemn the fleet forever', async () => {
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
+    await expect(pruneClientStamps(cs, ['tab-2'])).resolves.toEqual({});
+  });
+
+  it('keeps everything when the live set cannot be read at all', () => {
+    // Null is not "no windows are open": forgetting a tab that is still open
+    // costs the rescue its evidence, while remembering a dead one costs at most
+    // one force-activation that then navigates nobody.
+    expect(retainLiveClients({ 'tab-1': OLD_SHELL }, null)).toEqual({ 'tab-1': OLD_SHELL });
+    expect(retainLiveClients({ 'tab-1': OLD_SHELL }, [])).toEqual({});
+  });
+
+  it('drops malformed entries and never throws when storage refuses', async () => {
+    const cs = fakeCacheStorage();
+    const cache = await cs.open(SHELL_META_CACHE);
+    await cache.put('/__gcb-client-builds', new Response(JSON.stringify({ a: 42, b: '', c: NEW_SHELL })));
+    await expect(readClientStamps(cs)).resolves.toEqual({ c: NEW_SHELL });
+    const broken = { open: async () => Promise.reject(new Error('blocked')) } as unknown as CacheStorage;
+    await expect(readClientStamps(broken)).resolves.toEqual({});
+    await expect(recordClientStamp(broken, 'tab-1', NEW_SHELL, null)).resolves.toBeUndefined();
+  });
+
+  it('rescues a tab still EXECUTING an old build behind an up-to-date served shell', () => {
+    // The whole ticket, as one assertion: without the client stamps this reads
+    // `activeStamp: NEW_SHELL` and declines.
+    expect(
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: ARMED_FLOOR,
+        clientStamps: [OLD_SHELL, NEW_SHELL],
+      }),
+    ).toBe(true);
+  });
+
+  it('still declines when every client is at or above the floor', () => {
+    expect(
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: ARMED_FLOOR,
+        clientStamps: [NEW_SHELL, NEW_SHELL],
+      }),
+    ).toBe(false);
+  });
+
+  it('navigates exactly the windows the floor condemns', () => {
+    expect(shouldNavigateClient(OLD_SHELL, ARMED_FLOOR)).toBe(true);
+    expect(shouldNavigateClient(NEW_SHELL, ARMED_FLOOR)).toBe(false);
+  });
+
+  it('navigates a window that never registered, and every window with no usable floor', () => {
+    // An unregistered client is running a pre-#516 build or died before its
+    // module scope ran — the stranded cohort — so "unknown" reads as condemned.
+    expect(shouldNavigateClient(undefined, ARMED_FLOOR)).toBe(true);
+    expect(shouldNavigateClient(NEW_SHELL, null)).toBe(true);
+    expect(shouldNavigateClient(NEW_SHELL, '')).toBe(true);
   });
 });
 
