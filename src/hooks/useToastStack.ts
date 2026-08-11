@@ -148,11 +148,29 @@ export function __resetClaimSheetOpenForTests(): void {
   claimSheetListeners.clear();
 }
 
+/**
+ * The same signal, read WITHOUT a React tree (Codex P1 on #516/#621).
+ *
+ * `src/swClientBridge.ts` defers its automatic reload on this from module
+ * scope, where no hook can run and where the React tree may not exist at all —
+ * which is the whole reason that bridge lives outside `main.tsx`. The store
+ * behind `useClaimSheetOpen` is a plain module singleton, so the non-hook read
+ * is the same value the hook reports, not a second source of truth.
+ */
+export function isClaimSheetOpen(): boolean {
+  return claimSheetOpen;
+}
+
+/** Subscribes to changes in that signal; returns the unsubscribe. Also what
+ *  `useClaimSheetOpen` subscribes through, so there is one listener set. */
+export function subscribeClaimSheetOpen(listener: () => void): () => void {
+  claimSheetListeners.add(listener);
+  return () => {
+    claimSheetListeners.delete(listener);
+  };
+}
+
 /** Whether a claim sheet is open — gates the update banner. */
 export function useClaimSheetOpen(): boolean {
-  return useSyncExternalStore(
-    (l) => (claimSheetListeners.add(l), () => claimSheetListeners.delete(l)),
-    () => claimSheetOpen,
-    () => claimSheetOpen,
-  );
+  return useSyncExternalStore(subscribeClaimSheetOpen, isClaimSheetOpen, isClaimSheetOpen);
 }

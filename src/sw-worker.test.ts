@@ -405,15 +405,48 @@ describe('the rescue tracks what each tab EXECUTES, not just the served shell (#
     expect(w.self.skipWaiting).not.toHaveBeenCalled();
   });
 
+  it('rescues a live tab that never registered, behind an up-to-date shell and registry', async () => {
+    // Codex P1 round 2 — THE ROLLOUT CASE, and the one this whole ticket is
+    // for. On the deploy that introduces `CLIENT_BUILD`, every open tab is
+    // running a build that cannot post it. Here tab-2 has already reloaded onto
+    // the accepted build, so it updated `activeStamp` AND is the only registry
+    // entry; tab-1 is a pre-#516 tab, live and silent. Deciding over the
+    // registry alone reads "the shell is fine, and every client I know of is
+    // fine", declines to force, and never reaches the claim — so tab-1 is
+    // stranded by the very feature meant to rescue it.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    // Only the silent tab: tab-2 named an accepted build and keeps its work.
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('does not force when the ONLY unregistered window is one this worker cannot see', async () => {
+    // `clients.matchAll()` failing is not evidence that a stranded tab exists.
+    const w = twoTabsOnDifferentBuilds();
+    w.self.clients.matchAll = vi.fn().mockRejectedValue(new Error('no clients'));
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
   it('ignores a CLIENT_BUILD with no client id or no stamp', async () => {
     const w = twoTabsOnDifferentBuilds();
     stubFloor(ARMED_FLOOR);
     await import('./sw');
     await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: OLD_SHELL }, { source: null });
     await fire(w.handlers, 'message', { type: 'CLIENT_BUILD' }, { source: { id: 'tab-1' } });
-    await fire(w.handlers, 'install');
-    // Nothing was registered, and the served shell is current, so no rescue.
-    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+    // Nothing was registered — asserted on the REGISTRY, not on the rescue
+    // decision. Both windows now read as unregistered, and an unregistered live
+    // window IS force evidence (Codex P1 round 2), so a "no rescue" assertion
+    // here would pass for the malformed-message reason and fail for the right
+    // one the moment the rollout case was fixed.
+    expect(w.cacheStore.get('/__gcb-client-builds')).toBeUndefined();
   });
 });
 

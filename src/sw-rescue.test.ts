@@ -368,7 +368,8 @@ describe('the client build registry (#516)', () => {
         activeStamp: NEW_SHELL,
         ownStamp: NEW_SHELL,
         floor: ARMED_FLOOR,
-        clientStamps: [OLD_SHELL, NEW_SHELL],
+        clientStamps: { 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL },
+        liveClientIds: ['tab-1', 'tab-2'],
       }),
     ).toBe(true);
   });
@@ -379,9 +380,85 @@ describe('the client build registry (#516)', () => {
         activeStamp: NEW_SHELL,
         ownStamp: NEW_SHELL,
         floor: ARMED_FLOOR,
-        clientStamps: [NEW_SHELL, NEW_SHELL],
+        clientStamps: { 'tab-1': NEW_SHELL, 'tab-2': NEW_SHELL },
+        liveClientIds: ['tab-1', 'tab-2'],
       }),
     ).toBe(false);
+  });
+
+  it('rescues an open window that never REGISTERED at all — the rollout case', () => {
+    // Codex P1 round 2. On the very deploy that introduces `CLIENT_BUILD`,
+    // every tab running the previous build is unregistered by definition. Let
+    // one tab reload onto the accepted build and both the served shell and the
+    // only registry entry read as current — so deciding over the registry alone
+    // declines to force, `activate` never claims, and `shouldNavigateClient`
+    // never gets the chance to notice the stranded tab.
+    expect(
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: ARMED_FLOOR,
+        clientStamps: { 'tab-2': NEW_SHELL },
+        liveClientIds: ['tab-1', 'tab-2'],
+      }),
+    ).toBe(true);
+  });
+
+  it('does NOT invent a stranded window when the live set could not be read', () => {
+    // Null is "the windows could not be enumerated", which is not evidence that
+    // an unregistered one exists — the fallback is the registry, unchanged.
+    expect(
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: ARMED_FLOOR,
+        clientStamps: { 'tab-2': NEW_SHELL },
+        liveClientIds: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('still forces nobody under the inert floor, unregistered windows included', () => {
+    // The safety property that makes shipping this a no-op survives treating an
+    // absence as evidence: the stand-in stamp sits 1ms after the epoch, so it
+    // is not below the inert floor either.
+    expect(
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: INERT_FLOOR,
+        clientStamps: {},
+        liveClientIds: ['tab-1', 'tab-2'],
+      }),
+    ).toBe(false);
+  });
+
+  it('serializes overlapping writes, so two tabs naming themselves at once cannot lose one', async () => {
+    // Codex P2. Each write is a read-modify-write across four awaits, and the
+    // worker runs each on its own microtask — so two overlapping `CLIENT_BUILD`
+    // handlers both read the same old map and the second `put` discards the
+    // first. Losing the STALE tab costs the install decision its evidence;
+    // losing a CURRENT tab makes it look unregistered and navigates it for
+    // nothing.
+    const cs = fakeCacheStorage();
+    await Promise.all([
+      recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1', 'tab-2']),
+      recordClientStamp(cs, 'tab-2', NEW_SHELL, ['tab-1', 'tab-2']),
+    ]);
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL });
+  });
+
+  it('serializes a sweep racing a write, which rewrites the same record', async () => {
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
+    const [, swept] = await Promise.all([
+      recordClientStamp(cs, 'tab-2', NEW_SHELL, ['tab-1', 'tab-2']),
+      pruneClientStamps(cs, ['tab-1', 'tab-2']),
+    ]);
+    // Whichever order the two land in, the sweep cannot drop an entry the
+    // concurrent write added, and the write cannot resurrect one it dropped.
+    expect(Object.keys(swept).length).toBeGreaterThanOrEqual(1);
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL });
   });
 
   it('navigates exactly the windows the floor condemns', () => {

@@ -135,9 +135,12 @@ export function shouldForceActivate(input: {
   floor: unknown;
   /** False when there is no existing worker at all — a FIRST install. */
   hasActiveWorker?: boolean;
-  /** What the open windows are EXECUTING (#516), which is not the same thing
-   *  as the shell being SERVED — see below. */
-  clientStamps?: readonly string[];
+  /** What the open windows are EXECUTING (#516), keyed by the browser's own
+   *  client id. Not the same thing as the shell being SERVED — see below. */
+  clientStamps?: ClientStamps;
+  /** EVERY open window, registered or not, or null when the live set could not
+   *  be read. The ids are what make an absence visible — see below. */
+  liveClientIds?: readonly string[] | null;
 }): boolean {
   // A first install has no shell to rescue (Phase 4b P2 on #515). Without this,
   // `readActiveStamp()` returning null on a brand-new registration is
@@ -147,13 +150,37 @@ export function shouldForceActivate(input: {
   // precache was still installing, sign-in included.
   if (input.hasActiveWorker === false) return false;
   const active = input.activeStamp ?? UNKNOWN_ACTIVE_STAMP;
-  // Decide against the OLDEST of the served shell and every registered client
-  // (#516). `gcb-shell-meta` records the build that most recently ACTIVATED, so
-  // two tabs on build A, one of which reloads onto B, leave the record saying
-  // B — and a floor set between A and B would then read "the shell is fine" and
-  // never rescue the tab still executing A. A set is below the floor exactly
-  // when its minimum is, so `some` IS the oldest test.
-  if (![active, ...(input.clientStamps ?? [])].some((stamp) => buildBelowFloor(stamp, input.floor))) return false;
+  const registry = input.clientStamps ?? {};
+  // Decide over EVERY LIVE WINDOW, not merely the registered ones (Codex P1
+  // round 2 on #516). Deciding over the registry alone loses the rollout case
+  // this ticket exists for: a tab running the build that shipped BEFORE
+  // `CLIENT_BUILD` existed cannot register at all, so on the very deploy that
+  // introduces the registry every stranded tab is invisible to it. Let another
+  // tab reload onto the accepted build — which updates `activeStamp` and adds
+  // the only registry entry there is — and the served shell plus every
+  // registered stamp are then above the floor, so the next worker declines to
+  // force, `activate` never runs the claim, and `shouldNavigateClient` is never
+  // reached to notice the unregistered tab at all. Deciding over the live ids
+  // instead makes the ABSENCE itself the evidence: an id with no entry stands
+  // in as `UNKNOWN_ACTIVE_STAMP`, exactly as an unrecorded shell does, and for
+  // the same reason — a client that has not named itself is running a pre-#516
+  // build or died before its module scope ran, which is the stranded cohort.
+  //
+  // A null/absent live set falls back to the registry, because "the windows
+  // could not be enumerated" is not evidence that an unregistered one exists;
+  // inventing one would force-activate on nothing at all.
+  const clients = (input.liveClientIds ?? Object.keys(registry)).map((id) => registry[id] ?? UNKNOWN_ACTIVE_STAMP);
+  // The OLDEST of the served shell and those clients is what the floor is
+  // tested against (#516). `gcb-shell-meta` records the build that most
+  // recently ACTIVATED, so two tabs on build A, one of which reloads onto B,
+  // leave the record saying B — and a floor set between A and B would then read
+  // "the shell is fine" and never rescue the tab still executing A. A set is
+  // below the floor exactly when its minimum is, so `some` IS the oldest test.
+  //
+  // The inert shipped floor still force-activates nobody: `UNKNOWN_ACTIVE_STAMP`
+  // sits one millisecond after the epoch precisely so a stand-in stamp — for an
+  // unrecorded shell or now for an unregistered window — is not below it.
+  if (![active, ...clients].some((stamp) => buildBelowFloor(stamp, input.floor))) return false;
   if (buildBelowFloor(input.ownStamp, input.floor)) return false;
   return true;
 }
@@ -221,6 +248,35 @@ async function putClientStamps(cacheStorage: CacheStorage, stamps: ClientStamps)
   }
 }
 
+/**
+ * The tail of the registry's write chain (Codex P2 on #516).
+ *
+ * Every mutation here is a read-modify-write across four awaits — `open`,
+ * `match`, `json`, `put` — and the worker runs each of them on its own
+ * microtask. Two tabs posting `CLIENT_BUILD` close together therefore overlap:
+ * both handlers read the same old map, each adds only its own entry, and the
+ * second `cache.put` silently discards the first. Losing the STALE tab's entry
+ * costs the install decision its evidence; losing a CURRENT tab's entry makes
+ * that tab look unregistered, so a forced activation navigates it for nothing.
+ *
+ * One shared chain rather than a per-key lock, because a prune rewrites the
+ * whole record too — a prune racing a record is the same lost update.
+ *
+ * Module state, and deliberately so: it only has to order the writes of ONE
+ * worker instance. A torn-down worker has no in-flight writes left to order,
+ * and the Cache is the durable record either way.
+ */
+let registryWrites: Promise<unknown> = Promise.resolve();
+
+function serializeRegistryWrite<T>(op: () => Promise<T>): Promise<T> {
+  // `then(op, op)` so a rejected predecessor still runs this one: the chain
+  // orders writes, it must never be able to cancel them. Every op below
+  // swallows its own storage failures, but the chain cannot assume that.
+  const run = registryWrites.then(op, op);
+  registryWrites = run.catch(() => undefined);
+  return run;
+}
+
 /** Records what one window is executing, evicting dead windows in the same
  *  write. Called on every `CLIENT_BUILD`, which is once per page load, so the
  *  registry is swept about as often as it grows. */
@@ -230,9 +286,11 @@ export async function recordClientStamp(
   stamp: string,
   liveIds: readonly string[] | null,
 ): Promise<void> {
-  const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
-  stamps[clientId] = stamp;
-  await putClientStamps(cacheStorage, stamps);
+  await serializeRegistryWrite(async () => {
+    const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
+    stamps[clientId] = stamp;
+    await putClientStamps(cacheStorage, stamps);
+  });
 }
 
 /** Sweeps the registry and returns what survived. */
@@ -240,9 +298,11 @@ export async function pruneClientStamps(
   cacheStorage: CacheStorage,
   liveIds: readonly string[] | null,
 ): Promise<ClientStamps> {
-  const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
-  await putClientStamps(cacheStorage, stamps);
-  return stamps;
+  return serializeRegistryWrite(async () => {
+    const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
+    await putClientStamps(cacheStorage, stamps);
+    return stamps;
+  });
 }
 
 /**

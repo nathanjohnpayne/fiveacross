@@ -223,14 +223,21 @@ self.addEventListener('install', (event: ExtendableEvent) => {
         // earlier marker — turning an ordinary activation into a forced
         // claim-and-navigation of every open tab. Each attempt re-earns it.
         await clearForcedActivation(caches);
-        const [floor, activeStamp, clientStamps] = await Promise.all([
+        // Enumerated ONCE and handed to the decision as well as to the sweep
+        // (Codex P1 round 2 on #516): a live window with no registry entry is
+        // itself the evidence that something unregistered — i.e. something from
+        // before this contract existed — is still open, and only the id list
+        // can show that absence.
+        const liveIds = liveWindowIds();
+        const [floor, activeStamp, clientStamps, liveClientIds] = await Promise.all([
           // Retried: this worker gets exactly one `install`, and a waiting
           // worker never gets another (Phase 4b P1 on #515).
           fetchFloorWithRetry(fetch, () => Date.now()),
           readActiveStamp(caches),
           // Swept here too, so a tab closed long ago cannot keep the decision
           // anchored to a build nothing is running any more (#516).
-          liveWindowIds().then((ids) => pruneClientStamps(caches, ids)),
+          liveIds.then((ids) => pruneClientStamps(caches, ids)),
+          liveIds,
         ]);
         // `registration.active` is null only on a FIRST install, where there
         // is no shell to rescue — without this a fresh client would claim and
@@ -241,7 +248,8 @@ self.addEventListener('install', (event: ExtendableEvent) => {
           ownStamp: __BUILD_STAMP__,
           floor,
           hasActiveWorker,
-          clientStamps: Object.values(clientStamps),
+          clientStamps,
+          liveClientIds,
         });
         if (!force) return;
         forcedActivation = { forced: true, floor };
