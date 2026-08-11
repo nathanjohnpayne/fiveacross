@@ -149,6 +149,13 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // A pledge writes NO Proof doc — no Feed entry, no Doubt satisfaction.
     expect(H.attachProof).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByText(/proof for/i)).toBeNull());
+    // #721: the pledge is the 'pledge' source of mark_square, never conflated
+    // with a bare boolean — marked: true is explicit and source pins the mode.
+    expect(H.track).toHaveBeenCalledWith('mark_square', {
+      source: 'pledge',
+      mode: 'honor',
+      marked: true,
+    });
   });
 
   it('Cancel leaves the Square unmarked; unmarking a marked Square stays instant with no sheet', async () => {
@@ -169,6 +176,11 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
     expect(H.setMark.mock.calls[0][0]).toMatchObject({ index: 1, nextMarked: false });
     expect(screen.queryByText(/proof for/i)).toBeNull();
+    // #721: an unmark fires the distinct unmark_square event, NEVER
+    // mark_square { marked: false } — the fix for the #721 root cause (a raw
+    // mark_square count that mixed unmarks in with real marks).
+    expect(H.track).toHaveBeenCalledWith('unmark_square', { mode: 'honor' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('opens Photo-first (#309) — photo body on first paint, other bodies once chosen — and the pledge row fits one line (nowrap, full width)', async () => {

@@ -697,6 +697,8 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     blackoutTransition: boolean;
     pinAs: string | null;
     at: number;
+    /** Squares newly echoed onto this freshly-dealt card (#721 `echo_mark`). */
+    count: number;
   } | null = null;
   const dealt = await runTransaction(db, async (tx) => {
     dealtEcho = null;
@@ -754,6 +756,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         blackoutTransition: echoRes.blackoutTransition,
         pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
         at: now,
+        count: echoRes.echoedItemIds.length,
       };
       if (!statsAllowed) {
         tx.set(
@@ -806,6 +809,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       blackoutTransition: boolean;
       pinAs: string | null;
       at: number;
+      count: number;
     };
     if (echo.bingoTransition || echo.blackoutTransition) {
       enqueueWinMoments({
@@ -821,6 +825,12 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     if (echo.pinAs) {
       void pinDayFirstBingo(dayIndex, { uid: u.uid, displayName: echo.pinAs, photoURL: null }, echo.at);
     }
+    // Echo Mark instrumentation (#721): this card arrived pre-marked from the
+    // Player's OTHER Day Cards, not from a tap — countable, never folded into
+    // `mark_square` (specs/w2-ga4-events.md § Reconciliation).
+    void import('../analytics')
+      .then(({ track }) => track('echo_mark', { trigger: 'deal', dayIndex, count: echo.count }))
+      .catch(() => {});
   }
   return dealt;
 }
@@ -1002,6 +1012,8 @@ export async function reshuffleBoard(params: {
     blackoutTransition: boolean;
     pinAs: string | null;
     at: number;
+    /** Squares newly echoed onto the replacement card (#721 `echo_mark`). */
+    count: number;
   } | null = null;
   const spend = await runTransaction(db, async (tx) => {
     // Firestore can invoke this callback more than once. Do not let a discarded
@@ -1109,6 +1121,7 @@ export async function reshuffleBoard(params: {
           blackoutTransition: echoRes.blackoutTransition,
           pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
           at: now,
+          count: echoRes.echoedItemIds.length,
         }
       : null;
     // Orphaned-marker cleanup (Codex P2 on #447): the discarded card can only
@@ -1204,6 +1217,7 @@ export async function reshuffleBoard(params: {
       blackoutTransition: boolean;
       pinAs: string | null;
       at: number;
+      count: number;
     };
     if (echo.bingoTransition || echo.blackoutTransition) {
       enqueueWinMoments({
@@ -1216,6 +1230,12 @@ export async function reshuffleBoard(params: {
     if (echo.pinAs) {
       void pinDayFirstBingo(dayIndex, { uid, displayName: echo.pinAs, photoURL: null }, echo.at);
     }
+    // Echo Mark instrumentation (#721): the replacement card re-echoed from
+    // the same achievements the discarded one wore — countable, never folded
+    // into `mark_square` (specs/w2-ga4-events.md § Reconciliation).
+    void import('../analytics')
+      .then(({ track }) => track('echo_mark', { trigger: 'reshuffle', dayIndex, count: echo.count }))
+      .catch(() => {});
   }
   return spend;
 }
@@ -1900,6 +1920,19 @@ async function runSetMark(
         }),
       )
       .catch(() => undefined);
+    // Echo Mark instrumentation (#721): THIS Mark's confirmed cascade onto
+    // sibling Day Cards — one echoed cell per sibling board pushed into
+    // `echoBoards` above (a singleton `achieved` set per Mark), so its length
+    // IS the newly-echoed count. Countable, never folded into `mark_square`
+    // (specs/w2-ga4-events.md § Reconciliation). Separate `.catch()` from the
+    // reconcile chain above so one failing never blocks the other.
+    void committed
+      .then(() =>
+        import('../analytics').then(({ track }) =>
+          track('echo_mark', { trigger: 'mark', dayIndex, count: echoBoards.length }),
+        ),
+      )
+      .catch(() => undefined);
   }
   void committed.catch((err: unknown) => {
     if (markerRepairCandidate) forgetMarkerRepair(markerRepairCandidate);
@@ -2380,6 +2413,16 @@ async function runReconcileEchoes(
           statsFrozen: params.statsFrozen,
           database,
         }),
+      )
+      .catch(() => undefined);
+    // Echo Mark instrumentation (#721): the open-time backfill heal wrote the
+    // missing echo(es) this device never saw committed — countable, never
+    // folded into `mark_square` (specs/w2-ga4-events.md § Reconciliation).
+    void committed
+      .then(() =>
+        import('../analytics').then(({ track }) =>
+          track('echo_mark', { trigger: 'open_reconcile', dayIndex, count: res.echoedItemIds.length }),
+        ),
       )
       .catch(() => undefined);
   }

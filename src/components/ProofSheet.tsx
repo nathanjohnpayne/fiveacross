@@ -2,7 +2,6 @@ import { useRef, useState } from 'react';
 import { Camera, Mic, PenLine, Images, X } from 'lucide-react';
 import { attachProof, type AttachProofResult } from '../data/proofs';
 import { track } from '../analytics';
-import { markSquareOccurred } from '../hooks/useToastStack';
 import { safeMediaUrl } from './safeMediaUrl';
 import type { Cell, ClaimMode, ProofType } from '../types';
 
@@ -223,14 +222,27 @@ export default function ProofSheet(props: Props) {
         proof,
       });
       track('attach_proof', { type, ...(type === 'photo' && photoSource ? { source: photoSource } : {}) });
-      // Install-nudge first-Mark trigger (#219, Codex review PR #238): proof-
-      // required/admin-confirmed flows (and an honor-mode Player who attaches
-      // proof instead of tapping the pledge) mark an unmarked square through
-      // THIS path, not `Board.doMark`'s `mark_square` track() call — so that
-      // call site alone misses them. `cell` is the sheet's opening snapshot
-      // (unmutated by this submit), so `!cell.marked` is exactly "this attach
-      // just marked a previously-unmarked square."
-      if (!cell.marked) markSquareOccurred();
+      // Mark-transition instrumentation (#721): proof-required/admin-confirmed
+      // flows (and an honor-mode Player who attaches proof instead of tapping
+      // the pledge) mark an unmarked square through THIS path, not
+      // `Board.doMark`'s `mark_square` call — so that call site alone misses
+      // them (the root cause of #721: only 6 `mark_square` events for a POC
+      // that marked 25 squares, almost all of them proof attaches). `cell` is
+      // the sheet's opening snapshot (unmutated by this submit), so
+      // `!cell.marked` is exactly "this attach just marked a
+      // previously-unmarked square" — a proof ADDED to an already-marked
+      // Square (the ＋ affordance) is not a mark transition and fires nothing
+      // here. In `admin_confirmed` mode the cell lands `pending`
+      // (uncredited — `game/logic.ts`'s `countMarked` excludes it), so this
+      // event alone is not 1:1 with `dayStats[*].squaresMarked` in that mode;
+      // the later `admin_confirm` mark_square (`data/admin.ts`) is the one
+      // that corresponds to the credited transition — see
+      // specs/w2-ga4-events.md § Reconciliation. This ALSO subsumes the old
+      // direct `markSquareOccurred()` install-nudge trigger call that used to
+      // live here: `track()`'s own `mark_square` wiring
+      // (`useToastStack`'s module doc) now fires it, so a second direct call
+      // would only be duplicate logic.
+      if (!cell.marked) track('mark_square', { source: 'proof', mode: claimMode, marked: true });
       // Report the win verdict AFTER the transaction committed and BEFORE closing,
       // so Board enqueues the Moment for a proofed win (PR #110 round 2 finding 1).
       // Truthiness-guarded: suites stub attachProof to resolve undefined.

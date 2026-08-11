@@ -632,7 +632,7 @@ const isClaimCell = (x: Cell, c: ClaimDoc): boolean =>
 
 export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   const creditedAt = Date.now();
-  return resolve(
+  const confirmed = resolve(
     c,
     (cells) =>
       cells.map((x) =>
@@ -641,6 +641,28 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     adminUid,
     'confirmed',
   );
+  // Mark-transition instrumentation (#721): `confirmClaim` only ever resolves
+  // a PENDING claim (ReviewQueue's "Pending claims" queue is admin_confirmed-
+  // mode only, per its own module comment) reaching `confirmed` — the moment
+  // `countMarked` (game/logic.ts) starts crediting the Square, since it
+  // excludes `status: 'pending'`. The Square itself went `marked: true`
+  // earlier, at proof-attach time (ProofSheet's `source: 'proof'` event), so
+  // one confirmed admin_confirmed-mode Square produces TWO `mark_square`
+  // events before it counts once in `dayStats[*].squaresMarked` — documented
+  // in specs/w2-ga4-events.md § Reconciliation, not a double-count bug. Fired
+  // only after `confirmed` resolves (the transaction committed), via a
+  // dynamic import — matching src/data/api.ts's `mark_rejected` call site —
+  // so this Firestore-only module stays free of an eager
+  // analytics/firebase-singleton dependency; test doubles mock `../firebase`
+  // with only what the writes need.
+  void confirmed
+    .then(() =>
+      import('../analytics').then(({ track }) =>
+        track('mark_square', { source: 'admin_confirm', mode: 'admin_confirmed', marked: true }),
+      ),
+    )
+    .catch(() => {});
+  return confirmed;
 }
 
 export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {

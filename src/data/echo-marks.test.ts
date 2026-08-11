@@ -33,6 +33,12 @@ const H = vi.hoisted(() => ({
   // overrides it can restore EXACTLY this (a lookalike without the tally
   // branch would silently change marker-cache semantics for later tests).
   defaultGetDocFromCache: undefined as unknown as (ref: { args?: unknown[] }) => Promise<unknown>,
+  // #721: api.ts / admin.ts fire echo_mark / mark_square via a DYNAMIC
+  // `import('../analytics')` (mirroring the existing #387 mark_rejected call
+  // site) so this Firestore-only module graph stays free of the eager
+  // analytics/firebase-singleton dependency — mock the module so the dynamic
+  // import resolves to this spy instead of loading the real one.
+  track: vi.fn(),
 }));
 
 vi.mock('../firebase', () => ({
@@ -44,6 +50,8 @@ vi.mock('../firebase', () => ({
   googleProvider: {},
   analytics: null,
 }));
+
+vi.mock('../analytics', () => ({ track: H.track }));
 
 vi.mock('firebase/functions', () => ({ httpsCallable: vi.fn() }));
 
@@ -307,6 +315,12 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(echoed).toMatchObject({ marked: true, status: 'confirmed', echo: true, itemId: 'shared' });
     // The non-carrier sibling (Day 1) is untouched.
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(false);
+    // #721: the mark-time cascade fires its own echo_mark, NEVER folded into
+    // mark_square — the acted Mark's OWN mark_square is Board.tsx's concern,
+    // not setMark's; `dayIndex` is the ACTED day, `count` the one sibling cell.
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 2, count: 1 }),
+    );
   });
 
   it('#474: SKIPS the echo for a sibling with no server-confirmed seed watch — the acted Mark still commits alone', async () => {
@@ -678,6 +692,11 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
     };
     expect(playerWrite.dayStats[0].squaresMarked).toBe(1);
     expect(playerWrite.squaresMarked).toBe(2); // Day 1 prior bucket + this echo
+    // #721: the dealt card arrived pre-marked, not tapped — countable via its
+    // own echo_mark, never mark_square.
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'deal', dayIndex: 0, count: 1 }),
+    );
   });
 
   it('revalidates achieved prompts inside the deal transaction before it writes Echoes', async () => {
@@ -765,6 +784,10 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     // The Day-1 bucket is RE-DERIVED from the replacement's echoes — the
     // discarded card's echo stats never survive as phantoms.
     expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
+    // #721: the replacement card's re-echo fires echo_mark, same as a fresh deal.
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'reshuffle', dayIndex: 1, count: 1 }),
+    );
   });
 
   it('REGRESSION: a no-echo reshuffle keeps the exact three-write shape (board + counter + spend marker, #463) — the counter write is bare', async () => {
@@ -880,6 +903,11 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       expect(stats.dayStats[2].squaresMarked).toBe(1);
       expect(stats.squaresMarked).toBe(2); // Day-1 prior bucket + this echo
     });
+    // #721: the open-time backfill heal fires echo_mark for the Square this
+    // device never saw committed, on the OPENED board's Day.
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'open_reconcile', dayIndex: 2, count: 1 }),
+    );
   });
 
   it('#491: a stats-lagged board heals on open — cells ahead of the cached bucket trigger a server-derived stats write, stamped from the CELLS and re-pinning the honor', async () => {
@@ -1599,6 +1627,21 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     expect(write.dayStats[1].squaresMarked).toBe(1);
     expect(write.dayStats[2].squaresMarked).toBe(1);
     expect(write.squaresMarked).toBe(2);
+    // #721: confirming is the CREDITED transition for an admin_confirmed-mode
+    // Square (countMarked excludes `pending`) — fires mark_square{source:
+    // 'admin_confirm'}, the second of the two mark_square events this Square
+    // produces (the first, source: 'proof', fired at claim-submit time and is
+    // not this suite's concern). NOT echo_mark: this is the CLAIM'S OWN
+    // Square, a player action, not the sibling echo (#721 scopes echo_mark to
+    // the four data/api.ts propagation paths; confirmClaim's own sibling
+    // echo — the write asserted above — is unchanged by this ticket).
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('mark_square', {
+        source: 'admin_confirm',
+        mode: 'admin_confirmed',
+        marked: true,
+      }),
+    );
   });
 
   it('rejecting echoes NOTHING', async () => {

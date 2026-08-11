@@ -267,6 +267,41 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     expect(props.onClose).toHaveBeenCalled();
   });
 
+  it('a submit that marks a previously-unmarked Square also fires mark_square { source: "proof" } (#721)', async () => {
+    const user = userEvent.setup();
+    const props = baseProps(); // cell() defaults marked: false
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'saw it happen');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    // Both events fire: attach_proof records the capture, mark_square records
+    // the transition — #721's fix is that a proofed claim is a SUBSET of
+    // marking, not an alternative to it (specs/w4-honor-pledge.md).
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).toHaveBeenCalledWith('mark_square', {
+      source: 'proof',
+      mode: 'proof_required',
+      marked: true,
+    });
+  });
+
+  it('a proof added to an ALREADY-marked Square (the ＋ affordance) does not re-fire mark_square (#721)', async () => {
+    const user = userEvent.setup();
+    const props = { ...baseProps(), cell: cell({ marked: true, markedAt: 1, status: 'confirmed' as const }) };
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'adding evidence');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
   it('an audio submit attaches a recorded audio Proof and closes the sheet', async () => {
     const user = userEvent.setup();
     const props = baseProps();

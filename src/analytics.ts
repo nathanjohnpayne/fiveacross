@@ -13,7 +13,7 @@ import { resolvedCanonicalHost } from './canonicalHost';
  * `firebase/analytics` directly.
  * Call sites: `login` + `login_failed` (auth/AuthContext.tsx), `join_event` (App.tsx),
  * `add_item` + `report_item` (components/ItemPool.tsx, ProofFeed.tsx),
- * `mark_square` + `bingo` + `blackout` (components/Board.tsx),
+ * `bingo` + `blackout` (components/Board.tsx),
  * `attach_proof` (components/ProofSheet.tsx), `theme_change`
  * (components/ThemeSwitcher.tsx), `text_size_change` (components/More.tsx,
  * #215), `share_click` (components/Celebration.tsx).
@@ -21,6 +21,20 @@ import { resolvedCanonicalHost } from './canonicalHost';
  * #30) are catalogued and type-checked here so each ticket can add its one
  * call site as a one-line `track(...)` addition; this ticket (#38) does not
  * build either flow.
+ * `mark_square` does NOT live only in Board.tsx (#721 fixed this stale claim,
+ * which the spec repeated at specs/w4-honor-pledge.md): it fires from every
+ * path that transitions a Square to `marked: true`, `source`-tagged so the
+ * paths stay separable — `'pledge'` (components/Board.tsx, the honor
+ * pledge), `'proof'` (components/ProofSheet.tsx, a proof attach), and
+ * `'admin_confirm'` (data/admin.ts, an admin-confirmed claim reaching
+ * `confirmed`). The instant Board unmark fires the separate `unmark_square`
+ * (mode only, no `source`) instead of `mark_square { marked: false }` — a
+ * raw `mark_square` count is therefore always "Squares Players marked," never
+ * polluted by unmarks. Echo Marks (a Square pre-marked by achievement on
+ * ANOTHER of the Player's Day Cards, not by any tap) fire the separate
+ * `echo_mark` from data/api.ts, deliberately excluded from both `source` sets
+ * — see `echo_mark`'s own catalog comment below and specs/w2-ga4-events.md §
+ * Reconciliation.
  */
 export const GA4_EVENTS = [
   'login',
@@ -67,6 +81,26 @@ export const GA4_EVENTS = [
   // reverting players' marks.
   // Call site: src/data/api.ts (setMark's commit-rejection handler).
   'mark_rejected',
+  // Unmark (#721, specs/w2-ga4-events.md § Reconciliation): a Square's
+  // marked cell transitioned back to unmarked via the Board's instant tap
+  // (`toggle` → `doMark`). Split out of `mark_square` — which used to fire
+  // `{ marked: false }` for this same transition, the #721 root cause (a raw
+  // `mark_square` count mixed unmarks in with marks) — so counting "Squares
+  // marked" never requires filtering a boolean by hand. Params: `mode`
+  // (ClaimMode). Call site: components/Board.tsx.
+  'unmark_square',
+  // Echo Mark (#721, specs/echo-marks.md, specs/w2-ga4-events.md §
+  // Reconciliation): a Square was pre-marked by the Echo Marks system — a
+  // Prompt already achieved on ANOTHER of the Player's Day Cards — not by a
+  // tap. Deliberately its OWN event, not a `mark_square` source: an echo
+  // carries no player action on the receiving card, so folding it into
+  // `mark_square` would reintroduce the exact source-conflation #721 fixes,
+  // just one level down. Fires from all four propagation paths (deal-time,
+  // reshuffle, mark-time cascade, open-time reconcile). Params: `trigger`
+  // ('deal' | 'reshuffle' | 'mark' | 'open_reconcile'), `dayIndex` (the
+  // receiving/opened board's Day), `count` (Squares newly echoed by this
+  // write — always >= 1). Call site: src/data/api.ts.
+  'echo_mark',
 ] as const;
 
 export type GA4EventName = (typeof GA4_EVENTS)[number];
@@ -118,11 +152,12 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
   phCapture(name, params);
   // Install nudge trigger (#219, daily-cards-spec § "Install nudge and
   // update banner"): reuses this existing `mark_square` call site as the
-  // signal instead of a new one in Board.tsx — see useToastStack's module doc.
-  // Gated on `marked === true` (Codex review, PR #238): Board.doMark fires
-  // this same event for unmarking too, and an unmark shouldn't count as
-  // "the Player marked a Square on this device" (e.g. marks synced from
-  // another device, then undone here first).
+  // signal instead of a new one per source — see useToastStack's module doc.
+  // Every `mark_square` emission now carries `marked: true` by construction
+  // (#721 split the unmark direction into its own `unmark_square` event, so
+  // `mark_square` itself never fires for an unmark), but the explicit guard
+  // is kept as a defensive invariant matching the documented event contract
+  // rather than trusting every future call site to honor it silently.
   if (name === 'mark_square' && params?.marked === true) markSquareOccurred();
 }
 
