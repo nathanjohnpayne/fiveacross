@@ -32,7 +32,7 @@ Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode a
 `gh project item-add` does not set Status on its own—whether or not the built-in workflow above is enabled, treat a freshly added item as landing with **no Status** and set it explicitly:
 
 ```bash
-gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
+scripts/gh-as-author.sh -- gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
 PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Backlog"
 ```

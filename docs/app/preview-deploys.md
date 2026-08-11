@@ -12,7 +12,7 @@ It is the Vercel branch URL of a dedicated `preview` branch, and it always serve
 
 ## Which Vercel hosts can sign in, and why
 
-Every host whose auth domain is not self-pinned via ADR 0010's same-origin escape hatch (see the single-Event custom-domain row below) must complete Google sign-in registered **three times**, all by exact hostname: in `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts`), in Firebase Authentication's authorized domains, and as an authorized redirect URI on a Google OAuth web client. None of the three accepts a wildcard, which is the whole reason this page exists.
+Every host needs Google sign-in registered by exact hostname in Firebase Authentication's authorized domains and as an authorized redirect URI on a Google OAuth web client—self-pinning does not exempt either of those, and neither accepts a wildcard. The third registration, `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts`), is the one ADR 0010's same-origin escape hatch removes: a host whose auth domain is self-pinned to itself (see the single-Event custom-domain row below) needs no cross-origin allowlist entry, so it completes only the first two. Every host whose auth domain is NOT self-pinned still needs all three—which is the whole reason this page exists.
 
 | Host | Signs in? | Why |
 |---|---|---|
