@@ -71,6 +71,31 @@ describe('coerceEventPreview — fail-soft field-by-field read', () => {
     expect(got).toEqual({ eventName: 'Weekend in Bodega Bay', hostedBy: 'Kim' });
   });
 
+  it('drops the whole schedule on an out-of-order or duplicate date — never renumbers or misfires the ordinal', () => {
+    // Codex P2 on #653: previewDayLine finds "today" with `findIndex` and
+    // reports the array position as the Day number, so a schedule that isn't
+    // strictly increasing could skip the current day or announce the wrong
+    // ordinal instead of failing soft.
+    const outOfOrder = coerceEventPreview({
+      eventName: 'Weekend in Bodega Bay',
+      hostedBy: 'Kim',
+      days: [
+        { date: '2026-08-08', title: 'Side Quests' },
+        { date: '2026-08-07', title: 'The Birds Have Entered the Chat' },
+      ],
+    });
+    expect(outOfOrder).toEqual({ eventName: 'Weekend in Bodega Bay', hostedBy: 'Kim' });
+
+    const duplicate = coerceEventPreview({
+      eventName: 'Weekend in Bodega Bay',
+      days: [
+        { date: '2026-08-07', title: 'The Birds Have Entered the Chat' },
+        { date: '2026-08-07', title: 'Duplicate Day' },
+      ],
+    });
+    expect(duplicate).toEqual({ eventName: 'Weekend in Bodega Bay' });
+  });
+
   it('drops the whole schedule when a date has ISO shape but is not a calendar day', () => {
     for (const date of ['2026-13-01', '2026-02-31']) {
       expect(

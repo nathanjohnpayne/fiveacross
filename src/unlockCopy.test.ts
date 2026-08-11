@@ -180,5 +180,19 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
         expect(boundary as number).toBeGreaterThan(now);
       }
     });
+
+    // Codex P2 on #674: sampling the offset only at `now` breaks across a DST
+    // transition. Spring-forward 2026 in America/Los_Angeles lands at 2 a.m.
+    // on March 8 (PST → PDT). At 1:30 a.m. that morning the runner's own
+    // offset is still PST, but the boundary being computed — midnight
+    // starting March 9 — falls entirely after the jump, in PDT. The old
+    // now-sampled offset scheduled that boundary an hour late.
+    it('resolves the target midnight in the offset that applies THERE, across a spring-forward night', () => {
+      const springForwardDays: DayDef[] = [
+        day({ index: 0, pool: 'main', unlockAt: at('2026-03-09T06:00:00-07:00'), date: '2026-03-09' }),
+      ];
+      const now = at('2026-03-08T01:30:00-08:00'); // still PST, before the 2 a.m. jump
+      expect(nextChaosBoundary(springForwardDays, TZ, now)).toBe(at('2026-03-09T00:00:00-07:00'));
+    });
   });
 });

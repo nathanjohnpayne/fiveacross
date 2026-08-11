@@ -193,12 +193,6 @@ function zoneOffsetMs(at: number, timezone: string | undefined): number {
  * #670): either the unlock itself — after which the sentence retires — or the
  * Event zone's next midnight, which is what turns "tomorrow" into "later
  * today". `null` once there is no sentence left to maintain.
- *
- * Across a DST transition the computed midnight can land an hour early or late,
- * since the offset is sampled at `now` rather than at the boundary. The caller
- * re-arms after every tick, so the worst case is one extra wake-up (early) or a
- * caption an hour stale on one night a year (late) — not worth an exact-zone
- * arithmetic library for a banner.
  */
 export function nextChaosBoundary(
   days: readonly DayDef[] | undefined,
@@ -207,8 +201,28 @@ export function nextChaosBoundary(
 ): number | null {
   const first = firstChaosDay(days);
   if (!first || first.unlockAt <= now) return null;
-  const offset = zoneOffsetMs(now, timezone);
+  return Math.min(first.unlockAt, nextLocalMidnightMs(now, timezone));
+}
+
+/**
+ * The next instant at which the Event zone's wall-clock date rolls over.
+ * Resolved with the offset that actually applies at the boundary rather than
+ * the offset at `at`: on a DST-transition night those differ, and sampling
+ * only at `at` schedules the refresh an hour early or late (Codex P2 on
+ * #674). The offset changes by at most a couple of hours around a transition,
+ * so re-deriving the candidate against the newly-sampled offset converges in
+ * a bounded number of steps.
+ */
+function nextLocalMidnightMs(at: number, timezone: string | undefined): number {
   const dayMs = 86_400_000;
-  const nextMidnight = (Math.floor((now + offset) / dayMs) + 1) * dayMs - offset;
-  return Math.min(first.unlockAt, nextMidnight);
+  let offset = zoneOffsetMs(at, timezone);
+  const localDayIndex = Math.floor((at + offset) / dayMs) + 1;
+  let candidate = localDayIndex * dayMs - offset;
+  for (let i = 0; i < 4; i++) {
+    const offsetAtCandidate = zoneOffsetMs(candidate, timezone);
+    if (offsetAtCandidate === offset) break;
+    offset = offsetAtCandidate;
+    candidate = localDayIndex * dayMs - offset;
+  }
+  return candidate;
 }
