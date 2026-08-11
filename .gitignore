@@ -13,7 +13,6 @@ build/
 # exception keeps the committed target template visible to new checkouts.
 /.env.*
 !/.env.example
-!/.env.tpl
 *.pem
 *.key
 
