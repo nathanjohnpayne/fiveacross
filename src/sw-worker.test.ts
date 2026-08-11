@@ -57,11 +57,16 @@ function installFakeWorker() {
   vi.stubGlobal('self', self);
 
   const cache = {
-    match: vi.fn(async (k: string) => sharedCacheStore.get(k)),
+    match: vi.fn(async (k: string | { url: string }) =>
+      sharedCacheStore.get(typeof k === 'string' ? k : new URL(k.url).pathname)?.clone(),
+    ),
     put: vi.fn(async (k: string, v: Response) => {
       sharedCacheStore.set(k, v);
     }),
     delete: vi.fn(async (k: string) => sharedCacheStore.delete(k)),
+    // The #516 registry keeps one record per window, so reading it enumerates
+    // the cache; the real API hands back Requests carrying an absolute url.
+    keys: vi.fn(async () => [...sharedCacheStore.keys()].map((k) => ({ url: new URL(k, location.origin).href }))),
   };
   const deletedCaches: string[] = [];
   vi.stubGlobal('caches', {
@@ -435,6 +440,49 @@ describe('the rescue tracks what each tab EXECUTES, not just the served shell (#
     expect(w.self.skipWaiting).not.toHaveBeenCalled();
   });
 
+  /** The same-origin window Firebase opens for Google sign-in. It is not our
+   *  page: it never runs main.tsx, so it can never post `CLIENT_BUILD`. */
+  function withSignInPopup(w: ReturnType<typeof twoTabsOnDifferentBuilds>) {
+    const popup = {
+      url: 'https://gaycruisebingo.com/__/auth/handler?apiKey=x&providerId=google.com',
+      id: 'oauth-popup',
+      navigate: vi.fn(async (u: string) => w.navigated.push(u)),
+    };
+    w.clients.push(popup);
+    return popup;
+  }
+
+  it('does not treat an open sign-in popup as a stranded client', async () => {
+    // Codex P2 round 3. The popup is unregistered by construction, and an
+    // unregistered live window is force evidence — so without the `/__/*`
+    // filter, simply having sign-in open force-activates the whole fleet under
+    // an armed floor with every actual app tab already on the current build.
+    const w = twoTabsOnDifferentBuilds();
+    withSignInPopup(w);
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('never navigates the sign-in popup, even on a genuine forced activation', async () => {
+    // `claim()` takes the popup over too, and reloading it mid-flow dead-ends
+    // Google sign-in — a far worse regression than the stale tab being rescued
+    // here. src/sw.ts already refuses to serve the app shell into that
+    // namespace for the same reason (#182).
+    const w = twoTabsOnDifferentBuilds();
+    withSignInPopup(w);
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await nameBuilds(w); // tab-1 stale, tab-2 current
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
   it('ignores a CLIENT_BUILD with no client id or no stamp', async () => {
     const w = twoTabsOnDifferentBuilds();
     stubFloor(ARMED_FLOOR);
@@ -446,7 +494,19 @@ describe('the rescue tracks what each tab EXECUTES, not just the served shell (#
     // window IS force evidence (Codex P1 round 2), so a "no rescue" assertion
     // here would pass for the malformed-message reason and fail for the right
     // one the moment the rollout case was fixed.
-    expect(w.cacheStore.get('/__gcb-client-builds')).toBeUndefined();
+    expect([...w.cacheStore.keys()].filter((k) => k.startsWith('/__gcb-client-build/'))).toEqual([]);
+  });
+
+  it('keys the registry per window, so nothing a page posts can clobber another', async () => {
+    // Codex P2 round 3, from the worker side: the record the active worker
+    // writes for one tab is a different cache entry from every other tab's, so
+    // an installing worker sweeping concurrently has nothing to lose.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    await nameBuilds(w);
+    const keys = [...w.cacheStore.keys()].filter((k) => k.startsWith('/__gcb-client-build/')).sort();
+    expect(keys).toEqual(['/__gcb-client-build/tab-1', '/__gcb-client-build/tab-2']);
   });
 });
 

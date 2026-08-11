@@ -1,19 +1,20 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   ACTIVE_STAMP_URL,
+  CLIENT_STAMP_SWEEP_GRACE_MS,
   FORCED_FLAG_URL,
   SHELL_META_CACHE,
   UNKNOWN_ACTIVE_STAMP,
   dueForFloorRecheck,
   fetchFloorInWorker,
   fetchFloorWithRetry,
+  isAppShellClientUrl,
   recordFloorCheck,
   markForcedActivation,
   pruneClientStamps,
   readActiveStamp,
   readClientStamps,
   recordClientStamp,
-  retainLiveClients,
   shouldForceActivate,
   shouldNavigateClient,
   takeForcedActivation,
@@ -72,6 +73,13 @@ describe('shouldForceActivate', () => {
   });
 });
 
+/** The real Cache API matches a Request against the url it was stored under;
+ *  this fake stores by the path the worker passes, so a Request-shaped lookup
+ *  has to come back to that path. */
+function storeKey(k: string | { url: string }): string {
+  return typeof k === 'string' ? k : new URL(k.url).pathname;
+}
+
 function fakeCacheStorage(initial?: unknown) {
   const store = new Map<string, Response>();
   if (initial !== undefined) store.set(ACTIVE_STAMP_URL, new Response(JSON.stringify(initial)));
@@ -80,11 +88,14 @@ function fakeCacheStorage(initial?: unknown) {
     // Cache API hands back a fresh Response per `match`. Returning the stored
     // instance made a second read throw on a locked body — a fixture artifact
     // that looked exactly like a storage failure.
-    match: vi.fn(async (k: string) => store.get(k)?.clone()),
+    match: vi.fn(async (k: string | { url: string }) => store.get(storeKey(k))?.clone()),
     put: vi.fn(async (k: string, v: Response) => {
       store.set(k, v);
     }),
     delete: vi.fn(async (k: string) => store.delete(k)),
+    // The real API hands back Requests, whose `url` is absolute. Modelled that
+    // way so the key parsing is exercised, not bypassed.
+    keys: vi.fn(async () => [...store.keys()].map((k) => ({ url: new URL(k, 'https://gcb.test').href }))),
   };
   return { open: vi.fn(async () => cache), _store: store, _cache: cache } as unknown as CacheStorage & {
     _store: Map<string, Response>;
@@ -338,26 +349,62 @@ describe('the client build registry (#516)', () => {
 
   it('evicts windows that are gone, so a closed tab cannot condemn the fleet forever', async () => {
     const cs = fakeCacheStorage();
-    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
-    await expect(pruneClientStamps(cs, ['tab-2'])).resolves.toEqual({});
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1'], 1_000_000);
+    const later = 1_000_000 + CLIENT_STAMP_SWEEP_GRACE_MS + 1;
+    await expect(pruneClientStamps(cs, ['tab-2'], later)).resolves.toEqual({});
+    await expect(readClientStamps(cs)).resolves.toEqual({});
   });
 
-  it('keeps everything when the live set cannot be read at all', () => {
+  it('never sweeps a record younger than the grace, whatever the live set says', async () => {
+    // The live ids a sweep runs against are enumerated BEFORE it — matchAll is
+    // async — so a window that opened in between is alive and absent from the
+    // snapshot. Deleting its record would make an accepted tab read as
+    // unregistered and get navigated, which is the harm the per-key records
+    // exist to prevent, arriving by a different road.
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-late', NEW_SHELL, null, 1_000_000);
+    await expect(pruneClientStamps(cs, ['tab-1'], 1_000_000 + 10)).resolves.toEqual({ 'tab-late': NEW_SHELL });
+  });
+
+  it('keeps everything when the live set cannot be read at all', async () => {
     // Null is not "no windows are open": forgetting a tab that is still open
     // costs the rescue its evidence, while remembering a dead one costs at most
     // one force-activation that then navigates nobody.
-    expect(retainLiveClients({ 'tab-1': OLD_SHELL }, null)).toEqual({ 'tab-1': OLD_SHELL });
-    expect(retainLiveClients({ 'tab-1': OLD_SHELL }, [])).toEqual({});
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, null, 1_000_000);
+    const later = 1_000_000 + CLIENT_STAMP_SWEEP_GRACE_MS + 1;
+    await expect(pruneClientStamps(cs, null, later)).resolves.toEqual({ 'tab-1': OLD_SHELL });
+    await expect(pruneClientStamps(cs, [], later)).resolves.toEqual({});
   });
 
-  it('drops malformed entries and never throws when storage refuses', async () => {
+  it('drops malformed records and never throws when storage refuses', async () => {
     const cs = fakeCacheStorage();
     const cache = await cs.open(SHELL_META_CACHE);
-    await cache.put('/__gcb-client-builds', new Response(JSON.stringify({ a: 42, b: '', c: NEW_SHELL })));
+    await cache.put('/__gcb-client-build/a', new Response(JSON.stringify({ stamp: 42 })));
+    await cache.put('/__gcb-client-build/b', new Response(JSON.stringify({ stamp: '' })));
+    await cache.put('/__gcb-client-build/c', new Response(JSON.stringify({ stamp: NEW_SHELL })));
     await expect(readClientStamps(cs)).resolves.toEqual({ c: NEW_SHELL });
     const broken = { open: async () => Promise.reject(new Error('blocked')) } as unknown as CacheStorage;
     await expect(readClientStamps(broken)).resolves.toEqual({});
     await expect(recordClientStamp(broken, 'tab-1', NEW_SHELL, null)).resolves.toBeUndefined();
+  });
+
+  it('reads past the OTHER records living in the same cache', async () => {
+    // `gcb-shell-meta` also holds the active stamp, the forced-activation
+    // marker, and the floor throttle. Enumerating the cache has to tell those
+    // apart from a client record rather than treating every key as one.
+    const cs = fakeCacheStorage();
+    await writeActiveStamp(cs, NEW_SHELL);
+    await markForcedActivation(cs, NEW_SHELL, ARMED_FLOOR);
+    await recordFloorCheck(cs, 1_000_000, true);
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL });
+  });
+
+  it('round-trips a client id that is not url-safe', async () => {
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab/one?two#three', OLD_SHELL, ['tab/one?two#three']);
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab/one?two#three': OLD_SHELL });
   });
 
   it('rescues a tab still EXECUTING an old build behind an up-to-date served shell', () => {
@@ -433,13 +480,25 @@ describe('the client build registry (#516)', () => {
     ).toBe(false);
   });
 
-  it('serializes overlapping writes, so two tabs naming themselves at once cannot lose one', async () => {
-    // Codex P2. Each write is a read-modify-write across four awaits, and the
-    // worker runs each on its own microtask — so two overlapping `CLIENT_BUILD`
-    // handlers both read the same old map and the second `put` discards the
-    // first. Losing the STALE tab costs the install decision its evidence;
-    // losing a CURRENT tab makes it look unregistered and navigates it for
-    // nothing.
+  it('gives every window its OWN record, so no write can reach another window`s', async () => {
+    // Codex P2 round 3, and the structural statement of the fix. Round 2
+    // ordered the writes with a module-scope promise chain, which is per-GLOBAL
+    // state: a page posts `CLIENT_BUILD` to the ACTIVE worker while a
+    // replacement worker sweeps the same record from its own `install`, and
+    // those two globals hold two separate chains that cannot order each other.
+    // Nothing here can be serialized across worker versions, so the fix is to
+    // need no serialization: a registration writes exactly one key, its own.
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
+    cs._cache.put.mockClear();
+    await recordClientStamp(cs, 'tab-2', NEW_SHELL, ['tab-1', 'tab-2']);
+    const written = cs._cache.put.mock.calls.map((call) => String(call[0]));
+    expect(written).toEqual([expect.stringContaining('tab-2')]);
+    expect(written[0]).not.toContain('tab-1');
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL });
+  });
+
+  it('loses neither of two windows naming themselves at the same instant', async () => {
     const cs = fakeCacheStorage();
     await Promise.all([
       recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1', 'tab-2']),
@@ -448,17 +507,44 @@ describe('the client build registry (#516)', () => {
     await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL });
   });
 
-  it('serializes a sweep racing a write, which rewrites the same record', async () => {
+  it('loses nothing when a sweep in ANOTHER worker overlaps a write in this one', async () => {
+    // The cross-version case in the shape it actually takes: the installing
+    // worker's sweep interleaved with the active worker's registration. No
+    // shared state is available to order them, and none is needed.
     const cs = fakeCacheStorage();
     await recordClientStamp(cs, 'tab-1', OLD_SHELL, ['tab-1']);
     const [, swept] = await Promise.all([
       recordClientStamp(cs, 'tab-2', NEW_SHELL, ['tab-1', 'tab-2']),
       pruneClientStamps(cs, ['tab-1', 'tab-2']),
     ]);
-    // Whichever order the two land in, the sweep cannot drop an entry the
-    // concurrent write added, and the write cannot resurrect one it dropped.
     expect(Object.keys(swept).length).toBeGreaterThanOrEqual(1);
     await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-1': OLD_SHELL, 'tab-2': NEW_SHELL });
+  });
+
+  it('a sweep deleting a dead window leaves a live one`s record untouched', async () => {
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'gone', OLD_SHELL, null, 1_000_000);
+    await recordClientStamp(cs, 'here', NEW_SHELL, null, 1_000_000);
+    const later = 1_000_000 + CLIENT_STAMP_SWEEP_GRACE_MS + 1;
+    await expect(pruneClientStamps(cs, ['here'], later)).resolves.toEqual({ here: NEW_SHELL });
+    await expect(readClientStamps(cs)).resolves.toEqual({ here: NEW_SHELL });
+  });
+
+  it('does not count a Firebase sign-in popup as one of our windows', () => {
+    // Codex P2 round 3. `/__/auth/handler` is a same-origin window that is not
+    // our page: it never runs main.tsx, so it never posts `CLIENT_BUILD` and is
+    // absent from the registry — the exact shape the rescue reads as "ancient,
+    // condemn it". Unfiltered, an open sign-in popup force-activates the fleet
+    // on an armed floor with no stale app tab anywhere, and then gets navigated
+    // out of the OAuth flow.
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/__/auth/handler?apiKey=x')).toBe(false);
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/__/auth/iframe')).toBe(false);
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/')).toBe(true);
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/board?day=3')).toBe(true);
+    // A path that merely LOOKS reserved is ours; only the namespace is not.
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/__notauth')).toBe(true);
+    // Unidentifiable reads as not-ours, so it is left strictly alone.
+    expect(isAppShellClientUrl('not a url')).toBe(false);
   });
 
   it('navigates exactly the windows the floor condemns', () => {

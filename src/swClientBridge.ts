@@ -20,8 +20,25 @@ import { askWorkerBuildStamp } from './updateDismissal';
  *  pins the name from the worker side. */
 export const CLIENT_BUILD_MESSAGE = 'CLIENT_BUILD';
 
+/**
+ * The container, or undefined where there is none — INCLUDING where merely
+ * asking is an error (Codex P2 round 3).
+ *
+ * `navigator.serviceWorker` is not always a plain absent property: in a
+ * sandboxed iframe and in a few privacy modes the getter itself throws a
+ * `SecurityError`. This function is the DEFAULT ARGUMENT of both exports, so it
+ * runs before either of them reaches its own `try` — and `main.tsx` calls
+ * `postClientBuild()` synchronously at module scope, so an exception escaping
+ * here would abort application startup rather than degrade to the no-op this
+ * file promises. Catching at the access is the only place that covers every
+ * caller, present and future.
+ */
 function swContainer(): ServiceWorkerContainer | undefined {
-  return typeof navigator !== 'undefined' ? navigator.serviceWorker : undefined;
+  try {
+    return typeof navigator !== 'undefined' ? navigator.serviceWorker : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -96,34 +113,58 @@ function requestReload(reload: () => void): void {
 }
 
 /**
- * Re-asks on the next thing that could plausibly have ENDED the interaction:
- * the tab's visibility changing, or the claim sheet closing. Visibility alone
- * is not enough now that the claim sheet defers a hidden tab too — a player who
- * backgrounds the app to take the photo and comes back to finish the claim
- * would otherwise get one `visibilitychange`, still be mid-capture, and then
- * wait for another that may never come.
+ * Waits for the interaction to actually END, watching every signal that could
+ * end one. There is exactly ONE activation event to spend, so a deferral that
+ * misses its cue does not merely delay the reload — it loses it, and the tab
+ * stays on the old build for the rest of its life.
  *
- * Both listeners are one-shot and tear each other down, so a deferral that
- * re-defers replaces its listeners rather than stacking them.
+ * Three signals, because each of the three things `midInteraction` consults
+ * ends in its own way:
+ *
+ *  - VISIBILITY, for a backgrounded tab coming forward;
+ *  - THE CLAIM SHEET, which is a module singleton with its own subscription and
+ *    touches no DOM this module can watch. Visibility alone is not enough now
+ *    that the claim sheet defers a hidden tab too — a player who backgrounds
+ *    the app to take the photo and comes back to finish the claim would get one
+ *    `visibilitychange`, still be mid-capture, and then wait for another that
+ *    may never come;
+ *  - THE DOM, for the generic `role="dialog"` sheets (Codex P2 round 3). The
+ *    profile, reshuffle, and More sheets close by unmounting, which fires
+ *    neither of the other two, so a player who opened one while a deploy landed
+ *    was stranded until some later visibility change that may never come.
+ *    Watching the tree is what closes that class rather than enumerating the
+ *    sheets one by one: any modal `midInteraction` can see, this can see leave.
+ *
+ * The listeners persist and simply re-ask until nothing is in the way, so a
+ * signal that fires mid-interaction costs nothing and none of them can stack.
  */
 function deferReload(reload: () => void): void {
   const doc = typeof document !== 'undefined' ? document : null;
   const cleanups: Array<() => void> = [];
-  let done = false;
-  const retry = () => {
-    if (done) return;
-    done = true;
+  let settled = false;
+  const recheck = () => {
+    if (settled || midInteraction()) return;
+    settled = true;
     cleanups.forEach((fn) => fn());
     requestReload(reload);
   };
-  const onVisibilityChange = () => retry();
-  doc?.addEventListener('visibilitychange', onVisibilityChange, { once: true });
-  cleanups.push(() => doc?.removeEventListener('visibilitychange', onVisibilityChange));
-  cleanups.push(
-    subscribeClaimSheetOpen(() => {
-      if (!isClaimSheetOpen()) retry();
-    }),
-  );
+  doc?.addEventListener('visibilitychange', recheck);
+  cleanups.push(() => doc?.removeEventListener('visibilitychange', recheck));
+  cleanups.push(subscribeClaimSheetOpen(recheck));
+  const root = doc?.body ?? doc?.documentElement;
+  if (root && typeof MutationObserver !== 'undefined') {
+    const observer = new MutationObserver(recheck);
+    // Narrow on purpose: a modal leaves `midInteraction`'s query either by
+    // being removed from the tree or by dropping one of the two attributes it
+    // matches on, and nothing else about the page needs watching.
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['role', 'aria-modal'],
+    });
+    cleanups.push(() => observer.disconnect());
+  }
 }
 
 /**
@@ -168,21 +209,36 @@ export async function armUncontrolledUpdateReload(
   try {
     if (!container || container.controller) return;
     const registration = await container.ready;
-    // The worker that got here before the listener could be attached.
-    await reloadIfPageIsBehind(registration.active, pageStamp, askStamp, reload);
-    registration.addEventListener('updatefound', () => {
-      const installing = registration.installing;
-      if (!installing) return;
+    const watched = new WeakSet<object>();
+    const watch = (worker: ServiceWorker | null | undefined) => {
+      if (!worker || watched.has(worker)) return;
+      watched.add(worker);
       // Read NOW, while the outgoing worker is still the active one: a worker
       // taking over from another IS a deploy landing underneath this page, and
       // needs no stamp query to prove it.
-      const replacesAnActiveWorker = registration.active !== null;
-      installing.addEventListener('statechange', () => {
-        if (installing.state !== 'activated') return;
+      const replacesAnActiveWorker = registration.active !== null && registration.active !== worker;
+      worker.addEventListener('statechange', () => {
+        if (worker.state !== 'activated') return;
         if (replacesAnActiveWorker) requestReload(reload);
-        else void reloadIfPageIsBehind(installing, pageStamp, askStamp, reload);
+        else void reloadIfPageIsBehind(worker, pageStamp, askStamp, reload);
       });
-    });
+    };
+    // ATTACHED BEFORE THE STAMP QUERY BELOW, and that ordering is the point
+    // (Codex P2 round 3). That query is a `postMessage` round trip with a
+    // timeout, so it can be pending for seconds; a deploy activating inside
+    // that window would dispatch `updatefound` to nobody, the old worker would
+    // answer with the page's own stamp, and the tab would sit on the dead build
+    // for the rest of its life. There is only ever one activation to catch.
+    registration.addEventListener('updatefound', () => watch(registration.installing));
+    // An update ALREADY in flight when the registration resolved never
+    // dispatches `updatefound` to a listener attached now: `container.ready`
+    // waits for an ACTIVE worker, which says nothing about whether a
+    // replacement started installing first. Pick those up by hand — `watch`
+    // dedupes, so a worker that also arrives via the event is only watched once.
+    watch(registration.installing);
+    watch(registration.waiting);
+    // The worker that got here before any of the above could be attached.
+    await reloadIfPageIsBehind(registration.active, pageStamp, askStamp, reload);
   } catch {
     /* no service worker, or a registration that never becomes ready */
   }

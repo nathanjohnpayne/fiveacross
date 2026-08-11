@@ -34,6 +34,7 @@ import {
   clearForcedActivation,
   dueForFloorRecheck,
   fetchFloorWithRetry,
+  isAppShellClientUrl,
   recordFloorCheck,
   markForcedActivation,
   pruneClientStamps,
@@ -186,17 +187,28 @@ async function registerClientBuild(clientId: string, stamp: string): Promise<voi
   }
 }
 
-/** Every open window's id, or null when the list cannot be read at all —
- *  `retainLiveClients` treats those two very differently. `includeUncontrolled`
- *  because an installing worker controls nothing yet, and the whole point of
- *  this registry is the tabs it does not yet own. */
-async function liveWindowIds(): Promise<string[] | null> {
+/** Every open window that is one of OUR pages, or null when the list cannot be
+ *  read at all — `pruneClientStamps` treats those two very differently.
+ *  `includeUncontrolled` because an installing worker controls nothing yet, and
+ *  the whole point of this registry is the tabs it does not yet own.
+ *
+ *  The `/__/*` filter is load-bearing (Codex P2 round 3 on #516): a Google
+ *  sign-in popup is a same-origin window that never posts `CLIENT_BUILD`, so
+ *  without it an open sign-in reads as an ancient client — force-activating the
+ *  fleet on an armed floor with no stale app tab anywhere, and then navigating
+ *  the popup out of the OAuth flow. See `isAppShellClientUrl`. */
+async function appShellWindows(options: ClientQueryOptions): Promise<Client[] | null> {
   try {
-    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    return windows.map((client) => client.id);
+    const windows = await self.clients.matchAll({ type: 'window', ...options });
+    return windows.filter((client) => isAppShellClientUrl(client.url));
   } catch {
     return null;
   }
+}
+
+async function liveWindowIds(): Promise<string[] | null> {
+  const windows = await appShellWindows({ includeUncontrolled: true });
+  return windows ? windows.map((client) => client.id) : null;
 }
 
 // --- The rescue (#514) ------------------------------------------------------
@@ -286,7 +298,9 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
         // be asked to do anything — it may be showing a blank screen with its
         // React tree already torn down, which is precisely how clients got
         // stranded in the first place.
-        const windows = await self.clients.matchAll({ type: 'window' });
+        // Same `/__/*` exclusion as the decision above: `claim()` takes over
+        // the sign-in popup too, and navigating it would abort the OAuth flow.
+        const windows = (await appShellWindows({})) ?? [];
         // Only the windows the floor actually condemns (#516). A tab that has
         // already reloaded onto an accepted build is left alone: navigating it
         // would discard whatever the player is doing there and rescue nobody.

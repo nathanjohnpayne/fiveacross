@@ -34,7 +34,12 @@ function fakeEmitter() {
 }
 
 function fakeRegistration() {
-  return { ...fakeEmitter(), active: null as unknown, installing: null as ReturnType<typeof fakeWorker> | null };
+  return {
+    ...fakeEmitter(),
+    active: null as unknown,
+    installing: null as ReturnType<typeof fakeWorker> | null,
+    waiting: null as ReturnType<typeof fakeWorker> | null,
+  };
 }
 
 function fakeContainer(registration: ReturnType<typeof fakeRegistration>, controller: unknown = null) {
@@ -81,6 +86,45 @@ describe('postClientBuild (#516)', () => {
 
   it('is a no-op where service workers do not exist', () => {
     expect(() => postClientBuild(OLD_SHELL, undefined)).not.toThrow();
+  });
+});
+
+// Codex P2 round 3. `navigator.serviceWorker` is not always a plainly absent
+// property: in a sandboxed iframe and in a few privacy modes the GETTER throws
+// a SecurityError. It is read while evaluating each export's default argument,
+// which happens before that export reaches its own `try` — and `main.tsx` calls
+// `postClientBuild()` synchronously at module scope, so an escape there aborts
+// application startup rather than degrading to the documented no-op.
+describe('a serviceWorker getter that THROWS', () => {
+  function withThrowingGetter(body: () => void | Promise<void>) {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      get() {
+        throw new DOMException('service workers are blocked here', 'SecurityError');
+      },
+    });
+    const restore = () => {
+      if (original) Object.defineProperty(navigator, 'serviceWorker', original);
+      else Reflect.deleteProperty(navigator, 'serviceWorker');
+    };
+    return Promise.resolve()
+      .then(body)
+      .finally(restore);
+  }
+
+  it('cannot take down module-scope startup', async () => {
+    await withThrowingGetter(() => {
+      expect(() => postClientBuild(OLD_SHELL)).not.toThrow();
+    });
+  });
+
+  it('leaves the update watcher a quiet no-op rather than an unhandled rejection', async () => {
+    // `main.tsx` fires this one as `void armUncontrolledUpdateReload()`, so a
+    // rejection has nowhere to go.
+    await withThrowingGetter(async () => {
+      await expect(armUncontrolledUpdateReload()).resolves.toBeUndefined();
+    });
   });
 });
 
@@ -154,6 +198,79 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     expect(reload).not.toHaveBeenCalled();
     document.body.innerHTML = '';
     document.dispatchEvent(new Event('visibilitychange'));
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('retries when an ORDINARY modal closes with no visibility change (Codex P2)', async () => {
+    // The profile, reshuffle, and More sheets close by unmounting: no
+    // `visibilitychange`, no claim-sheet signal. There is exactly one
+    // activation event to spend, so a deferral that misses its cue does not
+    // delay the reload, it loses it — the tab stays on the old build for good.
+    const { registration, reload } = await armed();
+    document.body.innerHTML = '<div role="dialog" aria-modal="true">profile</div>';
+    deployLands(registration);
+    expect(reload).not.toHaveBeenCalled();
+    document.body.innerHTML = '';
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  });
+
+  it('keeps waiting while a modal is merely REPLACED by another', async () => {
+    // The DOM watcher re-asks rather than firing; a mutation is not by itself
+    // the end of an interaction.
+    const { registration, reload } = await armed();
+    document.body.innerHTML = '<div role="dialog" aria-modal="true">profile</div>';
+    deployLands(registration);
+    document.body.innerHTML = '<div role="dialog" aria-modal="true">reshuffle</div>';
+    await Promise.resolve();
+    expect(reload).not.toHaveBeenCalled();
+    document.body.innerHTML = '';
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  });
+
+  it('does not miss a deploy that lands WHILE the first stamp query is pending', async () => {
+    // Codex P2 round 3. The query is a postMessage round trip with a timeout,
+    // so it can be pending for seconds. A worker activating inside that window
+    // used to dispatch `updatefound` to nobody — the listener was attached on
+    // the line after the await — while the OLD worker answered with the page's
+    // own stamp, so nothing reloaded and the tab stayed stale for good.
+    const registration = fakeRegistration();
+    registration.active = { id: 'sw-a' };
+    const container = fakeContainer(registration);
+    const reload = vi.fn();
+    const askStamp = vi.fn(async () => {
+      deployLands(registration);
+      return PAGE_BUILD; // the outgoing worker: no mismatch to act on
+    });
+    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, askStamp);
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('picks up an update that was ALREADY installing when the registration resolved', async () => {
+    // One level down from the finding: `container.ready` waits only for an
+    // ACTIVE worker, which says nothing about whether a replacement started
+    // installing first. That worker's `updatefound` is already history, so a
+    // listener attached first still never hears about it.
+    const registration = fakeRegistration();
+    registration.active = { id: 'sw-a' };
+    const installing = fakeWorker();
+    registration.installing = installing;
+    const container = fakeContainer(registration);
+    const reload = vi.fn();
+    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => PAGE_BUILD);
+    installing.become('activated');
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('watches a worker exactly once however many ways it arrives', async () => {
+    const registration = fakeRegistration();
+    registration.active = { id: 'sw-a' };
+    const installing = fakeWorker();
+    registration.installing = installing;
+    const container = fakeContainer(registration);
+    const reload = vi.fn();
+    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => PAGE_BUILD);
+    registration.emit('updatefound'); // same worker, announced again
+    installing.become('activated');
     expect(reload).toHaveBeenCalledOnce();
   });
 });

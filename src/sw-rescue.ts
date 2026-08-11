@@ -39,13 +39,77 @@ export const FORCED_FLAG_URL = '/__gcb-forced-activation';
 /** Synthetic key holding when the ACTIVE worker last re-read the floor. */
 export const FLOOR_CHECKED_URL = '/__gcb-floor-checked-at';
 
-/** Synthetic key holding what each OPEN WINDOW is EXECUTING (#516) — a
- *  `clientId -> build stamp` map. Same cache as the records above, so it
- *  survives the worker teardown the lifecycle permits between events. */
-export const CLIENT_STAMPS_URL = '/__gcb-client-builds';
+/**
+ * Synthetic key PREFIX for what each OPEN WINDOW is EXECUTING (#516). Same
+ * cache as the records above, so it survives the worker teardown the lifecycle
+ * permits between events.
+ *
+ * ONE RECORD PER WINDOW, not one map for all of them, and that shape is the
+ * whole concurrency story (Codex P2 round 3 on #516). A single map makes every
+ * registration a read-modify-write, and read-modify-writes on this record are
+ * run by workers that cannot coordinate: a page posts `CLIENT_BUILD` to the
+ * ACTIVE worker while a replacement worker is sweeping the same record from its
+ * `install`, and those are two separate globals. Round 2's promise chain was
+ * module state, so each global had its own copy of it and neither ordered the
+ * other — both read the same map and the later `put` discarded the earlier
+ * entry. Losing the STALE tab's entry costs the install decision its evidence;
+ * losing a CURRENT tab's entry makes it look unregistered, so a forced
+ * activation navigates a player who was doing nothing wrong.
+ *
+ * Per-key records need no coordination at all, in this worker or across worker
+ * versions: a registration writes exactly one key — its own — and a sweep
+ * deletes only keys it has decided are dead. Nothing reads a value in order to
+ * write it back, so there is no update left to lose.
+ */
+export const CLIENT_STAMP_KEY_PREFIX = '/__gcb-client-build/';
 
 /** `clientId -> __BUILD_STAMP__` for every window that has named itself. */
 export type ClientStamps = Record<string, string>;
+
+/**
+ * How recently a record must have been written to be immune from the sweep,
+ * whatever the live set says.
+ *
+ * The sweep runs against an id list enumerated BEFORE it — `clients.matchAll`
+ * is itself async — so a window that opened in between is genuinely alive and
+ * genuinely absent from that snapshot. Deleting its record is the same lost
+ * registration the per-key shape exists to prevent, arriving by a different
+ * road: the tab then reads as unregistered and a forced activation navigates
+ * it. Age is the one signal about a record that a stale snapshot cannot make
+ * wrong, so a young record is simply never swept. The cost is bounded and
+ * harmless — a closed tab lingers for a few minutes, and both consumers of the
+ * registry look entries up by LIVE client id, so a lingering one is ignored.
+ */
+export const CLIENT_STAMP_SWEEP_GRACE_MS = 5 * 60_000;
+
+/** Firebase Hosting's reserved namespace. Mirrors the `denylist` on the
+ *  navigation route in `src/sw.ts` — see `isAppShellClientUrl`. */
+const RESERVED_HOSTING_PATH = /^\/__\//;
+
+/**
+ * Whether a same-origin window is one of OUR pages (Codex P2 round 3 on #516).
+ *
+ * `clients.matchAll({ includeUncontrolled: true })` returns every window on
+ * this origin, and the Google sign-in popup at `/__/auth/handler` is one of
+ * them. That document is Firebase's, not ours: it never runs `main.tsx`, so it
+ * never posts `CLIENT_BUILD` and is therefore absent from the registry — which
+ * is exactly the shape this rescue reads as "an ancient client, condemn it".
+ * Left unfiltered, an open sign-in popup would force-activate the fleet on an
+ * armed floor with no stale app tab anywhere, and then `navigate()` the popup
+ * itself mid-flow. `src/sw.ts` already refuses to serve the app shell into that
+ * namespace for the same reason (#182); breaking sign-in to fix a stale tab is
+ * a far worse trade than missing the rescue.
+ *
+ * An unparseable url reads as NOT ours, so anything we cannot identify is left
+ * strictly alone rather than navigated.
+ */
+export function isAppShellClientUrl(url: string): boolean {
+  try {
+    return !RESERVED_HOSTING_PATH.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
 
 /** How rarely the active worker re-reads the floor. It wakes on ordinary
  *  navigations, so this is the throttle that keeps an emergency lever from
@@ -205,104 +269,120 @@ export function shouldNavigateClient(stamp: string | undefined, floor: unknown):
   return buildBelowFloor(stamp, floor);
 }
 
-/** The registry as stored, with non-string entries dropped. Never throws — the
- *  empty map is the safe reading, since an unregistered client navigates. */
-export async function readClientStamps(cacheStorage: CacheStorage): Promise<ClientStamps> {
+/** The cache key one window's record lives under. Encoded because the id is
+ *  the browser's, not ours, and a key has to be a valid same-origin url. */
+function clientStampKey(clientId: string): string {
+  return `${CLIENT_STAMP_KEY_PREFIX}${encodeURIComponent(clientId)}`;
+}
+
+/** The inverse, or null for any key in this cache that is not one of ours —
+ *  the active stamp, the forced-activation marker, the throttle record. */
+function clientIdFromKey(url: string): string | null {
+  try {
+    const { pathname } = new URL(url, 'https://gcb.invalid');
+    if (!pathname.startsWith(CLIENT_STAMP_KEY_PREFIX)) return null;
+    const id = decodeURIComponent(pathname.slice(CLIENT_STAMP_KEY_PREFIX.length));
+    return id === '' ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+/** One window's record: what it is executing, and when it said so. */
+type ClientRecord = { stamp: string; at: number };
+
+/** Every stored record, with malformed ones dropped. Never throws — the empty
+ *  map is the safe reading, since an unregistered client navigates. */
+async function readClientRecords(cacheStorage: CacheStorage): Promise<Record<string, ClientRecord>> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
-    const hit = await cache.match(CLIENT_STAMPS_URL);
-    if (!hit) return {};
-    const body: unknown = await hit.json();
-    if (typeof body !== 'object' || body === null) return {};
-    const clean: ClientStamps = {};
-    for (const [id, stamp] of Object.entries(body as Record<string, unknown>)) {
-      if (typeof stamp === 'string' && stamp !== '') clean[id] = stamp;
-    }
-    return clean;
+    const keys = await cache.keys();
+    const records: Record<string, ClientRecord> = {};
+    await Promise.all(
+      keys.map(async (key) => {
+        const id = clientIdFromKey(typeof key === 'string' ? key : key.url);
+        if (id === null) return;
+        const hit = await cache.match(key);
+        if (!hit) return;
+        const body = (await hit.json()) as { stamp?: unknown; at?: unknown } | null;
+        if (typeof body?.stamp !== 'string' || body.stamp === '') return;
+        // A record with no usable timestamp reads as ancient, so the sweep can
+        // still collect it — the grace below is a shield for FRESH records.
+        records[id] = { stamp: body.stamp, at: typeof body.at === 'number' ? body.at : 0 };
+      }),
+    );
+    return records;
   } catch {
     return {};
   }
 }
 
-/**
- * Drops entries whose window is gone, so a tab closed weeks ago cannot keep
- * reading as an ancient client and force-activate the fleet forever.
- *
- * `liveIds` of null means the live set could not be read at all. Keeping every
- * entry is the safe answer there: forgetting a tab that is still open costs the
- * rescue its evidence, while remembering a dead one costs at most one
- * force-activation that then navigates nobody (`shouldNavigateClient`).
- */
-export function retainLiveClients(stamps: ClientStamps, liveIds: readonly string[] | null): ClientStamps {
-  if (!liveIds) return stamps;
-  const live = new Set(liveIds);
-  return Object.fromEntries(Object.entries(stamps).filter(([id]) => live.has(id)));
-}
-
-async function putClientStamps(cacheStorage: CacheStorage, stamps: ClientStamps): Promise<void> {
-  try {
-    const cache = await cacheStorage.open(SHELL_META_CACHE);
-    await cache.put(CLIENT_STAMPS_URL, new Response(JSON.stringify(stamps)));
-  } catch {
-    /* storage refused — the client reads as unregistered, i.e. as condemned */
-  }
+/** The registry as the decision layer wants it: `clientId -> build stamp`. */
+export async function readClientStamps(cacheStorage: CacheStorage): Promise<ClientStamps> {
+  const records = await readClientRecords(cacheStorage);
+  return Object.fromEntries(Object.entries(records).map(([id, record]) => [id, record.stamp]));
 }
 
 /**
- * The tail of the registry's write chain (Codex P2 on #516).
+ * Records what one window is executing, and sweeps in the same call — the
+ * message arrives once per page load, so the registry is swept about as often
+ * as it grows.
  *
- * Every mutation here is a read-modify-write across four awaits — `open`,
- * `match`, `json`, `put` — and the worker runs each of them on its own
- * microtask. Two tabs posting `CLIENT_BUILD` close together therefore overlap:
- * both handlers read the same old map, each adds only its own entry, and the
- * second `cache.put` silently discards the first. Losing the STALE tab's entry
- * costs the install decision its evidence; losing a CURRENT tab's entry makes
- * that tab look unregistered, so a forced activation navigates it for nothing.
- *
- * One shared chain rather than a per-key lock, because a prune rewrites the
- * whole record too — a prune racing a record is the same lost update.
- *
- * Module state, and deliberately so: it only has to order the writes of ONE
- * worker instance. A torn-down worker has no in-flight writes left to order,
- * and the Cache is the durable record either way.
+ * The write touches ONE key, this window's own, so no other worker's write can
+ * be lost to it however the two interleave (see `CLIENT_STAMP_KEY_PREFIX`).
  */
-let registryWrites: Promise<unknown> = Promise.resolve();
-
-function serializeRegistryWrite<T>(op: () => Promise<T>): Promise<T> {
-  // `then(op, op)` so a rejected predecessor still runs this one: the chain
-  // orders writes, it must never be able to cancel them. Every op below
-  // swallows its own storage failures, but the chain cannot assume that.
-  const run = registryWrites.then(op, op);
-  registryWrites = run.catch(() => undefined);
-  return run;
-}
-
-/** Records what one window is executing, evicting dead windows in the same
- *  write. Called on every `CLIENT_BUILD`, which is once per page load, so the
- *  registry is swept about as often as it grows. */
 export async function recordClientStamp(
   cacheStorage: CacheStorage,
   clientId: string,
   stamp: string,
   liveIds: readonly string[] | null,
+  now: number = Date.now(),
 ): Promise<void> {
-  await serializeRegistryWrite(async () => {
-    const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
-    stamps[clientId] = stamp;
-    await putClientStamps(cacheStorage, stamps);
-  });
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    await cache.put(clientStampKey(clientId), new Response(JSON.stringify({ stamp, at: now })));
+  } catch {
+    /* storage refused — the client reads as unregistered, i.e. as condemned */
+  }
+  await pruneClientStamps(cacheStorage, liveIds, now);
 }
 
-/** Sweeps the registry and returns what survived. */
+/**
+ * Sweeps records whose window is gone and returns what survived.
+ *
+ * `liveIds` of null means the live set could not be read at all. Keeping every
+ * record is the safe answer there: forgetting a tab that is still open costs
+ * the rescue its evidence, while remembering a dead one costs at most one
+ * force-activation that then navigates nobody (`shouldNavigateClient`).
+ *
+ * A record younger than `CLIENT_STAMP_SWEEP_GRACE_MS` is kept whatever the live
+ * set says, because that set was enumerated before this sweep ran and a window
+ * that opened in between is absent from it while being perfectly alive.
+ */
 export async function pruneClientStamps(
   cacheStorage: CacheStorage,
   liveIds: readonly string[] | null,
+  now: number = Date.now(),
 ): Promise<ClientStamps> {
-  return serializeRegistryWrite(async () => {
-    const stamps = retainLiveClients(await readClientStamps(cacheStorage), liveIds);
-    await putClientStamps(cacheStorage, stamps);
-    return stamps;
-  });
+  const records = await readClientRecords(cacheStorage);
+  const survivors: ClientStamps = {};
+  const doomed: string[] = [];
+  const live = liveIds ? new Set(liveIds) : null;
+  for (const [id, record] of Object.entries(records)) {
+    if (!live || live.has(id) || now - record.at < CLIENT_STAMP_SWEEP_GRACE_MS) survivors[id] = record.stamp;
+    else doomed.push(id);
+  }
+  if (doomed.length > 0) {
+    try {
+      const cache = await cacheStorage.open(SHELL_META_CACHE);
+      // One delete per dead window, so a sweep can never disturb a record it
+      // did not choose — including one written while it was running.
+      await Promise.all(doomed.map((id) => cache.delete(clientStampKey(id))));
+    } catch {
+      /* storage refused — a stale record is ignored by both consumers anyway */
+    }
+  }
+  return survivors;
 }
 
 /**
