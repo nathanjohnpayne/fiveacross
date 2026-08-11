@@ -16,7 +16,7 @@ This is the manual board-update protocol every agent (and human) follows so [Pro
 
 Project → **⋯** → **Workflows**. Enable:
 
-- **Item added to project → set Status = Backlog** (usually on by default).
+- **Item added to project → set Status = Backlog**.
 - **Item reopened → set Status = Backlog** (or In progress).
 - **Pull request merged → set Status = Done**, and/or **Issue closed → set Status = Done**.
 - **Pull request opened / linked (auto-add) → set Status = In review** if your plan offers it.
@@ -26,6 +26,18 @@ The built-ins cannot infer "claimed" or promote `Backlog → Ready` across a dep
 ## The manual protocol
 
 Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode all)"` then `export GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT"` (author identity `nathanjohnpayne`; `move-item.sh` verifies it). All commands assume `REPO=nathanjohnpayne/gaycruisebingo OWNER=nathanjohnpayne PROJECT=7`.
+
+### 0. File a ticket (adds with no Status)
+
+`gh project item-add` does not set Status on its own—whether or not the built-in workflow above is enabled, treat a freshly added item as landing with **no Status** and set it explicitly:
+
+```bash
+gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+  GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Backlog"
+```
+
+Skipping this leaves the item in a No Status column—invisible in any Status-grouped board view.
 
 ### 1. Claim a ticket (Ready → In progress)
 

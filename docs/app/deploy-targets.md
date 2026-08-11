@@ -24,7 +24,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 
 ### Both targets are single-Event builds
 
-A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup, so the Event and the Edition are frozen at build time. The Five Across target config sets `VITE_EVENT_ID=bodega-bay-2026`.
+A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup **for Event routing**, so the Event and the Edition are frozen at build time. It still reads that document for the adult-content posture: `README.md` § Event id notes the live watcher re-proves the seeded posture and observes a later server-side raise regardless of build mode. The Five Across target config sets `VITE_EVENT_ID=bodega-bay-2026`.
 
 This **contradicts `README.md` § Event id**, which says a Five Across build "MUST leave it empty". That instruction is scoped to the wildcard-router design — the multi-Event build every `*.fiveacross.app` host would share once the Worker router ([#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545)) exists. Today's hosts are exact Firebase Hosting custom domains, one Event each, and the single-Event build is the deliberate choice: `preview-deploys.md` records the reasoning, which is that a hostname-resolved build must complete a Firestore `getDocFromServer` before first paint and `shouldMountOnBootstrapFailure` fails **closed** to the `unreachable` screen if that read fails.
 
