@@ -20,10 +20,13 @@ Every host whose auth domain is not self-pinned via ADR 0010's same-origin escap
 | `gaycruisebingo-git-preview-…vercel.app` | Yes | The stable preview alias—one branch URL, registered once (Parts 1–4). |
 | `fiveacross.vercel.app` | Yes† | The Five Across mirror, registered on the `fiveacross` project (last section). |
 | `vacaybingo.vercel.app` | Yes† | The Vacay Bingo mirror—also registered on the `fiveacross` project; Vacay is an Edition of it, not its own project. |
-| A single-Event Firebase custom domain, e.g. `bodega-bay.fiveacross.app` | Yes | Its build pins `authDomain` to itself—ADR 0010's same-origin escape hatch. |
+| A single-Event Firebase custom domain, e.g. `bodega-bay.vacaybingo.com` | Yes | Its build pins `authDomain` to itself (`VITE_FIREBASE_AUTH_DOMAIN=bodega-bay.vacaybingo.com`, `scripts/build-target.mjs:39`)—ADR 0010's same-origin escape hatch. |
+| `fiveacross.app`, `bodega-bay.fiveacross.app` | Yes‡ | **Not** self-pinned—do not treat these as the same case as the row above. The `fiveacross` target's build bakes `VITE_FIREBASE_AUTH_DOMAIN=bodega-bay.vacaybingo.com` (the row above's host), a FOREIGN `authDomain` on these two hosts. They sign in only because both are explicitly listed in `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts:63-67`); omitting either entry there darks sign-in on that host with no other symptom. |
 | Any per-deployment or per-branch preview host, `…-<hash>-…vercel.app` | **No, and never** | The hostname changes per push, so there is nothing stable to register. |
 
 † Both mirrors are provisioned and serving, but their console registrations are **outstanding**—see § The brand mirrors → Current state. Until those land they render a Google button that fails, so neither URL should be handed out yet.
+
+‡ The `fiveacross`/`bodega-bay.fiveacross.app` pair looks like another instance of the self-pinned row above—same Event, same Firebase project—but its build was set up with `bodega-bay.vacaybingo.com` as the one true `authDomain`; the `.fiveacross.app` hosts ride the explicit allowlist instead. Confirmed by `src/auth-domain.test.ts:169-173` (`isSignInReachableOnHost` only resolves on these hosts because of the allowlist entries, not same-origin pinning).
 
 A per-deployment preview host therefore renders the `auth-unconfigured` screen—"This address is not open yet". That screen is the gate working as designed, not a regression: before #576 those hosts showed a Google button that silently dead-ended, which was strictly worse. On a `*.vercel.app` hostname the screen now adds a developer note pointing back here (#585, `src/components/EventNotFound.tsx`), because the person reading it on that host is by construction someone who just pushed a branch.
 
