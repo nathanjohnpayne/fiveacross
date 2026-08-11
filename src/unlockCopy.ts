@@ -181,9 +181,14 @@ function zoneOffsetMs(at: number, timezone: string | undefined): number {
     second: '2-digit',
   }).formatToParts(new Date(at));
   const num = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
-  // `hour: '2-digit'` with hour12:false renders midnight as "24" in some ICU
-  // builds; Date.UTC absorbs the rollover either way.
-  const wallClock = Date.UTC(num('year'), num('month') - 1, num('day'), num('hour'), num('minute'), num('second'));
+  // `hour: '2-digit'` with hour12:false resolves to the h24 cycle in some ICU
+  // builds, which spells midnight "24" while the date parts still name the day
+  // that is STARTING — "24:30" on the 15th, not the 14th. Fold that back to 0
+  // in place. Letting `Date.UTC` absorb the rollover instead advances to the
+  // following day and reports an offset a full 24 hours too large, which sends
+  // `nextLocalMidnightMs` a day backwards (Codex P1 on #674).
+  const hour = num('hour') % 24;
+  const wallClock = Date.UTC(num('year'), num('month') - 1, num('day'), hour, num('minute'), num('second'));
   return wallClock - Math.floor(at / 1000) * 1000;
 }
 
@@ -212,17 +217,31 @@ export function nextChaosBoundary(
  * #674). The offset changes by at most a couple of hours around a transition,
  * so re-deriving the candidate against the newly-sampled offset converges in
  * a bounded number of steps.
+ *
+ * The result is ALWAYS strictly after `at`. Not every zone has a fixed point
+ * for the loop to reach: Asia/Beirut and America/Havana spring forward AT
+ * 00:00, so the midnight being resolved never happens and the two offsets each
+ * point at the other's candidate, leaving the iteration to stop wherever its
+ * bound runs out. The caller turns this instant into a `setTimeout`, and a
+ * boundary in the past arms a 250 ms timer that re-arms forever — continuous
+ * re-renders behind a caption that never refreshes (Codex P1 on #674) — so a
+ * candidate that is not ahead of `at` is discarded in favour of the last one
+ * that was.
  */
 function nextLocalMidnightMs(at: number, timezone: string | undefined): number {
   const dayMs = 86_400_000;
   let offset = zoneOffsetMs(at, timezone);
   const localDayIndex = Math.floor((at + offset) / dayMs) + 1;
+  // Strictly after `at` by construction: `localDayIndex * dayMs` is the first
+  // day boundary past `at + offset`, so this seeds the future-only fallback.
   let candidate = localDayIndex * dayMs - offset;
+  let lastFuture = candidate;
   for (let i = 0; i < 4; i++) {
     const offsetAtCandidate = zoneOffsetMs(candidate, timezone);
     if (offsetAtCandidate === offset) break;
     offset = offsetAtCandidate;
     candidate = localDayIndex * dayMs - offset;
+    if (candidate > at) lastFuture = candidate;
   }
-  return candidate;
+  return candidate > at ? candidate : lastFuture;
 }
