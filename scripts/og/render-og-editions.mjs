@@ -51,12 +51,14 @@
 //   node scripts/og/render-og-editions.mjs --edition vacay --out /tmp/og
 //   node scripts/og/compare-og.mjs --new /tmp/og --edition vacay
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { transformSync } from 'esbuild';
 import { assertWithinHardCap } from './og-size-guard.mjs';
+import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
+import { commitStaged, discardStaged } from './og-stage-commit.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -422,7 +424,16 @@ for (const id of targets) {
 }
 
 const browser = await chromium.launch();
-const written = [];
+// Every edition's render is staged to its scratch path here first (#699) and
+// ONLY moved into its committed destination once every targeted edition has
+// individually cleared the hard cap (#713 on `--all`): if edition 3 of 3
+// fails, editions 1 and 2 must still not have replaced anything in `public/`
+// or the wireframes mirror. Renaming inside the per-edition loop, as the
+// original version of this script did, broke that guarantee for `--all` —
+// it made the earlier passing editions durable before the later ones had
+// even been checked, so a late failure left a partially-updated render set
+// contradicting the fail-before-overwrite behaviour this file exists for.
+const staged = [];
 try {
   for (const id of targets) {
     const config = configFor(id);
@@ -477,8 +488,14 @@ try {
     // Render to a scratch path next to `dest`, NOT `dest` itself (#699): the
     // hard-cap check below must be able to refuse a bad render without ever
     // having touched the committed copy it would otherwise have overwritten.
-    const scratch = `${dest}.render-tmp`;
-    await page.screenshot({ path: scratch });
+    // The path is `.png`-suffixed and `type: 'png'` is passed explicitly
+    // (#713): Playwright infers the screenshot format from `path`'s
+    // extension and throws for anything else unless `type` overrides it, so
+    // a scratch suffix without a recognised image extension fails the
+    // screenshot itself, before the hard-cap guard it was meant to protect
+    // ever runs.
+    const scratch = scratchPathFor(dest);
+    await page.screenshot(screenshotOptionsFor(dest));
     await page.close();
 
     // Crush ONLY if the lossless render misses the size budget. og-default.png
@@ -521,21 +538,31 @@ try {
       throw err;
     }
 
-    renameSync(scratch, dest);
-
-    // The wireframes' reference copy, written from the same bytes so the two
-    // can never disagree (#681 acceptance criterion).
+    // Stage only — do NOT touch `dest` or the wireframes mirror yet. See the
+    // note above `staged`: committing here, inside the per-edition loop,
+    // is exactly what made `--all` non-atomic (#713).
     const mirror = outDir
       ? join(outDir, ART[id].mirror)
       : join(repo, 'plans', 'og-images', ART[id].mirror);
-    mkdirSync(dirname(mirror), { recursive: true });
-    copyFileSync(dest, mirror);
-
-    written.push({ id, dest, mirror, bytes: statSync(dest).size });
+    staged.push({ id, scratch, dest, mirror, bytes: finalBytes });
   }
+} catch (err) {
+  // A later edition failed its hard cap (or a font/render problem threw
+  // first). Every earlier edition in this run already passed its own guard
+  // and is sitting in a scratch file, not yet committed — clean those up so
+  // a failed `--all` doesn't leave stray `*.render-tmp.png` files behind,
+  // and rethrow so the process still exits nonzero and `public/` (and the
+  // mirror) stay exactly as they were before this run started.
+  discardStaged(staged);
+  throw err;
 } finally {
   await browser.close();
 }
+
+// Every targeted edition cleared the hard cap — commit them all now, in one
+// pass, so a run either updates every targeted destination or (per the catch
+// above) none of them.
+const written = commitStaged(staged).map((w) => ({ ...w, bytes: statSync(w.dest).size }));
 
 // Every entry here already cleared HARD_CAP_BYTES — a render that didn't
 // threw above and never reached `written`, so there is nothing left to warn
