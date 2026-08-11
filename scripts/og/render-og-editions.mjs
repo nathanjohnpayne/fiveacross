@@ -51,11 +51,12 @@
 //   node scripts/og/render-og-editions.mjs --edition vacay --out /tmp/og
 //   node scripts/og/compare-og.mjs --new /tmp/og --edition vacay
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { transformSync } from 'esbuild';
+import { assertWithinHardCap } from './og-size-guard.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -350,6 +351,14 @@ const ART = {
 // before a messenger silently drops the preview.
 const SIZE_BUDGET_BYTES = 500 * 1024;
 
+// The hard cap itself (#699): whatever survives quantisation — or the
+// lossless render, if pngquant is missing or fails — MUST clear this before
+// it is allowed to replace a committed copy. Automation checks this script's
+// exit status to decide whether an asset is safe to ship; a link preview that
+// silently fails to unfurl on WhatsApp is exactly what that check exists to
+// catch.
+const HARD_CAP_BYTES = 600 * 1024;
+
 const GOOGLE_FONTS_CSS_PATTERN = /^https:\/\/fonts\.googleapis\.com\/css2\?/;
 const EXPECTED_FACES = [
   { family: 'Anton', weight: 400 },
@@ -465,7 +474,11 @@ try {
 
     const dest = outDir ? join(outDir, ART[id].file) : join(repo, 'public', ART[id].file);
     mkdirSync(dirname(dest), { recursive: true });
-    await page.screenshot({ path: dest });
+    // Render to a scratch path next to `dest`, NOT `dest` itself (#699): the
+    // hard-cap check below must be able to refuse a bad render without ever
+    // having touched the committed copy it would otherwise have overwritten.
+    const scratch = `${dest}.render-tmp`;
+    await page.screenshot({ path: scratch });
     await page.close();
 
     // Crush ONLY if the lossless render misses the size budget. og-default.png
@@ -475,24 +488,40 @@ try {
     // takes the corner radial washes from ~70 distinct values across a row to
     // ~16, which is invisible at size but shows as contour rings under
     // contrast amplification. The #609 originals were truecolor; so are these.
-    const losslessBytes = statSync(dest).size;
+    const losslessBytes = statSync(scratch).size;
     if (losslessBytes > SIZE_BUDGET_BYTES) {
       try {
         execFileSync(
           'pngquant',
-          ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${dest}.quant`, dest],
+          ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${scratch}.quant`, scratch],
           { stdio: 'inherit' },
         );
-        renameSync(`${dest}.quant`, dest);
+        renameSync(`${scratch}.quant`, scratch);
         console.warn(
           `  ${id}: ${(losslessBytes / 1024).toFixed(0)} KB lossless exceeded the ` +
             `${(SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB budget — quantised to ` +
-            `${(statSync(dest).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
+            `${(statSync(scratch).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
         );
       } catch {
         console.warn(`  ${id}: over budget and pngquant is unavailable — shipping the lossless PNG.`);
       }
     }
+
+    // The hard cap (#699): refuse to replace the committed copies with a
+    // render known not to unfurl. Whatever caused it — pngquant missing,
+    // pngquant failing, or the artwork just being too heavy even quantised —
+    // the failure happens BEFORE `dest` or the wireframes mirror is touched,
+    // and the process exits nonzero so automation checking this script's
+    // status does not accept the asset.
+    const finalBytes = statSync(scratch).size;
+    try {
+      assertWithinHardCap(id, finalBytes, HARD_CAP_BYTES);
+    } catch (err) {
+      unlinkSync(scratch);
+      throw err;
+    }
+
+    renameSync(scratch, dest);
 
     // The wireframes' reference copy, written from the same bytes so the two
     // can never disagree (#681 acceptance criterion).
@@ -508,13 +537,10 @@ try {
   await browser.close();
 }
 
+// Every entry here already cleared HARD_CAP_BYTES — a render that didn't
+// threw above and never reached `written`, so there is nothing left to warn
+// about post hoc.
 for (const w of written) {
   console.log(`${w.id.padEnd(11)} ${(w.bytes / 1024).toFixed(0).padStart(4)} KB  ${w.dest}`);
   console.log(`${''.padEnd(11)}      mirrored -> ${w.mirror}`);
-}
-const oversize = written.filter((w) => w.bytes > 600 * 1024);
-if (oversize.length > 0) {
-  console.warn(
-    `\nWARNING: over WhatsApp's 600 KB og:image cap: ${oversize.map((w) => w.id).join(', ')}`,
-  );
 }
