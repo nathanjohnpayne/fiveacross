@@ -21,6 +21,7 @@ import { track } from '../analytics';
 import { adultContentRequired } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
+import { consumePostUpdateDealGrace, watchPostUpdateReload } from '../postUpdateDeal';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
@@ -873,12 +874,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearDealError();
           return;
         }
+        // #519: the FIRST deal after a service-worker update reload gets ONE
+        // silent re-deal instead of the error surface. `updateServiceWorker(true)`
+        // reloads the moment the new worker takes control, so this deal can fire
+        // against an auth token / Firestore connection that is still coming up —
+        // the failure reported twice on 2026-08-01, where Retry then succeeded on
+        // the spot. The re-deal IS that Retry, minus making the player tap it:
+        // `dealError` is never set (so `DealError` never renders, not even for a
+        // frame) and `dealing` stays up, because the re-entrant attempt bumps
+        // `dealAttemptRef` before the `finally` below reads it — the player sees
+        // uninterrupted progress. Everything the manual Retry relies on holds
+        // unchanged: the two joins serialize inside `joinAndDeal`'s transaction
+        // (#409) and the attempt guard keeps the superseded one from reporting.
+        //
+        // Bounded three ways, so a real failure is never masked: only TRANSIENT
+        // failures reach here at all (a pool-shortfall or a permanent Firestore
+        // error already surfaced above); the grace is armed only by a
+        // `controllerchange` and consumed by its first taker, so it is one
+        // re-deal per document and cannot loop; and a definitely-offline player
+        // is excluded, so genuine no-connectivity still reaches the retry surface
+        // on the first failure rather than after a second wasted attempt.
+        if (isOnline() && consumePostUpdateDealGrace()) {
+          void runDealRef.current(u);
+          return;
+        }
       }
       failDeal(err);
     } finally {
       if (dealAttemptRef.current === attempt) setDealing(false);
     }
   }, [failDeal, clearDealError]);
+  // Self-reference for the one silent re-deal the #519 grace fires: `runDeal` is a
+  // `useCallback` and cannot name itself. Re-pointed every render at the current
+  // closure, the same way `PoolRecoveryWatcher` holds `retryDeal`. Which closure
+  // wins does not matter — the attempt counter, not the closure identity, is what
+  // supersedes — so this needs no effect to be correct.
+  const runDealRef = useRef(runDeal);
+  runDealRef.current = runDeal;
+
+  // Arm the #519 post-update grace for this document. Mounted here rather than in
+  // `main.tsx` because the grace exists for the deal, and this is where the deal
+  // lives; the update reload is only ever offered from inside the mounted tree
+  // (`UpdatePrompt`), so the listener is always in place before it can fire.
+  useEffect(watchPostUpdateReload, []);
 
   // Deal a Board only once the 18+ attestation is settled TRUE (#23, Finding 1):
   // the gate must gate the SIDE EFFECT, not just the UI. A signed-in returning
