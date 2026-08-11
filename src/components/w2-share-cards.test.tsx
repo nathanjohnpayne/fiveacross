@@ -149,6 +149,11 @@ afterEach(() => {
   Reflect.deleteProperty(window.navigator, 'share');
   Reflect.deleteProperty(window.navigator, 'canShare');
   Reflect.deleteProperty(window.navigator, 'clipboard');
+  Reflect.deleteProperty(window.navigator, 'userActivation');
+  // shareCardBlob's terminal fallback sheet (#712 round 3) mounts on
+  // document.body OUTSIDE any React root, so RTL's cleanup cannot take it
+  // down — a leaked sheet would answer the next test's role queries.
+  document.querySelector('.share-fallback-backdrop')?.remove();
   // Module state, not a mock — clear any #607 test's resolved canonical
   // host so it never leaks into an unrelated assertion.
   applyResolvedCanonicalHost(null);
@@ -1222,6 +1227,103 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
       Reflect.deleteProperty(window.navigator, 'userActivation');
     }
   });
+
+  // Codex P1, PR #712 round 3 — THE acceptance property: a tap never ends in
+  // a silent no-op. Round 2 skipped the share legs for the clipboard, but
+  // Safari and Firefox gate `clipboard.writeText` on transient activation
+  // too, so in the case that started all of this — a stalled cold render
+  // handing over `blob: null` with the activation already spent — every
+  // remaining leg declined in silence and the chain returned 'none'. The
+  // terminal leg needs no activation at all: it puts the link on screen with
+  // a button whose PRESS mints the activation the silent write lacked.
+  function fallbackSheet(): HTMLElement {
+    const sheet = document.querySelector<HTMLElement>('.share-fallback-backdrop');
+    if (!sheet) throw new Error('no share fallback sheet mounted');
+    return sheet;
+  }
+
+  function sheetButton(label: string): HTMLButtonElement {
+    const match = [...fallbackSheet().querySelectorAll('button')].find(
+      (b) => b.textContent === label,
+    );
+    if (!match) throw new Error(`no "${label}" button in the share fallback sheet`);
+    return match;
+  }
+
+  it('shows a visible, activation-free affordance instead of a silent no-op when activation is gone, the clipboard is gated, and there is no image', async () => {
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    // The gated write: rejected exactly as Safari/Firefox reject a clipboard
+    // write with no transient activation — the same expiry that skipped the
+    // share legs, which is why round 2's clipboard fallback was no fallback.
+    const clipboardMock = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'NotAllowedError' }))
+      .mockResolvedValue(undefined);
+    stubNavigator({ canShare: () => true, share: shareMock, clipboard: { writeText: clipboardMock } });
+    stubUserActivation(false);
+
+    const outcome = await shareCardBlob({
+      blob: null, // the stalled cold render's payload
+      filename: 'card.png',
+      title: 'T',
+      text: 'body',
+      url: 'https://x.test',
+    });
+
+    expect(outcome).toBe('prompt');
+    expect(shareMock).not.toHaveBeenCalled();
+    // Visible, labelled, and carrying the link even before anything is pressed.
+    const sheet = fallbackSheet();
+    expect(sheet.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe(
+      'Finish sharing',
+    );
+    expect(sheet.querySelector('.share-fallback-url')?.textContent).toBe('https://x.test');
+
+    // And actionable: the press is a fresh gesture, so the write that failed
+    // silently a moment ago now lands.
+    const copy = sheetButton('Copy link');
+    fireEvent.click(copy);
+    await waitFor(() => expect(clipboardMock).toHaveBeenCalledTimes(2));
+    expect(clipboardMock).toHaveBeenLastCalledWith('https://x.test');
+    await waitFor(() => expect(copy.textContent).toBe('Link copied'));
+  });
+
+  it('the fallback sheet keeps the link on screen with no Clipboard API at all, and Close dismisses it', async () => {
+    stubUserActivation(false); // no share, no clipboard, no blob — nothing gated left
+
+    const outcome = await shareCardBlob({
+      blob: null,
+      filename: 'card.png',
+      title: 'T',
+      text: 'body',
+      url: 'https://x.test',
+    });
+
+    expect(outcome).toBe('prompt');
+    // No Copy button to offer, but the URL is still there to select by hand.
+    expect(fallbackSheet().querySelector('.share-fallback-url')?.textContent).toBe(
+      'https://x.test',
+    );
+    fireEvent.click(sheetButton('Close'));
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+  });
+
+  it('does not put a fallback sheet in front of a Player who simply dismissed the share sheet', async () => {
+    const shareMock = vi.fn().mockRejectedValue(Object.assign(new Error('cancel'), { name: 'AbortError' }));
+    stubNavigator({ canShare: () => true, share: shareMock });
+    stubUserActivation(true);
+
+    const outcome = await shareCardBlob({
+      blob,
+      filename: 'card.png',
+      title: 'T',
+      text: 'body',
+      url: 'https://x.test',
+    });
+
+    expect(outcome).toBe('cancelled');
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1857,21 +1959,28 @@ describe('FarewellPodium — share affordance', () => {
     expect(shareArg.url).not.toBe('https://bodega-bay.vacaybingo.com');
   });
 
-  it('warms the render on hover and the tap reuses it — exactly one rasterization', async () => {
+  // #712 round 3 replaced warm-on-intent-only with ONE eager render as soon
+  // as sharing is ready (the Celebration treatment — the payload is frozen).
+  // The tap no longer waits on the render at all, so the render has to be
+  // under way BEFORE the tap or the common cold mobile tap would lose the
+  // image; hover and tap then both reuse it — still exactly one rasterization.
+  it('renders the card eagerly once sharing is ready; hover and the tap both reuse it — exactly one rasterization', async () => {
     const shareMock = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
     Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
     const user = userEvent.setup();
 
     render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
-    expect(toBlobMock).not.toHaveBeenCalled(); // warm-on-intent, never mount-eager
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1)); // eager, not tap-time
 
     await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
     expect(toBlobMock).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole('button', { name: 'Share final standings' }));
     await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
-    expect(toBlobMock).toHaveBeenCalledTimes(1); // the tap reused the warmed render
+    expect(toBlobMock).toHaveBeenCalledTimes(1); // the tap reused the eager render
+    // And the eager render is what lets the no-wait tap still carry the image.
+    expect(shareMock.mock.calls[0][0].files).toHaveLength(1);
   });
 
   // Codex P2, PR #450: buildPodium withholds derived daily honors while the
@@ -2137,40 +2246,69 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     );
   });
 
-  // Codex P1, PR #712 round 2: bounding the decode stopped the HANG but not
-  // the no-op. A cold tap on a stalled hero used to await the whole per-stage
-  // budget (8s fetch + 8s decode) before calling navigator.share, by which
-  // point the transient activation was long gone — the file share rejects,
-  // shareCardBlob reports 'cancelled', and the Player gets nothing at all.
-  // The tap now gives up on the image after SHARE_ACTIVATION_BUDGET_MS and
-  // shares the link INSIDE the activation window instead.
-  it('a tap whose hero render outlives the activation budget still shares — link leg, not a silent no-op (#712)', async () => {
-    vi.useFakeTimers();
-    try {
-      // A fetch that never settles: the warmed card promise cannot resolve.
-      fetchMock.mockReturnValue(new Promise(() => {}));
-      const shareMock = vi.fn().mockResolvedValue(undefined);
-      Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
-      Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+  // Codex P1, PR #712 — three rounds on one bug, and this is the property
+  // that finally closes it. Round 1 bounded the decode (the hang stopped, the
+  // no-op didn't). Round 2 bounded the TAP at four seconds and routed a spent
+  // activation to the clipboard — but a four-second wait can still outlive
+  // the activation, and the clipboard is activation-gated on Safari/Firefox,
+  // so the tap dead-ended all the same. Round 3 removes the wait itself: the
+  // tap takes the render only if it has ALREADY settled, so navigator.share
+  // is invoked in the same turn as the gesture — no timers involved at all.
+  it('a tap on a stalled hero render shares in the same turn as the gesture — no wait to outlive the activation (#712)', async () => {
+    // A fetch that never settles: the warmed card promise cannot resolve.
+    fetchMock.mockReturnValue(new Promise(() => {}));
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
 
-      render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
-      fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
 
-      await vi.advanceTimersByTimeAsync(3999);
-      expect(shareMock).not.toHaveBeenCalled();
+    // No await, no timer advance: the share call has ALREADY happened by the
+    // time the click handler returns, which is the whole guarantee.
+    expect(shareMock).toHaveBeenCalledTimes(1);
+    // No image (the render never produced one) — but a real share sheet
+    // carrying the title/text/URL, which is the documented degrade.
+    const shareArg = shareMock.mock.calls[0][0];
+    expect(shareArg.files).toBeUndefined();
+    expect(shareArg.title).toBe('Gay Cruise Bingo—Final standings');
+    expect(shareArg.url).toBeTruthy();
+    // The image was never rasterized, so nothing stale reached the sheet.
+    expect(toBlobMock).not.toHaveBeenCalled();
+  });
 
-      await vi.advanceTimersByTimeAsync(1);
-      expect(shareMock).toHaveBeenCalledTimes(1);
-      // No image (the render never produced one) — but a real share sheet
-      // carrying the title/text/URL, which is the documented degrade.
-      const shareArg = shareMock.mock.calls[0][0];
-      expect(shareArg.files).toBeUndefined();
-      expect(shareArg.title).toBe('Gay Cruise Bingo—Final standings');
-      expect(shareArg.url).toBeTruthy();
-      // The image was never rasterized, so nothing stale reached the sheet.
-      expect(toBlobMock).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+  // The end-to-end acceptance property (Codex P1, PR #712 round 3): even in
+  // the worst combination — stalled cold render, activation ALREADY spent
+  // before the handler runs, and a Safari/Firefox-style gated clipboard —
+  // the tap leaves the Player with something visible to act on.
+  it('a stalled cold render with the activation already spent still leaves the Player something to act on (#712)', async () => {
+    fetchMock.mockReturnValue(new Promise(() => {}));
+    const shareMock = vi.fn().mockResolvedValue(undefined);
+    const clipboardMock = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
+    Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: { writeText: clipboardMock },
+      configurable: true,
+    });
+    Object.defineProperty(window.navigator, 'userActivation', {
+      value: { isActive: false, hasBeenActive: true },
+      configurable: true,
+    });
+
+    render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Share final standings' }));
+
+    await waitFor(() =>
+      expect(document.querySelector('.share-fallback-backdrop')).not.toBeNull(),
+    );
+    // Nothing activation-gated ran, and nothing was silently swallowed: the
+    // link is on screen, with the shared origin the share sheet would carry.
+    expect(shareMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.share-fallback-url')?.textContent).toBe(
+      window.location.origin,
+    );
   });
 });

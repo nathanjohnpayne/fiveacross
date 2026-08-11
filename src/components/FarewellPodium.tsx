@@ -288,46 +288,25 @@ function mostLovedShareCreditLine(
 const HERO_PHOTO_FETCH_TIMEOUT_MS = 8000;
 
 /**
- * How long a TAP may wait for the farewell card before sharing without it
- * (Codex P1, PR #712 round 2).
+ * The warmed farewell card, with its SETTLED state carried alongside the
+ * promise (Codex P1, PR #712 round 3).
  *
- * `navigator.share` only runs under transient user activation, and browsers
- * expire that activation ~5s after the gesture. The hero pipeline's own
- * bounds are per-stage and generous by design — an 8s fetch followed by an 8s
- * decode — so a cold tap on a stalled hero could sit here for 16s and reach
- * the share sheet with the activation long dead: a delayed no-op, which is
- * the residual `specs/w2-share-cards.md` § Eager pre-render already names for
- * the cold/stale warm-on-intent path and #661's decode bound alone did not
- * close. 4s is deliberately just inside the activation window: a render that
- * would have made it under the old code still makes it, and one that would
- * NOT have made it now shares the link inside the window instead of doing
- * nothing. The card promise is cached, so it keeps rasterizing and a second
- * tap gets the image.
+ * Round 2 let the tap wait up to four seconds for this render. That was still
+ * a wait, and a wait is the whole problem: `navigator.share` needs transient
+ * user activation, so does `clipboard.writeText` on Safari and Firefox, and a
+ * wait that outlives the activation leaves every one of those legs unable to
+ * fire — a bounded no-op instead of an unbounded one. Only a tap that never
+ * waits at all is structurally safe, so the tap reads `blob` (valid only when
+ * `settled`) and calls `shareCardBlob` in the same turn as the gesture.
+ * `blob` is deliberately allowed to be `null` on a settled render too: a
+ * failed render already means "share without the image" downstream.
  */
-const SHARE_ACTIVATION_BUDGET_MS = 4000;
-
-/**
- * Resolve the warmed card, or `null` once the activation budget runs out —
- * whichever comes first. `card` never rejects (`warmShareCard` folds every
- * failure into `.catch(() => null)`), so this only ever races a resolution
- * against the clock; a `null` here means "share without the image", exactly
- * what a failed render already means downstream.
- */
-function withinActivationBudget(card: Promise<Blob | null>): Promise<Blob | null> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), SHARE_ACTIVATION_BUDGET_MS);
-    void card.then(
-      (blob) => {
-        clearTimeout(timer);
-        resolve(blob);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(null);
-      },
-    );
-  });
-}
+type WarmedCard = {
+  key: string;
+  promise: Promise<Blob | null>;
+  settled: boolean;
+  blob: Blob | null;
+};
 
 /**
  * Fetch the winning photo's bytes for the share card. A plain `<img>` load of
@@ -507,13 +486,16 @@ function FarewellPodiumInner({
 
   // Warm-on-intent pre-render, mirroring Leaderboard.tsx (Codex P2, PR #111
   // round 2 finding 2 lineage): hover/focus/press starts the rasterization so
-  // the tap's await reuses a settled render inside the activation window.
+  // the tap reuses an already-settled render inside the activation window.
   // Keyed on the CARD PAYLOAD (podium content + composed copy) rather than
   // the roster array's identity: Board re-filters `players` every snapshot,
   // so an identity key would invalidate on every render even though the
   // frozen podium almost never changes. #561: the key swaps the hero's object
   // URL for its proofId (object URLs differ per fetch; the photo does not).
-  const warmedCard = useRef<{ key: string; promise: Promise<Blob | null> } | null>(null);
+  const warmedCard = useRef<WarmedCard | null>(null);
+  // One eager render per mount, once sharing is allowed (see the effect
+  // below) — the ref, not a `useEffect` dep list, is what makes it once.
+  const eagerRenderStarted = useRef(false);
   // The hero-photo fetch, cached by proofId so warm and tap share ONE fetch.
   const heroPhoto = useRef<{ proofId: string; promise: Promise<Blob | null> } | null>(null);
 
@@ -588,14 +570,31 @@ function FarewellPodiumInner({
         if (objectUrl) URL.revokeObjectURL(objectUrl);
       }
     })().catch(() => null);
-    warmedCard.current = { key, promise };
+    const entry: WarmedCard = { key, promise, settled: false, blob: null };
+    warmedCard.current = entry;
+    // Mutating the entry (rather than checking identity here) is deliberate:
+    // a superseded entry recording its own result is harmless, because every
+    // READ goes through `warmedCard.current`, whose key must match the card
+    // the tap is about to share.
+    void promise.then((rendered) => {
+      entry.settled = true;
+      entry.blob = rendered;
+    });
     return promise;
   };
 
   const shareFinalStandings = async () => {
-    // Bounded by the activation budget, never by the render: a hero that is
-    // still fetching/decoding costs the image, not the share (#712 round 2).
-    const blob = await withinActivationBudget(warmShareCard());
+    // NOTHING is awaited before `shareCardBlob` (#712 round 3). Start (or
+    // reuse) the render, then take its blob ONLY if it has already settled:
+    // an unsettled render costs the image, never the share. `shareCardBlob`
+    // is therefore invoked in the same turn as the tap, so `navigator.share`
+    // runs while the transient activation is unambiguously alive — the
+    // structural version of the guarantee round 2's four-second budget only
+    // approximated. The cached promise keeps rasterizing either way, so a
+    // second tap gets the image.
+    void warmShareCard();
+    const warmed = warmedCard.current;
+    const blob = warmed?.settled === true ? warmed.blob : null;
     try {
       await shareCardBlob({
         blob,
@@ -625,6 +624,29 @@ function FarewellPodiumInner({
   // the hero was still on its way. The explicit no-award record (winners: [])
   // is photo-less by definition and waits for nothing.
   const shareReady = dayMetasLoaded && (!award || award.winners.length === 0 || proofsLoaded);
+
+  // ONE eager render as soon as sharing is allowed (#712 round 3) — the
+  // Celebration treatment, and for the Celebration reason: the payload is
+  // FROZEN here (`buildPodium` excludes the farewell Day's own marks, the
+  // award is a persisted record), so pre-rendering it cannot bake in
+  // something a later snapshot would change. It is what keeps the round-3
+  // no-wait tap from costing the image on the common cold mobile tap, where
+  // `onPointerDown` gives the render only the length of the press.
+  //
+  // Deliberately ONE, guarded by a ref rather than by dep-list identity:
+  // that caps the farewell view's eager cost at a single fetch+rasterize even
+  // if the payload key later churns, so this cannot become the per-snapshot
+  // re-rasterization the Leaderboard refused to take on (§ Eager pre-render).
+  // A post-eager key change simply falls back to warm-on-intent, as before.
+  useEffect(() => {
+    if (!shareReady || eagerRenderStarted.current) return;
+    eagerRenderStarted.current = true;
+    void warmShareCard();
+    // Intentionally re-checked on every commit: `warmShareCard` closes over
+    // live podium/award values, and the ref above — not the dep list — is
+    // what makes it run once.
+  });
+
   const share = shareReady
     ? { onShare: () => void shareFinalStandings(), onWarm: () => void warmShareCard() }
     : undefined;

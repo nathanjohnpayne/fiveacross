@@ -1696,6 +1696,42 @@ textarea.input {
 .sheet-actions .btn {
   flex: 1;
 }
+
+/* ---------- share fallback sheet (Codex P1, PR #712 round 3) ----------
+   ShareCard's terminal degrade: shown only when every share/clipboard/
+   download leg has declined — typically because the transient user
+   activation expired, which gates `navigator.share` AND (on Safari and
+   Firefox) `clipboard.writeText`. Centred rather than bottom-anchored: it is
+   a short "here's the link" panel, not a task sheet, and it can appear over
+   the celebration overlay, whose own content is centred too. All colors come
+   from theme tokens (issue #72's no-hardcoded-#fff rule). */
+.share-fallback-backdrop {
+  align-items: center;
+  padding: 16px;
+}
+.share-fallback {
+  border-radius: 18px;
+  padding: 16px;
+}
+.share-fallback-note {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--dim);
+}
+/* The link itself, always on screen even when no Copy button could be
+   offered (no Clipboard API at all): `user-select: all` makes one tap-and-
+   hold select the whole URL for a manual copy. */
+.share-fallback-url {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
 /* #fff below is a deliberate, documented exemption from issue #72's "no
    hardcoded #fff text fill" rule (specs/theme-on-color-contrast.md): the
    button's own rgba(0, 0, 0, 0.35) background is a fixed, theme-independent

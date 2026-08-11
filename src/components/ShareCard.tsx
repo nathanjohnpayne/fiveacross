@@ -561,7 +561,14 @@ if (import.meta.env.MODE === 'e2e') {
 // Leaderboard.tsx so the degrade path lives exactly once.
 // ---------------------------------------------------------------------------
 
-export type ShareOutcome = 'files' | 'text' | 'clipboard' | 'download' | 'cancelled' | 'none';
+export type ShareOutcome =
+  | 'files'
+  | 'text'
+  | 'clipboard'
+  | 'download'
+  | 'cancelled'
+  | 'prompt'
+  | 'none';
 
 function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -575,6 +582,117 @@ function downloadBlob(blob: Blob, filename: string): void {
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+/** Marks the fallback sheet's own node, so a second dead-ended tap replaces
+ *  the first rather than stacking a second sheet on top of it. */
+const SHARE_FALLBACK_CLASS = 'share-fallback-backdrop';
+
+/**
+ * The chain's TERMINAL, activation-free affordance (Codex P1, PR #712 round
+ * 3) — the leg that makes "the tap did nothing" unreachable.
+ *
+ * Every other leg in this chain depends on the very thing that can be gone by
+ * the time a slow render finishes: `navigator.share` requires transient user
+ * activation, and so does `clipboard.writeText` on Safari and Firefox. So
+ * when a tap arrives with the activation already spent, the API legs can ALL
+ * decline in silence, and with no blob there is not even a download left —
+ * the chain used to return `'none'` and the Player saw nothing happen at all.
+ *
+ * This leg deliberately calls no gated API. It renders a small sheet carrying
+ * the link (selectable, so it is useful even with no Clipboard API at all)
+ * plus the buttons the Player can press: pressing one is a FRESH gesture that
+ * mints FRESH activation, which is exactly what the silent write was missing.
+ * The Player is told what happened and handed the next step, instead of being
+ * left to wonder whether the button works.
+ *
+ * Built as plain DOM on `document.body` rather than as React state in each of
+ * the three callers, for the reason this whole function exists: the degrade
+ * path lives exactly once (and `downloadBlob` above already reaches for the
+ * DOM the same way). It owns its own teardown — the Close button, a backdrop
+ * click, or Escape — and only one can ever be mounted.
+ *
+ * Returns whether a sheet was actually mounted: with neither a link nor an
+ * image there is genuinely nothing to offer, and the caller keeps `'none'`.
+ */
+function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filename: string }): boolean {
+  const { url, blob, filename } = opts;
+  if (!url && !blob) return false;
+  if (typeof document === 'undefined' || !document.body) return false;
+
+  document.querySelector(`.${SHARE_FALLBACK_CLASS}`)?.remove();
+
+  const backdrop = el('div', `sheet-backdrop ${SHARE_FALLBACK_CLASS}`);
+  const sheet = el('div', 'sheet share-fallback');
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-modal', 'true');
+  sheet.setAttribute('aria-label', 'Finish sharing');
+  sheet.appendChild(el('div', 'sheet-title', 'Finish sharing'));
+  sheet.appendChild(
+    el(
+      'p',
+      'share-fallback-note',
+      url
+        ? 'Your browser wouldn’t open the share sheet. Here’s the link — copy it and paste it anywhere.'
+        : 'Your browser wouldn’t open the share sheet. Save the card and send it yourself.',
+    ),
+  );
+  if (url) sheet.appendChild(el('p', 'share-fallback-url', url));
+
+  const actions = el('div', 'sheet-actions');
+  const close = (): void => {
+    document.removeEventListener('keydown', onKeydown);
+    backdrop.remove();
+  };
+  function onKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape') close();
+  }
+
+  const button = (className: string, label: string, onClick: () => void): HTMLButtonElement => {
+    const b = el('button', className, label);
+    b.type = 'button';
+    b.addEventListener('click', onClick);
+    actions.appendChild(b);
+    return b;
+  };
+
+  if (url && navigator.clipboard?.writeText) {
+    const copy = button('btn primary', 'Copy link', () => {
+      // A press is a fresh user activation, so this write is allowed where the
+      // chain's own silent one was not. A rejection even here leaves the link
+      // on screen to select by hand — still not a dead end.
+      void navigator.clipboard.writeText(url).then(
+        () => {
+          copy.textContent = 'Link copied';
+        },
+        () => {
+          copy.textContent = 'Copy it above';
+        },
+      );
+    });
+  }
+  if (blob) {
+    button('btn', 'Save image', () => {
+      try {
+        downloadBlob(blob, filename);
+      } catch {
+        /* the link (and the sheet) are still on screen */
+      }
+    });
+  }
+  const dismiss = button('btn', 'Close', close);
+
+  sheet.appendChild(actions);
+  backdrop.appendChild(sheet);
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) close();
+  });
+  document.addEventListener('keydown', onKeydown);
+  document.body.appendChild(backdrop);
+  // Focus lands on the primary action when there is one, so a keyboard Player
+  // is inside the sheet rather than back where the dead-ended tap left them.
+  (actions.querySelector<HTMLButtonElement>('.btn.primary') ?? dismiss).focus();
+  return true;
 }
 
 /**
@@ -653,7 +771,15 @@ function shareActivationAlive(): boolean {
  * the transient activation is already gone (Codex P1, PR #712 round 2): there
  * is no dismissal to respect when no sheet can open, so the chain degrades to
  * the clipboard/download legs rather than returning a fallback-less
- * `'cancelled'`. Either way, callers (`Celebration.tsx`, `Leaderboard.tsx`)
+ * `'cancelled'`.
+ *
+ * And because the clipboard leg is ALSO activation-gated on Safari and
+ * Firefox (Codex P1, PR #712 round 3), a spent activation with no blob to
+ * download would still have dead-ended at `'none'`. The chain therefore ends
+ * in an affordance that needs no activation at all —
+ * `showShareFallbackSheet`, outcome `'prompt'` — so a tap always leaves the
+ * Player with a sheet, a copied link, a download, or something visible to
+ * press. Either way, callers (`Celebration.tsx`, `Leaderboard.tsx`)
  * fire `share_click` unconditionally from their own `finally`, once per tap,
  * regardless of this function's return value — a cancelled share still
  * counts as a tap; the return value is what distinguishes outcomes for a
@@ -718,9 +844,19 @@ export async function shareCardBlob(opts: {
       downloadBlob(blob, filename);
       return 'download';
     } catch {
-      /* nothing left to try */
+      /* fall through to the visible fallback */
     }
   }
+
+  // Terminal leg (Codex P1, PR #712 round 3): every leg above needs either an
+  // image or a live user activation, and the case that started this — a
+  // stalled cold render handing over `blob: null` with the activation already
+  // spent — has neither, so all of them decline silently. Rather than return
+  // a `'none'` the Player experiences as a broken button, put the link in
+  // front of them with a press that will mint the activation the silent
+  // clipboard write lacked. Only a call with NOTHING to offer still reports
+  // `'none'`.
+  if (showShareFallbackSheet({ url, blob, filename })) return 'prompt';
 
   return 'none';
 }
