@@ -59,6 +59,7 @@ import { transformSync } from 'esbuild';
 import { assertWithinHardCap } from './og-size-guard.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
 import { commitStaged, discardStaged } from './og-stage-commit.mjs';
+import { withDestinationLocks } from './og-commit-lock.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -562,7 +563,25 @@ try {
   // never reached. Staying inside this try means a commit-phase failure
   // reaches the same `catch` as a render-phase one, so `discardStaged`
   // still runs and sweeps those up.
-  written = commitStaged(staged).map((w) => ({ ...w, bytes: statSync(w.dest).size }));
+  //
+  // Locked for the WHOLE commit-or-rollback phase, not just the call to
+  // `commitStaged` — see og-commit-lock.mjs's header (#713 round 4, id
+  // 3762521202). Unique scratch paths (round 3) stop two invocations from
+  // clobbering each other's STAGED bytes, but say nothing about two
+  // invocations publishing the same destination at once: without this,
+  // their rename-then-copy pairs (and their identically-named
+  // `*.rollback-tmp` backups) can interleave, so the destination that
+  // survives can come from one process while the mirror that survives
+  // comes from the other. Acquired only here, not around the render loop
+  // above — staging writes to per-invocation scratch paths that never
+  // touch a shared destination, so there is nothing to serialize before
+  // this point.
+  const releaseLocks = withDestinationLocks(staged);
+  try {
+    written = commitStaged(staged).map((w) => ({ ...w, bytes: statSync(w.dest).size }));
+  } finally {
+    releaseLocks();
+  }
 } catch (err) {
   // Either a later edition failed its hard cap (or a font/render problem
   // threw first) — every earlier edition in this run already passed its own
