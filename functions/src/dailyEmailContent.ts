@@ -302,32 +302,19 @@ export function formatDayDate(isoDate: string | undefined): string {
   }).format(new Date(at));
 }
 
-/** True when a Day carries a REAL unlock instant, rather than the `unlockAt: 0`
- *  "live from Event open" sentinel (#289) or a malformed value. The one place
- *  that question is answered, because the sender and the copy must agree on it:
- *  a Day the sender treats as sentinel-scheduled is a Day whose copy must not
- *  quote an unlock time. */
+/**
+ * True when a Day names a REAL unlock instant, rather than the `unlockAt: 0`
+ * "live from Event open" sentinel (#289), a missing value, or a corrupt one.
+ *
+ * ONE question, deliberately not three (#723). Sentinel, absent, `NaN`,
+ * negative and non-numeric all mean the same thing to both callers — there is
+ * no hour to quote and none to schedule against — so they are one case, and
+ * nothing downstream sorts them further. The sender and the copy must agree on
+ * it: a Day the sender mails at the Event's fallback morning hour is a Day
+ * whose copy must not promise an unlock time.
+ */
 export function hasScheduledUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
   return typeof day.unlockAt === 'number' && Number.isFinite(day.unlockAt) && day.unlockAt > 0;
-}
-
-/**
- * True only for the RECOGNISED open sentinel — `unlockAt` present and exactly
- * `0`, the "live from Event open" convention `src/domainTypes.d.ts` documents
- * (#289).
- *
- * NOT the complement of `hasScheduledUnlock`, and that is the whole point
- * (Codex #729). A missing, `undefined`, `NaN`, string or otherwise malformed
- * `unlockAt` also fails `hasScheduledUnlock`, but it is a partially written or
- * corrupted schedule, not a deliberate instruction to mail the Day at the
- * Event's opening hour. Only a Day that answers TRUE here may be scheduled off
- * its `date` label; everything else is malformed and is never due, because a
- * real email to real players is not a recoverable mistake. A negative value is
- * treated as malformed too: nothing in the schema mints one, and the previous
- * blanket `unlockAt <= 0` skip never mailed it either.
- */
-export function isOpenSentinelUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
-  return typeof day.unlockAt === 'number' && day.unlockAt === 0;
 }
 
 /**

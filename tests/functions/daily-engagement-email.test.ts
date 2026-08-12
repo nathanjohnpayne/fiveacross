@@ -17,6 +17,7 @@ import { renderDailyEmailHtml, renderDailyEmailText, safeUrl } from '../../funct
 import { standingsRows } from '../../functions/src/dailyEmailContent';
 import {
   dailyEmailEnabled,
+  DEFAULT_SEND_LOCAL_HOUR,
   dueDayForDailyEmail,
   resolveEventOrigin,
   readEmailRoster,
@@ -56,10 +57,13 @@ const gcbDay4: EmailDay = {
 const gcbEvent: EmailEvent = {
   name: 'Trieste → Barcelona',
   timezone: 'Europe/Rome',
+  // Every Day carries its `date` label, because a real `DayDef` does and the
+  // due check reads nothing else to decide which calendar date a Day belongs to
+  // (#723).
   days: [
-    { index: 0, unlockAt: DAY4_UNLOCK - 3 * 24 * 60 * 60 * 1000, theme: 'welcome-aboard' },
-    { index: 1, unlockAt: DAY4_UNLOCK - 2 * 24 * 60 * 60 * 1000, theme: 'duty-free' },
-    { index: 2, unlockAt: DAY4_UNLOCK - 24 * 60 * 60 * 1000, theme: 'glamiators' },
+    { index: 0, date: '2026-07-15', unlockAt: DAY4_UNLOCK - 3 * 24 * 60 * 60 * 1000, theme: 'welcome-aboard' },
+    { index: 1, date: '2026-07-16', unlockAt: DAY4_UNLOCK - 2 * 24 * 60 * 60 * 1000, theme: 'duty-free' },
+    { index: 2, date: '2026-07-17', unlockAt: DAY4_UNLOCK - 24 * 60 * 60 * 1000, theme: 'glamiators' },
     gcbDay4,
   ],
   settings: { dailyEmailEnabled: true },
@@ -703,9 +707,12 @@ describe('dailyEmailEnabled (the Event-level admin toggle)', () => {
 });
 
 describe('dueDayForDailyEmail', () => {
+  // No timezone is passed in this block, so the Event clock is UTC and
+  // `1_000_000` is 1970-01-01T00:16:40Z. Each Day carries the `date` label the
+  // due check keys off (#723) — a Day without one belongs to no calendar date.
   const days: EmailDay[] = [
-    { index: 0, unlockAt: 1_000_000 },
-    { index: 1, unlockAt: 1_000_000 + 86_400_000 },
+    { index: 0, date: '1970-01-01', unlockAt: 1_000_000 },
+    { index: 1, date: '1970-01-02', unlockAt: 1_000_000 + 86_400_000 },
   ];
 
   it('fires at the Day unlock and stays due for the send window', () => {
@@ -719,47 +726,50 @@ describe('dueDayForDailyEmail', () => {
     expect(dueDayForDailyEmail(days, 1_000_000 + H8)).toBeNull();
   });
 
-  it('never fires for an UNDATED sentinel Day, rather than mailing it forever (#289)', () => {
-    // A Day with neither a real unlock nor a `date` label belongs to no calendar
-    // day, so it can never own one. This is the guarantee the old blanket
-    // `unlockAt <= 0` skip bought, kept intact while the DATED sentinel Day
-    // (Bodega's Friday) regains its send below.
+  it('never fires for a Day with no usable date, whatever its unlockAt (#289)', () => {
+    // Was "ignores the unlockAt:0 sentinel". The sentinel is no longer what
+    // disqualifies anything — a missing or unparseable `date` is, and it is the
+    // ONLY disqualifier left. A Day that belongs to no calendar date can never
+    // own one, which is the guarantee the old blanket `unlockAt <= 0` skip
+    // bought and the reason a broken Day cannot look permanently overdue.
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: 0 }], 5_000_000)).toBeNull();
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: -1 }], 5_000_000)).toBeNull();
+    expect(dueDayForDailyEmail([{ index: 0, unlockAt: 1_000_000 }], 1_000_200)).toBeNull();
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: 0, date: 'not-a-date' }], 5_000_000)).toBeNull();
+    expect(dueDayForDailyEmail([{ index: 0, unlockAt: 0, date: '' }], 5_000_000)).toBeNull();
   });
 
   it('handles an absent or malformed schedule without throwing', () => {
     expect(dueDayForDailyEmail(undefined, 1)).toBeNull();
     expect(dueDayForDailyEmail([], 1)).toBeNull();
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: Number.NaN }], 1)).toBeNull();
+    expect(dueDayForDailyEmail([null] as unknown as EmailDay[], 1)).toBeNull();
   });
 
   it('collapses two Days that share one Event-local calendar date onto the FIRST of them (#723)', () => {
     // Was "prefers the latest due Day when a schedule somehow overlaps". That
     // rule is exactly what mailed Bodega Bay twice on Sunday: the email is the
-    // morning touchpoint for a CALENDAR DAY, so a later Day sharing the date
+    // morning touchpoint for a CALENDAR DATE, so a later Day sharing the date
     // never takes it over.
     const sameDay: EmailDay[] = [
-      { index: 0, unlockAt: 1_000_000 },
-      { index: 1, unlockAt: 1_000_100 },
+      { index: 0, date: '1970-01-01', unlockAt: 1_000_000 },
+      { index: 1, date: '1970-01-01', unlockAt: 1_000_100 },
     ];
     expect(dueDayForDailyEmail(sameDay, 1_000_200)?.index).toBe(0);
     // Declaration order must not decide it — the lowest INDEX owns the date.
     expect(dueDayForDailyEmail([sameDay[1], sameDay[0]], 1_000_200)?.index).toBe(0);
   });
 
-  it('groups Days by the EVENT zone, not UTC', () => {
-    const days: EmailDay[] = [
-      { index: 0, unlockAt: Date.parse('2026-08-09T05:00:00-07:00') },
-      { index: 1, unlockAt: Date.parse('2026-08-09T18:00:00-07:00') },
-    ];
-    const at = Date.parse('2026-08-09T18:30:00-07:00');
-    // In Los Angeles both Days are Aug 9, so Day 0 owns it and its window has
-    // long closed — nothing is due. Read in UTC the two fall on Aug 9 and Aug
-    // 10, which is how the second one would sneak its own email.
-    expect(dueDayForDailyEmail(days, at, 'America/Los_Angeles')).toBeNull();
-    expect(dueDayForDailyEmail(days, at)?.index).toBe(1);
+  it("reads TODAY on the EVENT's clock, not the sweep's UTC", () => {
+    // Was "groups Days by the EVENT zone, not UTC" — grouping no longer needs a
+    // clock at all, because each Day states its own `date`. The zone is still
+    // load-bearing for the other half of the question: WHICH local date is
+    // today, and therefore whether this Day's morning is happening now.
+    const days: EmailDay[] = [{ index: 0, date: '2026-08-10' }];
+    const at = Date.parse('2026-08-10T08:30:00-07:00');
+    expect(dueDayForDailyEmail(days, at, 'America/Los_Angeles')?.index).toBe(0);
+    // The same instant is 15:30 UTC — long past the morning window.
+    expect(dueDayForDailyEmail(days, at)).toBeNull();
   });
 });
 
@@ -768,12 +778,11 @@ describe('dueDayForDailyEmail: ownership picks the Day, it does not shorten the 
   const at = (iso: string) => Date.parse(iso);
 
   it("keeps a real unlock's absolute window open across local midnight", () => {
-    // The spec is explicit that only the SENTINEL's window is clamped to a wall
-    // clock; a real unlock keeps `[unlockAt, unlockAt + SEND_WINDOW_MS)`. A
-    // calendar-date ownership test applied to the window instead of to the Day
-    // would drop this Day at midnight and lose the email permanently to a
-    // two-hour outage.
-    const days: EmailDay[] = [{ index: 0, unlockAt: at('2026-08-09T23:00:00-07:00') }];
+    // Only a Day with no unlock hour of its own is clamped to a wall clock; a
+    // real unlock keeps `[unlockAt, unlockAt + SEND_WINDOW_MS)`. A calendar-date
+    // ownership test applied to the window instead of to the Day would drop this
+    // Day at midnight and lose the email permanently to a two-hour outage.
+    const days: EmailDay[] = [{ index: 0, date: '2026-08-09', unlockAt: at('2026-08-09T23:00:00-07:00') }];
     expect(dueDayForDailyEmail(days, at('2026-08-09T23:00:00-07:00'), tz)?.index).toBe(0);
     expect(dueDayForDailyEmail(days, at('2026-08-10T01:00:00-07:00'), tz)?.index).toBe(0);
     expect(dueDayForDailyEmail(days, at('2026-08-10T04:59:00-07:00'), tz)?.index).toBe(0);
@@ -783,8 +792,8 @@ describe('dueDayForDailyEmail: ownership picks the Day, it does not shorten the 
 
   it("prefers today's owner over a Day carried over from yesterday", () => {
     const days: EmailDay[] = [
-      { index: 0, unlockAt: at('2026-08-09T23:00:00-07:00') },
-      { index: 1, unlockAt: at('2026-08-10T04:00:00-07:00') },
+      { index: 0, date: '2026-08-09', unlockAt: at('2026-08-09T23:00:00-07:00') },
+      { index: 1, date: '2026-08-10', unlockAt: at('2026-08-10T04:00:00-07:00') },
     ];
     // 03:00 — only last night's Day is inside its window.
     expect(dueDayForDailyEmail(days, at('2026-08-10T03:00:00-07:00'), tz)?.index).toBe(0);
@@ -792,11 +801,14 @@ describe('dueDayForDailyEmail: ownership picks the Day, it does not shorten the 
     expect(dueDayForDailyEmail(days, at('2026-08-10T04:30:00-07:00'), tz)?.index).toBe(1);
   });
 
-  it('never mails a Day whose unlockAt is malformed, even with a valid date', () => {
-    // Only the deliberate `unlockAt: 0` is the open sentinel. A partially
-    // written or corrupted Day fails `hasScheduledUnlock` too, and scheduling it
-    // off its `date` would mail real players on garbage.
-    const morning = at('2026-08-09T09:00:00-07:00');
+  it('mails a Day with a malformed unlockAt at the fallback morning hour, rather than never (#723)', () => {
+    // DELIBERATE REVERSAL of the previous round, which made a malformed
+    // `unlockAt` a permanent disqualifier and kept a separate `isOpenSentinelUnlock`
+    // taxonomy to tell "recognised sentinel" from "corrupt". The rule is now
+    // "send an email before any day that exists, regardless of what sort of day":
+    // the DATE decides eligibility, and `unlockAt` only decides the hour. So
+    // every shape below — sentinel included — is one case, "names no hour", and
+    // lands in the same Event-local morning window.
     const broken = [
       { index: 0, date: '2026-08-09' },
       { index: 0, date: '2026-08-09', unlockAt: undefined },
@@ -805,29 +817,46 @@ describe('dueDayForDailyEmail: ownership picks the Day, it does not shorten the 
       { index: 0, date: '2026-08-09', unlockAt: Number.POSITIVE_INFINITY },
       { index: 0, date: '2026-08-09', unlockAt: '2026-08-09T06:00:00-07:00' },
       { index: 0, date: '2026-08-09', unlockAt: -1 },
+      { index: 0, date: '2026-08-09', unlockAt: 0 },
     ] as unknown as EmailDay[];
+    // No real unlock anywhere in this one-Day schedule, so the window opens at
+    // DEFAULT_SEND_LOCAL_HOUR and runs the usual six hours.
+    const hh = (hour: number) => String(hour).padStart(2, '0');
+    const opens = DEFAULT_SEND_LOCAL_HOUR;
+    const closes = opens + SEND_WINDOW_MS / 3_600_000;
     for (const day of broken) {
-      expect(dueDayForDailyEmail([day], morning, tz)).toBeNull();
-      // Not merely late — no hour of that local date makes it due.
-      for (let hour = 0; hour < 24; hour++) {
-        const when = at(`2026-08-09T${String(hour).padStart(2, '0')}:30:00-07:00`);
-        expect(dueDayForDailyEmail([day], when, tz)).toBeNull();
-      }
+      expect(dueDayForDailyEmail([day], at(`2026-08-09T${hh(opens - 1)}:59:00-07:00`), tz)).toBeNull();
+      expect(dueDayForDailyEmail([day], at(`2026-08-09T${hh(opens)}:00:00-07:00`), tz)?.index).toBe(0);
+      expect(dueDayForDailyEmail([day], at(`2026-08-09T${hh(closes - 1)}:59:00-07:00`), tz)?.index).toBe(0);
+      expect(dueDayForDailyEmail([day], at(`2026-08-09T${hh(closes)}:00:00-07:00`), tz)).toBeNull();
+      // Bounded to that one date — never permanently overdue.
+      expect(dueDayForDailyEmail([day], at('2026-09-09T08:00:00-07:00'), tz)).toBeNull();
     }
-    // The RECOGNISED sentinel on the same date is still mailed — the line is the
-    // deliberate 0, not "anything that fails `hasScheduledUnlock`".
-    expect(dueDayForDailyEmail([{ index: 0, date: '2026-08-09', unlockAt: 0 }], morning, tz)?.index).toBe(0);
   });
 
-  it('lets a malformed Day silence its date rather than promoting the next Day on it', () => {
+  it("derives the fallback hour from the Event's own earliest unlock, not a hardcoded 08:00", () => {
+    // Bodega opens its real Days at 06:00, so a fixed 08:00 would mail the
+    // opening Day two hours out of step with every other morning of the trip.
+    const days = [
+      { index: 0, date: '2026-08-07' },
+      { index: 1, date: '2026-08-08', unlockAt: at('2026-08-08T06:00:00-07:00') },
+    ] as unknown as EmailDay[];
+    expect(dueDayForDailyEmail(days, at('2026-08-07T06:00:00-07:00'), tz)?.index).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-07T05:59:00-07:00'), tz)).toBeNull();
+    expect(dueDayForDailyEmail(days, at('2026-08-07T12:00:00-07:00'), tz)).toBeNull();
+  });
+
+  it('lets a Day with no unlock hour keep its date rather than promoting the next Day on it', () => {
     const days = [
       { index: 0, date: '2026-08-09' },
       { index: 1, date: '2026-08-09', unlockAt: at('2026-08-09T11:00:00-07:00') },
     ] as unknown as EmailDay[];
-    // 11:30 PDT: Day 1's own window is open, but Day 0 still holds Sunday. A
-    // corrupted Day must not hand its date's email to a Day written for another
-    // moment entirely — Bodega's 11:00 wrap-up is precisely that Day.
-    expect(dueDayForDailyEmail(days, at('2026-08-09T11:30:00-07:00'), tz)).toBeNull();
+    // Sunday's owner is Day 0 whatever its `unlockAt` looks like, so the 11:00
+    // Day — Bodega's ceremonial wrap-up is exactly this shape — never takes the
+    // date's email. Day 0's own morning opens at the Event's earliest real
+    // unlock, which here is that same 11:00.
+    expect(dueDayForDailyEmail(days, at('2026-08-09T11:30:00-07:00'), tz)?.index).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-09T11:30:00-07:00'), tz)?.index).not.toBe(1);
   });
 });
 
@@ -841,14 +870,17 @@ describe('dueDayForDailyEmail against the live Bodega Bay schedule (#723)', () =
 
   it('sends on the opening Day, which carries the open sentinel by design', () => {
     expect(days[0].unlockAt).toBe(0);
-    expect(dueDayForDailyEmail(days, at('2026-08-07T08:00:00-07:00'), tz)?.index).toBe(0);
-    expect(dueDayForDailyEmail(days, at('2026-08-07T13:59:00-07:00'), tz)?.index).toBe(0);
+    // 06:00, not 08:00: the fallback hour is derived from this Event's own
+    // earliest real unlock, so Friday's email lands on the same rhythm as
+    // Saturday's and Sunday's rather than two hours behind them.
+    expect(dueDayForDailyEmail(days, at('2026-08-07T06:00:00-07:00'), tz)?.index).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-07T11:59:00-07:00'), tz)?.index).toBe(0);
   });
 
-  it('keeps that sentinel Day bounded to one local morning, on one date', () => {
-    expect(dueDayForDailyEmail(days, at('2026-08-07T07:59:00-07:00'), tz)).toBeNull();
-    expect(dueDayForDailyEmail(days, at('2026-08-07T14:00:00-07:00'), tz)).toBeNull();
-    expect(dueDayForDailyEmail(days, at('2026-09-07T08:00:00-07:00'), tz)).toBeNull();
+  it('keeps that opening Day bounded to one local morning, on one date', () => {
+    expect(dueDayForDailyEmail(days, at('2026-08-07T05:59:00-07:00'), tz)).toBeNull();
+    expect(dueDayForDailyEmail(days, at('2026-08-07T12:00:00-07:00'), tz)).toBeNull();
+    expect(dueDayForDailyEmail(days, at('2026-09-07T06:00:00-07:00'), tz)).toBeNull();
   });
 
   it('sends on Saturday — the one Day the POC got right', () => {
@@ -1134,21 +1166,19 @@ describe('sendDailyEmailForEvent', () => {
     expect(all.length).toBeGreaterThan(5);
   });
 
-  it("resolves the due Day in the EVENT's timezone, not the sweep's UTC (#723)", async () => {
-    // Two Days on one Los Angeles Sunday whose UTC dates differ: 18:00 PDT is
-    // already Aug 10 in UTC, so a UTC-grouped due check hands the second Day its
-    // own email hours after the morning card. Only the Event zone collapses
-    // them, and only the sender can supply it.
+  it("resolves the due Day on the EVENT's clock, not the sweep's UTC (#723)", async () => {
+    // A Day with no unlock hour of its own is mailed in the Event-local morning,
+    // so only the Event zone can say whether that morning is happening. 08:30
+    // PDT is 15:30 UTC — a sender that forgot to pass `event.timezone` would
+    // read the window as long closed and drop the Day's only email.
     const docs = seedEvent();
     const event = docs['events/med-2026'] as Record<string, unknown>;
     event.timezone = 'America/Los_Angeles';
-    event.days = [
-      { index: 0, unlockAt: Date.parse('2026-08-09T05:00:00-07:00'), theme: 'welcome-aboard' },
-      { index: 1, unlockAt: Date.parse('2026-08-09T18:00:00-07:00'), theme: 'duty-free' },
-    ];
-    const { result, sent } = await run(docs, { now: () => Date.parse('2026-08-09T18:30:00-07:00') });
-    expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
-    expect(sent).toHaveLength(0);
+    event.days = [{ index: 0, date: '2026-08-09', theme: 'welcome-aboard' }];
+    const { result, sent } = await run(docs, { now: () => Date.parse('2026-08-09T08:30:00-07:00') });
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(sent).toHaveLength(2);
+    expect(sent[0].text).toContain('your Day 1 card is live now');
   });
 
   it('logs roster overflow even when a banned row makes the filtered page look within the ceiling', async () => {
