@@ -83,6 +83,15 @@ function deferred<T>() {
   return { promise, settle };
 }
 
+// The two failure SHAPES the bootstrap has to tell apart. Firestore rejects with a
+// `FirebaseError` carrying a `code`, and AuthContext classifies on that code — so
+// these model the real thing rather than a bare `new Error(message)`, whose
+// classification would fall through to the uncoded message regex instead.
+const unreachable = () =>
+  Object.assign(new Error('net::ERR_INTERNET_DISCONNECTED'), { code: 'unavailable' });
+const permanent = () =>
+  Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
+
 // `loading` is App.tsx's Board gate (App renders "Loading…" while loading is true,
 // the Board only once it is false), so a unit test can read it as the proxy for
 // "would the Board render?". `board` renders only when the re-prompt gate is DOWN;
@@ -119,7 +128,10 @@ const dealErrorShown = () => screen.queryByRole('alert') !== null;
 // `canRenderEventContent` is the App.tsx authority boundary (#521): App.tsx
 // returns the full-screen DealError and withholds the whole Event — including
 // any durable cached card — whenever this is false, regardless of dealError.
-const mayRenderEventContent = () => screen.getByTestId('authority').textContent === 'may-render';
+// `queryBy`, not `getBy`: when the re-prompt gate is UP, AuthProvider renders
+// <SignIn/> in place of `children`, so the Probe is unmounted entirely — which is
+// itself "the Event is not rendering", not a missing element.
+const mayRenderEventContent = () => screen.queryByTestId('authority')?.textContent === 'may-render';
 // `dealing` drives the DealError Retry button's disabled/"Dealing…" state — stuck
 // true would leave Retry unusable through a supersede (round 5, finding B).
 const dealingActive = () => screen.getByTestId('dealing').textContent === 'dealing';
@@ -812,8 +824,8 @@ describe('offline cold boot (#115)', () => {
     // proves 18+ from the SAME cached stamp the OFFLINE branch trusts.
     setOnline(true);
     mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
-    mocks.ensureUserProfile.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
-    mocks.readAdultAttestationFromServer.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
+    mocks.ensureUserProfile.mockRejectedValue(unreachable());
+    mocks.readAdultAttestationFromServer.mockRejectedValue(unreachable());
 
     mount();
     await coldBoot(RETURNING_USER);
@@ -837,8 +849,8 @@ describe('offline cold boot (#115)', () => {
     // before the fix.
     setOnline(true);
     mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
-    mocks.ensureUserProfile.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
-    mocks.readAdultAttestationFromServer.mockRejectedValue(new Error('net::ERR_INTERNET_DISCONNECTED'));
+    mocks.ensureUserProfile.mockRejectedValue(unreachable());
+    mocks.readAdultAttestationFromServer.mockRejectedValue(unreachable());
 
     mount();
     await coldBoot(RETURNING_USER);
@@ -852,6 +864,132 @@ describe('offline cold boot (#115)', () => {
     );
     expect(mayRenderEventContent()).toBe(false);
     expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2): a PERMANENT authority failure does NOT lift the render gate from cache — the Event stays withheld behind the retry surface', async () => {
+    // Same cached stamp, same "the authority read failed" shape — but the failure
+    // is `permission-denied`, which reconnecting cannot fix. The #521 fallback
+    // exists for the captive-Wi-Fi/effectively-offline case only; lifting here
+    // would mount Nav/Feed/Ranks/More over a rules/schema fault while App's own
+    // #434 cached-card gate (`dealErrorReason === 'connection'`) still refuses to
+    // paint the card the lift was for. Both decisions read the SAME classifier, so
+    // they cannot disagree.
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    mocks.readAdultAttestationFromServer.mockRejectedValue(permanent());
+
+    mount();
+    await coldBoot(RETURNING_USER);
+
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    // The permanent-class failure never even consults the cache…
+    expect(mocks.readAdultAttestationFromCache).not.toHaveBeenCalled();
+    // …so the whole Event stays withheld: App renders the full-screen DealError.
+    expect(mayRenderEventContent()).toBe(false);
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2): a LATE authoritative NULL that lands after AUTH_BOOTSTRAP_TIMEOUT_MS downgrades the provisional cache lift to the re-prompt', async () => {
+    // `withTimeout` rejects the race but cannot cancel the read. The provisional
+    // cache lift keeps the Event rendering, and no connectivity event ever fires
+    // while navigator.onLine stays true — so a DISCARDED late server-NULL would
+    // leave the stale lift standing forever. The late result must still settle.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+
+    // The timeout surfaced the retryable error and the cache lifted the gate.
+    expect(dealErrorShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(true);
+    expect(rePromptShown()).toBe(false);
+
+    // …and NOW the orphaned server read lands, definitively unstamped.
+    await act(async () => {
+      read.settle(null);
+    });
+
+    // The authority wins: gate closed, stale error cleared, re-prompt shown, and
+    // still no rows created for a User the server has not confirmed.
+    expect(mayRenderEventContent()).toBe(false);
+    expect(rePromptShown()).toBe(true);
+    expect(dealErrorShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2): a LATE authoritative STAMP that lands after the timeout clears the stale error and deals — no manual Retry needed', async () => {
+    // The mirror case: the same orphaned read comes back CONFIRMING the stamp.
+    // Routing it through the same settle recovers the session in place, the way
+    // runDeal's late-success net already does for a timed-out deal.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1);
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(dealErrorShown()).toBe(true);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+
+    await act(async () => {
+      read.settle(1);
+    });
+
+    expect(dealErrorShown()).toBe(false);
+    expect(mayRenderEventContent()).toBe(true);
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+  });
+
+  it('#521 (Codex P2): a cache read that resolves AFTER a late authoritative NULL cannot re-lift the gate the downgrade closed', async () => {
+    // The one-level-down version of the same bug: the provisional lift is
+    // fire-and-forget, so its `.then` can land after the authoritative settle.
+    // Authority is terminal for the attempt — a slow cache stamp must not undo it.
+    vi.useFakeTimers();
+    setOnline(true);
+    const cache = deferred<number | null>();
+    mocks.readAdultAttestationFromCache.mockReturnValue(cache.promise);
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    // The lift was requested but its cache read is still in flight.
+    expect(mocks.readAdultAttestationFromCache).toHaveBeenCalledWith(RETURNING_USER.uid);
+    expect(mayRenderEventContent()).toBe(false);
+
+    // Authority lands FIRST, definitively unstamped → re-prompt.
+    await act(async () => {
+      read.settle(null);
+    });
+    expect(rePromptShown()).toBe(true);
+
+    // …and only then does the cache come back with a stamp. It must be ignored.
+    await act(async () => {
+      cache.settle(1);
+    });
+    expect(rePromptShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(false);
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
   });
 });
