@@ -1,10 +1,14 @@
 import type { Cell } from '../types';
 
+export type EchoAnalyticsTrigger = 'deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm';
+
+export type EchoAnalyticsTransition = { id: string; trigger: EchoAnalyticsTrigger };
+
 /**
  * Persisted identity for one countable Echo Mark transition. Analytics delivery
  * is intentionally at-least-once: a tab can die after Firestore accepts its
  * cells but before its post-commit continuation runs, and another device can
- * open the same board. PostHog reconciliation therefore deduplicates on this
+ * open the same board. Downstream reconciliation therefore deduplicates on this
  * identity instead of trusting device-local storage or event delivery order.
  */
 export function echoAnalyticsId(params: {
@@ -32,6 +36,7 @@ export function stampEchoAnalyticsTransitions(params: {
   uid: string;
   dayIndex: number;
   boardSeed: number | undefined;
+  trigger: EchoAnalyticsTrigger;
   limit?: number;
 }): Cell[] {
   const limit = params.limit ?? Number.POSITIVE_INFINITY;
@@ -63,37 +68,54 @@ export function stampEchoAnalyticsTransitions(params: {
         cellIndex: cell.index,
         generation: cell.echoGeneration as number,
       }),
+      echoAnalyticsTrigger: params.trigger,
     };
   });
 }
 
 /** Stable identities carried by a board's countable Echo Mark cells. */
 export function echoAnalyticsIds(cells: readonly Cell[]): string[] {
+  return echoAnalyticsTransitions(cells).map((transition) => transition.id);
+}
+
+/** Persisted identity plus the propagation path that originally minted it. */
+export function echoAnalyticsTransitions(cells: readonly Cell[]): EchoAnalyticsTransition[] {
   return cells
-    .map((cell) => cell.echoAnalyticsId)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0)
-    .sort();
+    .flatMap((cell) => {
+      if (typeof cell.echoAnalyticsId !== 'string' || cell.echoAnalyticsId.length === 0) return [];
+      const trigger = cell.echoAnalyticsTrigger;
+      if (
+        trigger !== 'deal' &&
+        trigger !== 'reshuffle' &&
+        trigger !== 'mark' &&
+        trigger !== 'open_reconcile' &&
+        trigger !== 'admin_confirm'
+      ) {
+        return [];
+      }
+      return [{ id: cell.echoAnalyticsId, trigger }];
+    })
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /**
  * Ship one event per durable transition. Duplicate delivery is deliberate and
- * safe: analytics reconciliation groups by `transitionId`, not raw event rows.
+ * safe: downstream reconciliation groups by `transitionId`, not raw event rows.
  */
 export async function trackEchoTransitions(params: {
-  ids: readonly string[];
-  trigger: 'deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm';
+  transitions: readonly EchoAnalyticsTransition[];
   uid: string;
   dayIndex: number;
 }): Promise<void> {
-  if (params.ids.length === 0) return;
+  if (params.transitions.length === 0) return;
   const { track } = await import('../analytics');
-  for (const transitionId of params.ids) {
+  for (const transition of params.transitions) {
     track('echo_mark', {
-      trigger: params.trigger,
+      trigger: transition.trigger,
       uid: params.uid,
       dayIndex: params.dayIndex,
       count: 1,
-      transitionId,
+      transitionId: transition.id,
     });
   }
 }

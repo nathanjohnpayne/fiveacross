@@ -433,10 +433,20 @@ export interface Cell {
   // durable transition even after a player unmarks and later re-earns it.
   echoGeneration?: number;
   // Present only for Echo transitions that advance the receiving Day's
-  // `squaresMarked` bucket. This is the PostHog reconciliation key; delivery
+  // `squaresMarked` bucket. This is the analytics reconciliation key; delivery
   // is allowed to retry across reloads and devices, so raw events are grouped
   // by this persisted id rather than deduplicated in browser storage.
   echoAnalyticsId?: string;
+  // The propagation path that CREATED `echoAnalyticsId`. Open-time recovery
+  // replays this original trigger, rather than reclassifying a deal/mark echo
+  // as an `open_reconcile` event merely because another device delivered it.
+  echoAnalyticsTrigger?: 'deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm';
+  // Durable identity for a direct Board mark/unmark transition. It is stamped
+  // in the same batch as the cell, so concurrent stale writers report the
+  // same transitionId after their commits instead of two indistinguishable
+  // analytics rows. The generation survives later reversals.
+  markAnalyticsGeneration?: number;
+  markAnalyticsId?: string;
   // A Player can explicitly unmark an Echo on this card. Keep that choice on
   // the cell so open-time reconciliation does not add the same Echo back.
   echoOptOut?: boolean;

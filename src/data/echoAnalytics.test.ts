@@ -21,6 +21,7 @@ function stamped(cells: Cell[], changed: Cell[]): Cell[] {
     uid: 'player',
     dayIndex: 2,
     boardSeed: 42,
+    trigger: 'mark',
   });
 }
 
@@ -52,6 +53,7 @@ describe('persisted Echo analytics identities', () => {
       uid: 'player',
       dayIndex: 2,
       boardSeed: 42,
+      trigger: 'reshuffle',
       limit: 0,
     });
     expect(echoAnalyticsIds(suppressed)).toEqual([]);

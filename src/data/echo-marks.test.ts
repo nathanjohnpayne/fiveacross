@@ -410,6 +410,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
           echo: true,
           echoGeneration: 1,
           echoAnalyticsId: transitionId,
+          echoAnalyticsTrigger: 'mark',
         },
       }),
     });
@@ -430,9 +431,9 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     // The second delivery is intentionally the SAME durable transition, not a
     // new high-water total. Querying distinct `transitionId` therefore counts
     // it once even when another tab/device performs this recovery.
-    await vi.waitFor(() => expectEchoTrack('open_reconcile', 3));
+    await vi.waitFor(() => expectEchoTrack('mark', 3));
     const replayedId = (H.track.mock.calls.find(
-      ([name, payload]) => name === 'echo_mark' && (payload as { trigger?: string }).trigger === 'open_reconcile',
+      ([name, payload]) => name === 'echo_mark' && (payload as { trigger?: string }).trigger === 'mark',
     )![1] as { transitionId: string }).transitionId;
     expect(replayedId).toBe(transitionId);
   });
@@ -1072,6 +1073,7 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
           echo: true,
           echoGeneration: 1,
           echoAnalyticsId: 'echo-v1:test-event:u1:2:222:14:1',
+          echoAnalyticsTrigger: 'deal',
         },
       }),
     });
@@ -1111,7 +1113,7 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     // firing site above never ran. The persisted Echo identity is the recovery
     // point: it emits one event for this one Echo, independently of the wider
     // stale stats delta (which also includes three manual Marks).
-    await vi.waitFor(() => expectEchoTrack('open_reconcile', 2));
+    await vi.waitFor(() => expectEchoTrack('deal', 2));
   });
 
   it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {

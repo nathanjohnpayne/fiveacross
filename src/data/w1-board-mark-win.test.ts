@@ -369,6 +369,8 @@ describe('setMark (write shape)', () => {
       bingoTransition: false,
       blackoutTransition: false,
       markTransition: true,
+      committed: expect.any(Promise),
+      markTransitionId: expect.any(String),
     });
   });
 });
@@ -671,6 +673,8 @@ describe('setMark (surfaces a genuine commit failure instead of swallowing it)',
       bingoTransition: false,
       blackoutTransition: false,
       markTransition: true,
+      committed: expect.any(Promise),
+      markTransitionId: expect.any(String),
     });
 
     // commit() is fire-and-forget, so the .catch runs on a later microtask.

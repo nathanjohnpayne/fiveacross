@@ -4,7 +4,7 @@ import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
-import { echoAnalyticsIds, stampEchoAnalyticsTransitions, trackEchoTransitions } from './echoAnalytics';
+import { echoAnalyticsTransitions, stampEchoAnalyticsTransitions, trackEchoTransitions } from './echoAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
@@ -409,7 +409,7 @@ interface ResolveResult {
    *  other echo propagation path), so a concurrent-confirm replay pushes
    *  nothing here even though `transitioned` is independently `false` for
    *  that same call. */
-  echoes: Array<{ dayIndex: number; ids: string[] }>;
+  echoes: Array<{ dayIndex: number; transitions: ReturnType<typeof echoAnalyticsTransitions> }>;
 }
 
 async function resolve(
@@ -527,7 +527,7 @@ async function resolve(
     // same per-sibling `res.changed` gate, so it stays empty for exactly the
     // stale/replayed-confirm and reject cases `echoBuckets` also skips — see
     // `ResolveResult.echoes`'s doc comment above.
-    const echoMarkEvents: Array<{ dayIndex: number; ids: string[] }> = [];
+    const echoMarkEvents: Array<{ dayIndex: number; transitions: ReturnType<typeof echoAnalyticsTransitions> }> = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];
     const echoNow = Date.now();
@@ -547,6 +547,7 @@ async function resolve(
             uid: c.uid,
             dayIndex: echoSiblingDays[idx],
             boardSeed: typeof sib.seed === 'number' ? sib.seed : undefined,
+            trigger: 'admin_confirm',
           }),
         };
         if (!res.changed) return;
@@ -559,7 +560,7 @@ async function resolve(
         });
         echoMarkEvents.push({
           dayIndex: echoSiblingDays[idx],
-          ids: echoAnalyticsIds(changedCells(sibCells, res.cells)),
+          transitions: echoAnalyticsTransitions(changedCells(sibCells, res.cells)),
         });
         echoBuckets.push({
           dayIndex: echoSiblingDays[idx],
@@ -773,8 +774,7 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
       await Promise.all(
         echoes.map((echo) =>
           trackEchoTransitions({
-            ids: echo.ids,
-            trigger: 'admin_confirm',
+            transitions: echo.transitions,
             uid: c.uid,
             dayIndex: echo.dayIndex,
           }),

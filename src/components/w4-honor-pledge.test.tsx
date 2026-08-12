@@ -154,7 +154,14 @@ beforeEach(() => {
   // suite would falsely read as "no transition, suppress the event." The one
   // test that exercises the OPPOSITE case (a stale-cache rewrite) overrides
   // this per-call.
-  H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: true });
+  H.setMark.mockResolvedValue({
+    cells: [],
+    bingo: false,
+    blackout: false,
+    markTransition: true,
+    markTransitionId: 'mark-v1:test',
+    committed: Promise.resolve(),
+  });
   H.attachProof.mockResolvedValue(undefined);
 });
 
@@ -182,11 +189,42 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     await waitFor(() => expect(screen.queryByText(/proof for/i)).toBeNull());
     // #721: the pledge is the 'pledge' source of mark_square, never conflated
     // with a bare boolean — marked: true is explicit and source pins the mode.
-    expect(H.track).toHaveBeenCalledWith('mark_square', {
-      source: 'pledge',
-      mode: 'honor',
-      marked: true,
+    await waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith(
+        'mark_square',
+        expect.objectContaining({ source: 'pledge', mode: 'honor', marked: true, transitionId: 'mark-v1:test' }),
+      ),
+    );
+  });
+
+  it('waits for the mark batch acknowledgement before emitting the direct-transition event', async () => {
+    let acknowledge!: () => void;
+    const committed = new Promise<void>((resolve) => {
+      acknowledge = resolve;
     });
+    H.setMark.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      markTransition: true,
+      markTransitionId: 'mark-v1:deferred',
+      committed,
+    });
+    const user = userEvent.setup();
+    render(<Board />);
+    clickCell(0);
+    await user.click(await screen.findByRole('button', { name: PLEDGE }));
+
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+
+    acknowledge();
+    await waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith(
+        'mark_square',
+        expect.objectContaining({ transitionId: 'mark-v1:deferred' }),
+      ),
+    );
   });
 
   it('Cancel leaves the Square unmarked; unmarking a marked Square stays instant with no sheet', async () => {
@@ -210,7 +248,12 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // #721: an unmark fires the distinct unmark_square event, NEVER
     // mark_square { marked: false } — the fix for the #721 root cause (a raw
     // mark_square count that mixed unmarks in with real marks).
-    expect(H.track).toHaveBeenCalledWith('unmark_square', { mode: 'honor' });
+    await waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith(
+        'unmark_square',
+        expect.objectContaining({ mode: 'honor', transitionId: 'mark-v1:test' }),
+      ),
+    );
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
@@ -249,12 +292,18 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // before #727's fix this event carried no `dayIndex` at all and relied
     // on the app-wide `day_index` default dimension, which is registered
     // once from `todaysDayIndex` and would misattribute this exact scenario.
-    expect(H.track).toHaveBeenCalledWith('mark_square', {
-      source: 'pledge',
-      mode: 'honor',
-      marked: true,
-      dayIndex: 0,
-    });
+    await waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith(
+        'mark_square',
+        expect.objectContaining({
+          source: 'pledge',
+          mode: 'honor',
+          marked: true,
+          dayIndex: 0,
+          transitionId: 'mark-v1:test',
+        }),
+      ),
+    );
   });
 
   it('a stale-cache-fold rewrite (no real transition) fires no mark_square (Codex P2 on #727)', async () => {
