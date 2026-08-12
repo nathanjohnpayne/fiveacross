@@ -1694,7 +1694,7 @@ async function runSetMark(
   // durable event only when the server really observed this cell edge. That
   // means an offline queue survives a reload, while a stale tab's true→true
   // rewrite carries a new request but produces no false second event.
-  const directAnalyticsRequest = markTransition
+  const analyticsRequestToken = markTransition
     ? directMarkAnalyticsRequest({
         cellIndex: params.index,
         marked: params.nextMarked,
@@ -1850,7 +1850,7 @@ async function runSetMark(
     boardRef,
     ...cellsMergeSet(cellsPatch(changedCells(baseCells, cells)), {
       ...(typeof markSeed === 'number' ? { markSeed } : {}),
-      ...(directAnalyticsRequest ? { directAnalyticsRequest } : {}),
+      ...(analyticsRequestToken ? { directAnalyticsRequest: analyticsRequestToken } : {}),
     }),
   );
   // Echoed sibling boards ride the SAME batch, each carrying ITS OWN board's

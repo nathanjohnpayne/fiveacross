@@ -264,7 +264,7 @@ export const notifyItemModeration = onDocumentWritten(
  * Cloud Functions' at-least-once trigger delivery cannot duplicate it.
  */
 export const recordLegacyDirectMarkAnalytics = onDocumentWritten(
-  { document: 'events/{eventId}/boards/{uid}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  { document: 'events/{eventId}/boards/{uid}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
   (event) => {
     const commitOrder = firestoreCommitOrder(event.data?.after.updateTime);
     if (!commitOrder) return;
@@ -280,7 +280,11 @@ export const recordLegacyDirectMarkAnalytics = onDocumentWritten(
 );
 
 export const recordDayDirectMarkAnalytics = onDocumentWritten(
-  { document: 'events/{eventId}/days/{dayIndex}/boards/{uid}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  {
+    document: 'events/{eventId}/days/{dayIndex}/boards/{uid}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    retry: true,
+  },
   (event) => {
     const dayIndex = Number(event.params.dayIndex);
     const commitOrder = firestoreCommitOrder(event.data?.after.updateTime);
