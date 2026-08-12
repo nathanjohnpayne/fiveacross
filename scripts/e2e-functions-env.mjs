@@ -43,10 +43,20 @@ import { pathToFileURL } from 'node:url';
 /**
  * `defineString('NAME'` / `defineBoolean('NAME'` / `defineSecret('NAME'` …
  *
+ * Deliberately NOT an enumeration of the constructors in use. firebase-functions
+ * 5.1.1 also exports `defineInt`, `defineFloat` and `defineList`, and a listed
+ * subset fails in the worst possible way: the omitted constructor is skipped
+ * silently, the existing declarations keep the zero-match guard from firing, and
+ * every test still passes while the new param goes uncovered and hangs the
+ * emulator (Codex P2 on PR #730 — `defineFloat` was in fact missing). Matching
+ * any `define<Name>(` means a constructor added by a future SDK is caught
+ * without an edit here, and an over-match fails in the safe direction: a loud
+ * "no value for X" rather than a silent omission.
+ *
  * Anchored on the quoted name literal that must follow the paren, so prose
  * references to a `defineBoolean(...)` call in a doc comment cannot match.
  */
-const DEFINE_RE = /\bdefine(String|Boolean|Int|List|Secret)\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]/g;
+const DEFINE_RE = /\bdefine([A-Z][A-Za-z]*)\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]/g;
 
 /**
  * The characters firebase-tools' dotenv parser unescapes, and their escapes —

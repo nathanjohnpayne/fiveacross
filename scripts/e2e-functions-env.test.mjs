@@ -50,6 +50,33 @@ describe('e2e functions dotenv generation', () => {
     expect(() => declaredParamNames('export const nothing = 1;\n')).toThrow(/DEFINE_RE/);
   });
 
+  // Codex P2 on PR #730: an enumerated list of constructors fails silently —
+  // the omitted one is skipped, the existing declarations keep the zero-match
+  // guard quiet, and every assertion still passes.
+  it('catches every param constructor, including ones this repo does not use yet', () => {
+    const exotic = [
+      "defineFloat('SAMPLE_RATE', { default: 0.5 })",
+      "defineInt('BATCH_SIZE', { default: 10 })",
+      "defineList('ALLOWED_HOSTS', { default: [] })",
+      // Not an SDK export today. A constructor a future firebase-functions adds
+      // must be caught without an edit to DEFINE_RE.
+      "defineDuration('RETRY_BACKOFF')",
+    ].join('\n');
+
+    expect(declaredParamNames(exotic).params).toEqual([
+      'SAMPLE_RATE',
+      'BATCH_SIZE',
+      'ALLOWED_HOSTS',
+      'RETRY_BACKOFF',
+    ]);
+  });
+
+  it('ignores a prose reference to a constructor in a doc comment', () => {
+    const withProse = `${PARAMS_SOURCE}\n// equally a defineBoolean(...) read, which is not a declaration\n`;
+
+    expect(declaredParamNames(withProse)).toEqual(declaredParamNames(PARAMS_SOURCE));
+  });
+
   it('separates secrets from plain params', () => {
     const { params, secrets } = declaredParamNames(PARAMS_SOURCE);
 
