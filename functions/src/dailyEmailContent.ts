@@ -312,6 +312,25 @@ export function hasScheduledUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
 }
 
 /**
+ * True only for the RECOGNISED open sentinel — `unlockAt` present and exactly
+ * `0`, the "live from Event open" convention `src/domainTypes.d.ts` documents
+ * (#289).
+ *
+ * NOT the complement of `hasScheduledUnlock`, and that is the whole point
+ * (Codex #729). A missing, `undefined`, `NaN`, string or otherwise malformed
+ * `unlockAt` also fails `hasScheduledUnlock`, but it is a partially written or
+ * corrupted schedule, not a deliberate instruction to mail the Day at the
+ * Event's opening hour. Only a Day that answers TRUE here may be scheduled off
+ * its `date` label; everything else is malformed and is never due, because a
+ * real email to real players is not a recoverable mistake. A negative value is
+ * treated as malformed too: nothing in the schema mints one, and the previous
+ * blanket `unlockAt <= 0` skip never mailed it either.
+ */
+export function isOpenSentinelUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
+  return typeof day.unlockAt === 'number' && day.unlockAt === 0;
+}
+
+/**
  * "8:00 a.m." — the Day's unlock in the Event's timezone — or `null` when the
  * Day has no real unlock instant to quote.
  *

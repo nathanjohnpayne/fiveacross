@@ -763,6 +763,74 @@ describe('dueDayForDailyEmail', () => {
   });
 });
 
+describe('dueDayForDailyEmail: ownership picks the Day, it does not shorten the window (#729)', () => {
+  const tz = 'America/Los_Angeles';
+  const at = (iso: string) => Date.parse(iso);
+
+  it("keeps a real unlock's absolute window open across local midnight", () => {
+    // The spec is explicit that only the SENTINEL's window is clamped to a wall
+    // clock; a real unlock keeps `[unlockAt, unlockAt + SEND_WINDOW_MS)`. A
+    // calendar-date ownership test applied to the window instead of to the Day
+    // would drop this Day at midnight and lose the email permanently to a
+    // two-hour outage.
+    const days: EmailDay[] = [{ index: 0, unlockAt: at('2026-08-09T23:00:00-07:00') }];
+    expect(dueDayForDailyEmail(days, at('2026-08-09T23:00:00-07:00'), tz)?.index).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-10T01:00:00-07:00'), tz)?.index).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-10T04:59:00-07:00'), tz)?.index).toBe(0);
+    // And it still closes on time, six hours after the unlock.
+    expect(dueDayForDailyEmail(days, at('2026-08-10T05:00:00-07:00'), tz)).toBeNull();
+  });
+
+  it("prefers today's owner over a Day carried over from yesterday", () => {
+    const days: EmailDay[] = [
+      { index: 0, unlockAt: at('2026-08-09T23:00:00-07:00') },
+      { index: 1, unlockAt: at('2026-08-10T04:00:00-07:00') },
+    ];
+    // 03:00 — only last night's Day is inside its window.
+    expect(dueDayForDailyEmail(days, at('2026-08-10T03:00:00-07:00'), tz)?.index).toBe(0);
+    // 04:30 — both are, and today's card wins rather than the stale one.
+    expect(dueDayForDailyEmail(days, at('2026-08-10T04:30:00-07:00'), tz)?.index).toBe(1);
+  });
+
+  it('never mails a Day whose unlockAt is malformed, even with a valid date', () => {
+    // Only the deliberate `unlockAt: 0` is the open sentinel. A partially
+    // written or corrupted Day fails `hasScheduledUnlock` too, and scheduling it
+    // off its `date` would mail real players on garbage.
+    const morning = at('2026-08-09T09:00:00-07:00');
+    const broken = [
+      { index: 0, date: '2026-08-09' },
+      { index: 0, date: '2026-08-09', unlockAt: undefined },
+      { index: 0, date: '2026-08-09', unlockAt: null },
+      { index: 0, date: '2026-08-09', unlockAt: Number.NaN },
+      { index: 0, date: '2026-08-09', unlockAt: Number.POSITIVE_INFINITY },
+      { index: 0, date: '2026-08-09', unlockAt: '2026-08-09T06:00:00-07:00' },
+      { index: 0, date: '2026-08-09', unlockAt: -1 },
+    ] as unknown as EmailDay[];
+    for (const day of broken) {
+      expect(dueDayForDailyEmail([day], morning, tz)).toBeNull();
+      // Not merely late — no hour of that local date makes it due.
+      for (let hour = 0; hour < 24; hour++) {
+        const when = at(`2026-08-09T${String(hour).padStart(2, '0')}:30:00-07:00`);
+        expect(dueDayForDailyEmail([day], when, tz)).toBeNull();
+      }
+    }
+    // The RECOGNISED sentinel on the same date is still mailed — the line is the
+    // deliberate 0, not "anything that fails `hasScheduledUnlock`".
+    expect(dueDayForDailyEmail([{ index: 0, date: '2026-08-09', unlockAt: 0 }], morning, tz)?.index).toBe(0);
+  });
+
+  it('lets a malformed Day silence its date rather than promoting the next Day on it', () => {
+    const days = [
+      { index: 0, date: '2026-08-09' },
+      { index: 1, date: '2026-08-09', unlockAt: at('2026-08-09T11:00:00-07:00') },
+    ] as unknown as EmailDay[];
+    // 11:30 PDT: Day 1's own window is open, but Day 0 still holds Sunday. A
+    // corrupted Day must not hand its date's email to a Day written for another
+    // moment entirely — Bodega's 11:00 wrap-up is precisely that Day.
+    expect(dueDayForDailyEmail(days, at('2026-08-09T11:30:00-07:00'), tz)).toBeNull();
+  });
+});
+
 describe('dueDayForDailyEmail against the live Bodega Bay schedule (#723)', () => {
   // The real seeded Event that misfired, not a lookalike: four Days over three
   // calendar days, opening on the `unlockAt: 0` sentinel and closing with an

@@ -47,6 +47,7 @@ import {
   buildDailyEmailModel,
   firstBingoUid,
   hasScheduledUnlock,
+  isOpenSentinelUnlock,
   standingsThrough,
   type EmailDay,
   type EmailEvent,
@@ -111,7 +112,7 @@ export function dailyEmailEnabled(event: EmailEvent | undefined): boolean {
 }
 
 /**
- * The Event-local hour at which a Day carrying the `unlockAt <= 0` open
+ * The Event-local hour at which a Day carrying the `unlockAt: 0` open
  * sentinel (#289) becomes due, on its own `date`.
  *
  * The sentinel means "live from Event open"; it is not an instant, so there is
@@ -158,30 +159,75 @@ function eventWallClock(at: number, timeZone: string | undefined): { date: strin
   return { date: `${part('year')}-${part('month')}-${part('day')}`, minutes: hour * 60 + Number(part('minute')) };
 }
 
-/** The Event-local calendar date one Day's email belongs to, or `''` when the
- *  Day names neither a real unlock instant nor a usable `date` label — in which
- *  case it is never due, which is the #289 guarantee the old blanket skip made. */
+/**
+ * The Event-local calendar date one Day's email belongs to, or `''` for a Day
+ * that belongs to no calendar day at all — in which case it is never due, which
+ * is the #289 guarantee the old blanket skip made.
+ *
+ * A Day with a real unlock is dated by that instant read on the Event's wall
+ * clock. A Day carrying the RECOGNISED open sentinel is dated by its own `date`
+ * label, since it names no instant. A Day whose `unlockAt` is malformed
+ * (missing, `NaN`, not a number, negative) is dated by its `date` label too —
+ * but it can never be DUE, so what that buys is the SILENCING of its date
+ * rather than a send: a corrupted Day still holds the date it was written for,
+ * and the alternative — dropping it and promoting the next Day on that date —
+ * would let a garbled schedule hand Bodega's 11:00 wrap-up exactly the email
+ * this module exists to withhold. No email beats the wrong email.
+ */
 function dayCalendarDate(day: EmailDay, timeZone: string | undefined): string {
   if (hasScheduledUnlock(day)) return eventWallClock(day.unlockAt, timeZone).date;
   return typeof day.date === 'string' && ISO_DATE.test(day.date) ? day.date : '';
 }
 
+/** Whether a Day that OWNS its date is inside its send window at `now`.
+ *
+ *  Two clocks, deliberately. A real unlock keeps the absolute
+ *  `[unlockAt, unlockAt + windowMs)` — unchanged since #616 and unaffected by
+ *  which calendar date `now` falls on, so a 23:00 unlock is still mailable at
+ *  01:00 after an outage (Codex #729; the spec says the absolute window is
+ *  unchanged and only the sentinel is clamped). The sentinel has no instant to
+ *  measure from, so it gets the same span on the Event's WALL clock, opening at
+ *  `SENTINEL_SEND_LOCAL_HOUR` and clamped at local midnight — one morning, on
+ *  the one date it is anchored to. A malformed `unlockAt` is neither, and is
+ *  never due. */
+function windowIsOpen(
+  day: EmailDay,
+  date: string,
+  now: number,
+  today: { date: string; minutes: number },
+  windowMs: number,
+): boolean {
+  if (hasScheduledUnlock(day)) return now >= day.unlockAt && now < day.unlockAt + windowMs;
+  if (!isOpenSentinelUnlock(day)) return false;
+  if (date !== today.date) return false;
+  const opensAt = SENTINEL_SEND_LOCAL_HOUR * 60;
+  const closesAt = Math.min(24 * 60, opensAt + windowMs / 60_000);
+  return today.minutes >= opensAt && today.minutes < closesAt;
+}
+
 /**
  * The Day whose email is due at `now`, or `null`.
  *
- * ONE Day owns an Event-local calendar date, and it is the LOWEST-INDEXED Day on
- * it. This email is the morning touchpoint for a calendar day, not a per-Day
- * notification: Bodega Bay's Sunday carries both the 06:00 competitive card and
- * the 11:00 ceremonial wrap-up, and mailing each in turn put two emails five
- * hours apart on one Sunday — the second of them announcing the wrap-up Day's
- * `place`, "The drive home", through an arrival line built for a port name
- * (#723). A later Day sharing a date is not a new day and gets no email; its
- * content still reaches players in the app.
+ * TWO RULES, and they answer different questions (#723, Codex #729).
  *
- * Owning the date is necessary but not sufficient — the send window still has
- * to be open. For a Day with a real unlock that is the unchanged
- * `[unlockAt, unlockAt + windowMs)`; for the open sentinel it is the same span
- * measured on the Event's wall clock from `SENTINEL_SEND_LOCAL_HOUR`.
+ * WHICH Day may speak for a date: ONE Day owns an Event-local calendar date,
+ * and it is the LOWEST-INDEXED Day on it. This email is the morning touchpoint
+ * for a calendar day, not a per-Day notification: Bodega Bay's Sunday carries
+ * both the 06:00 competitive card and the 11:00 ceremonial wrap-up, and mailing
+ * each in turn put two emails five hours apart on one Sunday — the second of
+ * them announcing the wrap-up Day's `place`, "The drive home", through an
+ * arrival line built for a port name. A later Day sharing a date is not a new
+ * day and gets no email; its content still reaches players in the app.
+ *
+ * WHEN that owner may be mailed: its own send window, on its own clock — the
+ * absolute one for a real unlock, the wall clock for the sentinel (see
+ * `windowIsOpen`). Ownership decides who; it does not shorten anyone's window.
+ * The date rolling over while a late-evening Day's six hours are still running
+ * must not cancel the send, or a scheduler outage between 23:00 and 01:00 would
+ * lose that Day's email permanently.
+ *
+ * When two owners are somehow due at once — a Day carried over from yesterday
+ * and today's — today's owner wins, so the send is never a stale card.
  */
 export function dueDayForDailyEmail(
   days: readonly EmailDay[] | undefined,
@@ -190,20 +236,22 @@ export function dueDayForDailyEmail(
   windowMs: number = SEND_WINDOW_MS,
 ): EmailDay | null {
   const today = eventWallClock(now, timeZone);
-  let owner: EmailDay | null = null;
+  // Every Event-local date that has a Day on it, mapped to the Day that owns it.
+  const owners = new Map<string, EmailDay>();
   for (const day of days ?? []) {
-    if (!day || dayCalendarDate(day, timeZone) !== today.date) continue;
-    if (!owner || day.index < owner.index) owner = day;
+    if (!day) continue;
+    const date = dayCalendarDate(day, timeZone);
+    if (!date) continue;
+    const held = owners.get(date);
+    if (!held || day.index < held.index) owners.set(date, day);
   }
-  if (!owner) return null;
-  if (hasScheduledUnlock(owner)) {
-    return now >= owner.unlockAt && now < owner.unlockAt + windowMs ? owner : null;
+  let carried: EmailDay | null = null;
+  for (const [date, day] of owners) {
+    if (!windowIsOpen(day, date, now, today, windowMs)) continue;
+    if (date === today.date) return day;
+    if (!carried || day.unlockAt > carried.unlockAt) carried = day;
   }
-  const opensAt = SENTINEL_SEND_LOCAL_HOUR * 60;
-  // Clamped at local midnight: a wall-clock window cannot run past the date it
-  // is anchored to, and the Day stops owning the date there anyway.
-  const closesAt = Math.min(24 * 60, opensAt + windowMs / 60_000);
-  return today.minutes >= opensAt && today.minutes < closesAt ? owner : null;
+  return carried;
 }
 
 /** Whether this participant should be mailed for `dayIndex`: opted in, and not
