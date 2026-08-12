@@ -32,23 +32,29 @@ done
 
 # Callable flows need the compiled Functions entrypoint as well as the emulator.
 npm --prefix functions run build
+
+# The emulator prompts — and then blocks forever — for any param declared in
+# functions/src/params.ts that these two throwaway dotenv files do not name,
+# whatever `--non-interactive` says, and whether or not the param has a default
+# (#724). So the file contents are DERIVED from params.ts rather than restated
+# here: scripts/e2e-functions-env.mjs fails loudly naming an uncovered param
+# instead of letting the next added one hang the suite. It also holds a
+# developer's own pre-existing file to the same rule, which is the case that
+# never surfaces on its own — whoever has one is precisely who cannot reproduce
+# the fresh-checkout hang.
+#
+# Ownership is decided here, before the generator runs, so the trap can clean up
+# whatever this run creates even if a later step dies: a file that already
+# existed belongs to the developer and is left alone.
 created_env=false
 created_secret=false
-if [[ ! -e functions/.env.local ]]; then
-  printf '%s\n' \
-    'EMAIL_FROM=Gay Cruise Bingo <e2e@example.invalid>' \
-    'ADMIN_NOTIFY_EMAIL=' \
-    'APP_BASE_URL=http://127.0.0.1:4173' \
-    'BUG_REPORT_APP_CHECK=false' > functions/.env.local
-  created_env=true
-fi
-if [[ ! -e functions/.secret.local ]]; then
-  printf '%s\n' 'RESEND_API_KEY=e2e-not-used' > functions/.secret.local
-  created_secret=true
-fi
+[[ -e functions/.env.local ]] || created_env=true
+[[ -e functions/.secret.local ]] || created_secret=true
 cleanup() {
   [[ "$created_env" == false ]] || rm -f functions/.env.local
   [[ "$created_secret" == false ]] || rm -f functions/.secret.local
 }
 trap cleanup EXIT INT TERM
+node scripts/e2e-functions-env.mjs \
+  functions/src/params.ts functions/.env.local functions/.secret.local "$PROJECT_ID"
 npx firebase --non-interactive emulators:exec --only auth,firestore,storage,functions --project "$PROJECT_ID" "$cmd"
