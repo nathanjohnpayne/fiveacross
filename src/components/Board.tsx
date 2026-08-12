@@ -776,13 +776,13 @@ export default function Board() {
   // at mount and flipped by CoachOverlay's own dismiss — a plain render-time read
   // would never re-render Board when that key is written.
   const [coachSeen, setCoachSeen] = useState(isCoachOverlayDismissed);
-  // The launch announcement self-gates on its own stored flag, and a bare
-  // storage write does not re-render Board — so its dismissal has to nudge us
-  // explicitly. Deliberately a nonce and not a mirrored boolean: `overlayOpen`
-  // below reads the stored flag itself, so a second copy of that truth is the
-  // thing that can go stale (Codex P2, round 2). This only schedules the render
-  // on which the authoritative read happens.
-  const [, bumpLaunchIntroDismissal] = useReducer((n: number) => n + 1, 0);
+  // Did THIS tab dismiss the launch announcement during this mount? Seeded
+  // false, not from the stored flag: `overlayOpen` below ORs this with the
+  // stored flag, mirroring the child's own `seenThisMount || hasSeen()`, so
+  // this half only has to carry the case storage cannot — a dismissal whose
+  // write silently failed (Codex P2, round 3). Setting it also forces the
+  // re-render that a bare storage write does not trigger.
+  const [launchIntroSeen, setLaunchIntroSeen] = useState(false);
   // A Feed Tally Card's pending "open this Prompt's sheet" request (#261),
   // consumed by the intent effect below once the right Day's board renders.
   const openSquareIntent = useOpenSquareIntent();
@@ -2231,22 +2231,26 @@ export default function Board() {
    * were reachable) into the default experience.
    *
    * CoachOverlay and LaunchIntro both self-gate on a stored flag, so their
-   * mount conditions do not say whether a scrim is actually up.
+   * mount conditions do not say whether a scrim is actually up. Each mirrors
+   * the child's OWN two-part test, because either half alone strands the card
+   * inert with no visible scrim — and `inert` blocks pointer events too, so
+   * that state is not a focus nit, it is a dead card until remount:
    *
-   * Their visibility is read from the SAME predicate the component itself
-   * reads, never from the `*Seen` mirrors (Codex P2, round 2). A mirror only
-   * moves on THIS tab's `onDismiss`, while the child re-checks storage on every
-   * render — so another tab writing the flag desynchronizes them, and the
-   * failure is severe in this direction: an overlay that has stopped rendering
-   * while its mirror still reads "open" leaves the card inert with no visible
-   * scrim, and `inert` blocks pointer events too, so the card is simply dead
-   * until remount. Reading storage here keeps parent and child in lockstep by
-   * construction; the mirrors survive only to force the re-render that a bare
-   * storage write does not trigger.
+   *  - Stored flag alone (Codex P2, round 2): another tab writes the key, the
+   *    child re-reads storage every render and stops drawing, but a boolean
+   *    mirrored in this tab only moves on this tab's own `onDismiss`.
+   *  - This tab's dismissal alone (Codex P2, round 3): `markSeen`/
+   *    `markDismissed` swallow write failures by design (private mode, storage
+   *    disabled), so the child hides itself on local state while the stored
+   *    flag stays unset forever.
+   *
+   * Dismissed by EITHER route means no scrim, which is exactly the child's own
+   * `seenThisMount || hasSeen()`. The `*Seen` values are this tab's half; they
+   * also force the re-render that a bare storage write does not trigger.
    */
-  const coachOverlayUp = cells.length > 0 && !isCoachOverlayDismissed();
+  const coachOverlayUp = cells.length > 0 && !coachSeen && !isCoachOverlayDismissed();
   const launchIntroUp =
-    hasDays && cells.length > 0 && coachSeen && !isLaunchIntroDismissed();
+    hasDays && cells.length > 0 && coachSeen && !launchIntroSeen && !isLaunchIntroDismissed();
   const overlayOpen =
     coachOverlayUp ||
     launchIntroUp ||
@@ -2300,7 +2304,7 @@ export default function Board() {
           (single Board, no `days[]` schedule) must never be told about a chip it
           can never show. */}
       {hasDays && cells.length > 0 && coachSeen && (
-        <LaunchIntro onDismiss={bumpLaunchIntroDismissal} />
+        <LaunchIntro onDismiss={() => setLaunchIntroSeen(true)} />
       )}
       {/* `board-area` is the retint scope (daily-cards-spec § "Day switcher"):
           `data-theme` here — set ONLY when the Event carries a Day schedule —

@@ -1950,6 +1950,30 @@ describe('board inert while an overlay is up', () => {
     expect(boardArea()).not.toHaveAttribute('inert');
   });
 
+  it('releases the card when the dismissal cannot be persisted at all', () => {
+    // The other half of the same trap (Codex P2, round 3). CoachOverlay's
+    // `markDismissed` swallows write failures by design — private mode, storage
+    // disabled — and then hides itself on component-local state. Reading ONLY
+    // the stored flag would leave the card inert forever behind no scrim, which
+    // is worse than the stale-mirror case it replaced: it needs no second tab.
+    const readOnly = new MemoryStorage();
+    readOnly.setItem = () => {
+      throw new DOMException('QuotaExceededError');
+    };
+    vi.stubGlobal('localStorage', readOnly);
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    expect(boardArea()).toHaveAttribute('inert');
+
+    fireEvent.click(document.querySelector('.coach-overlay-cta')!);
+
+    // The write failed, so the flag is still unset — but the scrim is gone, so
+    // the card has to be live.
+    expect(document.querySelector('.coach-overlay')).toBeNull();
+    expect(boardArea()).not.toHaveAttribute('inert');
+  });
+
   it('marks the card inert while the first-open coach overlay is up', () => {
     // No dismissal flag written: the overlay self-gates on it, so an empty
     // store means the scrim IS up and the card behind it must leave the tab
