@@ -1,12 +1,12 @@
 /**
- * Server-observed direct Board transitions (#721, #727 Phase 4b).
+ * Server-observed Board analytics (#721, #727 Phase 4b).
  *
- * A Board toggle can be queued offline, outlive the browser that initiated it,
- * and arrive after a stale writer. The client therefore writes only a fresh
- * request token. This module derives the analytics event from Firestore's
- * committed before/after snapshots: a stale true→true rewrite is ignored,
- * while a queued mark → unmark → mark sequence gets three distinct CloudEvent
- * identities in the exact order Firestore committed it.
+ * A browser may close while an offline Board write is queued, and cached state
+ * may later be rolled back by a stale-write/rules rejection. Analytics rows
+ * therefore derive exclusively from Firestore's committed before/after
+ * snapshots. Every row carries the source document's version key, rather than
+ * the asynchronous trigger's arrival order, so consumers can reconstruct the
+ * order in which one Board actually changed.
  */
 
 export type DirectMarkAnalyticsEvent = {
@@ -16,10 +16,29 @@ export type DirectMarkAnalyticsEvent = {
   marked?: true;
   uid: string;
   dayIndex?: number;
+  requestId: string;
   transitionId: string;
+  commitOrder: string;
 };
 
-type BoardCell = { marked?: unknown };
+export type EchoAnalyticsEvent = {
+  name: 'echo_mark';
+  trigger: 'deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm';
+  uid: string;
+  dayIndex?: number;
+  count: 1;
+  transitionId: string;
+  commitOrder: string;
+};
+
+export type BoardAnalyticsEvent = DirectMarkAnalyticsEvent | EchoAnalyticsEvent;
+
+type BoardCell = {
+  marked?: unknown;
+  echo?: unknown;
+  echoAnalyticsId?: unknown;
+  echoAnalyticsTrigger?: unknown;
+};
 type DirectRequest = {
   id?: unknown;
   cellIndex?: unknown;
@@ -32,14 +51,37 @@ type BoardWrite = {
 };
 
 const CLAIM_MODES = new Set(['honor', 'proof_required', 'admin_confirmed']);
+const ECHO_TRIGGERS = new Set(['deal', 'reshuffle', 'mark', 'open_reconcile', 'admin_confirm']);
 
-/** Returns an event only when this committed write actually crossed its edge. */
+/**
+ * Firestore document versions carry seconds and nanoseconds. A fixed-width
+ * encoding sorts lexicographically in the same order as those committed
+ * versions, including rapid toggles that share a millisecond.
+ */
+export function firestoreCommitOrder(value: unknown): string | null {
+  const timestamp = value as { seconds?: unknown; nanoseconds?: unknown } | null;
+  if (
+    !timestamp ||
+    typeof timestamp.seconds !== 'number' ||
+    !Number.isSafeInteger(timestamp.seconds) ||
+    typeof timestamp.nanoseconds !== 'number' ||
+    !Number.isInteger(timestamp.nanoseconds) ||
+    timestamp.nanoseconds < 0 ||
+    timestamp.nanoseconds > 999_999_999
+  ) {
+    return null;
+  }
+  return `${String(timestamp.seconds).padStart(16, '0')}:${String(timestamp.nanoseconds).padStart(9, '0')}`;
+}
+
+/** Returns an event only when this committed write actually crossed its direct edge. */
 export function directMarkAnalyticsForWrite(params: {
   before: BoardWrite | undefined;
   after: BoardWrite | undefined;
   uid: string;
   dayIndex?: number;
   transitionId: string;
+  commitOrder: string;
 }): DirectMarkAnalyticsEvent | null {
   const request = params.after?.directAnalyticsRequest;
   const beforeRequest = params.before?.directAnalyticsRequest;
@@ -71,14 +113,71 @@ export function directMarkAnalyticsForWrite(params: {
     mode: request.mode as DirectMarkAnalyticsEvent['mode'],
     uid: params.uid,
     ...(params.dayIndex === undefined ? {} : { dayIndex: params.dayIndex }),
+    requestId: request.id,
     transitionId: params.transitionId,
+    commitOrder: params.commitOrder,
   };
   return afterMarked
     ? { name: 'mark_square', source: 'pledge', marked: true, ...common }
     : { name: 'unmark_square', ...common };
 }
 
-type TransitionDoc = { create(data: DirectMarkAnalyticsEvent): Promise<unknown> };
+/**
+ * Extracts every newly committed Echo from a Board write. The durable ID and
+ * original propagation trigger are stamped with the cells, but this function
+ * refuses to report either until Firestore supplies the committed snapshot.
+ */
+export function echoAnalyticsForWrite(params: {
+  before: BoardWrite | undefined;
+  after: BoardWrite | undefined;
+  uid: string;
+  dayIndex?: number;
+  commitOrder: string;
+}): EchoAnalyticsEvent[] {
+  const afterCells = params.after?.cells ?? {};
+  return Object.entries(afterCells).flatMap(([cellKey, afterCell]) => {
+    const beforeCell = params.before?.cells?.[cellKey];
+    const id = afterCell.echoAnalyticsId;
+    const trigger = afterCell.echoAnalyticsTrigger;
+    if (
+      afterCell.marked !== true ||
+      beforeCell?.marked === true ||
+      afterCell.echo !== true ||
+      typeof id !== 'string' ||
+      id.length === 0 ||
+      typeof trigger !== 'string' ||
+      !ECHO_TRIGGERS.has(trigger)
+    ) {
+      return [];
+    }
+    return [
+      {
+        name: 'echo_mark' as const,
+        trigger: trigger as EchoAnalyticsEvent['trigger'],
+        uid: params.uid,
+        ...(params.dayIndex === undefined ? {} : { dayIndex: params.dayIndex }),
+        count: 1 as const,
+        transitionId: id,
+        commitOrder: params.commitOrder,
+      },
+    ];
+  });
+}
+
+/** Returns all immutable analytics rows caused by one committed Board write. */
+export function boardAnalyticsForWrite(params: {
+  before: BoardWrite | undefined;
+  after: BoardWrite | undefined;
+  uid: string;
+  dayIndex?: number;
+  transitionId: string;
+  commitOrder: string;
+}): BoardAnalyticsEvent[] {
+  const direct = directMarkAnalyticsForWrite(params);
+  return [...(direct ? [direct] : []), ...echoAnalyticsForWrite(params)];
+}
+
+type TransitionDoc = { create(data: BoardAnalyticsEvent & { recordedAt: unknown }): Promise<unknown> };
 export type DirectMarkAnalyticsStore = { doc(path: string): TransitionDoc };
 
 function isAlreadyExists(error: unknown): boolean {
@@ -87,22 +186,23 @@ function isAlreadyExists(error: unknown): boolean {
 }
 
 /**
- * Creates one immutable event row per CloudEvent id. Firestore can redeliver a
- * trigger, so `create()` (rather than a merge set) makes repeated delivery a
- * no-op without allowing it to rewrite the original event.
+ * Creates one immutable event row per transition identity. Firestore can
+ * redeliver a trigger, so `create()` (rather than a merge set) makes repeated
+ * delivery a no-op without allowing it to rewrite the source ordering key.
  */
 export async function recordDirectMarkAnalytics(
   store: DirectMarkAnalyticsStore,
-  params: Parameters<typeof directMarkAnalyticsForWrite>[0] & { eventId: string },
+  params: Parameters<typeof boardAnalyticsForWrite>[0] & { eventId: string },
 ): Promise<void> {
-  const transition = directMarkAnalyticsForWrite(params);
-  if (!transition) return;
-  try {
-    await store
-      .doc(`events/${params.eventId}/players/${params.uid}/analyticsTransitions/${params.transitionId}`)
-      .create(transition);
-  } catch (error) {
-    if (isAlreadyExists(error)) return;
-    throw error;
+  for (const transition of boardAnalyticsForWrite(params)) {
+    try {
+      await store
+        .doc(`events/${params.eventId}/players/${params.uid}/analyticsTransitions/${transition.transitionId}`)
+        .create({ ...transition, recordedAt: FieldValue.serverTimestamp() });
+    } catch (error) {
+      if (isAlreadyExists(error)) continue;
+      throw error;
+    }
   }
 }
+import { FieldValue } from 'firebase-admin/firestore';

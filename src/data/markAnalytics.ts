@@ -14,6 +14,36 @@ export interface DirectMarkAnalyticsRequest {
   mode: ClaimMode;
 }
 
+const localRequestStorageKey = 'five-across:local-direct-mark-requests';
+const MAX_LOCAL_REQUEST_IDS = 100;
+
+function localRequestIds(): string[] {
+  try {
+    const raw = localStorage.getItem(localRequestStorageKey);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberLocalMarkRequest(id: string): void {
+  try {
+    const ids = localRequestIds().filter((known) => known !== id);
+    ids.push(id);
+    localStorage.setItem(localRequestStorageKey, JSON.stringify(ids.slice(-MAX_LOCAL_REQUEST_IDS)));
+  } catch {
+    // The server-observed event remains valid. This only decides whether this
+    // browser, rather than another tab for the same player, gets the local
+    // first-mark install-nudge side effect.
+  }
+}
+
+/** True only for a mark request issued by this browser profile. */
+export function isLocalDirectMarkRequest(id: string): boolean {
+  return localRequestIds().includes(id);
+}
+
 function requestId(): string {
   // All supported browsers expose randomUUID. The fallback keeps test and
   // embedded-webview environments collision-resistant without depending on a
@@ -28,10 +58,12 @@ export function directMarkAnalyticsRequest(params: {
   mode: ClaimMode;
   id?: string;
 }): DirectMarkAnalyticsRequest {
-  return {
+  const request = {
     id: params.id ?? requestId(),
     cellIndex: params.cellIndex,
     marked: params.marked,
     mode: params.mode,
   };
+  if (request.marked) rememberLocalMarkRequest(request.id);
+  return request;
 }

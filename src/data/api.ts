@@ -53,11 +53,7 @@ import { cellsMergeSet } from './cellsMerge';
 import { trustedDayBoardSeed } from './board-freshness';
 import { pinDayFirstBingo } from './dayMeta';
 import { directMarkAnalyticsRequest } from './markAnalytics';
-import {
-  echoAnalyticsTransitions,
-  stampEchoAnalyticsTransitions,
-  trackEchoTransitions,
-} from './echoAnalytics';
+import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
@@ -703,8 +699,6 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     blackoutTransition: boolean;
     pinAs: string | null;
     at: number;
-    /** Persisted identities for this card's countable Echo transitions. */
-    transitions: ReturnType<typeof echoAnalyticsTransitions>;
   } | null = null;
   const dealt = await runTransaction(db, async (tx) => {
     dealtEcho = null;
@@ -774,7 +768,6 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         blackoutTransition: echoRes.blackoutTransition,
         pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
         at: now,
-        transitions: echoAnalyticsTransitions(echoRes.cells),
       };
       if (!statsAllowed) {
         tx.set(
@@ -827,7 +820,6 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       blackoutTransition: boolean;
       pinAs: string | null;
       at: number;
-      transitions: ReturnType<typeof echoAnalyticsTransitions>;
     };
     if (echo.bingoTransition || echo.blackoutTransition) {
       enqueueWinMoments({
@@ -843,10 +835,6 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     if (echo.pinAs) {
       void pinDayFirstBingo(dayIndex, { uid: u.uid, displayName: echo.pinAs, photoURL: null }, echo.at);
     }
-    // Echo Mark instrumentation (#721): this card arrived pre-marked from the
-    // Player's OTHER Day Cards, not from a tap — countable, never folded into
-    // `mark_square` (specs/w2-ga4-events.md § Reconciliation).
-    void trackEchoTransitions({ transitions: echo.transitions, uid: u.uid, dayIndex }).catch(() => {});
   }
   return dealt;
 }
@@ -1028,8 +1016,6 @@ export async function reshuffleBoard(params: {
     blackoutTransition: boolean;
     pinAs: string | null;
     at: number;
-    /** Persisted identities for the replacement's net-new Echo transitions. */
-    transitions: ReturnType<typeof echoAnalyticsTransitions>;
   } | null = null;
   const spend = await runTransaction(db, async (tx) => {
     // Firestore can invoke this callback more than once. Do not let a discarded
@@ -1167,7 +1153,6 @@ export async function reshuffleBoard(params: {
           blackoutTransition: echoRes.blackoutTransition,
           pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
           at: now,
-          transitions: echoAnalyticsTransitions(echoRes.cells),
         }
       : null;
     // Orphaned-marker cleanup (Codex P2 on #447): the discarded card can only
@@ -1263,7 +1248,6 @@ export async function reshuffleBoard(params: {
       blackoutTransition: boolean;
       pinAs: string | null;
       at: number;
-      transitions: ReturnType<typeof echoAnalyticsTransitions>;
     };
     if (echo.bingoTransition || echo.blackoutTransition) {
       enqueueWinMoments({
@@ -1275,17 +1259,6 @@ export async function reshuffleBoard(params: {
     }
     if (echo.pinAs) {
       void pinDayFirstBingo(dayIndex, { uid, displayName: echo.pinAs, photoURL: null }, echo.at);
-    }
-    // Echo Mark instrumentation (#721, Codex round 1 finding 4): the
-    // replacement card re-echoed from the same achievements the discarded one
-    // wore — countable, never folded into `mark_square`
-    // (specs/w2-ga4-events.md § Reconciliation) — but ONLY when `echo.count`
-    // (computed above as the net-new increase over the discarded card's own
-    // marked count) is actually positive; a reshuffle that re-echoes the
-    // exact same Prompt(s) the discarded card already carried adds nothing to
-    // `dayStats[dayIndex].squaresMarked` and must fire nothing here.
-    if (echo.transitions.length > 0) {
-      void trackEchoTransitions({ transitions: echo.transitions, uid, dayIndex }).catch(() => {});
     }
   }
   return spend;
@@ -1792,8 +1765,6 @@ async function runSetMark(
     bucket: EchoBucket;
     bingoTransition: boolean;
     blackoutTransition: boolean;
-    /** Stable, persisted identities for the newly echoed receiving cells. */
-    analyticsTransitions: ReturnType<typeof echoAnalyticsTransitions>;
   }> = [];
   if (echoItemId && echoDayIndexes.length > 0) {
     const achieved = new Set([echoItemId]);
@@ -1845,7 +1816,6 @@ async function runSetMark(
         },
         bingoTransition: res.bingoTransition,
         blackoutTransition: res.blackoutTransition,
-        analyticsTransitions: echoAnalyticsTransitions(changedCells(sibCells, res.cells)),
       });
     });
   }
@@ -2024,25 +1994,6 @@ async function runSetMark(
           database,
         }),
       )
-      .catch(() => undefined);
-    // The IDs ride in the same batch as their cells. A later open may emit the
-    // same ID if this continuation dies; PostHog groups by `transitionId`.
-    void committed
-      .then(async () => {
-        // Keep each receiving day independent: an analytics import/send
-        // failure for one board must not abandon later siblings in the wave.
-        for (const echoBoard of echoBoards) {
-          try {
-            await trackEchoTransitions({
-              transitions: echoBoard.analyticsTransitions,
-              uid,
-              dayIndex: echoBoard.dayIndex,
-            });
-          } catch {
-            // The durable ID will be replayed when that board next opens.
-          }
-        }
-      })
       .catch(() => undefined);
   }
   void committed.catch((err: unknown) => {
@@ -2329,16 +2280,6 @@ async function runReconcileEchoes(
   const board = boardSnap.value.data() as { uid?: string; cells?: unknown; seed?: number };
   if (board.uid !== uid) return { ...none, complete: false };
   const boardCells = cellsFromData(board.cells);
-  // A persisted transition is the source of truth, not this tab's memory.
-  // Emit every known ID on open: it covers a tab dying after Firestore accepted
-  // a queued write, and a second device opening the same card. Each ID keeps
-  // the trigger that created it, so recovery never turns a deal/mark echo into
-  // a misleading `open_reconcile` row.
-  void trackEchoTransitions({
-    transitions: echoAnalyticsTransitions(boardCells),
-    uid,
-    dayIndex,
-  }).catch(() => undefined);
 
   const allBoards: Cell[][] = [boardCells];
   for (const snap of sibSnaps) {
@@ -2556,15 +2497,6 @@ async function runReconcileEchoes(
           ceremonialDayIndexes: params.ceremonialDayIndexes,
           statsFrozen: params.statsFrozen,
           database,
-        }),
-      )
-      .catch(() => undefined);
-    void committed
-      .then(() =>
-        trackEchoTransitions({
-          transitions: echoAnalyticsTransitions(changedCells(boardCells, res.cells)),
-          uid,
-          dayIndex,
         }),
       )
       .catch(() => undefined);

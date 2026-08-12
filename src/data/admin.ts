@@ -4,7 +4,7 @@ import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
-import { echoAnalyticsTransitions, stampEchoAnalyticsTransitions, trackEchoTransitions } from './echoAnalytics';
+import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
@@ -392,24 +392,6 @@ interface ResolveResult {
    *  'confirmed'` internally) so a future confirm-adjacent caller cannot
    *  forget to ask; `rejectClaim` below simply never reads it. */
   transitioned: boolean;
-  /** Sibling Days newly echoed onto BY THIS CALL, dayIndex + the count of
-   *  Squares that Day newly received (Codex P2 finding, #727 round 3):
-   *  confirming an admin_confirmed claim cascades the Prompt onto the
-   *  owner's other Day Cards in the SAME transaction as the claim's own
-   *  cell (see the Echo Marks block below), and each of THOSE Days'
-   *  `squaresMarked` increments exactly like any other echo — but until
-   *  this fix, that increment fired no `echo_mark`, the same
-   *  instrumentation gap #721 closed for the other three propagation paths
-   *  (specs/w2-ga4-events.md § Reconciliation's "every squaresMarked
-   *  increment is counted exactly once" no longer held for this one).
-   *  Naturally empty for `status: 'rejected'` (a reject never echoes, see
-   *  the Echo Marks block's own comment) and for a stale or replayed
-   *  confirm — `applyEchoes` returns `changed: false` when a sibling
-   *  already carries the echo (idempotent re-derivation, matching every
-   *  other echo propagation path), so a concurrent-confirm replay pushes
-   *  nothing here even though `transitioned` is independently `false` for
-   *  that same call. */
-  echoes: Array<{ dayIndex: number; transitions: ReturnType<typeof echoAnalyticsTransitions> }>;
 }
 
 async function resolve(
@@ -460,7 +442,7 @@ async function resolve(
     // Read board + player inside the txn so a concurrent mark/proof from the same
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
-    if (!bSnap.exists()) return { transitioned: false, echoes: [] };
+    if (!bSnap.exists()) return { transitioned: false };
     const pSnap = await tx.get(player(c.uid));
     // The owner's sibling Day Cards, read in the SAME transaction (before any
     // write, per Firestore's reads-first contract) so a retry re-derives the
@@ -523,11 +505,6 @@ async function resolve(
     const echoItemId =
       confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
     const echoBuckets: EchoBucket[] = [];
-    // The `echo_mark` counterpart to `echoBuckets` (Codex P2, #727 round 3):
-    // same per-sibling `res.changed` gate, so it stays empty for exactly the
-    // stale/replayed-confirm and reject cases `echoBuckets` also skips — see
-    // `ResolveResult.echoes`'s doc comment above.
-    const echoMarkEvents: Array<{ dayIndex: number; transitions: ReturnType<typeof echoAnalyticsTransitions> }> = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];
     const echoNow = Date.now();
@@ -557,10 +534,6 @@ async function resolve(
           set: cellsMergeSet(cellsPatch(changedCells(sibCells, res.cells)), {
             ...(typeof sib.seed === 'number' ? { markSeed: sib.seed } : {}),
           }),
-        });
-        echoMarkEvents.push({
-          dayIndex: echoSiblingDays[idx],
-          transitions: echoAnalyticsTransitions(changedCells(sibCells, res.cells)),
         });
         echoBuckets.push({
           dayIndex: echoSiblingDays[idx],
@@ -691,7 +664,7 @@ async function resolve(
     if (status === 'confirmed' && c.proofId) {
       tx.set(proof(c.proofId), { status: 'active' }, { merge: true });
     }
-    return { transitioned: transitionedToConfirmed, echoes: echoMarkEvents };
+    return { transitioned: transitionedToConfirmed };
   });
 }
 
@@ -746,40 +719,17 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // not the claim owner's — there is otherwise no way to recover whose
   // Square this was from the payload alone.
   //
-  // Sibling `echo_mark`s (Codex P2, #727 round 3): confirming cascades the
-  // Prompt onto the owner's OTHER Day Cards in the SAME transaction (the
-  // Echo Marks block inside `resolve()`), and each of THOSE Days'
-  // `squaresMarked` increments exactly like the four data/api.ts propagation
-  // paths — so it needs the same `echo_mark` counterpart, one event PER
-  // receiving Day, `trigger: 'admin_confirm'` naming this fifth propagation
-  // path (specs/w2-ga4-events.md § Reconciliation, updated alongside this
-  // fix). Independent of the `mark_square` gate above: `resolve()`'s own
-  // `res.changed` check (see `ResolveResult.echoes`) is what keeps
-  // `echoMarkEvents` empty on a stale or replayed confirm, so this loop
-  // needs no separate `transitioned` gate — every entry landing in `echoes`
-  // is already a genuine, freshly-committed echo.
   void confirmed
-    .then(async ({ transitioned, echoes }) => {
-      if (!transitioned && echoes.length === 0) return;
+    .then(async ({ transitioned }) => {
+      if (!transitioned) return;
       const { track } = await import('../analytics');
-      if (transitioned) {
-        track('mark_square', {
-          source: 'admin_confirm',
-          mode: 'admin_confirmed',
-          marked: true,
-          dayIndex: c.dayIndex,
-          uid: c.uid,
-        });
-      }
-      await Promise.all(
-        echoes.map((echo) =>
-          trackEchoTransitions({
-            transitions: echo.transitions,
-            uid: c.uid,
-            dayIndex: echo.dayIndex,
-          }),
-        ),
-      );
+      track('mark_square', {
+        source: 'admin_confirm',
+        mode: 'admin_confirmed',
+        marked: true,
+        dayIndex: c.dayIndex,
+        uid: c.uid,
+      });
     })
     .catch(() => {});
   return confirmed.then(() => undefined);

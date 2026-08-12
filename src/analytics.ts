@@ -112,10 +112,10 @@ export const GA4_EVENTS = [
   // cascade — the last added #727 round 3, Codex P2). Params: `trigger`
   // ('deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm'),
   // `uid` (the receiving player), `dayIndex` (the receiving/opened board's
-  // Day), `count: 1`, and the persisted `transitionId`. Delivery is
-  // at-least-once across reloads/devices; PostHog reconciliation groups by
-  // `transitionId`. Call sites: src/data/api.ts (the first four) and
-  // src/data/admin.ts's confirmClaim (admin_confirm).
+  // Day), `count: 1`, the persisted `transitionId`, and `commitOrder` (the
+  // source Board's server version). A Firestore trigger writes immutable
+  // server-observed rows and Board's listener delivers them at-least-once
+  // across reloads/devices; PostHog reconciliation groups by `transitionId`.
   'echo_mark',
 ] as const;
 
@@ -150,7 +150,11 @@ function currentPageLocation(): string {
  * to both. These explicit events are additive: PostHog also autocaptures
  * pageviews, clicks, heatmaps, and session replays (see posthog.ts). Never throws.
  */
-export function track(name: GA4EventName, params?: Record<string, unknown>): void {
+export function track(
+  name: GA4EventName,
+  params?: Record<string, unknown>,
+  options?: { localMarkOccurred?: boolean },
+): void {
   try {
     // Firebase's `logEvent` overloads key off literal reserved event names
     // (e.g. `login`), so a union type like `GA4EventName` matches no single
@@ -181,7 +185,12 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
   // admin_confirm through here would wrongly mark the admin's OWN device as
   // having earned its first Square and could surface the nudge to someone
   // who never tapped a Square themselves.
-  if (name === 'mark_square' && params?.marked === true && params?.source !== 'admin_confirm') {
+  if (
+    options?.localMarkOccurred !== false &&
+    name === 'mark_square' &&
+    params?.marked === true &&
+    params?.source !== 'admin_confirm'
+  ) {
     markSquareOccurred();
   }
 }

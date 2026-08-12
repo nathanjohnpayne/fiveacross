@@ -109,25 +109,3 @@ export function echoAnalyticsTransitions(cells: readonly Cell[]): EchoAnalyticsT
     })
     .sort((a, b) => a.id.localeCompare(b.id));
 }
-
-/**
- * Ship one event per durable transition. Duplicate delivery is deliberate and
- * safe: downstream reconciliation groups by `transitionId`, not raw event rows.
- */
-export async function trackEchoTransitions(params: {
-  transitions: readonly EchoAnalyticsTransition[];
-  uid: string;
-  dayIndex: number;
-}): Promise<void> {
-  if (params.transitions.length === 0) return;
-  const { track } = await import('../analytics');
-  for (const transition of params.transitions) {
-    track('echo_mark', {
-      trigger: transition.trigger,
-      uid: params.uid,
-      dayIndex: params.dayIndex,
-      count: 1,
-      transitionId: transition.id,
-    });
-  }
-}
