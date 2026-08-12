@@ -2,9 +2,9 @@
  * Daily themed engagement email — the scheduled ORCHESTRATION (issue #616,
  * plans/daily-cards-wireframes.html § "Daily engagement email").
  *
- * One email per participant per Day, sent at the Day's unlock in the Event's
- * timezone, carrying the Day's Theme. This module owns WHO gets it and WHEN;
- * `dailyEmailContent.ts` owns WHAT it says, `dailyEmailTemplate.ts` owns how it
+ * One email per participant per Event-local calendar day, sent at that day's
+ * unlock in the Event's timezone, carrying its Theme. This module owns WHO gets
+ * it and WHEN; `dailyEmailContent.ts` owns WHAT it says, `dailyEmailTemplate.ts` owns how it
  * looks, and `emailOptOut.ts` owns consent. The trigger seam in `index.ts` is
  * three lines.
  *
@@ -17,11 +17,18 @@
  * time an Event is created somewhere new. So the schedule is a frequent, dumb
  * sweep and the DUE CHECK is the real clock: `dueDayForDailyEmail` fires only
  * inside a window that opens at the Day's own `unlockAt` (an absolute instant
- * derived from the Event's local schedule), which makes the send
- * timezone-correct with no timezone arithmetic anywhere in this file. Fifteen
- * minutes rather than an hour for the same reason `unlockDay` uses it: real
+ * derived from the Event's local schedule). Fifteen minutes rather than an hour
+ * for the same reason `unlockDay` uses it: real
  * IANA offsets include :30 and :45, so an hourly sweep would be late by up to
  * 59 minutes in those zones.
+ *
+ * THE DUE CHECK IS PER EVENT-LOCAL CALENDAR DAY, not per Day document (#723).
+ * A Day's `unlockAt` alone is not the schedule: an Event's `days` array does
+ * not map one-to-one onto its calendar days. Bodega Bay puts TWO Days on
+ * Sunday — the competitive 06:00 card and the ceremonial 11:00 wrap-up whose
+ * unlock IS the Standings Freeze — and opens with a Day carrying the
+ * `unlockAt: 0` sentinel, which is not an instant at all. Keying off raw
+ * unlocks mailed that Event twice on Sunday and never on Friday.
  *
  * SAFE TO RUN 96× A DAY because every beat is self-guarded, not schedule-timed:
  * the Event-level admin toggle is off by default, the due window closes six
@@ -39,6 +46,7 @@
 import {
   buildDailyEmailModel,
   firstBingoUid,
+  hasScheduledUnlock,
   standingsThrough,
   type EmailDay,
   type EmailEvent,
@@ -103,26 +111,99 @@ export function dailyEmailEnabled(event: EmailEvent | undefined): boolean {
 }
 
 /**
- * The Day whose email is due at `now`, or `null`. Due means: unlock has passed
- * AND `now` is still inside the send window. The LAST such Day wins, so an
- * Event whose Days somehow overlap sends today's card, not a stale one.
+ * The Event-local hour at which a Day carrying the `unlockAt <= 0` open
+ * sentinel (#289) becomes due, on its own `date`.
+ *
+ * The sentinel means "live from Event open"; it is not an instant, so there is
+ * no unlock for a window to open at, and this module used to skip such a Day
+ * outright — which is why Bodega Bay's opening Friday, deliberately seeded with
+ * the sentinel so a same-day unlock could not stamp an empty Prompt snapshot,
+ * got no email at all (#723). Anchoring instead to 08:00 on the Day's own
+ * calendar date — the schedule convention `src/domainTypes.d.ts` documents for
+ * `unlockAt` — restores the send while keeping what the skip was protecting: a
+ * sentinel Day is due inside exactly one six-hour local morning, on exactly one
+ * date, so it can never look permanently overdue and mail forever.
+ */
+export const SENTINEL_SEND_LOCAL_HOUR = 8;
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** An instant as the Event's own wall clock: its calendar date ("2026-08-09")
+ *  and minutes since local midnight. Both come from ONE formatter call, so they
+ *  cannot describe different instants. Falls back to UTC for a bogus IANA
+ *  string, exactly as `formatUnlockTime` does. */
+function eventWallClock(at: number, timeZone: string | undefined): { date: string; minutes: number } {
+  const read = (tz: string): Intl.DateTimeFormatPart[] =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).formatToParts(new Date(at));
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = read(timeZone || 'UTC');
+  } catch {
+    parts = read('UTC');
+  }
+  const part = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+  // `hour12: false` resolves to the h24 cycle in some ICU builds, which spells
+  // midnight "24" while the date parts already name the day that is STARTING —
+  // the same trap `src/unlockCopy.ts` folds out. Assembled from parts rather
+  // than a formatted string so the result is locale-independent.
+  const hour = Number(part('hour')) % 24;
+  return { date: `${part('year')}-${part('month')}-${part('day')}`, minutes: hour * 60 + Number(part('minute')) };
+}
+
+/** The Event-local calendar date one Day's email belongs to, or `''` when the
+ *  Day names neither a real unlock instant nor a usable `date` label — in which
+ *  case it is never due, which is the #289 guarantee the old blanket skip made. */
+function dayCalendarDate(day: EmailDay, timeZone: string | undefined): string {
+  if (hasScheduledUnlock(day)) return eventWallClock(day.unlockAt, timeZone).date;
+  return typeof day.date === 'string' && ISO_DATE.test(day.date) ? day.date : '';
+}
+
+/**
+ * The Day whose email is due at `now`, or `null`.
+ *
+ * ONE Day owns an Event-local calendar date, and it is the LOWEST-INDEXED Day on
+ * it. This email is the morning touchpoint for a calendar day, not a per-Day
+ * notification: Bodega Bay's Sunday carries both the 06:00 competitive card and
+ * the 11:00 ceremonial wrap-up, and mailing each in turn put two emails five
+ * hours apart on one Sunday — the second of them announcing the wrap-up Day's
+ * `place`, "The drive home", through an arrival line built for a port name
+ * (#723). A later Day sharing a date is not a new day and gets no email; its
+ * content still reaches players in the app.
+ *
+ * Owning the date is necessary but not sufficient — the send window still has
+ * to be open. For a Day with a real unlock that is the unchanged
+ * `[unlockAt, unlockAt + windowMs)`; for the open sentinel it is the same span
+ * measured on the Event's wall clock from `SENTINEL_SEND_LOCAL_HOUR`.
  */
 export function dueDayForDailyEmail(
   days: readonly EmailDay[] | undefined,
   now: number,
+  timeZone?: string,
   windowMs: number = SEND_WINDOW_MS,
 ): EmailDay | null {
-  let due: EmailDay | null = null;
+  const today = eventWallClock(now, timeZone);
+  let owner: EmailDay | null = null;
   for (const day of days ?? []) {
-    if (typeof day?.unlockAt !== 'number' || !Number.isFinite(day.unlockAt)) continue;
-    // A non-positive `unlockAt` is the "live pre-event" sentinel some seeds use
-    // (#289), not a real instant — it would look permanently overdue and mail
-    // the Day forever, so it is never due.
-    if (day.unlockAt <= 0) continue;
-    if (day.unlockAt > now || now >= day.unlockAt + windowMs) continue;
-    if (!due || day.unlockAt > due.unlockAt) due = day;
+    if (!day || dayCalendarDate(day, timeZone) !== today.date) continue;
+    if (!owner || day.index < owner.index) owner = day;
   }
-  return due;
+  if (!owner) return null;
+  if (hasScheduledUnlock(owner)) {
+    return now >= owner.unlockAt && now < owner.unlockAt + windowMs ? owner : null;
+  }
+  const opensAt = SENTINEL_SEND_LOCAL_HOUR * 60;
+  // Clamped at local midnight: a wall-clock window cannot run past the date it
+  // is anchored to, and the Day stops owning the date there anyway.
+  const closesAt = Math.min(24 * 60, opensAt + windowMs / 60_000);
+  return today.minutes >= opensAt && today.minutes < closesAt ? owner : null;
 }
 
 /** Whether this participant should be mailed for `dayIndex`: opted in, and not
@@ -358,7 +439,7 @@ export async function sendDailyEmailForEvent(
   if (!event) return { sent: 0, skipped: 0, failed: 0, reason: 'no-event' };
   if (!dailyEmailEnabled(event)) return { sent: 0, skipped: 0, failed: 0, reason: 'disabled' };
 
-  const day = dueDayForDailyEmail(event.days, now);
+  const day = dueDayForDailyEmail(event.days, now, event.timezone);
   if (!day) return { sent: 0, skipped: 0, failed: 0, reason: 'not-due' };
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();

@@ -302,8 +302,28 @@ export function formatDayDate(isoDate: string | undefined): string {
   }).format(new Date(at));
 }
 
-/** "8:00 a.m." — the Day's unlock in the Event's timezone. */
-export function formatUnlockTime(unlockAt: number, timeZone: string): string {
+/** True when a Day carries a REAL unlock instant, rather than the `unlockAt: 0`
+ *  "live from Event open" sentinel (#289) or a malformed value. The one place
+ *  that question is answered, because the sender and the copy must agree on it:
+ *  a Day the sender treats as sentinel-scheduled is a Day whose copy must not
+ *  quote an unlock time. */
+export function hasScheduledUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
+  return typeof day.unlockAt === 'number' && Number.isFinite(day.unlockAt) && day.unlockAt > 0;
+}
+
+/**
+ * "8:00 a.m." — the Day's unlock in the Event's timezone — or `null` when the
+ * Day has no real unlock instant to quote.
+ *
+ * NULL RATHER THAN A FORMATTED SENTINEL (#723). Epoch 0 is a perfectly valid
+ * instant to `Intl`, so the sentinel formats as a plausible clock time —
+ * "4:00 p.m." in `America/Los_Angeles` — and a caller that forgets to branch
+ * ships a confident lie about when the card opens instead of something anybody
+ * would notice. Returning null makes the omission render as the literal `null`,
+ * which a test catches at a glance and a reviewer cannot miss.
+ */
+export function formatUnlockTime(unlockAt: number, timeZone: string): string | null {
+  if (!hasScheduledUnlock({ unlockAt })) return null;
   const fmt = (tz: string): string =>
     new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz }).format(
       new Date(unlockAt),
@@ -468,7 +488,12 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // context line, and a flag mid-sentence reads as decoration rather than data.
   const arrivalPlace = (day.place ?? day.port ?? '').trim();
   const arrival = arrivalPlace ? register.arrivalLine(arrivalPlace) : register.arrivalLineNoPlace;
-  const nudgeLine = `${greeting}${arrival}—your Day ${dayNumber} card is live at ${formatUnlockTime(day.unlockAt, timeZone)}: 24 fresh squares.`;
+  // The opening Day of an Event that uses the open sentinel has no unlock hour
+  // to promise — it is already live — so the copy says so rather than quoting
+  // the epoch (#723).
+  const unlockClock = formatUnlockTime(day.unlockAt, timeZone);
+  const liveWhen = unlockClock ? `live at ${unlockClock}` : 'live now';
+  const nudgeLine = `${greeting}${arrival}—your Day ${dayNumber} card is ${liveWhen}: 24 fresh squares.`;
   const tonight = (day.tonight ?? []).filter((t) => typeof t === 'string' && t.trim() !== '');
   const tonightLine = tonight.length > 0 ? tonight.join(' · ') : null;
 
@@ -483,7 +508,9 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // clients truncate hard and the hook is what earns the open.
   const preheader = played
     ? `Day ${dayNumber}: ${theme.label}—standings through Day ${dayNumber - 1} inside.`
-    : `Day ${dayNumber} is here—your card unlocks at ${formatUnlockTime(day.unlockAt, timeZone)}.`;
+    : unlockClock
+      ? `Day ${dayNumber} is here—your card unlocks at ${unlockClock}.`
+      : `Day ${dayNumber} is here—your card is live now.`;
 
   return {
     edition: args.edition || DEFAULT_EMAIL_EDITION,

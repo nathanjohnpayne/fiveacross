@@ -28,6 +28,7 @@ import {
   type DailyEmailFirestore,
 } from '../../functions/src/dailyEmail';
 import { sendEmail, type EmailPayload } from '../../functions/src/email';
+import { EVENT_SEED as BODEGA_SEED } from '../../scripts/seed-data/bodega-bay-2026.mjs';
 
 // Covers specs/daily-engagement-email.md, functions layer: the Day-Theme token
 // mirror, the per-Edition content model, the email-safe template, and the
@@ -551,6 +552,19 @@ describe('buildDailyEmailModel', () => {
     expect(formatUnlockTime(DAY4_UNLOCK, 'Not/AZone')).toBe('6:00 a.m.'); // falls back to UTC
   });
 
+  it('refuses to format the open sentinel as a clock time, and says "live now" instead (#723)', () => {
+    // Epoch 0 is a valid instant to `Intl`, so the sentinel used to render as a
+    // plausible "4:00 p.m." for any Pacific Event — a confident lie about when
+    // the card opens. Null is the visible failure; the copy branches on it.
+    expect(formatUnlockTime(0, 'America/Los_Angeles')).toBeNull();
+    expect(formatUnlockTime(Number.NaN, 'Europe/Rome')).toBeNull();
+    const opening: EmailDay = { ...gcbDay4, index: 0, unlockAt: 0 };
+    const model = build({ day: opening, players: [], ranked: [] });
+    expect(model.nudgeLine).toContain('your Day 1 card is live now: 24 fresh squares.');
+    expect(model.preheader).toBe('Day 1 is here—your card is live now.');
+    expect(`${model.nudgeLine}${model.preheader}`).not.toContain('null');
+  });
+
   it('renders the Day date as the calendar label it already is, with no second offset applied', () => {
     // `DayDef.date` is ALREADY the Event's local date. Re-applying a zone shifts
     // it past ±12h: `Pacific/Kiritimati` is UTC+14, where noon UTC is the next
@@ -705,9 +719,14 @@ describe('dueDayForDailyEmail', () => {
     expect(dueDayForDailyEmail(days, 1_000_000 + H8)).toBeNull();
   });
 
-  it('ignores the unlockAt:0 "live pre-event" sentinel instead of mailing it forever (#289)', () => {
+  it('never fires for an UNDATED sentinel Day, rather than mailing it forever (#289)', () => {
+    // A Day with neither a real unlock nor a `date` label belongs to no calendar
+    // day, so it can never own one. This is the guarantee the old blanket
+    // `unlockAt <= 0` skip bought, kept intact while the DATED sentinel Day
+    // (Bodega's Friday) regains its send below.
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: 0 }], 5_000_000)).toBeNull();
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: -1 }], 5_000_000)).toBeNull();
+    expect(dueDayForDailyEmail([{ index: 0, unlockAt: 0, date: 'not-a-date' }], 5_000_000)).toBeNull();
   });
 
   it('handles an absent or malformed schedule without throwing', () => {
@@ -716,12 +735,68 @@ describe('dueDayForDailyEmail', () => {
     expect(dueDayForDailyEmail([{ index: 0, unlockAt: Number.NaN }], 1)).toBeNull();
   });
 
-  it('prefers the latest due Day when a schedule somehow overlaps', () => {
-    const overlapping: EmailDay[] = [
+  it('collapses two Days that share one Event-local calendar date onto the FIRST of them (#723)', () => {
+    // Was "prefers the latest due Day when a schedule somehow overlaps". That
+    // rule is exactly what mailed Bodega Bay twice on Sunday: the email is the
+    // morning touchpoint for a CALENDAR DAY, so a later Day sharing the date
+    // never takes it over.
+    const sameDay: EmailDay[] = [
       { index: 0, unlockAt: 1_000_000 },
       { index: 1, unlockAt: 1_000_100 },
     ];
-    expect(dueDayForDailyEmail(overlapping, 1_000_200)?.index).toBe(1);
+    expect(dueDayForDailyEmail(sameDay, 1_000_200)?.index).toBe(0);
+    // Declaration order must not decide it — the lowest INDEX owns the date.
+    expect(dueDayForDailyEmail([sameDay[1], sameDay[0]], 1_000_200)?.index).toBe(0);
+  });
+
+  it('groups Days by the EVENT zone, not UTC', () => {
+    const days: EmailDay[] = [
+      { index: 0, unlockAt: Date.parse('2026-08-09T05:00:00-07:00') },
+      { index: 1, unlockAt: Date.parse('2026-08-09T18:00:00-07:00') },
+    ];
+    const at = Date.parse('2026-08-09T18:30:00-07:00');
+    // In Los Angeles both Days are Aug 9, so Day 0 owns it and its window has
+    // long closed — nothing is due. Read in UTC the two fall on Aug 9 and Aug
+    // 10, which is how the second one would sneak its own email.
+    expect(dueDayForDailyEmail(days, at, 'America/Los_Angeles')).toBeNull();
+    expect(dueDayForDailyEmail(days, at)?.index).toBe(1);
+  });
+});
+
+describe('dueDayForDailyEmail against the live Bodega Bay schedule (#723)', () => {
+  // The real seeded Event that misfired, not a lookalike: four Days over three
+  // calendar days, opening on the `unlockAt: 0` sentinel and closing with an
+  // 11:00 ceremonial wrap-up that shares Sunday with the 06:00 competitive card.
+  const days = BODEGA_SEED.days;
+  const tz = BODEGA_SEED.timezone;
+  const at = (iso: string) => Date.parse(iso);
+
+  it('sends on the opening Day, which carries the open sentinel by design', () => {
+    expect(days[0].unlockAt).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-07T08:00:00-07:00'), tz)?.index).toBe(0);
+    expect(dueDayForDailyEmail(days, at('2026-08-07T13:59:00-07:00'), tz)?.index).toBe(0);
+  });
+
+  it('keeps that sentinel Day bounded to one local morning, on one date', () => {
+    expect(dueDayForDailyEmail(days, at('2026-08-07T07:59:00-07:00'), tz)).toBeNull();
+    expect(dueDayForDailyEmail(days, at('2026-08-07T14:00:00-07:00'), tz)).toBeNull();
+    expect(dueDayForDailyEmail(days, at('2026-09-07T08:00:00-07:00'), tz)).toBeNull();
+  });
+
+  it('sends on Saturday — the one Day the POC got right', () => {
+    expect(dueDayForDailyEmail(days, at('2026-08-08T06:00:00-07:00'), tz)?.index).toBe(1);
+  });
+
+  it('never lets the 11:00 wrap-up Day take a second Sunday email', () => {
+    expect(days[3].unlockAt).toBe(at('2026-08-09T11:00:00-07:00'));
+    expect(dueDayForDailyEmail(days, at('2026-08-09T06:00:00-07:00'), tz)?.index).toBe(2);
+    // 11:00 PDT: the wrap-up unlocks and used to win the "latest due Day"
+    // tie-break — the second Sunday email, five hours after the first.
+    expect(dueDayForDailyEmail(days, at('2026-08-09T11:00:00-07:00'), tz)?.index).toBe(2);
+    for (let hour = 0; hour < 24; hour++) {
+      const when = at(`2026-08-09T${String(hour).padStart(2, '0')}:30:00-07:00`);
+      expect(dueDayForDailyEmail(days, when, tz)?.index).not.toBe(3);
+    }
   });
 });
 
@@ -991,6 +1066,23 @@ describe('sendDailyEmailForEvent', () => {
     expect(all.length).toBeGreaterThan(5);
   });
 
+  it("resolves the due Day in the EVENT's timezone, not the sweep's UTC (#723)", async () => {
+    // Two Days on one Los Angeles Sunday whose UTC dates differ: 18:00 PDT is
+    // already Aug 10 in UTC, so a UTC-grouped due check hands the second Day its
+    // own email hours after the morning card. Only the Event zone collapses
+    // them, and only the sender can supply it.
+    const docs = seedEvent();
+    const event = docs['events/med-2026'] as Record<string, unknown>;
+    event.timezone = 'America/Los_Angeles';
+    event.days = [
+      { index: 0, unlockAt: Date.parse('2026-08-09T05:00:00-07:00'), theme: 'welcome-aboard' },
+      { index: 1, unlockAt: Date.parse('2026-08-09T18:00:00-07:00'), theme: 'duty-free' },
+    ];
+    const { result, sent } = await run(docs, { now: () => Date.parse('2026-08-09T18:30:00-07:00') });
+    expect(result).toMatchObject({ sent: 0, reason: 'not-due' });
+    expect(sent).toHaveLength(0);
+  });
+
   it('logs roster overflow even when a banned row makes the filtered page look within the ceiling', async () => {
     const docs = seedEvent();
     (docs['events/med-2026'] as Record<string, unknown>).bannedUids = ['theo'];
@@ -1004,6 +1096,99 @@ describe('sendDailyEmailForEvent', () => {
       3,
     );
     error.mockRestore();
+  });
+});
+
+describe('the Bodega Bay POC, replayed sweep by sweep (#723)', () => {
+  // The whole four-day trip through the real quarter-hourly sweep, against ONE
+  // Firestore stand-in so `lastSentDayIndex` carries across runs exactly as it
+  // does live. This is the regression test for all three reported symptoms at
+  // once: no Day 1 send, two emails on Sunday, and the wrap-up Day's `place`
+  // ("The drive home") rendered through the Vacay arrival line.
+  const bodegaDocs = (): Docs => ({
+    'events/bodega-bay-2026': {
+      name: BODEGA_SEED.name,
+      status: 'active',
+      timezone: BODEGA_SEED.timezone,
+      days: BODEGA_SEED.days,
+      settings: { dailyEmailEnabled: true },
+    },
+    'events/bodega-bay-2026/players/nat': {
+      displayName: 'Nat',
+      bingoCount: 0,
+      squaresMarked: 0,
+      firstBingoAt: null,
+    },
+    'hostnames/bodega.example.com': {
+      eventId: 'bodega-bay-2026',
+      canonicalHost: 'bodega.example.com',
+      edition: 'vacay',
+      status: 'active',
+      isCanonical: true,
+    },
+  });
+
+  const replay = async (): Promise<Array<CapturedSend & { at: number }>> => {
+    const db = makeDb(bodegaDocs());
+    const sent: Array<CapturedSend & { at: number }> = [];
+    // 288 sweeps, each logging its own per-Event summary line — quiet them, or
+    // this one test buries the rest of the suite's output.
+    const quiet = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let at = Date.parse('2026-08-07T00:00:00-07:00');
+    const end = Date.parse('2026-08-10T00:00:00-07:00');
+    for (; at < end; at += 15 * 60 * 1000) {
+      const when = at;
+      await sendDailyEmailForEvent(db, 'bodega-bay-2026', {
+        ...baseDeps(),
+        now: () => when,
+        send: async (args) => {
+          sent.push({
+            at: when,
+            from: args.from ?? '',
+            to: args.to,
+            subject: args.subject,
+            html: args.html,
+            text: args.text,
+            headers: args.headers,
+            idempotencyKey: args.idempotencyKey,
+          });
+          return true;
+        },
+      });
+    }
+    quiet.mockRestore();
+    return sent;
+  };
+
+  const localDate = (at: number) =>
+    new Intl.DateTimeFormat('en-CA', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: BODEGA_SEED.timezone,
+    }).format(new Date(at));
+
+  it('sends exactly one email per calendar day, on the right calendar day', async () => {
+    const sent = await replay();
+    expect(sent.map((m) => localDate(m.at))).toEqual(['2026-08-07', '2026-08-08', '2026-08-09']);
+    expect(sent.map((m) => m.idempotencyKey)).toEqual([
+      'daily-email/bodega-bay-2026/0/nat',
+      'daily-email/bodega-bay-2026/1/nat',
+      'daily-email/bodega-bay-2026/2/nat',
+    ]);
+  });
+
+  it('never ships "The group lands in The drive home today"', async () => {
+    const sent = await replay();
+    for (const mail of sent) {
+      expect(`${mail.subject}${mail.text}${mail.html}`).not.toContain('The drive home');
+    }
+  });
+
+  it('opens Day 1 with a live card rather than an epoch-0 unlock hour', async () => {
+    const [dayOne] = await replay();
+    expect(dayOne.text).toContain('your Day 1 card is live now: 24 fresh squares.');
+    expect(dayOne.text).not.toContain('4:00 p.m.');
   });
 });
 
