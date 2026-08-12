@@ -59,7 +59,7 @@ import FarewellPodium from './FarewellPodium';
 import { farewellPinIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
-import LaunchIntro from './LaunchIntro';
+import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
 import ReshuffleSheet from './ReshuffleSheet';
 import { THEMES } from '../theme/themes';
 import { FREE_TEXT } from '../data/seed';
@@ -776,6 +776,10 @@ export default function Board() {
   // at mount and flipped by CoachOverlay's own dismiss — a plain render-time read
   // would never re-render Board when that key is written.
   const [coachSeen, setCoachSeen] = useState(isCoachOverlayDismissed);
+  // Same shape for the launch announcement, and for the same reason: it too
+  // self-gates on a stored flag, so Board cannot tell from the mount condition
+  // alone whether its scrim is actually up (see `overlayOpen` below).
+  const [launchIntroSeen, setLaunchIntroSeen] = useState(isLaunchIntroDismissed);
   // A Feed Tally Card's pending "open this Prompt's sheet" request (#261),
   // consumed by the intent effect below once the right Day's board renders.
   const openSquareIntent = useOpenSquareIntent();
@@ -2212,6 +2216,30 @@ export default function Board() {
     if (revalidateAfterAwait(uid).isCurrentAccount) drainMoments(res.cells, actedDay);
   };
 
+  /**
+   * Is a modal scrim currently up over the card?
+   *
+   * Load-bearing since the Squares became real controls (Codex P1, round 1):
+   * every overlay below is a sibling of `.board-area`, and none of them traps
+   * focus or marks the card inert, so a keyboard user could Tab straight past
+   * the dialog's CTA into the grid behind it — unmarking a hidden Square, or
+   * opening a SECOND sheet from behind an `aria-modal` dialog. 25 new tab stops
+   * turned a latent gap (only the free centre and the badges on marked Squares
+   * were reachable) into the default experience.
+   *
+   * CoachOverlay and LaunchIntro both self-gate on a stored flag, so their
+   * mount conditions do not say whether a scrim is actually up — hence the
+   * `*Seen` mirrors, seeded from the same predicates the components read and
+   * flipped by their own `onDismiss`.
+   */
+  const overlayOpen =
+    (cells.length > 0 && !coachSeen) ||
+    (hasDays && cells.length > 0 && coachSeen && !launchIntroSeen) ||
+    proofTarget != null ||
+    tallyTarget != null ||
+    reshuffleOpen ||
+    celebrate != null;
+
   const toggle = (c: Cell) => {
     // The shared attribution guard (PR #110 finding 2, widened in round 2):
     // NO action may start from a render still showing another account's board —
@@ -2256,7 +2284,9 @@ export default function Board() {
       {/* `hasDays` too: Reshuffle is a daily-cards feature, so a legacy Event
           (single Board, no `days[]` schedule) must never be told about a chip it
           can never show. */}
-      {hasDays && cells.length > 0 && coachSeen && <LaunchIntro />}
+      {hasDays && cells.length > 0 && coachSeen && (
+        <LaunchIntro onDismiss={() => setLaunchIntroSeen(true)} />
+      )}
       {/* `board-area` is the retint scope (daily-cards-spec § "Day switcher"):
           `data-theme` here — set ONLY when the Event carries a Day schedule —
           follows the VIEWED Day and cascades the theme token set (themes.css)
@@ -2264,7 +2294,14 @@ export default function Board() {
           Player's own Theme choice, ThemeContext) untouched. Absent entirely
           on a not-yet-migrated Event (`hasDays` false), so the pre-Phase-1.5
           single-Board rendering is byte-identical to before. */}
-      <div className="board-area" data-theme={viewedDay?.theme}>
+      {/* `inert` while any overlay is up (see `overlayOpen`): the platform
+          primitive for "this subtree is behind a modal" — it drops the whole
+          card from the tab order AND from the accessibility tree in one
+          attribute, which covers the Squares, the daybar's reshuffle chip and
+          the podium's Share alike, rather than threading a disabled flag
+          through each. Every overlay is a SIBLING of this container, so none of
+          them is ever caught by its own scrim. */}
+      <div className="board-area" data-theme={viewedDay?.theme} inert={overlayOpen}>
         {/* The daybar (#260 — wireframes' day gallery): "Day N · Theme" +
             tutorial tag, port, and the dress-code description, on every
             viewed Day. Absorbs the pre-#260 tutorial-only board-header
@@ -2359,38 +2396,6 @@ export default function Board() {
                   : null),
               } as CSSProperties
             }
-            /* EVERY Square is a button-role control, not just the free centre
-               (which is all this used to cover). Tapping a Square is the
-               mainline path to the claim sheet, so a bare div left a
-               keyboard-only or switch-access Player with no way to claim at
-               all — the nested ＋/tally/doubt controls below are real
-               <button>s and were the only reachable thing on a Square.
-               `role="button"` on the div rather than an actual <button>
-               element: these nested controls sit INSIDE the tile, and a
-               <button> may not contain interactive descendants. A focusable
-               descendant is exempt from the presentational-children rule, so
-               they stay exposed and tabbable under the role. */
-            role="button"
-            tabIndex={0}
-            aria-label={squareLabel(c)}
-            title={c.free ? 'Free space—already marked' : undefined}
-            onClick={() => toggle(c)}
-            onKeyDown={(event) => {
-              // Descendant-originated keys belong to the nested controls: those
-              // <button>s activate themselves on Enter/Space and the event
-              // bubbles here, which would claim (or unmark) the Square behind
-              // them. Their onClick `stopPropagation` guards the pointer path
-              // only; this is the keyboard half of the same fence.
-              if (event.target !== event.currentTarget) return;
-              if (event.key !== 'Enter' && event.key !== ' ') return;
-              // Space scrolls the page by default, and both keys activate a
-              // button-role control (WAI-ARIA button pattern).
-              event.preventDefault();
-              // A held key auto-repeats keydown; a native button fires once.
-              // Without this an unmark (the instant path) would re-fire.
-              if (event.repeat) return;
-              toggle(c);
-            }}
             onAnimationEnd={(event) => {
               if (c.free) setFreePulse(0);
               // The stamp is one-shot: release the class the moment its own
@@ -2399,27 +2404,62 @@ export default function Board() {
               if (event.animationName === 'cell-stamp') clearStamp(c.index);
             }}
           >
-            {c.free ? (
-              <>
-                <span className="free-label" aria-hidden="true">
-                  FREE
-                </span>
-                <span className="free-prompt">{c.text}</span>
-              </>
-            ) : (
-              <SquareText text={c.text} />
-            )}
+            {/* The claim control. Tapping a Square is the mainline path to the
+                claim sheet, and this used to be a bare `onClick` on the tile
+                div — no tabIndex, no role, no key handling — so a keyboard-only
+                or switch-access Player could not claim at all. (The ＋/tally/
+                doubt controls below are real <button>s, which made the
+                proof-add path reachable and the claim path not.)
+
+                A real <button> filling the tile, rather than `role="button"` on
+                the tile div itself: those nested controls would then be
+                interactive descendants of a button role, which ARIA's
+                presentational-children rule leaves under-defined. The
+                focusable-descendant carve-out means a conforming UA still
+                exposes them, but the pattern is not interoperable across
+                screen-reader/browser pairs and is exactly what the
+                `nested-interactive` audit rule flags — a poor trade on a change
+                whose whole purpose is reach (Codex P1, round 1). As siblings of
+                a full-bleed button they are plain, unambiguous controls.
+
+                Being a real <button> also means Enter/Space activation, scroll
+                suppression on Space, and key-repeat semantics are the platform's
+                rather than hand-rolled here. */}
+            <button
+              type="button"
+              className="cell-claim"
+              aria-label={squareLabel(c)}
+              title={c.free ? 'Free space—already marked' : undefined}
+              onClick={() => toggle(c)}
+            >
+              {c.free ? (
+                <>
+                  <span className="free-label" aria-hidden="true">
+                    FREE
+                  </span>
+                  <span className="free-prompt">{c.text}</span>
+                </>
+              ) : (
+                <SquareText text={c.text} />
+              )}
+            </button>
             {c.marked && !c.free && (
               <button
                 className="proofbtn"
                 title="Add proof"
                 onClick={(e) => {
-                  // stopPropagation bypasses `toggle`, so this handler needs the
-                  // shared attribution guard itself (PR #110 round 3 finding C):
-                  // during an account switch this cell can belong to the PREVIOUS
-                  // uid's board, and a sheet opened from it would attach a proof
-                  // (and broadcast a Moment) for the current uid off the wrong card.
+                  // The claim control is now a SIBLING button rather than this
+                  // tile div, so nothing here can reach `toggle` by bubbling and
+                  // stopPropagation is no longer what keeps the two apart. Kept
+                  // anyway: the tile sits inside pull-to-refresh / board chrome
+                  // that may take pointer events, and a proof tap is not a
+                  // gesture for them.
                   e.stopPropagation();
+                  // The attribution guard is load-bearing on its own (PR #110
+                  // round 3 finding C): during an account switch this cell can
+                  // belong to the PREVIOUS uid's board, and a sheet opened from
+                  // it would attach a proof (and broadcast a Moment) for the
+                  // current uid off the wrong card.
                   if (!cellsAttributable) return;
                   setProofTarget(c);
                 }}
