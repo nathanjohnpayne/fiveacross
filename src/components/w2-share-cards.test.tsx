@@ -154,6 +154,9 @@ afterEach(() => {
   // document.body OUTSIDE any React root, so RTL's cleanup cannot take it
   // down — a leaked sheet would answer the next test's role queries.
   document.querySelector('.share-fallback-backdrop')?.remove();
+  // Same for the stand-in Share triggers the round-4 focus tests plant on the
+  // body to play the part of the opener.
+  document.querySelectorAll('[data-test-share-opener]').forEach((node) => node.remove());
   // Module state, not a mock — clear any #607 test's resolved canonical
   // host so it never leaks into an unrelated assertion.
   applyResolvedCanonicalHost(null);
@@ -1306,6 +1309,124 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     );
     fireEvent.click(sheetButton('Close'));
     expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+  });
+
+  // Codex P2, PR #712 round 4 — the sheet declares `aria-modal="true"`, which
+  // is a promise that nothing outside it is reachable and that focus comes
+  // back where it started. These pin both halves of that contract.
+  function plantOpener(label: string): HTMLButtonElement {
+    const opener = document.createElement('button');
+    opener.type = 'button';
+    opener.textContent = label;
+    opener.setAttribute('data-test-share-opener', '');
+    document.body.appendChild(opener);
+    opener.focus();
+    return opener;
+  }
+
+  /** Mounts the terminal sheet from a focused stand-in Share trigger, with a
+   *  Clipboard API that is PRESENT but activation-gated — so the chain still
+   *  falls all the way through, and the sheet offers Copy as well as Close
+   *  (two stops for the trap to cycle between). */
+  async function openFallbackFrom(label: string): Promise<HTMLButtonElement> {
+    const opener = plantOpener(label);
+    stubNavigator({
+      clipboard: {
+        writeText: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error('denied'), { name: 'NotAllowedError' })),
+      },
+    });
+    stubUserActivation(false);
+    const outcome = await shareCardBlob({
+      blob: null,
+      filename: 'card.png',
+      title: 'T',
+      text: 'body',
+      url: 'https://x.test',
+    });
+    expect(outcome).toBe('prompt');
+    return opener;
+  }
+
+  it('contains Tab and Shift+Tab inside the fallback sheet — a keyboard Player cannot walk into the app it covers', async () => {
+    const opener = await openFallbackFrom('Share');
+    const copy = sheetButton('Copy link');
+    const close = sheetButton('Close');
+    expect(document.activeElement).toBe(copy); // the primary action is the landing spot
+
+    // Forward from the LAST stop wraps to the first rather than leaving.
+    close.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(copy);
+
+    // Backward from the FIRST stop wraps to the last, same rule.
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(close);
+
+    // And focus that has somehow landed OUTSIDE (here: back on the covered
+    // trigger) is pulled back in, not wrapped from a stop that isn't ours.
+    opener.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(copy);
+  });
+
+  it('restores focus to the Share trigger on every close path', async () => {
+    // Close button.
+    let opener = await openFallbackFrom('Share A');
+    fireEvent.click(sheetButton('Close'));
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+
+    // Escape.
+    opener = await openFallbackFrom('Share B');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+
+    // Backdrop click.
+    opener = await openFallbackFrom('Share C');
+    fireEvent.click(fallbackSheet());
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it('supersedes an earlier sheet through the same close path — no orphaned key handler pointing at the old opener', async () => {
+    const first = await openFallbackFrom('Share first');
+    const second = await openFallbackFrom('Share second');
+
+    // One sheet, not two stacked.
+    expect(document.querySelectorAll('.share-fallback-backdrop')).toHaveLength(1);
+
+    // Closing the live sheet returns focus to ITS opener, not the stale one.
+    fireEvent.click(sheetButton('Close'));
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(second);
+    expect(document.activeElement).not.toBe(first);
+
+    // And the superseded sheet took its key handler with it. A handler left
+    // bound to a detached sheet keeps answering every keystroke in the app
+    // afterwards — its trap sees focus "outside" its own dead node, swallows
+    // the Tab and aims focus at a button nobody can see. With no sheet on
+    // screen, Tab must reach the app uncancelled: `fireEvent` returns false
+    // exactly when a listener called `preventDefault`.
+    first.focus();
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('leaves focus alone when something else has taken it before the sheet closes', async () => {
+    const opener = await openFallbackFrom('Share');
+    const elsewhere = plantOpener('Somewhere else');
+    elsewhere.focus();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(elsewhere);
+    expect(document.activeElement).not.toBe(opener);
   });
 
   it('does not put a fallback sheet in front of a Player who simply dismissed the share sheet', async () => {

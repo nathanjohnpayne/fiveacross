@@ -588,6 +588,23 @@ function downloadBlob(blob: Blob, filename: string): void {
  *  the first rather than stacking a second sheet on top of it. */
 const SHARE_FALLBACK_CLASS = 'share-fallback-backdrop';
 
+/** Focus-trap query — the same one every other dialog in the app traps on
+ *  (ProfileEditor.tsx, More.tsx, AdminSheet.tsx, ProofFeed.tsx). */
+const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/**
+ * The single mounted fallback sheet's teardown (Codex P2, PR #712 round 4).
+ *
+ * The sheet is a singleton, and superseding one used to be a bare
+ * `node.remove()` — which skipped the close path entirely, orphaning the
+ * document-level `keydown` listener and leaving a stale opener that a later
+ * Escape would have yanked focus back to. Routing supersession through the
+ * SAME `close()` every other dismissal uses means there is exactly one way a
+ * sheet can go away, so listener removal and focus restoration cannot be
+ * missed by a path that forgot to do them.
+ */
+let closeMountedFallbackSheet: ((restoreFocus: boolean) => void) | null = null;
+
 /**
  * The chain's TERMINAL, activation-free affordance (Codex P1, PR #712 round
  * 3) — the leg that makes "the tap did nothing" unreachable.
@@ -610,7 +627,14 @@ const SHARE_FALLBACK_CLASS = 'share-fallback-backdrop';
  * the three callers, for the reason this whole function exists: the degrade
  * path lives exactly once (and `downloadBlob` above already reaches for the
  * DOM the same way). It owns its own teardown — the Close button, a backdrop
- * click, or Escape — and only one can ever be mounted.
+ * click, Escape, or a second dead-ended tap superseding it — and only one can
+ * ever be mounted.
+ *
+ * Being a real `aria-modal` dialog, it carries the same keyboard contract as
+ * the app's React sheets (Codex P2, PR #712 round 4): the opener is captured
+ * on mount, Tab/Shift+Tab are CONTAINED inside the sheet instead of walking
+ * into the app it covers, and focus is restored to the opener on every close
+ * path — all four of which now run through the one `close()` below.
  *
  * Returns whether a sheet was actually mounted: with neither a link nor an
  * image there is genuinely nothing to offer, and the caller keeps `'none'`.
@@ -620,7 +644,23 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
   if (!url && !blob) return false;
   if (typeof document === 'undefined' || !document.body) return false;
 
+  // Supersede through the real close path, not a bare remove (see
+  // `closeMountedFallbackSheet`). No focus restore: the sheet replacing it is
+  // about to take focus itself, and bouncing through the old opener first
+  // would be a visible flicker for no gain.
+  closeMountedFallbackSheet?.(false);
+  // Belt and braces for any node that outlived its closure (a stale sheet
+  // left by an earlier module instance in a test, say) — the class is a
+  // singleton marker, so nothing else may wear it.
   document.querySelector(`.${SHARE_FALLBACK_CLASS}`)?.remove();
+
+  // The element the tap left focus on — restored when the sheet closes so a
+  // keyboard Player lands back on the Share button rather than at the top of
+  // the document. `document.body` is not a real landing spot; treat it as
+  // "no opener" (a tap on iOS Safari often leaves focus there).
+  const activeOnOpen = document.activeElement;
+  const opener =
+    activeOnOpen instanceof HTMLElement && activeOnOpen !== document.body ? activeOnOpen : null;
 
   const backdrop = el('div', `sheet-backdrop ${SHARE_FALLBACK_CLASS}`);
   const sheet = el('div', 'sheet share-fallback');
@@ -640,12 +680,61 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
   if (url) sheet.appendChild(el('p', 'share-fallback-url', url));
 
   const actions = el('div', 'sheet-actions');
-  const close = (): void => {
+  /**
+   * The ONE way this sheet goes away — Close, backdrop, Escape, supersession.
+   * Idempotent, so a double-fire (Escape while the click is already in flight)
+   * cannot double-restore focus or clear a successor's teardown handle. Keyed
+   * on its own `closed` flag rather than the node's connectedness, so it still
+   * unbinds the document listener for a sheet whose node was pulled out from
+   * under it.
+   */
+  let closed = false;
+  const close = (restoreFocus = true): void => {
+    if (closed) return;
+    closed = true;
+    if (closeMountedFallbackSheet === close) closeMountedFallbackSheet = null;
     document.removeEventListener('keydown', onKeydown);
+    // Only reclaim focus the sheet actually holds: if something else has taken
+    // it in the meantime, yanking it back to the opener would be the theft
+    // this restoration exists to prevent.
+    const held = backdrop.contains(document.activeElement);
     backdrop.remove();
+    if (restoreFocus && held && opener?.isConnected) opener.focus();
   };
   function onKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    // Containment, not just edge-wrapping: `aria-modal` is a promise to AT
+    // that nothing outside this dialog is reachable, and Tab is the one key
+    // that can break it. Disabled controls are filtered out for the reason
+    // AdminSheet.tsx filters them — they cannot take focus, so treating one as
+    // the first/last stop makes the wrap a no-op and lets Tab escape.
+    const focusable = Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      (node) => !node.hasAttribute('disabled'),
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    // Focus already outside the sheet (the open-time `focus()` was refused, or
+    // AT moved it) — pull it back in rather than wrapping from a stop that
+    // isn't ours.
+    if (!(active instanceof HTMLElement) || !sheet.contains(active)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+      return;
+    }
+    if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 
   const button = (className: string, label: string, onClick: () => void): HTMLButtonElement => {
@@ -680,7 +769,9 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
       }
     });
   }
-  const dismiss = button('btn', 'Close', close);
+  // Wrapped, not passed bare: a click listener is called WITH the MouseEvent,
+  // which would land in `close`'s `restoreFocus` parameter.
+  const dismiss = button('btn', 'Close', () => close());
 
   sheet.appendChild(actions);
   backdrop.appendChild(sheet);
@@ -689,6 +780,7 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
   });
   document.addEventListener('keydown', onKeydown);
   document.body.appendChild(backdrop);
+  closeMountedFallbackSheet = close;
   // Focus lands on the primary action when there is one, so a keyboard Player
   // is inside the sheet rather than back where the dead-ended tap left them.
   (actions.querySelector<HTMLButtonElement>('.btn.primary') ?? dismiss).focus();
