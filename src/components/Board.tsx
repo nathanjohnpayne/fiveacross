@@ -1966,10 +1966,31 @@ export default function Board() {
       // the three ways a Square reaches `marked: true`; see
       // specs/w2-ga4-events.md § Reconciliation for how the three sources
       // relate to `dayStats[*].squaresMarked`.
+      //
+      // `dayIndex` (Codex round 1 finding 2): the ACTED Day, not whichever Day
+      // the app's global `day_index` GA4/PostHog default dimension happens to
+      // carry — that dimension is registered ONCE from `todaysDayIndex` at
+      // startup (src/analytics.ts's `registerDayIndexDimension`) and never
+      // re-registered per Day switch, so a Player viewing and marking an
+      // OLDER Day (catch-up marking, the exact daily-cards use case) would
+      // have every `mark_square`/`unmark_square` misattributed to today's Day
+      // instead of the Day the write actually landed on — making the
+      // documented per-`(uid, dayIndex)` reconciliation impossible for
+      // exactly the Days most likely to need it. `undefined` on a legacy
+      // (non-daily) Event, matching every other Day-stamped param in this
+      // file (e.g. `broadcastWinVerdict`'s Moment `dayIndex` above): daily-
+      // cards-spec's "Day N" naming does not apply there, and `board?.dayIndex`
+      // defaults to 0 on a legacy board — a value that would misread as a
+      // real "Day 1" rather than "no Day schedule".
       if (nextMarked) {
-        track('mark_square', { source: 'pledge', mode: claimMode, marked: true });
+        track('mark_square', {
+          source: 'pledge',
+          mode: claimMode,
+          marked: true,
+          dayIndex: hasDays ? viewedIndex : undefined,
+        });
       } else {
-        track('unmark_square', { mode: claimMode });
+        track('unmark_square', { mode: claimMode, dayIndex: hasDays ? viewedIndex : undefined });
       }
       if (nextMarked && res.bingo) track('bingo');
       if (nextMarked) {

@@ -317,10 +317,42 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(false);
     // #721: the mark-time cascade fires its own echo_mark, NEVER folded into
     // mark_square — the acted Mark's OWN mark_square is Board.tsx's concern,
-    // not setMark's; `dayIndex` is the ACTED day, `count` the one sibling cell.
+    // not setMark's. `dayIndex` (Codex round 1 finding 4) is the RECEIVING
+    // Day (3, the carrier), never the acted Day (2) — `squaresMarked`
+    // increments on the RECEIVING bucket (specs/w2-ga4-events.md §
+    // Reconciliation), so attributing this to the acted Day would make that
+    // Day's own reconciliation identity unprovable.
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 2, count: 1 }),
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 3, count: 1 }),
     );
+  });
+
+  it('a Mark that echoes onto TWO siblings fires echo_mark once PER receiving Day (Codex round 1 finding 1, #727)', async () => {
+    // Day 2 (acted) carries the shared Prompt; Days 1 AND 3 both carry it too
+    // — a Mark on Day 2 must echo onto BOTH, and #721's reconciliation
+    // identity requires one echo_mark per RECEIVING Day, not one aggregated
+    // event under the acted Day.
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: actedCells });
+    H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => (i === 4 ? 'shared' : `c${i}`)) });
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    trustDayBoard(1, 'u1', 111);
+    trustDayBoard(2, 'u1', 222);
+    trustDayBoard(3, 'u1', 333);
+    H.player = {
+      uid: 'u1',
+      displayName: 'Alice',
+      firstBingoAt: null,
+      dayStats: { 2: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+    };
+    await markShared();
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(true);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(true);
+    await vi.waitFor(() => {
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 1, count: 1 });
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 3, count: 1 });
+    });
+    // Never one aggregated event under the acted Day.
+    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ dayIndex: 2 }));
   });
 
   it('#474: SKIPS the echo for a sibling with no server-confirmed seed watch — the acted Mark still commits alone', async () => {
@@ -765,7 +797,7 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     H.player = { uid: 'u1', reshufflesUsed: 0, ...params.playerExtra };
   };
 
-  it('an echo-only card is still reshuffleable, and the replacement re-echoes with its bucket re-derived', async () => {
+  it('an echo-only card is still reshuffleable, and the replacement re-echoes with its bucket re-derived — but fires NO echo_mark (net-new is zero, Codex round 1 finding 4, #727)', async () => {
     seedShuffle({
       // The Day-1 card wears an ECHO of s0 (achieved on Day 0) — pristine.
       day1Cells: { 0: { marked: true, markedAt: 1, status: 'confirmed', echo: true } },
@@ -782,9 +814,30 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     const playerWrite = H.txSet.mock.calls.find(isPlayerWrite)![1] as Record<string, unknown>;
     expect(playerWrite.reshufflesUsed).toBe(1);
     // The Day-1 bucket is RE-DERIVED from the replacement's echoes — the
-    // discarded card's echo stats never survive as phantoms.
+    // discarded card's echo stats never survive as phantoms. Before AND
+    // after the reshuffle the bucket reads 1 — the discarded card already
+    // wore this exact echo (a pristine card can ONLY carry echoes), so the
+    // replacement re-landing the SAME Prompt is not a NEW echo.
     expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
-    // #721: the replacement card's re-echo fires echo_mark, same as a fresh deal.
+    // #721, Codex round 1 finding 4: `echo_mark`'s `count` must be the NET-NEW
+    // increase over what this Day's bucket already carried, never the
+    // replacement's raw echo total — firing `count: 1` here (as the
+    // pre-fix code did) would report an echo the bucket never moved for,
+    // breaking the reconciliation identity (specs/w2-ga4-events.md §
+    // Reconciliation: `squaresMarked[d] = markCount[d] + echoCount[d]`).
+    await new Promise((r) => setTimeout(r, 0)); // let every microtask continuation settle
+    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'reshuffle' }));
+  });
+
+  it('a reshuffle that echoes a GENUINELY new Prompt (the discarded card was echo-free) still fires echo_mark with the real net-new count', async () => {
+    seedShuffle({
+      // The Day-1 card is pristine and UNMARKED — no echo to trade away.
+      day0Overrides: { 0: { marked: true, markedAt: 1, status: 'confirmed' } },
+      playerExtra: { dayStats: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } } },
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).resolves.toBe(1);
+    const playerWrite = H.txSet.mock.calls.find(isPlayerWrite)![1] as Record<string, unknown>;
+    expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
     await vi.waitFor(() =>
       expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'reshuffle', dayIndex: 1, count: 1 }),
     );
@@ -962,6 +1015,17 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         at: 7,
       });
     });
+    // #721, Codex round 1 finding 7: the SAME reload that stranded the pin
+    // continuation above also stranded the mark-time cascade's OWN
+    // `echo_mark` continuation — the cells already carry the echo (drained
+    // durably offline) but `res.changed` is false this open, so the ordinary
+    // firing site above never ran. This heal is the recovery point: it fires
+    // the lost event sized to the ACTUAL server-confirmed increase (4, the
+    // cached row had NO Day-2 bucket at all — a 0 → 4 delta), not the heal's
+    // full recomputed total by coincidence matching it here.
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'open_reconcile', dayIndex: 2, count: 4 }),
+    );
   });
 
   it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {
@@ -1039,6 +1103,12 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       // The opened Day's bucket rides along unchanged — the heal never
       // fabricates a bucket from anything but the board's committed cells.
       expect(stats.dayStats[1]).toMatchObject({ bingoCount: 0, squaresMarked: 1 });
+      // #721, Codex round 1 finding 7: a ROOT-only lag (this case — Day 1's
+      // OWN bucket already matched its board before the heal ran) must fire
+      // NO echo_mark: nothing NEW echoed onto Day 1, so reporting one here
+      // would claim a count the bucket never actually moved for.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'open_reconcile' }));
     });
 
     it('ignores the ceremonial Day bucket, which the roots never counted (#265)', async () => {
@@ -1635,13 +1705,46 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     // Square, a player action, not the sibling echo (#721 scopes echo_mark to
     // the four data/api.ts propagation paths; confirmClaim's own sibling
     // echo — the write asserted above — is unchanged by this ticket).
+    // `dayIndex`/`uid` (Codex round 1 findings 2 & 6): the claim's own Day
+    // and OWNER — this call runs in the ADMIN's session, so without an
+    // explicit `uid` the event would attribute to the admin's distinct id.
     await vi.waitFor(() =>
       expect(H.track).toHaveBeenCalledWith('mark_square', {
         source: 'admin_confirm',
         mode: 'admin_confirmed',
         marked: true,
+        dayIndex: 1,
+        uid: 'u1',
       }),
     );
+  });
+
+  it('a stale claim (no matching board/cell) resolves without firing mark_square (Codex round 1 finding 3, #727)', async () => {
+    seedClaim();
+    // The claim's cellIndex/proofId no longer matches anything on the board —
+    // a reshuffle traded the cell away underneath a still-pending claim.
+    await confirmClaim(claim({ cellIndex: 99, proofId: null }), 'admin-1');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a SECOND confirm racing an already-confirmed claim does not double-fire mark_square (Codex round 1 finding 3, #727)', async () => {
+    // The board is ALREADY confirmed (a first admin's transaction won the
+    // race) — this simulates the loser's transaction replaying against the
+    // winner's committed state.
+    H.dayBoards.set(1, {
+      uid: 'u1',
+      seed: 111,
+      dayIndex: 1,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), {
+        5: { marked: true, markedAt: 1, status: 'confirmed' },
+      }),
+    });
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: card((i) => (i === 7 ? 'shared' : `b${i}`)) });
+    H.player = { uid: 'u1', displayName: 'Alice', dayStats: {} };
+    await confirmClaim(claim(), 'admin-2');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('rejecting echoes NOTHING', async () => {

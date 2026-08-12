@@ -125,6 +125,16 @@ export interface AttachProofResult {
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  // The false→true edge on THIS cell (#721, Codex round 1 finding 6), derived
+  // from the transaction's OWN `existingCell` read — the committed board
+  // state, not the caller's sheet-opening snapshot. A concurrent write from
+  // another device (or tab) can mark this Square between the sheet opening
+  // and this transaction's read; `attachProof` still runs and merely attaches
+  // proof to an already-marked cell, so the caller's stale `!cell.marked`
+  // check would wrongly read that as a transition and fire a second
+  // `mark_square` for a Square that was already credited. The caller must gate
+  // its `mark_square` emission on THIS field, not its own opening snapshot.
+  markTransition: boolean;
 }
 
 /**
@@ -208,6 +218,11 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     const liveRaw = cellsFromData(boardData?.cells);
     const liveCells = liveRaw.length > 0 ? liveRaw : cells;
     const existingCell = liveCells.find((cell) => cell.index === cellIndex);
+    // The COMMITTED false→true edge (#721, Codex round 1 finding 6): derived
+    // from this transaction's own live read, never the caller's
+    // sheet-opening snapshot — see `AttachProofResult.markTransition`'s doc
+    // comment for why the caller's own `cell` prop cannot be trusted here.
+    const markTransition = existingCell?.marked !== true;
     // A confirmed Echo has already passed the original admin confirmation. Adding
     // proof makes it a local mark, but must not create a second pending claim.
     const pendingClaim = pending && !(existingCell?.echo === true && existingCell.status === 'confirmed');
@@ -345,6 +360,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       blackout,
       bingoTransition: completedLines(liveCells).length === 0 && bingoCount > 0,
       blackoutTransition: blackout && !isBlackout(liveCells),
+      markTransition,
     };
   });
 }

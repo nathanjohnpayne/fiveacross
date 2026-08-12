@@ -25,11 +25,22 @@ import { resolvedCanonicalHost } from './canonicalHost';
  * which the spec repeated at specs/w4-honor-pledge.md): it fires from every
  * path that transitions a Square to `marked: true`, `source`-tagged so the
  * paths stay separable — `'pledge'` (components/Board.tsx, the honor
- * pledge), `'proof'` (components/ProofSheet.tsx, a proof attach), and
- * `'admin_confirm'` (data/admin.ts, an admin-confirmed claim reaching
- * `confirmed`). The instant Board unmark fires the separate `unmark_square`
- * (mode only, no `source`) instead of `mark_square { marked: false }` — a
- * raw `mark_square` count is therefore always "Squares Players marked," never
+ * pledge), `'proof'` (components/ProofSheet.tsx, a proof attach — gated on
+ * the ATTACH TRANSACTION's own committed read, not the sheet's opening
+ * snapshot, Codex round 1 finding 6), and `'admin_confirm'` (data/admin.ts,
+ * an admin-confirmed claim reaching `confirmed`, gated on a genuine
+ * pending→confirmed transition, Codex round 1 finding 3 — a stale claim or a
+ * concurrent-confirm race fires nothing). Every source also carries
+ * `dayIndex`, the ACTED Day (Codex round 1 finding 2) — never the app-wide
+ * `day_index` default dimension below, which is registered once from
+ * `todaysDayIndex` and would misattribute a Player catching up on an older
+ * Day. The `admin_confirm` source additionally carries `uid`, the claim
+ * OWNER's id (Codex round 1 finding 6) — this call runs in the confirming
+ * ADMIN's own session, so without it PostHog/GA4 would attribute the event
+ * to the admin's distinct id with no way to recover whose Square it was. The
+ * instant Board unmark fires the separate `unmark_square` (mode + dayIndex,
+ * no `source`) instead of `mark_square { marked: false }` — a raw
+ * `mark_square` count is therefore always "Squares Players marked," never
  * polluted by unmarks. Echo Marks (a Square pre-marked by achievement on
  * ANOTHER of the Player's Day Cards, not by any tap) fire the separate
  * `echo_mark` from data/api.ts, deliberately excluded from both `source` sets
@@ -87,7 +98,8 @@ export const GA4_EVENTS = [
   // `{ marked: false }` for this same transition, the #721 root cause (a raw
   // `mark_square` count mixed unmarks in with marks) — so counting "Squares
   // marked" never requires filtering a boolean by hand. Params: `mode`
-  // (ClaimMode). Call site: components/Board.tsx.
+  // (ClaimMode), `dayIndex` (the ACTED Day — Codex round 1 finding 2,
+  // `undefined` on a legacy non-daily Event). Call site: components/Board.tsx.
   'unmark_square',
   // Echo Mark (#721, specs/echo-marks.md, specs/w2-ga4-events.md §
   // Reconciliation): a Square was pre-marked by the Echo Marks system — a
@@ -158,7 +170,16 @@ export function track(name: GA4EventName, params?: Record<string, unknown>): voi
   // `mark_square` itself never fires for an unmark), but the explicit guard
   // is kept as a defensive invariant matching the documented event contract
   // rather than trusting every future call site to honor it silently.
-  if (name === 'mark_square' && params?.marked === true) markSquareOccurred();
+  // `source !== 'admin_confirm'` (#721, Codex round 1 finding 6): this call
+  // runs in the CONFIRMING ADMIN's own browser (`data/admin.ts`'s
+  // `confirmClaim`), not the claim owner's — `markSquareOccurred()` flips a
+  // per-DEVICE localStorage flag that gates the install nudge, so letting an
+  // admin_confirm through here would wrongly mark the admin's OWN device as
+  // having earned its first Square and could surface the nudge to someone
+  // who never tapped a Square themselves.
+  if (name === 'mark_square' && params?.marked === true && params?.source !== 'admin_confirm') {
+    markSquareOccurred();
+  }
 }
 
 /**

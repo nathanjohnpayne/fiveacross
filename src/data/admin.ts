@@ -371,12 +371,28 @@ export async function adminUpdateItemText(id: string, text: string): Promise<voi
   });
 }
 
+/**
+ * Resolves a Claim (confirm or reject). Returns whether THIS call performed a
+ * genuine pending→confirmed transition on the claim's own cell (#721, Codex
+ * round 1 findings 3 & 5) — the moment `countMarked` (game/logic.ts, which
+ * excludes `status: 'pending'`) starts crediting the Square, and therefore
+ * the ONLY moment `confirmClaim`'s `mark_square { source: 'admin_confirm' }`
+ * may fire. `false` covers both non-credit-changing cases in one signal: a
+ * stale claim whose board no longer exists, or whose cell no longer matches
+ * `isClaimCell` (both no-ops below — no write, no transition), and the
+ * concurrent-confirm race (two admins resolve the same claim; Firestore
+ * replays the loser's transaction against the WINNER's already-`confirmed`
+ * cell, so its own `before` read is 'confirmed', not 'pending' — a rewrite,
+ * not a transition). Computed generically here (not gated to `status ===
+ * 'confirmed'` internally) so a future confirm-adjacent caller cannot forget
+ * to ask; `rejectClaim` below simply never reads it.
+ */
 async function resolve(
   c: ClaimDoc,
   transform: (cells: Cell[]) => Cell[],
   adminUid: string,
   status: 'confirmed' | 'rejected',
-): Promise<void> {
+): Promise<boolean> {
   // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
   // its `dayIndex`, so resolve against `days/{dayIndex}/boards/{uid}` and fold the
   // owner's `dayStats[dayIndex]` — the SAME routing attachProof/setMark use. Legacy
@@ -415,11 +431,11 @@ async function resolve(
       echoSiblingDays = days.map((d) => d.index).filter((i) => i !== (c.dayIndex as number));
     }
   }
-  await runTransaction(db, async (tx) => {
+  return await runTransaction(db, async (tx): Promise<boolean> => {
     // Read board + player inside the txn so a concurrent mark/proof from the same
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
-    if (!bSnap.exists()) return;
+    if (!bSnap.exists()) return false;
     const pSnap = await tx.get(player(c.uid));
     // The owner's sibling Day Cards, read in the SAME transaction (before any
     // write, per Firestore's reads-first contract) so a retry re-derives the
@@ -429,6 +445,17 @@ async function resolve(
     const boardData = bSnap.data() as { cells?: unknown; seed?: number };
     const cells = cellsFromData(boardData.cells);
     const next = transform(cells);
+    // The transition verdict (#721, Codex round 1 findings 3 & 5): computed
+    // from THIS transaction's own before/after reads of the claim's cell —
+    // see this function's doc comment. `isClaimCell` matches nothing when the
+    // claim's board has moved on (a reshuffle traded the cell's position
+    // away, or the index is simply stale); a `before` that is anything but
+    // 'pending' means either it was never pending (a legacy/malformed claim)
+    // or another confirm already credited it.
+    const claimCellBefore = cells.find((x) => isClaimCell(x, c));
+    const claimCellAfter = next.find((x) => isClaimCell(x, c));
+    const transitionedToConfirmed =
+      status === 'confirmed' && claimCellBefore?.status === 'pending' && claimCellAfter?.status === 'confirmed';
     const bingoCount = completedLines(next).length;
     const bingoTransition = completedLines(cells).length === 0 && bingoCount > 0;
     const squares = countMarked(next);
@@ -618,6 +645,7 @@ async function resolve(
     if (status === 'confirmed' && c.proofId) {
       tx.set(proof(c.proofId), { status: 'active' }, { merge: true });
     }
+    return transitionedToConfirmed;
   });
 }
 
@@ -655,17 +683,43 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // so this Firestore-only module stays free of an eager
   // analytics/firebase-singleton dependency; test doubles mock `../firebase`
   // with only what the writes need.
+  //
+  // Gated on `resolve()`'s own transition verdict (Codex round 1 finding 3):
+  // a stale claim (no board, or `isClaimCell` matches nothing on the current
+  // board — a reshuffle traded the cell away) resolves without moving the
+  // Square from pending to confirmed at all, and two admins racing the SAME
+  // claim have their loser's transaction replay against the winner's
+  // already-confirmed cell — a rewrite, not a transition. Firing here
+  // unconditionally would report a credited Square in both cases even though
+  // `dayStats[*].squaresMarked` never moved, breaking the reconciliation
+  // identity specs/w2-ga4-events.md § Reconciliation documents.
+  //
+  // `uid: c.uid` (Codex round 1 finding 6): `track()` runs in the resolving
+  // ADMIN's own browser/session, so without an explicit target-player
+  // identifier PostHog/GA4 attribute this event to the ADMIN's distinct id,
+  // not the claim owner's — there is otherwise no way to recover whose
+  // Square this was from the payload alone.
   void confirmed
-    .then(() =>
-      import('../analytics').then(({ track }) =>
-        track('mark_square', { source: 'admin_confirm', mode: 'admin_confirmed', marked: true }),
-      ),
-    )
+    .then((transitioned) => {
+      if (!transitioned) return undefined;
+      return import('../analytics').then(({ track }) =>
+        track('mark_square', {
+          source: 'admin_confirm',
+          mode: 'admin_confirmed',
+          marked: true,
+          dayIndex: c.dayIndex,
+          uid: c.uid,
+        }),
+      );
+    })
     .catch(() => {});
-  return confirmed;
+  return confirmed.then(() => undefined);
 }
 
 export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
+  // `resolve()`'s transition verdict is confirm-only instrumentation
+  // (`confirmClaim`'s concern, above) — a reject fires no `mark_square`, so
+  // the boolean is simply discarded here.
   return resolve(
     c,
     (cells) =>
@@ -676,5 +730,5 @@ export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
       ),
     adminUid,
     'rejected',
-  );
+  ).then(() => undefined);
 }

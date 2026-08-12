@@ -227,22 +227,32 @@ export default function ProofSheet(props: Props) {
       // the pledge) mark an unmarked square through THIS path, not
       // `Board.doMark`'s `mark_square` call — so that call site alone misses
       // them (the root cause of #721: only 6 `mark_square` events for a POC
-      // that marked 25 squares, almost all of them proof attaches). `cell` is
-      // the sheet's opening snapshot (unmutated by this submit), so
-      // `!cell.marked` is exactly "this attach just marked a
-      // previously-unmarked square" — a proof ADDED to an already-marked
-      // Square (the ＋ affordance) is not a mark transition and fires nothing
-      // here. In `admin_confirmed` mode the cell lands `pending`
-      // (uncredited — `game/logic.ts`'s `countMarked` excludes it), so this
-      // event alone is not 1:1 with `dayStats[*].squaresMarked` in that mode;
-      // the later `admin_confirm` mark_square (`data/admin.ts`) is the one
-      // that corresponds to the credited transition — see
-      // specs/w2-ga4-events.md § Reconciliation. This ALSO subsumes the old
-      // direct `markSquareOccurred()` install-nudge trigger call that used to
-      // live here: `track()`'s own `mark_square` wiring
-      // (`useToastStack`'s module doc) now fires it, so a second direct call
-      // would only be duplicate logic.
-      if (!cell.marked) track('mark_square', { source: 'proof', mode: claimMode, marked: true });
+      // that marked 25 squares, almost all of them proof attaches).
+      // `res.markTransition` (Codex round 1 finding 6) — NOT the sheet's
+      // opening `cell` snapshot — is exactly "this attach just marked a
+      // previously-unmarked square": `attachProof` derives it from the LIVE
+      // board its own transaction read, so another device marking this
+      // Square in the gap between the sheet opening and this submit no
+      // longer double-fires (attachProof still runs — it merely attaches
+      // proof to an already-marked cell — but that is not a mark transition).
+      // A proof ADDED to an already-marked Square (the ＋ affordance) is
+      // likewise not a transition and fires nothing here. In
+      // `admin_confirmed` mode the cell lands `pending` (uncredited —
+      // `game/logic.ts`'s `countMarked` excludes it), so this event alone is
+      // not 1:1 with `dayStats[*].squaresMarked` in that mode; the later
+      // `admin_confirm` mark_square (`data/admin.ts`) is the one that
+      // corresponds to the credited transition — see specs/w2-ga4-events.md §
+      // Reconciliation. This ALSO subsumes the old direct
+      // `markSquareOccurred()` install-nudge trigger call that used to live
+      // here: `track()`'s own `mark_square` wiring (`useToastStack`'s module
+      // doc) now fires it, so a second direct call would only be duplicate
+      // logic. `dayIndex` (Codex round 1 finding 2): the viewed/proofed Day,
+      // the same value already threaded to `attachProof` above — never the
+      // global `day_index` default dimension, which is wrong for a Player
+      // catching up on an older Day.
+      if (res?.markTransition) {
+        track('mark_square', { source: 'proof', mode: claimMode, marked: true, dayIndex });
+      }
       // Report the win verdict AFTER the transaction committed and BEFORE closing,
       // so Board enqueues the Moment for a proofed win (PR #110 round 2 finding 1).
       // Truthiness-guarded: suites stub attachProof to resolve undefined.

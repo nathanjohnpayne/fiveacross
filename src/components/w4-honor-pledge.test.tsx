@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { BoardDoc, Cell, EventDoc, PlayerDoc } from '../types';
+import type { BoardDoc, Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 
 // specs/w4-honor-pledge.md (issue #181), RTL-jsdom. EVERY claim tap opens the
 // ProofSheet — honor included, which used to mark instantly — and honor mode
@@ -78,6 +78,12 @@ vi.mock('../data/api', () => ({
   reshuffleBoard: vi.fn(async () => 1),
   setMark: H.setMark,
   dealDayCard: vi.fn(() => Promise.resolve(false)),
+  // Daily mode's open-time echo reconcile (#446): inert here — these tests
+  // never exercise Echo Marks — but Board unconditionally calls it once
+  // `hasDays` is true, so the mock needs the export to exist at all.
+  reconcileEchoes: vi.fn(() =>
+    Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+  ),
   resolveDisplayName: (
     profile: { displayName?: unknown } | null | undefined,
     fallback: string | null | undefined,
@@ -110,6 +116,22 @@ function dealt(pool = 'i'): Cell[] {
     markedAt: null,
   }));
 }
+
+// A minimal daily-cards DayDef (daily-cards-spec § "Data model"), for the
+// dayIndex-attribution regression below — mirrors src/data/echo-marks.test.ts's
+// `day()` helper.
+const day = (index: number, over: Partial<DayDef> = {}): DayDef =>
+  ({
+    index,
+    date: '2026-07-16',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
+    theme: 'get-sporty',
+    pool: 'main',
+    tutorial: false,
+    unlockAt: 0,
+    ...over,
+  }) as DayDef;
 
 const PLEDGE = /cross my heart/i;
 
@@ -181,6 +203,49 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // mark_square count that mixed unmarks in with real marks).
     expect(H.track).toHaveBeenCalledWith('unmark_square', { mode: 'honor' });
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a pledge on a VIEWED, non-today Day stamps mark_square with the acted Day, not today (Codex round 1 finding 2, #727)', async () => {
+    const user = userEvent.setup();
+    const now = Date.parse('2026-07-17T12:00:00Z');
+    // Day 0 unlocked yesterday (a "past" chip); Day 1 unlocked this morning
+    // ("today"). The Board auto-selects Day 1 on mount (defaultViewedIndex),
+    // so the Player must actively switch BACK to Day 0 to mark it — the
+    // catch-up-marking scenario the bug misattributes.
+    H.event = {
+      claimMode: 'honor',
+      days: [
+        day(0, { date: '2026-07-16', unlockAt: now - 24 * 60 * 60 * 1000 }),
+        day(1, { date: '2026-07-17', unlockAt: now - 60 * 60 * 1000 }),
+      ],
+    } as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    render(<Board />);
+
+    // Switch the viewed Day BACK to Day 0 — the only Day this test's mocked
+    // `useDayBoard` has a board for.
+    const tabs = await screen.findAllByRole('tab');
+    await user.click(tabs[0]);
+
+    clickCell(0);
+    expect(await screen.findByText(/proof for/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: PLEDGE }));
+
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    // The write itself already carries the viewed Day (#216/#246, unchanged
+    // by this fix) — asserted here as the baseline the analytics event must
+    // agree with.
+    expect(H.setMark.mock.calls[0][0]).toMatchObject({ dayIndex: 0 });
+    // The FIX: mark_square carries the ACTED Day (0), never `today` (1) —
+    // before #727's fix this event carried no `dayIndex` at all and relied
+    // on the app-wide `day_index` default dimension, which is registered
+    // once from `todaysDayIndex` and would misattribute this exact scenario.
+    expect(H.track).toHaveBeenCalledWith('mark_square', {
+      source: 'pledge',
+      mode: 'honor',
+      marked: true,
+      dayIndex: 0,
+    });
   });
 
   it('opens Photo-first (#309) — photo body on first paint, other bodies once chosen — and the pledge row fits one line (nowrap, full width)', async () => {

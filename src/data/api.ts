@@ -1115,13 +1115,30 @@ export async function reshuffleBoard(params: {
     const statsAllowed = !standingsFrozen({ frozenAt: eventData?.frozenAt, days }) ||
       ceremonialDayIndexSet(days).has(dayIndex);
     const savedName = typeof player?.displayName === 'string' ? player.displayName : undefined;
+    // Net-new echo count (#721, Codex round 1 finding 4): `echoRes` is derived
+    // against the freshly-dealt REPLACEMENT card, so `echoedItemIds` is every
+    // Prompt the replacement arrives echoing — including one the DISCARDED
+    // card already wore, if the same itemId happens to land on the
+    // replacement again (a pristine reshuffleable card can only carry echoes,
+    // so `priorBoardCells` is entirely free/unmarked/echoed). That re-applied
+    // echo adds nothing to `dayStats[dayIndex].squaresMarked` — the bucket is
+    // RE-DERIVED from the replacement's cells, not incremented — so counting
+    // it here would break the reconciliation identity (specs/w2-ga4-events.md
+    // § Reconciliation): the event would report an echo the bucket never
+    // moved for. Report only the ACTUAL increase over what this Day's board
+    // already carried marked, floored at zero (a reshuffle can only add
+    // echoes back or keep the same count — a pristine card cannot lose a
+    // non-echo Mark it never had — but the floor keeps this robust even if
+    // that invariant is ever relaxed).
+    const priorMarkedCount = countMarked(priorBoardCells);
+    const netNewEchoCount = Math.max(0, echoRes.squaresMarked - priorMarkedCount);
     reshuffleEcho = echoRes.changed
       ? {
           bingoTransition: echoRes.bingoTransition,
           blackoutTransition: echoRes.blackoutTransition,
           pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
           at: now,
-          count: echoRes.echoedItemIds.length,
+          count: netNewEchoCount,
         }
       : null;
     // Orphaned-marker cleanup (Codex P2 on #447): the discarded card can only
@@ -1230,12 +1247,19 @@ export async function reshuffleBoard(params: {
     if (echo.pinAs) {
       void pinDayFirstBingo(dayIndex, { uid, displayName: echo.pinAs, photoURL: null }, echo.at);
     }
-    // Echo Mark instrumentation (#721): the replacement card re-echoed from
-    // the same achievements the discarded one wore — countable, never folded
-    // into `mark_square` (specs/w2-ga4-events.md § Reconciliation).
-    void import('../analytics')
-      .then(({ track }) => track('echo_mark', { trigger: 'reshuffle', dayIndex, count: echo.count }))
-      .catch(() => {});
+    // Echo Mark instrumentation (#721, Codex round 1 finding 4): the
+    // replacement card re-echoed from the same achievements the discarded one
+    // wore — countable, never folded into `mark_square`
+    // (specs/w2-ga4-events.md § Reconciliation) — but ONLY when `echo.count`
+    // (computed above as the net-new increase over the discarded card's own
+    // marked count) is actually positive; a reshuffle that re-echoes the
+    // exact same Prompt(s) the discarded card already carried adds nothing to
+    // `dayStats[dayIndex].squaresMarked` and must fire nothing here.
+    if (echo.count > 0) {
+      void import('../analytics')
+        .then(({ track }) => track('echo_mark', { trigger: 'reshuffle', dayIndex, count: echo.count }))
+        .catch(() => {});
+    }
   }
   return spend;
 }
@@ -1920,17 +1944,34 @@ async function runSetMark(
         }),
       )
       .catch(() => undefined);
-    // Echo Mark instrumentation (#721): THIS Mark's confirmed cascade onto
-    // sibling Day Cards — one echoed cell per sibling board pushed into
-    // `echoBoards` above (a singleton `achieved` set per Mark), so its length
-    // IS the newly-echoed count. Countable, never folded into `mark_square`
-    // (specs/w2-ga4-events.md § Reconciliation). Separate `.catch()` from the
-    // reconcile chain above so one failing never blocks the other.
+    // Echo Mark instrumentation (#721, Codex round 1 finding 1): THIS Mark's
+    // confirmed cascade onto sibling Day Cards — one echoed cell per sibling
+    // board pushed into `echoBoards` above. Fired PER RECEIVING Day, not once
+    // under the acted `dayIndex`: `dayStats[*].squaresMarked` moves on the
+    // RECEIVING board (specs/w2-ga4-events.md § Reconciliation — "every
+    // echo_mark is a squaresMarked increment on the RECEIVING Day's bucket"),
+    // so attributing every echo to the source Day would make the per-Day
+    // identity unprovable for a Mark that echoes onto more than one sibling —
+    // the source Day would over-report (an echo_mark with no matching bucket
+    // increase) while the true receiving Days under-report (a bucket increase
+    // with no echo_mark). Grouped by `echoBoard.dayIndex` so a Mark that
+    // echoes onto several siblings still fires one event per Day (today
+    // always count 1 — `applyEchoes` pushes at most one `echoBoards` entry per
+    // sibling board — but grouping keeps the count field meaningful if that
+    // ever changes). Countable, never folded into `mark_square`. Separate
+    // `.catch()` from the reconcile chain above so one failing never blocks
+    // the other.
+    const echoCountsByDay = new Map<number, number>();
+    for (const echoBoard of echoBoards) {
+      echoCountsByDay.set(echoBoard.dayIndex, (echoCountsByDay.get(echoBoard.dayIndex) ?? 0) + 1);
+    }
     void committed
       .then(() =>
-        import('../analytics').then(({ track }) =>
-          track('echo_mark', { trigger: 'mark', dayIndex, count: echoBoards.length }),
-        ),
+        import('../analytics').then(({ track }) => {
+          for (const [receivingDayIndex, count] of echoCountsByDay) {
+            track('echo_mark', { trigger: 'mark', dayIndex: receivingDayIndex, count });
+          }
+        }),
       )
       .catch(() => undefined);
   }
@@ -2358,6 +2399,38 @@ async function runReconcileEchoes(
               { uid, displayName: pinName, photoURL: null },
               healedStamp,
             ).catch(() => undefined);
+          }
+        }
+        // Lost `echo_mark` recovery (#721, Codex round 1 finding 7): the SAME
+        // reload that strands the pin continuation above also strands the
+        // mark-time cascade's `committed.then(() => track('echo_mark', ...))`
+        // continuation (src/data/api.ts, the confirmed-Mark echo path) — an
+        // offline echo batch persists durably (Firestore drains it from
+        // IndexedDB regardless of whether this tab is still open), but the
+        // in-memory analytics continuation dies with the tab, and on the next
+        // open `res.changed` above is already false (the cells arrived
+        // pre-echoed from cache), so the ordinary firing site never runs. This
+        // `bucketLag`/`rootLag` heal is the ONE choke point every echo write
+        // path already relies on to repair a lost continuation (see the pin
+        // repair immediately above, and the #491 comment on the mark-time
+        // cascade: "a reload that loses it is healed by the stats-lag check
+        // in runReconcileEchoes") — so it is also the one place a lost
+        // `echo_mark` can be recovered, rather than patching each write path
+        // to persist its own analytics intent. The count is the ACTUAL
+        // server-confirmed increase in this Day's `squaresMarked` over what
+        // the cached player row showed before the heal — never the
+        // heal-recomputed total — so a `rootLag`-only heal (buckets already
+        // converged, only the roots were stale) reports zero and fires
+        // nothing, matching the reconciliation identity exactly.
+        const healedBucket = healed?.dayStats?.[dayIndex];
+        if (healedBucket) {
+          const netNewSquares = healedBucket.squaresMarked - (rowBucket?.squaresMarked ?? 0);
+          if (netNewSquares > 0) {
+            void import('../analytics')
+              .then(({ track }) =>
+                track('echo_mark', { trigger: 'open_reconcile', dayIndex, count: netNewSquares }),
+              )
+              .catch(() => undefined);
           }
         }
       } catch {
