@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { __resetClaimSheetOpenForTests, setClaimSheetOpen } from './hooks/useToastStack';
 import {
   CLIENT_BUILD_MESSAGE,
+  UNSAVED_WORK_ATTRIBUTE,
   __resetUpdateReloadForTests,
   armUncontrolledUpdateReload,
   postClientBuild,
@@ -84,8 +86,51 @@ describe('postClientBuild (#516)', () => {
     expect(controller.postMessage).toHaveBeenCalledWith({ type: CLIENT_BUILD_MESSAGE, stamp: OLD_SHELL });
   });
 
+  it('registers a page that will NEVER have a controller, via the active worker', async () => {
+    // Codex P2 round 4. An uncontrolled page is not a transient state waiting
+    // for `controllerchange`: `src/sw.ts` never calls `clientsClaim()`, so a
+    // first-ever visit — and every run of the uptime synthetic, which gets a
+    // fresh browser profile each time — stays uncontrolled for its whole life.
+    // Without this path that window never registers, and an unregistered LIVE
+    // window is a condemned one (`shouldForceActivate`, src/sw-rescue.ts).
+    const registration = fakeRegistration();
+    const active = { postMessage: vi.fn() };
+    registration.active = active;
+    const container = fakeContainer(registration);
+    postClientBuild(OLD_SHELL, container);
+    await vi.waitFor(() =>
+      expect(active.postMessage).toHaveBeenCalledWith({ type: CLIENT_BUILD_MESSAGE, stamp: OLD_SHELL }),
+    );
+  });
+
   it('is a no-op where service workers do not exist', () => {
     expect(() => postClientBuild(OLD_SHELL, undefined)).not.toThrow();
+  });
+
+  it('is called for the uptime synthetic too — only the RELOAD watcher is skipped', () => {
+    // Codex P2 round 4, pinned against the entrypoint's source because
+    // `main.tsx` is a side-effecting module that cannot be imported here.
+    // Naming a build is a `postMessage`; it reloads nothing. Gating it behind
+    // `isSyntheticProbe()` alongside the reload watcher made the probe a
+    // same-origin window `clients.matchAll()` can see and the registry cannot
+    // — the exact shape `shouldForceActivate` condemns as an ancient tab.
+    const main = readFileSync('src/main.tsx', 'utf8');
+    expect(main).toMatch(/^postClientBuild\(__BUILD_STAMP__\);$/m);
+    expect(main).toMatch(/^if \(!isSyntheticProbe\(\)\) void armUncontrolledUpdateReload\(\);$/m);
+  });
+
+  it('swallows a registration that never becomes ready, rather than rejecting at module scope', async () => {
+    // `main.tsx` calls this bare — not `void`-prefixed and with nowhere to put
+    // a rejection — so a browser whose `ready` never resolves must not turn
+    // every page load into an unhandled rejection.
+    const container = {
+      ...fakeEmitter(),
+      controller: null,
+      ready: Promise.reject(new Error('no worker here')),
+    } as unknown as ServiceWorkerContainer;
+    expect(() => postClientBuild(OLD_SHELL, container)).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 });
 
@@ -282,24 +327,24 @@ describe('armUncontrolledUpdateReload (#621)', () => {
 // until the player submits. An uncontrolled page can be reloaded by this module
 // without `UpdatePrompt` ever appearing, so its own claim-sheet defer is no
 // protection here.
-describe('the automatic reload defers to a proof capture in progress', () => {
-  async function armedWithDeploy() {
-    const registration = fakeRegistration();
-    const container = fakeContainer(registration);
-    const reload = vi.fn();
-    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => null);
-    return {
-      reload,
-      land() {
-        registration.active = {};
-        const installing = fakeWorker();
-        registration.installing = installing;
-        registration.emit('updatefound');
-        installing.become('activated');
-      },
-    };
-  }
+async function armedWithDeploy() {
+  const registration = fakeRegistration();
+  const container = fakeContainer(registration);
+  const reload = vi.fn();
+  await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => null);
+  return {
+    reload,
+    land() {
+      registration.active = {};
+      const installing = fakeWorker();
+      registration.installing = installing;
+      registration.emit('updatefound');
+      installing.become('activated');
+    },
+  };
+}
 
+describe('the automatic reload defers to a proof capture in progress', () => {
   it('waits while the claim sheet is open, and reloads once it closes', async () => {
     const { reload, land } = await armedWithDeploy();
     setClaimSheetOpen(true);
@@ -327,6 +372,56 @@ describe('the automatic reload defers to a proof capture in progress', () => {
     hideTab(true);
     land();
     expect(reload).toHaveBeenCalledOnce();
+  });
+});
+
+// Codex P2 round 4. The bug-report flow holds its description, its screenshot,
+// and the route that screenshot was taken on in `BugReportProvider` state and
+// nowhere else until submit — so a reload destroys the report rather than
+// interrupting it — and it spends half its life as a `role="group"` pick bar
+// the generic modal query cannot see. `data-unsaved-work` is the declaration
+// that closes that class for any such surface, present and future;
+// `w4-bug-report-inbox.test.tsx` pins the other half of the contract.
+describe('the automatic reload defers to a bug report in progress', () => {
+  const DIALOG_PHASE = `<div ${UNSAVED_WORK_ATTRIBUTE}><div role="dialog" aria-modal="true">report</div></div>`;
+  /** Pick mode: the dialog is GONE and only a `role="group"` bar remains. */
+  const PICK_PHASE = `<div ${UNSAVED_WORK_ATTRIBUTE}><div role="group">capture a different screen</div></div>`;
+
+  it('waits for the WHOLE bug-report flow, pick mode included', async () => {
+    const { reload, land } = await armedWithDeploy();
+    document.body.innerHTML = PICK_PHASE;
+    land();
+    expect(reload).not.toHaveBeenCalled();
+    document.body.innerHTML = '';
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  });
+
+  it('keeps waiting when the report sheet parks into pick mode', async () => {
+    // The reported path: a deferral taken while the dialog was up, then
+    // "Capture a different screen" unmounts that dialog. The DOM watcher
+    // re-asks, and matching only `[role=dialog][aria-modal]` used to find
+    // nothing in the way — reloading the tab and eating the draft.
+    const { reload, land } = await armedWithDeploy();
+    document.body.innerHTML = DIALOG_PHASE;
+    land();
+    expect(reload).not.toHaveBeenCalled();
+    document.body.innerHTML = PICK_PHASE;
+    await Promise.resolve();
+    expect(reload).not.toHaveBeenCalled();
+    document.body.innerHTML = '';
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  });
+
+  it('waits even on a HIDDEN tab while a report draft is open', async () => {
+    // Same reasoning as the claim sheet: a destroyed draft is destroyed
+    // whether or not the reporter was looking at the tab.
+    const { reload, land } = await armedWithDeploy();
+    document.body.innerHTML = PICK_PHASE;
+    hideTab(true);
+    land();
+    expect(reload).not.toHaveBeenCalled();
+    document.body.innerHTML = '';
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
 });
 

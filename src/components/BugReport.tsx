@@ -213,7 +213,15 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
     <BugReportFlowContext.Provider value={flow}>
       {children}
       {stage !== 'closed' && (
-        <div className="bug-report-ui" data-bug-report-ui>
+        // `data-unsaved-work` covers the WHOLE flow, not just the dialog phase
+        // (Codex P2 round 4, src/swClientBridge.ts). The description, the
+        // screenshot, and the route it was taken on live in this component's
+        // state and nowhere else until submit, so an automatic post-deploy
+        // reload does not interrupt the report — it destroys it. The pick phase
+        // is the dangerous one: its container is a `role="group"`, invisible to
+        // the generic modal query, and it is the phase that explicitly invites
+        // the reporter to go wander the app while the draft is held here.
+        <div className="bug-report-ui" data-bug-report-ui data-unsaved-work>
           {stage === 'sheet' && (
             <div className="sheet-backdrop bug-report-backdrop" role="presentation" onClick={close}>
               <section

@@ -42,20 +42,47 @@ function swContainer(): ServiceWorkerContainer | undefined {
 }
 
 /**
- * Tells the controlling worker which build this window is running (#516) — the
+ * Tells the worker in charge which build this window is running (#516) — the
  * evidence `shouldForceActivate` needs to tell the shell being SERVED apart
  * from what each open tab is EXECUTING (`src/sw-rescue.ts` explains why those
  * differ, and what the rescue gets wrong without it).
  *
- * Re-posted on `controllerchange` because an uncontrolled page has nothing to
- * post to: it registers itself the moment a worker takes over.
+ * THREE DELIVERY ATTEMPTS, because an unregistered window is a CONDEMNED one
+ * and the page only gets to be wrong about that once (Codex P2 round 4).
+ * `shouldForceActivate` reads a live client id with no registry entry as
+ * `UNKNOWN_ACTIVE_STAMP` — deliberately, since that absence is the only way the
+ * rollout case can see a pre-#516 tab — so a page that runs this module and
+ * still fails to land its record is force-activated and navigated exactly as if
+ * it were stranded.
+ *
+ *  - THE CONTROLLER, when there is one. The ordinary case.
+ *  - `controllerchange`, for a page that had none yet.
+ *  - `registration.active`, for a page that will never have one. An
+ *    UNCONTROLLED page is not a transient state waiting for `controllerchange`:
+ *    this worker does not call `clientsClaim()` (src/sw.ts), so a first-ever
+ *    visit — and every load of the uptime synthetic, which runs in a fresh
+ *    browser profile — stays uncontrolled for its entire life and would never
+ *    register at all. `ServiceWorker.postMessage` works from an uncontrolled
+ *    window and the worker still sees a `Client` as `event.source`, so the
+ *    record lands and it lands under the same client id.
+ *
+ * All three carry the same payload for the same window, and the worker's write
+ * is a single keyed `put` (`src/sw-rescue.ts`), so a duplicate delivery is
+ * idempotent rather than a second registration.
  */
 export function postClientBuild(stamp: string, container = swContainer()): void {
   try {
     if (!container) return;
-    const send = () => container.controller?.postMessage({ type: CLIENT_BUILD_MESSAGE, stamp });
+    const message = { type: CLIENT_BUILD_MESSAGE, stamp };
+    const send = () => container.controller?.postMessage(message);
     send();
     container.addEventListener('controllerchange', send);
+    // Fire-and-forget, and swallowed: this runs at module scope in `main.tsx`,
+    // where an unhandled rejection is a console error on every load of a
+    // browser that has no worker to become ready.
+    void Promise.resolve(container.ready)
+      .then((registration) => registration?.active?.postMessage(message))
+      .catch(() => {});
   } catch {
     /* no service worker here — nothing to register with */
   }
@@ -73,10 +100,26 @@ export function __resetUpdateReloadForTests(): void {
 }
 
 /**
+ * The opt-in marker any surface uses to say "I am holding work that lives
+ * nowhere but React state" (Codex P2 round 4).
+ *
+ * `role="dialog" aria-modal="true"` is a statement about the SCREEN, not about
+ * what would be lost, and the two keep coming apart: the claim sheet is
+ * destructive and carries neither attribute, while the bug-report flow is
+ * destructive for its whole life but only carries them during its dialog phase.
+ * Rather than teach this module a third bespoke description of a specific
+ * component — a fourth, a fifth — the surfaces declare it themselves and this
+ * module asks one question. A new sheet with an unsaved draft joins by adding
+ * the attribute; nothing here has to learn its name.
+ */
+export const UNSAVED_WORK_ATTRIBUTE = 'data-unsaved-work';
+
+/**
  * Whether reloading right now would yank the player out of something, and
  * specifically whether it would DESTROY something (Codex P1 on #621).
  *
- * Two signals, because neither covers the other:
+ * Three signals, in two tiers. The first two are DESTRUCTIVE and are checked
+ * ahead of the visibility gate; the third is merely rude and is not.
  *
  *  - THE CLAIM SHEET, consulted first and deliberately NOT behind the
  *    visibility gate. `ProofSheet` holds a selected photo, a recorded audio
@@ -90,6 +133,14 @@ export function __resetUpdateReloadForTests(): void {
  *    visibility gate is skipped because backgrounding the tab is part of
  *    capturing the proof — the camera or the file picker takes the foreground —
  *    and that in-flight capture is exactly what must not be thrown away.
+ *  - ANY SURFACE CARRYING `UNSAVED_WORK_ATTRIBUTE`, likewise ahead of the
+ *    visibility gate and for the same reason: a destroyed draft is destroyed
+ *    whether or not the player was looking at the tab. `BugReportProvider`
+ *    marks its whole flow, dialog phase AND pick phase — the phase where the
+ *    reporter is explicitly invited to go navigate the app, and the phase whose
+ *    container is a `role="group"` the generic query below cannot see. Matching
+ *    only the dialog turned "Capture a different screen" into a reload that ate
+ *    the description and the screenshot the reporter had already taken.
  *  - ANY OTHER MODAL SHEET holding the screen of a VISIBLE tab. Those carry
  *    `role="dialog" aria-modal="true"` and hold no unsaved capture, so
  *    interrupting one is rude rather than destructive; a hidden tab is nobody's
@@ -98,6 +149,7 @@ export function __resetUpdateReloadForTests(): void {
 function midInteraction(): boolean {
   if (isClaimSheetOpen()) return true;
   if (typeof document === 'undefined') return false;
+  if (document.querySelector(`[${UNSAVED_WORK_ATTRIBUTE}]`) !== null) return true;
   if (document.visibilityState !== 'visible') return false;
   return document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
 }
@@ -128,12 +180,14 @@ function requestReload(reload: () => void): void {
  *    the app to take the photo and comes back to finish the claim would get one
  *    `visibilitychange`, still be mid-capture, and then wait for another that
  *    may never come;
- *  - THE DOM, for the generic `role="dialog"` sheets (Codex P2 round 3). The
- *    profile, reshuffle, and More sheets close by unmounting, which fires
- *    neither of the other two, so a player who opened one while a deploy landed
- *    was stranded until some later visibility change that may never come.
- *    Watching the tree is what closes that class rather than enumerating the
- *    sheets one by one: any modal `midInteraction` can see, this can see leave.
+ *  - THE DOM, for every surface `midInteraction` finds by query — the generic
+ *    `role="dialog"` sheets (Codex P2 round 3) and anything carrying
+ *    `UNSAVED_WORK_ATTRIBUTE`. The profile, reshuffle, and More sheets close by
+ *    unmounting, as does the bug-report flow, which fires neither of the other
+ *    two, so a player who opened one while a deploy landed was stranded until
+ *    some later visibility change that may never come. Watching the tree is
+ *    what closes that class rather than enumerating the sheets one by one: any
+ *    surface `midInteraction` can see, this can see leave.
  *
  * The listeners persist and simply re-ask until nothing is in the way, so a
  * signal that fires mid-interaction costs nothing and none of them can stack.
@@ -154,14 +208,14 @@ function deferReload(reload: () => void): void {
   const root = doc?.body ?? doc?.documentElement;
   if (root && typeof MutationObserver !== 'undefined') {
     const observer = new MutationObserver(recheck);
-    // Narrow on purpose: a modal leaves `midInteraction`'s query either by
-    // being removed from the tree or by dropping one of the two attributes it
-    // matches on, and nothing else about the page needs watching.
+    // Narrow on purpose: a surface leaves `midInteraction`'s queries either by
+    // being removed from the tree or by dropping one of the attributes they
+    // match on, and nothing else about the page needs watching.
     observer.observe(root, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['role', 'aria-modal'],
+      attributeFilter: ['role', 'aria-modal', UNSAVED_WORK_ATTRIBUTE],
     });
     cleanups.push(() => observer.disconnect());
   }
