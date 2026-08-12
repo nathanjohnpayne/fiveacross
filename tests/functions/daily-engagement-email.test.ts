@@ -846,6 +846,58 @@ describe('dueDayForDailyEmail: ownership picks the Day, it does not shorten the 
     expect(dueDayForDailyEmail(days, at('2026-08-07T12:00:00-07:00'), tz)).toBeNull();
   });
 
+  it('treats a date label that names no real calendar day as no date at all (#729)', () => {
+    // The shape check alone (`/^\d{4}-\d{2}-\d{2}$/`) is not the check. A label
+    // like `2026-99-99` would pass it and OWN a date that does not exist — and
+    // since a nonexistent label can never equal today's, its owner reaches the
+    // send only through the carried-Day path, i.e. on the evening after the
+    // real owner's window has closed. That is Bodega's 11:00 wrap-up back in a
+    // second Sunday email, one garbled label away.
+    const garbled = [
+      { index: 0, date: '2026-08-09', unlockAt: at('2026-08-09T06:00:00-07:00') },
+      { index: 1, date: '2026-99-99', unlockAt: at('2026-08-09T11:00:00-07:00') },
+    ] as unknown as EmailDay[];
+    expect(dueDayForDailyEmail(garbled, at('2026-08-09T06:30:00-07:00'), tz)?.index).toBe(0);
+    for (let hour = 0; hour < 24; hour++) {
+      const when = at(`2026-08-09T${String(hour).padStart(2, '0')}:30:00-07:00`);
+      expect(dueDayForDailyEmail(garbled, when, tz)?.index).not.toBe(1);
+    }
+    // Parsing is not enough either, which is why the label has to ROUND-TRIP:
+    // `Date.parse('2026-02-30T12:00:00Z')` does not fail, it rolls forward to
+    // March 2. A NaN-only guard would let this one own a date under a name no
+    // calendar uses.
+    expect(new Date(Date.parse('2026-02-30T12:00:00Z')).toISOString().slice(0, 10)).toBe('2026-03-02');
+    for (const date of ['2026-99-99', '2026-02-30', '2026-04-31', '2026-13-01', '2026-00-10']) {
+      const day = [{ index: 0, date, unlockAt: at('2026-08-09T11:00:00-07:00') }] as unknown as EmailDay[];
+      expect(dueDayForDailyEmail(day, at('2026-08-09T11:30:00-07:00'), tz)).toBeNull();
+    }
+  });
+
+  it('survives an unlockAt outside the range a Date can represent, rather than aborting the sweep (#729)', () => {
+    // `Number.MAX_VALUE` is finite and positive, so a naive "is it a number"
+    // guard calls it a real unlock — but `new Date` of it is Invalid Date and
+    // every `Intl` call on it throws `RangeError`, including the one
+    // `morningOpensAt` makes for EVERY Day in the Event. One corrupt future Day
+    // would take down the whole Event's due check and silently suppress that
+    // morning's valid email: mailing nothing, the exact failure #723 removes.
+    const corrupt = [
+      { index: 0, date: '2026-08-09' },
+      { index: 1, date: '2026-08-10', unlockAt: Number.MAX_VALUE },
+    ] as unknown as EmailDay[];
+    expect(dueDayForDailyEmail(corrupt, at('2026-08-09T08:00:00-07:00'), tz)?.index).toBe(0);
+    // And the corrupt Day itself is simply a Day that names no hour, so it gets
+    // the same fallback morning on its own date rather than never being mailed.
+    expect(dueDayForDailyEmail(corrupt, at('2026-08-10T08:00:00-07:00'), tz)?.index).toBe(1);
+    expect(dueDayForDailyEmail(corrupt, at('2026-08-10T14:00:00-07:00'), tz)).toBeNull();
+    // The bound is the ECMA-262 time clip, and the copy agrees with the sender
+    // because both ask `hasScheduledUnlock`: an unlock the sweep cannot
+    // schedule against is one the email must not quote.
+    expect(() => formatUnlockTime(Number.MAX_VALUE, tz)).not.toThrow();
+    expect(formatUnlockTime(Number.MAX_VALUE, tz)).toBeNull();
+    expect(formatUnlockTime(8.64e15 + 1, tz)).toBeNull();
+    expect(formatUnlockTime(8.64e15, tz)).not.toBeNull();
+  });
+
   it('lets a Day with no unlock hour keep its date rather than promoting the next Day on it', () => {
     const days = [
       { index: 0, date: '2026-08-09' },

@@ -303,18 +303,40 @@ export function formatDayDate(isoDate: string | undefined): string {
 }
 
 /**
+ * The largest millisecond offset a JavaScript `Date` can represent (ECMA-262
+ * "time clip", ±100,000,000 days around the epoch).
+ */
+const MAX_TIME_VALUE = 8.64e15;
+
+/**
  * True when a Day names a REAL unlock instant, rather than the `unlockAt: 0`
  * "live from Event open" sentinel (#289), a missing value, or a corrupt one.
  *
  * ONE question, deliberately not three (#723). Sentinel, absent, `NaN`,
- * negative and non-numeric all mean the same thing to both callers — there is
- * no hour to quote and none to schedule against — so they are one case, and
- * nothing downstream sorts them further. The sender and the copy must agree on
- * it: a Day the sender mails at the Event's fallback morning hour is a Day
- * whose copy must not promise an unlock time.
+ * negative, non-numeric and out-of-range all mean the same thing to both
+ * callers — there is no hour to quote and none to schedule against — so they
+ * are one case, and nothing downstream sorts them further. The sender and the
+ * copy must agree on it: a Day the sender mails at the Event's fallback morning
+ * hour is a Day whose copy must not promise an unlock time.
+ *
+ * FINITE IS NOT THE SAME AS REPRESENTABLE, and this predicate is the single
+ * place that difference is caught (Codex #729 P2). `Number.MAX_VALUE` is finite
+ * and positive, but `new Date(Number.MAX_VALUE)` is an Invalid Date and EVERY
+ * `Intl` call on it throws `RangeError` — including the `formatToParts` in
+ * `morningOpensAt`, whose try/catch only re-reads in UTC and so rethrows. One
+ * corrupt future Day would abort the whole Event's due check and silently
+ * suppress that morning's otherwise valid email, which is precisely the
+ * mail-nothing failure the #723 rule exists to remove. Bounding here rather
+ * than at each `new Date` keeps the callers agreeing by construction: an
+ * unlock the sender cannot schedule against is an unlock the copy cannot quote.
  */
 export function hasScheduledUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
-  return typeof day.unlockAt === 'number' && Number.isFinite(day.unlockAt) && day.unlockAt > 0;
+  return (
+    typeof day.unlockAt === 'number' &&
+    Number.isFinite(day.unlockAt) &&
+    day.unlockAt > 0 &&
+    day.unlockAt <= MAX_TIME_VALUE
+  );
 }
 
 /**

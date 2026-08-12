@@ -154,9 +154,25 @@ function eventWallClock(at: number, timeZone: string | undefined): { date: strin
  * calendar day and can never be due: the single disqualifier in the whole due
  * check, and the #289 guarantee that a Day with nothing to anchor to never
  * mails forever.
+ *
+ * THE SHAPE IS NOT THE CHECK (Codex #729 P2). `ISO_DATE` says only "ten
+ * characters that look like a date", so `2026-99-99` would pass it and take
+ * ownership of a date that does not exist — and because a nonexistent label can
+ * never equal today's, its owner can only ever surface through the carried-Day
+ * path, i.e. on an evening when the real owner's window has closed. That is how
+ * one garbled label would put Bodega's 11:00 wrap-up back into a second Sunday
+ * email, the exact regression this rule was written to kill. Parsing alone is
+ * not enough either: `Date.parse('2026-02-30T12:00:00Z')` happily rolls forward
+ * to March 2 rather than failing, so the label has to ROUND-TRIP. Noon UTC is
+ * the same anchor `formatDayDate` parses with, deliberately — a date the email
+ * cannot print is a date that must not own a morning.
  */
 function dayCalendarDate(day: EmailDay): string {
-  return typeof day.date === 'string' && ISO_DATE.test(day.date) ? day.date : '';
+  const label = typeof day.date === 'string' ? day.date : '';
+  if (!ISO_DATE.test(label)) return '';
+  const at = Date.parse(`${label}T12:00:00Z`);
+  if (Number.isNaN(at)) return '';
+  return new Date(at).toISOString().slice(0, 10) === label ? label : '';
 }
 
 /**
