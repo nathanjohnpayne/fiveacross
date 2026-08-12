@@ -94,6 +94,23 @@ describe('e2e functions dotenv generation', () => {
     expect(() => declaredParamNames(computed)).toThrow(/cannot resolve statically/);
   });
 
+  // Codex P2 on PR #730: an alias is legal TypeScript that would hide every
+  // declaration made through it, so the no-alias convention has to be enforced
+  // rather than assumed.
+  it('rejects an aliased constructor import instead of finding nothing', () => {
+    const aliased = [
+      "import { defineString as stringParam } from 'firebase-functions/params';",
+      "export const A = stringParam('SMTP_BRIDGE_URL', { default: '' });",
+    ].join('\n');
+
+    expect(() => declaredParamNames(aliased)).toThrow(/defineString as stringParam/);
+  });
+
+  it('leaves the real unaliased import alone', () => {
+    expect(PARAMS_SOURCE).toMatch(/from 'firebase-functions\/params'/);
+    expect(() => declaredParamNames(PARAMS_SOURCE)).not.toThrow();
+  });
+
   it('separates secrets from plain params', () => {
     const { params, secrets } = declaredParamNames(PARAMS_SOURCE);
 

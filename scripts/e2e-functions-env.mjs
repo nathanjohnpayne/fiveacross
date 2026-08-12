@@ -80,6 +80,41 @@ function withoutComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
+/** The named-import block for the params module, if the source has one. */
+const PARAMS_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*['"]firebase-functions\/params['"]/;
+
+/**
+ * Rejects an aliased constructor import — `defineString as stringParam` — which
+ * would make every call site invisible to `DEFINE_CALL_RE` (Codex P2 on PR
+ * #730). The alias is legal TypeScript, so the convention it violates has to be
+ * enforced rather than assumed; the alternative is resolving bindings, which
+ * means parsing TypeScript for a file that has never needed one.
+ *
+ * Checked only when the import is present, so the synthetic call fragments the
+ * sibling spec builds are still parseable on their own. A source that stops
+ * importing from this module entirely has changed shape far past an alias, and
+ * the zero-match guard below is what catches that.
+ */
+function rejectAliasedConstructors(source) {
+  const imported = PARAMS_IMPORT_RE.exec(source);
+  if (!imported) {
+    return;
+  }
+  const aliased = imported[1]
+    .split(',')
+    .map((specifier) => specifier.trim())
+    .filter((specifier) => /\sas\s/.test(specifier));
+  if (aliased.length > 0) {
+    throw new Error(
+      `functions/src/params.ts imports ${aliased.join(', ')} from firebase-functions/params. ` +
+        'This generator finds params by their constructor name at the call site, so an alias ' +
+        'hides every declaration made through it — and a hidden declaration is one the ' +
+        'emulator blocks on. Import the constructors unaliased, or teach ' +
+        'scripts/e2e-functions-env.mjs to resolve the binding.',
+    );
+  }
+}
+
 /**
  * The characters firebase-tools' dotenv parser unescapes, and their escapes —
  * mirrored from `ALL_ESCAPABLE_CHARACTERS_RE` / `CHARACTERS_TO_ESCAPE_SEQUENCES`
@@ -152,6 +187,7 @@ export function declaredParamNames(source) {
   const params = [];
   const secrets = [];
   const unresolvable = [];
+  rejectAliasedConstructors(source);
   for (const [, kind, argument] of withoutComments(source).matchAll(DEFINE_CALL_RE)) {
     const literal = NAME_LITERAL_RE.exec(argument.trim());
     if (!literal) {
