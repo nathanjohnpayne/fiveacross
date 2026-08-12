@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import type { BoardDoc, Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 import { ThemeProvider } from '../theme/ThemeContext';
@@ -1915,6 +1916,40 @@ describe('board inert while an overlay is up', () => {
     expect(boardArea()).not.toHaveAttribute('inert');
   });
 
+  it('releases the card when another tab dismissed an overlay this tab never showed', () => {
+    // The desync that made mirroring the stored flags unsafe (Codex P2, round
+    // 2): a mirror only moves on THIS tab's onDismiss, while the overlay
+    // re-reads storage every render. Another tab dismissing the launch
+    // announcement while this tab sits behind the coach overlay used to strand
+    // the mirror at "open" — leaving the card inert with no visible scrim, and
+    // `inert` blocks pointer events too, so the card was simply dead.
+    const store = new MemoryStorage();
+    vi.stubGlobal('localStorage', store);
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    // Nothing dismissed yet: the coach overlay is up and the card is inert.
+    expect(boardArea()).toHaveAttribute('inert');
+
+    // Another tab dismisses the launch announcement — a bare storage write,
+    // with no callback into this tab.
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+
+    // Dismissing the coach here is the render on which this tab notices.
+    fireEvent.click(document.querySelector('.coach-overlay-cta')!);
+
+    // No scrim is left, so the card must be live again.
+    expect(document.querySelector('.coach-overlay')).toBeNull();
+    expect(document.querySelector('.launch-intro')).toBeNull();
+    expect(boardArea()).not.toHaveAttribute('inert');
+  });
+
   it('marks the card inert while the first-open coach overlay is up', () => {
     // No dismissal flag written: the overlay self-gates on it, so an empty
     // store means the scrim IS up and the card behind it must leave the tab
@@ -1926,5 +1961,36 @@ describe('board inert while an overlay is up', () => {
 
     expect(document.querySelector('.coach-overlay')).not.toBeNull();
     expect(boardArea()).toHaveAttribute('inert');
+  });
+});
+
+// The Square's decorative glyphs are CSS-only, so their hit-testing behaviour
+// cannot be exercised in jsdom (no layout, no stylesheet cascade). These pin
+// the rules themselves — the same posture as the motion-polish suite.
+describe('decorative Square glyphs never swallow a claim tap', () => {
+  const indexCss = readFileSync('src/index.css', 'utf8');
+
+  it('makes the ✓ and echo ⟲ pseudo-elements ignore pointer events', () => {
+    // Both are positioned children generated around `.cell-claim`, so they
+    // paint over the claim button, and a hit on the glyph targets `.cell` —
+    // which stopped carrying the handler when it moved onto the button. Without
+    // `pointer-events: none` the visible ✓ is a dead spot in the corner of every
+    // marked Square instead of unmarking it (Codex P2, round 2).
+    const check = indexCss.match(/\.cell\.marked::after\s*\{[^}]*\}/)?.[0];
+    const echo = indexCss.match(/\.cell\.echo::before\s*\{[^}]*\}/)?.[0];
+    expect(check).toBeTruthy();
+    expect(echo).toBeTruthy();
+    expect(check).toMatch(/pointer-events:\s*none/);
+    expect(echo).toMatch(/pointer-events:\s*none/);
+  });
+
+  it('keeps the claim button under those glyphs rather than above them', () => {
+    // The fix is deliberately `pointer-events`, NOT restacking: the glyphs must
+    // keep PAINTING over the marked tile's gradient, and the badges (z-index 3)
+    // must keep painting over everything. Raising the claim button would hide
+    // the ✓ behind it.
+    const claim = indexCss.match(/\.cell-claim\s*\{[^}]*\}/)?.[0];
+    expect(claim).toBeTruthy();
+    expect(claim).not.toMatch(/z-index/);
   });
 });
