@@ -77,7 +77,7 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 const POLL_MS = 25;
@@ -89,6 +89,10 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const STALE_MS = 60_000;
 
 const lockPathFor = (dest) => `${dest}.commit-lock`;
+// A short-lived gate owned by a stale-lock taker. New acquirers check this
+// before and after publishing their hard-link lock, so a stale takeover never
+// races a healthy replacement at the same pathname.
+const takeoverPathFor = (dest) => `${lockPathFor(dest)}.takeover`;
 
 /** Block the calling thread for `ms` without yielding to any event loop —
  *  this module's callers (render-og-editions.mjs's top-level commit step)
@@ -110,6 +114,10 @@ function tryUnlink(p) {
   } catch {
     // Already gone — fine.
   }
+}
+
+function sameFile(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
 }
 
 /** True if `og-stage-commit.mjs`'s `commitStaged` left an unfinished
@@ -163,25 +171,50 @@ function pidAlive(pid) {
  *  observable state in between for another process to misread. */
 function tryAcquireOne(dest) {
   const lockPath = lockPathFor(dest);
+  const takeoverPath = takeoverPathFor(dest);
+  // A stealer owns the gate from BEFORE it judges staleness through removal.
+  // Do not publish a replacement in that interval.
+  if (existsSync(takeoverPath)) return null;
   const scratchPath = `${lockPath}.acquire-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
+  let ownership = null;
   const fd = openSync(scratchPath, 'wx');
   try {
-    writeSync(fd, `${process.pid}\n`);
+    // Keep the private hard link for the lock's whole lifetime. That witness
+    // keeps its inode allocated, so a later owner can never reuse it and fool
+    // this owner's release check. The lock records only its basename, allowing
+    // a stale takeover to clean the dead owner's otherwise-unreachable link.
+    writeSync(fd, `${process.pid}\n${basename(scratchPath)}\n`);
   } finally {
     closeSync(fd);
   }
   try {
     linkSync(scratchPath, lockPath);
-    return true;
+    // A takeover gate may have appeared after the first check while this
+    // process was creating/linking its private scratch file. Keep the scratch
+    // link until this check so we can prove the path is still ours before
+    // withdrawing it; never return a healthy-looking lock through a gate.
+    if (existsSync(takeoverPath)) {
+      try {
+        if (sameFile(statSync(lockPath), statSync(scratchPath))) tryUnlink(lockPath);
+      } catch {
+        // A stealer already removed it — the gate makes that equivalent.
+      }
+      return null;
+    }
+    try {
+      ownership = { scratchPath };
+      return ownership;
+    } catch {
+      // The path vanished before this acquirer could establish ownership.
+      return null;
+    }
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    return false;
+    return null;
   } finally {
-    // The scratch path is a private per-attempt name nobody else ever
-    // references (win or lose) — always clean it up. Best-effort: if this
-    // fails, it is a stray temp file, not a correctness problem, since
-    // `lockPathFor` never points at it.
-    tryUnlink(scratchPath);
+    // A successful acquire intentionally retains its private hard-link
+    // witness until release. Every other outcome cleans this attempt up.
+    if (ownership === null) tryUnlink(scratchPath);
   }
 }
 
@@ -192,36 +225,42 @@ function tryAcquireOne(dest) {
  *  someone else since the caller's last failed `tryAcquireOne` — either way
  *  the next poll's `tryAcquireOne` is the source of truth.
  *
- *  Ownership re-check before delete (id 3762857439, #713 round 7): staleness
- *  is decided from a `readFileSync` + `statSync` snapshot taken at the top
- *  of this function, but the `unlinkSync` that acts on that decision used to
- *  run afterward with no re-verification. In the window between them, the
- *  lock's actual OWNER can change: the holder this call judged stale can
- *  release normally right as another waiter's `tryAcquireOne` publishes a
- *  brand-new, fully healthy lock at the same `lockPath` (via `linkSync`,
- *  same as this file's `tryAcquireOne`). An unconditional `unlinkSync` at
- *  that point deletes the REPLACEMENT lock, not the stale one this call
- *  reasoned about — so the process that just legitimately acquired it loses
- *  its lock without knowing, and a later poll lets a second process in
- *  alongside it. Deleting a lock therefore has to prove, immediately before
- *  the delete, that the file at `lockPath` is still the SAME file this
- *  function inspected — not merely a file with the same name. `dev`+`ino`
- *  identity (captured from the first `statSync`, re-checked with a second
- *  one right before `unlinkSync`) is that proof: a replacement lock is a
- *  new inode even though the path is unchanged, so a mismatch here means
- *  "someone already replaced what I was about to delete" and this call
- *  backs off instead — the next `tryAcquireOne`/`stealIfStale` poll is what
- *  decides the replacement's own fate, on its own merits. */
+ *  The `.takeover` gate is the ownership primitive here. It is exclusively
+ *  created BEFORE the stale read and held through the unlink. `tryAcquireOne`
+ *  checks it both before and after link publication, withdrawing any attempt
+ *  that raced the gate, so no compliant waiter can publish a healthy lock at
+ *  `lockPath` while this call removes the stale one. This is stronger than a
+ *  stat/inode re-check: POSIX has no conditional-unlink syscall, and inode
+ *  reuse means a pathname+inode comparison still cannot be an atomic CAS. */
 function stealIfStale(dest) {
   const lockPath = lockPathFor(dest);
+  const takeoverPath = takeoverPathFor(dest);
+  let takeoverFd;
+  try {
+    takeoverFd = openSync(takeoverPath, 'wx');
+  } catch {
+    // Another stealer owns the gate. Its result will be visible next poll.
+    return;
+  }
+  try {
+    closeSync(takeoverFd);
+  } catch {
+    tryUnlink(takeoverPath);
+    return;
+  }
   let holderPid;
   let mtimeMs;
-  let dev;
-  let ino;
+  let ownerWitness = null;
   try {
-    holderPid = Number.parseInt(readFileSync(lockPath, 'utf8').trim(), 10);
-    ({ mtimeMs, dev, ino } = statSync(lockPath));
+    const [pidLine, witnessLine] = readFileSync(lockPath, 'utf8').trim().split('\n');
+    holderPid = Number.parseInt(pidLine, 10);
+    const expectedWitnessPrefix = `${basename(lockPath)}.acquire-tmp.`;
+    if (typeof witnessLine === 'string' && witnessLine.startsWith(expectedWitnessPrefix)) {
+      ownerWitness = join(dirname(lockPath), witnessLine);
+    }
+    ({ mtimeMs } = statSync(lockPath));
   } catch {
+    tryUnlink(takeoverPath);
     return;
   }
   // Clamped at zero: a lock stolen for being dead-owned rather than old
@@ -230,24 +269,13 @@ function stealIfStale(dest) {
   // rounding, which reads as a bug in the message itself.
   const ageMs = Math.max(0, Date.now() - mtimeMs);
   const holderLooksAlive = Number.isInteger(holderPid) && pidAlive(holderPid);
-  if (holderLooksAlive && ageMs < STALE_MS) return;
-  let current;
-  try {
-    current = statSync(lockPath);
-  } catch {
-    // Already gone — someone else's release or steal beat us here. Nothing
-    // to delete.
-    return;
-  }
-  if (current.dev !== dev || current.ino !== ino) {
-    // The file at `lockPath` is no longer the one we judged stale — a
-    // waiter's healthy `linkSync` publish landed in the window between our
-    // two stats. Do NOT delete another process's live lock; leave it for
-    // the next poll to evaluate on its own.
+  if (holderLooksAlive && ageMs < STALE_MS) {
+    tryUnlink(takeoverPath);
     return;
   }
   try {
     unlinkSync(lockPath);
+    if (ownerWitness) tryUnlink(ownerWitness);
     const leftoverBackup = hasLeftoverRollbackBackup(dest);
     console.warn(
       `og-commit-lock: stole an abandoned lock at ${lockPath} ` +
@@ -264,6 +292,8 @@ function stealIfStale(dest) {
   } catch {
     // Someone else already stole or released it — fine, the next
     // tryAcquireOne is what actually decides who has it now.
+  } finally {
+    tryUnlink(takeoverPath);
   }
 }
 
@@ -272,7 +302,8 @@ function stealIfStale(dest) {
  *  elapses while the holder is neither releasing nor going stale. */
 function acquireOne(dest, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  while (!tryAcquireOne(dest)) {
+  let ownership;
+  while ((ownership = tryAcquireOne(dest)) === null) {
     if (Date.now() > deadline) {
       throw new Error(
         `og-commit-lock: timed out after ${timeoutMs}ms waiting for the commit lock on ${dest} ` +
@@ -287,11 +318,17 @@ function acquireOne(dest, timeoutMs) {
     if (released) return;
     released = true;
     try {
-      unlinkSync(lockPathFor(dest));
+      const lockPath = lockPathFor(dest);
+      // An expired holder can finish after a stealer has handed the path to a
+      // new renderer. The retained witness prevents inode reuse, so release
+      // can prove this is still its own lock before unlinking by pathname.
+      if (sameFile(statSync(lockPath), statSync(ownership.scratchPath))) unlinkSync(lockPath);
     } catch {
       // Already gone — releasing is best-effort cleanup, not a correctness
       // requirement: the lock's only job was to keep OTHER processes out
       // while we held it, and we are done needing that now.
+    } finally {
+      tryUnlink(ownership.scratchPath);
     }
   };
 }

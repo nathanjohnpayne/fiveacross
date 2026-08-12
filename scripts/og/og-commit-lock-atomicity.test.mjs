@@ -25,7 +25,6 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -110,52 +109,31 @@ describe('lock acquisition never exposes a partially-written lock file (id 37626
       // yet) or a truncated digit sequence. The fix guarantees the content
       // is already the complete "<pid>\n" line by the time anything makes
       // it visible under the lock path's name.
-      expect(linkSourceContentAtCallTime[0]).toMatch(/^\d+\n$/);
+      expect(linkSourceContentAtCallTime[0]).toMatch(/^\d+\n.+\.acquire-tmp\.\d+-[0-9a-f]+\n$/);
     } finally {
       release();
     }
   });
 });
 
-describe('a stale-looking lock is not stolen if it is replaced between the staleness check and the delete (id 3762857439, #713 round 7)', () => {
-  it("does not delete a healthy lock a waiter just published in that window, and never lets this call acquire it either", () => {
+describe('a stale takeover cannot delete a healthy replacement lock (id 3763125838, #713 round 9)', () => {
+  it('keeps the replacement when the stale holder releases after a takeover', () => {
     const dest = join(dir, 'gcb.png');
     const lockPath = `${dest}.commit-lock`;
+    const releaseA = withDestinationLocks([{ dest }]);
+    // The A holder is still alive, but its lock has exceeded the deliberately
+    // generous stale bound — the exact case takeover must tolerate.
+    const old = new Date(Date.now() - 120_000);
+    actualFs.utimesSync(lockPath, old, old);
 
-    // "A"'s lock: a guaranteed-dead pid, so stealIfStale's staleness check
-    // decides to steal it on the very first poll, regardless of STALE_MS.
-    const deadA = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-    actualFs.writeFileSync(lockPath, `${deadA.pid}\n`);
-
-    // stealIfStale calls statSync(lockPath) twice: once to read the
-    // mtime/inode it bases its staleness decision on, and once more (the
-    // fix under test) immediately before the unlink, to confirm the file is
-    // still the one it decided about. Landing the swap between those two
-    // calls reproduces exactly the race Codex described: another waiter's
-    // `linkSync`-published, fully healthy lock ("B") replaces A's in that
-    // window.
-    let calls = 0;
-    fs.statSync.mockImplementation((p, ...rest) => {
-      const result = actualFs.statSync(p, ...rest);
-      if (p === lockPath) {
-        calls += 1;
-        if (calls === 1) {
-          actualFs.unlinkSync(lockPath);
-          actualFs.writeFileSync(lockPath, `${process.pid}\n`);
-        }
-      }
-      return result;
-    });
-
-    // B's lock is real, live, and fresh — a correct implementation must
-    // leave it alone and therefore never acquire it either within this
-    // short timeout.
-    expect(() => withDestinationLocks([{ dest }], { timeoutMs: 300 })).toThrow(/timed out/);
-
-    // The decisive assertion: B's lock is still exactly what B published —
-    // not deleted by the steal that was reasoning about A's now-gone lock,
-    // and not overwritten by this call's own (wrongly) successful acquire.
-    expect(actualFs.readFileSync(lockPath, 'utf8')).toBe(`${process.pid}\n`);
-    expect(calls).toBeGreaterThanOrEqual(2);
+    const releaseB = withDestinationLocks([{ dest }], { timeoutMs: 300 });
+    try {
+      // A's delayed release must see its retained private hard-link witness
+      // differs from B's lock. Blind pathname unlink would delete B here.
+      releaseA();
+      expect(actualFs.existsSync(lockPath)).toBe(true);
+    } finally {
+      releaseB();
+    }
   });
 });
