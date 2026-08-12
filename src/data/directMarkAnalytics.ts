@@ -4,6 +4,7 @@ import {
   trackToAnalyticsSinks,
   type AnalyticsSinkSelection,
 } from '../analytics';
+import { onPostHogReady } from '../posthog';
 import { db, EVENT_ID } from '../firebase';
 import { isLocalDirectMarkRequest } from './markAnalytics';
 import type { ClaimMode } from '../types';
@@ -159,12 +160,12 @@ function dispatch(delivery: PendingDelivery): PendingDelivery {
       count: 1,
       transitionId: event.transitionId,
       commitOrder: event.commitOrder,
-    }, undefined, pending);
+    }, { posthogOptions: { durableOutbox: true } }, pending);
   } else {
     acknowledged = trackToAnalyticsSinks(
       event.name,
       {
-    ...(event.name === 'mark_square' ? { source: event.source, marked: true } : {}),
+        ...(event.name === 'mark_square' ? { source: event.source, marked: true } : {}),
         mode: event.mode,
         uid: event.uid,
         ...(event.dayIndex === undefined ? {} : { dayIndex: event.dayIndex }),
@@ -180,6 +181,7 @@ function dispatch(delivery: PendingDelivery): PendingDelivery {
           pending.ga4 &&
           pending.posthog &&
           isLocalDirectMarkRequest(event.requestId),
+        posthogOptions: { durableOutbox: true },
       },
       pending,
     );
@@ -247,16 +249,25 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
   const outbox = storedOutbox(uid);
   const cursor = storedCursor(uid);
   let unsubscribed = false;
+  let pendingCursor: DeliveryCursor | null = null;
   const flushOutbox = () => {
     for (const delivery of [...outbox.values()]) {
       const updated = dispatch(delivery);
       outbox.set(updated.event.transitionId, updated);
-      if (!storeOutbox(uid, outbox)) return false;
+      // Persistence is the preferred crash boundary, but constrained browsers
+      // can block or exhaust localStorage. Keep retrying in memory there;
+      // because the cursor does not advance until every sink acknowledges,
+      // Firestore replays the immutable transition on the next mount.
+      storeOutbox(uid, outbox);
       if (!fullyAcknowledged(updated)) return false;
       outbox.delete(updated.event.transitionId);
-      if (!storeOutbox(uid, outbox)) return false;
+      storeOutbox(uid, outbox);
       delivered.add(updated.event.transitionId);
       storeIds(uid, delivered);
+    }
+    if (pendingCursor) {
+      storeCursor(uid, pendingCursor);
+      pendingCursor = null;
     }
     return true;
   };
@@ -281,8 +292,6 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
         // another. Never use it to advance the high-water cursor: doing so
         // would make `startAfter` skip a server row this tab never saw.
         if (snapshot.metadata?.fromCache === true) return;
-        if (!flushOutbox()) return;
-        let cursorSafe = true;
         let lastCursor: DeliveryCursor | null = null;
         for (const row of snapshot.docs) {
           const event = parseDirectMarkAnalyticsEvent(row.data());
@@ -291,29 +300,17 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
             if (nextCursor) lastCursor = nextCursor;
             continue;
           }
-          const initial: PendingDelivery = { event, pending: { ga4: true, posthog: true } };
-          outbox.set(event.transitionId, initial);
-          if (!storeOutbox(uid, outbox)) {
-            cursorSafe = false;
-            break;
+          // Queue the entire server snapshot before attempting a sink. A
+          // temporarily unavailable first row must not strand its later rows
+          // until Firestore happens to emit another snapshot.
+          if (!outbox.has(event.transitionId)) {
+            outbox.set(event.transitionId, { event, pending: { ga4: true, posthog: true } });
           }
-          const updated = dispatch(initial);
-          outbox.set(event.transitionId, updated);
-          if (!storeOutbox(uid, outbox) || !fullyAcknowledged(updated)) {
-            cursorSafe = false;
-            break;
-          }
-          outbox.delete(event.transitionId);
-          if (!storeOutbox(uid, outbox)) {
-            outbox.set(event.transitionId, updated);
-            cursorSafe = false;
-            break;
-          }
-          delivered.add(event.transitionId);
-          storeIds(uid, delivered);
           if (nextCursor) lastCursor = nextCursor;
         }
-        if (cursorSafe && lastCursor) storeCursor(uid, lastCursor);
+        if (lastCursor) pendingCursor = lastCursor;
+        storeOutbox(uid, outbox);
+        flushOutbox();
       },
       () => {
         // Analytics must never disrupt the Board when a listener is briefly
@@ -324,12 +321,15 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
     // Analytics finishes initializing. `trackToAnalyticsSinks` retains that
     // pending GA4 delivery in the outbox; retry it once readiness settles even
     // if Firestore has no further snapshot to wake this listener.
-    void analyticsInitializationSettled.then(() => {
+    const retryOutbox = () => {
       if (!unsubscribed) flushOutbox();
-    });
+    };
+    void analyticsInitializationSettled.then(retryOutbox);
+    const stopPostHogRetry = onPostHogReady(retryOutbox);
     return () => {
       unsubscribed = true;
       unsubscribe();
+      stopPostHogRetry();
     };
   } catch {
     // Keep lightweight component tests and constrained webviews from treating

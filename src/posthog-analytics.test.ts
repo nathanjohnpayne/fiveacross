@@ -463,6 +463,26 @@ describe('PostHog init with a key', () => {
     );
   });
 
+  it('leaves a separately durable transition outside the pre-init queue and wakes its owner once PostHog is ready (#727)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    const ready = vi.fn();
+    mod.onPostHogReady(ready);
+
+    expect(mod.phCapture('mark_square', { transitionId: 'durable-1' }, { durableOutbox: true })).toBe(false);
+    expect(ph.capture).not.toHaveBeenCalled();
+
+    await mod.initPostHog();
+
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(ph.capture).not.toHaveBeenCalledWith('mark_square', expect.anything(), expect.anything());
+    expect(mod.phCapture('mark_square', { transitionId: 'durable-1' }, { durableOutbox: true })).toBe(true);
+    expect(ph.capture).toHaveBeenLastCalledWith('mark_square', { transitionId: 'durable-1' });
+  });
+
   it('replays a queued capture that survived a RECOVERY RELOAD (#513)', async () => {
     // Codex P2 on #513: the queue's main customer reloads the page immediately
     // after queueing, and the same-origin build-floor probe can beat the

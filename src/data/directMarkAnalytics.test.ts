@@ -15,6 +15,7 @@ const H = vi.hoisted(() => ({
   startAfter: vi.fn(),
   trackToAnalyticsSinks: vi.fn(() => ({ ga4: true, posthog: true })),
   analyticsInitializationSettled: Promise.resolve(),
+  onPostHogReady: vi.fn<(listener: () => void) => () => void>(() => () => {}),
   isLocalDirectMarkRequest: vi.fn(() => false),
 }));
 
@@ -23,6 +24,7 @@ vi.mock('../analytics', () => ({
   analyticsInitializationSettled: H.analyticsInitializationSettled,
   trackToAnalyticsSinks: H.trackToAnalyticsSinks,
 }));
+vi.mock('../posthog', () => ({ onPostHogReady: H.onPostHogReady }));
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'event' }));
 vi.mock('./markAnalytics', () => ({ isLocalDirectMarkRequest: H.isLocalDirectMarkRequest }));
 
@@ -107,14 +109,14 @@ describe('durable direct-mark analytics delivery', () => {
       1,
       'unmark_square',
       expect.objectContaining({ transitionId: 'event-2' }),
-      { localMarkOccurred: false },
+      { localMarkOccurred: false, posthogOptions: { durableOutbox: true } },
       { ga4: true, posthog: true },
     );
     expect(H.trackToAnalyticsSinks).toHaveBeenNthCalledWith(
       2,
       'echo_mark',
       expect.objectContaining({ trigger: 'mark', transitionId: 'echo-1' }),
-      undefined,
+      { posthogOptions: { durableOutbox: true } },
       { ga4: true, posthog: true },
     );
     vi.unstubAllGlobals();
@@ -224,10 +226,102 @@ describe('durable direct-mark analytics delivery', () => {
     expect(H.trackToAnalyticsSinks).toHaveBeenLastCalledWith(
       'unmark_square',
       expect.objectContaining({ transitionId: 'transition-pre-ready' }),
-      { localMarkOccurred: false },
+      { localMarkOccurred: false, posthogOptions: { durableOutbox: true } },
       { ga4: true, posthog: false },
     );
     expect(storage.get('five-across:board-analytics-outbox:event:u1')).toBe('[]');
+    vi.unstubAllGlobals();
+  });
+
+  it('queues every row in a blocked snapshot, then drains the tail when PostHog becomes ready', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    let postHogReady!: () => void;
+    H.onPostHogReady.mockImplementationOnce((listener) => {
+      postHogReady = listener;
+      return () => {};
+    });
+    H.trackToAnalyticsSinks.mockReturnValueOnce({ ga4: true, posthog: false }).mockReturnValue({ ga4: true, posthog: true });
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      onNext({
+        metadata: { fromCache: false },
+        docs: [
+          {
+            id: 'row-posthog-1',
+            data: () => ({
+              name: 'unmark_square', mode: 'honor', uid: 'u1', requestId: 'request-posthog-1',
+              transitionId: 'transition-posthog-1', commitOrder: '0000000000000013:000000000',
+              recordedAt: { seconds: 13, nanoseconds: 0 },
+            }),
+          },
+          {
+            id: 'row-posthog-2',
+            data: () => ({
+              name: 'unmark_square', mode: 'honor', uid: 'u1', requestId: 'request-posthog-2',
+              transitionId: 'transition-posthog-2', commitOrder: '0000000000000014:000000000',
+              recordedAt: { seconds: 14, nanoseconds: 0 },
+            }),
+          },
+        ],
+      });
+      return () => {};
+    });
+
+    const callsBeforeSubscribe = H.trackToAnalyticsSinks.mock.calls.length;
+    subscribeDirectMarkAnalytics('u1');
+
+    const beforeReady = storage.get('five-across:board-analytics-outbox:event:u1') ?? '';
+    expect(beforeReady).toContain('transition-posthog-1');
+    expect(beforeReady).toContain('transition-posthog-2');
+    expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(callsBeforeSubscribe + 1);
+
+    postHogReady();
+
+    expect(H.trackToAnalyticsSinks).toHaveBeenLastCalledWith(
+      'unmark_square',
+      expect.objectContaining({ transitionId: 'transition-posthog-2' }),
+      expect.objectContaining({ posthogOptions: { durableOutbox: true } }),
+      { ga4: true, posthog: true },
+    );
+    expect(storage.get('five-across:board-analytics-cursor:event:u1')).toContain('"seconds":14');
+    vi.unstubAllGlobals();
+  });
+
+  it('still dispatches transitions at least once when localStorage cannot accept an outbox', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('quota exceeded');
+      },
+    });
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      onNext({
+        metadata: { fromCache: false },
+        docs: [
+          {
+            id: 'row-memory-only',
+            data: () => ({
+              name: 'unmark_square', mode: 'honor', uid: 'u1', requestId: 'request-memory-only',
+              transitionId: 'transition-memory-only', commitOrder: '0000000000000015:000000000',
+              recordedAt: { seconds: 15, nanoseconds: 0 },
+            }),
+          },
+        ],
+      });
+      return () => {};
+    });
+
+    subscribeDirectMarkAnalytics('u1');
+
+    expect(H.trackToAnalyticsSinks).toHaveBeenCalledWith(
+      'unmark_square',
+      expect.objectContaining({ transitionId: 'transition-memory-only' }),
+      expect.objectContaining({ posthogOptions: { durableOutbox: true } }),
+      { ga4: true, posthog: true },
+    );
     vi.unstubAllGlobals();
   });
 
@@ -270,7 +364,7 @@ describe('durable direct-mark analytics delivery', () => {
     expect(H.trackToAnalyticsSinks).toHaveBeenLastCalledWith(
       'unmark_square',
       expect.objectContaining({ transitionId: 'transition-11' }),
-      { localMarkOccurred: false },
+      { localMarkOccurred: false, posthogOptions: { durableOutbox: true } },
       { ga4: false, posthog: true },
     );
     expect(storage.get('five-across:board-analytics-cursor:event:u1')).toContain('"seconds":11');

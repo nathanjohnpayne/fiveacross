@@ -349,6 +349,7 @@ let ready = false;
 let initInFlight: Promise<void> | null = null;
 let identityGateRequired = false;
 let identityGateReady = false;
+const readyListeners = new Set<() => void>();
 
 export type InitPostHogOptions = { waitForAuth?: boolean };
 
@@ -514,12 +515,39 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
     }
   }
   replayRegister();
+  for (const listener of readyListeners) {
+    try {
+      listener();
+    } catch {
+      // Readiness listeners are telemetry conveniences; they must never make
+      // a successfully initialized SDK look like a failed app startup.
+    }
+  }
+  readyListeners.clear();
 }
 
 export const posthogReady = (): boolean => ready;
 
+/** Run once PostHog can synchronously accept a capture. A durable caller uses
+ * this to retry an event it deliberately kept outside PostHog's pre-init
+ * queue, so its own outbox remains the one delivery authority. */
+export function onPostHogReady(listener: () => void): () => void {
+  if (ready) {
+    void Promise.resolve().then(listener);
+    return () => {};
+  }
+  readyListeners.add(listener);
+  return () => readyListeners.delete(listener);
+}
+
 /** Capture options for events emitted just before the page goes away. */
-export type CaptureOptions = { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_instantly?: boolean };
+export type CaptureOptions = {
+  transport?: 'XHR' | 'fetch' | 'sendBeacon';
+  send_instantly?: boolean;
+  /** This event is persisted by a separate durable outbox. Do not also put it
+   * in PostHog's pre-init queue, which would create two retry authorities. */
+  durableOutbox?: boolean;
+};
 
 /**
  * Capture an explicit event. Called by analytics.ts `track()` alongside GA4.
@@ -537,6 +565,10 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
     // as acknowledged so callers that also support GA4 do not retain an
     // undrainable durability queue forever.
     if (!(import.meta.env.VITE_POSTHOG_KEY as string | undefined)) return true;
+    // A server-observed transition has its own durable retry record. Leaving
+    // it out of this module's in-memory/session queue prevents the ready path
+    // and that outbox from independently replaying the same transition.
+    if (options?.durableOutbox) return false;
     // Queue instead of dropping (Phase 4b P2 on #513) — into the SAME ordered
     // queue as the identity ops (#613, Phase 4b round-2 P1), so replay keeps
     // each capture attributed to the identity state that held when it was
@@ -558,9 +590,8 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
       // die with that navigation, so the startup crash this queue exists to
       // rescue would still vanish. sessionStorage survives the reload.
       persistPendingCaptures();
-      // Session storage dies when the tab/window closes. A caller with its
-      // own durable outbox must therefore retry after PostHog becomes ready,
-      // rather than treating this pre-init queue as a delivery acknowledgement.
+      // The return remains false: this queue is a local startup convenience,
+      // not a sink acknowledgement a caller can safely use as a commit point.
       return false;
     }
     return false;
@@ -568,7 +599,8 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
   try {
     // Kept arity-exact for the common path: every existing caller passes no
     // options and must keep producing a two-argument `capture` call.
-    if (options) posthog.capture(name, params, options);
+    const { durableOutbox: _durableOutbox, ...posthogOptions } = options ?? {};
+    if (Object.keys(posthogOptions).length > 0) posthog.capture(name, params, posthogOptions);
     else posthog.capture(name, params);
     return true;
   } catch {
