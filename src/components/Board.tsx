@@ -559,6 +559,27 @@ function firstCompletedLineAt(cells: Cell[]): number | null {
 }
 
 /**
+ * A Square's accessible name: the Prompt text plus the state a sighted Player
+ * reads straight off the tile. Every one of those state cues is CSS-only —
+ * `.cell.marked`'s ::after ✓, `.cell.pending`'s dashed/faded tile,
+ * `.cell.free.marked`'s FREE badge — so without this a screen reader announces
+ * 25 buttons whose names differ only by prompt and gives no way to tell a
+ * claimed Square from an open one.
+ *
+ * Not folded into `aria-pressed` instead: a Square is not a plain toggle. An
+ * unmarked tap OPENS the claim sheet (issue #181) rather than marking, and in
+ * `admin_confirmed` mode a Mark lands in a third, pending state that a boolean
+ * pressed value cannot carry.
+ */
+function squareLabel(c: Cell): string {
+  if (c.free) return `${c.text}—free space, already marked`;
+  if (!c.marked) return `${c.text}—not marked`;
+  // The app's own vocabulary for this state (ProofSheet: "Goes pending until an
+  // admin confirms.").
+  return c.status === 'pending' ? `${c.text}—marked, pending admin confirmation` : `${c.text}—marked`;
+}
+
+/**
  * The locked-Day preview (daily-cards-spec § "Locked Day preview"): full
  * themed chrome for the viewed Day over a 5x5 grid of blank Squares — only
  * the free space (index 12, the same center the live deal uses) is
@@ -2338,16 +2359,37 @@ export default function Board() {
                   : null),
               } as CSSProperties
             }
-            role={c.free ? 'button' : undefined}
-            tabIndex={c.free ? 0 : undefined}
-            aria-label={c.free ? c.text : undefined}
+            /* EVERY Square is a button-role control, not just the free centre
+               (which is all this used to cover). Tapping a Square is the
+               mainline path to the claim sheet, so a bare div left a
+               keyboard-only or switch-access Player with no way to claim at
+               all — the nested ＋/tally/doubt controls below are real
+               <button>s and were the only reachable thing on a Square.
+               `role="button"` on the div rather than an actual <button>
+               element: these nested controls sit INSIDE the tile, and a
+               <button> may not contain interactive descendants. A focusable
+               descendant is exempt from the presentational-children rule, so
+               they stay exposed and tabbable under the role. */
+            role="button"
+            tabIndex={0}
+            aria-label={squareLabel(c)}
             title={c.free ? 'Free space—already marked' : undefined}
             onClick={() => toggle(c)}
             onKeyDown={(event) => {
-              if (c.free && (event.key === 'Enter' || event.key === ' ')) {
-                event.preventDefault();
-                toggle(c);
-              }
+              // Descendant-originated keys belong to the nested controls: those
+              // <button>s activate themselves on Enter/Space and the event
+              // bubbles here, which would claim (or unmark) the Square behind
+              // them. Their onClick `stopPropagation` guards the pointer path
+              // only; this is the keyboard half of the same fence.
+              if (event.target !== event.currentTarget) return;
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              // Space scrolls the page by default, and both keys activate a
+              // button-role control (WAI-ARIA button pattern).
+              event.preventDefault();
+              // A held key auto-repeats keydown; a native button fires once.
+              // Without this an unmark (the instant path) would re-fire.
+              if (event.repeat) return;
+              toggle(c);
             }}
             onAnimationEnd={(event) => {
               if (c.free) setFreePulse(0);

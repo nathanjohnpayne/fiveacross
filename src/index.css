@@ -385,6 +385,19 @@ a {
 .cell:active {
   transform: scale(0.95);
 }
+/* Every Square is a focusable button-role control (Board.tsx), so the keyboard
+   path needs a visible focus indicator (WCAG 2.4.7). --ink, not --accent: the
+   ring is painted OUTSIDE the tile against the page background, and --ink is
+   the token already tuned to clear WCAG AA against --bg in every theme (see
+   .cell.marked's border-color note below) — an accent ring washes out on the
+   themes where --accent sits close to --bg. `outline` (not box-shadow) so the
+   ring survives .cell's own `overflow: hidden` and rides the marked tile's
+   gradient unchanged. Offset 1px + 2px wide reaches 3px out, half the grid's
+   6px gap, so a ring never crowds the neighbouring Square. */
+.cell:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
 .cell.marked {
   /* --on-gradient (issue #72, specs/theme-on-color-contrast.md) replaces the
      literal #fff that used to fail WCAG AA against this gradient in 7 of 8

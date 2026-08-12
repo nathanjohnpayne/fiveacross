@@ -244,9 +244,11 @@ describe('Board render', () => {
     const free = container.querySelectorAll('.cell.free');
     expect(free).toHaveLength(1); // exactly one Free Space
     expect(container.querySelectorAll('.grid .cell')[CENTER]).toHaveClass('free');
-    // The prompt remains the cell's accessible name, while a separate visual
-    // eyebrow makes the special center square immediately identifiable.
-    expect(free[0]).toHaveAccessibleName(FREE_TEXT);
+    // The prompt leads the cell's accessible name — now trailed by the state
+    // the tile shows only visually, since every Square is a button-role control
+    // (see Board.test.tsx § "Square keyboard operability") — while a separate
+    // visual eyebrow makes the special center square immediately identifiable.
+    expect(free[0]).toHaveAccessibleName(`${FREE_TEXT}—free space, already marked`);
     expect(free[0].querySelector('.free-label')).toHaveTextContent('FREE');
     expect(free[0].querySelector('.free-prompt')).toHaveTextContent(FREE_TEXT);
     expect(free[0]).toHaveClass('marked'); // the centre is always marked
@@ -258,7 +260,7 @@ describe('Board render', () => {
 
     render(<Board />);
 
-    const free = screen.getByRole('button', { name: FREE_TEXT });
+    const free = screen.getByRole('button', { name: `${FREE_TEXT}—free space, already marked` });
     fireEvent.click(free);
     expect(free).toHaveClass('free-pulse-a', 'marked');
     fireEvent.animationEnd(free);
@@ -276,13 +278,20 @@ describe('Board render', () => {
     const reDeal = /re-?deal|deal again|shuffle|swap|redraw|re-?roll|new card|regenerate/i;
     expect(screen.queryByRole('button', { name: reDeal })).toBeNull();
     expect(screen.queryByText(reDeal)).toBeNull();
-    // A freshly dealt card exposes only the permanent Free Space feedback control
-    // — no proof buttons, and certainly no re-deal button. The former 18+ ·
-    // Guidelines pill in the Board footer (#143) relocated to the More menu as
-    // `AcceptableUse variant="row"` (#208, specs/d15-more-menu.md) — Board no
-    // longer mounts it, so it's no longer app chrome sharing this surface.
-    expect(screen.queryAllByRole('button')).toHaveLength(1);
-    expect(screen.getByRole('button', { name: FREE_TEXT })).toBeInTheDocument();
+    // A freshly dealt card's ONLY controls are the 25 Squares themselves —
+    // button-role since every Square became keyboard-operable (see
+    // Board.test.tsx § "Square keyboard operability"); nothing else rides the
+    // surface. No proof buttons (nothing is marked yet), and certainly no
+    // re-deal button. The former 18+ · Guidelines pill in the Board footer
+    // (#143) relocated to the More menu as `AcceptableUse variant="row"` (#208,
+    // specs/d15-more-menu.md) — Board no longer mounts it, so it's no longer
+    // app chrome sharing this surface.
+    const buttons = screen.queryAllByRole('button');
+    expect(buttons).toHaveLength(25);
+    expect(buttons.every((b) => b.classList.contains('cell'))).toBe(true);
+    expect(
+      screen.getByRole('button', { name: `${FREE_TEXT}—free space, already marked` }),
+    ).toBeInTheDocument();
   });
 });
 

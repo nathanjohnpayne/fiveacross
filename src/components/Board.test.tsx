@@ -1713,3 +1713,154 @@ describe('per-Day First to BINGO (#264)', () => {
     expect(document.querySelector('.daybar-meta')?.textContent).toContain('Port 0');
   });
 });
+
+// --- Square keyboard operability --------------------------------------------
+//
+// Tapping a Square is the mainline path to the claim sheet, so a Square that is
+// only a `<div onClick>` puts claiming out of reach for a keyboard-only or
+// switch-access Player entirely — the nested ＋/tally/doubt controls are real
+// <button>s and used to be the only reachable thing on a tile. Every Square is
+// now a button-role control with an accessible name that carries the state the
+// tile shows in CSS alone (the ✓ fill, the dashed pending tile, FREE).
+
+describe('Square keyboard operability', () => {
+  /** A dealt card with cell 1 marked, cell 2 marked-but-pending, 12 free. */
+  function mixedCells(): Cell[] {
+    const cells = dealt();
+    cells[1] = { ...cells[1], marked: true, markedAt: 1, status: 'confirmed' };
+    cells[2] = { ...cells[2], marked: true, markedAt: 2, status: 'pending' };
+    return cells;
+  }
+
+  const squares = () => Array.from(document.querySelectorAll<HTMLElement>('.grid .cell'));
+
+  it('exposes all 25 Squares as focusable button-role controls', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+
+    const cells = squares();
+    expect(cells).toHaveLength(25);
+    for (const cell of cells) {
+      expect(cell).toHaveAttribute('role', 'button');
+      expect(cell).toHaveAttribute('tabindex', '0');
+    }
+  });
+
+  it('names each Square by its Prompt plus the state the tile shows only in CSS', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+
+    // Unmarked, marked, and the admin_confirmed pending tile are three distinct
+    // states a sighted Player reads off the tile; without these names a screen
+    // reader cannot tell a claimed Square from an open one.
+    expect(screen.getByRole('button', { name: 'Prompt i0—not marked' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Prompt i1—marked' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Prompt i2—marked, pending admin confirmation' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'FREE—free space, already marked' })).toBeInTheDocument();
+  });
+
+  it('opens the claim sheet on Enter — the keyboard twin of the mainline tap', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    fireEvent.keyDown(squares()[0], { key: 'Enter' });
+
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+    // The sheet is the claim, not the Mark (issue #181) — same as a tap.
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('opens the claim sheet on Space, and swallows the key so the page does not scroll', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    const swallowed = !fireEvent.keyDown(squares()[0], { key: ' ', cancelable: true });
+
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+    expect(swallowed).toBe(true);
+  });
+
+  it('unmarks a marked Square on Enter, instantly and without a sheet', async () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+    fireEvent.keyDown(squares()[1], { key: 'Enter' });
+    await act(async () => {});
+
+    expect(H.setMark).toHaveBeenCalledTimes(1);
+    expect(H.setMark.mock.calls[0][0]).toMatchObject({ index: 1, nextMarked: false });
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+  });
+
+  it('ignores a held key — auto-repeat must not re-fire the unmark write', async () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+    fireEvent.keyDown(squares()[1], { key: 'Enter', repeat: true });
+    await act(async () => {});
+
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('leaves other keys alone', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    fireEvent.keyDown(squares()[0], { key: 'a' });
+    fireEvent.keyDown(squares()[0], { key: 'ArrowRight' });
+
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the free centre operable — Enter pulses it instead of claiming', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    const free = squares()[12];
+    expect(free).not.toHaveClass('free-pulse-a');
+
+    fireEvent.keyDown(free, { key: 'Enter' });
+
+    expect(free).toHaveClass('free-pulse-a');
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('does not claim the Square behind a nested control when a key is pressed on it', async () => {
+    // The nested <button>s stop propagation on click only; a key pressed on one
+    // bubbles to the Square, which would unmark the tile out from under it.
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+    const proofBtn = squares()[1].querySelector<HTMLElement>('.proofbtn');
+    expect(proofBtn).not.toBeNull();
+
+    fireEvent.keyDown(proofBtn!, { key: 'Enter' });
+    await act(async () => {});
+
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('leaves the locked-Day preview inert — no Square there is a control', () => {
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'glamiators', unlockAt: now + DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    render(<Board />);
+
+    const locked = Array.from(document.querySelectorAll('.locked-grid .cell'));
+    expect(locked).toHaveLength(25);
+    for (const cell of locked) {
+      expect(cell).not.toHaveAttribute('role');
+      expect(cell).not.toHaveAttribute('tabindex');
+    }
+  });
+});
