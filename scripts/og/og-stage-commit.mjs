@@ -74,6 +74,14 @@ function tryUnlink(p) {
  *  it. */
 function rollback(backups) {
   for (const b of backups) {
+    // A backup copy can fail before this entry has touched either committed
+    // target. In that case the original files are still authoritative; do not
+    // rename a partial backup over them. We still remove every temp path below.
+    if (!b.ready) {
+      tryUnlink(b.destBackup);
+      tryUnlink(b.mirrorBackup);
+      continue;
+    }
     for (const [target, backup, existed] of [
       [b.dest, b.destBackup, b.destExisted],
       [b.mirror, b.mirrorBackup, b.mirrorExisted],
@@ -88,6 +96,8 @@ function rollback(backups) {
         console.error(`og-stage-commit: failed to roll back ${target}: ${err.message}`);
       }
     }
+    tryUnlink(b.destBackup);
+    tryUnlink(b.mirrorBackup);
   }
 }
 
@@ -177,11 +187,17 @@ export function commitStaged(staged) {
       const mirrorBackup = rollbackBackupPath(s.mirror, token);
       const destExisted = existsSync(s.dest);
       const mirrorExisted = existsSync(s.mirror);
+      // Register BEFORE copying so a disk-full or permission failure that
+      // leaves a partial backup still reaches cleanup. `ready` stays false
+      // until both copies have completed, which tells rollback that no
+      // destructive rename has started for this entry yet.
+      const backup = { dest: s.dest, mirror: s.mirror, destBackup, mirrorBackup, destExisted, mirrorExisted, ready: false };
+      backups.push(backup);
       if (destExisted) copyFileSync(s.dest, destBackup);
       if (mirrorExisted) copyFileSync(s.mirror, mirrorBackup);
-      // Recorded before the destructive steps below so a failure inside
-      // THIS entry's own rename/copy is still covered by the rollback.
-      backups.push({ dest: s.dest, mirror: s.mirror, destBackup, mirrorBackup, destExisted, mirrorExisted });
+      // Recorded before the destructive steps below so a failure inside THIS
+      // entry's own rename/copy is still covered by the rollback.
+      backup.ready = true;
 
       renameSync(s.scratch, s.dest);
       copyFileSync(s.dest, s.mirror);
@@ -193,8 +209,8 @@ export function commitStaged(staged) {
   }
   // Every entry committed cleanly — the backups are no longer needed.
   for (const b of backups) {
-    if (b.destExisted) tryUnlink(b.destBackup);
-    if (b.mirrorExisted) tryUnlink(b.mirrorBackup);
+    tryUnlink(b.destBackup);
+    tryUnlink(b.mirrorBackup);
   }
   return written;
 }

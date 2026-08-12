@@ -17,7 +17,7 @@
 // it). That second pair is the one to break-and-restore for verification:
 // flip `useLock` off in production wiring (or delete the lock call in
 // render-og-editions.mjs) and the "holds mutual exclusion" case fails.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -106,6 +106,21 @@ describe('withDestinationLocks — abandoned-lock recovery', () => {
     const release = withDestinationLocks([{ dest }], { timeoutMs: 3000 });
     expect(isLocked(dest)).toBe(true); // now held by THIS process
     release();
+  });
+
+  it('reclaims a takeover gate left by a crashed stealer instead of wedging later renders', () => {
+    const dest = join(dir, 'gcb.png');
+    const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    const takeover = `${dest}.commit-lock.takeover`;
+    writeFileSync(takeover, `${dead.pid}\n`);
+
+    const release = withDestinationLocks([{ dest }], { timeoutMs: 3000 });
+    try {
+      expect(isLocked(dest)).toBe(true);
+      expect(existsSync(takeover)).toBe(false);
+    } finally {
+      release();
+    }
   });
 
   it('warns about a leftover rollback backup when stealing a lock left by a killed commit (#713 round 8, id 3762932710)', () => {

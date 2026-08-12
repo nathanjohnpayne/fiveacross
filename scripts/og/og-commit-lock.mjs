@@ -91,7 +91,10 @@ const STALE_MS = 60_000;
 const lockPathFor = (dest) => `${dest}.commit-lock`;
 // A short-lived gate owned by a stale-lock taker. New acquirers check this
 // before and after publishing their hard-link lock, so a stale takeover never
-// races a healthy replacement at the same pathname.
+// races a healthy replacement at the same pathname. It uses the same
+// write-private-then-link publication as the lock itself: a process killed
+// while taking over leaves enough ownership evidence for the next run to
+// reclaim the gate instead of wedging every future renderer.
 const takeoverPathFor = (dest) => `${lockPathFor(dest)}.takeover`;
 
 /** Block the calling thread for `ms` without yielding to any event loop —
@@ -118,6 +121,76 @@ function tryUnlink(p) {
 
 function sameFile(a, b) {
   return a.dev === b.dev && a.ino === b.ino;
+}
+
+function writeOwnershipScratch(path) {
+  const scratchPath = `${path}.acquire-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
+  const fd = openSync(scratchPath, 'wx');
+  try {
+    writeSync(fd, `${process.pid}\n${basename(scratchPath)}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  return scratchPath;
+}
+
+/** Publish a fully-written ownership witness under `path`, or return null if
+ * another process already owns that path. */
+function tryAcquireOwnership(path) {
+  const scratchPath = writeOwnershipScratch(path);
+  let ownership = null;
+  try {
+    linkSync(scratchPath, path);
+    ownership = { scratchPath };
+    return ownership;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    return null;
+  } finally {
+    // A successful owner keeps its witness until release so an old owner can
+    // never mistake a replacement inode for its own lock.
+    if (ownership === null) tryUnlink(scratchPath);
+  }
+}
+
+/** Release only the link this owner published, then remove its private witness. */
+function releaseOwnership(path, ownership) {
+  try {
+    if (sameFile(statSync(path), statSync(ownership.scratchPath))) tryUnlink(path);
+  } catch {
+    /* another owner replaced or removed the path; never unlink by name alone */
+  } finally {
+    tryUnlink(ownership.scratchPath);
+  }
+}
+
+/**
+ * A takeover must not be able to strand the renderer if its process dies after
+ * claiming the gate. A valid dead owner is safe to reclaim immediately; an
+ * older malformed gate is only reclaimed after the normal stale interval so a
+ * concurrently running pre-upgrade renderer is never displaced mid-write.
+ */
+function recoverAbandonedTakeover(dest) {
+  const takeoverPath = takeoverPathFor(dest);
+  let holderPid;
+  let mtimeMs;
+  let ownerWitness = null;
+  try {
+    const [pidLine, witnessLine] = readFileSync(takeoverPath, 'utf8').trim().split('\n');
+    holderPid = Number.parseInt(pidLine, 10);
+    ({ mtimeMs } = statSync(takeoverPath));
+    const expectedWitnessPrefix = `${basename(takeoverPath)}.acquire-tmp.`;
+    if (typeof witnessLine === 'string' && witnessLine.startsWith(expectedWitnessPrefix)) {
+      ownerWitness = join(dirname(takeoverPath), witnessLine);
+    }
+  } catch {
+    return;
+  }
+  const ownerAlive = Number.isInteger(holderPid) && pidAlive(holderPid);
+  const malformedGateIsOld = !ownerWitness && Date.now() - mtimeMs >= STALE_MS;
+  if (ownerAlive || (!Number.isInteger(holderPid) && !malformedGateIsOld)) return;
+  tryUnlink(takeoverPath);
+  if (ownerWitness) tryUnlink(ownerWitness);
 }
 
 /** True if `og-stage-commit.mjs`'s `commitStaged` left an unfinished
@@ -235,45 +308,38 @@ function tryAcquireOne(dest) {
 function stealIfStale(dest) {
   const lockPath = lockPathFor(dest);
   const takeoverPath = takeoverPathFor(dest);
-  let takeoverFd;
-  try {
-    takeoverFd = openSync(takeoverPath, 'wx');
-  } catch {
-    // Another stealer owns the gate. Its result will be visible next poll.
+  const takeover = tryAcquireOwnership(takeoverPath);
+  if (!takeover) {
+    // Another stealer owns the gate. If it crashed, reclaim its documented
+    // dead owner so the gate cannot permanently wedge future renderers.
+    recoverAbandonedTakeover(dest);
     return;
   }
   try {
-    closeSync(takeoverFd);
-  } catch {
-    tryUnlink(takeoverPath);
-    return;
-  }
-  let holderPid;
-  let mtimeMs;
-  let ownerWitness = null;
-  try {
-    const [pidLine, witnessLine] = readFileSync(lockPath, 'utf8').trim().split('\n');
-    holderPid = Number.parseInt(pidLine, 10);
-    const expectedWitnessPrefix = `${basename(lockPath)}.acquire-tmp.`;
-    if (typeof witnessLine === 'string' && witnessLine.startsWith(expectedWitnessPrefix)) {
-      ownerWitness = join(dirname(lockPath), witnessLine);
+    let holderPid;
+    let mtimeMs;
+    let ownerWitness = null;
+    try {
+      const [pidLine, witnessLine] = readFileSync(lockPath, 'utf8').trim().split('\n');
+      holderPid = Number.parseInt(pidLine, 10);
+      const expectedWitnessPrefix = `${basename(lockPath)}.acquire-tmp.`;
+      if (typeof witnessLine === 'string' && witnessLine.startsWith(expectedWitnessPrefix)) {
+        ownerWitness = join(dirname(lockPath), witnessLine);
+      }
+      ({ mtimeMs } = statSync(lockPath));
+    } catch {
+      return;
     }
-    ({ mtimeMs } = statSync(lockPath));
-  } catch {
-    tryUnlink(takeoverPath);
-    return;
-  }
-  // Clamped at zero: a lock stolen for being dead-owned rather than old
-  // (the common case in tests, and for a process killed moments after
-  // acquiring) can otherwise print a tiny negative age from clock/mtime
-  // rounding, which reads as a bug in the message itself.
-  const ageMs = Math.max(0, Date.now() - mtimeMs);
-  const holderLooksAlive = Number.isInteger(holderPid) && pidAlive(holderPid);
-  if (holderLooksAlive && ageMs < STALE_MS) {
-    tryUnlink(takeoverPath);
-    return;
-  }
-  try {
+    // Clamped at zero: a lock stolen for being dead-owned rather than old
+    // (the common case in tests, and for a process killed moments after
+    // acquiring) can otherwise print a tiny negative age from clock/mtime
+    // rounding, which reads as a bug in the message itself.
+    const ageMs = Math.max(0, Date.now() - mtimeMs);
+    const holderLooksAlive = Number.isInteger(holderPid) && pidAlive(holderPid);
+    // Age is evidence only when the recorded process is gone. A paused or slow
+    // live holder still owns the critical section; stealing it would let two
+    // writers interleave publication and rollback.
+    if (holderLooksAlive) return;
     unlinkSync(lockPath);
     if (ownerWitness) tryUnlink(ownerWitness);
     const leftoverBackup = hasLeftoverRollbackBackup(dest);
@@ -293,7 +359,7 @@ function stealIfStale(dest) {
     // Someone else already stole or released it — fine, the next
     // tryAcquireOne is what actually decides who has it now.
   } finally {
-    tryUnlink(takeoverPath);
+    releaseOwnership(takeoverPath, takeover);
   }
 }
 

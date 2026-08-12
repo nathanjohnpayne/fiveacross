@@ -116,24 +116,22 @@ describe('lock acquisition never exposes a partially-written lock file (id 37626
   });
 });
 
-describe('a stale takeover cannot delete a healthy replacement lock (id 3763125838, #713 round 9)', () => {
-  it('keeps the replacement when the stale holder releases after a takeover', () => {
+describe('a live holder remains exclusive even when its lock is old (#713 Phase 4b)', () => {
+  it('does not steal a live lock solely because its mtime exceeded the stale interval', () => {
     const dest = join(dir, 'gcb.png');
     const lockPath = `${dest}.commit-lock`;
     const releaseA = withDestinationLocks([{ dest }]);
-    // The A holder is still alive, but its lock has exceeded the deliberately
-    // generous stale bound — the exact case takeover must tolerate.
+    // The A holder is still alive but paused or slow. Age alone cannot revoke
+    // its ownership: doing so would let A and a replacement interleave their
+    // publication/rollback critical sections.
     const old = new Date(Date.now() - 120_000);
     actualFs.utimesSync(lockPath, old, old);
 
-    const releaseB = withDestinationLocks([{ dest }], { timeoutMs: 300 });
     try {
-      // A's delayed release must see its retained private hard-link witness
-      // differs from B's lock. Blind pathname unlink would delete B here.
-      releaseA();
+      expect(() => withDestinationLocks([{ dest }], { timeoutMs: 300 })).toThrow(/timed out/);
       expect(actualFs.existsSync(lockPath)).toBe(true);
     } finally {
-      releaseB();
+      releaseA();
     }
   });
 });

@@ -501,56 +501,67 @@ try {
     // mints a fresh random token per call (#713 round 3), so calling it
     // twice for the "same" file would silently produce two different paths.
     const scratch = scratchPathFor(dest);
-    await page.screenshot(screenshotOptionsFor(scratch));
-    await page.close();
+    let stagedScratch = false;
+    try {
+      await page.screenshot(screenshotOptionsFor(scratch));
+      await page.close();
 
-    // Crush ONLY if the lossless render misses the size budget. og-default.png
-    // is quantised because at 2400x1260 it is ~1.6 MB lossless and WhatsApp
-    // caps og:image at 600 KB; at 1200x630 these land near 250 KB, so there is
-    // nothing to buy. And quantising is not free on this artwork: the palette
-    // takes the corner radial washes from ~70 distinct values across a row to
-    // ~16, which is invisible at size but shows as contour rings under
-    // contrast amplification. The #609 originals were truecolor; so are these.
-    const losslessBytes = statSync(scratch).size;
-    if (losslessBytes > SIZE_BUDGET_BYTES) {
-      try {
-        execFileSync(
-          'pngquant',
-          ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${scratch}.quant`, scratch],
-          { stdio: 'inherit' },
-        );
-        renameSync(`${scratch}.quant`, scratch);
-        console.warn(
-          `  ${id}: ${(losslessBytes / 1024).toFixed(0)} KB lossless exceeded the ` +
-            `${(SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB budget — quantised to ` +
-            `${(statSync(scratch).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
-        );
-      } catch {
-        console.warn(`  ${id}: over budget and pngquant is unavailable — shipping the lossless PNG.`);
+      // Crush ONLY if the lossless render misses the size budget. og-default.png
+      // is quantised because at 2400x1260 it is ~1.6 MB lossless and WhatsApp
+      // caps og:image at 600 KB; at 1200x630 these land near 250 KB, so there is
+      // nothing to buy. And quantising is not free on this artwork: the palette
+      // takes the corner radial washes from ~70 distinct values across a row to
+      // ~16, which is invisible at size but shows as contour rings under
+      // contrast amplification. The #609 originals were truecolor; so are these.
+      const losslessBytes = statSync(scratch).size;
+      if (losslessBytes > SIZE_BUDGET_BYTES) {
+        try {
+          execFileSync(
+            'pngquant',
+            ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${scratch}.quant`, scratch],
+            { stdio: 'inherit' },
+          );
+          renameSync(`${scratch}.quant`, scratch);
+          console.warn(
+            `  ${id}: ${(losslessBytes / 1024).toFixed(0)} KB lossless exceeded the ` +
+              `${(SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB budget — quantised to ` +
+              `${(statSync(scratch).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
+          );
+        } catch {
+          console.warn(`  ${id}: over budget and pngquant is unavailable — shipping the lossless PNG.`);
+        }
+      }
+
+      // The hard cap (#699): refuse to replace the committed copies with a
+      // render known not to unfurl. Whatever caused it — pngquant missing,
+      // pngquant failing, or the artwork just being too heavy even quantised —
+      // the failure happens BEFORE `dest` or the wireframes mirror is touched,
+      // and the process exits nonzero so automation checking this script's
+      // status does not accept the asset.
+      const finalBytes = statSync(scratch).size;
+      assertWithinHardCap(id, finalBytes, HARD_CAP_BYTES);
+
+      // Stage only — do NOT touch `dest` or the wireframes mirror yet. See the
+      // note above `staged`: committing here, inside the per-edition loop,
+      // is exactly what made `--all` non-atomic (#713).
+      const mirror = outDir
+        ? join(outDir, ART[id].mirror)
+        : join(repo, 'plans', 'og-images', ART[id].mirror);
+      staged.push({ id, scratch, dest, mirror, bytes: finalBytes });
+      stagedScratch = true;
+    } finally {
+      // A screenshot can create a partial file before rejecting, and `close`,
+      // quantization, or the size check can fail before this path reaches the
+      // shared staged list. Delete the current file locally in every one of
+      // those paths; `discardStaged` can only clean entries it was told about.
+      if (!stagedScratch) {
+        try {
+          unlinkSync(scratch);
+        } catch {
+          /* no file was written, or cleanup was already attempted */
+        }
       }
     }
-
-    // The hard cap (#699): refuse to replace the committed copies with a
-    // render known not to unfurl. Whatever caused it — pngquant missing,
-    // pngquant failing, or the artwork just being too heavy even quantised —
-    // the failure happens BEFORE `dest` or the wireframes mirror is touched,
-    // and the process exits nonzero so automation checking this script's
-    // status does not accept the asset.
-    const finalBytes = statSync(scratch).size;
-    try {
-      assertWithinHardCap(id, finalBytes, HARD_CAP_BYTES);
-    } catch (err) {
-      unlinkSync(scratch);
-      throw err;
-    }
-
-    // Stage only — do NOT touch `dest` or the wireframes mirror yet. See the
-    // note above `staged`: committing here, inside the per-edition loop,
-    // is exactly what made `--all` non-atomic (#713).
-    const mirror = outDir
-      ? join(outDir, ART[id].mirror)
-      : join(repo, 'plans', 'og-images', ART[id].mirror);
-    staged.push({ id, scratch, dest, mirror, bytes: finalBytes });
   }
 
   // Every targeted edition cleared the hard cap — commit them all now, in
@@ -578,7 +589,11 @@ try {
   // this point.
   const releaseLocks = withDestinationLocks(staged);
   try {
-    written = commitStaged(staged).map((w) => ({ ...w, bytes: statSync(w.dest).size }));
+    // `bytes` was measured and cap-checked while the file was still staged.
+    // Do not perform any fallible reporting read after commitStaged has thrown
+    // away its rollback backups: a successful publish must not later be
+    // reported as a failed, rollbackable run merely because `stat` failed.
+    written = commitStaged(staged).map((w) => ({ ...w, bytes: staged.find((s) => s.id === w.id).bytes }));
   } finally {
     releaseLocks();
   }
