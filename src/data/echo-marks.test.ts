@@ -1760,10 +1760,9 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     // Square (countMarked excludes `pending`) — fires mark_square{source:
     // 'admin_confirm'}, the second of the two mark_square events this Square
     // produces (the first, source: 'proof', fired at claim-submit time and is
-    // not this suite's concern). NOT echo_mark: this is the CLAIM'S OWN
-    // Square, a player action, not the sibling echo (#721 scopes echo_mark to
-    // the four data/api.ts propagation paths; confirmClaim's own sibling
-    // echo — the write asserted above — is unchanged by this ticket).
+    // not this suite's concern). This is the CLAIM'S OWN Square, a player
+    // action, so it fires mark_square — never echo_mark, which is asserted
+    // separately below for Day 2's sibling echo.
     // `dayIndex`/`uid` (Codex round 1 findings 2 & 6): the claim's own Day
     // and OWNER — this call runs in the ADMIN's session, so without an
     // explicit `uid` the event would attribute to the admin's distinct id.
@@ -1776,15 +1775,31 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
         uid: 'u1',
       }),
     );
+    // Round 3 (Codex P2, #727): the sibling echo onto Day 2 (the write
+    // asserted above) is its OWN squaresMarked increment with no tap behind
+    // it — the same reasoning that gives every other propagation path an
+    // `echo_mark`, now extended to this fifth one (admin_confirm). Grouped by
+    // the RECEIVING Day (2), never the claim's own acted Day (1).
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', {
+        trigger: 'admin_confirm',
+        dayIndex: 2,
+        count: 1,
+      }),
+    );
   });
 
-  it('a stale claim (no matching board/cell) resolves without firing mark_square (Codex round 1 finding 3, #727)', async () => {
+  it('a stale claim (no matching board/cell) resolves without firing mark_square or echo_mark (Codex round 1 finding 3, #727; round 3)', async () => {
     seedClaim();
     // The claim's cellIndex/proofId no longer matches anything on the board —
-    // a reshuffle traded the cell away underneath a still-pending claim.
+    // a reshuffle traded the cell away underneath a still-pending claim. With
+    // no matching cell, `resolve()`'s `confirmedCell` is never found, so
+    // `echoItemId` stays null and no sibling echo — and no `echo_mark` —
+    // fires either (round 3, Codex P2, #727).
     await confirmClaim(claim({ cellIndex: 99, proofId: null }), 'admin-1');
     await new Promise((r) => setTimeout(r, 0));
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.anything());
   });
 
   it('a SECOND confirm racing an already-confirmed claim does not double-fire mark_square (Codex round 1 finding 3, #727)', async () => {

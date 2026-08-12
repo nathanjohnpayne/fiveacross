@@ -107,11 +107,13 @@ export const GA4_EVENTS = [
   // tap. Deliberately its OWN event, not a `mark_square` source: an echo
   // carries no player action on the receiving card, so folding it into
   // `mark_square` would reintroduce the exact source-conflation #721 fixes,
-  // just one level down. Fires from all four propagation paths (deal-time,
-  // reshuffle, mark-time cascade, open-time reconcile). Params: `trigger`
-  // ('deal' | 'reshuffle' | 'mark' | 'open_reconcile'), `dayIndex` (the
-  // receiving/opened board's Day), `count` (Squares newly echoed by this
-  // write — always >= 1). Call site: src/data/api.ts.
+  // just one level down. Fires from all five propagation paths (deal-time,
+  // reshuffle, mark-time cascade, open-time reconcile, admin-confirm
+  // cascade — the last added #727 round 3, Codex P2). Params: `trigger`
+  // ('deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm'),
+  // `dayIndex` (the receiving/opened board's Day), `count` (Squares newly
+  // echoed by this write — always >= 1). Call sites: src/data/api.ts (the
+  // first four) and src/data/admin.ts's confirmClaim (admin_confirm).
   'echo_mark',
 ] as const;
 

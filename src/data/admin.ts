@@ -372,27 +372,51 @@ export async function adminUpdateItemText(id: string, text: string): Promise<voi
 }
 
 /**
- * Resolves a Claim (confirm or reject). Returns whether THIS call performed a
- * genuine pending→confirmed transition on the claim's own cell (#721, Codex
- * round 1 findings 3 & 5) — the moment `countMarked` (game/logic.ts, which
- * excludes `status: 'pending'`) starts crediting the Square, and therefore
- * the ONLY moment `confirmClaim`'s `mark_square { source: 'admin_confirm' }`
- * may fire. `false` covers both non-credit-changing cases in one signal: a
- * stale claim whose board no longer exists, or whose cell no longer matches
- * `isClaimCell` (both no-ops below — no write, no transition), and the
- * concurrent-confirm race (two admins resolve the same claim; Firestore
- * replays the loser's transaction against the WINNER's already-`confirmed`
- * cell, so its own `before` read is 'confirmed', not 'pending' — a rewrite,
- * not a transition). Computed generically here (not gated to `status ===
- * 'confirmed'` internally) so a future confirm-adjacent caller cannot forget
- * to ask; `rejectClaim` below simply never reads it.
+ * What one `resolve()` call performed, for `confirmClaim`'s post-commit
+ * analytics to fire off of.
  */
+interface ResolveResult {
+  /** Whether THIS call performed a genuine pending→confirmed transition on
+   *  the claim's own cell (#721, Codex round 1 findings 3 & 5) — the moment
+   *  `countMarked` (game/logic.ts, which excludes `status: 'pending'`) starts
+   *  crediting the Square, and therefore the ONLY moment `confirmClaim`'s
+   *  `mark_square { source: 'admin_confirm' }` may fire. `false` covers both
+   *  non-credit-changing cases in one signal: a stale claim whose board no
+   *  longer exists, or whose cell no longer matches `isClaimCell` (both
+   *  no-ops below — no write, no transition), and the concurrent-confirm
+   *  race (two admins resolve the same claim; Firestore replays the loser's
+   *  transaction against the WINNER's already-`confirmed` cell, so its own
+   *  `before` read is 'confirmed', not 'pending' — a rewrite, not a
+   *  transition). Computed generically here (not gated to `status ===
+   *  'confirmed'` internally) so a future confirm-adjacent caller cannot
+   *  forget to ask; `rejectClaim` below simply never reads it. */
+  transitioned: boolean;
+  /** Sibling Days newly echoed onto BY THIS CALL, dayIndex + the count of
+   *  Squares that Day newly received (Codex P2 finding, #727 round 3):
+   *  confirming an admin_confirmed claim cascades the Prompt onto the
+   *  owner's other Day Cards in the SAME transaction as the claim's own
+   *  cell (see the Echo Marks block below), and each of THOSE Days'
+   *  `squaresMarked` increments exactly like any other echo — but until
+   *  this fix, that increment fired no `echo_mark`, the same
+   *  instrumentation gap #721 closed for the other three propagation paths
+   *  (specs/w2-ga4-events.md § Reconciliation's "every squaresMarked
+   *  increment is counted exactly once" no longer held for this one).
+   *  Naturally empty for `status: 'rejected'` (a reject never echoes, see
+   *  the Echo Marks block's own comment) and for a stale or replayed
+   *  confirm — `applyEchoes` returns `changed: false` when a sibling
+   *  already carries the echo (idempotent re-derivation, matching every
+   *  other echo propagation path), so a concurrent-confirm replay pushes
+   *  nothing here even though `transitioned` is independently `false` for
+   *  that same call. */
+  echoes: Array<{ dayIndex: number; count: number }>;
+}
+
 async function resolve(
   c: ClaimDoc,
   transform: (cells: Cell[]) => Cell[],
   adminUid: string,
   status: 'confirmed' | 'rejected',
-): Promise<boolean> {
+): Promise<ResolveResult> {
   // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
   // its `dayIndex`, so resolve against `days/{dayIndex}/boards/{uid}` and fold the
   // owner's `dayStats[dayIndex]` — the SAME routing attachProof/setMark use. Legacy
@@ -431,11 +455,11 @@ async function resolve(
       echoSiblingDays = days.map((d) => d.index).filter((i) => i !== (c.dayIndex as number));
     }
   }
-  return await runTransaction(db, async (tx): Promise<boolean> => {
+  return await runTransaction(db, async (tx): Promise<ResolveResult> => {
     // Read board + player inside the txn so a concurrent mark/proof from the same
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
-    if (!bSnap.exists()) return false;
+    if (!bSnap.exists()) return { transitioned: false, echoes: [] };
     const pSnap = await tx.get(player(c.uid));
     // The owner's sibling Day Cards, read in the SAME transaction (before any
     // write, per Firestore's reads-first contract) so a retry re-derives the
@@ -498,6 +522,11 @@ async function resolve(
     const echoItemId =
       confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
     const echoBuckets: EchoBucket[] = [];
+    // The `echo_mark` counterpart to `echoBuckets` (Codex P2, #727 round 3):
+    // same per-sibling `res.changed` gate, so it stays empty for exactly the
+    // stale/replayed-confirm and reject cases `echoBuckets` also skips — see
+    // `ResolveResult.echoes`'s doc comment above.
+    const echoMarkEvents: Array<{ dayIndex: number; count: number }> = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];
     const echoNow = Date.now();
@@ -516,6 +545,7 @@ async function resolve(
             ...(typeof sib.seed === 'number' ? { markSeed: sib.seed } : {}),
           }),
         });
+        echoMarkEvents.push({ dayIndex: echoSiblingDays[idx], count: res.echoedItemIds.length });
         echoBuckets.push({
           dayIndex: echoSiblingDays[idx],
           bingoCount: res.bingoCount,
@@ -645,7 +675,7 @@ async function resolve(
     if (status === 'confirmed' && c.proofId) {
       tx.set(proof(c.proofId), { status: 'active' }, { merge: true });
     }
-    return transitionedToConfirmed;
+    return { transitioned: transitionedToConfirmed, echoes: echoMarkEvents };
   });
 }
 
@@ -699,18 +729,35 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // identifier PostHog/GA4 attribute this event to the ADMIN's distinct id,
   // not the claim owner's — there is otherwise no way to recover whose
   // Square this was from the payload alone.
+  //
+  // Sibling `echo_mark`s (Codex P2, #727 round 3): confirming cascades the
+  // Prompt onto the owner's OTHER Day Cards in the SAME transaction (the
+  // Echo Marks block inside `resolve()`), and each of THOSE Days'
+  // `squaresMarked` increments exactly like the four data/api.ts propagation
+  // paths — so it needs the same `echo_mark` counterpart, one event PER
+  // receiving Day, `trigger: 'admin_confirm'` naming this fifth propagation
+  // path (specs/w2-ga4-events.md § Reconciliation, updated alongside this
+  // fix). Independent of the `mark_square` gate above: `resolve()`'s own
+  // `res.changed` check (see `ResolveResult.echoes`) is what keeps
+  // `echoMarkEvents` empty on a stale or replayed confirm, so this loop
+  // needs no separate `transitioned` gate — every entry landing in `echoes`
+  // is already a genuine, freshly-committed echo.
   void confirmed
-    .then((transitioned) => {
-      if (!transitioned) return undefined;
-      return import('../analytics').then(({ track }) =>
+    .then(async ({ transitioned, echoes }) => {
+      if (!transitioned && echoes.length === 0) return;
+      const { track } = await import('../analytics');
+      if (transitioned) {
         track('mark_square', {
           source: 'admin_confirm',
           mode: 'admin_confirmed',
           marked: true,
           dayIndex: c.dayIndex,
           uid: c.uid,
-        }),
-      );
+        });
+      }
+      for (const echo of echoes) {
+        track('echo_mark', { trigger: 'admin_confirm', dayIndex: echo.dayIndex, count: echo.count });
+      }
     })
     .catch(() => {});
   return confirmed.then(() => undefined);
