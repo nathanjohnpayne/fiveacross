@@ -27,7 +27,7 @@ import {
   SEND_WINDOW_MS,
   type DailyEmailFirestore,
 } from '../../functions/src/dailyEmail';
-import type { EmailPayload } from '../../functions/src/email';
+import { sendEmail, type EmailPayload } from '../../functions/src/email';
 
 // Covers specs/daily-engagement-email.md, functions layer: the Day-Theme token
 // mirror, the per-Edition content model, the email-safe template, and the
@@ -913,6 +913,30 @@ describe('sendDailyEmailForEvent', () => {
     });
     expect(result).toMatchObject({ sent: 0, failed: 2 });
     expect(db.docs['events/med-2026/emailPrefs/theo']).not.toHaveProperty('lastSentDayIndex');
+  });
+
+  // #633: fail-closed regression. Exercises the REAL `sendEmail` (not a boolean
+  // stub) with a Resend-shaped `{ error }` — the exact response an unverified
+  // `EMAIL_FROM` domain produces — and proves the rejection propagates all the
+  // way through `sendDailyEmailForEvent`'s accounting: not counted as `sent`,
+  // and the recipient's `lastSentDayIndex` is never written, so a misconfigured
+  // sender domain cannot be recorded as successful delivery.
+  it('propagates a real Resend rejection (unverified domain) as a failure, not a delivery', async () => {
+    const docs = seedEvent();
+    const db = makeDb(docs);
+    const result = await sendDailyEmailForEvent(db, 'med-2026', {
+      ...baseDeps(),
+      send: (args) =>
+        sendEmail({
+          ...args,
+          sender: async () => ({
+            error: { name: 'validation_error', message: 'The gaycruisebingo.com domain is not verified' },
+          }),
+        }),
+    });
+    expect(result).toMatchObject({ sent: 0, failed: 2 });
+    expect(db.docs['events/med-2026/emailPrefs/theo']).not.toHaveProperty('lastSentDayIndex');
+    expect(db.docs['events/med-2026/emailPrefs/jess']).not.toHaveProperty('lastSentDayIndex');
   });
 
   it('excludes banned participants from both the roster and the standings', async () => {
