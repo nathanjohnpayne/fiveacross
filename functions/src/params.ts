@@ -8,8 +8,17 @@
 import { defineBoolean, defineSecret, defineString } from 'firebase-functions/params';
 
 export const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
+/**
+ * Default `from` address for every transactional send. MUST sit on a
+ * Resend-verified sending domain — as of 2026-08-05 the account's only
+ * verified sending domain is `mail.nathanpayne.com` (see #633; the prior
+ * apex-domain default was never verified, so Resend rejected every send and
+ * `sendEmail` swallowed it into a logged `false`, per ADR 0001's never-throw
+ * contract). Override per project in `functions/.env.<projectId>` — the Five
+ * Across deployment already does (`Vacay Bingo <fiveacross@mail.nathanpayne.com>`).
+ */
 export const EMAIL_FROM = defineString('EMAIL_FROM', {
-  default: 'Gay Cruise Bingo <gaycruisebingo@nathanpayne.com>',
+  default: 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
 });
 /**
  * Address replies land in, applied to every transactional send.

@@ -84,6 +84,16 @@ export function coerceEventPreview(v: unknown): EventPreview | undefined {
         valid = false;
         break;
       }
+      const prev = days[days.length - 1];
+      if (prev && date <= prev.date) {
+        // Strictly increasing, not just non-decreasing: `previewDayLine` uses
+        // array position as the Day ordinal, so a duplicate or out-of-order
+        // date would let two entries claim the same "next" slot or renumber
+        // Days out of sequence — same all-or-nothing failure mode as the
+        // per-entry checks above.
+        valid = false;
+        break;
+      }
       const day: EventPreviewDay = { date, title };
       const emoji = asText(e.emoji);
       if (emoji) day.emoji = emoji;

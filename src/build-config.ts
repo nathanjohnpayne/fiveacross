@@ -1,3 +1,31 @@
+export type AppVersionEnv = {
+  GITHUB_SHA?: string;
+  // Set on Vercel's own Git-integration builds (#665) — never on `vercel
+  // deploy` from a laptop, which is how the mirrors are actually published
+  // (docs/app/deploy-targets.md § Deploying a mirror passes GITHUB_SHA
+  // explicitly via --build-env instead).
+  VERCEL_GIT_COMMIT_SHA?: string;
+};
+
+/**
+ * Resolve the commit `__APP_VERSION__` bakes into the bundle.
+ *
+ * `resolveGitHead` is injected (rather than shelling out here) so this stays a
+ * pure function to unit-test: the CI/target-build case never reaches it
+ * because GITHUB_SHA is already set, and the local-dev case that does reach
+ * it depends on the checkout's actual git state, which a unit test should not
+ * have to fake.
+ */
+export function resolveAppVersion(env: AppVersionEnv, resolveGitHead: () => string): string {
+  if (env.GITHUB_SHA) return env.GITHUB_SHA.slice(0, 40);
+  if (env.VERCEL_GIT_COMMIT_SHA) return env.VERCEL_GIT_COMMIT_SHA.slice(0, 40);
+  try {
+    return resolveGitHead().trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
 export type FirebaseDeployBuild = {
   command: string;
   mode: string;
