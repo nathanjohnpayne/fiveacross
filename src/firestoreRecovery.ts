@@ -152,6 +152,8 @@ export interface PoisonRecoveryOptions {
   originReachable?: () => Promise<boolean>;
   /** Whether this document has a service-worker-controlled shell to reload into. */
   hasControllingServiceWorker?: () => boolean;
+  /** Bounded uncontrolled-page probe retry; exposed to keep the timing testable. */
+  reachabilityRetryMs?: number;
 }
 
 /** A controller is the cheap, reliable proof this page has the PWA shell to
@@ -187,6 +189,7 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
   const reload = options.reload ?? (() => window.location.reload());
   const canReachOrigin = options.originReachable ?? originReachable;
   const hasCachedShell = options.hasControllingServiceWorker ?? hasControllingServiceWorker;
+  const reachabilityRetryMs = options.reachabilityRetryMs ?? 5_000;
 
   /** Set the instant a reload is committed, so the burst that follows is inert. */
   let reloading = false;
@@ -196,6 +199,9 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
   let awaitingOnline = false;
   /** Retained so uninstall can cancel the deferred retry too. */
   let onlineRetry: (() => void) | null = null;
+  /** At most one timer retry for a nominally-online but unreachable origin. */
+  let reachabilityRetry: ReturnType<typeof setTimeout> | null = null;
+  let reachabilityRetrySpent = false;
   /** Report a refusal once per document; the amplifier below fires it in bursts. */
   let reportedRefusal = false;
   /** Makes every listener and an in-flight reachability probe inert after teardown. */
@@ -231,9 +237,25 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
     onlineRetry = () => {
       onlineRetry = null;
       awaitingOnline = false;
+      if (reachabilityRetry !== null) {
+        clearTimeout(reachabilityRetry);
+        reachabilityRetry = null;
+      }
       void recover(`${source}:online`);
     };
     listenerTarget.addEventListener('online', onlineRetry, { once: true });
+  }
+
+  function deferUntilReachable(source: string): void {
+    // `navigator.onLine` can remain true through a captive portal or a
+    // congested link. One bounded retry gets an independent signal without
+    // turning a poisoned tab into a background polling loop.
+    if (reachabilityRetrySpent || reachabilityRetry !== null || disposed) return;
+    reachabilityRetrySpent = true;
+    reachabilityRetry = setTimeout(() => {
+      reachabilityRetry = null;
+      void recover(`${source}:reachability-retry`);
+    }, reachabilityRetryMs);
   }
 
   async function recover(source: string): Promise<void> {
@@ -268,8 +290,9 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
     // portal, and reloading it into a browser error page is worse than leaving
     // the current, readable shell visible. Reuse shellRecovery's strict
     // redirect/same-origin/payload probe before that navigation. The pending
-    // latch folds the b815 burst into one probe, and a failed probe retries only
-    // on the next real `online` transition.
+    // latch folds the b815 burst into one probe. A failed probe gets one bounded
+    // retry as well as the `online` listener: nominal online status does not
+    // guarantee the browser will emit an offline→online transition.
     if (!hasCachedShell()) {
       recoveryPending = true;
       let reachable = false;
@@ -283,6 +306,7 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
       }
       if (disposed || reloading) return;
       if (!reachable) {
+        deferUntilReachable(source);
         deferUntilOnline(source);
         refuse('deferred-unreachable', source);
         return;
@@ -335,6 +359,7 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
     listenerTarget.removeEventListener('error', onError);
     listenerTarget.removeEventListener('unhandledrejection', onRejection);
     if (onlineRetry) listenerTarget.removeEventListener('online', onlineRetry);
+    if (reachabilityRetry !== null) clearTimeout(reachabilityRetry);
     onlineRetry = null;
     awaitingOnline = false;
   };

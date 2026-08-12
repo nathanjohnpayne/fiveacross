@@ -65,6 +65,7 @@ function harness(options: Omit<PoisonRecoveryOptions, 'target' | 'reload'> = {})
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -338,6 +339,23 @@ describe('offline', () => {
     target.dispatchEvent(new Event('online'));
     await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
     expect(canReachOrigin).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries an uncontrolled nominally-online page once even without an online event', async () => {
+    vi.useFakeTimers();
+    const canReachOrigin = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const { reload, poison } = harness({
+      hasControllingServiceWorker: () => false,
+      originReachable: canReachOrigin,
+      reachabilityRetryMs: 1,
+    });
+    poison();
+    await vi.runAllTicks();
+    expect(canReachOrigin).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(canReachOrigin).toHaveBeenCalledTimes(2);
+    expect(reload).toHaveBeenCalledOnce();
   });
 });
 
