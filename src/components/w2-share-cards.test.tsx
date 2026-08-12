@@ -152,8 +152,10 @@ afterEach(() => {
   Reflect.deleteProperty(window.navigator, 'userActivation');
   // shareCardBlob's terminal fallback sheet (#712 round 3) mounts on
   // document.body OUTSIDE any React root, so RTL's cleanup cannot take it
-  // down — a leaked sheet would answer the next test's role queries.
-  document.querySelector('.share-fallback-backdrop')?.remove();
+  // down. Dismiss it through the component's one close path: bare removal
+  // would retain its key listener, singleton teardown handle, and preview URL.
+  const closeFallback = screen.queryByRole('button', { name: 'Close' });
+  if (closeFallback) fireEvent.click(closeFallback);
   // Same for the stand-in Share triggers the round-4 focus tests plant on the
   // body to play the part of the opener.
   document.querySelectorAll('[data-test-share-opener]').forEach((node) => node.remove());
@@ -428,6 +430,17 @@ const indexCssPath = join(dirname(fileURLToPath(import.meta.url)), '../index.css
 const indexCss = readFileSync(indexCssPath, 'utf8');
 
 describe('ShareCard CSS — .share-card-title contrast', () => {
+  it('keeps the fallback sheet reachable on short viewports and its empty status registered as a live region', () => {
+    const sheet = indexCss.match(/\.share-fallback\s*\{([^}]*)\}/)?.[1] ?? '';
+    const preview = indexCss.match(/\.share-fallback-preview\s*\{([^}]*)\}/)?.[1] ?? '';
+    const emptyStatus = indexCss.match(/\.share-fallback-status:empty\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(sheet).toMatch(/max-height:\s*calc\(100dvh - 32px\)/);
+    expect(sheet).toMatch(/overflow-y:\s*auto/);
+    expect(preview).toMatch(/max-height:\s*min\(180px, 32dvh\)/);
+    expect(emptyStatus).not.toMatch(/display:\s*none/);
+    expect(emptyStatus).toMatch(/clip:\s*rect\(0 0 0 0\)/);
+  });
+
   it('fills the title with var(--ink), not a hardcoded hex', () => {
     // Hardcoded #fff was invisible against summer-white's light --bg — the
     // same failure issue #71 already fixed for the (since-removed, #39/ADR

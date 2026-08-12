@@ -1767,8 +1767,12 @@ textarea.input {
 .share-fallback-backdrop {
   align-items: center;
   padding: 16px;
+  overflow-y: auto;
 }
 .share-fallback {
+  box-sizing: border-box;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
   border-radius: 18px;
   padding: 16px;
 }
@@ -1807,7 +1811,7 @@ textarea.input {
 .share-fallback-preview {
   display: block;
   width: 100%;
-  max-height: 180px;
+  max-height: min(180px, 32dvh);
   margin: 0 0 12px;
   object-fit: contain;
   border-radius: 12px;
@@ -1822,7 +1826,13 @@ textarea.input {
   color: var(--ink);
 }
 .share-fallback-status:empty {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 /* #fff below is a deliberate, documented exemption from issue #72's "no
    hardcoded #fff text fill" rule (specs/theme-on-color-contrast.md): the
