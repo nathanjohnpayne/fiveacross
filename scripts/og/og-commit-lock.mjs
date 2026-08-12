@@ -44,7 +44,40 @@
 // killed or crashed process and stolen rather than waited on forever — a
 // hard-killed renderer must not brick every future commit to that
 // destination.
-import { closeSync, existsSync, linkSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+//
+// Round 8 (#713, id 3762932710): stealing an abandoned lock says nothing
+// about what state `dest`/`mirror` were left in. If the dead holder was
+// killed between `commitStaged`'s `renameSync` and its `copyFileSync` (see
+// that function's header), `dest` already has the new bytes and `mirror`
+// does not — a torn pair — and neither of `commitStaged`'s own cleanup
+// paths (the success-path unlink, the catch-block rollback) ever ran to
+// notice or fix it, because both run synchronously in the process that no
+// longer exists. Codex asked this module to recover that state
+// automatically before letting a new commit proceed. It does not: doing so
+// SAFELY needs a durable, fsync-ordered completion marker this module has
+// no infrastructure for — a leftover `*.rollback-tmp.*` backup is
+// consistent with an interrupted commit, but is equally consistent with a
+// commit that finished every entry correctly and was killed only during its
+// own final backup cleanup, and blindly restoring from it in that case
+// would silently UNDO a fully successful commit (see the header on
+// `commitStaged` in og-stage-commit.mjs for the full rebuttal). What this
+// module does instead is cheap and safe: `stealIfStale` checks whether a
+// leftover backup exists for the destination it is about to steal, and if
+// so, says so loudly — surfacing the evidence to the operator, who is
+// about to overwrite both files with a fresh render anyway and can check
+// `git status`/`git diff` first if that is not what they expected.
+import {
+  closeSync,
+  existsSync,
+  linkSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 const POLL_MS = 25;
@@ -76,6 +109,22 @@ function tryUnlink(p) {
     unlinkSync(p);
   } catch {
     // Already gone — fine.
+  }
+}
+
+/** True if `og-stage-commit.mjs`'s `commitStaged` left an unfinished
+ *  rollback backup for `dest` on disk — detection only, never read or acted
+ *  on beyond that (see the round-8 note above for why acting on it would be
+ *  unsound). Matches by prefix, not an exact name, because the backup's
+ *  suffix carries a per-call token (`${dest}.rollback-tmp.<token>`, round 6)
+ *  this module has no reason to know the shape of beyond that prefix. */
+function hasLeftoverRollbackBackup(dest) {
+  const dir = dirname(dest);
+  const prefix = `${basename(dest)}.rollback-tmp.`;
+  try {
+    return readdirSync(dir).some((name) => name.startsWith(prefix));
+  } catch {
+    return false;
   }
 }
 
@@ -199,11 +248,18 @@ function stealIfStale(dest) {
   }
   try {
     unlinkSync(lockPath);
+    const leftoverBackup = hasLeftoverRollbackBackup(dest);
     console.warn(
       `og-commit-lock: stole an abandoned lock at ${lockPath} ` +
         `(holder pid ${Number.isInteger(holderPid) ? holderPid : 'unknown'}, ` +
         `${holderLooksAlive ? 'still running but' : 'no longer running,'} ` +
-        `${(ageMs / 1000).toFixed(0)}s old).`,
+        `${(ageMs / 1000).toFixed(0)}s old).` +
+        (leftoverBackup
+          ? ` A rollback backup for ${dest} is still on disk — the previous holder may have been ` +
+            `killed mid-commit, which can leave ${dest} and its mirror out of sync. This run will ` +
+            `overwrite both with a fresh, consistent render; check git status/git diff first if ` +
+            `that is not what you expected.`
+          : ''),
     );
   } catch {
     // Someone else already stole or released it — fine, the next

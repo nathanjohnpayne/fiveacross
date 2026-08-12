@@ -123,7 +123,48 @@ function rollback(backups) {
  *  but that means any NEW caller that publishes to a shared destination
  *  MUST acquire that same lock for the whole call first, or the race
  *  reopens. See og-stage-commit.test.mjs's "exercised through the locked
- *  path" tests for the shape that takes. */
+ *  path" tests for the shape that takes.
+ *
+ *  Rebuttal — process death mid-commit (round 8, #713, id 3762932710):
+ *  Codex asked this module to "persist enough transaction state to recover
+ *  an interrupted commit" — i.e. if this function is killed (SIGKILL, a
+ *  crash, a machine shutdown) between the `renameSync` and the
+ *  `copyFileSync` for one entry, a later invocation should detect and
+ *  repair the resulting torn `dest`/mirror pair before proceeding, rather
+ *  than leaving that to `catch`, which a killed process never reaches.
+ *  Not implemented, for two reasons:
+ *
+ *  1. It is not safe to build from what this module already writes. The
+ *     per-entry backup IS durable transaction state, but its mere presence
+ *     is ambiguous: it exists both while an entry is mid-commit AND in the
+ *     narrow window after every entry has committed correctly but before
+ *     the final cleanup loop (right below) has unlinked it. A recovery
+ *     routine that restores from a leftover backup on sight cannot tell
+ *     those two cases apart without a further durable, fsync-ordered
+ *     "this call fully succeeded" marker this module has no infrastructure
+ *     for — and getting that wrong in the second case would silently undo
+ *     a fully successful commit, which is worse than the torn state it was
+ *     trying to fix.
+ *  2. The blast radius the torn state creates does not warrant that
+ *     infrastructure here. `render-og-editions.mjs` is manual and local
+ *     (see its header) — a human runs it, watches it, and commits its
+ *     output through ordinary code review, never an automated or
+ *     unattended path. A crash landing in the single-syscall gap between
+ *     `renameSync` and `copyFileSync` is far narrower than the
+ *     multi-second, multi-process windows rounds 2 through 7 closed. If it
+ *     is hit anyway, `src/recon-share-og.test.ts` already fails on a
+ *     dest/mirror byte mismatch before anything reaches a PR, and the
+ *     renderer's own next run is a full fresh overwrite of both files —
+ *     not an incremental patch — so simply re-running it (which an
+ *     operator whose command just died naturally does) self-heals the
+ *     torn pair without needing to know it happened.
+ *
+ *  What IS added instead, because it is cheap and can never itself cause
+ *  harm: og-commit-lock.mjs's `stealIfStale` checks whether a leftover
+ *  backup exists for a destination it is about to steal an abandoned lock
+ *  for, and warns loudly if so — surfacing exactly the evidence Codex's
+ *  finding is about, without acting on it. See the round-8 note on that
+ *  module. */
 export function commitStaged(staged) {
   const token = `${process.pid}-${randomBytes(4).toString('hex')}`;
   const backups = [];

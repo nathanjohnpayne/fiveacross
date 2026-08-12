@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isLocked, withDestinationLocks } from './og-commit-lock.mjs';
 
 let dir;
@@ -106,6 +106,45 @@ describe('withDestinationLocks — abandoned-lock recovery', () => {
     const release = withDestinationLocks([{ dest }], { timeoutMs: 3000 });
     expect(isLocked(dest)).toBe(true); // now held by THIS process
     release();
+  });
+
+  it('warns about a leftover rollback backup when stealing a lock left by a killed commit (#713 round 8, id 3762932710)', () => {
+    const dest = join(dir, 'gcb.png');
+    const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    writeFileSync(`${dest}.commit-lock`, `${dead.pid}\n`);
+    // og-stage-commit.mjs's commitStaged writes this before its rename+copy
+    // and only removes it via one of its own two cleanup paths (success
+    // unlink or catch-block rollback) — both of which run inside the same
+    // process. Still being on disk once that process is confirmed dead is
+    // exactly the durable trace of a commit killed before it reached
+    // either one.
+    writeFileSync(`${dest}.rollback-tmp.99999-deadbeef`, 'stale-backup-bytes');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const release = withDestinationLocks([{ dest }], { timeoutMs: 3000 });
+      release();
+      const messages = warnSpy.mock.calls.map((args) => args.join(' '));
+      expect(messages.some((m) => m.includes('rollback backup') && m.includes(dest))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not mention a rollback backup when stealing a lock with no leftover backup', () => {
+    const dest = join(dir, 'gcb.png');
+    const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    writeFileSync(`${dest}.commit-lock`, `${dead.pid}\n`);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const release = withDestinationLocks([{ dest }], { timeoutMs: 3000 });
+      release();
+      const messages = warnSpy.mock.calls.map((args) => args.join(' '));
+      expect(messages.some((m) => m.includes('rollback backup'))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
