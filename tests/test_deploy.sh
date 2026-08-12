@@ -336,26 +336,26 @@ fi
 # Case 6 (#142): the post-deploy synthetic runs by default and the deploy
 # completes when it passes. The `npm` stub records `run … test:synthetic`.
 # ---------------------------------------------------------------------------
-REPO5="$WORKDIR/case5-synthetic-runs"
-init_fixture_repo "$REPO5"
-OUT5="$WORKDIR/case5.out"
-ERR5="$WORKDIR/case5.err"
-: >"$WORKDIR/ofd-calls-5.log"
-: >"$WORKDIR/npm-calls-5.log"
+REPO6="$WORKDIR/case6-synthetic-runs"
+init_fixture_repo "$REPO6"
+OUT6="$WORKDIR/case6.out"
+ERR6="$WORKDIR/case6.err"
+: >"$WORKDIR/ofd-calls-6.log"
+: >"$WORKDIR/npm-calls-6.log"
 
 set +e
 PATH="$STUB_DIR:$PATH" \
-OFD_LOG="$WORKDIR/ofd-calls-5.log" \
-NPM_LOG="$WORKDIR/npm-calls-5.log" \
-  bash -c "cd '$REPO5' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
-  >"$OUT5" 2>"$ERR5"
-RC5=$?
+OFD_LOG="$WORKDIR/ofd-calls-6.log" \
+NPM_LOG="$WORKDIR/npm-calls-6.log" \
+  bash -c "cd '$REPO6' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
+  >"$OUT6" 2>"$ERR6"
+RC6=$?
 set -e
 
-if [[ $RC5 -ne 0 ]]; then
-  fail "synthetic-runs: deploy.sh returned $RC5 though the stubbed synthetic passed. stderr was:"
-  cat "$ERR5" >&2
-elif ! grep -q 'test:synthetic' "$WORKDIR/npm-calls-5.log"; then
+if [[ $RC6 -ne 0 ]]; then
+  fail "synthetic-runs: deploy.sh returned $RC6 though the stubbed synthetic passed. stderr was:"
+  cat "$ERR6" >&2
+elif ! grep -q 'test:synthetic' "$WORKDIR/npm-calls-6.log"; then
   fail "synthetic-runs: deploy.sh did not invoke the post-deploy synthetic (npm run test:synthetic)."
 else
   pass "synthetic-runs: deploy.sh runs the post-deploy synthetic and completes when it passes."
