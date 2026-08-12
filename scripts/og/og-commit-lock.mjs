@@ -141,14 +141,37 @@ function tryAcquireOne(dest) {
  *  remove it so a later `tryAcquireOne` can succeed. A no-op (not an error)
  *  if the lock is still healthy, or has already been removed or stolen by
  *  someone else since the caller's last failed `tryAcquireOne` — either way
- *  the next poll's `tryAcquireOne` is the source of truth. */
+ *  the next poll's `tryAcquireOne` is the source of truth.
+ *
+ *  Ownership re-check before delete (id 3762857439, #713 round 7): staleness
+ *  is decided from a `readFileSync` + `statSync` snapshot taken at the top
+ *  of this function, but the `unlinkSync` that acts on that decision used to
+ *  run afterward with no re-verification. In the window between them, the
+ *  lock's actual OWNER can change: the holder this call judged stale can
+ *  release normally right as another waiter's `tryAcquireOne` publishes a
+ *  brand-new, fully healthy lock at the same `lockPath` (via `linkSync`,
+ *  same as this file's `tryAcquireOne`). An unconditional `unlinkSync` at
+ *  that point deletes the REPLACEMENT lock, not the stale one this call
+ *  reasoned about — so the process that just legitimately acquired it loses
+ *  its lock without knowing, and a later poll lets a second process in
+ *  alongside it. Deleting a lock therefore has to prove, immediately before
+ *  the delete, that the file at `lockPath` is still the SAME file this
+ *  function inspected — not merely a file with the same name. `dev`+`ino`
+ *  identity (captured from the first `statSync`, re-checked with a second
+ *  one right before `unlinkSync`) is that proof: a replacement lock is a
+ *  new inode even though the path is unchanged, so a mismatch here means
+ *  "someone already replaced what I was about to delete" and this call
+ *  backs off instead — the next `tryAcquireOne`/`stealIfStale` poll is what
+ *  decides the replacement's own fate, on its own merits. */
 function stealIfStale(dest) {
   const lockPath = lockPathFor(dest);
   let holderPid;
   let mtimeMs;
+  let dev;
+  let ino;
   try {
     holderPid = Number.parseInt(readFileSync(lockPath, 'utf8').trim(), 10);
-    mtimeMs = statSync(lockPath).mtimeMs;
+    ({ mtimeMs, dev, ino } = statSync(lockPath));
   } catch {
     return;
   }
@@ -159,6 +182,21 @@ function stealIfStale(dest) {
   const ageMs = Math.max(0, Date.now() - mtimeMs);
   const holderLooksAlive = Number.isInteger(holderPid) && pidAlive(holderPid);
   if (holderLooksAlive && ageMs < STALE_MS) return;
+  let current;
+  try {
+    current = statSync(lockPath);
+  } catch {
+    // Already gone — someone else's release or steal beat us here. Nothing
+    // to delete.
+    return;
+  }
+  if (current.dev !== dev || current.ino !== ino) {
+    // The file at `lockPath` is no longer the one we judged stale — a
+    // waiter's healthy `linkSync` publish landed in the window between our
+    // two stats. Do NOT delete another process's live lock; leave it for
+    // the next poll to evaluate on its own.
+    return;
+  }
   try {
     unlinkSync(lockPath);
     console.warn(
