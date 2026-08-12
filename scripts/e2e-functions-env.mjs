@@ -80,6 +80,7 @@ const PARAMS_MODULE = 'firebase-functions/params';
  */
 function constructorBindings(sourceFile) {
   const bindings = new Map();
+  const namespaces = new Set();
   for (const statement of sourceFile.statements) {
     if (
       !ts.isImportDeclaration(statement) ||
@@ -97,24 +98,33 @@ function constructorBindings(sourceFile) {
           bindings.set(element.name.text, kind[1]);
         }
       }
+    } else if (named && ts.isNamespaceImport(named)) {
+      namespaces.add(named.name.text);
     }
   }
-  return bindings;
+  return { bindings, namespaces };
 }
 
 /**
- * The constructor kind a call expression invokes, or null when it is not a param
- * declaration at all.
+ * The constructor kind a call invokes, or null when it is not a param
+ * declaration.
  *
- * The bare-name fallback covers two real cases: a namespace import
- * (`params.defineString(…)`), and the standalone call fragments the sibling spec
- * builds, which have no import to resolve against.
+ * Resolved from the IMPORT, never from how the call is spelled. A module with an
+ * unrelated local `defineString(…)` helper, or a `schema.defineString(…)` method,
+ * would otherwise read as declaring a Firebase param — and the generator would
+ * abort every e2e run demanding a value for a param the emulator has never heard
+ * of (Codex P2 on PR #730). Provenance is the only thing that distinguishes the
+ * two, and the earlier name-shaped fallback did not have it.
  */
-function constructorKindOf(call, bindings) {
+function constructorKindOf(call, { bindings, namespaces }) {
   if (ts.isIdentifier(call.expression)) {
-    return bindings.get(call.expression.text) ?? CONSTRUCTOR_RE.exec(call.expression.text)?.[1] ?? null;
+    return bindings.get(call.expression.text) ?? null;
   }
-  if (ts.isPropertyAccessExpression(call.expression)) {
+  if (
+    ts.isPropertyAccessExpression(call.expression) &&
+    ts.isIdentifier(call.expression.expression) &&
+    namespaces.has(call.expression.expression.text)
+  ) {
     return CONSTRUCTOR_RE.exec(call.expression.name.text)?.[1] ?? null;
   }
   return null;
@@ -298,10 +308,20 @@ export function declaredParamNamesAcross(sources) {
   return { params: [...params], secrets: [...secrets] };
 }
 
-/** Every TypeScript module under the Functions source tree, with its path. */
+/**
+ * Every module under the Functions source tree that the build can load.
+ *
+ * Not `.ts` alone: the tree ships `bugReportContract.cjs`, imported from
+ * `bugReportCore.ts`, so a `.ts`-only filter would miss a param declared there
+ * while the params.ts declarations kept the zero-match guard satisfied (Codex P2
+ * on PR #730). The TypeScript scanner reads plain JavaScript perfectly well, so
+ * covering the rest costs nothing.
+ */
+const LOADABLE_SOURCE_RE = /\.(?:[cm]?ts|[cm]?js|tsx|jsx)$/;
+
 export function functionsSources(directory) {
   return readdirSync(directory, { recursive: true })
-    .filter((entry) => typeof entry === 'string' && entry.endsWith('.ts'))
+    .filter((entry) => typeof entry === 'string' && LOADABLE_SOURCE_RE.test(entry))
     .sort()
     .map((entry) => ({
       label: join(directory, entry),

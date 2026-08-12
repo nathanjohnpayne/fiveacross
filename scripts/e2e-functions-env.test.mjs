@@ -27,6 +27,10 @@ const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf
 
 const PARAMS_SOURCE = read('../functions/src/params.ts');
 const PROJECT_ID = 'demo-gaycruisebingo-e2e';
+// Provenance is what marks a call as a param declaration, so every fragment
+// below imports for real rather than relying on a name-shaped guess.
+const IMPORT =
+  "import { defineString, defineBoolean, defineSecret, defineInt, defineFloat, defineList } from 'firebase-functions/params';";
 
 // The regression this file exists for (#724). `npm run test:e2e` is a local
 // smoke runner that app-ci deliberately does not execute, so nothing in CI ever
@@ -62,12 +66,13 @@ describe('e2e functions dotenv generation', () => {
   // guard quiet, and every assertion still passes.
   it('catches every param constructor, including ones this repo does not use yet', () => {
     const exotic = [
-      "defineFloat('SAMPLE_RATE', { default: 0.5 })",
-      "defineInt('BATCH_SIZE', { default: 10 })",
-      "defineList('ALLOWED_HOSTS', { default: [] })",
-      // Not an SDK export today. A constructor a future firebase-functions adds
-      // must be caught without an edit to DEFINE_CALL_RE.
-      "defineDuration('RETRY_BACKOFF')",
+      // `defineDuration` is not an SDK export today: a constructor a future
+      // firebase-functions adds must be caught without an edit to CONSTRUCTOR_RE.
+      "import { defineFloat, defineInt, defineList, defineDuration } from 'firebase-functions/params';",
+      "export const A = defineFloat('SAMPLE_RATE', { default: 0.5 });",
+      "export const B = defineInt('BATCH_SIZE', { default: 10 });",
+      "export const C = defineList('ALLOWED_HOSTS', { default: [] });",
+      "export const D = defineDuration('RETRY_BACKOFF');",
     ].join('\n');
 
     expect(declaredParamNames(exotic).params).toEqual([
@@ -90,8 +95,8 @@ describe('e2e functions dotenv generation', () => {
   // skipped is indistinguishable from not existing — the hang comes back and
   // every assertion here still passes.
   it('reads a backtick literal, and rejects a name it cannot resolve', () => {
-    const backticked = 'export const A = defineString(`SMTP_BRIDGE_URL`, { default: "" });';
-    const computed = "export const A = defineString(PARAM_NAME, { default: '' });";
+    const backticked = `${IMPORT}\nexport const A = defineString(\`SMTP_BRIDGE_URL\`, { default: '' });`;
+    const computed = `${IMPORT}\nexport const A = defineString(PARAM_NAME, { default: '' });`;
 
     expect(declaredParamNames(backticked).params).toEqual(['SMTP_BRIDGE_URL']);
     expect(() => declaredParamNames(computed)).toThrow(/defineString\(…\)/);
@@ -156,6 +161,7 @@ describe('e2e functions dotenv generation', () => {
   // confuse the two.
   it('does not lose a declaration bracketed by comment delimiters inside strings', () => {
     const stringsWithDelimiters = [
+      IMPORT,
       'const opening = `/* this is data, not a comment`;',
       "export const A = defineString('NEW_PARAM');",
       'const closing = `and this closes it */`;',
@@ -183,7 +189,7 @@ describe('e2e functions dotenv generation', () => {
   it('finds a param declared outside params.ts', () => {
     const spread = [
       { label: 'functions/src/params.ts', text: PARAMS_SOURCE },
-      { label: 'functions/src/handler.ts', text: "export const S = defineString('SMTP_BRIDGE_URL');" },
+      { label: 'functions/src/handler.ts', text: `${IMPORT}\nexport const S = defineString('SMTP_BRIDGE_URL');` },
     ];
 
     expect(declaredParamNamesAcross(spread).params).toContain('SMTP_BRIDGE_URL');
@@ -194,6 +200,44 @@ describe('e2e functions dotenv generation', () => {
 
     expect(tree.length).toBeGreaterThan(1);
     expect(declaredParamNamesAcross(tree)).toEqual(declaredParamNames(PARAMS_SOURCE));
+  });
+
+  // Codex P2 on PR #730: the earlier fallback classified a call by how it was
+  // SPELLED, so an unrelated local helper or object method named defineString
+  // read as a Firebase param — and the generator then aborted every run
+  // demanding a value the emulator has never heard of.
+  it('ignores a look-alike call that did not come from the params module', () => {
+    const impostors = [
+      'function defineString(name) { return name; }',
+      "export const A = defineString('NOT_A_PARAM');",
+      'const schema = { defineString: (name) => name };',
+      "schema.defineString('ALSO_NOT_A_PARAM');",
+    ].join('\n');
+
+    const scanned = declaredParamNamesAcross([
+      { label: 'functions/src/params.ts', text: PARAMS_SOURCE },
+      { label: 'functions/src/impostor.ts', text: impostors },
+    ]);
+
+    expect(scanned.params).not.toContain('NOT_A_PARAM');
+    expect(scanned.params).not.toContain('ALSO_NOT_A_PARAM');
+    expect(scanned).toEqual(declaredParamNames(PARAMS_SOURCE));
+  });
+
+  // Codex P2 on PR #730: the tree ships bugReportContract.cjs, loaded from
+  // bugReportCore.ts, so a `.ts`-only filter had a real blind spot.
+  it('scans non-TypeScript modules the Functions build can load', () => {
+    const scanned = functionsSources(new URL('../functions/src', import.meta.url).pathname);
+
+    expect(scanned.map(({ label }) => label)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/bugReportContract\.cjs$/)]),
+    );
+    expect(
+      declaredParamNamesAcross([
+        { label: 'functions/src/params.ts', text: PARAMS_SOURCE },
+        { label: 'functions/src/legacy.cjs', text: `${IMPORT}\nexports.A = defineString('CJS_PARAM');` },
+      ]).params,
+    ).toContain('CJS_PARAM');
   });
 
   it('separates secrets from plain params', () => {
