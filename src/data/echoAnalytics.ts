@@ -36,15 +36,21 @@ export function stampEchoAnalyticsTransitions(params: {
   uid: string;
   dayIndex: number;
   boardSeed: number | undefined;
-  trigger: EchoAnalyticsTrigger;
-  limit?: number;
+ trigger: EchoAnalyticsTrigger;
+ limit?: number;
+  /** Positions already marked on the discarded Board. A reshuffle must spend
+   * its limited identities on positions that are actual Firestore false→true
+   * transitions, not merely the lowest indexes on the replacement card. */
+  excludeMarkedIndexes?: ReadonlySet<number>;
 }): Cell[] {
   const limit = params.limit ?? Number.POSITIVE_INFINITY;
   if (limit <= 0) return params.cells;
+  const excluded = params.excludeMarkedIndexes ?? new Set<number>();
   const candidates = new Set(
     params.changed
       .filter(
         (cell) =>
+          !excluded.has(cell.index) &&
           cell.echo === true &&
           typeof cell.echoGeneration === 'number' &&
           Number.isSafeInteger(cell.echoGeneration) &&

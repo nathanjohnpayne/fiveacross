@@ -1134,6 +1134,12 @@ export async function reshuffleBoard(params: {
     // that invariant is ever relaxed).
     const priorMarkedCount = countMarked(priorBoardCells);
     const netNewEchoCount = Math.max(0, rawEchoRes.squaresMarked - priorMarkedCount);
+    // The server trigger compares matching cell indexes in the before/after
+    // Board map. When a reshuffle keeps an Echo at an old marked index, that
+    // position is not a false→true write and cannot carry one of the limited
+    // net-new identities; spend the identity on a replacement position whose
+    // prior index was unmarked instead.
+    const priorMarkedIndexes = new Set(priorBoardCells.filter((cell) => cell.marked).map((cell) => cell.index));
     const echoRes = {
       ...rawEchoRes,
       cells: stampEchoAnalyticsTransitions({
@@ -1145,6 +1151,7 @@ export async function reshuffleBoard(params: {
         boardSeed: seed,
         trigger: 'reshuffle',
         limit: netNewEchoCount,
+        excludeMarkedIndexes: priorMarkedIndexes,
       }),
     };
     reshuffleEcho = echoRes.changed

@@ -59,6 +59,26 @@ describe('persisted Echo analytics identities', () => {
     expect(echoAnalyticsIds(suppressed)).toEqual([]);
   });
 
+  it('spends a reshuffle identity on a position that is newly marked on the committed Board', () => {
+    const echoed = applyEchoes([cell({ index: 0 }), cell({ index: 1 })], new Set(['shared']), 1);
+    const stamped = stampEchoAnalyticsTransitions({
+      cells: echoed.cells,
+      changed: echoed.cells,
+      eventId: 'event',
+      uid: 'player',
+      dayIndex: 2,
+      boardSeed: 42,
+      trigger: 'reshuffle',
+      limit: 1,
+      // Index 0 was already marked on the discarded card. The Firestore
+      // observer correctly suppresses it, so the single identity must land on
+      // index 1 where this replacement is a real false→true transition.
+      excludeMarkedIndexes: new Set([0]),
+    });
+    expect(stamped[0].echoAnalyticsId).toBeUndefined();
+    expect(stamped[1].echoAnalyticsId).toEqual(expect.any(String));
+  });
+
   it('replaces an old identity when a non-Board reversal re-earns an Echo', () => {
     const prior = echoAnalyticsId({
       eventId: 'event',
