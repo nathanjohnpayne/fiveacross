@@ -76,11 +76,22 @@ interface Props {
   // The Prompt's already-subscribed Tally count (ADR 0002 — no new read) for the
   // "🔥 Marked by N others so far" heat line.
   tallyCount?: number;
+  // The control that opened this sheet, captured by the caller BEFORE the state
+  // update that mounts us. Optional; `document.activeElement` at mount is the
+  // fallback and stays correct for every caller that does not neutralize the
+  // surface behind the sheet. Board does: it marks the card `inert` in the same
+  // commit that mounts this sheet, and the HTML spec has a user agent move
+  // focus out of a subtree that becomes inert — so by the time the passive
+  // effect below runs, `document.activeElement` may already be `<body>` and the
+  // restore on close would drop the Player back to the top of the page instead
+  // of the Square they came from (Codex P2, round 6). Chrome measurably keeps
+  // focus, but relying on that is relying on one engine's behaviour.
+  restoreFocusTo?: HTMLElement | null;
   onClose: () => void;
 }
 
 export default function ProofSheet(props: Props) {
-  const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, onClose } = props;
+  const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, restoreFocusTo, onClose } = props;
   // Photo opens pre-selected (#309, folding in the #310 row-16 parity note):
   // the wireframe paints the claim sheet with the Photo body OPEN — Take photo
   // + Library visible on first paint — which drops one tap from the mainline
@@ -134,8 +145,12 @@ export default function ProofSheet(props: Props) {
   // is captured at mount rather than held as a `triggerRef`: the sheet opens from
   // any of 25 Squares or their ＋ proof-add buttons, so there is no single
   // trigger node to point at — the same reasoning FeedWhoListSheet documents.
+  // Read through a ref for the same reason `onClose` is: the effect below runs
+  // exactly once per mount, so it must not list this in its deps.
+  const restoreFocusToRef = useRef(restoreFocusTo);
   useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const previouslyFocused =
+      restoreFocusToRef.current ?? (document.activeElement as HTMLElement | null);
     titleRef.current?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {

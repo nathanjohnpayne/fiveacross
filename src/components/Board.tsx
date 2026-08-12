@@ -763,6 +763,14 @@ export default function Board() {
   // wholesale on a board-identity change (the edgeStateKey adjust block).
   const [stamped, setStamped] = useState<ReadonlySet<number>>(() => new Set());
   const [proofTarget, setProofTarget] = useState<Cell | null>(null);
+  // The control that opened the claim sheet, captured in the click handler —
+  // BEFORE the state update whose commit marks this card `inert`. ProofSheet
+  // restores focus here on close; left to its own `document.activeElement`
+  // read, it samples in a passive effect that runs after that commit, and the
+  // HTML spec has a user agent move focus out of a subtree that becomes inert
+  // (Codex P2, round 6). Null for an open with no trigger — the Feed's
+  // open-this-Square intent — where the sheet's own fallback is right.
+  const proofTriggerRef = useRef<HTMLElement | null>(null);
   const [tallyTarget, setTallyTarget] = useState<Cell | null>(null);
   // The Reshuffle confirm sheet (#378). Parent-owned open flag, like the sheets
   // above; the eligibility gate that decides whether the chip exists at all is
@@ -1644,7 +1652,14 @@ export default function Board() {
     }
     if (!cellsAttributable || cells.length === 0) return;
     const cell = cells.find((c) => !c.free && c.itemId === openSquareIntent.itemId);
-    if (cell) setProofTarget(cell);
+    if (cell) {
+      // Opened by a Feed Tally Card, not by a control on this card — clear any
+      // trigger a previous open left behind so the sheet falls back to its own
+      // `document.activeElement` read rather than restoring focus to an
+      // unrelated Square.
+      proofTriggerRef.current = null;
+      setProofTarget(cell);
+    }
     clearOpenSquare();
   }, [openSquareIntent, hasDays, viewedIndex, cells, cellsAttributable]);
 
@@ -2449,7 +2464,12 @@ export default function Board() {
               className="cell-claim"
               aria-label={squareLabel(c)}
               title={c.free ? 'Free space—already marked' : undefined}
-              onClick={() => toggle(c)}
+              onClick={(e) => {
+                // Capture BEFORE the state update: the commit that mounts the
+                // claim sheet is the same one that marks this card inert.
+                proofTriggerRef.current = e.currentTarget;
+                toggle(c);
+              }}
             >
               {c.free ? (
                 <>
@@ -2480,6 +2500,7 @@ export default function Board() {
                   // it would attach a proof (and broadcast a Moment) for the
                   // current uid off the wrong card.
                   if (!cellsAttributable) return;
+                  proofTriggerRef.current = e.currentTarget;
                   setProofTarget(c);
                 }}
               >
@@ -2654,6 +2675,9 @@ export default function Board() {
                   void doMark(target, true);
                 }
           }
+          // Captured in the opening control's click handler, before the commit
+          // that marks this card inert — see `proofTriggerRef`.
+          restoreFocusTo={proofTriggerRef.current}
           onClose={() => setProofTarget(null)}
         />
       )}

@@ -1916,6 +1916,32 @@ describe('board inert while an overlay is up', () => {
     expect(boardArea()).not.toHaveAttribute('inert');
   });
 
+  it('hands the claim sheet the control that opened it, captured before the card goes inert', () => {
+    // ProofSheet restores focus on close. Left to its own `document.activeElement`
+    // read it samples in a passive effect, which runs AFTER the commit that marks
+    // this card inert — and the HTML spec has a user agent move focus out of a
+    // subtree that becomes inert, so that read can be `<body>` (Codex P2, round
+    // 6). Board therefore captures the trigger synchronously in the click
+    // handler. jsdom implements no inert behaviour and cannot reproduce the
+    // eviction, so this pins the hand-off itself: the sheet is given the exact
+    // Square button that opened it.
+    dismissOneTimeOverlays();
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    const claim = document.querySelectorAll<HTMLButtonElement>('.grid .cell > button.cell-claim')[0];
+    fireEvent.click(claim);
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+
+    // Focus lands back on the Square that opened the sheet. This is only true
+    // because Board handed the sheet an explicit trigger: `fireEvent.click`
+    // does not move focus in jsdom, so the sheet's own `document.activeElement`
+    // fallback would have captured `<body>` and restored nothing.
+    expect(document.activeElement).toBe(claim);
+  });
+
   it('releases the card when another tab dismissed an overlay this tab never showed', () => {
     // The desync that made mirroring the stored flags unsafe (Codex P2, round
     // 2): a mirror only moves on THIS tab's onDismiss, while the overlay
