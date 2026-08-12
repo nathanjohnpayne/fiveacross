@@ -13,12 +13,12 @@ const H = vi.hoisted(() => ({
   orderBy: vi.fn((field) => ({ field })),
   query: vi.fn(() => ({})),
   startAfter: vi.fn(),
-  track: vi.fn(() => true),
+  trackToAnalyticsSinks: vi.fn(() => ({ ga4: true, posthog: true })),
   isLocalDirectMarkRequest: vi.fn(() => false),
 }));
 
 vi.mock('firebase/firestore', () => H);
-vi.mock('../analytics', () => ({ track: H.track }));
+vi.mock('../analytics', () => ({ trackToAnalyticsSinks: H.trackToAnalyticsSinks }));
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'event' }));
 vi.mock('./markAnalytics', () => ({ isLocalDirectMarkRequest: H.isLocalDirectMarkRequest }));
 
@@ -56,6 +56,11 @@ describe('durable direct-mark analytics delivery', () => {
   });
 
   it('delivers server rows in their stored commit order and suppresses a remote tab’s nudge', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
     H.onSnapshot.mockImplementationOnce((_query, onNext) => {
       onNext({
         metadata: { fromCache: false },
@@ -94,17 +99,21 @@ describe('durable direct-mark analytics delivery', () => {
 
     expect(H.orderBy).toHaveBeenNthCalledWith(1, 'recordedAt');
     expect(H.orderBy).toHaveBeenNthCalledWith(2, '__name__');
-    expect(H.track).toHaveBeenNthCalledWith(
+    expect(H.trackToAnalyticsSinks).toHaveBeenNthCalledWith(
       1,
       'unmark_square',
       expect.objectContaining({ transitionId: 'event-2' }),
       { localMarkOccurred: false },
+      { ga4: true, posthog: true },
     );
-    expect(H.track).toHaveBeenNthCalledWith(
+    expect(H.trackToAnalyticsSinks).toHaveBeenNthCalledWith(
       2,
       'echo_mark',
       expect.objectContaining({ trigger: 'mark', transitionId: 'echo-1' }),
+      undefined,
+      { ga4: true, posthog: true },
     );
+    vi.unstubAllGlobals();
   });
 
   it('uses the persisted server-record cursor instead of re-reading prior history on remount', () => {
@@ -148,7 +157,7 @@ describe('durable direct-mark analytics delivery', () => {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),
     });
-    H.track.mockReturnValueOnce(false);
+    H.trackToAnalyticsSinks.mockReturnValueOnce({ ga4: false, posthog: true });
     H.onSnapshot.mockImplementationOnce((_query, onNext) => {
       onNext({
         metadata: { fromCache: false },
@@ -174,6 +183,52 @@ describe('durable direct-mark analytics delivery', () => {
 
     expect(storage.get('five-across:board-analytics-cursor:event:u1')).toBeUndefined();
     expect(storage.get('five-across:board-analytics-outbox:event:u1')).toContain('transition-10');
+    vi.unstubAllGlobals();
+  });
+
+  it('retries only the sink that did not acknowledge a durable transition', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    const snapshot = {
+      metadata: { fromCache: false },
+      docs: [
+        {
+          id: 'row-11',
+          data: () => ({
+            name: 'unmark_square',
+            mode: 'honor',
+            uid: 'u1',
+            requestId: 'request-11',
+            transitionId: 'transition-11',
+            commitOrder: '0000000000000011:000000000',
+            recordedAt: { seconds: 11, nanoseconds: 0 },
+          }),
+        },
+      ],
+    };
+    let deliver: (snapshot: unknown) => void;
+    H.trackToAnalyticsSinks.mockReturnValueOnce({ ga4: true, posthog: false });
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      deliver = onNext;
+      deliver(snapshot);
+      return () => {};
+    });
+
+    subscribeDirectMarkAnalytics('u1');
+    expect(storage.get('five-across:board-analytics-cursor:event:u1')).toBeUndefined();
+
+    deliver!(snapshot);
+
+    expect(H.trackToAnalyticsSinks).toHaveBeenLastCalledWith(
+      'unmark_square',
+      expect.objectContaining({ transitionId: 'transition-11' }),
+      { localMarkOccurred: false },
+      { ga4: false, posthog: true },
+    );
+    expect(storage.get('five-across:board-analytics-cursor:event:u1')).toContain('"seconds":11');
     vi.unstubAllGlobals();
   });
 });

@@ -1,5 +1,5 @@
 import { Timestamp, collection, documentId, onSnapshot, orderBy, query, startAfter } from 'firebase/firestore';
-import { track } from '../analytics';
+import { trackToAnalyticsSinks, type AnalyticsSinkSelection } from '../analytics';
 import { db, EVENT_ID } from '../firebase';
 import { isLocalDirectMarkRequest } from './markAnalytics';
 import type { ClaimMode } from '../types';
@@ -33,6 +33,7 @@ const cursorStorageKey = (uid: string) => `five-across:board-analytics-cursor:${
 const outboxStorageKey = (uid: string) => `five-across:board-analytics-outbox:${EVENT_ID}:${uid}`;
 
 type DeliveryCursor = { seconds: number; nanoseconds: number; id: string };
+type PendingDelivery = { event: BoardAnalyticsEvent; pending: AnalyticsSinkSelection };
 
 function storedIds(uid: string): Set<string> {
   try {
@@ -105,14 +106,27 @@ function storeCursor(uid: string, cursor: DeliveryCursor): void {
   }
 }
 
-function storedOutbox(uid: string): Map<string, BoardAnalyticsEvent> {
+function parsePendingDelivery(value: unknown): PendingDelivery | null {
+  const entry = value as Partial<PendingDelivery> | null;
+  const event = parseDirectMarkAnalyticsEvent(entry?.event ?? value);
+  if (!event) return null;
+  const pending = entry?.pending;
+  if (pending && typeof pending.ga4 === 'boolean' && typeof pending.posthog === 'boolean') {
+    return { event, pending: { ga4: pending.ga4, posthog: pending.posthog } };
+  }
+  // Migrate an outbox written before per-sink acknowledgements. Replaying it
+  // is intentionally at-least-once, which is safer than dropping a sink.
+  return { event, pending: { ga4: true, posthog: true } };
+}
+
+function storedOutbox(uid: string): Map<string, PendingDelivery> {
   try {
     const raw = localStorage.getItem(outboxStorageKey(uid));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     const events = Array.isArray(parsed)
-      ? parsed.map(parseDirectMarkAnalyticsEvent).filter((event): event is BoardAnalyticsEvent => event !== null)
+      ? parsed.map(parsePendingDelivery).filter((entry): entry is PendingDelivery => entry !== null)
       : [];
-    return new Map(events.map((event) => [event.transitionId, event]));
+    return new Map(events.map((entry) => [entry.event.transitionId, entry]));
   } catch {
     return new Map();
   }
@@ -120,7 +134,7 @@ function storedOutbox(uid: string): Map<string, BoardAnalyticsEvent> {
 
 /** A transition is cursor-safe only once this write read-backs. A termination
  * between this point and `track()` replays the outbox on the next mount. */
-function storeOutbox(uid: string, outbox: Map<string, BoardAnalyticsEvent>): boolean {
+function storeOutbox(uid: string, outbox: Map<string, PendingDelivery>): boolean {
   try {
     const encoded = JSON.stringify([...outbox.values()]);
     localStorage.setItem(outboxStorageKey(uid), encoded);
@@ -130,29 +144,47 @@ function storeOutbox(uid: string, outbox: Map<string, BoardAnalyticsEvent>): boo
   }
 }
 
-function dispatch(event: BoardAnalyticsEvent): boolean {
+function dispatch(delivery: PendingDelivery): PendingDelivery {
+  const { event, pending } = delivery;
+  let acknowledged: AnalyticsSinkSelection;
   if (event.name === 'echo_mark') {
-    return track('echo_mark', {
+    acknowledged = trackToAnalyticsSinks('echo_mark', {
       trigger: event.trigger,
       uid: event.uid,
       ...(event.dayIndex === undefined ? {} : { dayIndex: event.dayIndex }),
       count: 1,
       transitionId: event.transitionId,
       commitOrder: event.commitOrder,
-    });
+    }, undefined, pending);
+  } else {
+    acknowledged = trackToAnalyticsSinks(
+      event.name,
+      {
+        ...(event.name === 'mark_square' ? { source: 'pledge', marked: true } : {}),
+        mode: event.mode,
+        uid: event.uid,
+        ...(event.dayIndex === undefined ? {} : { dayIndex: event.dayIndex }),
+        transitionId: event.transitionId,
+        commitOrder: event.commitOrder,
+      },
+      {
+        // The local install-nudge is an action side effect, not a per-sink
+        // delivery side effect. Do it only on the first outbox attempt; a
+        // later retry may be for one analytics sink alone.
+        localMarkOccurred:
+          event.name === 'mark_square' &&
+          pending.ga4 &&
+          pending.posthog &&
+          isLocalDirectMarkRequest(event.requestId),
+      },
+      pending,
+    );
   }
-  return track(
-    event.name,
-    {
-      ...(event.name === 'mark_square' ? { source: 'pledge', marked: true } : {}),
-      mode: event.mode,
-      uid: event.uid,
-      ...(event.dayIndex === undefined ? {} : { dayIndex: event.dayIndex }),
-      transitionId: event.transitionId,
-      commitOrder: event.commitOrder,
-    },
-    { localMarkOccurred: event.name === 'mark_square' && isLocalDirectMarkRequest(event.requestId) },
-  );
+  return { event, pending: { ga4: !acknowledged.ga4, posthog: !acknowledged.posthog } };
+}
+
+function fullyAcknowledged(delivery: PendingDelivery): boolean {
+  return !delivery.pending.ga4 && !delivery.pending.posthog;
 }
 
 export function parseDirectMarkAnalyticsEvent(value: unknown): BoardAnalyticsEvent | null {
@@ -205,11 +237,14 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
   const outbox = storedOutbox(uid);
   const cursor = storedCursor(uid);
   const flushOutbox = () => {
-    for (const event of [...outbox.values()]) {
-      if (!dispatch(event)) return false;
-      outbox.delete(event.transitionId);
+    for (const delivery of [...outbox.values()]) {
+      const updated = dispatch(delivery);
+      outbox.set(updated.event.transitionId, updated);
       if (!storeOutbox(uid, outbox)) return false;
-      delivered.add(event.transitionId);
+      if (!fullyAcknowledged(updated)) return false;
+      outbox.delete(updated.event.transitionId);
+      if (!storeOutbox(uid, outbox)) return false;
+      delivered.add(updated.event.transitionId);
       storeIds(uid, delivered);
     }
     return true;
@@ -245,22 +280,21 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
             if (nextCursor) lastCursor = nextCursor;
             continue;
           }
-          outbox.set(event.transitionId, event);
-          const durableBeforeDispatch = storeOutbox(uid, outbox);
-          if (!dispatch(event)) {
+          const initial: PendingDelivery = { event, pending: { ga4: true, posthog: true } };
+          outbox.set(event.transitionId, initial);
+          if (!storeOutbox(uid, outbox)) {
             cursorSafe = false;
             break;
           }
-          // An embedded webview can be denied localStorage. It may still
-          // receive analytics, but it has no crash-safe acknowledgement, so
-          // deliberately leave the cursor behind for an at-least-once replay.
-          if (!durableBeforeDispatch) {
+          const updated = dispatch(initial);
+          outbox.set(event.transitionId, updated);
+          if (!storeOutbox(uid, outbox) || !fullyAcknowledged(updated)) {
             cursorSafe = false;
-            continue;
+            break;
           }
           outbox.delete(event.transitionId);
           if (!storeOutbox(uid, outbox)) {
-            outbox.set(event.transitionId, event);
+            outbox.set(event.transitionId, updated);
             cursorSafe = false;
             break;
           }

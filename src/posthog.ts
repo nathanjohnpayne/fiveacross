@@ -531,8 +531,12 @@ export type CaptureOptions = { transport?: 'XHR' | 'fetch' | 'sendBeacon'; send_
  * position pass `{ transport: 'sendBeacon', send_instantly: true }`, which
  * survives the page context being destroyed.
  */
-export function phCapture(name: string, params?: Record<string, unknown>, options?: CaptureOptions): void {
+export function phCapture(name: string, params?: Record<string, unknown>, options?: CaptureOptions): boolean {
   if (!ready) {
+    // A build without a PostHog key has no configured PostHog sink. Treat it
+    // as acknowledged so callers that also support GA4 do not retain an
+    // undrainable durability queue forever.
+    if (!(import.meta.env.VITE_POSTHOG_KEY as string | undefined)) return true;
     // Queue instead of dropping (Phase 4b P2 on #513) — into the SAME ordered
     // queue as the identity ops (#613, Phase 4b round-2 P1), so replay keeps
     // each capture attributed to the identity state that held when it was
@@ -553,17 +557,18 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
       // a proxy is blocked, which is the shipboard case. Module memory would
       // die with that navigation, so the startup crash this queue exists to
       // rescue would still vanish. sessionStorage survives the reload.
-      persistPendingCaptures();
+      return persistPendingCaptures();
     }
-    return;
+    return false;
   }
   try {
     // Kept arity-exact for the common path: every existing caller passes no
     // options and must keep producing a two-argument `capture` call.
     if (options) posthog.capture(name, params, options);
     else posthog.capture(name, params);
+    return true;
   } catch {
-    /* analytics must never throw into product code */
+    return false;
   }
 }
 
@@ -643,12 +648,14 @@ function carried(): PendingCapture[] {
  *  Identity ops are deliberately NOT persisted: a new load re-derives its
  *  identity from Firebase auth state, so replaying a stale reset/identify
  *  from a dead load could only fight the fresh one. */
-function persistPendingCaptures(): void {
+function persistPendingCaptures(): boolean {
   try {
     const all = [...carried(), ...queuedCaptures()].slice(0, MAX_PENDING_CAPTURES);
-    sessionStorage?.setItem(PENDING_CAPTURES_KEY, JSON.stringify(all));
+    const encoded = JSON.stringify(all);
+    sessionStorage?.setItem(PENDING_CAPTURES_KEY, encoded);
+    return sessionStorage?.getItem(PENDING_CAPTURES_KEY) === encoded;
   } catch {
-    /* quota/policy/absent — the in-memory queue still covers the no-reload case */
+    return false;
   }
 }
 

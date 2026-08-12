@@ -44,9 +44,7 @@ export function setHeart(params: {
   const ref = heartRef(heartDocId(uid, targetKind, targetId));
   if (!on) {
     return deleteDoc(ref).then(
-      () => {
-        track('heart_post', { targetKind, on: false });
-      },
+      () => track('heart_post', { targetKind, on: false }),
       (err: unknown) => {
         console.warn('[hearts] unheart rejected; the listener will re-sync', err);
       },
@@ -63,9 +61,7 @@ export function setHeart(params: {
   // a recreated post refreshes the incarnation stamp in place (the rules
   // allow owner create AND update under the same full validation).
   return setDoc(ref, payload).then(
-    () => {
-      track('heart_post', { targetKind, on: true });
-    },
+    () => track('heart_post', { targetKind, on: true }),
     (err: unknown) => {
       console.warn('[hearts] heart rejected; the listener will re-sync', err);
     },

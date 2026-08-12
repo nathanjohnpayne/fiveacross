@@ -1,6 +1,6 @@
 import { logEvent, setDefaultEventParameters } from 'firebase/analytics';
 import { analytics, analyticsReady } from './firebase';
-import { phCapture, phRegister } from './posthog';
+import { phCapture, phRegister, type CaptureOptions } from './posthog';
 import { markSquareOccurred } from './hooks/useToastStack';
 import { activeEdition } from './editions';
 import { resolvedCanonicalHost } from './canonicalHost';
@@ -150,37 +150,47 @@ function currentPageLocation(): string {
  * to both. These explicit events are additive: PostHog also autocaptures
  * pageviews, clicks, heatmaps, and session replays (see posthog.ts). Never throws.
  */
-export function track(
+type TrackOptions = { localMarkOccurred?: boolean; posthogOptions?: CaptureOptions };
+export type AnalyticsSinkSelection = { ga4: boolean; posthog: boolean };
+
+/** Dispatch to the selected analytics sinks and report their individual local
+ * enqueue acknowledgements. A durable transition outbox uses this to retry
+ * only the sink that did not accept a transition, never double-counting the
+ * sink that already did. */
+export function trackToAnalyticsSinks(
   name: GA4EventName,
   params?: Record<string, unknown>,
-  options?: { localMarkOccurred?: boolean },
-): boolean {
-  let enqueued = false;
-  try {
+  options?: TrackOptions,
+  selected: AnalyticsSinkSelection = { ga4: true, posthog: true },
+): AnalyticsSinkSelection {
+  let ga4 = !selected.ga4;
+  let posthog = !selected.posthog;
+  if (selected.ga4) {
+    try {
     // Firebase's `logEvent` overloads key off literal reserved event names
     // (e.g. `login`), so a union type like `GA4EventName` matches no single
     // overload — widen to `string` (the SDK's generic-event overload).
-    if (analytics) {
-      logEvent(analytics, name as string, {
-        ...params,
-        page_location: currentPageLocation(),
-      } as Record<string, unknown>);
-      enqueued = true;
+      if (analytics) {
+        logEvent(analytics, name as string, {
+          ...params,
+          page_location: currentPageLocation(),
+        } as Record<string, unknown>);
+      }
+      // A disabled GA4 build has no required GA4 sink. An enabled SDK only
+      // acknowledges after `logEvent` accepted its local queue entry.
+      ga4 = true;
+    } catch {
+      ga4 = false;
     }
-  } catch {
-    /* no-op */
   }
-  // PostHog, alongside GA4 — same event, same params (internally guarded).
-  try {
-    // `phCapture` persists captures while PostHog is still initializing, and
-    // the ready SDK owns its own client queue. Reaching this call is therefore
-    // the local enqueue acknowledgement the durable Board-transition outbox
-    // needs before it advances a Firestore cursor.
-    phCapture(name, params);
-    enqueued = true;
-  } catch {
-    /* analytics must never throw into product code */
+  if (selected.posthog) {
+    posthog = options?.posthogOptions ? phCapture(name, params, options.posthogOptions) : phCapture(name, params);
   }
+  markLocalSquareIfNeeded(name, params, options);
+  return { ga4, posthog };
+}
+
+function markLocalSquareIfNeeded(name: GA4EventName, params: Record<string, unknown> | undefined, options: TrackOptions | undefined): void {
   // Install nudge trigger (#219, daily-cards-spec § "Install nudge and
   // update banner"): reuses this existing `mark_square` call site as the
   // signal instead of a new one per source — see useToastStack's module doc.
@@ -204,7 +214,10 @@ export function track(
   ) {
     markSquareOccurred();
   }
-  return enqueued;
+}
+
+export function track(name: GA4EventName, params?: Record<string, unknown>, options?: TrackOptions): void {
+  trackToAnalyticsSinks(name, params, options);
 }
 
 /**
