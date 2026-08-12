@@ -48,6 +48,39 @@ import { pathToFileURL } from 'node:url';
  */
 const DEFINE_RE = /\bdefine(String|Boolean|Int|List|Secret)\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]/g;
 
+/**
+ * The characters firebase-tools' dotenv parser unescapes, and their escapes —
+ * mirrored from `ALL_ESCAPABLE_CHARACTERS_RE` / `CHARACTERS_TO_ESCAPE_SEQUENCES`
+ * in its `lib/functions/env.js`, which is the reader these files are written for.
+ */
+const ESCAPABLE_RE = /[\n\r\t\v\\'"]/g;
+const ESCAPE_SEQUENCES = {
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+  '\v': '\\v',
+  '\\': '\\\\',
+  "'": "\\'",
+  '"': '\\"',
+};
+
+/**
+ * One dotenv assignment, serialized so firebase-tools reads back the value it
+ * was given.
+ *
+ * Its own writer escapes and quotes only when escaping changed something, which
+ * leaves two silent lossy cases its READER creates: an unquoted `#` opens a
+ * comment (`LABEL=QA #1` reads back as `QA`), and an unquoted value is trimmed.
+ * Both would corrupt a future param value with no error and no failing
+ * assertion-line count, so quote for those too. The sibling spec proves the
+ * round trip against the real parser rather than against this reasoning.
+ */
+export function formatAssignment(key, value) {
+  const escaped = value.replace(ESCAPABLE_RE, (character) => ESCAPE_SEQUENCES[character]);
+  const lossyUnquoted = escaped !== value || value.includes('#') || value !== value.trim();
+  return lossyUnquoted ? `${key}="${escaped}"` : `${key}=${escaped}`;
+}
+
 /** The e2e run's functions emulator port — firebase.json `emulators.functions.port`. */
 export const FUNCTIONS_EMULATOR_PORT = 5001;
 
@@ -59,7 +92,7 @@ export const FUNCTIONS_EMULATOR_PORT = 5001;
  * `EMAIL_UNSUBSCRIBE_URL` therefore points at the emulator's own
  * `emailUnsubscribe` endpoint rather than the production default in `params.ts`.
  */
-function e2eParamValues(projectId) {
+export function e2eParamValues(projectId) {
   return {
     EMAIL_FROM: 'Gay Cruise Bingo <e2e@example.invalid>',
     EMAIL_REPLY_TO: '',
@@ -75,7 +108,7 @@ function e2eParamValues(projectId) {
  * than `.env.local`. No e2e path performs a real send; the key only has to
  * exist so the emulator does not ask for one.
  */
-const E2E_SECRET_VALUES = {
+export const E2E_SECRET_VALUES = {
   RESEND_API_KEY: 'e2e-not-used',
 };
 
@@ -110,7 +143,7 @@ function renderDotenv(names, values, target) {
         'exempt it).',
     );
   }
-  return names.map((name) => `${name}=${values[name]}`).join('\n') + '\n';
+  return names.map((name) => formatAssignment(name, values[name])).join('\n') + '\n';
 }
 
 /**
@@ -131,9 +164,17 @@ export function e2eFunctionsEnv(paramsSource, projectId) {
  * before a param was added hangs exactly like a missing one, and is the case
  * least likely to be noticed, since the person who has one never sees the bug
  * that a fresh checkout hits.
+ *
+ * The prefix mirrors firebase-tools' `LINE_RE` (`^\s*(?:export)?\s*KEY\s*=`)
+ * rather than a tighter `KEY=`, because THIS check decides whether to abort
+ * someone else's run: a file the emulator would read happily must not be
+ * rejected here. `export EMAIL_FROM=x` and `EMAIL_FROM = x` are both
+ * assignments to that parser (Codex P2 on PR #730).
  */
 export function unassignedNames(fileBody, names) {
-  return names.filter((name) => !new RegExp(`^\\s*${name}=`, 'm').test(fileBody));
+  return names.filter(
+    (name) => !new RegExp(`^\\s*(?:export)?\\s*${name}\\s*=`, 'm').test(fileBody),
+  );
 }
 
 function ensureFile(path, names, body) {

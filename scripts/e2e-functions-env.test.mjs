@@ -1,10 +1,18 @@
 // @vitest-environment node
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+// The dotenv reader these files are actually written for. Asserting against it
+// rather than against a hand-rolled parser is the point: both of the Codex P2
+// findings on PR #730 were cases where a plausible-looking regex disagreed with
+// this module. It is a devDependency, so it is present wherever `npm test` runs.
+import { parse } from 'firebase-tools/lib/functions/env.js';
 import {
+  E2E_SECRET_VALUES,
   FUNCTIONS_EMULATOR_PORT,
   declaredParamNames,
   e2eFunctionsEnv,
+  e2eParamValues,
+  formatAssignment,
   unassignedNames,
 } from './e2e-functions-env.mjs';
 
@@ -70,6 +78,58 @@ describe('e2e functions dotenv generation', () => {
 
     expect(unassignedNames(stale, declaredParamNames(PARAMS_SOURCE).params)).toContain(
       'EMAIL_UNSUBSCRIBE_URL',
+    );
+  });
+
+  // Codex P2 on PR #730: this check aborts someone else's run, so it must not
+  // be stricter than the parser it is standing in for.
+  it('accepts every assignment form the emulator itself accepts', () => {
+    const emulatorLegal = 'export EMAIL_FROM=a\nEMAIL_REPLY_TO = b\n  APP_BASE_URL=c\n';
+
+    expect(parse(emulatorLegal).envs).toEqual({
+      EMAIL_FROM: 'a',
+      EMAIL_REPLY_TO: 'b',
+      APP_BASE_URL: 'c',
+    });
+    expect(unassignedNames(emulatorLegal, ['EMAIL_FROM', 'EMAIL_REPLY_TO', 'APP_BASE_URL'])).toEqual(
+      [],
+    );
+  });
+
+  it('does not count a commented-out key as assigned', () => {
+    expect(unassignedNames('# EMAIL_FROM=a\n', ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
+  });
+});
+
+// Codex P2 on PR #730. firebase-tools' own writer escapes only what its parser
+// unescapes, which still round-trips lossily through its reader for an unquoted
+// `#` or untrimmed value — silently, and invisibly to a test that only counts
+// assignment lines.
+describe('dotenv value round trip', () => {
+  it('reads back every generated value exactly as configured', () => {
+    const { params, secrets } = declaredParamNames(PARAMS_SOURCE);
+    const { env, secret } = e2eFunctionsEnv(PARAMS_SOURCE, PROJECT_ID);
+    const values = e2eParamValues(PROJECT_ID);
+
+    for (const name of params) {
+      expect(parse(env).envs[name]).toBe(values[name]);
+    }
+    for (const name of secrets) {
+      expect(parse(secret).envs[name]).toBe(E2E_SECRET_VALUES[name]);
+    }
+  });
+
+  it('survives values that would otherwise be truncated or trimmed', () => {
+    const hostile = ['QA #1', 'a\nb', ' padded ', 'quote"and\'apostrophe', 'back\\slash', ''];
+
+    for (const value of hostile) {
+      expect(parse(formatAssignment('SOME_PARAM', value)).envs.SOME_PARAM).toBe(value);
+    }
+  });
+
+  it('leaves an ordinary value unquoted, so the file stays readable', () => {
+    expect(formatAssignment('APP_BASE_URL', 'http://127.0.0.1:4173')).toBe(
+      'APP_BASE_URL=http://127.0.0.1:4173',
     );
   });
 });
