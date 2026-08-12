@@ -91,11 +91,17 @@ function withoutComments(source) {
 const PARAMS_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*['"]firebase-functions\/params['"]/;
 
 /**
- * Rejects an aliased constructor import — `defineString as stringParam` — which
+ * Rejects an aliased CONSTRUCTOR import — `defineString as stringParam` — which
  * would make every call site invisible to `DEFINE_CALL_RE` (Codex P2 on PR
  * #730). The alias is legal TypeScript, so the convention it violates has to be
  * enforced rather than assumed; the alternative is resolving bindings, which
  * means parsing TypeScript for a file that has never needed one.
+ *
+ * Scoped to specifiers whose IMPORTED name matches the constructor convention.
+ * The module exports plenty that is not a constructor — `Expression`, `select`,
+ * `declaredParams`, `projectID` and others — and aliasing any of those leaves
+ * every `define*` call perfectly visible, so rejecting them would abort a run
+ * that works (Codex P2 on PR #730, on the first version of this check).
  *
  * Checked only when the import is present, so the synthetic call fragments the
  * sibling spec builds are still parseable on their own. A source that stops
@@ -110,7 +116,7 @@ function rejectAliasedConstructors(source) {
   const aliased = imported[1]
     .split(',')
     .map((specifier) => specifier.trim())
-    .filter((specifier) => /\sas\s/.test(specifier));
+    .filter((specifier) => /^define[A-Z]\w*\s+as\s+\w+$/.test(specifier));
   if (aliased.length > 0) {
     throw new Error(
       `functions/src/params.ts imports ${aliased.join(', ')} from firebase-functions/params. ` +

@@ -112,6 +112,19 @@ describe('e2e functions dotenv generation', () => {
     expect(() => declaredParamNames(PARAMS_SOURCE)).not.toThrow();
   });
 
+  // Codex P2 on PR #730, against the first version of the check above: the
+  // module exports Expression, select, declaredParams, projectID and more
+  // alongside its constructors. Aliasing one of those hides nothing, so
+  // rejecting it would abort a run that works.
+  it('allows aliasing an export that is not a param constructor', () => {
+    const aliasedHelper = [
+      "import { Expression as ParamExpression, defineString } from 'firebase-functions/params';",
+      "export const A = defineString('SMTP_BRIDGE_URL', { default: '' });",
+    ].join('\n');
+
+    expect(declaredParamNames(aliasedHelper).params).toEqual(['SMTP_BRIDGE_URL']);
+  });
+
   it('separates secrets from plain params', () => {
     const { params, secrets } = declaredParamNames(PARAMS_SOURCE);
 
