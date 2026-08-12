@@ -1,17 +1,20 @@
 // @vitest-environment node
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 // The dotenv reader these files are actually written for. Asserting against it
 // rather than against a hand-rolled parser is the point: both of the Codex P2
 // findings on PR #730 were cases where a plausible-looking regex disagreed with
 // this module. It is a devDependency, so it is present wherever `npm test` runs.
-import { parse } from 'firebase-tools/lib/functions/env.js';
+import { loadUserEnvs, parse } from 'firebase-tools/lib/functions/env.js';
 import {
   E2E_SECRET_VALUES,
   FUNCTIONS_EMULATOR_PORT,
   declaredParamNames,
   e2eFunctionsEnv,
   e2eParamValues,
+  emulatorDotenvFiles,
   formatAssignment,
   unassignedNames,
 } from './e2e-functions-env.mjs';
@@ -47,7 +50,7 @@ describe('e2e functions dotenv generation', () => {
   });
 
   it('refuses to emit an empty file set when the declarations stop parsing', () => {
-    expect(() => declaredParamNames('export const nothing = 1;\n')).toThrow(/DEFINE_RE/);
+    expect(() => declaredParamNames('export const nothing = 1;\n')).toThrow(/DEFINE_CALL_RE/);
   });
 
   // Codex P2 on PR #730: an enumerated list of constructors fails silently —
@@ -59,7 +62,7 @@ describe('e2e functions dotenv generation', () => {
       "defineInt('BATCH_SIZE', { default: 10 })",
       "defineList('ALLOWED_HOSTS', { default: [] })",
       // Not an SDK export today. A constructor a future firebase-functions adds
-      // must be caught without an edit to DEFINE_RE.
+      // must be caught without an edit to DEFINE_CALL_RE.
       "defineDuration('RETRY_BACKOFF')",
     ].join('\n');
 
@@ -72,9 +75,23 @@ describe('e2e functions dotenv generation', () => {
   });
 
   it('ignores a prose reference to a constructor in a doc comment', () => {
-    const withProse = `${PARAMS_SOURCE}\n// equally a defineBoolean(...) read, which is not a declaration\n`;
+    const lineComment = `${PARAMS_SOURCE}\n// equally a defineBoolean(...) read, not a declaration\n`;
+    const blockComment = `${PARAMS_SOURCE}\n/**\n * a defineString(SOME_CONSTANT, …) call, described\n */\n`;
 
-    expect(declaredParamNames(withProse)).toEqual(declaredParamNames(PARAMS_SOURCE));
+    expect(declaredParamNames(lineComment)).toEqual(declaredParamNames(PARAMS_SOURCE));
+    expect(declaredParamNames(blockComment)).toEqual(declaredParamNames(PARAMS_SOURCE));
+  });
+
+  // Codex P2 on PR #730: a name the regex cannot read must stop the run. Being
+  // skipped is indistinguishable from not existing — the hang comes back and
+  // every assertion here still passes.
+  it('reads a backtick literal, and rejects a name it cannot resolve', () => {
+    const backticked = 'export const A = defineString(`SMTP_BRIDGE_URL`, { default: "" });';
+    const computed = "export const A = defineString(PARAM_NAME, { default: '' });";
+
+    expect(declaredParamNames(backticked).params).toEqual(['SMTP_BRIDGE_URL']);
+    expect(() => declaredParamNames(computed)).toThrow('PARAM_NAME');
+    expect(() => declaredParamNames(computed)).toThrow(/cannot resolve statically/);
   });
 
   it('separates secrets from plain params', () => {
@@ -158,6 +175,43 @@ describe('dotenv value round trip', () => {
     expect(formatAssignment('APP_BASE_URL', 'http://127.0.0.1:4173')).toBe(
       'APP_BASE_URL=http://127.0.0.1:4173',
     );
+  });
+});
+
+// Codex P2 on PR #730. firebase-tools layers `.env`, `.env.<projectId>` and
+// `.env.local`, so judging coverage from the overlay alone would abort a run the
+// emulator would have served. Asserted against its real loader rather than
+// against the file list this module believes in.
+// firebase-tools rejects a non-uppercase dotenv key, so the per-layer marker
+// has to be uppercased before it can be written.
+const layerKey = (file) => `FROM${file.replace(/[.-]/g, '_').toUpperCase()}`;
+
+describe('dotenv layering the emulator merges', () => {
+  it('names the same files firebase-tools loads for an emulator run', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'e2e-dotenv-'));
+    for (const file of emulatorDotenvFiles(PROJECT_ID)) {
+      writeFileSync(join(dir, file), `${layerKey(file)}=1\n`);
+    }
+
+    const loaded = loadUserEnvs({ functionsSource: dir, projectId: PROJECT_ID, isEmulator: true });
+
+    // Every file this module merges is one the emulator actually reads...
+    expect(Object.keys(loaded).sort()).toEqual(
+      emulatorDotenvFiles(PROJECT_ID).map(layerKey).sort(),
+    );
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('accepts a param set split across the layers', () => {
+    const { params } = declaredParamNames(PARAMS_SOURCE);
+    const [first, ...rest] = params;
+    const shared = `${first}=shared\n`;
+    const overlay = rest.map((name) => `${name}=overlay\n`).join('');
+
+    // The overlay alone is incomplete — the old check aborted here...
+    expect(unassignedNames(overlay, params)).toEqual([first]);
+    // ...but the merged view the emulator resolves against is not.
+    expect(unassignedNames([shared, overlay].join('\n'), params)).toEqual([]);
   });
 });
 

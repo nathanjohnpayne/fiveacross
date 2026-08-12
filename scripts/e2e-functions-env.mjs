@@ -38,6 +38,7 @@
  * holds that file to the same coverage rule.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /**
@@ -53,10 +54,31 @@ import { pathToFileURL } from 'node:url';
  * without an edit here, and an over-match fails in the safe direction: a loud
  * "no value for X" rather than a silent omission.
  *
- * Anchored on the quoted name literal that must follow the paren, so prose
- * references to a `defineBoolean(...)` call in a doc comment cannot match.
+ * The first argument is CAPTURED rather than matched, so a name this file
+ * cannot resolve statically is rejected rather than skipped — see
+ * `declaredParamNames`. Skipping it would be the same silent-omission bug in a
+ * new costume (Codex P2 on PR #730).
  */
-const DEFINE_RE = /\bdefine([A-Z][A-Za-z]*)\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]/g;
+const DEFINE_CALL_RE = /\bdefine([A-Z][A-Za-z]*)\s*\(\s*([^,)]*)/g;
+
+/**
+ * A param name this file can resolve: one string literal, in any of the three
+ * quote styles, holding a bare identifier. Backticks count — a template literal
+ * with no substitution is an ordinary string, and rejecting one would be a
+ * silent skip rather than a loud failure.
+ */
+const NAME_LITERAL_RE = /^(['"`])([A-Za-z_][A-Za-z0-9_]*)\1$/;
+
+/**
+ * Source with comments removed, so prose ABOUT a constructor is not mistaken for
+ * a call to one — `visionGate.ts` carries exactly such a comment, and this file
+ * has to tell the two apart now that an unparseable call is an error rather than
+ * something to ignore. The `[^:]` guard keeps a `https://` inside a string from
+ * being eaten as a line comment.
+ */
+function withoutComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
 
 /**
  * The characters firebase-tools' dotenv parser unescapes, and their escapes —
@@ -129,13 +151,31 @@ export const E2E_SECRET_VALUES = {
 export function declaredParamNames(source) {
   const params = [];
   const secrets = [];
-  for (const [, kind, name] of source.matchAll(DEFINE_RE)) {
-    (kind === 'Secret' ? secrets : params).push(name);
+  const unresolvable = [];
+  for (const [, kind, argument] of withoutComments(source).matchAll(DEFINE_CALL_RE)) {
+    const literal = NAME_LITERAL_RE.exec(argument.trim());
+    if (!literal) {
+      unresolvable.push(`define${kind}(${argument.trim()})`);
+      continue;
+    }
+    (kind === 'Secret' ? secrets : params).push(literal[2]);
+  }
+  // A name this file cannot read statically — `defineString(PARAM_NAME, …)` —
+  // must stop the run rather than be dropped from the key set. Dropping it is
+  // indistinguishable from the param not existing, which is the exact hang this
+  // module exists to prevent, and every test would still pass.
+  if (unresolvable.length > 0) {
+    throw new Error(
+      `functions/src/params.ts declares ${unresolvable.join(', ')} with a name this ` +
+        'generator cannot resolve statically. Use a plain string literal for the param ' +
+        'name, or teach scripts/e2e-functions-env.mjs to resolve the expression — ' +
+        'silently skipping it would let the emulator block on a prompt for that param.',
+    );
   }
   if (params.length === 0 && secrets.length === 0) {
     throw new Error(
       'No firebase-functions/params declarations found in the params source. ' +
-        'If params.ts was restructured, update DEFINE_RE in scripts/e2e-functions-env.mjs — ' +
+        'If params.ts was restructured, update DEFINE_CALL_RE in scripts/e2e-functions-env.mjs — ' +
         'a parse that silently finds nothing would let the emulator prompt for every param.',
     );
   }
@@ -187,17 +227,50 @@ export function unassignedNames(fileBody, names) {
   );
 }
 
-function ensureFile(path, names, body) {
+/**
+ * The dotenv files the Functions emulator MERGES before resolving params, in
+ * firebase-tools' order (`findEnvfiles` in `lib/functions/env.js`): the common
+ * file, the per-project file, then the emulator overlay. Whichever exist are
+ * layered, later winning.
+ *
+ * Coverage has to be judged against that union, not against `.env.local` alone.
+ * Keeping shared values in `functions/.env` and only an override in `.env.local`
+ * is a supported layout, and checking the overlay in isolation would abort a run
+ * the emulator would have served happily (Codex P2 on PR #730). `.secret.local`
+ * has no equivalent layering — it is a single file
+ * (`LOCAL_SECRETS_FILE` in `lib/emulator/functionsEmulatorShared.js`).
+ */
+export function emulatorDotenvFiles(projectId) {
+  return ['.env', `.env.${projectId}`, '.env.local'];
+}
+
+/**
+ * Concatenation is the right merge here precisely because this only ever asks
+ * "is this name assigned anywhere the emulator will read": last-wins ordering
+ * cannot change the answer, so no value resolution is needed.
+ */
+function mergedDotenvBody(directory, projectId) {
+  return emulatorDotenvFiles(projectId)
+    .map((file) => join(directory, file))
+    .filter((path) => existsSync(path))
+    .map((path) => readFileSync(path, 'utf8'))
+    .join('\n');
+}
+
+function ensureFile(path, names, body, coverageBody) {
   if (!existsSync(path)) {
     writeFileSync(path, body);
     return;
   }
-  const missing = unassignedNames(readFileSync(path, 'utf8'), names);
+  const missing = unassignedNames(coverageBody ?? readFileSync(path, 'utf8'), names);
   if (missing.length > 0) {
     throw new Error(
-      `${path} exists but does not set ${missing.join(', ')}, which functions/src/params.ts ` +
-        'declares. The Functions emulator would block forever prompting for it. Add the ' +
-        `missing line(s), or delete ${path} to have npm run test:e2e regenerate the file.`,
+      `${path} exists, but functions/src/params.ts declares ${missing.join(', ')} — ` +
+        `${missing.length === 1 ? 'that name is' : 'those names are'} not set in any dotenv ` +
+        'file the emulator reads, and it would block forever prompting for ' +
+        `${missing.length === 1 ? 'it' : 'them'}. Add the missing line(s) to ${path} (or to ` +
+        `any file the emulator merges), or delete ${path} to have npm run test:e2e ` +
+        'regenerate it.',
     );
   }
 }
@@ -218,7 +291,7 @@ function main(argv) {
   // which of these two files it owns before calling here, and removes only
   // those on exit.
   const { env, secret } = e2eFunctionsEnv(source, projectId);
-  ensureFile(envPath, params, env);
+  ensureFile(envPath, params, env, mergedDotenvBody(dirname(envPath), projectId));
   ensureFile(secretPath, secrets, secret);
 }
 
