@@ -334,6 +334,28 @@ describe('Admin Schedule surface (specs/d15-admin-schedule.md, at /more/admin/sc
     expect(document.querySelector(marker)).toBeNull();
   });
 
+  it('a formatting-only Tonight edit is not unsaved work, before OR after the blur', () => {
+    // Codex P2 round 6, PR #720. `commitTonight` normalizes the draft before it
+    // compares, so retyping the separator without its spaces writes nothing —
+    // and, having written nothing, resets nothing either. A marker keyed on the
+    // RAW string therefore latches on and can never come off: the draft stays
+    // `A·B`, the stored line stays `A · B`, and because this attribute is
+    // checked ahead of the visibility gate it does not delay the post-deploy
+    // reload for this row, it cancels it for the row's whole life.
+    const days = [dayDef({ index: 0, unlockAt: Date.now() + 3600_000, tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'] })];
+    H.event = { ...H.event, days } as unknown as EventDoc;
+    renderAdmin('/more/admin/schedule');
+
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    const input = screen.getByLabelText('Day 1 tonight') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '🪖 Dog Tag T-Dance·✈️ Duty Free' } });
+    expect(document.querySelector(marker)).toBeNull();
+    fireEvent.blur(input);
+    expect(H.setDayTonight).not.toHaveBeenCalled();
+    expect(input.value).toBe('🪖 Dog Tag T-Dance·✈️ Duty Free'); // the no-op commit leaves the draft alone
+    expect(document.querySelector(marker)).toBeNull();
+  });
+
   it('surfaces a failed Tonight save and restores the persisted line', async () => {
     H.setDayTonight.mockRejectedValueOnce(new Error('locked'));
     const days = [dayDef({ index: 0, unlockAt: Date.now() + 3600_000, tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'] })];

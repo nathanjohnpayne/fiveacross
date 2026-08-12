@@ -116,6 +116,18 @@ function AdminItemRow({
   // and `busy` guards re-entry — a double Save/Enter before the write settles
   // must not issue a duplicate concurrent write (Codex P2, PR #412).
   const [saveState, setSaveState] = useState<'idle' | 'busy' | 'error'>('idle');
+  // `data-unsaved-work` while the inline editor holds copy that differs from
+  // what is stored (Codex P2 round 6, PR #720) — the same declaration the add
+  // bar above and Admin → Messages' inline copy editor make, for the same
+  // reason: this draft lives only in React state, so an automatic post-deploy
+  // reload does not interrupt it, it destroys it. A retained draft after a
+  // FAILED save is the sharpest case — the editor stays open holding the only
+  // copy of an edit that has already been rejected once.
+  //
+  // Keyed off exactly the condition `save` uses to decide a write happens at
+  // all, so an editor opened and untouched — or one cleared to nothing, which
+  // saves nothing and loses nothing — never pins the tab to a condemned build.
+  const draftDiffers = editing && draft.trim() !== '' && draft.trim() !== it.text;
   const save = async () => {
     if (saveState === 'busy') return;
     // Save-time re-check (Codex P2): the Day can unlock mid-edit — the row's
@@ -135,7 +147,7 @@ function AdminItemRow({
     }
   };
   return (
-    <div className="row">
+    <div className="row" data-unsaved-work={draftDiffers || undefined}>
       <div className="grow">
         {editing ? (
           <input

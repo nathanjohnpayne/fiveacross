@@ -392,6 +392,42 @@ describe('the client build registry (#516)', () => {
     await expect(recordClientStamp(broken, 'tab-1', NEW_SHELL, null)).resolves.toBeUndefined();
   });
 
+  it('isolates ONE unreadable record instead of dropping the whole registry', async () => {
+    // Codex P2 round 6, PR #720. A per-key rejection used to escape the
+    // `Promise.all` and be swallowed by the outer catch, which returns `{}` —
+    // and `{}` is not a lost record, it is a fleet-wide condemnation:
+    // `shouldForceActivate` reads every live id with no entry as
+    // `UNKNOWN_ACTIVE_STAMP`, so on an armed floor one corrupt body would
+    // force-activate and navigate tabs whose OWN records read back perfectly.
+    const cs = fakeCacheStorage();
+    const cache = await cs.open(SHELL_META_CACHE);
+    await recordClientStamp(cs, 'tab-good', NEW_SHELL, null);
+    // Truncated JSON — a body written by a worker torn down mid-`put`.
+    await cache.put('/__gcb-client-build/tab-torn', new Response('{"stamp":"2026-'));
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-good': NEW_SHELL });
+
+    // Same for a `match` that rejects outright on one key rather than the body.
+    const realMatch = cs._cache.match;
+    cs._cache.match = vi.fn(async (k: string | { url: string }) => {
+      if (String(typeof k === 'string' ? k : k.url).includes('tab-torn')) throw new Error('read failed');
+      return realMatch(k);
+    });
+    await expect(readClientStamps(cs)).resolves.toEqual({ 'tab-good': NEW_SHELL });
+
+    // And the decision layer therefore still sees the live tab as registered:
+    // an up-to-date window is not condemned by its neighbour's corrupt record.
+    const stamps = await readClientStamps(cs);
+    expect(
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: ARMED_FLOOR,
+        clientStamps: stamps,
+        liveClientIds: ['tab-good'],
+      }),
+    ).toBe(false);
+  });
+
   it('reads past the OTHER records living in the same cache', async () => {
     // `gcb-shell-meta` also holds the active stamp, the forced-activation
     // marker, and the floor throttle. Enumerating the cache has to tell those

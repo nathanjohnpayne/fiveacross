@@ -181,6 +181,15 @@ function splitTonight(text: string): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+// What a draft would actually STORE. The round trip is lossy on purpose —
+// bullet spacing, padding, and empty segments all normalize away — so the raw
+// text an admin typed and the text the write would produce routinely differ
+// while meaning the same thing. Every "has this changed?" question in this file
+// goes through here so none of them can answer differently from the write
+// itself (Codex P2 round 6, PR #720).
+function normalizeTonight(text: string): string {
+  return joinTonight(splitTonight(text));
+}
 
 // Best-effort admin chrome (schedule correction 2026-07-17): a "2 parties" pill
 // on Days whose two Tonight events are BOTH parties, vs a headline show/concert
@@ -276,7 +285,7 @@ function ScheduleRow({
       return;
     }
     setTonightError('');
-    if (joinTonight(next) === joinTonight(day.tonight)) return;
+    if (joinTonight(next) === tonightPersisted) return;
     try {
       await onChangeTonight(day.index, next);
     } catch {
@@ -288,7 +297,16 @@ function ScheduleRow({
   // (Codex P2 round 5, PR #720). This field commits on BLUR, so a draft the
   // admin is still typing exists only in React state and an automatic
   // post-deploy reload would discard it. See src/swClientBridge.ts.
-  const tonightUnsaved = tonightDraft !== tonightPersisted;
+  //
+  // Asked of the NORMALIZED draft — the same question `commitTonight` asks
+  // before it decides to write (Codex P2 round 6). A raw comparison marks work
+  // that does not exist and then never unmarks it: retype `A · B` as `A·B` and
+  // blur, and the commit normalizes both to the same value and returns without
+  // writing OR resetting the draft, so the raw strings differ forever. The
+  // marker is a promise to release, and this attribute is checked ahead of the
+  // visibility gate, so a stuck one does not delay the post-deploy reload — it
+  // pins the tab to a condemned build until the row unmounts.
+  const tonightUnsaved = normalizeTonight(tonightDraft) !== tonightPersisted;
   return (
     <div className="row schedule-row" data-unsaved-work={tonightUnsaved || undefined}>
       {/* Top line: uniform on every row — info grows, the theme dropdown trails.

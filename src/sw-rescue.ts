@@ -291,8 +291,29 @@ function clientIdFromKey(url: string): string | null {
 /** One window's record: what it is executing, and when it said so. */
 type ClientRecord = { stamp: string; at: number };
 
-/** Every stored record, with malformed ones dropped. Never throws — the empty
- *  map is the safe reading, since an unregistered client navigates. */
+/**
+ * Every stored record, with unreadable ones dropped. Never throws — the empty
+ * map is the safe reading, since an unregistered client navigates.
+ *
+ * ONE BAD RECORD IS ISOLATED, not fatal (Codex P2 round 6). The per-key read is
+ * inside its own `try` because a rejection escaping into the `Promise.all`
+ * would be caught by the outer handler below and replace the ENTIRE registry
+ * with `{}` — and an empty registry is not a lost record, it is a fleet-wide
+ * condemnation. `shouldForceActivate` reads every live client id with no entry
+ * as `UNKNOWN_ACTIVE_STAMP` and `shouldNavigateClient` navigates it, so on an
+ * armed floor a single corrupt body — truncated JSON from a torn-down worker, a
+ * body read that races the `put` writing it — would force-activate and reload
+ * every open tab, including the ones whose own records read back perfectly. The
+ * outer `try` stays for the failures that really are total: the cache handle
+ * and the key enumeration.
+ *
+ * An unreadable record is left in the cache rather than deleted, because the
+ * failure may be transient — a body read that races the `put` writing that same
+ * key reads fine on the next pass, and deleting it would throw away a live
+ * window's registration for a hiccup. Leaving it costs one failed parse per
+ * read: it is absent from this map, so both consumers already ignore it, and
+ * the window it belongs to re-registers on its next load.
+ */
 async function readClientRecords(cacheStorage: CacheStorage): Promise<Record<string, ClientRecord>> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
@@ -300,15 +321,19 @@ async function readClientRecords(cacheStorage: CacheStorage): Promise<Record<str
     const records: Record<string, ClientRecord> = {};
     await Promise.all(
       keys.map(async (key) => {
-        const id = clientIdFromKey(typeof key === 'string' ? key : key.url);
-        if (id === null) return;
-        const hit = await cache.match(key);
-        if (!hit) return;
-        const body = (await hit.json()) as { stamp?: unknown; at?: unknown } | null;
-        if (typeof body?.stamp !== 'string' || body.stamp === '') return;
-        // A record with no usable timestamp reads as ancient, so the sweep can
-        // still collect it — the grace below is a shield for FRESH records.
-        records[id] = { stamp: body.stamp, at: typeof body.at === 'number' ? body.at : 0 };
+        try {
+          const id = clientIdFromKey(typeof key === 'string' ? key : key.url);
+          if (id === null) return;
+          const hit = await cache.match(key);
+          if (!hit) return;
+          const body = (await hit.json()) as { stamp?: unknown; at?: unknown } | null;
+          if (typeof body?.stamp !== 'string' || body.stamp === '') return;
+          // A record with no usable timestamp reads as ancient, so the sweep can
+          // still collect it — the grace below is a shield for FRESH records.
+          records[id] = { stamp: body.stamp, at: typeof body.at === 'number' ? body.at : 0 };
+        } catch {
+          /* this ONE record is unreadable — the others still count */
+        }
       }),
     );
     return records;
