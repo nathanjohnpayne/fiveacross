@@ -368,7 +368,7 @@ describe('Edition registers (#608 lexicon)', () => {
     expect(registerFor('vacay').photosRest).toContain('group chat');
   });
 
-  it('carries the endorsement line on Vacay only (the one-identity rule)', () => {
+  it('carries the endorsement line on Vacay and GCB only (the one-identity rule)', () => {
     // Every Edition OF the platform signs off with the endorsement — vacay
     // from #616, gcb from #698 — and only the platform itself goes without.
     // Asserted as the same partition the in-app byline uses (src/editions.test.ts)
