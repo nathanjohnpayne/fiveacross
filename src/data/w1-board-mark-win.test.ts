@@ -361,12 +361,14 @@ describe('setMark (write shape)', () => {
     expect(commitSpy).toHaveBeenCalledTimes(1);
     // The return now also carries the win TRANSITION verdict doMark broadcasts the
     // Feed Moment off (issue #104): a bare non-winning Mark crosses neither edge.
+    // `markTransition: true` (Codex P2 on #727): cell 3 went unmarked → marked.
     expect(res).toEqual({
       cells: expect.any(Array),
       bingo: false,
       blackout: false,
       bingoTransition: false,
       blackoutTransition: false,
+      markTransition: true,
     });
   });
 });
@@ -660,13 +662,15 @@ describe('setMark (surfaces a genuine commit failure instead of swallowing it)',
 
     // Optimistic contract unchanged: setMark still resolves with the locally
     // computed win result (now incl. the transition verdict) even though the
-    // write will be rolled back.
+    // write will be rolled back. `markTransition: true` (Codex P2 on #727):
+    // cell 3 went unmarked → marked.
     expect(res).toEqual({
       cells: expect.any(Array),
       bingo: false,
       blackout: false,
       bingoTransition: false,
       blackoutTransition: false,
+      markTransition: true,
     });
 
     // commit() is fire-and-forget, so the .catch runs on a later microtask.

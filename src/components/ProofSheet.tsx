@@ -249,9 +249,22 @@ export default function ProofSheet(props: Props) {
       // logic. `dayIndex` (Codex round 1 finding 2): the viewed/proofed Day,
       // the same value already threaded to `attachProof` above — never the
       // global `day_index` default dimension, which is wrong for a Player
-      // catching up on an older Day.
+      // catching up on an older Day. Gated on `daily` (Codex P2 on #727), NOT
+      // the raw `dayIndex` prop: on a legacy (non-daily) Event that prop
+      // carries the Board doc's OWN `dayIndex`, which defaults to 0 — a value
+      // that would misread as a real "Day 1" rather than "no Day schedule"
+      // (the same `board?.dayIndex`-defaults-to-0 trap `doMark`'s pledge event
+      // above already avoids). The `admin_confirm` source (`data/admin.ts`)
+      // stamps `c.dayIndex`, which is `undefined` for a legacy claim, so
+      // gating here on `daily` keeps all three `mark_square` sources
+      // consistent: a legacy Event's Marks never carry a Day at all.
       if (res?.markTransition) {
-        track('mark_square', { source: 'proof', mode: claimMode, marked: true, dayIndex });
+        track('mark_square', {
+          source: 'proof',
+          mode: claimMode,
+          marked: true,
+          dayIndex: daily ? dayIndex : undefined,
+        });
       }
       // Report the win verdict AFTER the transaction committed and BEFORE closing,
       // so Board enqueues the Moment for a proofed win (PR #110 round 2 finding 1).

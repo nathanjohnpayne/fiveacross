@@ -348,6 +348,39 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
+  it('a legacy (non-daily) Event omits dayIndex from mark_square even when the caller passes a raw dayIndex prop of 0 (Codex P2 on #727)', async () => {
+    // Board stamps ProofSheet's `dayIndex` prop from `board?.dayIndex` on a
+    // legacy Event (Board.tsx: `dayIndex={hasDays ? viewedIndex : board?.dayIndex}`),
+    // and a legacy Board doc's own `dayIndex` defaults to 0 — a value that
+    // would misread as a real "Day 1" rather than "no Day schedule" if it
+    // rode straight into the event. `daily` (unset here, matching a legacy
+    // caller) is the actual gate, not whatever the raw `dayIndex` prop
+    // happens to carry.
+    const user = userEvent.setup();
+    const props = { ...baseProps(), dayIndex: 0 }; // daily left unset (legacy)
+    H.attachProof.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      bingoTransition: false,
+      blackoutTransition: false,
+      markTransition: true,
+    });
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'legacy event, no Day schedule');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    expect(H.track).toHaveBeenCalledWith('mark_square', {
+      source: 'proof',
+      mode: 'proof_required',
+      marked: true,
+      dayIndex: undefined, // never the raw prop's 0
+    });
+  });
+
   it('an audio submit attaches a recorded audio Proof and closes the sheet', async () => {
     const user = userEvent.setup();
     const props = baseProps();

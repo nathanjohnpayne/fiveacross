@@ -152,6 +152,7 @@ const isPlayerWrite = (call: unknown[]) => segs(call)[2] === 'players';
 const isMarkerWrite = (call: unknown[]) => segs(call)[2] === 'tally';
 
 import {
+  __resetEchoMarkWatermarksForTests,
   __resetPendingMarkerRepairsForTests,
   computeMark,
   dealDayCard,
@@ -224,6 +225,7 @@ beforeEach(() => {
   H.player = null;
   H.transactionRunner = null;
   __resetPendingMarkerRepairsForTests();
+  __resetEchoMarkWatermarksForTests();
   __resetBoardFreshnessForTests();
 });
 
@@ -353,6 +355,63 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     });
     // Never one aggregated event under the acted Day.
     expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ dayIndex: 2 }));
+  });
+
+  it('does not re-report a mark-time echo_mark from the open-time stats-lag heal when only the SIBLING stats continuation stranded (Codex P2 on #727)', async () => {
+    // The mark-time cascade's `echo_mark` send and its
+    // `reconcileEchoStatsFromServer` player-row write are two INDEPENDENT
+    // promises off the SAME batch commit (src/data/api.ts) — a reload can
+    // strand one while the other lands. Simulate exactly that: the echo_mark
+    // below fires and durably records its report BEFORE any assertion runs,
+    // but this mock never mutates `H.player` (the stats continuation's own
+    // write target), so the cached player row for Day 3 stays exactly as
+    // stale as a genuinely lost continuation would leave it.
+    seedBoards();
+    await markShared();
+    await vi.waitFor(() =>
+      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 3, count: 1 }),
+    );
+    H.track.mockClear();
+    // Also clear the mark-time cascade's OWN `reconcileEchoStatsFromServer`
+    // continuation's txSet call (fired off the SAME commit, independently of
+    // the echo_mark send above) — it read Day 3's board BEFORE the
+    // "next open" update below and would otherwise leave an unrelated
+    // squaresMarked:0 call in the mock history ahead of the heal's own
+    // write, which is what THIS test's stats assertion below must observe.
+    H.txSet.mockClear();
+
+    // "Next open" of Day 3: the echoed cell already drained durably (an
+    // offline batch persists regardless of the tab), so the board this
+    // device now reads already carries it — matching what the mark-time
+    // batch actually wrote.
+    H.dayBoards.set(3, {
+      uid: 'u1',
+      seed: 333,
+      dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), {
+        8: { marked: true, markedAt: 5, status: 'confirmed', echo: true },
+      }),
+    });
+    // `H.player.dayStats` still has NO Day-3 bucket (seedBoards only seeded
+    // Day 2) — the stranded stats continuation. This is exactly the
+    // `bucketLag` heal's trigger condition.
+    const res = await reconcileEchoes({ uid: 'u1', dayIndex: 3, dayIndexes: [2, 3] });
+    expect(res.changed).toBe(false); // nothing NEW to echo — Day 3's own cells already carry it
+    // The heal DOES repair the stranded stats write (proving the heal ran,
+    // not that it was skipped for some unrelated reason)...
+    await vi.waitFor(() => {
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      expect(
+        (statsWrite![1] as { dayStats: Record<number, { squaresMarked: number }> }).dayStats[3].squaresMarked,
+      ).toBe(1);
+    });
+    // ...but must NOT re-report the `echo_mark` the mark-time cascade already
+    // sent for this exact Day-3 total: stats lag alone does not prove the
+    // analytics send was lost too, and re-reporting here would double-count
+    // a valid event that already reached PostHog/GA4.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'open_reconcile' }));
   });
 
   it('#474: SKIPS the echo for a sibling with no server-confirmed seed watch — the acted Mark still commits alone', async () => {

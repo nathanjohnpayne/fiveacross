@@ -1982,15 +1982,31 @@ export default function Board() {
       // cards-spec's "Day N" naming does not apply there, and `board?.dayIndex`
       // defaults to 0 on a legacy board — a value that would misread as a
       // real "Day 1" rather than "no Day schedule".
-      if (nextMarked) {
-        track('mark_square', {
-          source: 'pledge',
-          mode: claimMode,
-          marked: true,
-          dayIndex: hasDays ? viewedIndex : undefined,
-        });
-      } else {
-        track('unmark_square', { mode: claimMode, dayIndex: hasDays ? viewedIndex : undefined });
+      //
+      // Gated on `res.markTransition` (Codex P2 on #727), the SAME kind of
+      // committed-write verdict the proof (`attachProof`'s `markTransition`)
+      // and admin (`confirmClaim`'s `resolve()` verdict) sources already gate
+      // on: `setMark` folds onto the FRESHEST cached Board it can read
+      // (`runSetMark`'s `getDocFromCache`), which can already hold this exact
+      // transition when another tab's Mark (or this tab's own earlier Mark)
+      // synced in between this render and the tap landing — a stale-render
+      // race that makes `doMark` run a true-to-true (pledge again on an
+      // already-marked cache) or false-to-false (unmark an already-unmarked
+      // cache) rewrite. `nextMarked` alone can't see that: it is the
+      // REQUESTED direction, not whether the write actually crossed an edge.
+      // `res.markTransition` is derived from the SAME cache read `setMark`
+      // folded onto, so it is never wrong in the direction that matters here.
+      if (res.markTransition) {
+        if (nextMarked) {
+          track('mark_square', {
+            source: 'pledge',
+            mode: claimMode,
+            marked: true,
+            dayIndex: hasDays ? viewedIndex : undefined,
+          });
+        } else {
+          track('unmark_square', { mode: claimMode, dayIndex: hasDays ? viewedIndex : undefined });
+        }
       }
       if (nextMarked && res.bingo) track('bingo');
       if (nextMarked) {

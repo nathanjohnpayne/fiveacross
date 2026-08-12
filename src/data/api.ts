@@ -1303,8 +1303,23 @@ export function computeMark(params: {
   // the write path is the single source of truth for "this mark won".
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  // The false→true or true→false edge on THIS cell (Codex P2 on #727), derived
+  // from the SAME `cells` this fold reads — the caller's freshest local
+  // knowledge (runSetMark's cache-read `baseCells`), not a component-lifetime
+  // render snapshot. Mirrors `attachProof`'s `markTransition` (proofs.ts),
+  // which derives it from its own transaction's live `existingCell` read for
+  // the identical reason: another tab can already have folded this Square
+  // into the shared persistent cache (another device's Mark synced in, or
+  // this same tab's own prior write) before this call runs, and `setMark`
+  // deliberately fields that fresher cache — writing a true-to-true (or
+  // false-to-false) rewrite rather than a real transition. Gate the caller's
+  // `mark_square`/`unmark_square` emission on this field, not on the
+  // requested `nextMarked` direction alone, so that stale-render race can
+  // never double-fire the event for a Square that did not actually change.
+  markTransition: boolean;
 } {
   const { cells, index, nextMarked, claimMode, currentFirstBingoAt, now } = params;
+  const wasMarked = cells.find((c) => c.index === index)?.marked === true;
   const next: Cell[] = cells.map((c) => {
     if (c.index !== index) return c;
     // A manual toggle STRIPS the Echo flag. Any manual unmark persists an
@@ -1364,6 +1379,7 @@ export function computeMark(params: {
     // rise on it.
     bingoTransition: previousBingoCount === 0 && bingoCount > 0,
     blackoutTransition: blackout && !isBlackout(cells),
+    markTransition: wasMarked !== nextMarked,
   };
 }
 
@@ -1463,6 +1479,84 @@ export function __resetPendingMarkerRepairsForTests(): void {
   for (const repairKey of [...pendingMarkerRepairs]) forgetMarkerRepair(repairKey);
 }
 
+// Echo Mark analytics idempotency (Codex P2 on #727): the 'mark' cascade
+// (below) and BOTH `runReconcileEchoes` firing sites (the direct `res.changed`
+// write and the stats-lag recovery heal) each fire `echo_mark` off a
+// fire-and-forget continuation of the SAME batch/transaction commit as an
+// INDEPENDENT sibling continuation that folds the echo into
+// `players/{uid}.dayStats[dayIndex]` (`reconcileEchoStatsFromServer`) — two
+// separate promises racing the same commit, so a reload (or any transient
+// failure) can strand one while the other lands. The recovery heal exists
+// precisely to repair a STRANDED STATS continuation by re-deriving the
+// bucket from server truth — but detecting stats lag proves only that the
+// STATS continuation was lost, never that the SIBLING analytics
+// continuation was too: if the analytics send already succeeded, re-firing
+// because the stats write is stale would double-count a valid event (and,
+// symmetric to it, the direct-write `res.changed` path's own analytics
+// continuation can equally be the one that's lost, leaving a LATER heal to
+// rediscover the same increase as bucket lag and report it for the first
+// time — both directions of the same race, one shared fix).
+//
+// This watermark decouples the two: it persists the HIGHEST `squaresMarked`
+// total for a given (uid, dayIndex) this device has ever reported an
+// `echo_mark` up through. Same two-tier discipline as `pendingMarkerRepairs`
+// above — an in-memory `Map` is the PRIMARY source of truth (so dedupe still
+// works within a session even where `localStorage` throws or is otherwise
+// unavailable — private browsing, a jsdom opaque-origin test environment),
+// mirrored into `localStorage` best-effort so the watermark also survives
+// the RELOAD an in-memory value cannot. Written BEFORE the event fires so a
+// tab that dies mid-send still leaves the intent recorded. Every
+// 'mark'/'open_reconcile' emitter calls `claimEchoMarkReport` with the FULL
+// post-echo total for that Day — never a delta — and fires only when it
+// returns true: a monotonic total is race-safe across the several
+// independent code paths that can report the same Day, where a delta
+// computed against a possibly-stale baseline would not be (two paths
+// concurrently reading the same stale prior total would each compute a
+// "new" delta and both fire).
+const echoMarkWatermarks = new Map<string, number>();
+const echoMarkWatermarkKey = (uid: string, dayIndex: number) => `${uid}:${dayIndex}`;
+const echoMarkWatermarkStorageKey = (key: string) => `gcb:echo-mark-reported:${EVENT_ID}:${key}`;
+
+function claimEchoMarkReport(uid: string, dayIndex: number, squaresMarked: number): boolean {
+  const key = echoMarkWatermarkKey(uid, dayIndex);
+  let priorWatermark = echoMarkWatermarks.get(key) ?? 0;
+  // The in-memory map is per-session (a fresh module load on every reload),
+  // so a device that already reported before a reload has NO in-memory
+  // watermark yet — fall back to the persisted one exactly once, the same
+  // lazy-hydrate `hasMarkerRepair` uses for its own candidate Set.
+  if (!echoMarkWatermarks.has(key)) {
+    try {
+      const raw = markerRepairStore()?.getItem(echoMarkWatermarkStorageKey(key));
+      const persisted = raw == null ? NaN : Number(raw);
+      if (Number.isFinite(persisted)) priorWatermark = persisted;
+    } catch {
+      // No persisted watermark to hydrate from — the in-memory 0 stands.
+    }
+  }
+  if (squaresMarked <= priorWatermark) return false;
+  echoMarkWatermarks.set(key, squaresMarked);
+  try {
+    markerRepairStore()?.setItem(echoMarkWatermarkStorageKey(key), String(squaresMarked));
+  } catch {
+    // Storage is an enhancement over the in-memory watermark (private mode,
+    // quota, or — in tests — a jsdom opaque origin); the claim above already
+    // stands for the rest of this session either way.
+  }
+  return true;
+}
+
+/** Test-only. */
+export function __resetEchoMarkWatermarksForTests(): void {
+  for (const key of [...echoMarkWatermarks.keys()]) {
+    echoMarkWatermarks.delete(key);
+    try {
+      markerRepairStore()?.removeItem(echoMarkWatermarkStorageKey(key));
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+}
+
 // The shared marker-attribution helper (`markerDisplayName`) lives in the
 // Firestore-free ./attribution module so proofs.ts can share it without
 // pulling this file's firebase/firestore import surface into its tests
@@ -1538,6 +1632,11 @@ export async function setMark(params: {
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  // The false→true / true→false edge on the ACTED cell (Codex P2 on #727) —
+  // see `computeMark`'s `markTransition` doc. The caller gates its
+  // `mark_square`/`unmark_square` emission on this, not on the requested
+  // `nextMarked` direction, so a stale-cache-fold rewrite never double-fires.
+  markTransition: boolean;
 }> {
   const { uid } = params;
   const database = params.database ?? db;
@@ -1584,6 +1683,7 @@ async function runSetMark(
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  markTransition: boolean;
 }> {
   const { uid } = params;
   // Daily-cards mode (#246): route the Mark to the DAY-SCOPED board
@@ -1657,7 +1757,7 @@ async function runSetMark(
   }
 
   const now = Date.now();
-  const { cells, player, bingo, blackout, bingoTransition, blackoutTransition } = computeMark({
+  const { cells, player, bingo, blackout, bingoTransition, blackoutTransition, markTransition } = computeMark({
     ...params,
     cells: baseCells,
     currentFirstBingoAt: baseFirstBingoAt,
@@ -1961,14 +2061,28 @@ async function runSetMark(
     // ever changes). Countable, never folded into `mark_square`. Separate
     // `.catch()` from the reconcile chain above so one failing never blocks
     // the other.
+    //
+    // Idempotency (Codex P2 on #727): this continuation and the
+    // `reconcileEchoStatsFromServer` one above are INDEPENDENT promises off
+    // the same `committed` — a reload can strand either without the other,
+    // and if THIS one already reported, the open-time stats-lag heal
+    // (`runReconcileEchoes`) must not report the same increase again once it
+    // repairs the stranded stats write. `claimEchoMarkReport` records the
+    // FULL post-echo total for the day (`echoBoard.bucket.squaresMarked`,
+    // not the delta `count`) durably BEFORE firing, and every echo_mark
+    // emitter for this Day checks the SAME watermark — see its doc.
     const echoCountsByDay = new Map<number, number>();
+    const echoTotalsByDay = new Map<number, number>();
     for (const echoBoard of echoBoards) {
       echoCountsByDay.set(echoBoard.dayIndex, (echoCountsByDay.get(echoBoard.dayIndex) ?? 0) + 1);
+      echoTotalsByDay.set(echoBoard.dayIndex, echoBoard.bucket.squaresMarked);
     }
     void committed
       .then(() =>
         import('../analytics').then(({ track }) => {
           for (const [receivingDayIndex, count] of echoCountsByDay) {
+            const total = echoTotalsByDay.get(receivingDayIndex);
+            if (typeof total === 'number' && !claimEchoMarkReport(uid, receivingDayIndex, total)) continue;
             track('echo_mark', { trigger: 'mark', dayIndex: receivingDayIndex, count });
           }
         }),
@@ -2071,7 +2185,7 @@ async function runSetMark(
   // fold above, computed BEFORE the fire-and-forget commit), which broadcasts
   // the matching Feed Moment off it — the win is tied to the mark that caused
   // it, not to a Board snapshot-diff that dies on unmount (issue #104).
-  return { cells, bingo, blackout, bingoTransition, blackoutTransition };
+  return { cells, bingo, blackout, bingoTransition, blackoutTransition, markTransition };
 }
 
 /**
@@ -2416,16 +2530,31 @@ async function runReconcileEchoes(
         // cascade: "a reload that loses it is healed by the stats-lag check
         // in runReconcileEchoes") — so it is also the one place a lost
         // `echo_mark` can be recovered, rather than patching each write path
-        // to persist its own analytics intent. The count is the ACTUAL
-        // server-confirmed increase in this Day's `squaresMarked` over what
-        // the cached player row showed before the heal — never the
-        // heal-recomputed total — so a `rootLag`-only heal (buckets already
-        // converged, only the roots were stale) reports zero and fires
-        // nothing, matching the reconciliation identity exactly.
+        // to persist its own analytics intent.
+        //
+        // Stats lag alone does NOT prove the analytics continuation was also
+        // lost (Codex P2 on #727): the mark-time cascade's `echo_mark` send
+        // and its `reconcileEchoStatsFromServer` player-row write are TWO
+        // INDEPENDENT promises off the same commit — a reload (or a
+        // transient failure) can strand the STATS write alone while the
+        // analytics one already succeeded, and this heal only ever sees the
+        // stats side. Re-reporting purely off the bucket delta would then
+        // double-count a valid event. `claimEchoMarkReport` is the decoupling:
+        // it checks/records a durable per-Day watermark every echo_mark
+        // emitter shares (the mark-time cascade included), keyed on the FULL
+        // post-echo total, not a delta — so a total this device already
+        // reported (by whichever path) is never reported again, no matter
+        // which of the two continuations actually stranded. The count
+        // reported is still the ACTUAL server-confirmed increase in this
+        // Day's `squaresMarked` over what the cached player row showed
+        // before the heal — never the heal-recomputed total — so a
+        // `rootLag`-only heal (buckets already converged, only the roots
+        // were stale) reports zero and fires nothing, matching the
+        // reconciliation identity exactly.
         const healedBucket = healed?.dayStats?.[dayIndex];
         if (healedBucket) {
           const netNewSquares = healedBucket.squaresMarked - (rowBucket?.squaresMarked ?? 0);
-          if (netNewSquares > 0) {
+          if (netNewSquares > 0 && claimEchoMarkReport(uid, dayIndex, healedBucket.squaresMarked)) {
             void import('../analytics')
               .then(({ track }) =>
                 track('echo_mark', { trigger: 'open_reconcile', dayIndex, count: netNewSquares }),
@@ -2491,12 +2620,25 @@ async function runReconcileEchoes(
     // Echo Mark instrumentation (#721): the open-time backfill heal wrote the
     // missing echo(es) this device never saw committed — countable, never
     // folded into `mark_square` (specs/w2-ga4-events.md § Reconciliation).
+    //
+    // Idempotency (Codex P2 on #727): this continuation and the
+    // `reconcileEchoStatsFromServer` one above are the SAME two-independent-
+    // promises-off-one-commit shape as the mark-time cascade — a reload can
+    // strand either. If THIS one lands but the stats write above is the one
+    // that strands, a LATER open's `bucketLag` heal would otherwise
+    // rediscover this exact increase as stale stats and report it a second
+    // time. `claimEchoMarkReport` shares its watermark with that heal (and
+    // the mark-time cascade), keyed on the FULL post-echo total
+    // (`res.squaresMarked`, not the delta `res.echoedItemIds.length`), so
+    // whichever of the two continuations survives first claims the total and
+    // the other can never re-report it.
     void committed
-      .then(() =>
-        import('../analytics').then(({ track }) =>
+      .then(() => {
+        if (!claimEchoMarkReport(uid, dayIndex, res.squaresMarked)) return;
+        return import('../analytics').then(({ track }) =>
           track('echo_mark', { trigger: 'open_reconcile', dayIndex, count: res.echoedItemIds.length }),
-        ),
-      )
+        );
+      })
       .catch(() => undefined);
   }
   if (markerRepairs.length > 0) {

@@ -145,7 +145,14 @@ beforeEach(() => {
   H.event = { claimMode: 'honor' } as EventDoc;
   H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
   H.player = null;
-  H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false });
+  // `markTransition: true` is the DEFAULT here (Codex P2 on #727): every
+  // existing test in this suite represents a genuine tap-caused transition —
+  // an unmarked Square getting pledged, or a marked one getting unmarked —
+  // so the default mock must agree with `doMark`'s new gate or the whole
+  // suite would falsely read as "no transition, suppress the event." The one
+  // test that exercises the OPPOSITE case (a stale-cache rewrite) overrides
+  // this per-call.
+  H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: true });
   H.attachProof.mockResolvedValue(undefined);
 });
 
@@ -246,6 +253,39 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
       marked: true,
       dayIndex: 0,
     });
+  });
+
+  it('a stale-cache-fold rewrite (no real transition) fires no mark_square (Codex P2 on #727)', async () => {
+    // Another tab already synced this exact Mark into the shared persistent
+    // cache before the pledge's tap lands — `setMark` deliberately folds
+    // from that fresher cache and performs a true-to-true rewrite, not a
+    // real transition. `res.markTransition: false` is what `runSetMark`
+    // reports for that case; `doMark` must gate the event on it, not on the
+    // requested `nextMarked` direction alone.
+    const user = userEvent.setup();
+    H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: false });
+    render(<Board />);
+    clickCell(0);
+
+    expect(await screen.findByText(/proof for/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: PLEDGE }));
+
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByText(/proof for/i)).toBeNull());
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('an unmark of an already-unmarked cached Square (the same stale-cache race) fires no unmark_square (Codex P2 on #727)', async () => {
+    const cells = dealt();
+    cells[1] = { ...cells[1], marked: true, markedAt: 1, status: 'confirmed' };
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells };
+    H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: false });
+    render(<Board />);
+
+    clickCell(1); // marked → instant unmark, never a sheet
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    expect(H.track).not.toHaveBeenCalledWith('unmark_square', expect.anything());
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('opens Photo-first (#309) — photo body on first paint, other bodies once chosen — and the pledge row fits one line (nowrap, full width)', async () => {
