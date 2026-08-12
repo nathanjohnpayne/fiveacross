@@ -1233,7 +1233,11 @@ describe('the frozen outbound request', () => {
     ...over,
   });
 
-  const build = (rows: Record<string, unknown>[], live: Record<string, Record<string, unknown>> = {}, opts: Parameters<typeof fakeDb>[3] extends never ? never : { failFreeze?: boolean } = {}) => {
+  const build = (
+    rows: Record<string, unknown>[],
+    live: Record<string, Record<string, unknown>> = {},
+    opts: { failFreeze?: boolean; failClaim?: boolean } = {},
+  ) => {
     const base: Record<string, Record<string, unknown>> = { 'events/med-2026': EVENT };
     for (const r of rows) base[`events/med-2026/items/${r.docId}`] = { status: 'pending', reportCount: 0 };
     return fakeDb(
@@ -1241,7 +1245,7 @@ describe('the frozen outbound request', () => {
       { ...base, ...live },
       [],
       false,
-      false,
+      opts.failClaim ?? false,
       opts.failFreeze ?? false,
     );
   };
@@ -1349,6 +1353,136 @@ describe('the frozen outbound request', () => {
     expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe(
       'admin-digest/med-2026/a1__1__1',
     );
+  });
+
+  it('LEAVES the row untouched when release finds a NEWER claim already in place (stale)', async () => {
+    // The concurrency guard `releaseBatch` exists for: a second invocation
+    // re-claims (or settles) these rows between this drain reading the frozen
+    // batch and its own release transaction. `data.batchId !== batchId` must
+    // refuse the release — erasing that newer claim would strand or duplicate
+    // whatever it is doing.
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1', { batchId: 'a1__1' })], {
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['removed-admin@example.com'],
+        subject: 'Admin · stale',
+        html: '<p>stale</p>',
+        text: 'stale',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', {
+      ...deps(send),
+      getAdminUids: async () => {
+        // Simulates the race: another invocation re-claims row `a1` under a
+        // NEW batch id after this drain already read the frozen request but
+        // before its release transaction re-reads the row.
+        await db.doc('events/med-2026/adminAlerts/a1').set({ ...alert('a1'), batchId: 'someone-else/2' });
+        return ['u1'];
+      },
+    });
+    spy.mockRestore();
+    expect(result).toEqual({ sent: 0, retired: 0, reason: 'claim-lost' });
+    expect(send).not.toHaveBeenCalled();
+    // The load-bearing assertion: the row is exactly what the newer claim
+    // left it as — release neither erased it nor wrote anything of its own.
+    const row = db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1');
+    expect(row?.batchId).toBe('someone-else/2');
+    // The abandoned freeze is not deleted out from under the newer claim.
+    const frozenAfter = await db.doc('events/med-2026/adminAlertBatches/a1__1').get();
+    expect(frozenAfter.data()).toBeDefined();
+  });
+
+  it('LEAVES the row untouched when release finds it TOMBSTONED under the same claim (stale)', async () => {
+    // The other half of `releaseBatch`'s guard: `data.sentAt !== null`,
+    // isolated the same way the newer-claim test above isolates
+    // `data.batchId !== batchId` — by changing only the one field the guard
+    // checks and holding the other constant. A concurrent drain can settle
+    // (send + tombstone) these SAME rows between this invocation's
+    // frozen-batch read and its own release transaction; `sentAt` going
+    // non-null must refuse the release on its own, independent of whatever
+    // `batchId` the row carries afterwards. (`finishBatch`'s real tombstone
+    // is a full replace that also drops `batchId` — an even easier case,
+    // already caught by the `batchId` half of the guard — so holding
+    // `batchId` fixed here is what actually exercises the `sentAt` half:
+    // deleting only that condition leaves this row's `batchId` still
+    // matching, and would incorrectly "release" a row that was, in fact,
+    // already delivered.)
+    const send = vi.fn(async () => true);
+    const db = build([alert('a1', { batchId: 'a1__1' })], {
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['removed-admin@example.com'],
+        subject: 'Admin · stale',
+        html: '<p>stale</p>',
+        text: 'stale',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', {
+      ...deps(send),
+      getAdminUids: async () => {
+        // Simulates the race: another invocation settled row `a1` under this
+        // SAME batch id after this drain already read the frozen request but
+        // before its release transaction re-reads the row.
+        await db.doc('events/med-2026/adminAlerts/a1').set({
+          ...alert('a1'),
+          batchId: 'a1__1',
+          sentAt: NOW,
+          expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+        });
+        return ['u1'];
+      },
+    });
+    spy.mockRestore();
+    expect(result).toEqual({ sent: 0, retired: 0, reason: 'claim-lost' });
+    expect(send).not.toHaveBeenCalled();
+    // The load-bearing assertion: the row is exactly what the settling drain
+    // left it as — release neither erased it nor wrote anything of its own.
+    const row = db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1');
+    expect(row?.sentAt).toBe(NOW);
+    expect(row?.batchId).toBe('a1__1');
+    // The abandoned freeze is not deleted out from under the settled send.
+    const frozenAfter = await db.doc('events/med-2026/adminAlertBatches/a1__1').get();
+    expect(frozenAfter.data()).toBeDefined();
+  });
+
+  it('LEAVES the row untouched when the release TRANSACTION itself fails (failed)', async () => {
+    // The other early return: the transaction rejects outright (a backend
+    // error), and `releaseBatch`'s catch block must not have written anything
+    // — the row stays claimed for a later, safe retry, and the frozen batch
+    // that would otherwise resurrect a tombstone is not dropped either.
+    const send = vi.fn(async () => true);
+    const db = build(
+      [alert('a1', { batchId: 'a1__1' })],
+      {
+        'events/med-2026/adminAlertBatches/a1__1': {
+          to: ['removed-admin@example.com'],
+          subject: 'Admin · stale',
+          html: '<p>stale</p>',
+          text: 'stale',
+          from: 'x <x@example.com>',
+          alertCount: 1,
+          createdAt: 1,
+        },
+      },
+      { failClaim: true },
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', deps(send));
+    spy.mockRestore();
+    expect(result).toEqual({ sent: 0, retired: 0, reason: 'claim-failed' });
+    expect(send).not.toHaveBeenCalled();
+    const row = db.rows('events/med-2026/adminAlerts').find((r) => r.id === 'a1');
+    expect(row?.batchId).toBe('a1__1');
+    expect(row?.sentAt).toBeNull();
+    const frozenAfter = await db.doc('events/med-2026/adminAlertBatches/a1__1').get();
+    expect(frozenAfter.data()).toBeDefined();
   });
 
   it('REPLAYS the winner when it loses the freeze race, discarding its own render', async () => {
