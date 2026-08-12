@@ -20,6 +20,7 @@ spec_test_map:
     - src/editions.test.ts
     - src/components/signin-edition-brand.test.tsx
     - src/components/ErrorBoundary.test.tsx
+    - src/auth-domain.test.ts
   # cells-map's pure boundary lives in src/game/cells.test.ts (module-named,
   # not spec-basename-named); the offline no-clobber proof matches by name.
   cells-map:

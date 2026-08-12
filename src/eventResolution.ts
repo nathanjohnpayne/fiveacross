@@ -73,6 +73,14 @@ export const CACHE_VERSION = 1;
  *  covering a whole event-day of offline use. */
 export const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
+/** Small allowance for ordinary clock drift between the write and the read
+ *  (NTP correction, a few seconds of skew) — NOT a grace window for genuine
+ *  rollback. A `fetchedAt` further in the future than this cannot have been
+ *  written honestly by `writeCache`, which always stamps `Date.now()` at
+ *  write time (Codex P3 on #582): treating it as fresh would let a device
+ *  clock rollback extend the 12-hour bound by the rollback duration. */
+const FUTURE_FETCH_TOLERANCE_MS = 60_000;
+
 interface CacheEnvelope {
   v: number;
   fetchedAt: number;
@@ -152,7 +160,7 @@ export function readCache(
         preview: coerceEventPreview(d.preview),
       },
       fetchedAt: env.fetchedAt,
-      stale: now - env.fetchedAt > CACHE_TTL_MS,
+      stale: now - env.fetchedAt > CACHE_TTL_MS || env.fetchedAt - now > FUTURE_FETCH_TOLERANCE_MS,
       requiresPreviewRevalidation: env.previewValidated !== true,
     };
   } catch {

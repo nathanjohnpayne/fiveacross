@@ -1,10 +1,14 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Camera, Mic, PenLine, Images, X } from 'lucide-react';
 import { attachProof, type AttachProofResult } from '../data/proofs';
 import { track } from '../analytics';
 import { markSquareOccurred } from '../hooks/useToastStack';
 import { safeMediaUrl } from './safeMediaUrl';
 import type { Cell, ClaimMode, ProofType } from '../types';
+
+// Focus-trap query — mirrors ProfileEditor.tsx / ProofFeed.tsx's
+// FOCUSABLE_SELECTOR, the shared dialog convention across the sheets.
+const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 // iOS Safari's MediaRecorder cannot produce WebM at all — it records MP4/AAC.
 // The pre-#295 code always let the browser pick a default (`new
@@ -72,11 +76,22 @@ interface Props {
   // The Prompt's already-subscribed Tally count (ADR 0002 — no new read) for the
   // "🔥 Marked by N others so far" heat line.
   tallyCount?: number;
+  // The control that opened this sheet, captured by the caller BEFORE the state
+  // update that mounts us. Optional; `document.activeElement` at mount is the
+  // fallback and stays correct for every caller that does not neutralize the
+  // surface behind the sheet. Board does: it marks the card `inert` in the same
+  // commit that mounts this sheet, and the HTML spec has a user agent move
+  // focus out of a subtree that becomes inert — so by the time the passive
+  // effect below runs, `document.activeElement` may already be `<body>` and the
+  // restore on close would drop the Player back to the top of the page instead
+  // of the Square they came from (Codex P2, round 6). Chrome measurably keeps
+  // focus, but relying on that is relying on one engine's behaviour.
+  restoreFocusTo?: HTMLElement | null;
   onClose: () => void;
 }
 
 export default function ProofSheet(props: Props) {
-  const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, onClose } = props;
+  const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, restoreFocusTo, onClose } = props;
   // Photo opens pre-selected (#309, folding in the #310 row-16 parity note):
   // the wireframe paints the claim sheet with the Photo body OPEN — Take photo
   // + Library visible on first paint — which drops one tap from the mainline
@@ -105,6 +120,79 @@ export default function ProofSheet(props: Props) {
   const [busy, setBusy] = useState(false);
   const recRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const titleRef = useRef<HTMLDivElement | null>(null);
+  // Latest-`onClose` ref (the React "latest ref" pattern). The focus effect below
+  // MUST run exactly once per mount, so it cannot list `onClose` in its deps the
+  // way ProfileEditor/FeedWhoListSheet do: Board passes an inline
+  // `() => setProofTarget(null)` and re-renders constantly off its live streams,
+  // so a fresh identity every render would re-run the effect, re-capture
+  // `previouslyFocused` (by then the title itself) and yank focus back to the
+  // title mid-typing — the same trap CodeRabbit flagged on #398, which the Feed
+  // solved caller-side with a `useCallback`. Reading through a ref fixes it
+  // HERE, so the sheet stays correct for every caller (the standalone renders in
+  // src/components/d15-claim-sheet-photo.test.tsx pass a fresh `vi.fn()` per
+  // rerender) without depending on call-site discipline.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  // Modal focus management, the same contract every other sheet carries
+  // (ProfileEditor, AcceptableUse, More, FeedWhoListSheet, AdminSheet): move
+  // focus into the dialog on open, trap Tab/Shift+Tab inside it, close on
+  // Escape, and restore focus to whatever was focused before. `previouslyFocused`
+  // is captured at mount rather than held as a `triggerRef`: the sheet opens from
+  // any of 25 Squares or their ＋ proof-add buttons, so there is no single
+  // trigger node to point at — the same reasoning FeedWhoListSheet documents.
+  // Read through a ref for the same reason `onClose` is: the effect below runs
+  // exactly once per mount, so it must not list this in its deps.
+  const restoreFocusToRef = useRef(restoreFocusTo);
+  useEffect(() => {
+    const previouslyFocused =
+      restoreFocusToRef.current ?? (document.activeElement as HTMLElement | null);
+    titleRef.current?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        // Matches Cancel and the backdrop, neither of which is gated on `busy`:
+        // dismissing mid-upload abandons the sheet, not the in-flight attach —
+        // `submit` still reports its verdict through `onAttached`.
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      // Exclude DISABLED controls from the trap's focusable set (the Codex P2 on
+      // #392, and load-bearing here rather than defensive): "Mark it" is the LAST
+      // focusable in the sheet and it is disabled on first paint (no capture yet),
+      // as is the pledge outside honor mode. Native Tab skips them, so treating a
+      // disabled button as `last` would mean the wrap check never fires and focus
+      // escapes the dialog on the very first Tab cycle.
+      const focusable = [
+        ...(dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? []),
+      ].filter((el) => !el.hasAttribute('disabled'));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      // The title holds focus (tabIndex=-1, the landing spot) but is deliberately
+      // outside FOCUSABLE_SELECTOR — treat it as preceding `first` so Shift+Tab
+      // from it still wraps to the end.
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === titleRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
 
   const onPhoto = (source: 'camera' | 'library') => (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -267,9 +355,18 @@ export default function ProofSheet(props: Props) {
           filled accent primaries) to THIS sheet — `.sheet` chrome is shared
           with the profile/tally/who-list/menu sheets, which keep the global
           `.btn` look. Same surface-scoped pattern as #322's toast register. */}
-      <div className="sheet claim-sheet" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        className="sheet claim-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="claim-sheet-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="sheet-header">
-          <div className="sheet-title">Proof for “{cell.text}”</div>
+          <div className="sheet-title" id="claim-sheet-title" ref={titleRef} tabIndex={-1}>
+            Proof for “{cell.text}”
+          </div>
           {/* The claim sheet's dismiss `x` (daily-cards-spec § "Iconography —
               Lucide" › Claim sheet) — an icon-only close alongside the
               existing "Cancel" action button below; either dismisses. */}

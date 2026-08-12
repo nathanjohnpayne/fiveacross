@@ -21,6 +21,7 @@ import { track } from '../analytics';
 import { adultContentRequired } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
+import { consumePostUpdateDealGrace } from '../postUpdateDeal';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
@@ -298,6 +299,22 @@ function isTransientDealError(err: unknown): boolean {
   if (typeof code === 'string') return TRANSIENT_DEAL_ERROR_CODES.has(code);
   const message = err instanceof Error ? err.message : String(err);
   return TRANSIENT_UNCODED_DEAL_ERROR.test(message);
+}
+
+// The single gate on the #519 post-update grace, consulted by BOTH halves of the
+// startup race an update reload can lose: the profile/attestation bootstrap
+// (`bootstrapUser`) and the deal itself (`runDeal`). Whichever fails first claims
+// it, and claiming SPENDS it — one silent repeat per document, never a loop, and
+// never two. The other three terms are what keep it from masking a real failure:
+// a definitely-offline Player is excluded, so genuine no-connectivity reaches the
+// retry surface on the first failure rather than after a second doomed attempt; a
+// pool-shortfall keeps its own copy and its own #70 recovery; and a PERMANENT
+// Firestore failure (permission-denied / failed-precondition / unknown-coded)
+// surfaces at once, the same three-way split `failDeal` makes. The consume is
+// LAST in the chain on purpose — the grace must never be spent by a failure it
+// would not have covered.
+function claimPostUpdateGrace(err: unknown): boolean {
+  return isOnline() && !isPoolShortfall(err) && isTransientDealError(err) && consumePostUpdateDealGrace();
 }
 
 // Player-facing copy for a deal failure. The main case (ADR 0003/0004) is
@@ -595,10 +612,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // ONLINE: the authoritative bootstrap. No provisional cache lift here — the
     // definitive server read is moments away and the app stays gated until it
     // lands, so lifting from cache first would only risk a premature deal.
-    let attestedRead: boolean | undefined;
-    let bootstrapFailure: { err: unknown } | null = null;
-    try {
-      attestedRead = await withTimeout(
+    // Named, so the #519 grace below can repeat it VERBATIM — which is what makes
+    // the repeat the same work the Player's Retry would run (`retryBootstrap`
+    // re-runs this identical pair).
+    const readAuthority = () =>
+      withTimeout(
         (async () => {
           await ensureUserProfile(u);
           // SERVER-ONLY authority read (Codex #117 round 6): getDocFromServer, NOT the
@@ -610,8 +628,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         })(),
         AUTH_BOOTSTRAP_TIMEOUT_MS,
       );
+    let attestedRead: boolean | undefined;
+    let bootstrapFailure: { err: unknown } | null = null;
+    try {
+      attestedRead = await readAuthority();
     } catch (err) {
       bootstrapFailure = { err };
+    }
+    // #519, the BOOTSTRAP half of the same startup race (Codex P2 on #719). An
+    // update reload can drop `ensureUserProfile` or the server-only attestation
+    // read exactly as easily as it drops the deal, and that failure reaches
+    // `failDeal` below WITHOUT `runDeal` ever being entered — so a grace consulted
+    // only there would leave the Player looking at the identical connection-worded
+    // `DealError`, cleared by an identical instantly-succeeding Retry. The two
+    // paths are indistinguishable to the Player, so they share one grace on
+    // identical terms (`claimPostUpdateGrace`): online, transient, not a
+    // pool-shortfall, at most once per document, claimed by whichever half fails
+    // first. The repeat is silent because NOTHING has settled yet — `loading` is
+    // still held and `profileReady` still false, so the Player stays on the same
+    // "Loading…" they were already on rather than seeing an error frame. Only this
+    // branch needs it: the optimistic-sticky arm below keys off `attestedUidsRef`,
+    // a per-document ref that a reload always resets to empty.
+    if (bootstrapFailure && profileAttemptRef.current === attempt && claimPostUpdateGrace(bootstrapFailure.err)) {
+      try {
+        attestedRead = await readAuthority();
+        bootstrapFailure = null;
+      } catch (err) {
+        bootstrapFailure = { err };
+      }
     }
     if (profileAttemptRef.current !== attempt) return;
     // OPTIMISTIC-UI vs DURABLE-AUTHORITY (round 7): the optimistic sticky only keeps
@@ -873,12 +917,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearDealError();
           return;
         }
+        // #519: the FIRST deal after a service-worker update reload gets ONE
+        // silent re-deal instead of the error surface. `updateServiceWorker(true)`
+        // reloads the moment the new worker takes control, so this deal can fire
+        // against an auth token / Firestore connection that is still coming up —
+        // the failure reported twice on 2026-08-01, where Retry then succeeded on
+        // the spot. The re-deal IS that Retry, minus making the player tap it:
+        // `dealError` is never set (so `DealError` never renders, not even for a
+        // frame) and `dealing` stays up, because the re-entrant attempt bumps
+        // `dealAttemptRef` before the `finally` below reads it — the player sees
+        // uninterrupted progress. Everything the manual Retry relies on holds
+        // unchanged: the two joins serialize inside `joinAndDeal`'s transaction
+        // (#409) and the attempt guard keeps the superseded one from reporting.
+        //
+        // `claimPostUpdateGrace` holds the bounds (see its comment): armed only by
+        // a `controllerchange`, transient failures only, never offline, never a
+        // pool-shortfall, and spent by its first taker — which may have been the
+        // bootstrap half of this same race, in which case this failure surfaces.
+        if (claimPostUpdateGrace(err)) {
+          void runDealRef.current(u);
+          return;
+        }
       }
       failDeal(err);
     } finally {
       if (dealAttemptRef.current === attempt) setDealing(false);
     }
   }, [failDeal, clearDealError]);
+  // Self-reference for the one silent re-deal the #519 grace fires: `runDeal` is a
+  // `useCallback` and cannot name itself. Re-pointed every render at the current
+  // closure, the same way `PoolRecoveryWatcher` holds `retryDeal`. Which closure
+  // wins does not matter — the attempt counter, not the closure identity, is what
+  // supersedes — so this needs no effect to be correct.
+  const runDealRef = useRef(runDeal);
+  runDealRef.current = runDeal;
 
   // Deal a Board only once the 18+ attestation is settled TRUE (#23, Finding 1):
   // the gate must gate the SIDE EFFECT, not just the UI. A signed-in returning

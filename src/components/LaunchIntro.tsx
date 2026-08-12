@@ -34,6 +34,17 @@ function hasSeen(): boolean {
   }
 }
 
+/**
+ * Whether the announcement has already been dismissed on this device — the
+ * twin of CoachOverlay's `isCoachOverlayDismissed`. Board needs it because this
+ * component self-gates on the stored flag: mounting it is not the same as
+ * showing it, and Board has to know whether a scrim is actually up before it
+ * decides to take the card behind it out of the tab order.
+ */
+export function isLaunchIntroDismissed(): boolean {
+  return hasSeen();
+}
+
 function markSeen(): void {
   try {
     localStorage.setItem(SEEN_KEY, String(Date.now()));
