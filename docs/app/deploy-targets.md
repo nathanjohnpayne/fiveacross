@@ -164,21 +164,9 @@ done
 
 For a Gay Cruise Bingo rollout the list is `gaycruisebingo.vercel.app`; for a change going to both projects it is all three.
 
-**Anything deployed without that flag bakes `unknown` instead**, and no Vercel metadata fills the gap — a CLI deployment reports `source: null` and no `meta.githubCommitSha`, and `vercel inspect` exposes only a `created` timestamp, which says when a build ran, not what was in it. **Do not fake it with that timestamp.** That covers every mirror built before [#676](https://github.com/nathanjohnpayne/gaycruisebingo/issues/676), and any deploy where the flag was dropped. For those, test for the **content you expect**, which is commit-aware in effect:
+**Anything deployed without that flag bakes `unknown` instead**, and no Vercel metadata fills the gap — a CLI deployment reports `source: null` and no `meta.githubCommitSha`, and `vercel inspect` exposes only a `created` timestamp, which says when a build ran, not what was in it. **Do not fake it with that timestamp.**
 
-```bash
-# Does the mirror contain the change you are looking for?
-# All THREE — gaycruisebingo.vercel.app is the ship-network fallback and is
-# now just as manual as the other two, so it needs the same check.
-for H in vacaybingo.vercel.app fiveacross.vercel.app gaycruisebingo.vercel.app; do
-  A=$(curl -sS "https://$H/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
-  printf '%-24s %s ' "$H" "$A"
-  curl -sS "https://$H$A" | grep -qE 'try\{[A-Za-z0-9_$]+=URL\.createObjectURL' \
-    && echo "has #660 guard" || echo "STALE (no #660 guard)"
-done
-```
-
-Substitute a marker unique to whatever commit you are verifying. A bare `unknown` where you expected a sha is itself the finding: that host was published without the flag, so re-deploy it with the guarded block rather than hunting for a marker. ([#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665) would close the same gap for *Git*-triggered builds via `VERCEL_GIT_COMMIT_SHA`; it is unrelated to the CLI path this page now prescribes.)
+Since [#665](https://github.com/nathanjohnpayne/gaycruisebingo/issues/665), `appVersion()` (`src/build-config.ts`'s `resolveAppVersion`) also falls back to Vercel's own `VERCEL_GIT_COMMIT_SHA`, which a Git-triggered build sets automatically — so the `preview`-branch alias `vercel.json` still allows to build on push now bakes a real commit too, with no flag to remember. The CLI path above is unaffected: `vercel deploy` never sets `VERCEL_GIT_COMMIT_SHA` either, which is exactly why it passes `GITHUB_SHA` explicitly. A bare `unknown` where you expected a sha is therefore always the same finding — that build was published without `--build-env GITHUB_SHA=...` — and the same sha-comparison loop above (§ "each must equal: `git rev-parse origin/main`") is what to re-run once you redeploy it with the guarded block; there is no separate content-marker case left to hand-maintain.
 
 > **Sign-in does not work on the Five Across mirrors yet.** `preview-deploys.md` verification step 5 is still *"Blocked on steps 5 and 6"* — the Firebase authorized-domain and Google OAuth redirect-URI registrations have not been done for `vacaybingo.vercel.app` / `fiveacross.vercel.app`. They render a Google button that fails with `auth/unauthorized-domain` or `redirect_uri_mismatch`. Keeping them current is still worth doing so they are ready, but **do not point players at them during an outage** until those two console steps are complete.
 

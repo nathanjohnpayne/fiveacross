@@ -22,7 +22,7 @@ Connect the production domain `gaycruisebingo.com` to Firebase Hosting so the Ev
 
 - Records MUST be DNS-only / unproxied — a proxied (orange-cloud) record blocks Firebase's cert issuance. Do the DNS step FIRST because propagation + issuance can take up to ~24 h (PRD risk).
 - Phase 0 hosting runs on the Spark plan; the domain connection does not require Blaze (unlike Functions).
-- Deploy via `op-firebase-deploy` (1Password-backed; `npm run deploy` / `deploy:hosting`) — never `firebase login` / `firebase deploy` directly (`docs/app/README.md`).
+- Deploy via `op-firebase-deploy` (1Password-backed; `npm run deploy:gaycruisebingo:hosting` or targeted `npm run deploy -- gaycruisebingo`) — never `firebase login` / `firebase deploy` directly (`docs/app/README.md`).
 - Keep `noindex` (`index.html:25`) intact — the custom domain does not change public discoverability.
 - Keep the PR small (needs-phase-4, deploy/infra); expect external review.
 - **decision-needed context:** the cutover timing is an open operational decision — tracked in #__NUM_x-decisions-needed__.

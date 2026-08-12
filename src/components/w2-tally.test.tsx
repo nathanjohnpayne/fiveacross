@@ -95,7 +95,9 @@ beforeEach(() => {
 
 async function tapFirstSquare() {
   const { container, getByText } = render(<Board />);
-  fireEvent.click(container.querySelectorAll('.grid .cell')[0]);
+  // `.cell-claim` is the Square's claim button — the tile div is a positioning
+  // shell, so the handler lives on the button that fills it.
+  fireEvent.click(container.querySelectorAll('.grid .cell .cell-claim')[0]);
   // The claim tap opens the (mocked) sheet; the 🎖️ pledge completes the honor
   // Mark (issue #181) — the same bare setMark the tap used to make directly.
   fireEvent.click(getByText('pledge'));
