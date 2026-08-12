@@ -7,15 +7,17 @@ import { describe, expect, it } from 'vitest';
 // rather than against a hand-rolled parser is the point: both of the Codex P2
 // findings on PR #730 were cases where a plausible-looking regex disagreed with
 // this module. It is a devDependency, so it is present wherever `npm test` runs.
-import { loadUserEnvs, parse } from 'firebase-tools/lib/functions/env.js';
+import { loadUserEnvs, parse, parseStrict } from 'firebase-tools/lib/functions/env.js';
 import {
   E2E_SECRET_VALUES,
   FUNCTIONS_EMULATOR_PORT,
   declaredParamNames,
+  declaredParamNamesAcross,
   e2eFunctionsEnv,
   e2eParamValues,
   emulatorDotenvFiles,
   formatAssignment,
+  functionsSources,
   parseDotenv,
   unassignedNames,
   unusableSecretNames,
@@ -126,6 +128,38 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(aliasedHelper).params).toEqual(['SMTP_BRIDGE_URL']);
   });
 
+  // Codex P2 on PR #730, against the first version of the alias check: a second
+  // import statement is legal, and a non-global exec inspects only the first.
+  it('inspects every params import, not just the first', () => {
+    const twoImports = [
+      "import { defineString } from 'firebase-functions/params';",
+      "import { defineFloat as floatParam } from 'firebase-functions/params';",
+      "export const A = defineString('SMTP_BRIDGE_URL', { default: '' });",
+    ].join('\n');
+
+    expect(() => declaredParamNames(twoImports)).toThrow(/defineFloat as floatParam/);
+  });
+
+  // Codex P2 on PR #730: Firebase resolves params from every loaded module, so a
+  // handler declaring one beside itself would be invisible to a params.ts-only
+  // scan — and the declarations already in params.ts keep the zero-match guard
+  // satisfied while the emulator hangs on the new name.
+  it('finds a param declared outside params.ts', () => {
+    const spread = [
+      { label: 'functions/src/params.ts', text: PARAMS_SOURCE },
+      { label: 'functions/src/handler.ts', text: "export const S = defineString('SMTP_BRIDGE_URL');" },
+    ];
+
+    expect(declaredParamNamesAcross(spread).params).toContain('SMTP_BRIDGE_URL');
+  });
+
+  it('scans the real Functions tree and still lands on the params.ts set', () => {
+    const tree = functionsSources(new URL('../functions/src', import.meta.url).pathname);
+
+    expect(tree.length).toBeGreaterThan(1);
+    expect(declaredParamNamesAcross(tree)).toEqual(declaredParamNames(PARAMS_SOURCE));
+  });
+
   it('separates secrets from plain params', () => {
     const { params, secrets } = declaredParamNames(PARAMS_SOURCE);
 
@@ -219,6 +253,26 @@ describe('secret values the emulator can actually use', () => {
     expect(() => parseDotenv(oneBadLine, 'functions/.secret.local')).toThrow(
       /functions\/\.secret\.local is not a dotenv file/,
     );
+  });
+
+  // Codex P2 on PR #730. parseStrict quotes each rejected line verbatim, and a
+  // malformed line in .secret.local is by definition a line holding a
+  // credential — so the message must locate the problem without repeating it.
+  it('never echoes the contents of a malformed secret line', () => {
+    const fumbledEquals = 'RESEND_API_KEY sk_live_do_not_leak_me\n';
+
+    let message = '';
+    try {
+      parseDotenv(fumbledEquals, 'functions/.secret.local');
+    } catch (error) {
+      message = error.message;
+    }
+
+    expect(message).not.toContain('sk_live_do_not_leak_me');
+    expect(message).toContain('functions/.secret.local');
+    expect(message).toContain('line 1');
+    // The parser's own message is what would have leaked it.
+    expect(() => parseStrict(fumbledEquals)).toThrow(/sk_live_do_not_leak_me/);
   });
 
   it('still allows an empty PARAM value, which is a legitimate default', () => {

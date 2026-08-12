@@ -37,7 +37,7 @@
  * reason its `BUG_REPORT_APP_CHECK` comment records (#158). The sibling spec
  * holds that file to the same coverage rule.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 // The dotenv reader these files are written for. Imported rather than
@@ -46,7 +46,7 @@ import { pathToFileURL } from 'node:url';
 // disagreeing in the accepting direction is a hang. firebase-tools is a
 // devDependency and `npx firebase` runs moments later in the same script, so
 // this adds no dependency the runner did not already have.
-import { parseStrict } from 'firebase-tools/lib/functions/env.js';
+import { parse, parseStrict } from 'firebase-tools/lib/functions/env.js';
 
 /**
  * `defineString('NAME'` / `defineBoolean('NAME'` / `defineSecret('NAME'` …
@@ -87,8 +87,13 @@ function withoutComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-/** The named-import block for the params module, if the source has one. */
-const PARAMS_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*['"]firebase-functions\/params['"]/;
+/**
+ * EVERY named-import block for the params module. Global, because a second
+ * import statement is a legal way to bring in a constructor and a first-match
+ * lookup would inspect only the first one, letting an alias through in the
+ * second (Codex P2 on PR #730, against the first version of this check).
+ */
+const PARAMS_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*['"]firebase-functions\/params['"]/g;
 
 /**
  * Rejects an aliased CONSTRUCTOR import — `defineString as stringParam` — which
@@ -109,12 +114,8 @@ const PARAMS_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*['"]firebase-functions\/
  * the zero-match guard below is what catches that.
  */
 function rejectAliasedConstructors(source) {
-  const imported = PARAMS_IMPORT_RE.exec(source);
-  if (!imported) {
-    return;
-  }
-  const aliased = imported[1]
-    .split(',')
+  const aliased = [...source.matchAll(PARAMS_IMPORT_RE)]
+    .flatMap(([, specifiers]) => specifiers.split(','))
     .map((specifier) => specifier.trim())
     .filter((specifier) => /^define[A-Z]\w*\s+as\s+\w+$/.test(specifier));
   if (aliased.length > 0) {
@@ -193,10 +194,14 @@ export const E2E_SECRET_VALUES = {
 };
 
 /**
- * Every param name `functions/src/params.ts` declares, split by where its
- * value belongs: `params` → `.env.local`, `secrets` → `.secret.local`.
+ * Every param name a source declares, split by where its value belongs:
+ * `params` → `.env.local`, `secrets` → `.secret.local`.
+ *
+ * `label` names the file in any error. Firebase discovers params from every
+ * loaded Functions module, not just `params.ts`, so callers scan the whole tree
+ * (see `declaredParamNamesAcross`) — this only ever sees one file at a time.
  */
-export function declaredParamNames(source) {
+export function declaredParamNames(source, label = 'functions/src/params.ts') {
   const params = [];
   const secrets = [];
   const unresolvable = [];
@@ -215,7 +220,7 @@ export function declaredParamNames(source) {
   // module exists to prevent, and every test would still pass.
   if (unresolvable.length > 0) {
     throw new Error(
-      `functions/src/params.ts declares ${unresolvable.join(', ')} with a name this ` +
+      `${label} declares ${unresolvable.join(', ')} with a name this ` +
         'generator cannot resolve statically. Use a plain string literal for the param ' +
         'name, or teach scripts/e2e-functions-env.mjs to resolve the expression — ' +
         'silently skipping it would let the emulator block on a prompt for that param.',
@@ -229,6 +234,56 @@ export function declaredParamNames(source) {
     );
   }
   return { params, secrets };
+}
+
+/**
+ * The union of every param declared anywhere under the Functions source tree.
+ *
+ * Scanning the tree rather than `params.ts` alone because Firebase resolves
+ * params from every loaded module: a handler that declared one beside itself
+ * would be invisible to a single-file scan, and the declarations already in
+ * `params.ts` would keep the zero-match guard satisfied while the emulator hung
+ * on the new name (Codex P2 on PR #730). Centralising params is this repo's
+ * convention, but a convention nothing enforces is not a guarantee — and here
+ * the enforcement costs one directory walk.
+ *
+ * The zero-match guard applies to the union, not to each file: almost every
+ * module legitimately declares nothing.
+ */
+export function declaredParamNamesAcross(sources) {
+  const params = new Set();
+  const secrets = new Set();
+  for (const { label, text } of sources) {
+    if (!DECLARES_A_PARAM_RE.test(withoutComments(text))) {
+      continue;
+    }
+    const found = declaredParamNames(text, label);
+    found.params.forEach((name) => params.add(name));
+    found.secrets.forEach((name) => secrets.add(name));
+  }
+  if (params.size === 0 && secrets.size === 0) {
+    throw new Error(
+      `No firebase-functions/params declarations found across ${sources.length} Functions ` +
+        'source file(s). If the tree was restructured, update DEFINE_CALL_RE in ' +
+        'scripts/e2e-functions-env.mjs — a scan that silently finds nothing would let the ' +
+        'emulator prompt for every param.',
+    );
+  }
+  return { params: [...params], secrets: [...secrets] };
+}
+
+/** Cheap pre-filter so the per-file zero-match guard never sees an empty module. */
+const DECLARES_A_PARAM_RE = /\bdefine[A-Z][A-Za-z]*\s*\(/;
+
+/** Every TypeScript module under the Functions source tree, with its path. */
+export function functionsSources(directory) {
+  return readdirSync(directory, { recursive: true })
+    .filter((entry) => typeof entry === 'string' && entry.endsWith('.ts'))
+    .sort()
+    .map((entry) => ({
+      label: join(directory, entry),
+      text: readFileSync(join(directory, entry), 'utf8'),
+    }));
 }
 
 function renderDotenv(names, values, target) {
@@ -250,7 +305,8 @@ function renderDotenv(names, values, target) {
  * naming any declared param that has no e2e value.
  */
 export function e2eFunctionsEnv(paramsSource, projectId) {
-  const { params, secrets } = declaredParamNames(paramsSource);
+  const { params, secrets } =
+    typeof paramsSource === 'string' ? declaredParamNames(paramsSource) : paramsSource;
   return {
     env: renderDotenv(params, e2eParamValues(projectId), 'functions/.env.local'),
     secret: renderDotenv(secrets, E2E_SECRET_VALUES, 'functions/.secret.local'),
@@ -294,13 +350,34 @@ export function unassignedNames(assigned, names) {
 export function parseDotenv(body, label) {
   try {
     return parseStrict(body);
-  } catch (error) {
+  } catch {
+    // NEVER propagate the parser's own message. It quotes each rejected line
+    // verbatim, and a malformed line in `.secret.local` is by definition a line
+    // holding a credential — `RESEND_API_KEY sk_live_…` with the `=` fumbled
+    // would print the key into the terminal, the agent transcript, and any
+    // captured test log (Codex P2 on PR #730). Line numbers locate the problem
+    // without disclosing it.
     throw new Error(
-      `${label} is not a dotenv file the emulator can read: ${error.message}. It parses ` +
-        'strictly, so a single malformed line discards the whole file — for .secret.local ' +
-        'that silently sends the run to the real Secret Manager.',
+      `${label} is not a dotenv file the emulator can read — ${describeBadLines(body)}. It ` +
+        'parses strictly, so a single malformed line discards the whole file: for ' +
+        '.secret.local that silently sends the run to the real Secret Manager. The ' +
+        'offending content is withheld here because this file holds credentials.',
     );
   }
+}
+
+/** Where the rejected lines are, never what they say. */
+function describeBadLines(body) {
+  const rejected = new Set(parse(body).errors.map((line) => line.trim()));
+  const numbers = body
+    .split('\n')
+    .map((line, index) => (rejected.has(line.trim()) ? index + 1 : 0))
+    .filter(Boolean);
+  const count = rejected.size;
+  const plural = count === 1 ? 'line' : 'lines';
+  return numbers.length > 0
+    ? `${count} malformed ${plural} (line ${numbers.join(', ')})`
+    : `${count} malformed ${plural}`;
 }
 
 /**
@@ -369,21 +446,21 @@ function ensureFile(path, names, body, { coverageEnvs, unmet, consequence }) {
 }
 
 function main(argv) {
-  const [paramsPath, envPath, secretPath, projectId] = argv;
-  if (!paramsPath || !envPath || !secretPath || !projectId) {
+  const [functionsSrc, envPath, secretPath, projectId] = argv;
+  if (!functionsSrc || !envPath || !secretPath || !projectId) {
     throw new Error(
-      'usage: e2e-functions-env.mjs <params.ts> <.env.local> <.secret.local> <projectId>',
+      'usage: e2e-functions-env.mjs <functions/src> <.env.local> <.secret.local> <projectId>',
     );
   }
-  const source = readFileSync(paramsPath, 'utf8');
-  const { params, secrets } = declaredParamNames(source);
+  const declared = declaredParamNamesAcross(functionsSources(functionsSrc));
+  const { params, secrets } = declared;
   // Both bodies are rendered before either is written, so the failure this
   // exists to produce — a param with no e2e value — creates nothing at all,
   // rather than a half-written file the next run would accept as good. Cleanup
   // after any LATER failure belongs to the caller: scripts/test-e2e.sh decides
   // which of these two files it owns before calling here, and removes only
   // those on exit.
-  const { env, secret } = e2eFunctionsEnv(source, projectId);
+  const { env, secret } = e2eFunctionsEnv(declared, projectId);
   ensureFile(envPath, params, env, {
     coverageEnvs: mergedDotenvEnvs(dirname(envPath), projectId),
     unmet: unassignedNames,
