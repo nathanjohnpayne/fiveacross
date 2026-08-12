@@ -107,7 +107,12 @@ vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
 // Both overlays self-gate on localStorage and would otherwise add their own CTAs
 // to this suite's button queries.
 vi.mock('./CoachOverlay', () => ({ default: () => null, isCoachOverlayDismissed: () => true }));
-vi.mock('./LaunchIntro', () => ({ default: () => null }));
+vi.mock('./LaunchIntro', () => ({
+  default: () => null,
+  // Board reads this to decide whether a scrim is up over the card; the stub
+  // reports "already dismissed" so the inert gate stays open here.
+  isLaunchIntroDismissed: () => true,
+}));
 
 import Board from './Board';
 
