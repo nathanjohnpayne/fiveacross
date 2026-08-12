@@ -35,8 +35,13 @@ export default function SquareText({ text }: { text: string }) {
 
   useLayoutEffect(() => {
     const el = ref.current;
-    const cell = el?.parentElement;
-    if (!el || !cell) return;
+    // The box this text has to fit inside. On the live Board that is the
+    // Square's full-bleed claim <button> (which spans the tile inside its
+    // border); on the read-only CachedCardFallback the span is still a direct
+    // child of `.cell`. Both carry the same 4px padding, so the measurement
+    // below holds for either host.
+    const host = el?.parentElement;
+    if (!el || !host) return;
 
     // Applies the fitted size directly to the DOM every time this runs,
     // independent of React state — `setFontSize` alone isn't enough: two
@@ -52,13 +57,14 @@ export default function SquareText({ text }: { text: string }) {
       el.style.fontSize = '';
       const baseSize = parseFloat(window.getComputedStyle(el).fontSize);
       if (!Number.isFinite(baseSize) || baseSize <= 0) return;
-      const cellRect = cell.getBoundingClientRect();
-      // .cell's own 4px padding on every side (index.css) — the usable box
-      // the text actually has to fit inside is the cell minus that padding.
-      const CELL_PADDING = 8;
+      const hostRect = host.getBoundingClientRect();
+      // The host's 4px padding on every side (index.css: `.cell` and
+      // `.cell-claim` both set it) — the usable box the text actually has to
+      // fit inside is the host minus that padding.
+      const HOST_PADDING = 8;
       const box = {
-        width: Math.max(0, cellRect.width - CELL_PADDING),
-        height: Math.max(0, cellRect.height - CELL_PADDING),
+        width: Math.max(0, hostRect.width - HOST_PADDING),
+        height: Math.max(0, hostRect.height - HOST_PADDING),
       };
       const fitted = fitTextSize(text, box, { baseSize });
       if (fitted != null) el.style.fontSize = `${fitted}px`;
@@ -77,7 +83,7 @@ export default function SquareText({ text }: { text: string }) {
     // dependency of the guard (the effect above still fits on mount/change).
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => measure());
-    observer.observe(cell);
+    observer.observe(host);
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textSize only retriggers the DOM re-read above; see the doc comment.
   }, [text, textSize]);

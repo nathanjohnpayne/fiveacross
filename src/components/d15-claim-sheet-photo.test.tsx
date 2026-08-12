@@ -8,6 +8,8 @@ import userEvent from '@testing-library/user-event';
 //   2. uploadProofMedia (unit) — the EXIF/GPS strip re-encode + fail-closed guard.
 // The Feed's 🖼️ badge + Day chip are covered in w2-proof-capture-feed.test.tsx;
 // attachProof's source/dayIndex stamp + strip pass-through in w2-proof-capture.test.ts.
+// The claim sheet's dialog semantics + focus management ride here too, since this
+// is the file that renders ProofSheet standalone — see the last describe block.
 
 const H = vi.hoisted(() => ({ attachProof: vi.fn(), uploadBytes: vi.fn(), getDownloadURL: vi.fn() }));
 
@@ -214,6 +216,94 @@ describe('claim sheet button register (#309 — wireframe parity)', () => {
     await user.click(screen.getByRole('button', { name: 'Sound' }));
     expect(screen.getByRole('button', { name: 'Sound' })).toHaveClass('on');
     expect(screen.getByRole('button', { name: 'Photo' })).not.toHaveClass('on');
+  });
+});
+
+describe('claim sheet dialog semantics + focus management', () => {
+  // The claim sheet was the ONE modal sheet in src/components/** without
+  // `role="dialog"` / `aria-modal` — screen readers announced it as ordinary
+  // page content and nothing scoped focus to it, leaving the whole board
+  // tabbable behind a visually-covering backdrop. Same contract every sibling
+  // sheet carries (ProfileEditor, AcceptableUse, More, ProofFeed's
+  // FeedWhoListSheet, AdminSheet), asserted here at the ProofSheet layer.
+
+  const title = () => screen.getByText(/^Proof for/);
+
+  it('exposes the sheet as a modal dialog named by its "Proof for …" title', () => {
+    render(<ProofSheet {...baseProps()} />);
+    const dialog = screen.getByRole('dialog', { name: /Proof for/ });
+    // The scope hook and the dialog live on the SAME node — the a11y semantics
+    // wrap the whole sheet, not an inner slice of it.
+    expect(dialog).toHaveClass('sheet', 'claim-sheet');
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    // Named by the existing title element, not a duplicated `aria-label` that
+    // could drift from the Prompt text rendered on screen.
+    expect(dialog).toHaveAttribute('aria-labelledby', title().id);
+  });
+
+  it('moves focus into the dialog on open and restores it to the opener on close', () => {
+    // The sheet opens from any of 25 Squares (or their ＋ proof-add buttons), so
+    // it captures whatever was focused at mount rather than holding a triggerRef.
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const { unmount } = render(<ProofSheet {...baseProps()} />);
+    expect(title()).toHaveFocus();
+    expect(screen.getByRole('dialog')).toContainElement(document.activeElement as HTMLElement);
+
+    unmount();
+    expect(opener).toHaveFocus();
+    opener.remove();
+  });
+
+  it('closes on Escape', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ProofSheet {...baseProps()} onClose={onClose} />);
+
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('traps Tab and Shift+Tab inside the dialog, skipping the disabled submit', async () => {
+    const user = userEvent.setup();
+    render(<ProofSheet {...baseProps()} />);
+
+    const close = screen.getByRole('button', { name: 'Close' });
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    // "Mark it" is the LAST focusable in the sheet and is disabled until a
+    // capture lands — the exact case that makes the disabled filter load-bearing
+    // rather than defensive. Treated as `last`, the wrap below would never fire
+    // and Tab would walk straight out of the dialog.
+    expect(screen.getByRole('button', { name: 'Mark it' })).toBeDisabled();
+
+    cancel.focus();
+    await user.tab(); // wraps forward past the disabled submit — stays inside
+    expect(close).toHaveFocus();
+
+    // The title holds focus but sits outside the focusable set; Shift+Tab from
+    // it still wraps to the last ENABLED control.
+    title().focus();
+    await user.tab({ shift: true });
+    expect(cancel).toHaveFocus();
+  });
+
+  it('does not yank focus back to the title when the parent re-renders', async () => {
+    // Board passes an inline `onClose` and re-renders constantly off its live
+    // streams. A focus effect keyed on `onClose` would re-run on every one of
+    // those renders and steal focus mid-typing (the #398 trap) — so it reads the
+    // callback through a ref and runs exactly once per mount.
+    const user = userEvent.setup();
+    const { rerender } = render(<ProofSheet {...baseProps()} />);
+    await user.click(screen.getByRole('button', { name: 'Callout' }));
+    await user.type(screen.getByRole('textbox'), 'saw it myself');
+
+    const textarea = screen.getByRole('textbox');
+    expect(textarea).toHaveFocus();
+    rerender(<ProofSheet {...baseProps()} />); // fresh onClose identity, same sheet
+    expect(textarea).toHaveFocus();
+    expect(textarea).toHaveValue('saw it myself');
   });
 });
 
