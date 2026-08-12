@@ -180,5 +180,91 @@ describe('chaosLine (the warm-up banner’s schedule sentence)', () => {
         expect(boundary as number).toBeGreaterThan(now);
       }
     });
+
+    // Codex P2 on #674: sampling the offset only at `now` breaks across a DST
+    // transition. Spring-forward 2026 in America/Los_Angeles lands at 2 a.m.
+    // on March 8 (PST → PDT). At 1:30 a.m. that morning the runner's own
+    // offset is still PST, but the boundary being computed — midnight
+    // starting March 9 — falls entirely after the jump, in PDT. The old
+    // now-sampled offset scheduled that boundary an hour late.
+    it('resolves the target midnight in the offset that applies THERE, across a spring-forward night', () => {
+      const springForwardDays: DayDef[] = [
+        day({ index: 0, pool: 'main', unlockAt: at('2026-03-09T06:00:00-07:00'), date: '2026-03-09' }),
+      ];
+      const now = at('2026-03-08T01:30:00-08:00'); // still PST, before the 2 a.m. jump
+      expect(nextChaosBoundary(springForwardDays, TZ, now)).toBe(at('2026-03-09T00:00:00-07:00'));
+    });
+
+    // Codex P1 on round 1 of this PR. The offset probe asks for `hour12:
+    // false`, which most ICU builds resolve to the h23 cycle (midnight is
+    // "00") — but some resolve it to h24, where midnight is "24" and the date
+    // parts still name the day that is STARTING. Feeding a 24 straight into
+    // `Date.UTC` rolls to the following day and reports an offset 24 hours too
+    // large, which walks the resampling loop off the target midnight. Both
+    // zones below spring forward on the night in question, so a bad offset
+    // sample survives instead of being cancelled out by the next one: Beirut
+    // lands a whole day late (the caption would say "tomorrow" for two days)
+    // and Lord Howe, whose DST step is half an hour, lands 30 minutes late.
+    it.each([
+      ['Asia/Beirut', '2026-03-27T22:30:00Z', '2026-03-28T22:00:00Z'],
+      ['Australia/Lord_Howe', '2026-10-03T14:30:00Z', '2026-10-04T13:00:00Z'],
+    ])('reads a formatter that spells midnight “24” without drifting (%s)', (zone, nowIso, expectedIso) => {
+      const now = at(nowIso);
+      // An unlock far enough out that midnight is always the earlier of the
+      // two boundaries, so this exercises the zone math and not `Math.min`.
+      const skipDays: DayDef[] = [day({ index: 0, pool: 'main', unlockAt: now + 30 * 86_400_000 })];
+      expect(nextChaosBoundary(skipDays, zone, now)).toBe(at(expectedIso));
+      const underH24 = withH24HourCycle(() => nextChaosBoundary(skipDays, zone, now));
+      expect(underH24).toBe(at(expectedIso));
+      expect(underH24 as number).toBeGreaterThan(now);
+    });
+
+    // Some zones spring forward AT 00:00, so the midnight being resolved does
+    // not exist and the two candidate offsets each point at the other's
+    // instant — the loop has no fixed point to converge on. Whatever it stops
+    // on, the answer still has to be ahead of `now`, under either hour cycle:
+    // the caller arms a `setTimeout` from it, and a past boundary fires
+    // immediately and re-arms forever.
+    it.each([
+      ['Asia/Beirut', '2026-03-28T21:00:00Z'], // 23:00 local, DST starts at 00:00 on the 29th
+      ['America/Havana', '2026-03-08T04:00:00Z'], // 23:00 local, DST starts at 00:00 on the 8th
+      ['America/Santiago', '2026-09-05T03:00:00Z'], // 23:00 local, DST starts at 00:00 on the 6th
+    ])('never names a past boundary in %s, whose local midnight the DST jump skips', (zone, fromIso) => {
+      const from = at(fromIso);
+      for (let minute = 0; minute <= 180; minute++) {
+        const now = from + minute * 60_000;
+        const skipDays: DayDef[] = [day({ index: 0, pool: 'main', unlockAt: now + 30 * 86_400_000 })];
+        for (const boundary of [
+          nextChaosBoundary(skipDays, zone, now),
+          withH24HourCycle(() => nextChaosBoundary(skipDays, zone, now)),
+        ]) {
+          expect(boundary).not.toBeNull();
+          expect(boundary as number).toBeGreaterThan(now);
+        }
+      }
+    });
   });
 });
+
+/**
+ * Run `fn` with `Intl.DateTimeFormat` resolving `hour12: false` to the h24
+ * hour cycle — what the ICU builds `zoneOffsetMs` guards against actually do.
+ * Node's own ICU resolves it to h23, so stubbing is the only way to reach that
+ * branch from a test.
+ */
+function withH24HourCycle<T>(fn: () => T): T {
+  const original = Intl.DateTimeFormat;
+  Intl.DateTimeFormat = new Proxy(original, {
+    construct(target, args) {
+      const [locales, options] = args as [(string | string[])?, Intl.DateTimeFormatOptions?];
+      if (options?.hour12 !== false) return new target(locales, options);
+      const { hour12: _h12, ...rest } = options;
+      return new target(locales, { ...rest, hourCycle: 'h24' });
+    },
+  });
+  try {
+    return fn();
+  } finally {
+    Intl.DateTimeFormat = original;
+  }
+}

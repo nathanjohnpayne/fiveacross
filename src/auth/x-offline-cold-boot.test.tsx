@@ -992,4 +992,102 @@ describe('offline cold boot (#115)', () => {
     expect(mayRenderEventContent()).toBe(false);
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
   });
+
+  it('#521 (Codex P2 on #728): the RETRY path honors a late authoritative NULL too — a provisional lift is not immortal behind Retry', async () => {
+    // The remaining hole in the #521 contract, one level down from the bootstrap
+    // case above: with a provisional cache lift standing, the Player's Retry runs
+    // `retryBootstrap` (not the deal — `mayDeal` is false without authority). That
+    // path had its OWN `withTimeout` and discarded whatever landed after it. Since
+    // `navigator.onLine` never flips on captive Wi-Fi, no connectivity event ever
+    // supersedes the attempt and nothing re-reads authority — so a discarded late
+    // server-NULL left the stale lift up and the #434 durable card painted for a
+    // User the server says has no stamp. Both paths must honor a late answer.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const boot = deferred<number | null>();
+    const retry = deferred<number | null>();
+    mocks.readAdultAttestationFromServer
+      .mockReturnValueOnce(boot.promise)
+      .mockReturnValueOnce(retry.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    // The bootstrap timed out and the cache lifted the gate provisionally.
+    expect(dealErrorShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(true);
+
+    // The Player taps Retry. No authority was ever established, so this is
+    // `retryBootstrap` — and it times out as well.
+    await act(async () => {
+      ctxRetryDeal();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestationFromServer).toHaveBeenCalledTimes(2);
+    expect(mayRenderEventContent()).toBe(true); // still standing on the stale lift
+
+    // …and NOW the RETRY's orphaned read lands, definitively unstamped.
+    await act(async () => {
+      retry.settle(null);
+    });
+
+    expect(rePromptShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2 on #728): a late authoritative STAMP retires the optimistic-sticky arm’s cached-board probe — no stale error over a dealt Board', async () => {
+    // The optimistic-only arm fires `hasCachedBoard` fire-and-forget to decide
+    // whether a BOARDLESS User needs a retry surface. That probe was guarded on the
+    // attempt alone — but a LATE authority read settles the SAME attempt, so a
+    // stamp landing mid-probe grants authority, clears the error and deals, and the
+    // slower `hasCachedBoard(false)` would then re-post the obsolete timeout error
+    // over the freshly dealt Board with nothing left to clear it.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    mocks.attestAdult.mockReturnValue(NEVER); // optimistic-only: never commits
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+    const boarded = deferred<boolean>();
+    mocks.hasCachedBoard.mockReturnValue(boarded.promise);
+    mocks.auth.currentUser = RETURNING_USER;
+
+    mount();
+    await act(async () => {
+      void ctxAttest(); // optimistic sticky set; attestAdult pending (uncommitted)
+    });
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    // The probe is in flight and no error has been posted yet.
+    expect(mocks.hasCachedBoard).toHaveBeenCalledWith(RETURNING_USER.uid);
+    expect(dealErrorShown()).toBe(false);
+
+    // The orphaned server read lands CONFIRMING the stamp: authority granted, the
+    // deferred deal fires.
+    // (No `waitFor` under fake timers — flush the effect's microtasks by hand.)
+    await act(async () => {
+      read.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // …and only now does the boardless probe come back. It is retired.
+    await act(async () => {
+      boarded.settle(false);
+    });
+    expect(dealErrorShown()).toBe(false);
+    expect(mayRenderEventContent()).toBe(true);
+  });
 });
