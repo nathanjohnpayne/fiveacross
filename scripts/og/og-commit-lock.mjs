@@ -44,7 +44,8 @@
 // killed or crashed process and stolen rather than waited on forever — a
 // hard-killed renderer must not brick every future commit to that
 // destination.
-import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 const POLL_MS = 25;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -66,6 +67,18 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Best-effort delete — used to clean up a `tryAcquireOne` scratch file
+ *  whether the attempt won or lost. A leftover scratch file is a nuisance,
+ *  never a correctness problem, since nothing else ever looks it up by
+ *  name. */
+function tryUnlink(p) {
+  try {
+    unlinkSync(p);
+  } catch {
+    // Already gone — fine.
+  }
+}
+
 /** True if `pid` names a process this user can still signal. Only used to
  *  decide whether a lock left by another process is worth stealing before
  *  `STALE_MS` elapses — a false "alive" here just means `acquireOne` falls
@@ -81,20 +94,45 @@ function pidAlive(pid) {
 }
 
 /** Try once to become the exclusive holder of `dest`'s lock. Returns
- *  whether it succeeded; never blocks. */
+ *  whether it succeeded; never blocks.
+ *
+ *  Round 5 (#713, id 3762692296): this used to `openSync(lockPath, 'wx')`
+ *  and write the pid into it as a SEPARATE step. That leaves a real window
+ *  — between the create and the write — where `lockPath` exists on disk
+ *  with no (or partial) content. A concurrent `stealIfStale` landing in
+ *  that window reads an unparseable pid, treats the lock as if its owner
+ *  were already dead, and unlinks it out from under the process that is
+ *  still mid-acquire — so both processes can end up believing they hold
+ *  the same lock. The fix is to never let `lockPath` become visible until
+ *  its content is already complete: the pid is written in full to a
+ *  per-attempt scratch path first, and `linkSync` — an atomic,
+ *  EEXIST-on-collision, no-clobber publish, unlike `renameSync` which
+ *  would silently steal an existing lock out from under its holder — is
+ *  what makes that scratch path additionally visible as `lockPath`. Either
+ *  the link succeeds and `lockPath` is immediately readable with the full
+ *  pid line, or it fails and `lockPath` is untouched; there is no
+ *  observable state in between for another process to misread. */
 function tryAcquireOne(dest) {
   const lockPath = lockPathFor(dest);
+  const scratchPath = `${lockPath}.acquire-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
+  const fd = openSync(scratchPath, 'wx');
   try {
-    const fd = openSync(lockPath, 'wx');
-    try {
-      writeSync(fd, `${process.pid}\n`);
-    } finally {
-      closeSync(fd);
-    }
+    writeSync(fd, `${process.pid}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    linkSync(scratchPath, lockPath);
     return true;
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
     return false;
+  } finally {
+    // The scratch path is a private per-attempt name nobody else ever
+    // references (win or lose) — always clean it up. Best-effort: if this
+    // fails, it is a stray temp file, not a correctness problem, since
+    // `lockPathFor` never points at it.
+    tryUnlink(scratchPath);
   }
 }
 
