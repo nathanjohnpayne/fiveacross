@@ -111,9 +111,11 @@ export const GA4_EVENTS = [
   // reshuffle, mark-time cascade, open-time reconcile, admin-confirm
   // cascade — the last added #727 round 3, Codex P2). Params: `trigger`
   // ('deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm'),
-  // `dayIndex` (the receiving/opened board's Day), `count` (Squares newly
-  // echoed by this write — always >= 1). Call sites: src/data/api.ts (the
-  // first four) and src/data/admin.ts's confirmClaim (admin_confirm).
+  // `uid` (the receiving player), `dayIndex` (the receiving/opened board's
+  // Day), `count: 1`, and the persisted `transitionId`. Delivery is
+  // at-least-once across reloads/devices; PostHog reconciliation groups by
+  // `transitionId`. Call sites: src/data/api.ts (the first four) and
+  // src/data/admin.ts's confirmClaim (admin_confirm).
   'echo_mark',
 ] as const;
 

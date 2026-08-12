@@ -52,6 +52,11 @@ import { cellsToMap, cellsPatch, changedCells, cellsFromData } from '../game/cel
 import { cellsMergeSet } from './cellsMerge';
 import { trustedDayBoardSeed } from './board-freshness';
 import { pinDayFirstBingo } from './dayMeta';
+import {
+  echoAnalyticsIds,
+  stampEchoAnalyticsTransitions,
+  trackEchoTransitions,
+} from './echoAnalytics';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
@@ -697,8 +702,8 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     blackoutTransition: boolean;
     pinAs: string | null;
     at: number;
-    /** Squares newly echoed onto this freshly-dealt card (#721 `echo_mark`). */
-    count: number;
+    /** Persisted identities for this card's countable Echo transitions. */
+    ids: string[];
   } | null = null;
   const dealt = await runTransaction(db, async (tx) => {
     dealtEcho = null;
@@ -732,7 +737,18 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         .filter((snap) => snap.exists())
         .map((snap) => cellsFromData((snap.data() as { cells?: unknown }).cells)),
     );
-    const echoRes = applyEchoes(cells, achieved, now);
+    const rawEchoRes = applyEchoes(cells, achieved, now);
+    const echoRes = {
+      ...rawEchoRes,
+      cells: stampEchoAnalyticsTransitions({
+        cells: rawEchoRes.cells,
+        changed: changedCells(cells, rawEchoRes.cells),
+        eventId: EVENT_ID,
+        uid: u.uid,
+        dayIndex,
+        boardSeed: seed,
+      }),
+    };
     tx.set(boardRef, { uid: u.uid, dayIndex, seed, createdAt: now, cells: cellsToMap(echoRes.cells), easyMixRatio });
     if (echoRes.changed) {
       // The echoed card's REAL opening bucket, folded with the cruise root
@@ -756,7 +772,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         blackoutTransition: echoRes.blackoutTransition,
         pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
         at: now,
-        count: echoRes.echoedItemIds.length,
+        ids: echoAnalyticsIds(echoRes.cells),
       };
       if (!statsAllowed) {
         tx.set(
@@ -809,7 +825,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       blackoutTransition: boolean;
       pinAs: string | null;
       at: number;
-      count: number;
+      ids: string[];
     };
     if (echo.bingoTransition || echo.blackoutTransition) {
       enqueueWinMoments({
@@ -828,9 +844,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // Echo Mark instrumentation (#721): this card arrived pre-marked from the
     // Player's OTHER Day Cards, not from a tap — countable, never folded into
     // `mark_square` (specs/w2-ga4-events.md § Reconciliation).
-    void import('../analytics')
-      .then(({ track }) => track('echo_mark', { trigger: 'deal', dayIndex, count: echo.count }))
-      .catch(() => {});
+    void trackEchoTransitions({ ids: echo.ids, trigger: 'deal', uid: u.uid, dayIndex }).catch(() => {});
   }
   return dealt;
 }
@@ -1012,8 +1026,8 @@ export async function reshuffleBoard(params: {
     blackoutTransition: boolean;
     pinAs: string | null;
     at: number;
-    /** Squares newly echoed onto the replacement card (#721 `echo_mark`). */
-    count: number;
+    /** Persisted identities for the replacement's net-new Echo transitions. */
+    ids: string[];
   } | null = null;
   const spend = await runTransaction(db, async (tx) => {
     // Firestore can invoke this callback more than once. Do not let a discarded
@@ -1111,7 +1125,7 @@ export async function reshuffleBoard(params: {
         if (!cell.free && cell.marked && cell.itemId) peerMarkedItems.add(cell.itemId);
       }
     }
-    const echoRes = applyEchoes(cells, achieved, now);
+    const rawEchoRes = applyEchoes(cells, achieved, now);
     const statsAllowed = !standingsFrozen({ frozenAt: eventData?.frozenAt, days }) ||
       ceremonialDayIndexSet(days).has(dayIndex);
     const savedName = typeof player?.displayName === 'string' ? player.displayName : undefined;
@@ -1131,14 +1145,26 @@ export async function reshuffleBoard(params: {
     // non-echo Mark it never had — but the floor keeps this robust even if
     // that invariant is ever relaxed).
     const priorMarkedCount = countMarked(priorBoardCells);
-    const netNewEchoCount = Math.max(0, echoRes.squaresMarked - priorMarkedCount);
+    const netNewEchoCount = Math.max(0, rawEchoRes.squaresMarked - priorMarkedCount);
+    const echoRes = {
+      ...rawEchoRes,
+      cells: stampEchoAnalyticsTransitions({
+        cells: rawEchoRes.cells,
+        changed: changedCells(cells, rawEchoRes.cells),
+        eventId: EVENT_ID,
+        uid,
+        dayIndex,
+        boardSeed: seed,
+        limit: netNewEchoCount,
+      }),
+    };
     reshuffleEcho = echoRes.changed
       ? {
           bingoTransition: echoRes.bingoTransition,
           blackoutTransition: echoRes.blackoutTransition,
           pinAs: echoRes.bingoTransition && statsAllowed ? honorDisplayName(undefined, savedName) : null,
           at: now,
-          count: netNewEchoCount,
+          ids: echoAnalyticsIds(echoRes.cells),
         }
       : null;
     // Orphaned-marker cleanup (Codex P2 on #447): the discarded card can only
@@ -1234,7 +1260,7 @@ export async function reshuffleBoard(params: {
       blackoutTransition: boolean;
       pinAs: string | null;
       at: number;
-      count: number;
+      ids: string[];
     };
     if (echo.bingoTransition || echo.blackoutTransition) {
       enqueueWinMoments({
@@ -1255,10 +1281,8 @@ export async function reshuffleBoard(params: {
     // marked count) is actually positive; a reshuffle that re-echoes the
     // exact same Prompt(s) the discarded card already carried adds nothing to
     // `dayStats[dayIndex].squaresMarked` and must fire nothing here.
-    if (echo.count > 0) {
-      void import('../analytics')
-        .then(({ track }) => track('echo_mark', { trigger: 'reshuffle', dayIndex, count: echo.count }))
-        .catch(() => {});
+    if (echo.ids.length > 0) {
+      void trackEchoTransitions({ ids: echo.ids, trigger: 'reshuffle', uid, dayIndex }).catch(() => {});
     }
   }
   return spend;
@@ -1325,7 +1349,12 @@ export function computeMark(params: {
     // A manual toggle STRIPS the Echo flag. Any manual unmark persists an
     // opt-out so a standing sibling Echo cannot restore the Player's choice;
     // manually marking it again clears that opt-out.
-    const { echo: _echo, echoOptOut: _echoOptOut, ...manual } = c;
+    const {
+      echo: _echo,
+      echoOptOut: _echoOptOut,
+      echoAnalyticsId: _echoAnalyticsId,
+      ...manual
+    } = c;
     return {
       ...manual,
       marked: nextMarked,
@@ -1477,84 +1506,6 @@ function hasMarkerRepair(repairKey: string): boolean {
 /** Test-only. */
 export function __resetPendingMarkerRepairsForTests(): void {
   for (const repairKey of [...pendingMarkerRepairs]) forgetMarkerRepair(repairKey);
-}
-
-// Echo Mark analytics idempotency (Codex P2 on #727): the 'mark' cascade
-// (below) and BOTH `runReconcileEchoes` firing sites (the direct `res.changed`
-// write and the stats-lag recovery heal) each fire `echo_mark` off a
-// fire-and-forget continuation of the SAME batch/transaction commit as an
-// INDEPENDENT sibling continuation that folds the echo into
-// `players/{uid}.dayStats[dayIndex]` (`reconcileEchoStatsFromServer`) — two
-// separate promises racing the same commit, so a reload (or any transient
-// failure) can strand one while the other lands. The recovery heal exists
-// precisely to repair a STRANDED STATS continuation by re-deriving the
-// bucket from server truth — but detecting stats lag proves only that the
-// STATS continuation was lost, never that the SIBLING analytics
-// continuation was too: if the analytics send already succeeded, re-firing
-// because the stats write is stale would double-count a valid event (and,
-// symmetric to it, the direct-write `res.changed` path's own analytics
-// continuation can equally be the one that's lost, leaving a LATER heal to
-// rediscover the same increase as bucket lag and report it for the first
-// time — both directions of the same race, one shared fix).
-//
-// This watermark decouples the two: it persists the HIGHEST `squaresMarked`
-// total for a given (uid, dayIndex) this device has ever reported an
-// `echo_mark` up through. Same two-tier discipline as `pendingMarkerRepairs`
-// above — an in-memory `Map` is the PRIMARY source of truth (so dedupe still
-// works within a session even where `localStorage` throws or is otherwise
-// unavailable — private browsing, a jsdom opaque-origin test environment),
-// mirrored into `localStorage` best-effort so the watermark also survives
-// the RELOAD an in-memory value cannot. Written BEFORE the event fires so a
-// tab that dies mid-send still leaves the intent recorded. Every
-// 'mark'/'open_reconcile' emitter calls `claimEchoMarkReport` with the FULL
-// post-echo total for that Day — never a delta — and fires only when it
-// returns true: a monotonic total is race-safe across the several
-// independent code paths that can report the same Day, where a delta
-// computed against a possibly-stale baseline would not be (two paths
-// concurrently reading the same stale prior total would each compute a
-// "new" delta and both fire).
-const echoMarkWatermarks = new Map<string, number>();
-const echoMarkWatermarkKey = (uid: string, dayIndex: number) => `${uid}:${dayIndex}`;
-const echoMarkWatermarkStorageKey = (key: string) => `gcb:echo-mark-reported:${EVENT_ID}:${key}`;
-
-function claimEchoMarkReport(uid: string, dayIndex: number, squaresMarked: number): boolean {
-  const key = echoMarkWatermarkKey(uid, dayIndex);
-  let priorWatermark = echoMarkWatermarks.get(key) ?? 0;
-  // The in-memory map is per-session (a fresh module load on every reload),
-  // so a device that already reported before a reload has NO in-memory
-  // watermark yet — fall back to the persisted one exactly once, the same
-  // lazy-hydrate `hasMarkerRepair` uses for its own candidate Set.
-  if (!echoMarkWatermarks.has(key)) {
-    try {
-      const raw = markerRepairStore()?.getItem(echoMarkWatermarkStorageKey(key));
-      const persisted = raw == null ? NaN : Number(raw);
-      if (Number.isFinite(persisted)) priorWatermark = persisted;
-    } catch {
-      // No persisted watermark to hydrate from — the in-memory 0 stands.
-    }
-  }
-  if (squaresMarked <= priorWatermark) return false;
-  echoMarkWatermarks.set(key, squaresMarked);
-  try {
-    markerRepairStore()?.setItem(echoMarkWatermarkStorageKey(key), String(squaresMarked));
-  } catch {
-    // Storage is an enhancement over the in-memory watermark (private mode,
-    // quota, or — in tests — a jsdom opaque origin); the claim above already
-    // stands for the rest of this session either way.
-  }
-  return true;
-}
-
-/** Test-only. */
-export function __resetEchoMarkWatermarksForTests(): void {
-  for (const key of [...echoMarkWatermarks.keys()]) {
-    echoMarkWatermarks.delete(key);
-    try {
-      markerRepairStore()?.removeItem(echoMarkWatermarkStorageKey(key));
-    } catch {
-      // Best-effort cleanup only.
-    }
-  }
 }
 
 // The shared marker-attribution helper (`markerDisplayName`) lives in the
@@ -1827,6 +1778,8 @@ async function runSetMark(
     bucket: EchoBucket;
     bingoTransition: boolean;
     blackoutTransition: boolean;
+    /** Stable, persisted identities for the newly echoed receiving cells. */
+    analyticsIds: string[];
   }> = [];
   if (echoItemId && echoDayIndexes.length > 0) {
     const achieved = new Set([echoItemId]);
@@ -1852,7 +1805,18 @@ async function runSetMark(
       const sibSeed = typeof sib.seed === 'number' ? sib.seed : undefined;
       if (!trust.trusted || trust.seed !== sibSeed) return;
       const sibCells = cellsFromData(sib.cells);
-      const res = applyEchoes(sibCells, achieved, now);
+      const rawRes = applyEchoes(sibCells, achieved, now);
+      const res = {
+        ...rawRes,
+        cells: stampEchoAnalyticsTransitions({
+          cells: rawRes.cells,
+          changed: changedCells(sibCells, rawRes.cells),
+          eventId: EVENT_ID,
+          uid,
+          dayIndex: sibDay,
+          boardSeed: sibSeed,
+        }),
+      };
       if (!res.changed) return;
       echoBoards.push({
         dayIndex: sibDay,
@@ -1866,6 +1830,7 @@ async function runSetMark(
         },
         bingoTransition: res.bingoTransition,
         blackoutTransition: res.blackoutTransition,
+        analyticsIds: echoAnalyticsIds(changedCells(sibCells, res.cells)),
       });
     });
   }
@@ -2044,49 +2009,25 @@ async function runSetMark(
         }),
       )
       .catch(() => undefined);
-    // Echo Mark instrumentation (#721, Codex round 1 finding 1): THIS Mark's
-    // confirmed cascade onto sibling Day Cards — one echoed cell per sibling
-    // board pushed into `echoBoards` above. Fired PER RECEIVING Day, not once
-    // under the acted `dayIndex`: `dayStats[*].squaresMarked` moves on the
-    // RECEIVING board (specs/w2-ga4-events.md § Reconciliation — "every
-    // echo_mark is a squaresMarked increment on the RECEIVING Day's bucket"),
-    // so attributing every echo to the source Day would make the per-Day
-    // identity unprovable for a Mark that echoes onto more than one sibling —
-    // the source Day would over-report (an echo_mark with no matching bucket
-    // increase) while the true receiving Days under-report (a bucket increase
-    // with no echo_mark). Grouped by `echoBoard.dayIndex` so a Mark that
-    // echoes onto several siblings still fires one event per Day (today
-    // always count 1 — `applyEchoes` pushes at most one `echoBoards` entry per
-    // sibling board — but grouping keeps the count field meaningful if that
-    // ever changes). Countable, never folded into `mark_square`. Separate
-    // `.catch()` from the reconcile chain above so one failing never blocks
-    // the other.
-    //
-    // Idempotency (Codex P2 on #727): this continuation and the
-    // `reconcileEchoStatsFromServer` one above are INDEPENDENT promises off
-    // the same `committed` — a reload can strand either without the other,
-    // and if THIS one already reported, the open-time stats-lag heal
-    // (`runReconcileEchoes`) must not report the same increase again once it
-    // repairs the stranded stats write. `claimEchoMarkReport` records the
-    // FULL post-echo total for the day (`echoBoard.bucket.squaresMarked`,
-    // not the delta `count`) durably BEFORE firing, and every echo_mark
-    // emitter for this Day checks the SAME watermark — see its doc.
-    const echoCountsByDay = new Map<number, number>();
-    const echoTotalsByDay = new Map<number, number>();
-    for (const echoBoard of echoBoards) {
-      echoCountsByDay.set(echoBoard.dayIndex, (echoCountsByDay.get(echoBoard.dayIndex) ?? 0) + 1);
-      echoTotalsByDay.set(echoBoard.dayIndex, echoBoard.bucket.squaresMarked);
-    }
+    // The IDs ride in the same batch as their cells. A later open may emit the
+    // same ID if this continuation dies; PostHog groups by `transitionId`.
     void committed
-      .then(() =>
-        import('../analytics').then(({ track }) => {
-          for (const [receivingDayIndex, count] of echoCountsByDay) {
-            const total = echoTotalsByDay.get(receivingDayIndex);
-            if (typeof total === 'number' && !claimEchoMarkReport(uid, receivingDayIndex, total)) continue;
-            track('echo_mark', { trigger: 'mark', dayIndex: receivingDayIndex, count });
+      .then(async () => {
+        // Keep each receiving day independent: an analytics import/send
+        // failure for one board must not abandon later siblings in the wave.
+        for (const echoBoard of echoBoards) {
+          try {
+            await trackEchoTransitions({
+              ids: echoBoard.analyticsIds,
+              trigger: 'mark',
+              uid,
+              dayIndex: echoBoard.dayIndex,
+            });
+          } catch {
+            // The durable ID will be replayed when that board next opens.
           }
-        }),
-      )
+        }
+      })
       .catch(() => undefined);
   }
   void committed.catch((err: unknown) => {
@@ -2365,6 +2306,16 @@ async function runReconcileEchoes(
   const board = boardSnap.value.data() as { uid?: string; cells?: unknown; seed?: number };
   if (board.uid !== uid) return { ...none, complete: false };
   const boardCells = cellsFromData(board.cells);
+  // A persisted transition is the source of truth, not this tab's memory.
+  // Emit every known ID on open: it covers a tab dying after Firestore accepted
+  // a queued write, and a second device opening the same card. Replays are
+  // deliberately collapsed by `transitionId` in the PostHog reconciliation.
+  void trackEchoTransitions({
+    ids: echoAnalyticsIds(boardCells),
+    trigger: 'open_reconcile',
+    uid,
+    dayIndex,
+  }).catch(() => undefined);
 
   const allBoards: Cell[][] = [boardCells];
   for (const snap of sibSnaps) {
@@ -2373,7 +2324,18 @@ async function runReconcileEchoes(
   }
   const achieved = achievedItemIds(allBoards);
   const now = Date.now();
-  const res = applyEchoes(boardCells, achieved, now);
+  const rawRes = applyEchoes(boardCells, achieved, now);
+  const res = {
+    ...rawRes,
+    cells: stampEchoAnalyticsTransitions({
+      cells: rawRes.cells,
+      changed: changedCells(boardCells, rawRes.cells),
+      eventId: EVENT_ID,
+      uid,
+      dayIndex,
+      boardSeed: board.seed,
+    }),
+  };
 
   const cachedPlayerData =
     playerSnap.status === 'fulfilled' && playerSnap.value.exists()
@@ -2515,53 +2477,9 @@ async function runReconcileEchoes(
             ).catch(() => undefined);
           }
         }
-        // Lost `echo_mark` recovery (#721, Codex round 1 finding 7): the SAME
-        // reload that strands the pin continuation above also strands the
-        // mark-time cascade's `committed.then(() => track('echo_mark', ...))`
-        // continuation (src/data/api.ts, the confirmed-Mark echo path) — an
-        // offline echo batch persists durably (Firestore drains it from
-        // IndexedDB regardless of whether this tab is still open), but the
-        // in-memory analytics continuation dies with the tab, and on the next
-        // open `res.changed` above is already false (the cells arrived
-        // pre-echoed from cache), so the ordinary firing site never runs. This
-        // `bucketLag`/`rootLag` heal is the ONE choke point every echo write
-        // path already relies on to repair a lost continuation (see the pin
-        // repair immediately above, and the #491 comment on the mark-time
-        // cascade: "a reload that loses it is healed by the stats-lag check
-        // in runReconcileEchoes") — so it is also the one place a lost
-        // `echo_mark` can be recovered, rather than patching each write path
-        // to persist its own analytics intent.
-        //
-        // Stats lag alone does NOT prove the analytics continuation was also
-        // lost (Codex P2 on #727): the mark-time cascade's `echo_mark` send
-        // and its `reconcileEchoStatsFromServer` player-row write are TWO
-        // INDEPENDENT promises off the same commit — a reload (or a
-        // transient failure) can strand the STATS write alone while the
-        // analytics one already succeeded, and this heal only ever sees the
-        // stats side. Re-reporting purely off the bucket delta would then
-        // double-count a valid event. `claimEchoMarkReport` is the decoupling:
-        // it checks/records a durable per-Day watermark every echo_mark
-        // emitter shares (the mark-time cascade included), keyed on the FULL
-        // post-echo total, not a delta — so a total this device already
-        // reported (by whichever path) is never reported again, no matter
-        // which of the two continuations actually stranded. The count
-        // reported is still the ACTUAL server-confirmed increase in this
-        // Day's `squaresMarked` over what the cached player row showed
-        // before the heal — never the heal-recomputed total — so a
-        // `rootLag`-only heal (buckets already converged, only the roots
-        // were stale) reports zero and fires nothing, matching the
-        // reconciliation identity exactly.
-        const healedBucket = healed?.dayStats?.[dayIndex];
-        if (healedBucket) {
-          const netNewSquares = healedBucket.squaresMarked - (rowBucket?.squaresMarked ?? 0);
-          if (netNewSquares > 0 && claimEchoMarkReport(uid, dayIndex, healedBucket.squaresMarked)) {
-            void import('../analytics')
-              .then(({ track }) =>
-                track('echo_mark', { trigger: 'open_reconcile', dayIndex, count: netNewSquares }),
-              )
-              .catch(() => undefined);
-          }
-        }
+        // Analytics recovery is independent of stats repair: the persisted
+        // cell IDs above are replayed on every open, whether or not this pass
+        // happened to observe a stale player bucket.
       } catch {
         // Offline again or a transient read failure: the heal must RETRY, so
         // this pass may not settle Board's once-per-board guard (Codex P2 on
@@ -2617,28 +2535,15 @@ async function runReconcileEchoes(
         }),
       )
       .catch(() => undefined);
-    // Echo Mark instrumentation (#721): the open-time backfill heal wrote the
-    // missing echo(es) this device never saw committed — countable, never
-    // folded into `mark_square` (specs/w2-ga4-events.md § Reconciliation).
-    //
-    // Idempotency (Codex P2 on #727): this continuation and the
-    // `reconcileEchoStatsFromServer` one above are the SAME two-independent-
-    // promises-off-one-commit shape as the mark-time cascade — a reload can
-    // strand either. If THIS one lands but the stats write above is the one
-    // that strands, a LATER open's `bucketLag` heal would otherwise
-    // rediscover this exact increase as stale stats and report it a second
-    // time. `claimEchoMarkReport` shares its watermark with that heal (and
-    // the mark-time cascade), keyed on the FULL post-echo total
-    // (`res.squaresMarked`, not the delta `res.echoedItemIds.length`), so
-    // whichever of the two continuations survives first claims the total and
-    // the other can never re-report it.
     void committed
-      .then(() => {
-        if (!claimEchoMarkReport(uid, dayIndex, res.squaresMarked)) return;
-        return import('../analytics').then(({ track }) =>
-          track('echo_mark', { trigger: 'open_reconcile', dayIndex, count: res.echoedItemIds.length }),
-        );
-      })
+      .then(() =>
+        trackEchoTransitions({
+          ids: echoAnalyticsIds(changedCells(boardCells, res.cells)),
+          trigger: 'open_reconcile',
+          uid,
+          dayIndex,
+        }),
+      )
       .catch(() => undefined);
   }
   if (markerRepairs.length > 0) {

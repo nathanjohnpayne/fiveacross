@@ -152,7 +152,6 @@ const isPlayerWrite = (call: unknown[]) => segs(call)[2] === 'players';
 const isMarkerWrite = (call: unknown[]) => segs(call)[2] === 'tally';
 
 import {
-  __resetEchoMarkWatermarksForTests,
   __resetPendingMarkerRepairsForTests,
   computeMark,
   dealDayCard,
@@ -185,6 +184,19 @@ function trustDayBoard(dayIndex: number, uid: string, seed: number | undefined):
 }
 
 const PAST = Date.now() - 3_600_000;
+
+/** Every raw delivery carries a stable ID; PostHog reconciliation dedupes it. */
+const expectEchoTrack = (trigger: string, dayIndex: number) =>
+  expect(H.track).toHaveBeenCalledWith(
+    'echo_mark',
+    expect.objectContaining({
+      trigger,
+      uid: 'u1',
+      dayIndex,
+      count: 1,
+      transitionId: expect.any(String),
+    }),
+  );
 
 /** A 25-cell card with explicit per-index item ids and overrides. */
 function card(
@@ -225,7 +237,6 @@ beforeEach(() => {
   H.player = null;
   H.transactionRunner = null;
   __resetPendingMarkerRepairsForTests();
-  __resetEchoMarkWatermarksForTests();
   __resetBoardFreshnessForTests();
 });
 
@@ -325,7 +336,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     // Reconciliation), so attributing this to the acted Day would make that
     // Day's own reconciliation identity unprovable.
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 3, count: 1 }),
+      expectEchoTrack('mark', 3),
     );
   });
 
@@ -350,14 +361,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(true);
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(true);
     await vi.waitFor(() => {
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 1, count: 1 });
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 3, count: 1 });
+      expectEchoTrack('mark', 1);
+      expectEchoTrack('mark', 3);
     });
     // Never one aggregated event under the acted Day.
     expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ dayIndex: 2 }));
   });
 
-  it('does not re-report a mark-time echo_mark from the open-time stats-lag heal when only the SIBLING stats continuation stranded (Codex P2 on #727)', async () => {
+  it('replays the same persisted mark-time transition on a later open when only the SIBLING stats continuation stranded (Codex P2 on #727)', async () => {
     // The mark-time cascade's `echo_mark` send and its
     // `reconcileEchoStatsFromServer` player-row write are two INDEPENDENT
     // promises off the SAME batch commit (src/data/api.ts) — a reload can
@@ -369,8 +380,11 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     seedBoards();
     await markShared();
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'mark', dayIndex: 3, count: 1 }),
+      expectEchoTrack('mark', 3),
     );
+    const transitionId = (H.track.mock.calls.find(
+      ([name, payload]) => name === 'echo_mark' && (payload as { trigger?: string }).trigger === 'mark',
+    )![1] as { transitionId: string }).transitionId;
     H.track.mockClear();
     // Also clear the mark-time cascade's OWN `reconcileEchoStatsFromServer`
     // continuation's txSet call (fired off the SAME commit, independently of
@@ -389,7 +403,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       seed: 333,
       dayIndex: 3,
       cells: card((i) => (i === 8 ? 'shared' : `b${i}`), {
-        8: { marked: true, markedAt: 5, status: 'confirmed', echo: true },
+        8: {
+          marked: true,
+          markedAt: 5,
+          status: 'confirmed',
+          echo: true,
+          echoGeneration: 1,
+          echoAnalyticsId: transitionId,
+        },
       }),
     });
     // `H.player.dayStats` still has NO Day-3 bucket (seedBoards only seeded
@@ -406,12 +427,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
         (statsWrite![1] as { dayStats: Record<number, { squaresMarked: number }> }).dayStats[3].squaresMarked,
       ).toBe(1);
     });
-    // ...but must NOT re-report the `echo_mark` the mark-time cascade already
-    // sent for this exact Day-3 total: stats lag alone does not prove the
-    // analytics send was lost too, and re-reporting here would double-count
-    // a valid event that already reached PostHog/GA4.
-    await new Promise((r) => setTimeout(r, 0));
-    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'open_reconcile' }));
+    // The second delivery is intentionally the SAME durable transition, not a
+    // new high-water total. Querying distinct `transitionId` therefore counts
+    // it once even when another tab/device performs this recovery.
+    await vi.waitFor(() => expectEchoTrack('open_reconcile', 3));
+    const replayedId = (H.track.mock.calls.find(
+      ([name, payload]) => name === 'echo_mark' && (payload as { trigger?: string }).trigger === 'open_reconcile',
+    )![1] as { transitionId: string }).transitionId;
+    expect(replayedId).toBe(transitionId);
   });
 
   it('#474: SKIPS the echo for a sibling with no server-confirmed seed watch — the acted Mark still commits alone', async () => {
@@ -786,7 +809,7 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
     // #721: the dealt card arrived pre-marked, not tapped — countable via its
     // own echo_mark, never mark_square.
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'deal', dayIndex: 0, count: 1 }),
+      expectEchoTrack('deal', 0),
     );
   });
 
@@ -898,7 +921,7 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     const playerWrite = H.txSet.mock.calls.find(isPlayerWrite)![1] as Record<string, unknown>;
     expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'reshuffle', dayIndex: 1, count: 1 }),
+      expectEchoTrack('reshuffle', 1),
     );
   });
 
@@ -1018,7 +1041,7 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     // #721: the open-time backfill heal fires echo_mark for the Square this
     // device never saw committed, on the OPENED board's Day.
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'open_reconcile', dayIndex: 2, count: 1 }),
+      expectEchoTrack('open_reconcile', 2),
     );
   });
 
@@ -1042,7 +1065,14 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         10: { marked: true, markedAt: 3, status: 'confirmed' },
         11: { marked: true, markedAt: 4, status: 'confirmed' },
         13: { marked: true, markedAt: 5, status: 'confirmed' },
-        14: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
+        14: {
+          marked: true,
+          markedAt: 7,
+          status: 'confirmed',
+          echo: true,
+          echoGeneration: 1,
+          echoAnalyticsId: 'echo-v1:test-event:u1:2:222:14:1',
+        },
       }),
     });
     // The cached player row has NO Day-2 bucket — the lost continuation.
@@ -1078,13 +1108,10 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     // continuation above also stranded the mark-time cascade's OWN
     // `echo_mark` continuation — the cells already carry the echo (drained
     // durably offline) but `res.changed` is false this open, so the ordinary
-    // firing site above never ran. This heal is the recovery point: it fires
-    // the lost event sized to the ACTUAL server-confirmed increase (4, the
-    // cached row had NO Day-2 bucket at all — a 0 → 4 delta), not the heal's
-    // full recomputed total by coincidence matching it here.
-    await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', { trigger: 'open_reconcile', dayIndex: 2, count: 4 }),
-    );
+    // firing site above never ran. The persisted Echo identity is the recovery
+    // point: it emits one event for this one Echo, independently of the wider
+    // stale stats delta (which also includes three manual Marks).
+    await vi.waitFor(() => expectEchoTrack('open_reconcile', 2));
   });
 
   it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {
@@ -1781,11 +1808,7 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     // `echo_mark`, now extended to this fifth one (admin_confirm). Grouped by
     // the RECEIVING Day (2), never the claim's own acted Day (1).
     await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('echo_mark', {
-        trigger: 'admin_confirm',
-        dayIndex: 2,
-        count: 1,
-      }),
+      expectEchoTrack('admin_confirm', 2),
     );
   });
 

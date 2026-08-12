@@ -428,6 +428,15 @@ export interface Cell {
   // strips `echo` on the toggled cell), so a real Mark can never ride under an
   // echo's pristine exemption.
   echo?: boolean;
+  // A monotonic generation assigned each time Echo Marks auto-marks this
+  // square. Together with the Board seed and cell index it identifies one
+  // durable transition even after a player unmarks and later re-earns it.
+  echoGeneration?: number;
+  // Present only for Echo transitions that advance the receiving Day's
+  // `squaresMarked` bucket. This is the PostHog reconciliation key; delivery
+  // is allowed to retry across reloads and devices, so raw events are grouped
+  // by this persisted id rather than deduplicated in browser storage.
+  echoAnalyticsId?: string;
   // A Player can explicitly unmark an Echo on this card. Keep that choice on
   // the cell so open-time reconciliation does not add the same Echo back.
   echoOptOut?: boolean;
