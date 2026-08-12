@@ -73,15 +73,22 @@ let emitAuth: (u: unknown) => unknown = () => {};
 let sawDealError = false;
 
 function Harness() {
-  const { dealError, dealing } = useAuth();
+  const { dealError, dealing, canRenderEventContent } = useAuth();
   if (dealError) sawDealError = true;
   return (
     <div>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
+      <span data-testid="authority">{canRenderEventContent ? 'may-render' : 'withheld'}</span>
     </div>
   );
 }
+
+/** AuthProvider renders `<SignIn/>` in place of `children` when the re-prompt gate is
+ *  up, so the Harness is unmounted behind it — the prompt's own copy is the read. */
+const rePromptShown = () => screen.queryByText(/One quick thing/i) !== null;
+/** `queryBy`, for the same reason: a missing Harness is "the Event is not rendering". */
+const mayRenderEventContent = () => screen.queryByTestId('authority')?.textContent === 'may-render';
 
 const mount = () => render(<AuthProvider><Harness /></AuthProvider>);
 const signInUser = () => act(async () => void (await emitAuth(FAKE_USER)));
@@ -378,6 +385,96 @@ describe('the #519 grace repeat and the #521 cache lift (ordering)', () => {
     expect(sawDealError).toBe(false);
     expect(screen.queryByRole('alert')).toBeNull();
     repeat.settle(null); // drain the orphan so no unhandled promise leaks
+  });
+
+  // The SIBLING of the case above, and the one the merge left open (Phase 4b P1 on
+  // #728). There, the late answer settled and the repeat FAILED — covered by the
+  // explicit `bootstrapFailure && authorityApplied` arm. Here the late answer
+  // settles and the repeat SUCCEEDS, which lands on the in-time settle instead. If
+  // that call is not itself idempotent, one attempt settles twice and the SECOND
+  // answer wins — the exact inversion of the stated contract, in both directions.
+  //
+  // The first of the two is a fail-OPEN of the 18+ gate, which is why it is a P1 and
+  // not a tidiness note: the server has said this User has no attestation, and the
+  // repeat's stamp would authorize the deal anyway.
+  it('a repeat that SUCCEEDS after a late server-NULL cannot re-open the gate that NULL closed — the 18+ re-prompt stands and no deal fires', async () => {
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    // The first read times out; the grace claims and starts the repeat.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // The ORPHANED first read lands while the repeat is still in flight, and it is
+    // definitive: this User has NO stamp. That is terminal for the attempt.
+    await act(async () => {
+      first.settle(null);
+    });
+
+    // …and only THEN does the repeat come back, disagreeing — a stamp. It is the
+    // second settle of one attempt, so it is dropped: the server's NULL stands.
+    await act(async () => {
+      repeat.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(rePromptShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('a repeat that SUCCEEDS with a NULL after a late server-STAMP cannot bounce a confirmed Player to the re-prompt', async () => {
+    // The other direction, and the reason the guard belongs in the settle rather
+    // than in an `if (attestedRead === true)` at the call site: first-settle-wins is
+    // not "prefer the stricter answer", it is "one attempt, one answer". Here the
+    // late answer is the permissive one, and it still wins.
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // The orphaned first read lands CONFIRMING the stamp: authority granted, the
+    // deferred deal fires.
+    await act(async () => {
+      first.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // The repeat then resolves NULL. Applying it would set `attested` false and
+    // hand a dealt, server-confirmed Player the 18+ prompt over their own Board.
+    await act(async () => {
+      repeat.settle(null);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(rePromptShown()).toBe(false);
+    expect(mayRenderEventContent()).toBe(true);
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+    expect(sawDealError).toBe(false);
   });
 });
 

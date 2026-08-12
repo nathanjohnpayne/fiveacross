@@ -231,8 +231,10 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number, label = 'Auth boots
 //
 // BOTH authority entry points go through here — `bootstrapUser`'s online branch and
 // `retryBootstrap` — so a late read can never be honored on one and dropped on the
-// other (Codex P2 on #728). Callers own the attempt guard and the terminal-settle
-// latch inside `onLate`.
+// other (Codex P2 on #728). Callers own the ATTEMPT guard inside `onLate`; the
+// terminal-settle latch is not theirs to remember — each caller's settle function is
+// itself idempotent, so first-settle-wins holds however the two reads interleave
+// (Phase 4b P1 on #728).
 function startAuthorityRead(u: User, onLate: (serverAttested: boolean) => void): Promise<boolean> {
   const authority = (async () => {
     await ensureUserProfile(u);
@@ -681,8 +683,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // the downgrade just closed — the same stale-provisional-over-authority bug one
     // level down. Authority is terminal for the attempt; only a NEW attempt (auth
     // change, connectivity flip, retry) may settle it again.
+    //
+    // THE INVARIANT, ENFORCED HERE RATHER THAN AT EACH CALL SITE (Phase 4b P1 on
+    // #728): the FIRST settle wins. `settleAuthoritative` is IDEMPOTENT — a second
+    // call for the same attempt is a no-op — because the callers cannot be trusted
+    // to remember the latch, and the cost of forgetting it is the 18+ gate failing
+    // OPEN. That is not hypothetical: the #519 grace repeat and the #521 late-
+    // authority handler are individually correct but jointly create a window where
+    // ONE attempt settles twice. The orphaned first read lands through `onLate`
+    // mid-repeat and settles terminally; then the repeat RESOLVES, and an
+    // unguarded in-time settle below would apply its result over the top —
+    // replacing a terminal server-NULL with a stamp that authorizes and deals, or
+    // a terminal stamp with a NULL. The failure arm already carried a
+    // `bootstrapFailure && authorityApplied` guard for the repeat-FAILS direction;
+    // its sibling (repeat-SUCCEEDS) had none. Latching at the source closes both
+    // and every future one.
     let authorityApplied = false;
     const settleAuthoritative = (serverAttested: boolean) => {
+      if (authorityApplied) return;
       authorityApplied = true;
       // UI: the server stamp, or an optimistic attest (don't re-prompt on a
       // not-yet-visible write). AUTHORITY: the server stamp, or a COMMITTED
@@ -705,11 +723,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // re-runs this identical pair). Each call starts its OWN read, and each read
     // wires its own late result back through `settleAuthoritative` (see
     // `startAuthorityRead`) — so the grace repeat cannot orphan the first read's
-    // answer, and the `authorityApplied` latch keeps whichever lands first terminal
-    // rather than letting the two overwrite each other.
+    // answer, and the settle's own first-wins latch keeps whichever lands first
+    // terminal rather than letting the two overwrite each other. Only the ATTEMPT
+    // guard is the caller's job here (a settle belonging to a superseded attempt
+    // must not touch current state at all); terminality is the settle's.
     const readAuthority = () =>
       startAuthorityRead(u, (late) => {
-        if (!authorityApplied && profileAttemptRef.current === attempt) settleAuthoritative(late);
+        if (profileAttemptRef.current === attempt) settleAuthoritative(late);
       });
     let attestedRead: boolean | undefined;
     let bootstrapFailure: { err: unknown } | null = null;
@@ -765,6 +785,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // provisional cache lift must not re-open a gate that answer just closed.
       // Only reachable via the grace repeat — it is the only `await` between the
       // catch that sets `bootstrapFailure` and this branch.
+      //
+      // This arm is the FAILURE half of that window. Its sibling — the repeat
+      // SUCCEEDS after the late answer already settled — is not handled here at
+      // all: it lands in the `else` below and is retired by the settle's own
+      // first-wins latch (Phase 4b P1 on #728). Guarding one half here and leaving
+      // the other to a call-site check is exactly how the hole opened, so the
+      // terminality now lives in `settleAuthoritative` and this arm covers only
+      // what it must: suppressing `failDeal` and the cache lift, neither of which
+      // routes through the settle.
     } else if (bootstrapFailure) {
       // Server read failed (not authoritative). A COMMITTED same-session attest is
       // durable authority and may deal; an OPTIMISTIC-only attest keeps the UI
@@ -836,7 +865,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
     } else {
-      // Authoritative read SETTLED in time — the same settle a late one takes.
+      // Authoritative read SETTLED in time — the same settle a late one takes, and
+      // deliberately unguarded: if the #519 grace repeat is what succeeded here but
+      // the orphaned FIRST read already landed through `onLate`, this call is the
+      // second settle of one attempt and `settleAuthoritative` drops it on the
+      // floor. The first answer stands (Phase 4b P1 on #728).
       settleAuthoritative(attestedRead === true);
     }
     setProfileReady(true);
@@ -1145,9 +1178,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // The retry's OWN terminal-settle latch, the exact analogue of the one in
     // `bootstrapUser`'s online branch: whichever server answer lands first — the
     // in-time race result or the late one below — is authority for this attempt,
-    // and nothing later may re-settle it.
+    // and nothing later may re-settle it. Enforced INSIDE the settle, not at the
+    // call sites, for the same reason (Phase 4b P1 on #728): today the in-time and
+    // late paths here are mutually exclusive (`onLate` fires only when the race
+    // rejected, which skips the in-time settle), so this is belt-and-braces — but
+    // that exclusivity is an accident of there being no `await` between them, and
+    // the bootstrap's sibling latch was breached the moment the #519 grace put one
+    // there. First settle wins, at the source, on both authority paths.
     let authorityApplied = false;
     const settleRetry = (read: boolean) => {
+      if (authorityApplied) return;
       authorityApplied = true;
       const optimisticSticky = attestedUidsRef.current.has(u.uid);
       const committedSticky = attestCommittedUidsRef.current.has(u.uid);
@@ -1189,7 +1229,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // User the server says has no stamp. Now it downgrades, same as everywhere
       // else.
       const read = await startAuthorityRead(u, (late) => {
-        if (!authorityApplied && profileAttemptRef.current === attempt) settleRetry(late);
+        if (profileAttemptRef.current === attempt) settleRetry(late);
       });
       if (profileAttemptRef.current !== attempt) return;
       settleRetry(read);
