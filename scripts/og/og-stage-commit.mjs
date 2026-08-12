@@ -82,6 +82,7 @@ function rollback(backups) {
       tryUnlink(b.mirrorBackup);
       continue;
     }
+    let restored = true;
     for (const [target, backup, existed] of [
       [b.dest, b.destBackup, b.destExisted],
       [b.mirror, b.mirrorBackup, b.mirrorExisted],
@@ -89,15 +90,26 @@ function rollback(backups) {
       try {
         if (existed) {
           renameSync(backup, target);
-        } else {
-          tryUnlink(target);
+        } else if (existsSync(target)) {
+          // A removal failure is a failed rollback, not harmless cleanup: the
+          // just-published bytes are still live and the backup must remain as
+          // recovery evidence for the operator.
+          unlinkSync(target);
         }
       } catch (err) {
+        restored = false;
         console.error(`og-stage-commit: failed to roll back ${target}: ${err.message}`);
       }
     }
-    tryUnlink(b.destBackup);
-    tryUnlink(b.mirrorBackup);
+    if (restored) {
+      tryUnlink(b.destBackup);
+      tryUnlink(b.mirrorBackup);
+    } else {
+      console.error(
+        `og-stage-commit: preserving rollback backups for incomplete recovery of ${b.dest}; ` +
+          'resolve the filesystem error before deleting them.',
+      );
+    }
   }
 }
 
