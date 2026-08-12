@@ -154,7 +154,8 @@ export function track(
   name: GA4EventName,
   params?: Record<string, unknown>,
   options?: { localMarkOccurred?: boolean },
-): void {
+): boolean {
+  let enqueued = false;
   try {
     // Firebase's `logEvent` overloads key off literal reserved event names
     // (e.g. `login`), so a union type like `GA4EventName` matches no single
@@ -164,12 +165,22 @@ export function track(
         ...params,
         page_location: currentPageLocation(),
       } as Record<string, unknown>);
+      enqueued = true;
     }
   } catch {
     /* no-op */
   }
   // PostHog, alongside GA4 — same event, same params (internally guarded).
-  phCapture(name, params);
+  try {
+    // `phCapture` persists captures while PostHog is still initializing, and
+    // the ready SDK owns its own client queue. Reaching this call is therefore
+    // the local enqueue acknowledgement the durable Board-transition outbox
+    // needs before it advances a Firestore cursor.
+    phCapture(name, params);
+    enqueued = true;
+  } catch {
+    /* analytics must never throw into product code */
+  }
   // Install nudge trigger (#219, daily-cards-spec § "Install nudge and
   // update banner"): reuses this existing `mark_square` call site as the
   // signal instead of a new one per source — see useToastStack's module doc.
@@ -193,6 +204,7 @@ export function track(
   ) {
     markSquareOccurred();
   }
+  return enqueued;
 }
 
 /**

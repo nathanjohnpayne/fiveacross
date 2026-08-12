@@ -13,7 +13,7 @@ const H = vi.hoisted(() => ({
   orderBy: vi.fn((field) => ({ field })),
   query: vi.fn(() => ({})),
   startAfter: vi.fn(),
-  track: vi.fn(),
+  track: vi.fn(() => true),
   isLocalDirectMarkRequest: vi.fn(() => false),
 }));
 
@@ -58,6 +58,7 @@ describe('durable direct-mark analytics delivery', () => {
   it('delivers server rows in their stored commit order and suppresses a remote tab’s nudge', () => {
     H.onSnapshot.mockImplementationOnce((_query, onNext) => {
       onNext({
+        metadata: { fromCache: false },
         docs: [
           {
             id: 'event-2',
@@ -120,6 +121,59 @@ describe('durable direct-mark analytics delivery', () => {
 
     expect(H.startAfter).toHaveBeenCalledWith(expect.any(H.Timestamp), 'row-4');
     expect(H.startAfter.mock.calls.at(-1)?.[0]).toMatchObject({ seconds: 4, nanoseconds: 5 });
+    vi.unstubAllGlobals();
+  });
+
+  it('does not advance the cursor from a cache-only snapshot', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      onNext({
+        metadata: { fromCache: true },
+        docs: [{ id: 'row-9', data: () => ({ recordedAt: { seconds: 9, nanoseconds: 0 } }) }],
+      });
+      return () => {};
+    });
+    subscribeDirectMarkAnalytics('u1');
+    expect(storage.get('five-across:board-analytics-cursor:event:u1')).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the cursor behind an event the analytics sinks did not accept', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    H.track.mockReturnValueOnce(false);
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      onNext({
+        metadata: { fromCache: false },
+        docs: [
+          {
+            id: 'row-10',
+            data: () => ({
+              name: 'unmark_square',
+              mode: 'honor',
+              uid: 'u1',
+              requestId: 'request-10',
+              transitionId: 'transition-10',
+              commitOrder: '0000000000000010:000000000',
+              recordedAt: { seconds: 10, nanoseconds: 0 },
+            }),
+          },
+        ],
+      });
+      return () => {};
+    });
+
+    subscribeDirectMarkAnalytics('u1');
+
+    expect(storage.get('five-across:board-analytics-cursor:event:u1')).toBeUndefined();
+    expect(storage.get('five-across:board-analytics-outbox:event:u1')).toContain('transition-10');
     vi.unstubAllGlobals();
   });
 });
