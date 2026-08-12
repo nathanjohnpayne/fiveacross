@@ -29,7 +29,7 @@ Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode a
 
 ### 0. File a ticket (adds with no Status)
 
-`gh project item-add` does not set Status on its own—whether or not the built-in workflow above is enabled, treat a freshly added item as landing with **no Status** and set it explicitly:
+`gh project item-add` does not set Status on its own. If the "Item added to project → set Status = Backlog" built-in (line 19 above) is enabled on Project #7, GitHub sets Status = Backlog for you and this step is redundant—skip it. If that workflow is disabled (Project #7's state as of this writing), a freshly added item lands with **no Status**, so set it explicitly:
 
 ```bash
 scripts/gh-as-author.sh -- gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
@@ -37,7 +37,7 @@ PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Backlog"
 ```
 
-Skipping this leaves the item in a No Status column—invisible in any Status-grouped board view.
+With the built-in workflow disabled, skipping this leaves the item in a No Status column—invisible in any Status-grouped board view. Keep the explicit move as a defensive, idempotent step even after enabling the workflow, since it's a no-op once Status is already Backlog.
 
 ### 1. Claim a ticket (Ready → In progress)
 
