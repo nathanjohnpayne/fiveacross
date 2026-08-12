@@ -12,6 +12,7 @@ import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-ch
 import { initializeAnalytics, isSupported, type Analytics } from 'firebase/analytics';
 import { isSyntheticProbe } from './synthetic-probe';
 import { resolveAuthDomain } from './auth-domain';
+import { installFirestorePoisonRecovery } from './firestoreRecovery';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -34,6 +35,25 @@ export const googleProvider = new GoogleAuthProvider();
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
 });
+
+// The watchdog for the instance created on the line above (#722,
+// src/firestoreRecovery.ts). A single throw inside Firestore's AsyncQueue
+// latches `failure` FOREVER — the SDK never clears it — so from then on every
+// operation re-throws `INTERNAL ASSERTION FAILED (ID: b815)` and the tab is
+// dead for data purposes until it is reloaded. That is what took out the
+// heaviest player of the Bodega Bay POC mid-event.
+//
+// It is installed HERE, in the module that owns `db`, rather than from
+// `main.tsx` module scope where the other out-of-tree rescues live, for two
+// reasons. It is where the poisonable object is created, so the watchdog cannot
+// drift away from what it watches. And it is provably early enough by
+// construction: `initializeFirestore` is lazy, so no AsyncQueue exists — and
+// therefore nothing can have poisoned one — until some later call touches `db`.
+//
+// Skipped for the uptime synthetic (#142), matching `enforceBuildFloor`: a probe
+// run must never turn into a page reload.
+if (!isSyntheticProbe()) installFirestorePoisonRecovery();
+
 export const storage = getStorage(app);
 export const functions = getFunctions(app, 'us-central1');
 
