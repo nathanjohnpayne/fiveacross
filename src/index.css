@@ -1739,6 +1739,32 @@ textarea.input {
   font-size: 14px;
   text-overflow: ellipsis;
 }
+/* The card itself (Codex P2, PR #712 round 6). "Save image" drives the one leg
+   that cannot report a failure, so when the download is refused a visible
+   image is the recovery that needs no API at all — press and hold, or
+   right-click, is the platform's own save affordance. Capped short: this is a
+   sheet, not a viewer, and the 600x750 card must not push the actions off a
+   small screen. */
+.share-fallback-preview {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  margin: 0 0 12px;
+  object-fit: contain;
+  border-radius: 12px;
+  background: var(--bg);
+}
+/* The sheet's own voice — an announced live region for a Copy or Save that
+   failed again here (Codex P2, PR #712 round 6). Hidden while empty so the
+   sheet keeps its shape until there is something to say. */
+.share-fallback-status {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+.share-fallback-status:empty {
+  display: none;
+}
 /* #fff below is a deliberate, documented exemption from issue #72's "no
    hardcoded #fff text fill" rule (specs/theme-on-color-contrast.md): the
    button's own rgba(0, 0, 0, 0.35) background is a fixed, theme-independent

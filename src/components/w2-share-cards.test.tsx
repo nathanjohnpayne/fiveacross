@@ -1188,7 +1188,15 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     }
   });
 
-  it('downloads the image when activation is gone and there is no URL to copy', async () => {
+  // Codex P1, PR #712 round 6 — the round-5 code called `downloadBlob` here
+  // and returned 'download' because `.click()` had not thrown. It reports
+  // nothing at all: WebKit ignores a synthetic download click once the
+  // transient activation is spent, WITHOUT throwing, so that outcome was a
+  // success invented out of the absence of an exception — the same tap-did-
+  // nothing bug the previous four rounds each pushed one level down. The leg
+  // now withholds the click it cannot verify and routes the image to the
+  // sheet, where a PRESS is a fresh gesture the browser will honour.
+  it('withholds the unverifiable click when activation is gone, and routes the image to the sheet instead of claiming a download', async () => {
     (globalThis.URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:mock';
     (globalThis.URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
     const shareMock = vi.fn().mockResolvedValue(undefined);
@@ -1199,9 +1207,78 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     try {
       const outcome = await shareCardBlob({ blob, filename: 'card.png', title: 'T', text: 'body' });
 
-      expect(outcome).toBe('download');
+      // NOT 'download' — nothing was delivered, and nothing pretends it was.
+      expect(outcome).toBe('prompt');
       expect(shareMock).not.toHaveBeenCalled();
+      expect(clickSpy).not.toHaveBeenCalled();
+
+      // What the Player gets instead: the card on screen (press-and-hold works
+      // with no API at all) plus a Save button.
+      expect(fallbackSheet().querySelector('img.share-fallback-preview')).not.toBeNull();
+
+      // And the press DOES download — the fresh gesture is the whole point of
+      // routing here rather than clicking blind.
+      stubUserActivation(true);
+      const save = sheetButton('Save image');
+      fireEvent.click(save);
       expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(save.textContent).toBe('Saved');
+    } finally {
+      clickSpy.mockRestore();
+      Reflect.deleteProperty(window.navigator, 'userActivation');
+    }
+  });
+
+  // Codex P1, PR #712 round 6 — the STALE-FACT half of the same finding.
+  // Round 2 read `navigator.userActivation` once at the top of the chain, but
+  // `navigator.share` CONSUMES the activation: a share that ran, burned it and
+  // then failed for a non-cancellation reason left every later leg reading a
+  // value that was true when taken and false by the time it was used. The
+  // blind download leg then clicked into a spent activation and reported
+  // 'download'. Each gate now re-reads immediately before it runs.
+  it('re-reads the activation before the blind download leg — a share that consumed it cannot license a claimed download', async () => {
+    (globalThis.URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:mock';
+    (globalThis.URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
+    // A live activation that the share call spends, exactly as the platform
+    // does — the reason a value read before the call cannot be trusted after.
+    const activation = { isActive: true, hasBeenActive: true };
+    Object.defineProperty(window.navigator, 'userActivation', {
+      value: activation,
+      configurable: true,
+    });
+    const shareMock = vi.fn().mockImplementation(() => {
+      activation.isActive = false;
+      return Promise.reject(new Error('some genuine failure'));
+    });
+    stubNavigator({ share: shareMock }); // no canShare -> text leg; no clipboard
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      const outcome = await shareCardBlob({ blob, filename: 'card.png', title: 'T', text: 'body' });
+
+      // The share leg ran (activation was alive for it) and genuinely failed,
+      // so the chain kept going — but it kept going into a spent activation.
+      expect(shareMock).toHaveBeenCalledTimes(1);
+      expect(clickSpy).not.toHaveBeenCalled();
+      expect(outcome).toBe('prompt');
+    } finally {
+      clickSpy.mockRestore();
+      Reflect.deleteProperty(window.navigator, 'userActivation');
+    }
+  });
+
+  it('still downloads on the last resort when the activation is alive — the evidence rule costs the normal path nothing', async () => {
+    (globalThis.URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:mock';
+    (globalThis.URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
+    stubUserActivation(true);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      const outcome = await shareCardBlob({ blob, filename: 'card.png', title: 'T', text: 'body' });
+
+      expect(outcome).toBe('download');
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
     } finally {
       clickSpy.mockRestore();
       Reflect.deleteProperty(window.navigator, 'userActivation');
@@ -1291,6 +1368,99 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     await waitFor(() => expect(clipboardMock).toHaveBeenCalledTimes(2));
     expect(clipboardMock).toHaveBeenLastCalledWith('https://x.test');
     await waitFor(() => expect(copy.textContent).toBe('Link copied'));
+  });
+
+  // Codex P2, PR #712 round 6 — this sheet is the LAST line of defence, and
+  // its two actions are the same two APIs that already declined on the way
+  // here, so a press can genuinely fail again. Round 5 caught both failures
+  // and changed nothing the Player could see in the no-URL case: a press that
+  // visibly does nothing, which is the original bug one level down.
+  it('says so when the fallback sheet cannot save the image, and names what is still possible', async () => {
+    (globalThis.URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:mock';
+    (globalThis.URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
+    stubUserActivation(false); // no share, no clipboard, no blind download
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {
+      throw new Error('download blocked');
+    });
+
+    try {
+      // NO url — the case the finding calls out, where there is no link to
+      // fall back on when the save fails.
+      expect(await shareCardBlob({ blob, filename: 'card.png', title: 'T', text: 'body' })).toBe(
+        'prompt',
+      );
+      const status = fallbackSheet().querySelector('.share-fallback-status');
+      expect(status?.getAttribute('role')).toBe('status');
+      expect(status?.textContent).toBe(''); // silent until there is something to say
+
+      stubUserActivation(true); // a press is a fresh gesture
+      const save = sheetButton('Save image');
+      fireEvent.click(save);
+
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(status?.textContent).toContain('Your browser blocked the download.');
+      // Actionable, not just an apology: the card is on screen, and saving it
+      // by hand needs no API at all.
+      expect(status?.textContent).toContain('Press and hold the card above');
+      expect(fallbackSheet().querySelector('img.share-fallback-preview')).not.toBeNull();
+      // And it never claimed the save it did not make, so the button still
+      // reads as pressable and the sheet stays up.
+      expect(save.textContent).toBe('Save image');
+      expect(document.querySelector('.share-fallback-backdrop')).not.toBeNull();
+    } finally {
+      clickSpy.mockRestore();
+      Reflect.deleteProperty(window.navigator, 'userActivation');
+    }
+  });
+
+  it('says so when the fallback sheet cannot copy the link either, and leaves the button pressable', async () => {
+    // openFallbackFrom's clipboard rejects every write, so the press repeats
+    // the exact failure that routed the Player here.
+    const opener = await openFallbackFrom('Share');
+    const copy = sheetButton('Copy link');
+    fireEvent.click(copy);
+
+    await waitFor(() =>
+      expect(fallbackSheet().querySelector('.share-fallback-status')?.textContent).toContain(
+        'Your browser blocked the copy.',
+      ),
+    );
+    // Pointed at the field that needs no API, and still pressable.
+    expect(fallbackSheet().querySelector('.share-fallback-status')?.textContent).toContain(
+      'Select the link above',
+    );
+    expect(copy.textContent).toBe('Copy link');
+    opener.remove();
+  });
+
+  // Codex P1, PR #712 round 6, the same rule applied to the terminal leg:
+  // `'prompt'` is a claim that something is on screen for the Player to press,
+  // so it is read back from the DOM rather than assumed from an append that
+  // returned. A mount that did not take reports 'none' honestly — and leaves
+  // no key handler behind swallowing Tab for a sheet that never appeared.
+  it('reports "none", not "prompt", when the sheet cannot actually be put on screen', async () => {
+    stubUserActivation(false);
+    const append = vi
+      .spyOn(document.body, 'appendChild')
+      .mockImplementation((node) => node as never);
+
+    try {
+      const outcome = await shareCardBlob({
+        blob: null,
+        filename: 'card.png',
+        title: 'T',
+        text: 'body',
+        url: 'https://x.test',
+      });
+
+      expect(outcome).toBe('none');
+    } finally {
+      append.mockRestore();
+    }
+
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    // `fireEvent` returns false exactly when a listener called preventDefault.
+    expect(fireEvent.keyDown(document, { key: 'Tab' })).toBe(true);
   });
 
   it('the fallback sheet keeps the link on screen with no Clipboard API at all, and Close dismisses it', async () => {
