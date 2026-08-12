@@ -46,7 +46,7 @@ import { pathToFileURL } from 'node:url';
 // disagreeing in the accepting direction is a hang. firebase-tools is a
 // devDependency and `npx firebase` runs moments later in the same script, so
 // this adds no dependency the runner did not already have.
-import { parse } from 'firebase-tools/lib/functions/env.js';
+import { parseStrict } from 'firebase-tools/lib/functions/env.js';
 
 /**
  * `defineString('NAME'` / `defineBoolean('NAME'` / `defineSecret('NAME'` …
@@ -272,9 +272,35 @@ export function e2eFunctionsEnv(paramsSource, projectId) {
  * INSIDE a multiline quoted value, which the parser does not treat as an
  * assignment at all.
  */
-export function unassignedNames(fileBody, names) {
-  const assigned = parse(fileBody).envs;
+export function unassignedNames(assigned, names) {
   return names.filter((name) => !Object.hasOwn(assigned, name));
+}
+
+/**
+ * A dotenv body as its consumers read it, or a throw naming the file.
+ *
+ * STRICT, because both consumers are: `loadUserEnvs` and `resolveSecretEnvs`
+ * each call `parseStrict`, so one malformed line does not merely get skipped —
+ * it discards the whole file. The lenient `parse` returns the good keys with the
+ * failures in an `errors` array that is easy to ignore, which made this guard
+ * accept a `.secret.local` the emulator would then treat as empty (Codex P2 on
+ * PR #730).
+ *
+ * That case is silent in the worst way. `resolveSecretEnvs` catches the throw
+ * and logs it only `if ("code" in e)` — and the FirebaseError parseStrict raises
+ * has no `code` — so `secretEnvs` is left `{}`, every secret reads as absent,
+ * and the run reaches for the real Secret Manager with nothing said.
+ */
+export function parseDotenv(body, label) {
+  try {
+    return parseStrict(body);
+  } catch (error) {
+    throw new Error(
+      `${label} is not a dotenv file the emulator can read: ${error.message}. It parses ` +
+        'strictly, so a single malformed line discards the whole file — for .secret.local ' +
+        'that silently sends the run to the real Secret Manager.',
+    );
+  }
 }
 
 /**
@@ -286,8 +312,7 @@ export function unassignedNames(fileBody, names) {
  * a supposedly self-contained e2e run looking for live credentials (Codex P2 on
  * PR #730). A names-only check cannot see that.
  */
-export function unusableSecretNames(fileBody, names) {
-  const assigned = parse(fileBody).envs;
+export function unusableSecretNames(assigned, names) {
   return names.filter((name) => !assigned[name]);
 }
 
@@ -309,24 +334,30 @@ export function emulatorDotenvFiles(projectId) {
 }
 
 /**
- * Concatenation is the right merge here precisely because this only ever asks
- * "is this name assigned anywhere the emulator will read": last-wins ordering
- * cannot change the answer, so no value resolution is needed.
+ * The merged environment the emulator resolves params against.
+ *
+ * Parsed per file rather than by concatenating the bodies, because that is what
+ * `loadUserEnvs` does — one file at a time, strictly — so a malformed layer is
+ * attributed to the file that actually contains it instead of being blamed on
+ * the join.
  */
-function mergedDotenvBody(directory, projectId) {
-  return emulatorDotenvFiles(projectId)
-    .map((file) => join(directory, file))
-    .filter((path) => existsSync(path))
-    .map((path) => readFileSync(path, 'utf8'))
-    .join('\n');
+function mergedDotenvEnvs(directory, projectId) {
+  let merged = {};
+  for (const file of emulatorDotenvFiles(projectId)) {
+    const path = join(directory, file);
+    if (existsSync(path)) {
+      merged = { ...merged, ...parseDotenv(readFileSync(path, 'utf8'), path) };
+    }
+  }
+  return merged;
 }
 
-function ensureFile(path, names, body, { coverageBody, unmet, consequence }) {
+function ensureFile(path, names, body, { coverageEnvs, unmet, consequence }) {
   if (!existsSync(path)) {
     writeFileSync(path, body);
     return;
   }
-  const missing = unmet(coverageBody ?? readFileSync(path, 'utf8'), names);
+  const missing = unmet(coverageEnvs ?? parseDotenv(readFileSync(path, 'utf8'), path), names);
   if (missing.length > 0) {
     const one = missing.length === 1;
     throw new Error(
@@ -354,7 +385,7 @@ function main(argv) {
   // those on exit.
   const { env, secret } = e2eFunctionsEnv(source, projectId);
   ensureFile(envPath, params, env, {
-    coverageBody: mergedDotenvBody(dirname(envPath), projectId),
+    coverageEnvs: mergedDotenvEnvs(dirname(envPath), projectId),
     unmet: unassignedNames,
     consequence:
       'not set in any dotenv file the emulator merges, and it would block forever ' +

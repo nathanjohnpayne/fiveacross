@@ -16,6 +16,7 @@ import {
   e2eParamValues,
   emulatorDotenvFiles,
   formatAssignment,
+  parseDotenv,
   unassignedNames,
   unusableSecretNames,
 } from './e2e-functions-env.mjs';
@@ -39,8 +40,8 @@ describe('e2e functions dotenv generation', () => {
     const { params, secrets } = declaredParamNames(PARAMS_SOURCE);
     const { env, secret } = e2eFunctionsEnv(PARAMS_SOURCE, PROJECT_ID);
 
-    expect(unassignedNames(env, params)).toEqual([]);
-    expect(unassignedNames(secret, secrets)).toEqual([]);
+    expect(unassignedNames(parseDotenv(env, 'env'), params)).toEqual([]);
+    expect(unassignedNames(parseDotenv(secret, 'secret'), secrets)).toEqual([]);
     expect(env.trimEnd().split('\n')).toHaveLength(params.length);
   });
 
@@ -151,7 +152,7 @@ describe('e2e functions dotenv generation', () => {
   it('reports the missing keys in a stale file a developer already had', () => {
     const stale = 'EMAIL_FROM=Gay Cruise Bingo <e2e@example.invalid>\nAPP_BASE_URL=http://127.0.0.1:4173\n';
 
-    expect(unassignedNames(stale, declaredParamNames(PARAMS_SOURCE).params)).toContain(
+    expect(unassignedNames(parseDotenv(stale, 'stale'), declaredParamNames(PARAMS_SOURCE).params)).toContain(
       'EMAIL_UNSUBSCRIBE_URL',
     );
   });
@@ -166,13 +167,13 @@ describe('e2e functions dotenv generation', () => {
       EMAIL_REPLY_TO: 'b',
       APP_BASE_URL: 'c',
     });
-    expect(unassignedNames(emulatorLegal, ['EMAIL_FROM', 'EMAIL_REPLY_TO', 'APP_BASE_URL'])).toEqual(
+    expect(unassignedNames(parseDotenv(emulatorLegal, 'legal'), ['EMAIL_FROM', 'EMAIL_REPLY_TO', 'APP_BASE_URL'])).toEqual(
       [],
     );
   });
 
   it('does not count a commented-out key as assigned', () => {
-    expect(unassignedNames('# EMAIL_FROM=a\n', ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
+    expect(unassignedNames(parseDotenv('# EMAIL_FROM=a\n', 'commented'), ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
   });
 
   // Codex P2 on PR #730, and the direction that actually hurts: a false ACCEPT
@@ -182,7 +183,7 @@ describe('e2e functions dotenv generation', () => {
     const decoy = 'OTHER="first\nEMAIL_FROM=not-a-key\nlast"\n';
 
     expect(Object.keys(parse(decoy).envs)).toEqual(['OTHER']);
-    expect(unassignedNames(decoy, ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
+    expect(unassignedNames(parseDotenv(decoy, 'decoy'), ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
   });
 });
 
@@ -191,10 +192,10 @@ describe('e2e functions dotenv generation', () => {
 // Manager, and a run that is supposed to be self-contained needs credentials.
 describe('secret values the emulator can actually use', () => {
   it('treats a present-but-empty secret as missing', () => {
-    expect(unusableSecretNames('RESEND_API_KEY=\n', ['RESEND_API_KEY'])).toEqual([
+    expect(unusableSecretNames(parseDotenv('RESEND_API_KEY=\n', 'secret'), ['RESEND_API_KEY'])).toEqual([
       'RESEND_API_KEY',
     ]);
-    expect(unusableSecretNames('RESEND_API_KEY=""\n', ['RESEND_API_KEY'])).toEqual([
+    expect(unusableSecretNames(parseDotenv('RESEND_API_KEY=""\n', 'secret'), ['RESEND_API_KEY'])).toEqual([
       'RESEND_API_KEY',
     ]);
   });
@@ -203,11 +204,25 @@ describe('secret values the emulator can actually use', () => {
     const { secrets } = declaredParamNames(PARAMS_SOURCE);
     const { secret } = e2eFunctionsEnv(PARAMS_SOURCE, PROJECT_ID);
 
-    expect(unusableSecretNames(secret, secrets)).toEqual([]);
+    expect(unusableSecretNames(parseDotenv(secret, 'secret'), secrets)).toEqual([]);
+  });
+
+  // Codex P2 on PR #730. `resolveSecretEnvs` calls parseStrict, so one bad line
+  // discards the WHOLE file rather than just that line — and the FirebaseError
+  // it raises has no `code`, so the emulator's own catch does not even log it.
+  // The lenient parse would have returned the good key and hidden all of that.
+  it('rejects a secret file the emulator would discard entirely', () => {
+    const oneBadLine = 'RESEND_API_KEY=real-value\nthis is not a valid line\n';
+
+    expect(parse(oneBadLine).envs).toEqual({ RESEND_API_KEY: 'real-value' });
+    expect(parse(oneBadLine).errors).toHaveLength(1);
+    expect(() => parseDotenv(oneBadLine, 'functions/.secret.local')).toThrow(
+      /functions\/\.secret\.local is not a dotenv file/,
+    );
   });
 
   it('still allows an empty PARAM value, which is a legitimate default', () => {
-    expect(unassignedNames('EMAIL_REPLY_TO=\n', ['EMAIL_REPLY_TO'])).toEqual([]);
+    expect(unassignedNames(parseDotenv('EMAIL_REPLY_TO=\n', 'empty'), ['EMAIL_REPLY_TO'])).toEqual([]);
   });
 });
 
@@ -275,9 +290,9 @@ describe('dotenv layering the emulator merges', () => {
     const overlay = rest.map((name) => `${name}=overlay\n`).join('');
 
     // The overlay alone is incomplete — the old check aborted here...
-    expect(unassignedNames(overlay, params)).toEqual([first]);
+    expect(unassignedNames(parseDotenv(overlay, 'overlay'), params)).toEqual([first]);
     // ...but the merged view the emulator resolves against is not.
-    expect(unassignedNames([shared, overlay].join('\n'), params)).toEqual([]);
+    expect(unassignedNames({ ...parseDotenv(shared, 'shared'), ...parseDotenv(overlay, 'overlay') }, params)).toEqual([]);
   });
 });
 
@@ -290,7 +305,7 @@ describe('functions/.env.example', () => {
     const template = read('../functions/.env.example');
     const { params } = declaredParamNames(PARAMS_SOURCE);
 
-    expect(unassignedNames(template, params)).toEqual([]);
+    expect(unassignedNames(parseDotenv(template, 'functions/.env.example'), params)).toEqual([]);
   });
 
   it('keeps RESEND_API_KEY out, since a secret is not a dotenv value', () => {
