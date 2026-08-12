@@ -123,6 +123,27 @@ describe('withDestinationLocks — abandoned-lock recovery', () => {
     }
   });
 
+  it('reclaims a recovery gate when the recovery process itself was killed mid-handoff', () => {
+    const dest = join(dir, 'gcb.png');
+    const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    const takeover = `${dest}.commit-lock.takeover`;
+    const recovering = `${takeover}.recovering`;
+    // This is the exact durable state left when a process dies after claiming
+    // recovery but before publishing the replacement lock. A fixed hard link
+    // here used to make every later acquire time out forever.
+    writeFileSync(takeover, `${dead.pid}\n`);
+    writeFileSync(recovering, `${dead.pid}\n`);
+
+    const release = withDestinationLocks([{ dest }], { timeoutMs: 3000 });
+    try {
+      expect(isLocked(dest)).toBe(true);
+      expect(existsSync(takeover)).toBe(false);
+      expect(existsSync(recovering)).toBe(false);
+    } finally {
+      release();
+    }
+  });
+
   it('warns about a leftover rollback backup when stealing a lock left by a killed commit (#713 round 8, id 3762932710)', () => {
     const dest = join(dir, 'gcb.png');
     const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);

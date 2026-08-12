@@ -73,6 +73,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -91,10 +92,7 @@ const STALE_MS = 60_000;
 const lockPathFor = (dest) => `${dest}.commit-lock`;
 // A short-lived gate owned by a stale-lock taker. New acquirers check this
 // before and after publishing their hard-link lock, so a stale takeover never
-// races a healthy replacement at the same pathname. It uses the same
-// write-private-then-link publication as the lock itself: a process killed
-// while taking over leaves enough ownership evidence for the next run to
-// reclaim the gate instead of wedging every future renderer.
+// races a healthy replacement at the same pathname.
 const takeoverPathFor = (dest) => `${lockPathFor(dest)}.takeover`;
 const takeoverRecoveryPathFor = (dest) => `${takeoverPathFor(dest)}.recovering`;
 
@@ -293,30 +291,75 @@ function tryAcquireOne(dest, { allowTakeover = false } = {}) {
  *  `lockPath` while this call removes the stale one. This is stronger than a
  *  stat/inode re-check: POSIX has no conditional-unlink syscall, and inode
  *  reuse means a pathname+inode comparison still cannot be an atomic CAS. */
-/** Publish the replacement before releasing `takeover`, so no waiter can use
- * the handoff window to create a lock that a delayed recovery might delete. */
-function replaceWhileHoldingTakeover(dest, takeover, state) {
+/** Move the known-old pathname aside before publishing a replacement. Rename
+ * is the required atomic handoff here: two recovery attempts cannot both move
+ * the same old inode, while an unlink could let a delayed attempt erase a new
+ * holder that had just won the name. */
+function retireCurrentLock(dest) {
   const lockPath = lockPathFor(dest);
-  tryUnlink(lockPath);
+  const retiredPath = `${lockPath}.retired-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
+  try {
+    renameSync(lockPath, retiredPath);
+    return retiredPath;
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** Publish a replacement while the takeover gate excludes ordinary waiters.
+ * The stale pathname is first atomically retired, never unlinked by name. */
+function replaceWhileHoldingTakeover(dest, state) {
+  const retiredPath = retireCurrentLock(dest);
   if (state?.ownerWitness) tryUnlink(state.ownerWitness);
   const ownership = tryAcquireOne(dest, { allowTakeover: true });
-  if (!ownership) return null;
-  releaseOwnership(takeoverPathFor(dest), takeover);
+  if (retiredPath) tryUnlink(retiredPath);
   return ownership;
 }
 
-/** Finish a takeover whose owner has died. The fixed `.recovering` hard link
- * is an exclusive claim of the dead gate; it remains in place until the
- * replacement lock has been published, so another recovery can never unlink a
- * newly-created lock or gate by pathname. */
+/** Acquire a recovery gate, replacing a dead recovery owner by atomically
+ * retiring its old pathname first. A killed recovery therefore leaves a
+ * recognisable, reclaimable ownership record rather than a permanent fixed
+ * `.recovering` hard link. */
+function acquireRecoverableOwnership(path) {
+  for (;;) {
+    const ownership = tryAcquireOwnership(path);
+    if (ownership) return ownership;
+    const state = readLockState(path);
+    if (!state || (Number.isInteger(state.holderPid) && pidAlive(state.holderPid))) return null;
+    const retiredPath = `${path}.retired-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
+    try {
+      renameSync(path, retiredPath);
+    } catch (err) {
+      if (err.code === 'ENOENT') continue;
+      return null;
+    }
+    if (state.ownerWitness) tryUnlink(state.ownerWitness);
+    tryUnlink(retiredPath);
+  }
+}
+
+/** Clear a confirmed-dead gate only while the caller owns `.recovering`.
+ * That gate excludes every compliant taker, so an old malformed lock from a
+ * pre-witness version may be safely removed too. */
+function clearDeadOwnership(path, state) {
+  try {
+    if (state?.ownerWitness && !sameFile(statSync(path), statSync(state.ownerWitness))) return;
+    tryUnlink(path);
+    if (state?.ownerWitness) tryUnlink(state.ownerWitness);
+  } catch {
+    // A malformed/out-of-band path is fail-closed; a later run can inspect it.
+  }
+}
+
+/** Finish a takeover whose owner has died. Recovery itself has a PID-bearing,
+ * reclaimable ownership gate, so a recovery process killed mid-handoff cannot
+ * wedge all later renderers. */
 function recoverAbandonedTakeover(dest) {
   const takeoverPath = takeoverPathFor(dest);
   const recoveryPath = takeoverRecoveryPathFor(dest);
-  try {
-    linkSync(takeoverPath, recoveryPath);
-  } catch {
-    return null;
-  }
+  const recovery = acquireRecoverableOwnership(recoveryPath);
+  if (!recovery) return null;
   try {
     const takeover = readLockState(takeoverPath);
     if (!takeover || (Number.isInteger(takeover.holderPid) && pidAlive(takeover.holderPid))) return null;
@@ -324,13 +367,15 @@ function recoverAbandonedTakeover(dest) {
     // A dead gate must never evict a different, live lock holder. That state is
     // not reachable through this protocol, but fail closed if the filesystem
     // was changed out of band instead of guessing at ownership.
-    if (current && Number.isInteger(current.holderPid) && pidAlive(current.holderPid)) return null;
-    return replaceWhileHoldingTakeover(dest, { scratchPath: recoveryPath }, current);
+    if (current && Number.isInteger(current.holderPid) && pidAlive(current.holderPid)) {
+      clearDeadOwnership(takeoverPath, takeover);
+      return null;
+    }
+    const ownership = replaceWhileHoldingTakeover(dest, current);
+    if (ownership) clearDeadOwnership(takeoverPath, takeover);
+    return ownership;
   } finally {
-    // A successful replacement already removed the original gate. This link is
-    // only a recovery mutex, so it may always be dropped after publishing (or
-    // after a fail-closed refusal); the gate remains for the next attempt.
-    tryUnlink(recoveryPath);
+    releaseOwnership(recoveryPath, recovery);
   }
 }
 
@@ -367,7 +412,9 @@ function stealIfStale(dest) {
             `that is not what you expected.`
           : ''),
     );
-    return replaceWhileHoldingTakeover(dest, takeover, state);
+    const ownership = replaceWhileHoldingTakeover(dest, state);
+    if (ownership) releaseOwnership(takeoverPath, takeover);
+    return ownership;
   } catch {
     return null;
   } finally {

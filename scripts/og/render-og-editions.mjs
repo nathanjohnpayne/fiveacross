@@ -425,6 +425,12 @@ for (const id of targets) {
 }
 
 const browser = await chromium.launch();
+let browserClosed = false;
+async function closeBrowser() {
+  if (browserClosed) return;
+  browserClosed = true;
+  await browser.close();
+}
 // Every edition's render is staged to its scratch path here first (#699) and
 // ONLY moved into its committed destination once every targeted edition has
 // individually cleared the hard cap (#713 on `--all`): if edition 3 of 3
@@ -516,18 +522,24 @@ try {
       const losslessBytes = statSync(scratch).size;
       if (losslessBytes > SIZE_BUDGET_BYTES) {
         try {
+          const quantizedScratch = `${scratch}.quant`;
           execFileSync(
             'pngquant',
-            ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${scratch}.quant`, scratch],
+            ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', quantizedScratch, scratch],
             { stdio: 'inherit' },
           );
-          renameSync(`${scratch}.quant`, scratch);
+          renameSync(quantizedScratch, scratch);
           console.warn(
             `  ${id}: ${(losslessBytes / 1024).toFixed(0)} KB lossless exceeded the ` +
               `${(SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB budget — quantised to ` +
               `${(statSync(scratch).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
           );
         } catch {
+          try {
+            unlinkSync(`${scratch}.quant`);
+          } catch {
+            /* pngquant did not leave a partial output */
+          }
           console.warn(`  ${id}: over budget and pngquant is unavailable — shipping the lossless PNG.`);
         }
       }
@@ -563,6 +575,11 @@ try {
       }
     }
   }
+
+  // All browser work is complete before committing. If Chromium shutdown
+  // fails, discard the staged assets rather than report a successful publish
+  // after `commitStaged` has removed its rollback backups.
+  await closeBrowser();
 
   // Every targeted edition cleared the hard cap — commit them all now, in
   // one pass, so a run either updates every targeted destination or (per
@@ -611,7 +628,15 @@ try {
   discardStaged(staged);
   throw err;
 } finally {
-  await browser.close();
+  if (!browserClosed) {
+    try {
+      await closeBrowser();
+    } catch {
+      // Preserve the rendering/commit failure that brought us here; a browser
+      // process that was already failing to close cannot make a successful
+      // publish look rollbackable because success closes it before commit.
+    }
+  }
 }
 
 // Every entry here already cleared HARD_CAP_BYTES — a render that didn't
