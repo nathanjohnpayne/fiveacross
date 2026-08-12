@@ -34,21 +34,31 @@ done
 npm --prefix functions run build
 created_env=false
 created_secret=false
-if [[ ! -e functions/.env.local ]]; then
-  printf '%s\n' \
-    'EMAIL_FROM=Gay Cruise Bingo <e2e@example.invalid>' \
-    'ADMIN_NOTIFY_EMAIL=' \
-    'APP_BASE_URL=http://127.0.0.1:4173' \
-    'BUG_REPORT_APP_CHECK=false' > functions/.env.local
-  created_env=true
-fi
-if [[ ! -e functions/.secret.local ]]; then
-  printf '%s\n' 'RESEND_API_KEY=e2e-not-used' > functions/.secret.local
-  created_secret=true
-fi
 cleanup() {
   [[ "$created_env" == false ]] || rm -f functions/.env.local
   [[ "$created_secret" == false ]] || rm -f functions/.secret.local
 }
+# Registered before generation (not after, as this used to be) so that a
+# failed `node scripts/gen-functions-env.mjs` invocation below — which, via
+# shell redirection, still creates an empty/truncated target file even
+# though the command itself failed — gets cleaned up rather than left
+# behind as a bogus "this file already exists" marker that would make the
+# NEXT run silently skip regeneration and feed the emulator an incomplete
+# env, recreating the very hang this script exists to prevent (#724).
 trap cleanup EXIT INT TERM
+# Generated from the params actually declared in functions/src/params.ts
+# (scripts/gen-functions-env.mjs), not hand-copied — a declared param with a
+# default that this generation step omitted used to leave the Functions
+# emulator blocking on an interactive prompt for it forever, even under
+# --non-interactive (#724). The generator itself fails loudly (nonzero exit,
+# caught by `set -e` above) for any param it cannot safely derive a value
+# for, so a future gap surfaces here instead of as a hang.
+if [[ ! -e functions/.env.local ]]; then
+  created_env=true
+  node scripts/gen-functions-env.mjs env functions > functions/.env.local
+fi
+if [[ ! -e functions/.secret.local ]]; then
+  created_secret=true
+  node scripts/gen-functions-env.mjs secrets functions > functions/.secret.local
+fi
 npx firebase --non-interactive emulators:exec --only auth,firestore,storage,functions --project "$PROJECT_ID" "$cmd"
