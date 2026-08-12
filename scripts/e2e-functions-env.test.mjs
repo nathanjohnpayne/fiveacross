@@ -54,7 +54,7 @@ describe('e2e functions dotenv generation', () => {
   });
 
   it('refuses to emit an empty file set when the declarations stop parsing', () => {
-    expect(() => declaredParamNames('export const nothing = 1;\n')).toThrow(/DEFINE_CALL_RE/);
+    expect(() => declaredParamNames('export const nothing = 1;\n')).toThrow(/CONSTRUCTOR_RE/);
   });
 
   // Codex P2 on PR #730: an enumerated list of constructors fails silently —
@@ -94,20 +94,29 @@ describe('e2e functions dotenv generation', () => {
     const computed = "export const A = defineString(PARAM_NAME, { default: '' });";
 
     expect(declaredParamNames(backticked).params).toEqual(['SMTP_BRIDGE_URL']);
-    expect(() => declaredParamNames(computed)).toThrow('PARAM_NAME');
+    expect(() => declaredParamNames(computed)).toThrow(/defineString\(…\)/);
     expect(() => declaredParamNames(computed)).toThrow(/cannot resolve statically/);
   });
 
-  // Codex P2 on PR #730: an alias is legal TypeScript that would hide every
-  // declaration made through it, so the no-alias convention has to be enforced
-  // rather than assumed.
-  it('rejects an aliased constructor import instead of finding nothing', () => {
+  // Codex P2 x3 on PR #730 pushed this from "detect the alias and refuse" to
+  // "resolve the binding". Reading the import is what makes an alias WORK, so
+  // there is no convention left to enforce and nothing to hide behind one.
+  it('resolves a constructor imported under an alias', () => {
     const aliased = [
       "import { defineString as stringParam } from 'firebase-functions/params';",
       "export const A = stringParam('SMTP_BRIDGE_URL', { default: '' });",
     ].join('\n');
 
-    expect(() => declaredParamNames(aliased)).toThrow(/defineString as stringParam/);
+    expect(declaredParamNames(aliased).params).toEqual(['SMTP_BRIDGE_URL']);
+  });
+
+  it('resolves a constructor reached through a namespace import', () => {
+    const namespaced = [
+      "import * as params from 'firebase-functions/params';",
+      "export const A = params.defineSecret('MY_SECRET');",
+    ].join('\n');
+
+    expect(declaredParamNames(namespaced).secrets).toEqual(['MY_SECRET']);
   });
 
   it('leaves the real unaliased import alone', () => {
@@ -128,16 +137,43 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(aliasedHelper).params).toEqual(['SMTP_BRIDGE_URL']);
   });
 
-  // Codex P2 on PR #730, against the first version of the alias check: a second
-  // import statement is legal, and a non-global exec inspects only the first.
-  it('inspects every params import, not just the first', () => {
+  // Codex P2 on PR #730: a second import statement is legal, and the earlier
+  // first-match-only lookup never saw it.
+  it('reads every params import, not just the first', () => {
     const twoImports = [
       "import { defineString } from 'firebase-functions/params';",
       "import { defineFloat as floatParam } from 'firebase-functions/params';",
-      "export const A = defineString('SMTP_BRIDGE_URL', { default: '' });",
+      "export const A = defineString('SMTP_BRIDGE_URL');",
+      "export const B = floatParam('SAMPLE_RATE');",
     ].join('\n');
 
-    expect(() => declaredParamNames(twoImports)).toThrow(/defineFloat as floatParam/);
+    expect(declaredParamNames(twoImports).params).toEqual(['SMTP_BRIDGE_URL', 'SAMPLE_RATE']);
+  });
+
+  // Codex P2 on PR #730. The old comment-stripping regex deleted everything
+  // between a `/*` and a `*/` wherever they appeared — including when both sat
+  // inside string data with a real declaration between them. A scanner does not
+  // confuse the two.
+  it('does not lose a declaration bracketed by comment delimiters inside strings', () => {
+    const stringsWithDelimiters = [
+      'const opening = `/* this is data, not a comment`;',
+      "export const A = defineString('NEW_PARAM');",
+      'const closing = `and this closes it */`;',
+    ].join('\n');
+
+    expect(declaredParamNames(stringsWithDelimiters).params).toEqual(['NEW_PARAM']);
+  });
+
+  // Codex P2 on PR #730: the alias check read raw source, so a commented-out
+  // experiment aborted the run even though every active import was unaliased.
+  it('ignores a commented-out import', () => {
+    const commentedExperiment = [
+      "// import { defineFloat as floatParam } from 'firebase-functions/params';",
+      "import { defineString } from 'firebase-functions/params';",
+      "export const A = defineString('SMTP_BRIDGE_URL');",
+    ].join('\n');
+
+    expect(declaredParamNames(commentedExperiment).params).toEqual(['SMTP_BRIDGE_URL']);
   });
 
   // Codex P2 on PR #730: Firebase resolves params from every loaded module, so a

@@ -40,6 +40,10 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+// The TypeScript scanner, used to read declarations out of Functions modules.
+// Already a devDependency (`npm run typecheck` runs tsc), so this costs the
+// runner nothing it did not already install.
+import ts from 'typescript';
 // The dotenv reader these files are written for. Imported rather than
 // re-implemented because every round of review on PR #730 found the same thing:
 // a hand-written approximation of this parser disagrees with it somewhere, and
@@ -49,84 +53,85 @@ import { pathToFileURL } from 'node:url';
 import { parse, parseStrict } from 'firebase-tools/lib/functions/env.js';
 
 /**
- * `defineString('NAME'` / `defineBoolean('NAME'` / `defineSecret('NAME'` …
+ * A firebase-functions/params constructor, by its EXPORTED name.
  *
- * Deliberately NOT an enumeration of the constructors in use. firebase-functions
- * 5.1.1 also exports `defineInt`, `defineFloat` and `defineList`, and a listed
- * subset fails in the worst possible way: the omitted constructor is skipped
- * silently, the existing declarations keep the zero-match guard from firing, and
- * every test still passes while the new param goes uncovered and hangs the
- * emulator (Codex P2 on PR #730 — `defineFloat` was in fact missing). Matching
- * any `define<Name>(` means a constructor added by a future SDK is caught
- * without an edit here, and an over-match fails in the safe direction: a loud
- * "no value for X" rather than a silent omission.
- *
- * The first argument is CAPTURED rather than matched, so a name this file
- * cannot resolve statically is rejected rather than skipped — see
- * `declaredParamNames`. Skipping it would be the same silent-omission bug in a
- * new costume (Codex P2 on PR #730).
+ * Not an enumeration of the ones in use: firebase-functions 5.1.1 exports
+ * defineInt, defineFloat and defineList too, and a listed subset fails in the
+ * worst available way — the omitted constructor is skipped, the existing
+ * declarations keep the zero-match guard quiet, and every test passes while the
+ * new param hangs the emulator (Codex P2 on PR #730; `defineFloat` was in fact
+ * missing). Matching the convention means a constructor a future SDK adds is
+ * caught with no edit here.
  */
-const DEFINE_CALL_RE = /\bdefine([A-Z][A-Za-z]*)\s*\(\s*([^,)]*)/g;
+const CONSTRUCTOR_RE = /^define([A-Z][A-Za-z]*)$/;
+
+/** The module whose constructors declare params. */
+const PARAMS_MODULE = 'firebase-functions/params';
 
 /**
- * A param name this file can resolve: one string literal, in any of the three
- * quote styles, holding a bare identifier. Backticks count — a template literal
- * with no substitution is an ordinary string, and rejecting one would be a
- * silent skip rather than a loud failure.
+ * Local name → constructor kind, for every params-module constructor a source
+ * binds, however it binds it.
+ *
+ * Resolving the binding is what makes an ALIAS work rather than merely be
+ * detected: `defineString as stringParam` now yields calls through
+ * `stringParam`, where three earlier attempts could only reject the import and
+ * hope nobody needed it (Codex P2 x3 on PR #730). A namespace import resolves
+ * through the property access instead, and is handled at the call site.
  */
-const NAME_LITERAL_RE = /^(['"`])([A-Za-z_][A-Za-z0-9_]*)\1$/;
-
-/**
- * Source with comments removed, so prose ABOUT a constructor is not mistaken for
- * a call to one — `visionGate.ts` carries exactly such a comment, and this file
- * has to tell the two apart now that an unparseable call is an error rather than
- * something to ignore. The `[^:]` guard keeps a `https://` inside a string from
- * being eaten as a line comment.
- */
-function withoutComments(source) {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+function constructorBindings(sourceFile) {
+  const bindings = new Map();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== PARAMS_MODULE
+    ) {
+      continue;
+    }
+    const named = statement.importClause?.namedBindings;
+    if (named && ts.isNamedImports(named)) {
+      for (const element of named.elements) {
+        const exported = (element.propertyName ?? element.name).text;
+        const kind = CONSTRUCTOR_RE.exec(exported);
+        if (kind) {
+          bindings.set(element.name.text, kind[1]);
+        }
+      }
+    }
+  }
+  return bindings;
 }
 
 /**
- * EVERY named-import block for the params module. Global, because a second
- * import statement is a legal way to bring in a constructor and a first-match
- * lookup would inspect only the first one, letting an alias through in the
- * second (Codex P2 on PR #730, against the first version of this check).
+ * The constructor kind a call expression invokes, or null when it is not a param
+ * declaration at all.
+ *
+ * The bare-name fallback covers two real cases: a namespace import
+ * (`params.defineString(…)`), and the standalone call fragments the sibling spec
+ * builds, which have no import to resolve against.
  */
-const PARAMS_IMPORT_RE = /import\s*\{([^}]*)\}\s*from\s*['"]firebase-functions\/params['"]/g;
+function constructorKindOf(call, bindings) {
+  if (ts.isIdentifier(call.expression)) {
+    return bindings.get(call.expression.text) ?? CONSTRUCTOR_RE.exec(call.expression.text)?.[1] ?? null;
+  }
+  if (ts.isPropertyAccessExpression(call.expression)) {
+    return CONSTRUCTOR_RE.exec(call.expression.name.text)?.[1] ?? null;
+  }
+  return null;
+}
 
 /**
- * Rejects an aliased CONSTRUCTOR import — `defineString as stringParam` — which
- * would make every call site invisible to `DEFINE_CALL_RE` (Codex P2 on PR
- * #730). The alias is legal TypeScript, so the convention it violates has to be
- * enforced rather than assumed; the alternative is resolving bindings, which
- * means parsing TypeScript for a file that has never needed one.
+ * The param name a declaration gives, or null when it is not a plain string.
  *
- * Scoped to specifiers whose IMPORTED name matches the constructor convention.
- * The module exports plenty that is not a constructor — `Expression`, `select`,
- * `declaredParams`, `projectID` and others — and aliasing any of those leaves
- * every `define*` call perfectly visible, so rejecting them would abort a run
- * that works (Codex P2 on PR #730, on the first version of this check).
- *
- * Checked only when the import is present, so the synthetic call fragments the
- * sibling spec builds are still parseable on their own. A source that stops
- * importing from this module entirely has changed shape far past an alias, and
- * the zero-match guard below is what catches that.
+ * A no-substitution template literal counts — it is an ordinary string, and
+ * treating it otherwise was a silent skip (Codex P2 on PR #730).
  */
-function rejectAliasedConstructors(source) {
-  const aliased = [...source.matchAll(PARAMS_IMPORT_RE)]
-    .flatMap(([, specifiers]) => specifiers.split(','))
-    .map((specifier) => specifier.trim())
-    .filter((specifier) => /^define[A-Z]\w*\s+as\s+\w+$/.test(specifier));
-  if (aliased.length > 0) {
-    throw new Error(
-      `functions/src/params.ts imports ${aliased.join(', ')} from firebase-functions/params. ` +
-        'This generator finds params by their constructor name at the call site, so an alias ' +
-        'hides every declaration made through it — and a hidden declaration is one the ' +
-        'emulator blocks on. Import the constructors unaliased, or teach ' +
-        'scripts/e2e-functions-env.mjs to resolve the binding.',
-    );
+function literalNameOf(call) {
+  const [first] = call.arguments;
+  if (!first) {
+    return null;
   }
+  return ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first) ? first.text : null;
 }
 
 /**
@@ -201,19 +206,33 @@ export const E2E_SECRET_VALUES = {
  * loaded Functions module, not just `params.ts`, so callers scan the whole tree
  * (see `declaredParamNamesAcross`) — this only ever sees one file at a time.
  */
-export function declaredParamNames(source, label = 'functions/src/params.ts') {
+function scanSource(source, label) {
   const params = [];
   const secrets = [];
   const unresolvable = [];
-  rejectAliasedConstructors(source);
-  for (const [, kind, argument] of withoutComments(source).matchAll(DEFINE_CALL_RE)) {
-    const literal = NAME_LITERAL_RE.exec(argument.trim());
-    if (!literal) {
-      unresolvable.push(`define${kind}(${argument.trim()})`);
-      continue;
+  // A real TypeScript parse, not a pattern match. Eight rounds of review on PR
+  // #730 each found the regex confusing code with something that only looked
+  // like it — a constructor named in prose, a `/*` inside a string literal, an
+  // aliased binding, a name that was not a literal. The scanner settles every
+  // one of those by construction, and it costs a devDependency the repo already
+  // installs for `npm run typecheck`.
+  const sourceFile = ts.createSourceFile(label, source, ts.ScriptTarget.Latest, true);
+  const bindings = constructorBindings(sourceFile);
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const kind = constructorKindOf(node, bindings);
+      if (kind) {
+        const name = literalNameOf(node);
+        if (name === null) {
+          unresolvable.push(`${node.expression.getText(sourceFile)}(…)`);
+        } else {
+          (kind === 'Secret' ? secrets : params).push(name);
+        }
+      }
     }
-    (kind === 'Secret' ? secrets : params).push(literal[2]);
-  }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   // A name this file cannot read statically — `defineString(PARAM_NAME, …)` —
   // must stop the run rather than be dropped from the key set. Dropping it is
   // indistinguishable from the param not existing, which is the exact hang this
@@ -226,14 +245,24 @@ export function declaredParamNames(source, label = 'functions/src/params.ts') {
         'silently skipping it would let the emulator block on a prompt for that param.',
     );
   }
-  if (params.length === 0 && secrets.length === 0) {
+  return { params, secrets };
+}
+/**
+ * One file's declarations, with the zero-match guard applied — the entry point
+ * for a caller that expects THIS file to declare params (params.ts, or a spec
+ * fragment). The tree scan uses `scanSource` directly, since almost every module
+ * legitimately declares nothing.
+ */
+export function declaredParamNames(source, label = 'functions/src/params.ts') {
+  const found = scanSource(source, label);
+  if (found.params.length === 0 && found.secrets.length === 0) {
     throw new Error(
-      'No firebase-functions/params declarations found in the params source. ' +
-        'If params.ts was restructured, update DEFINE_CALL_RE in scripts/e2e-functions-env.mjs — ' +
-        'a parse that silently finds nothing would let the emulator prompt for every param.',
+      `No firebase-functions/params declarations found in ${label}. If it was restructured, ` +
+        'update CONSTRUCTOR_RE in scripts/e2e-functions-env.mjs — a parse that silently finds ' +
+        'nothing would let the emulator prompt for every param.',
     );
   }
-  return { params, secrets };
+  return found;
 }
 
 /**
@@ -254,26 +283,20 @@ export function declaredParamNamesAcross(sources) {
   const params = new Set();
   const secrets = new Set();
   for (const { label, text } of sources) {
-    if (!DECLARES_A_PARAM_RE.test(withoutComments(text))) {
-      continue;
-    }
-    const found = declaredParamNames(text, label);
+    const found = scanSource(text, label);
     found.params.forEach((name) => params.add(name));
     found.secrets.forEach((name) => secrets.add(name));
   }
   if (params.size === 0 && secrets.size === 0) {
     throw new Error(
       `No firebase-functions/params declarations found across ${sources.length} Functions ` +
-        'source file(s). If the tree was restructured, update DEFINE_CALL_RE in ' +
+        'source file(s). If the tree was restructured, update CONSTRUCTOR_RE in ' +
         'scripts/e2e-functions-env.mjs — a scan that silently finds nothing would let the ' +
         'emulator prompt for every param.',
     );
   }
   return { params: [...params], secrets: [...secrets] };
 }
-
-/** Cheap pre-filter so the per-file zero-match guard never sees an empty module. */
-const DECLARES_A_PARAM_RE = /\bdefine[A-Z][A-Za-z]*\s*\(/;
 
 /** Every TypeScript module under the Functions source tree, with its path. */
 export function functionsSources(directory) {
