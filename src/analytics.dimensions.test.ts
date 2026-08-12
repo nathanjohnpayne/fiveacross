@@ -137,7 +137,7 @@ describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1
     // reintroducing the query-string leakage the path-only policy exists to
     // prevent, exactly on the branches with no canonical host (a
     // single-Event build, or the bootstrap failure branch).
-    vi.doMock('./firebase', () => ({ analytics: {} }));
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
     vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => null }));
     window.history.replaceState({}, '', '/feed?invite=SECRET#frag');
     const { track } = await import('./analytics');
@@ -149,7 +149,7 @@ describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1
   });
 
   it('adds a canonicalized page_location matching the CURRENT pathname when a canonical host is resolved', async () => {
-    vi.doMock('./firebase', () => ({ analytics: {} }));
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
     vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => 'bodega-bay.vacaybingo.com' }));
     window.history.replaceState({}, '', '/leaderboard');
     const { track } = await import('./analytics');
@@ -165,7 +165,7 @@ describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1
     // page_location ONCE (at dimension-registration time) as a static GA4
     // default, so every event tracked after a client-side route change kept
     // reporting the BOOT pathname.
-    vi.doMock('./firebase', () => ({ analytics: {} }));
+    vi.doMock('./firebase', () => ({ analytics: {}, analyticsReady: Promise.resolve({}) }));
     vi.doMock('./canonicalHost', () => ({ resolvedCanonicalHost: () => 'bodega-bay.vacaybingo.com' }));
     const { track } = await import('./analytics');
 
@@ -181,6 +181,34 @@ describe('track() — page_location computed fresh at DISPATCH time (Phase 4b P1
     expect(logEvent).toHaveBeenLastCalledWith({}, 'share_click', {
       surface: 'leaderboard',
       page_location: 'https://bodega-bay.vacaybingo.com/leaderboard',
+    });
+  });
+});
+
+describe('trackToAnalyticsSinks() — durable acknowledgement', () => {
+  afterEach(() => {
+    vi.doUnmock('./firebase');
+  });
+
+  it('does not acknowledge GA4 while its local queue is still initializing, then treats a disabled GA4 build as no required sink (#727)', async () => {
+    let resolveReady!: (instance: object | null) => void;
+    const ready = new Promise<object | null>((resolve) => {
+      resolveReady = resolve;
+    });
+    vi.doMock('./firebase', () => ({ analytics: null, analyticsReady: ready }));
+    const { analyticsInitializationSettled, trackToAnalyticsSinks } = await import('./analytics');
+
+    expect(trackToAnalyticsSinks('mark_square', { marked: true }, undefined, { ga4: true, posthog: false })).toEqual({
+      ga4: false,
+      posthog: true,
+    });
+
+    resolveReady(null);
+    await analyticsInitializationSettled;
+
+    expect(trackToAnalyticsSinks('mark_square', { marked: true }, undefined, { ga4: true, posthog: false })).toEqual({
+      ga4: true,
+      posthog: true,
     });
   });
 });

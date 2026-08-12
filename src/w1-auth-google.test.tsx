@@ -22,7 +22,7 @@ vi.mock('./auth/AuthContext', () => ({
 // Firebase SDK; a stub firebase module keeps the SDK from initializing, and
 // inert data hooks let the shell (Nav) and the /items page render under jsdom.
 vi.mock('./firebase', () => ({
-  auth: {}, googleProvider: {}, db: {}, storage: {}, analytics: null, app: {}, EVENT_ID: 'x',
+  auth: {}, googleProvider: {}, db: {}, storage: {}, analytics: null, analyticsReady: Promise.resolve(null), app: {}, EVENT_ID: 'x',
 }));
 vi.mock('./hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs.

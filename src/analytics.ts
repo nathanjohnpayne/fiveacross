@@ -153,6 +153,23 @@ function currentPageLocation(): string {
 type TrackOptions = { localMarkOccurred?: boolean; posthogOptions?: CaptureOptions };
 export type AnalyticsSinkSelection = { ga4: boolean; posthog: boolean };
 
+// `analytics` begins as null while Firebase performs its asynchronous support
+// and configuration check. A null value therefore means two materially
+// different things: GA4 is deliberately unavailable, or its local queue is
+// not ready to accept an event yet. Durable callers must preserve their event
+// in the latter case instead of treating both states as an acknowledgement.
+let ga4Availability: 'pending' | 'enabled' | 'disabled' = 'pending';
+export const analyticsInitializationSettled: Promise<void> = Promise.resolve(analyticsReady).then(
+  (instance) => {
+    ga4Availability = instance ? 'enabled' : 'disabled';
+  },
+  () => {
+    // GA4 is optional telemetry. A failed capability probe has no sink to
+    // retry, so it is equivalent to a deliberately disabled build.
+    ga4Availability = 'disabled';
+  },
+);
+
 /** Dispatch to the selected analytics sinks and report their individual local
  * enqueue acknowledgements. A durable transition outbox uses this to retry
  * only the sink that did not accept a transition, never double-counting the
@@ -175,10 +192,13 @@ export function trackToAnalyticsSinks(
           ...params,
           page_location: currentPageLocation(),
         } as Record<string, unknown>);
+        ga4 = true;
+      } else {
+        // Before `analyticsReady` settles, GA4 may still acquire a local
+        // queue. Report that as unacknowledged so the durable transition
+        // outbox retries after readiness instead of dropping the event.
+        ga4 = ga4Availability === 'disabled';
       }
-      // A disabled GA4 build has no required GA4 sink. An enabled SDK only
-      // acknowledges after `logEvent` accepted its local queue entry.
-      ga4 = true;
     } catch {
       ga4 = false;
     }

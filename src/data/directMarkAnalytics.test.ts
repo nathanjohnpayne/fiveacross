@@ -14,11 +14,15 @@ const H = vi.hoisted(() => ({
   query: vi.fn(() => ({})),
   startAfter: vi.fn(),
   trackToAnalyticsSinks: vi.fn(() => ({ ga4: true, posthog: true })),
+  analyticsInitializationSettled: Promise.resolve(),
   isLocalDirectMarkRequest: vi.fn(() => false),
 }));
 
 vi.mock('firebase/firestore', () => H);
-vi.mock('../analytics', () => ({ trackToAnalyticsSinks: H.trackToAnalyticsSinks }));
+vi.mock('../analytics', () => ({
+  analyticsInitializationSettled: H.analyticsInitializationSettled,
+  trackToAnalyticsSinks: H.trackToAnalyticsSinks,
+}));
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'event' }));
 vi.mock('./markAnalytics', () => ({ isLocalDirectMarkRequest: H.isLocalDirectMarkRequest }));
 
@@ -183,6 +187,47 @@ describe('durable direct-mark analytics delivery', () => {
 
     expect(storage.get('five-across:board-analytics-cursor:event:u1')).toBeUndefined();
     expect(storage.get('five-across:board-analytics-outbox:event:u1')).toContain('transition-10');
+    vi.unstubAllGlobals();
+  });
+
+  it('retries a pre-ready GA4 delivery once analytics initialization settles without waiting for another Firestore snapshot', async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    H.trackToAnalyticsSinks.mockReturnValueOnce({ ga4: false, posthog: true }).mockReturnValueOnce({ ga4: true, posthog: true });
+    H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+      onNext({
+        metadata: { fromCache: false },
+        docs: [
+          {
+            id: 'row-pre-ready',
+            data: () => ({
+              name: 'unmark_square',
+              mode: 'honor',
+              uid: 'u1',
+              requestId: 'request-pre-ready',
+              transitionId: 'transition-pre-ready',
+              commitOrder: '0000000000000012:000000000',
+              recordedAt: { seconds: 12, nanoseconds: 0 },
+            }),
+          },
+        ],
+      });
+      return () => {};
+    });
+
+    subscribeDirectMarkAnalytics('u1');
+    await H.analyticsInitializationSettled;
+
+    expect(H.trackToAnalyticsSinks).toHaveBeenLastCalledWith(
+      'unmark_square',
+      expect.objectContaining({ transitionId: 'transition-pre-ready' }),
+      { localMarkOccurred: false },
+      { ga4: true, posthog: false },
+    );
+    expect(storage.get('five-across:board-analytics-outbox:event:u1')).toBe('[]');
     vi.unstubAllGlobals();
   });
 

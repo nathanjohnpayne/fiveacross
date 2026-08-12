@@ -14,7 +14,7 @@ import {
 // firebase/analytics + ../firebase mocked (not analytics.ts) so the real
 // track() runs — proves the trigger rides the existing mark_square call site.
 vi.mock('firebase/analytics', () => ({ logEvent: vi.fn() }));
-vi.mock('../firebase', () => ({ analytics: null }));
+vi.mock('../firebase', () => ({ analytics: null, analyticsReady: Promise.resolve(null) }));
 import { track } from '../analytics';
 
 // Covers specs/d15-pwa-toasts.md (#219)'s new shared coordinator/signals in

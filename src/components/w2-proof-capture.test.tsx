@@ -267,7 +267,7 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     expect(props.onClose).toHaveBeenCalled();
   });
 
-  it('a submit that marks a previously-unmarked Square also fires mark_square { source: "proof" } (#721)', async () => {
+  it('a submit that marks a previously-unmarked Square delegates its durable proof transition to attachProof (#727)', async () => {
     const user = userEvent.setup();
     const props = baseProps(); // cell() defaults marked: false
     // The transaction's OWN committed read agrees with the sheet's opening
@@ -287,16 +287,12 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     await user.click(screen.getByRole('button', { name: /mark it/i }));
 
     await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
-    // Both events fire: attach_proof records the capture, mark_square records
-    // the transition — #721's fix is that a proofed claim is a SUBSET of
-    // marking, not an alternative to it (specs/w4-honor-pledge.md).
+    // `attachProof` writes the proof-sourced durable request in the same
+    // transaction as the mark transition; its data-layer tests prove that
+    // server-observed contract. The component only records the capture here,
+    // avoiding an ephemeral client-only mark event.
     expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
-    expect(H.track).toHaveBeenCalledWith('mark_square', {
-      source: 'proof',
-      mode: 'proof_required',
-      marked: true,
-      dayIndex: undefined,
-    });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('a proof added to an ALREADY-marked Square (the ＋ affordance) does not re-fire mark_square (#721)', async () => {
@@ -348,14 +344,13 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
-  it('a legacy (non-daily) Event omits dayIndex from mark_square even when the caller passes a raw dayIndex prop of 0 (Codex P2 on #727)', async () => {
+  it('a legacy (non-daily) Event leaves proof-mark attribution to attachProof even when the caller passes a raw dayIndex prop of 0 (#727)', async () => {
     // Board stamps ProofSheet's `dayIndex` prop from `board?.dayIndex` on a
     // legacy Event (Board.tsx: `dayIndex={hasDays ? viewedIndex : board?.dayIndex}`),
-    // and a legacy Board doc's own `dayIndex` defaults to 0 — a value that
-    // would misread as a real "Day 1" rather than "no Day schedule" if it
-    // rode straight into the event. `daily` (unset here, matching a legacy
-    // caller) is the actual gate, not whatever the raw `dayIndex` prop
-    // happens to carry.
+    // and a legacy Board doc's own `dayIndex` defaults to 0. Attribution is
+    // written by `attachProof`'s transaction (whose data-layer coverage
+    // verifies the legacy gate), not by a component-side event that could
+    // misread it as Day 1.
     const user = userEvent.setup();
     const props = { ...baseProps(), dayIndex: 0 }; // daily left unset (legacy)
     H.attachProof.mockResolvedValue({
@@ -373,12 +368,8 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     await user.click(screen.getByRole('button', { name: /mark it/i }));
 
     await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
-    expect(H.track).toHaveBeenCalledWith('mark_square', {
-      source: 'proof',
-      mode: 'proof_required',
-      marked: true,
-      dayIndex: undefined, // never the raw prop's 0
-    });
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('an audio submit attaches a recorded audio Proof and closes the sheet', async () => {

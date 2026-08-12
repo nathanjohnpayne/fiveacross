@@ -24,6 +24,7 @@ vi.mock('../firebase', () => ({
   auth: {},
   googleProvider: {},
   analytics: null,
+  analyticsReady: Promise.resolve(null),
 }));
 
 vi.mock('firebase/firestore', () => {

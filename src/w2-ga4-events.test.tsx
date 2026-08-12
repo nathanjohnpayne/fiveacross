@@ -23,6 +23,7 @@ vi.mock('./firebase', () => ({
   get analytics() {
     return mockAnalyticsInstance.current;
   },
+  analyticsReady: Promise.resolve({}),
 }));
 
 describe('GA4_EVENTS catalog', () => {

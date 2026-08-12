@@ -1,5 +1,9 @@
 import { Timestamp, collection, documentId, onSnapshot, orderBy, query, startAfter } from 'firebase/firestore';
-import { trackToAnalyticsSinks, type AnalyticsSinkSelection } from '../analytics';
+import {
+  analyticsInitializationSettled,
+  trackToAnalyticsSinks,
+  type AnalyticsSinkSelection,
+} from '../analytics';
 import { db, EVENT_ID } from '../firebase';
 import { isLocalDirectMarkRequest } from './markAnalytics';
 import type { ClaimMode } from '../types';
@@ -242,6 +246,7 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
   const delivered = storedIds(uid);
   const outbox = storedOutbox(uid);
   const cursor = storedCursor(uid);
+  let unsubscribed = false;
   const flushOutbox = () => {
     for (const delivery of [...outbox.values()]) {
       const updated = dispatch(delivery);
@@ -269,7 +274,7 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
           orderBy('recordedAt'),
           orderBy(documentId()),
         );
-    return onSnapshot(
+    const unsubscribe = onSnapshot(
       transitions,
       (snapshot) => {
         // A cache-only snapshot can be newer at one position but older at
@@ -315,6 +320,17 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
         // unavailable; immutable records are read on the next subscription.
       },
     );
+    // The listener can receive its first server snapshot before Firebase
+    // Analytics finishes initializing. `trackToAnalyticsSinks` retains that
+    // pending GA4 delivery in the outbox; retry it once readiness settles even
+    // if Firestore has no further snapshot to wake this listener.
+    void analyticsInitializationSettled.then(() => {
+      if (!unsubscribed) flushOutbox();
+    });
+    return () => {
+      unsubscribed = true;
+      unsubscribe();
+    };
   } catch {
     // Keep lightweight component tests and constrained webviews from treating
     // an unavailable analytics listener as a gameplay failure.
