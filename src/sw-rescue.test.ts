@@ -5,7 +5,10 @@ import {
   FORCED_FLAG_URL,
   SHELL_META_CACHE,
   UNKNOWN_ACTIVE_STAMP,
+  UNREGISTERED_CLIENT_CONFIRM_MS,
+  confirmClientStamps,
   dueForFloorRecheck,
+  hasUnregisteredClient,
   fetchFloorInWorker,
   fetchFloorWithRetry,
   isAppShellClientUrl,
@@ -406,7 +409,80 @@ describe('the client build registry (#516)', () => {
     await recordClientStamp(cs, 'tab/one?two#three', OLD_SHELL, ['tab/one?two#three']);
     await expect(readClientStamps(cs)).resolves.toEqual({ 'tab/one?two#three': OLD_SHELL });
   });
+});
 
+// Codex P2 round 5. An absence is the rescue's strongest evidence — it stands in
+// as `UNKNOWN_ACTIVE_STAMP` for the decision and is condemned outright by
+// `shouldNavigateClient` — and it is assembled from two reads nothing orders. A
+// window posts `CLIENT_BUILD` to the ACTIVE worker while the decision runs in
+// the INSTALLING one: separate globals, separate microtask queues. So a tab that
+// opened moments ago is enumerable before its record is readable, and the
+// five-minute sweep grace cannot help, because that shields records which EXIST.
+describe('confirming an absence before believing it (#516)', () => {
+  it('takes a second look when a live window has no record, and finds the late arrival', async () => {
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-old', OLD_SHELL, ['tab-old']);
+    const first = await readClientStamps(cs);
+    // The write that was in flight in the OTHER worker while the decision read.
+    const sleep = vi.fn(async () => {
+      await recordClientStamp(cs, 'tab-fresh', NEW_SHELL, ['tab-old', 'tab-fresh']);
+    });
+    await expect(confirmClientStamps(cs, ['tab-old', 'tab-fresh'], first, sleep)).resolves.toEqual({
+      'tab-old': OLD_SHELL,
+      'tab-fresh': NEW_SHELL,
+    });
+    expect(sleep).toHaveBeenCalledWith(UNREGISTERED_CLIENT_CONFIRM_MS);
+  });
+
+  it('does not wait at all when every live window is already registered', async () => {
+    // The ordinary case, on every install of every deploy. Paying a second of
+    // latency for it would be a tax on the path that is never in doubt.
+    const cs = fakeCacheStorage();
+    await recordClientStamp(cs, 'tab-1', NEW_SHELL, ['tab-1']);
+    const first = await readClientStamps(cs);
+    const sleep = vi.fn(async () => {});
+    await expect(confirmClientStamps(cs, ['tab-1'], first, sleep)).resolves.toEqual(first);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('still reports a window that genuinely never registers — the stranded cohort', async () => {
+    // A pre-#516 tab produces no record however long it is given, so the
+    // confirmation must not turn the rescue's whole evidence into a no-op.
+    const cs = fakeCacheStorage();
+    const confirmed = await confirmClientStamps(cs, ['tab-legacy'], {}, async () => {});
+    expect(hasUnregisteredClient(['tab-legacy'], confirmed)).toBe(true);
+    expect(shouldNavigateClient(confirmed['tab-legacy'], ARMED_FLOOR)).toBe(true);
+  });
+
+  it('has nothing to confirm when the live set could not be read', async () => {
+    const sleep = vi.fn(async () => {});
+    await expect(confirmClientStamps(fakeCacheStorage(), null, {}, sleep)).resolves.toEqual({});
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('turns the force decision AROUND once the late record lands', async () => {
+    // The end-to-end shape of the finding: an armed floor, a served shell above
+    // it, and one live window whose record simply had not been written yet.
+    const cs = fakeCacheStorage();
+    const live = ['tab-fresh'];
+    const decide = (clientStamps: Record<string, string>) =>
+      shouldForceActivate({
+        activeStamp: NEW_SHELL,
+        ownStamp: NEW_SHELL,
+        floor: ARMED_FLOOR,
+        hasActiveWorker: true,
+        clientStamps,
+        liveClientIds: live,
+      });
+    expect(decide({})).toBe(true); // the racy read: absence reads as ancient
+    const confirmed = await confirmClientStamps(cs, live, {}, async () => {
+      await recordClientStamp(cs, 'tab-fresh', NEW_SHELL, live);
+    });
+    expect(decide(confirmed)).toBe(false);
+  });
+});
+
+describe('the client build registry, as the decision reads it (#516)', () => {
   it('rescues a tab still EXECUTING an old build behind an up-to-date served shell', () => {
     // The whole ticket, as one assertion: without the client stamps this reads
     // `activeStamp: NEW_SHELL` and declines.

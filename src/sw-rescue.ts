@@ -324,6 +324,52 @@ export async function readClientStamps(cacheStorage: CacheStorage): Promise<Clie
 }
 
 /**
+ * How long a live window with no registry entry is given to produce one before
+ * its absence is believed (Codex P2 round 5).
+ *
+ * Absence is the rescue's strongest evidence — `shouldForceActivate` reads it as
+ * `UNKNOWN_ACTIVE_STAMP` and `shouldNavigateClient` condemns it — and it is
+ * gathered from two reads that nothing orders. A window's `CLIENT_BUILD` goes to
+ * the ACTIVE worker while the decision is taken in the INSTALLING one, which is
+ * a different global with a different microtask queue; a tab that opened a
+ * moment ago is therefore in `clients.matchAll()` before its record is in the
+ * cache. `CLIENT_STAMP_SWEEP_GRACE_MS` cannot cover that gap, because it shields
+ * records that EXIST and the whole problem is one that does not exist yet.
+ *
+ * A genuinely pre-#516 window never produces a record however long it is given,
+ * so the wait costs the real stranded cohort a second of install latency and
+ * nothing else — install is not a navigation, and the same worker already
+ * spends longer than this retrying the floor probe.
+ */
+export const UNREGISTERED_CLIENT_CONFIRM_MS = 1000;
+
+/** Whether any live window is missing from the registry — the only condition
+ *  under which a second read can change an answer. */
+export function hasUnregisteredClient(liveIds: readonly string[] | null | undefined, stamps: ClientStamps): boolean {
+  return (liveIds ?? []).some((id) => stamps[id] === undefined);
+}
+
+/**
+ * A SECOND look at the registry before an absence is treated as evidence.
+ *
+ * Only ever adds entries, so it can only ever talk the rescue OUT of condemning
+ * a window — the safe direction, and the reason it needs no coordination with
+ * whatever wrote them. Callers invoke it lazily, once they know the absence is
+ * about to matter, so a decision that was going to decline anyway pays nothing.
+ */
+export async function confirmClientStamps(
+  cacheStorage: CacheStorage,
+  liveIds: readonly string[] | null | undefined,
+  stamps: ClientStamps,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  delayMs: number = UNREGISTERED_CLIENT_CONFIRM_MS,
+): Promise<ClientStamps> {
+  if (!hasUnregisteredClient(liveIds, stamps)) return stamps;
+  await sleep(delayMs);
+  return { ...stamps, ...(await readClientStamps(cacheStorage)) };
+}
+
+/**
  * Records what one window is executing, and sweeps in the same call — the
  * message arrives once per page load, so the registry is swept about as often
  * as it grows.

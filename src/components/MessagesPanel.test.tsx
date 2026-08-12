@@ -36,6 +36,7 @@ vi.mock('../data/notices', () => ({
 }));
 
 import MessagesPanel from './admin/MessagesPanel';
+import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
 const days: DayDef[] = [{ index: 0 } as DayDef];
 const notice = (id: string, pinned: boolean): NoticeDoc => ({
@@ -205,6 +206,51 @@ describe('MessagesPanel (specs/admin-messages.md)', () => {
     fireEvent.change(screen.getByLabelText('Edit notice body'), { target: { value: 'B' } });
     fireEvent.change(screen.getByLabelText('Edit notice title'), { target: { value: '' } });
     expect(save).toBeDisabled();
+  });
+
+  // Codex P2 round 5, PR #720. A half-written broadcast lives in `useState` and
+  // nowhere else, and this panel is a plain page section — it matches neither
+  // `[role=dialog][aria-modal]` nor the claim-sheet signal — so the automatic
+  // post-deploy reload (src/swClientBridge.ts) had nothing to defer on and ate
+  // the draft. The declaration is the marker, and it goes on only while there
+  // IS a draft: an admin parked on this panel must not pin the tab to a
+  // condemned build for the rest of its life.
+  describe('an unsaved draft holds back the automatic post-deploy reload', () => {
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+
+    it('marks the compose form only once something has been typed', () => {
+      render(<MessagesPanel adminUid="admin-uid" days={days} />);
+      expect(document.querySelector(marker)).toBeNull();
+      fireEvent.change(screen.getByLabelText('Notice title'), { target: { value: 'Muster drill' } });
+      expect(document.querySelector(marker)).not.toBeNull();
+      fireEvent.change(screen.getByLabelText('Notice title'), { target: { value: '' } });
+      expect(document.querySelector(marker)).toBeNull();
+    });
+
+    it('marks the body on its own, not just the title', () => {
+      render(<MessagesPanel adminUid="admin-uid" days={days} />);
+      fireEvent.change(screen.getByLabelText('Notice body'), { target: { value: 'Deck 7 is closed' } });
+      expect(document.querySelector(marker)).not.toBeNull();
+    });
+
+    it('releases the reload once the broadcast is posted', async () => {
+      render(<MessagesPanel adminUid="admin-uid" days={days} />);
+      fireEvent.change(screen.getByLabelText('Notice title'), { target: { value: 'T' } });
+      fireEvent.change(screen.getByLabelText('Notice body'), { target: { value: 'B' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Post to everyone' }));
+      await waitFor(() => expect(document.querySelector(marker)).toBeNull());
+    });
+
+    it('marks the inline editor only once the copy actually differs', () => {
+      // Opening the editor and changing nothing is not a draft — `save` itself
+      // treats that as a no-op, so it must not hold the tab back either.
+      H.notices = [notice('n1', false)];
+      render(<MessagesPanel adminUid="admin-uid" days={days} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      expect(document.querySelector(marker)).toBeNull();
+      fireEvent.change(screen.getByLabelText('Edit notice body'), { target: { value: 'corrected' } });
+      expect(document.querySelector(marker)).not.toBeNull();
+    });
   });
 
   it('an edited Notice is marked "edited" in the history; an unedited one is not', () => {

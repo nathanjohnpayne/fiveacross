@@ -234,9 +234,10 @@ function deferReload(reload: () => void): void {
  * swaps the precache, and leaves this tab executing the previous build with no
  * banner and no reload. That tab stays stale until someone reloads by hand.
  *
- * So this watches the REGISTRATION rather than the controller: a worker that
- * reaches `activated` while another one was already `active` is a deploy taking
- * over underneath us, and the page it is running is now the old one.
+ * So this watches the REGISTRATION rather than the controller: a worker
+ * reaching `activated` is a deploy landing underneath us. Whether THIS page is
+ * behind that deploy is a separate question, and it is always asked — see
+ * `reloadUnlessPageIsCurrent`.
  *
  * Deliberately armed ONLY on an uncontrolled page. A controlled page has a live
  * `isUpdate: true`, so vite-plugin-pwa reloads it already and arming here too
@@ -268,13 +269,12 @@ export async function armUncontrolledUpdateReload(
       if (!worker || watched.has(worker)) return;
       watched.add(worker);
       // Read NOW, while the outgoing worker is still the active one: a worker
-      // taking over from another IS a deploy landing underneath this page, and
-      // needs no stamp query to prove it.
+      // taking over from another IS a deploy landing underneath this page. That
+      // says a deploy HAPPENED; it does not say this page is behind it.
       const replacesAnActiveWorker = registration.active !== null && registration.active !== worker;
       worker.addEventListener('statechange', () => {
         if (worker.state !== 'activated') return;
-        if (replacesAnActiveWorker) requestReload(reload);
-        else void reloadIfPageIsBehind(worker, pageStamp, askStamp, reload);
+        void reloadUnlessPageIsCurrent(worker, pageStamp, askStamp, reload, replacesAnActiveWorker);
       });
     };
     // ATTACHED BEFORE THE STAMP QUERY BELOW, and that ordering is the point
@@ -292,7 +292,7 @@ export async function armUncontrolledUpdateReload(
     watch(registration.installing);
     watch(registration.waiting);
     // The worker that got here before any of the above could be attached.
-    await reloadIfPageIsBehind(registration.active, pageStamp, askStamp, reload);
+    await reloadUnlessPageIsCurrent(registration.active, pageStamp, askStamp, reload, false);
   } catch {
     /* no service worker, or a registration that never becomes ready */
   }
@@ -302,25 +302,48 @@ export async function armUncontrolledUpdateReload(
  * Reloads only when the worker now in charge is serving a build STRICTLY NEWER
  * than the one this page is executing.
  *
+ * ASKED ON EVERY PATH, including the one where a deploy plainly landed (Codex P2
+ * round 5). "A worker replaced another" proves an activation happened; it says
+ * nothing about which build THIS page loaded, and the two come apart in the
+ * exact case the rescue is built for. A forced activation (`src/sw-rescue.ts`)
+ * is triggered by the OLDEST open window, so a tab that opened moments earlier
+ * on the incoming build is uncontrolled — this worker never calls
+ * `clientsClaim()` — watches that worker activate, and used to reload itself
+ * unconditionally. The worker had already excluded it by name:
+ * `shouldNavigateClient` filters the navigation targets to the clients actually
+ * below the floor, precisely so an up-to-date tab keeps its in-progress work.
+ * Reloading from the page side reintroduced the harm the worker side had just
+ * gone to the trouble of avoiding.
+ *
  * Strictly newer, not merely different, because the reload is served by that
  * worker's precache: reloading onto an OLDER worker would walk the player
  * backwards, which is the opposite of the repair. `buildBelowFloor` is the
  * repo's existing "is this stamp older than that one" comparator, fail-open on
  * anything that does not parse (src/buildFloor.ts).
  *
- * A null answer changes nothing. An unanswerable worker — a pre-#605 build with
- * no reply handler, a dropped port, a worker killed mid-question — is not
- * evidence of a mismatch, and a needless reload throws away whatever the player
- * did while the first precache was installing, sign-in included.
+ * `deployIsCertain` decides only what SILENCE means, and it is the one thing the
+ * "a worker replaced another" observation is genuinely evidence for. An
+ * unanswerable worker — a dropped port, a worker killed mid-question — is not
+ * evidence of a mismatch on a FIRST worker, where a needless reload throws away
+ * whatever the player did while the initial precache was installing, sign-in
+ * included; but where a replacement demonstrably took over, a page that cannot
+ * confirm it is current is more likely stale than not, and staying stale for the
+ * rest of its life is the bug #621 exists to fix. A stamp that IS named settles
+ * it either way, so this only decides the unanswerable case.
  */
-async function reloadIfPageIsBehind(
+async function reloadUnlessPageIsCurrent(
   worker: Pick<ServiceWorker, 'postMessage'> | null,
   pageStamp: string,
   askStamp: (worker: Pick<ServiceWorker, 'postMessage'> | null) => Promise<string | null>,
   reload: () => void,
+  deployIsCertain: boolean,
 ): Promise<void> {
   if (!worker) return;
   const workerStamp = await askStamp(worker);
-  if (workerStamp === null || !buildBelowFloor(pageStamp, workerStamp)) return;
+  if (workerStamp === null) {
+    if (deployIsCertain) requestReload(reload);
+    return;
+  }
+  if (!buildBelowFloor(pageStamp, workerStamp)) return;
   requestReload(reload);
 }

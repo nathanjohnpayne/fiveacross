@@ -284,8 +284,13 @@ function ScheduleRow({
       setTonightError('Tonight save failed. Reload the schedule and try again.');
     }
   };
+  // `data-unsaved-work` while the Tonight line differs from what is stored
+  // (Codex P2 round 5, PR #720). This field commits on BLUR, so a draft the
+  // admin is still typing exists only in React state and an automatic
+  // post-deploy reload would discard it. See src/swClientBridge.ts.
+  const tonightUnsaved = tonightDraft !== tonightPersisted;
   return (
-    <div className="row schedule-row">
+    <div className="row schedule-row" data-unsaved-work={tonightUnsaved || undefined}>
       {/* Top line: uniform on every row — info grows, the theme dropdown trails.
           No fallback control ever lands here, so the dropdown never shifts. */}
       <div className="schedule-row-top">

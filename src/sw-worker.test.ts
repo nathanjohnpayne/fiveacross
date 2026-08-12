@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { UNREGISTERED_CLIENT_CONFIRM_MS } from './sw-rescue';
 
 // Drives the ACTUAL install/activate handlers in src/sw.ts (#514), not just the
 // pure decision layer in src/sw-rescue.test.ts. The worker is where the rescue
@@ -427,6 +428,80 @@ describe('the rescue tracks what each tab EXECUTES, not just the served shell (#
     expect(w.self.skipWaiting).toHaveBeenCalledOnce();
     await fire(w.handlers, 'activate');
     // Only the silent tab: tab-2 named an accepted build and keeps its work.
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  /** Re-stubs `setTimeout` so the ONE sleep `confirmClientStamps` takes lets a
+   *  racing registration land first — the write that was in flight in the
+   *  ACTIVE worker while this INSTALLING one read the registry. Every other
+   *  timer (the floor probe's timeout and retry backoff) keeps the harness's
+   *  fire-immediately behaviour, so nothing else changes. */
+  function registerDuringTheConfirmationWindow(w: ReturnType<typeof twoTabsOnDifferentBuilds>, clientId: string) {
+    vi.stubGlobal('setTimeout', ((fn: () => void, ms?: number) => {
+      if (ms === UNREGISTERED_CLIENT_CONFIRM_MS) {
+        void fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, {
+          source: { id: clientId },
+        }).then(fn);
+      } else {
+        fn();
+      }
+      return 0;
+    }) as unknown as typeof setTimeout);
+  }
+
+  it('does not condemn a current tab whose registration was merely still in flight', async () => {
+    // Codex P2 round 5. A window posts `CLIENT_BUILD` to the ACTIVE worker
+    // while this decision runs in the INSTALLING one — two globals, nothing
+    // ordering them — so a tab that opened moments ago is in `matchAll()`
+    // before its record is in the cache. Believing that first snapshot
+    // force-activates the fleet with no stale tab anywhere and then navigates
+    // a player who was doing nothing wrong. The sweep grace cannot cover it:
+    // that shields records which EXIST, and this one does not yet.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    registerDuringTheConfirmationWindow(w, 'tab-1');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('still rescues the rollout cohort, which never registers however long it waits', async () => {
+    // The other half of the same knob: the confirmation must not turn the
+    // evidence the rescue exists for into a no-op. tab-1 is a pre-#516 build,
+    // so it stays silent through the wait and is still condemned.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    registerDuringTheConfirmationWindow(w, 'nobody-at-all');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('does not navigate a window that registers between the decision and the claim', async () => {
+    // One level down: `activate` re-reads the registry against a FRESH
+    // `matchAll()`, so a window that opened after the install decision has had
+    // no chance to register either — and here the cost of believing the
+    // absence is not a needless force but a navigation that discards whatever
+    // the player is doing in that window.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await nameBuilds(w);
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    // A third window opens, live and not yet in the registry.
+    w.clients.push({
+      url: 'https://gaycruisebingo.com/feed',
+      id: 'tab-3',
+      navigate: vi.fn(async (u: string) => w.navigated.push(u)),
+    });
+    registerDuringTheConfirmationWindow(w, 'tab-3');
+    await fire(w.handlers, 'activate');
+    // tab-1 is the genuinely stale one; tab-3 named an accepted build in time.
     expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
   });
 

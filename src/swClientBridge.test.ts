@@ -59,6 +59,22 @@ afterEach(() => {
   hideTab(false);
 });
 
+/**
+ * Lets the stamp query settle. EVERY reload decision is now asynchronous, even
+ * the one taken when a worker plainly replaced another (Codex P2 round 5): "a
+ * deploy activated" is not "this page is behind it", so the page always asks.
+ */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** An `askStamp` that answers NEWER_BUILD for one nominated worker and
+ *  PAGE_BUILD for every other, so a test can say which worker carries the
+ *  deploy rather than making every worker look like one. */
+function stampBy(newer: unknown) {
+  return async (worker: unknown) => (worker === newer ? NEWER_BUILD : PAGE_BUILD);
+}
+
 /** jsdom reports `visible` and offers no way to change it. */
 function hideTab(hidden: boolean): void {
   Object.defineProperty(document, 'visibilityState', {
@@ -199,6 +215,7 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     registration.emit('updatefound');
     installing.become('installed');
     installing.become('activated');
+    return installing;
   }
 
   /** The FIRST worker for this registration reaching `activated`: nothing was
@@ -211,9 +228,34 @@ describe('armUncontrolledUpdateReload (#621)', () => {
   }
 
   it('reloads when a deploy activates underneath the running page', async () => {
+    // The incoming worker cannot name its build here, and a replacement that
+    // demonstrably took over is the one case where silence still reloads: the
+    // alternative is a tab stranded on the dead build for the rest of its life.
     const { registration, reload } = await armed();
     deployLands(registration);
-    expect(reload).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  });
+
+  it('leaves a tab ALREADY running the build the incoming worker serves alone', async () => {
+    // Codex P2 round 5. A forced activation (src/sw-rescue.ts) is triggered by
+    // the OLDEST open window, and `shouldNavigateClient` then filters the
+    // navigation targets down to the clients actually below the floor — so a
+    // tab that opened moments ago on the incoming build is deliberately spared.
+    // That tab is UNCONTROLLED (this worker never calls `clientsClaim()`), so
+    // it watches the same activation, and reloading it from the page side
+    // undid exactly the care the worker side had just taken.
+    const { registration, reload } = await armed({ workerStamp: PAGE_BUILD });
+    deployLands(registration);
+    await settle();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('still reloads a tab a REPLACEMENT worker leaves behind', async () => {
+    // The other side of the same question: the deploy landed and this page is
+    // genuinely older than what the new worker serves.
+    const { registration, reload } = await armed({ workerStamp: NEWER_BUILD });
+    deployLands(registration);
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
 
   it('does NOT reload on a first worker that carries the build this page is running', async () => {
@@ -226,6 +268,7 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     // Arming both is a double reload, and #621 warns this path is racy.
     const { registration, reload } = await armed({ controller: { scriptURL: '/sw.js' } });
     deployLands(registration);
+    await settle();
     expect(reload).not.toHaveBeenCalled();
   });
 
@@ -233,6 +276,7 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     const { registration, reload } = await armed();
     deployLands(registration);
     deployLands(registration);
+    await settle();
     expect(reload).toHaveBeenCalledOnce();
   });
 
@@ -240,6 +284,7 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     const { registration, reload } = await armed();
     document.body.innerHTML = '<div role="dialog" aria-modal="true">proof capture</div>';
     deployLands(registration);
+    await settle();
     expect(reload).not.toHaveBeenCalled();
     document.body.innerHTML = '';
     document.dispatchEvent(new Event('visibilitychange'));
@@ -254,6 +299,7 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     const { registration, reload } = await armed();
     document.body.innerHTML = '<div role="dialog" aria-modal="true">profile</div>';
     deployLands(registration);
+    await settle();
     expect(reload).not.toHaveBeenCalled();
     document.body.innerHTML = '';
     await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
@@ -265,6 +311,7 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     const { registration, reload } = await armed();
     document.body.innerHTML = '<div role="dialog" aria-modal="true">profile</div>';
     deployLands(registration);
+    await settle();
     document.body.innerHTML = '<div role="dialog" aria-modal="true">reshuffle</div>';
     await Promise.resolve();
     expect(reload).not.toHaveBeenCalled();
@@ -279,15 +326,21 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     // the line after the await — while the OLD worker answered with the page's
     // own stamp, so nothing reloaded and the tab stayed stale for good.
     const registration = fakeRegistration();
-    registration.active = { id: 'sw-a' };
+    const outgoing = { id: 'sw-a' };
+    registration.active = outgoing;
     const container = fakeContainer(registration);
     const reload = vi.fn();
-    const askStamp = vi.fn(async () => {
-      deployLands(registration);
+    let landed = false;
+    const askStamp = vi.fn(async (worker: unknown) => {
+      if (worker !== outgoing) return NEWER_BUILD; // the incoming worker
+      if (!landed) {
+        landed = true;
+        deployLands(registration);
+      }
       return PAGE_BUILD; // the outgoing worker: no mismatch to act on
     });
     await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, askStamp);
-    expect(reload).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
 
   it('picks up an update that was ALREADY installing when the registration resolved', async () => {
@@ -301,9 +354,9 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     registration.installing = installing;
     const container = fakeContainer(registration);
     const reload = vi.fn();
-    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => PAGE_BUILD);
+    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, stampBy(installing));
     installing.become('activated');
-    expect(reload).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
 
   it('watches a worker exactly once however many ways it arrives', async () => {
@@ -313,10 +366,10 @@ describe('armUncontrolledUpdateReload (#621)', () => {
     registration.installing = installing;
     const container = fakeContainer(registration);
     const reload = vi.fn();
-    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => PAGE_BUILD);
+    await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, stampBy(installing));
     registration.emit('updatefound'); // same worker, announced again
     installing.become('activated');
-    expect(reload).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
 });
 
@@ -334,12 +387,15 @@ async function armedWithDeploy() {
   await armUncontrolledUpdateReload(container, reload, PAGE_BUILD, async () => null);
   return {
     reload,
-    land() {
+    /** Lands the deploy AND waits for the stamp query to settle, so the
+     *  deferral is actually registered before a test ends the interaction. */
+    async land() {
       registration.active = {};
       const installing = fakeWorker();
       registration.installing = installing;
       registration.emit('updatefound');
       installing.become('activated');
+      await settle();
     },
   };
 }
@@ -348,7 +404,7 @@ describe('the automatic reload defers to a proof capture in progress', () => {
   it('waits while the claim sheet is open, and reloads once it closes', async () => {
     const { reload, land } = await armedWithDeploy();
     setClaimSheetOpen(true);
-    land();
+    await land();
     expect(reload).not.toHaveBeenCalled();
     setClaimSheetOpen(false);
     expect(reload).toHaveBeenCalledOnce();
@@ -361,7 +417,7 @@ describe('the automatic reload defers to a proof capture in progress', () => {
     const { reload, land } = await armedWithDeploy();
     setClaimSheetOpen(true);
     hideTab(true);
-    land();
+    await land();
     expect(reload).not.toHaveBeenCalled();
     setClaimSheetOpen(false);
     expect(reload).toHaveBeenCalledOnce();
@@ -370,7 +426,7 @@ describe('the automatic reload defers to a proof capture in progress', () => {
   it('still reloads a hidden tab with no capture in progress', async () => {
     const { reload, land } = await armedWithDeploy();
     hideTab(true);
-    land();
+    await land();
     expect(reload).toHaveBeenCalledOnce();
   });
 });
@@ -390,7 +446,7 @@ describe('the automatic reload defers to a bug report in progress', () => {
   it('waits for the WHOLE bug-report flow, pick mode included', async () => {
     const { reload, land } = await armedWithDeploy();
     document.body.innerHTML = PICK_PHASE;
-    land();
+    await land();
     expect(reload).not.toHaveBeenCalled();
     document.body.innerHTML = '';
     await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
@@ -403,7 +459,7 @@ describe('the automatic reload defers to a bug report in progress', () => {
     // nothing in the way — reloading the tab and eating the draft.
     const { reload, land } = await armedWithDeploy();
     document.body.innerHTML = DIALOG_PHASE;
-    land();
+    await land();
     expect(reload).not.toHaveBeenCalled();
     document.body.innerHTML = PICK_PHASE;
     await Promise.resolve();
@@ -418,7 +474,7 @@ describe('the automatic reload defers to a bug report in progress', () => {
     const { reload, land } = await armedWithDeploy();
     document.body.innerHTML = PICK_PHASE;
     hideTab(true);
-    land();
+    await land();
     expect(reload).not.toHaveBeenCalled();
     document.body.innerHTML = '';
     await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());

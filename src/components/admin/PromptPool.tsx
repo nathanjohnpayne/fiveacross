@@ -40,8 +40,11 @@ function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
     if (!adminUid || !text.trim() || busy) return;
     await guard(effectiveSpicy, 'add', write);
   };
+  // `data-unsaved-work` while a prompt is half-typed (Codex P2 round 5, PR
+  // #720): the draft lives only in `text`, so an automatic post-deploy reload
+  // would eat it. See `midInteraction` in src/swClientBridge.ts.
   return (
-    <div className="row admin-add-item">
+    <div className="row admin-add-item" data-unsaved-work={text !== '' || undefined}>
       <input
         className="grow"
         value={text}

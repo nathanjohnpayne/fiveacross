@@ -32,6 +32,7 @@ import {
 } from './data/proofMediaCache';
 import {
   clearForcedActivation,
+  confirmClientStamps,
   dueForFloorRecheck,
   fetchFloorWithRetry,
   isAppShellClientUrl,
@@ -46,6 +47,7 @@ import {
   takeForcedActivation,
   writeActiveStamp,
 } from './sw-rescue';
+import type { ClientStamps } from './sw-rescue';
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{ url: string; revision: string | null }> };
 
@@ -255,14 +257,24 @@ self.addEventListener('install', (event: ExtendableEvent) => {
         // is no shell to rescue — without this a fresh client would claim and
         // re-navigate a page already running the current build (Phase 4b P2).
         const hasActiveWorker = self.registration.active !== null;
-        const force = shouldForceActivate({
-          activeStamp,
-          ownStamp: __BUILD_STAMP__,
-          floor,
-          hasActiveWorker,
-          clientStamps,
-          liveClientIds,
-        });
+        const decide = (stamps: ClientStamps) =>
+          shouldForceActivate({
+            activeStamp,
+            ownStamp: __BUILD_STAMP__,
+            floor,
+            hasActiveWorker,
+            clientStamps: stamps,
+            liveClientIds,
+          });
+        // Take a SECOND look before believing an absence (Codex P2 round 5).
+        // The registration a live window posts goes to the ACTIVE worker while
+        // this decision runs in the INSTALLING one — two globals, no ordering —
+        // so a tab that opened moments ago is enumerable before its record is
+        // readable, and a decision taken on that snapshot force-activates the
+        // fleet over a window that is perfectly current. Deferred until the
+        // absence is about to matter, so the ordinary decline costs nothing.
+        const force =
+          decide(clientStamps) && decide(await confirmClientStamps(caches, liveClientIds, clientStamps));
         if (!force) return;
         forcedActivation = { forced: true, floor };
         // Persist BEFORE promoting: once `skipWaiting()` resolves, `activate`
@@ -304,10 +316,13 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
         // Only the windows the floor actually condemns (#516). A tab that has
         // already reloaded onto an accepted build is left alone: navigating it
         // would discard whatever the player is doing there and rescue nobody.
-        const stamps = await pruneClientStamps(
-          caches,
-          windows.map((client) => client.id),
-        );
+        const liveIds = windows.map((client) => client.id);
+        // Confirmed the same way the install decision is, and for the same race
+        // one step later (Codex P2 round 5): a window that opened between the
+        // decision and the claim has not had a chance to register either, and
+        // here the cost of believing that absence is not a needless force but a
+        // navigation that discards what the player is doing in it.
+        const stamps = await confirmClientStamps(caches, liveIds, await pruneClientStamps(caches, liveIds));
         const targets = windows.filter((client) => shouldNavigateClient(stamps[client.id], decision.floor));
         await Promise.all(
           targets.map(async (client) => {

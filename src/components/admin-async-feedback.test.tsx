@@ -91,6 +91,7 @@ vi.mock('../theme/themes', () => {
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user }) }));
 
 import Admin from './Admin';
+import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
 const renderAdmin = (path: string) =>
   render(
@@ -194,6 +195,20 @@ describe('AsyncButton affordance on moderation actions (specs/admin-async-feedba
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Didn’t add—try again.');
     expect(input.value).toBe('Fragile prompt'); // draft kept for a one-tap retry
+  });
+
+  it('a half-typed curated add holds back the automatic post-deploy reload', async () => {
+    // Codex P2 round 5, PR #720. Same class as Admin → Messages: the draft
+    // lives only in React state, and this bar is neither a modal nor the claim
+    // sheet, so `midInteraction` (src/swClientBridge.ts) had nothing to see.
+    renderAdmin('/more/admin/pool');
+    const input = await screen.findByLabelText('New prompt text');
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    expect(document.querySelector(marker)).toBeNull();
+    fireEvent.change(input, { target: { value: 'Half a prompt' } });
+    expect(document.querySelector(marker)).not.toBeNull();
+    fireEvent.change(input, { target: { value: '' } });
+    expect(document.querySelector(marker)).toBeNull();
   });
 
   it('the inline save guards re-entry — a double Enter while pending issues exactly one write', async () => {
