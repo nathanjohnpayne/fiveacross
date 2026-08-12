@@ -51,6 +51,19 @@ describe('withDestinationLocks — acquire, release, and dedup', () => {
     expect(isLocked(destB)).toBe(false);
   });
 
+  it('also serializes a shared mirror even when the primary destinations differ', () => {
+    const destA = join(dir, 'a.png');
+    const destB = join(dir, 'b.png');
+    const mirror = join(dir, 'shared-mirror.png');
+    const release = withDestinationLocks([{ dest: destA, mirror }]);
+    try {
+      expect(() => withDestinationLocks([{ dest: destB, mirror }], { timeoutMs: 150 })).toThrow(/timed out/);
+      expect(isLocked(mirror)).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
   it('release is idempotent — calling it twice does not throw or affect anyone else\'s lock', () => {
     const dest = join(dir, 'gcb.png');
     const release = withDestinationLocks([{ dest }]);

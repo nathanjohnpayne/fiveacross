@@ -39,11 +39,9 @@
 // This is a plain `wx`-mode (exclusive-create) lock file, not a dependency.
 // `O_EXCL` create is atomic on the filesystems this manual, local,
 // macOS-only script already requires (see render-og-editions.mjs's platform
-// guard). A lock whose owning pid is no longer alive, or that has sat far
-// longer than any real render+commit takes, is treated as abandoned by a
-// killed or crashed process and stolen rather than waited on forever — a
-// hard-killed renderer must not brick every future commit to that
-// destination.
+// guard). A lock is treated as abandoned only once its owning pid is no
+// longer alive. Age alone is not ownership evidence: a PID can be reused by
+// an unrelated process, and a slow live holder must remain exclusive.
 //
 // Round 8 (#713, id 3762932710): stealing an abandoned lock says nothing
 // about what state `dest`/`mirror` were left in. If the dead holder was
@@ -83,12 +81,6 @@ import { randomBytes } from 'node:crypto';
 
 const POLL_MS = 25;
 const DEFAULT_TIMEOUT_MS = 30_000;
-// Real renders finish in low single-digit seconds; this is generous enough
-// that no genuinely in-progress commit ever gets stolen from under it, but
-// short enough that a lock abandoned by a killed process does not wedge
-// every future run for the rest of the day.
-const STALE_MS = 60_000;
-
 const lockPathFor = (dest) => `${dest}.commit-lock`;
 // A short-lived gate owned by a stale-lock taker. New acquirers check this
 // before and after publishing their hard-link lock, so a stale takeover never
@@ -195,11 +187,9 @@ function hasLeftoverRollbackBackup(dest) {
   }
 }
 
-/** True if `pid` names a process this user can still signal. Only used to
- *  decide whether a lock left by another process is worth stealing before
- *  `STALE_MS` elapses — a false "alive" here just means `acquireOne` falls
- *  back to waiting out the age-based check instead, which is still
- *  correct, only slower. */
+/** True if `pid` names a process this user can still signal. This is the
+ *  ownership check before recovery; time elapsed is intentionally not a
+ *  substitute because it cannot distinguish a slow holder from a dead one. */
 function pidAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -278,8 +268,7 @@ function tryAcquireOne(dest, { allowTakeover = false } = {}) {
 }
 
 /** If the lock currently sitting at `dest`'s lock path belongs to a dead
- *  process, or has simply sat there longer than any real commit takes,
- *  remove it so a later `tryAcquireOne` can succeed. A no-op (not an error)
+ *  process, remove it so a later `tryAcquireOne` can succeed. A no-op (not an error)
  *  if the lock is still healthy, or has already been removed or stolen by
  *  someone else since the caller's last failed `tryAcquireOne` — either way
  *  the next poll's `tryAcquireOne` is the source of truth.
@@ -389,22 +378,15 @@ function stealIfStale(dest) {
   try {
     const state = readLockState(lockPath);
     if (!state) return null;
-    // Clamped at zero: a lock stolen for being dead-owned rather than old
-    // (the common case in tests, and for a process killed moments after
-    // acquiring) can otherwise print a tiny negative age from clock/mtime
-    // rounding, which reads as a bug in the message itself.
-    const ageMs = Math.max(0, Date.now() - state.mtimeMs);
     const holderLooksAlive = Number.isInteger(state.holderPid) && pidAlive(state.holderPid);
-    // Age is evidence only when the recorded process is gone. A paused or slow
-    // live holder still owns the critical section; stealing it would let two
-    // writers interleave publication and rollback.
+    // A paused or slow live holder still owns the critical section; stealing
+    // it would let two writers interleave publication and rollback.
     if (holderLooksAlive) return null;
     const leftoverBackup = hasLeftoverRollbackBackup(dest);
     console.warn(
       `og-commit-lock: stole an abandoned lock at ${lockPath} ` +
         `(holder pid ${Number.isInteger(state.holderPid) ? state.holderPid : 'unknown'}, ` +
-        `${holderLooksAlive ? 'still running but' : 'no longer running,'} ` +
-        `${(ageMs / 1000).toFixed(0)}s old).` +
+        `${holderLooksAlive ? 'still running' : 'no longer running'}).` +
         (leftoverBackup
           ? ` A rollback backup for ${dest} is still on disk — the previous holder may have been ` +
             `killed mid-commit, which can leave ${dest} and its mirror out of sync. This run will ` +
@@ -461,8 +443,8 @@ function acquireOne(dest, timeoutMs) {
   };
 }
 
-/** Acquire the commit lock for every distinct destination in `staged`
- *  (`staged[].dest`, i.e. the shape `commitStaged` consumes), in
+/** Acquire the commit lock for every distinct path `commitStaged` mutates in
+ *  `staged` (`staged[].dest` AND its paired `staged[].mirror`), in
  *  lexicographic order — see the header for why the order must be fixed
  *  and caller-independent. Returns a single release function that unlocks
  *  everything THIS call locked; the caller must call it exactly once,
@@ -473,7 +455,11 @@ function acquireOne(dest, timeoutMs) {
  *  released before the error propagates, so a partial acquire never
  *  strands a lock. */
 export function withDestinationLocks(staged, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const dests = [...new Set(staged.map((s) => s.dest))].sort();
+  const dests = [
+    ...new Set(
+      staged.flatMap((s) => [s.dest, s.mirror].filter((path) => typeof path === 'string' && path.length > 0)),
+    ),
+  ].sort();
   const releases = [];
   try {
     for (const dest of dests) {
