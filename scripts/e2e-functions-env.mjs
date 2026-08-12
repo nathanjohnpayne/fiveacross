@@ -37,7 +37,7 @@
  * reason its `BUG_REPORT_APP_CHECK` comment records (#158). The sibling spec
  * holds that file to the same coverage rule.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 // The TypeScript scanner, used to read declarations out of Functions modules.
@@ -81,28 +81,109 @@ const PARAMS_MODULE = 'firebase-functions/params';
 function constructorBindings(sourceFile) {
   const bindings = new Map();
   const namespaces = new Set();
+
+  const takeNamed = (exported, local) => {
+    const kind = CONSTRUCTOR_RE.exec(exported);
+    if (kind) {
+      bindings.set(local, kind[1]);
+    }
+  };
+
   for (const statement of sourceFile.statements) {
+    // ESM: import { defineString [as alias] } / import * as params
     if (
-      !ts.isImportDeclaration(statement) ||
-      !ts.isStringLiteral(statement.moduleSpecifier) ||
-      statement.moduleSpecifier.text !== PARAMS_MODULE
+      ts.isImportDeclaration(statement) &&
+      ts.isStringLiteral(statement.moduleSpecifier) &&
+      statement.moduleSpecifier.text === PARAMS_MODULE
     ) {
+      const named = statement.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named)) {
+        for (const element of named.elements) {
+          takeNamed((element.propertyName ?? element.name).text, element.name.text);
+        }
+      } else if (named && ts.isNamespaceImport(named)) {
+        namespaces.add(named.name.text);
+      }
       continue;
     }
-    const named = statement.importClause?.namedBindings;
-    if (named && ts.isNamedImports(named)) {
-      for (const element of named.elements) {
-        const exported = (element.propertyName ?? element.name).text;
-        const kind = CONSTRUCTOR_RE.exec(exported);
-        if (kind) {
-          bindings.set(element.name.text, kind[1]);
-        }
+    // CommonJS: const { defineString } = require('…') / const params = require('…').
+    // A `.cjs` module in this tree binds its constructors this way, and only this
+    // way (Codex P2 on PR #730 — the fixture that motivated scanning `.cjs` was
+    // itself written in ESM, so it never exercised the real syntax).
+    if (!ts.isVariableStatement(statement)) {
+      continue;
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (!declaration.initializer || !isParamsRequire(declaration.initializer)) {
+        continue;
       }
-    } else if (named && ts.isNamespaceImport(named)) {
-      namespaces.add(named.name.text);
+      if (ts.isObjectBindingPattern(declaration.name)) {
+        for (const element of declaration.name.elements) {
+          const exported = element.propertyName ?? element.name;
+          if (ts.isIdentifier(exported) && ts.isIdentifier(element.name)) {
+            takeNamed(exported.text, element.name.text);
+          }
+        }
+      } else if (ts.isIdentifier(declaration.name)) {
+        namespaces.add(declaration.name.text);
+      }
     }
   }
   return { bindings, namespaces };
+}
+
+/** `require('firebase-functions/params')` — the CommonJS half of the same import. */
+function isParamsRequire(expression) {
+  return (
+    ts.isCallExpression(expression) &&
+    ts.isIdentifier(expression.expression) &&
+    expression.expression.text === 'require' &&
+    expression.arguments.length === 1 &&
+    ts.isStringLiteral(expression.arguments[0]) &&
+    expression.arguments[0].text === PARAMS_MODULE
+  );
+}
+
+/** Names a scope introduces itself, which therefore shadow anything outer. */
+function scopeDeclares(scope, name) {
+  const parameters = ts.isFunctionLike(scope) ? (scope.parameters ?? []) : [];
+  if (parameters.some((parameter) => ts.isIdentifier(parameter.name) && parameter.name.text === name)) {
+    return true;
+  }
+  const body = ts.isBlock(scope) ? scope : scope.body;
+  if (!body || !ts.isBlock(body)) {
+    return false;
+  }
+  return body.statements.some((statement) => {
+    if (ts.isFunctionDeclaration(statement)) {
+      return statement.name?.text === name;
+    }
+    if (!ts.isVariableStatement(statement)) {
+      return false;
+    }
+    return statement.declarationList.declarations.some(
+      (declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name,
+    );
+  });
+}
+
+/**
+ * Whether an inner scope rebinds `name` between this call and the file top.
+ *
+ * A file-wide name lookup reads `function f(defineString) { defineString('LOCAL') }`
+ * as declaring a param, and the generator then aborts every run demanding a value
+ * the emulator never registers (Codex P2 on PR #730). Walking up from the call
+ * settles it; the alternative — `ts.createProgram` and a real type checker — buys
+ * exact symbol resolution at the cost of module resolution and a compile, on a
+ * path that runs before every e2e suite.
+ */
+function isShadowed(call, name) {
+  for (let scope = call.parent; scope && !ts.isSourceFile(scope); scope = scope.parent) {
+    if (scopeDeclares(scope, name)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -118,12 +199,14 @@ function constructorBindings(sourceFile) {
  */
 function constructorKindOf(call, { bindings, namespaces }) {
   if (ts.isIdentifier(call.expression)) {
-    return bindings.get(call.expression.text) ?? null;
+    const kind = bindings.get(call.expression.text);
+    return kind && !isShadowed(call, call.expression.text) ? kind : null;
   }
   if (
     ts.isPropertyAccessExpression(call.expression) &&
     ts.isIdentifier(call.expression.expression) &&
-    namespaces.has(call.expression.expression.text)
+    namespaces.has(call.expression.expression.text) &&
+    !isShadowed(call, call.expression.expression.text)
   ) {
     return CONSTRUCTOR_RE.exec(call.expression.name.text)?.[1] ?? null;
   }
@@ -308,25 +391,83 @@ export function declaredParamNamesAcross(sources) {
   return { params: [...params], secrets: [...secrets] };
 }
 
-/**
- * Every module under the Functions source tree that the build can load.
- *
- * Not `.ts` alone: the tree ships `bugReportContract.cjs`, imported from
- * `bugReportCore.ts`, so a `.ts`-only filter would miss a param declared there
- * while the params.ts declarations kept the zero-match guard satisfied (Codex P2
- * on PR #730). The TypeScript scanner reads plain JavaScript perfectly well, so
- * covering the rest costs nothing.
- */
-const LOADABLE_SOURCE_RE = /\.(?:[cm]?ts|[cm]?js|tsx|jsx)$/;
+/** Extensions the Functions build can load, tried in resolution order. */
+const LOADABLE_EXTENSIONS = ['.ts', '.cts', '.mts', '.tsx', '.js', '.cjs', '.mjs', '.jsx'];
 
-export function functionsSources(directory) {
-  return readdirSync(directory, { recursive: true })
-    .filter((entry) => typeof entry === 'string' && LOADABLE_SOURCE_RE.test(entry))
-    .sort()
-    .map((entry) => ({
-      label: join(directory, entry),
-      text: readFileSync(join(directory, entry), 'utf8'),
-    }));
+/** The file a relative specifier names, or null when nothing on disk matches. */
+function resolveRelative(fromFile, specifier) {
+  const base = join(dirname(fromFile), specifier);
+  const candidates = [
+    base,
+    // A specifier may carry the COMPILED extension (`./x.js` for a `x.ts` source).
+    ...LOADABLE_EXTENSIONS.map((extension) => base.replace(/\.[cm]?jsx?$/, extension)),
+    ...LOADABLE_EXTENSIONS.map((extension) => `${base}${extension}`),
+    ...LOADABLE_EXTENSIONS.map((extension) => join(base, `index${extension}`)),
+  ];
+  return candidates.find((path) => existsSync(path) && statSync(path).isFile()) ?? null;
+}
+
+/** Every relative specifier a module imports or requires. */
+function relativeDependencies(sourceFile) {
+  const specifiers = [];
+  const visit = (node) => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isCallExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === 'require')) &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteral(node.arguments[0])
+    ) {
+      specifiers.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return specifiers.filter((specifier) => specifier.startsWith('.'));
+}
+
+/**
+ * Every module REACHABLE from the Functions entrypoint, with its path.
+ *
+ * Reachability, not presence on disk. Firebase discovery executes `lib/index.js`
+ * and its transitive imports, so a module that compiles but nothing imports
+ * declares no deployed param — counting it would make the generator demand an
+ * e2e value for a param the emulator never registers, aborting every run (Codex
+ * P2 on PR #730). This is the exact counterpart of the earlier finding that a
+ * params.ts-only scan misses a param declared beside its handler: the right set
+ * is neither one file nor every file, it is the import graph.
+ *
+ * Lazy `await import('./params')` counts — `dailyEmail.ts` reaches its params
+ * that way — which is why dynamic imports and requires are followed too. A
+ * specifier resolving to nothing on disk is skipped rather than fatal: it is a
+ * bare package import or a type-only path, and neither declares a runtime param.
+ */
+export function functionsSources(entrypoint) {
+  const seen = new Set();
+  const sources = [];
+  const walk = (file) => {
+    if (seen.has(file)) {
+      return;
+    }
+    seen.add(file);
+    const text = readFileSync(file, 'utf8');
+    sources.push({ label: file, text });
+    const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+    for (const specifier of relativeDependencies(sourceFile)) {
+      const resolved = resolveRelative(file, specifier);
+      if (resolved) {
+        walk(resolved);
+      }
+    }
+  };
+  walk(entrypoint);
+  return sources;
 }
 
 function renderDotenv(names, values, target) {
@@ -489,13 +630,13 @@ function ensureFile(path, names, body, { coverageEnvs, unmet, consequence }) {
 }
 
 function main(argv) {
-  const [functionsSrc, envPath, secretPath, projectId] = argv;
-  if (!functionsSrc || !envPath || !secretPath || !projectId) {
+  const [functionsEntrypoint, envPath, secretPath, projectId] = argv;
+  if (!functionsEntrypoint || !envPath || !secretPath || !projectId) {
     throw new Error(
-      'usage: e2e-functions-env.mjs <functions/src> <.env.local> <.secret.local> <projectId>',
+      'usage: e2e-functions-env.mjs <functions/src/index.ts> <.env.local> <.secret.local> <projectId>',
     );
   }
-  const declared = declaredParamNamesAcross(functionsSources(functionsSrc));
+  const declared = declaredParamNamesAcross(functionsSources(functionsEntrypoint));
   const { params, secrets } = declared;
   // Both bodies are rendered before either is written, so the failure this
   // exists to produce — a param with no e2e value — creates nothing at all,

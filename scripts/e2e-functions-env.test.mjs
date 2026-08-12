@@ -26,6 +26,9 @@ import {
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
 
 const PARAMS_SOURCE = read('../functions/src/params.ts');
+const ENTRYPOINT = new URL('../functions/src/index.ts', import.meta.url).pathname;
+/** What the emulator will actually resolve: the reachable module graph. */
+const DISCOVERED = declaredParamNamesAcross(functionsSources(ENTRYPOINT));
 const PROJECT_ID = 'demo-gaycruisebingo-e2e';
 // Provenance is what marks a call as a param declaration, so every fragment
 // below imports for real rather than relying on a name-shaped guess.
@@ -196,10 +199,10 @@ describe('e2e functions dotenv generation', () => {
   });
 
   it('scans the real Functions tree and still lands on the params.ts set', () => {
-    const tree = functionsSources(new URL('../functions/src', import.meta.url).pathname);
+    const reachable = functionsSources(ENTRYPOINT);
 
-    expect(tree.length).toBeGreaterThan(1);
-    expect(declaredParamNamesAcross(tree)).toEqual(declaredParamNames(PARAMS_SOURCE));
+    expect(reachable.length).toBeGreaterThan(1);
+    expect(declaredParamNamesAcross(reachable)).toEqual(declaredParamNames(PARAMS_SOURCE));
   });
 
   // Codex P2 on PR #730: the earlier fallback classified a call by how it was
@@ -227,7 +230,7 @@ describe('e2e functions dotenv generation', () => {
   // Codex P2 on PR #730: the tree ships bugReportContract.cjs, loaded from
   // bugReportCore.ts, so a `.ts`-only filter had a real blind spot.
   it('scans non-TypeScript modules the Functions build can load', () => {
-    const scanned = functionsSources(new URL('../functions/src', import.meta.url).pathname);
+    const scanned = functionsSources(ENTRYPOINT);
 
     expect(scanned.map(({ label }) => label)).toEqual(
       expect.arrayContaining([expect.stringMatching(/bugReportContract\.cjs$/)]),
@@ -238,6 +241,51 @@ describe('e2e functions dotenv generation', () => {
         { label: 'functions/src/legacy.cjs', text: `${IMPORT}\nexports.A = defineString('CJS_PARAM');` },
       ]).params,
     ).toContain('CJS_PARAM');
+  });
+
+  // Codex P2 on PR #730: the .cjs fixture that motivated the extension fix was
+  // written in ESM, which is not executable CommonJS. A real .cjs module binds
+  // its constructors through require.
+  it('resolves constructors bound by a CommonJS require', () => {
+    const destructured = [
+      "const { defineString } = require('firebase-functions/params');",
+      "exports.A = defineString('CJS_PARAM');",
+    ].join('\n');
+    const namespaced = [
+      "const params = require('firebase-functions/params');",
+      "exports.A = params.defineSecret('CJS_SECRET');",
+    ].join('\n');
+
+    expect(declaredParamNames(destructured).params).toEqual(['CJS_PARAM']);
+    expect(declaredParamNames(namespaced).secrets).toEqual(['CJS_SECRET']);
+  });
+
+  // Codex P2 on PR #730: a file-wide name lookup cannot see that an inner scope
+  // rebound the name, so a shadowed call read as a param and aborted every run.
+  it('ignores a call whose name is shadowed in an inner scope', () => {
+    const shadowing = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(defineString) {',
+      "  return defineString('LOCAL_NOT_A_PARAM');",
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(shadowing).params).toEqual(['REAL_PARAM']);
+  });
+
+  // Codex P2 on PR #730, and the exact counterpart of the earlier finding that a
+  // params.ts-only scan misses too much: presence on disk is not reachability,
+  // and Firebase discovery runs the entrypoint's import graph.
+  it('ignores a module nothing imports', () => {
+    const reachable = functionsSources(ENTRYPOINT).map(({ label }) => label);
+
+    expect(reachable).toEqual(expect.arrayContaining([expect.stringMatching(/params\.ts$/)]));
+    // The .d.cts declaration file is on disk beside a module that IS reachable,
+    // and is itself imported by nothing.
+    expect(reachable).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/bugReportContract\.d\.cts$/)]),
+    );
   });
 
   it('separates secrets from plain params', () => {
@@ -435,11 +483,16 @@ describe('dotenv layering the emulator merges', () => {
 // deploy at parameter resolution — the reason functions/.env.example declares
 // BUG_REPORT_APP_CHECK explicitly rather than leaning on its default (#158).
 describe('functions/.env.example', () => {
-  it('declares every param, so a non-interactive deploy never stops to prompt', () => {
+  // Codex P2 on PR #730: derived from the DISCOVERED set, not from params.ts.
+  // A param declared beside a reachable handler is one the extractor now
+  // supports, and deriving the expectation from params.ts alone would let this
+  // guard stay green while a non-interactive deploy stopped to prompt for it.
+  it('declares every discovered param, so a non-interactive deploy never stops to prompt', () => {
     const template = read('../functions/.env.example');
-    const { params } = declaredParamNames(PARAMS_SOURCE);
 
-    expect(unassignedNames(parseDotenv(template, 'functions/.env.example'), params)).toEqual([]);
+    expect(unassignedNames(parseDotenv(template, 'functions/.env.example'), DISCOVERED.params)).toEqual(
+      [],
+    );
   });
 
   it('keeps RESEND_API_KEY out, since a secret is not a dotenv value', () => {

@@ -56,5 +56,5 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 node scripts/e2e-functions-env.mjs \
-  functions/src functions/.env.local functions/.secret.local "$PROJECT_ID"
+  functions/src/index.ts functions/.env.local functions/.secret.local "$PROJECT_ID"
 npx firebase --non-interactive emulators:exec --only auth,firestore,storage,functions --project "$PROJECT_ID" "$cmd"
