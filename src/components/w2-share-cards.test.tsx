@@ -1280,7 +1280,9 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     expect(sheet.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe(
       'Finish sharing',
     );
-    expect(sheet.querySelector('.share-fallback-url')?.textContent).toBe('https://x.test');
+    expect(sheet.querySelector<HTMLInputElement>('.share-fallback-url')?.value).toBe(
+      'https://x.test',
+    );
 
     // And actionable: the press is a fresh gesture, so the write that failed
     // silently a moment ago now lands.
@@ -1304,11 +1306,58 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
 
     expect(outcome).toBe('prompt');
     // No Copy button to offer, but the URL is still there to select by hand.
-    expect(fallbackSheet().querySelector('.share-fallback-url')?.textContent).toBe(
+    expect(fallbackSheet().querySelector<HTMLInputElement>('.share-fallback-url')?.value).toBe(
       'https://x.test',
     );
     fireEvent.click(sheetButton('Close'));
     expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+  });
+
+  // Codex P2, PR #712 round 5 — the no-Clipboard case above is exactly the one
+  // where the link field is the Player's ONLY route to the URL, and the sheet
+  // is `aria-modal`, so whatever the Tab trap cannot reach does not exist for
+  // a keyboard-only Player. A `<p>` is not a tab stop: the trap cycled through
+  // Close alone and the note told them to copy a link they could not select.
+  it('hands a keyboard-only Player the link when there is no Copy button to press', async () => {
+    const opener = plantOpener('Share');
+    stubUserActivation(false); // no share, no clipboard, no blob
+
+    expect(
+      await shareCardBlob({
+        blob: null,
+        filename: 'card.png',
+        title: 'T',
+        text: 'body',
+        url: 'https://x.test',
+      }),
+    ).toBe('prompt');
+
+    const field = fallbackSheet().querySelector<HTMLInputElement>('.share-fallback-url');
+    if (!field) throw new Error('no link field in the share fallback sheet');
+    // Read-only, not disabled: a disabled control is unfocusable AND filtered
+    // out of the trap, which would put the link back out of reach.
+    expect(field.readOnly).toBe(true);
+    expect(field.disabled).toBe(false);
+    expect(field.getAttribute('aria-label')).toBe('Share link');
+
+    // It is the landing spot, with the URL already selected — Cmd+C is the
+    // whole manual copy, no hunting required.
+    expect(document.activeElement).toBe(field);
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe('https://x.test'.length);
+
+    // And it is a genuine stop in the trap's cycle, reachable from Close in
+    // both directions rather than skipped over.
+    const close = sheetButton('Close');
+    close.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(document.activeElement).toBe(field);
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.click(close);
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
   });
 
   // Codex P2, PR #712 round 4 — the sheet declares `aria-modal="true"`, which
@@ -1353,12 +1402,16 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     const opener = await openFallbackFrom('Share');
     const copy = sheetButton('Copy link');
     const close = sheetButton('Close');
-    expect(document.activeElement).toBe(copy); // the primary action is the landing spot
+    // The link field is the first stop in DOM order; the primary action is
+    // still the landing spot.
+    const field = fallbackSheet().querySelector<HTMLInputElement>('.share-fallback-url');
+    if (!field) throw new Error('no link field in the share fallback sheet');
+    expect(document.activeElement).toBe(copy);
 
     // Forward from the LAST stop wraps to the first rather than leaving.
     close.focus();
     fireEvent.keyDown(document, { key: 'Tab' });
-    expect(document.activeElement).toBe(copy);
+    expect(document.activeElement).toBe(field);
 
     // Backward from the FIRST stop wraps to the last, same rule.
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
@@ -1368,7 +1421,7 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     // trigger) is pulled back in, not wrapped from a stop that isn't ours.
     opener.focus();
     fireEvent.keyDown(document, { key: 'Tab' });
-    expect(document.activeElement).toBe(copy);
+    expect(document.activeElement).toBe(field);
   });
 
   it('restores focus to the Share trigger on every close path', async () => {
@@ -2428,7 +2481,7 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     // Nothing activation-gated ran, and nothing was silently swallowed: the
     // link is on screen, with the shared origin the share sheet would carry.
     expect(shareMock).not.toHaveBeenCalled();
-    expect(document.querySelector('.share-fallback-url')?.textContent).toBe(
+    expect(document.querySelector<HTMLInputElement>('.share-fallback-url')?.value).toBe(
       window.location.origin,
     );
   });

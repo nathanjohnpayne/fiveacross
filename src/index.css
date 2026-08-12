@@ -1719,18 +1719,25 @@ textarea.input {
   color: var(--dim);
 }
 /* The link itself, always on screen even when no Copy button could be
-   offered (no Clipboard API at all): `user-select: all` makes one tap-and-
-   hold select the whole URL for a manual copy. */
+   offered (no Clipboard API at all). A read-only INPUT rather than a
+   paragraph (Codex P2, PR #712 round 5): in exactly that no-Clipboard case it
+   is the Player's only route to the URL, and a `<p>` is not a tab stop, so a
+   keyboard-only Player could never reach the link the sheet tells them to
+   copy. `font: inherit` first so the control drops the UA's form font and
+   matches the sheet. */
 .share-fallback-url {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
   margin: 0;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg);
   color: var(--ink);
+  font: inherit;
   font-size: 14px;
-  overflow-wrap: anywhere;
-  user-select: all;
+  text-overflow: ellipsis;
 }
 /* #fff below is a deliberate, documented exemption from issue #72's "no
    hardcoded #fff text fill" rule (specs/theme-on-color-contrast.md): the

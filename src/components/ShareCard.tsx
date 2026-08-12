@@ -677,7 +677,32 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
         : 'Your browser wouldn’t open the share sheet. Save the card and send it yourself.',
     ),
   );
-  if (url) sheet.appendChild(el('p', 'share-fallback-url', url));
+  /**
+   * The link as a real, focusable control rather than a bare `<p>` (Codex P2,
+   * PR #712 round 5).
+   *
+   * With no Clipboard API at all there is no Copy button, so this field is the
+   * ONLY way to obtain the URL — and the dialog's Tab trap can reach exactly
+   * what `FOCUSABLE_SELECTOR` matches. A paragraph matches nothing, so a
+   * keyboard-only Player was trapped in a sheet cycling through Close and told
+   * to copy a link they could not reach. `readOnly`, deliberately, not
+   * `disabled`: a disabled control is unfocusable AND filtered out of the trap
+   * above, which would put the link straight back out of reach. Selecting on
+   * focus makes Tab-then-copy the whole manual gesture, and keeps the
+   * tap-and-hold selection the old `user-select: all` paragraph offered.
+   */
+  let urlField: HTMLInputElement | null = null;
+  if (url) {
+    const field = el('input', 'share-fallback-url');
+    field.type = 'text';
+    field.readOnly = true;
+    field.value = url;
+    field.spellcheck = false;
+    field.setAttribute('aria-label', 'Share link');
+    field.addEventListener('focus', () => field.select());
+    sheet.appendChild(field);
+    urlField = field;
+  }
 
   const actions = el('div', 'sheet-actions');
   /**
@@ -783,7 +808,10 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
   closeMountedFallbackSheet = close;
   // Focus lands on the primary action when there is one, so a keyboard Player
   // is inside the sheet rather than back where the dead-ended tap left them.
-  (actions.querySelector<HTMLButtonElement>('.btn.primary') ?? dismiss).focus();
+  // With no Clipboard API there IS no primary action, and the link field is
+  // the thing the note just told them to copy — landing there (selected) beats
+  // landing on Close, the one control that throws the link away.
+  (actions.querySelector<HTMLButtonElement>('.btn.primary') ?? urlField ?? dismiss).focus();
   return true;
 }
 
