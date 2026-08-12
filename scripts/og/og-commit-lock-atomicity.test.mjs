@@ -134,4 +134,21 @@ describe('a live holder remains exclusive even when its lock is old (#713 Phase 
       releaseA();
     }
   });
+
+  it('does not steal a lock when a restricted environment reports EPERM for its live owner', () => {
+    const dest = join(dir, 'gcb.png');
+    const lockPath = `${dest}.commit-lock`;
+    actualFs.writeFileSync(lockPath, `424242\n`);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const err = Object.assign(new Error('not permitted'), { code: 'EPERM' });
+      throw err;
+    });
+
+    try {
+      expect(() => withDestinationLocks([{ dest }], { timeoutMs: 300 })).toThrow(/timed out/);
+      expect(actualFs.existsSync(lockPath)).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 });

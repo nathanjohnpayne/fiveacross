@@ -114,11 +114,23 @@ function sameFile(a, b) {
   return a.dev === b.dev && a.ino === b.ino;
 }
 
+/** `writeSync` may make a short write. Never publish ownership until every
+ * byte of its PID+witness record reached the private inode. */
+function writeFully(fd, content) {
+  const bytes = Buffer.from(content);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset, null);
+    if (!Number.isInteger(written) || written <= 0) throw new Error('og-commit-lock: ownership record write failed');
+    offset += written;
+  }
+}
+
 function writeOwnershipScratch(path) {
   const scratchPath = `${path}.acquire-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
   const fd = openSync(scratchPath, 'wx');
   try {
-    writeSync(fd, `${process.pid}\n${basename(scratchPath)}\n`);
+    writeFully(fd, `${process.pid}\n${basename(scratchPath)}\n`);
   } finally {
     closeSync(fd);
   }
@@ -194,8 +206,11 @@ function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    // `EPERM` proves a process exists but belongs to someone this caller may
+    // not signal. Treat it, and every unknown probe failure, as live so a
+    // restrictive environment cannot revoke a real critical-section owner.
+    return err?.code !== 'ESRCH';
   }
 }
 
@@ -224,46 +239,21 @@ function tryAcquireOne(dest, { allowTakeover = false } = {}) {
   // A stealer owns the gate from BEFORE it judges staleness through removal.
   // Do not publish a replacement in that interval.
   if (!allowTakeover && existsSync(takeoverPath)) return null;
-  const scratchPath = `${lockPath}.acquire-tmp.${process.pid}-${randomBytes(4).toString('hex')}`;
-  let ownership = null;
-  const fd = openSync(scratchPath, 'wx');
+  const ownership = tryAcquireOwnership(lockPath);
+  if (!ownership) return null;
   try {
-    // Keep the private hard link for the lock's whole lifetime. That witness
-    // keeps its inode allocated, so a later owner can never reuse it and fool
-    // this owner's release check. The lock records only its basename, allowing
-    // a stale takeover to clean the dead owner's otherwise-unreachable link.
-    writeSync(fd, `${process.pid}\n${basename(scratchPath)}\n`);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    linkSync(scratchPath, lockPath);
     // A takeover gate may have appeared after the first check while this
     // process was creating/linking its private scratch file. Keep the scratch
     // link until this check so we can prove the path is still ours before
     // withdrawing it; never return a healthy-looking lock through a gate.
     if (!allowTakeover && existsSync(takeoverPath)) {
-      try {
-        if (sameFile(statSync(lockPath), statSync(scratchPath))) tryUnlink(lockPath);
-      } catch {
-        // A stealer already removed it — the gate makes that equivalent.
-      }
+      releaseOwnership(lockPath, ownership);
       return null;
     }
-    try {
-      ownership = { scratchPath };
-      return ownership;
-    } catch {
-      // The path vanished before this acquirer could establish ownership.
-      return null;
-    }
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err;
+    return ownership;
+  } catch {
+    releaseOwnership(lockPath, ownership);
     return null;
-  } finally {
-    // A successful acquire intentionally retains its private hard-link
-    // witness until release. Every other outcome cleans this attempt up.
-    if (ownership === null) tryUnlink(scratchPath);
   }
 }
 
