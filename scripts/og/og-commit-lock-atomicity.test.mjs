@@ -44,6 +44,7 @@ vi.mock('node:fs', async (importOriginal) => {
     // overrides this per-test to land a swap between stealIfStale's two
     // statSync calls.
     statSync: vi.fn(actual.statSync),
+    writeSync: vi.fn(actual.writeSync),
   };
 });
 
@@ -60,6 +61,7 @@ beforeEach(() => {
   fs.openSync.mockClear();
   fs.linkSync.mockClear();
   fs.statSync.mockClear();
+  fs.writeSync.mockClear();
   fs.statSync.mockImplementation(actualFs.statSync);
 });
 
@@ -109,6 +111,21 @@ describe('lock acquisition never exposes a partially-written lock file (id 37626
       // yet) or a truncated digit sequence. The fix guarantees the content
       // is already the complete "<pid>\n" line by the time anything makes
       // it visible under the lock path's name.
+      expect(linkSourceContentAtCallTime[0]).toMatch(/^\d+\n.+\.acquire-tmp\.\d+-[0-9a-f]+\n$/);
+    } finally {
+      release();
+    }
+  });
+
+  it('finishes a short ownership write before linkSync publishes the lock', () => {
+    const dest = join(dir, 'gcb.png');
+    fs.writeSync.mockImplementation((fd, bytes, offset, length, position) =>
+      actualFs.writeSync(fd, bytes, offset, Math.min(length, 1), position),
+    );
+
+    const release = withDestinationLocks([{ dest }]);
+    try {
+      expect(fs.writeSync.mock.calls.length).toBeGreaterThan(1);
       expect(linkSourceContentAtCallTime[0]).toMatch(/^\d+\n.+\.acquire-tmp\.\d+-[0-9a-f]+\n$/);
     } finally {
       release();
