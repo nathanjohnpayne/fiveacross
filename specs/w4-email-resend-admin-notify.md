@@ -11,7 +11,7 @@ Phase 1's server-authoritative moderation backend ([ADR 0004](../docs/adr/0004-r
 
 ## The reusable email wrapper
 
-`functions/src/email.ts` exposes `sendEmail({ to, subject, html, text?, idempotencyKey })` over the Resend Node SDK, lazily constructing `new Resend(RESEND_API_KEY.value())`. `RESEND_API_KEY` is a Secret Manager secret (`defineSecret`), never an env var; `EMAIL_FROM` is a non-secret `defineString` defaulting to the already-verified `nathanpayne.com` Resend domain. Both `from` and the transport are injectable, so the wrapper is unit-testable without a Functions runtime or a live key. The ENTIRE real-path setup—secret/param resolution and Resend construction—runs inside the guarded `try`, so this reusable wrapper never throws for any caller, even when the secret is unresolved.
+`functions/src/email.ts` exposes `sendEmail({ to, subject, html, text?, idempotencyKey })` over the Resend Node SDK, lazily constructing `new Resend(RESEND_API_KEY.value())`. `RESEND_API_KEY` is a Secret Manager secret (`defineSecret`), never an env var; `EMAIL_FROM` is a non-secret `defineString` defaulting to the already-verified `mail.nathanpayne.com` Resend domain—the apex `nathanpayne.com` is NOT verified for this project, and a future edit must not restore it as the default (#633; see `functions/src/params.ts`). Both `from` and the transport are injectable, so the wrapper is unit-testable without a Functions runtime or a live key. The ENTIRE real-path setup—secret/param resolution and Resend construction—runs inside the guarded `try`, so this reusable wrapper never throws for any caller, even when the secret is unresolved.
 
 - **Given** the send returns an `{ error }`, or the transport throws **then** `sendEmail` logs and returns `false`—never throws—and passes the computed `idempotencyKey` through to Resend unchanged. (Test: "surfaces a Resend { error } as false without throwing".)
 - **Given** the real-path setup itself throws (e.g. `RESEND_API_KEY` is unresolved) **then** `sendEmail` still resolves `false` rather than rejecting. (Test: "returns false (never rejects) when real-path SETUP throws".)
@@ -50,4 +50,4 @@ Firestore triggers carry no actor identity, so an admin who performs a manual hi
 
 ## Deferred deploy step (human)
 
-Setting `RESEND_API_KEY` in Secret Manager from the 1Password item and redeploying the bound functions is a human finishing step, not part of this code PR. The `nathanpayne.com` Resend domain is already verified—no new DNS.
+Setting `RESEND_API_KEY` in Secret Manager from the 1Password item and redeploying the bound functions is a human finishing step, not part of this code PR. The `mail.nathanpayne.com` Resend domain is already verified—no new DNS. The apex `nathanpayne.com` is NOT verified for this project.
