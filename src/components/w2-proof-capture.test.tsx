@@ -556,7 +556,9 @@ describe('ProofSheet — Sound proof records a Safari-playable format + blocks e
 
 describe('Board — proof-to-mark gating (ADR 0001: friction, not trust)', () => {
   const clickCell = (index: number) => {
-    const cells = document.querySelectorAll('.grid .cell');
+    // `.cell-claim` is the Square's claim button — the tile div is a
+    // positioning shell, so the handler lives on the button that fills it.
+    const cells = document.querySelectorAll('.grid .cell .cell-claim');
     fireEvent.click(cells[index]);
   };
 

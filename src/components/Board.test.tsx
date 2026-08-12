@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import type { BoardDoc, Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 import { ThemeProvider } from '../theme/ThemeContext';
@@ -1589,7 +1590,9 @@ describe('per-Day First to BINGO (#264)', () => {
     // Unmarking is instant (no sheet) — but here we tap an UNMARKED cell in
     // honor mode and take the pledge path? Simpler: tap a MARKED cell to
     // trigger doMark directly; the mocked setMark returns the transition.
-    const cells = document.querySelectorAll('.grid .cell');
+    // `.cell-claim` is the Square's claim button — the tile div is a
+    // positioning shell, so the handler lives on the button that fills it.
+    const cells = document.querySelectorAll('.grid .cell .cell-claim');
     fireEvent.click(cells[12]); // free cell — no-op sanity
     // Tap the pledge path: cell 3 is unmarked → sheet opens → pledge marks.
     fireEvent.click(cells[3]);
@@ -1615,7 +1618,9 @@ describe('per-Day First to BINGO (#264)', () => {
     H.setMark.mockResolvedValue({ cells: marked, bingo: true, blackout: false, bingoTransition: true, blackoutTransition: false });
 
     render(<Board />);
-    const cells = document.querySelectorAll('.grid .cell');
+    // `.cell-claim` is the Square's claim button — the tile div is a
+    // positioning shell, so the handler lives on the button that fills it.
+    const cells = document.querySelectorAll('.grid .cell .cell-claim');
     fireEvent.click(cells[3]);
     fireEvent.click(screen.getByText(/Cross My Heart/));
     await act(async () => {});
@@ -1711,5 +1716,331 @@ describe('per-Day First to BINGO (#264)', () => {
 
     render(<Board />);
     expect(document.querySelector('.daybar-meta')?.textContent).toContain('Port 0');
+  });
+});
+
+
+// --- Square keyboard operability --------------------------------------------
+//
+// Tapping a Square is the mainline path to the claim sheet, so a Square that is
+// only a `<div onClick>` puts claiming out of reach for a keyboard-only or
+// switch-access Player entirely — the ＋/tally/doubt controls are real <button>s
+// and used to be the only reachable thing on a tile. Each Square now carries a
+// real <button> filling the tile, with an accessible name that also spells out
+// the state the tile otherwise shows only in CSS (the ✓ fill, the dashed pending
+// tile, FREE).
+//
+// The claim button is a sibling of those badge controls rather than their
+// ancestor: nesting them under a button role is the `nested-interactive`
+// anti-pattern, and screen-reader/browser pairs disagree on whether descendants
+// of a button survive the presentational-children rule (Codex P1, round 1).
+
+describe('Square keyboard operability', () => {
+  /** A dealt card with cell 1 marked, cell 2 marked-but-pending, 12 free. */
+  function mixedCells(): Cell[] {
+    const cells = dealt();
+    cells[1] = { ...cells[1], marked: true, markedAt: 1, status: 'confirmed' };
+    cells[2] = { ...cells[2], marked: true, markedAt: 2, status: 'pending' };
+    return cells;
+  }
+
+  const tiles = () => Array.from(document.querySelectorAll<HTMLElement>('.grid .cell'));
+  const claims = () =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.grid .cell > button.cell-claim'));
+
+  it('gives all 25 Squares a real button, with the badge controls as siblings not descendants', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+
+    expect(tiles()).toHaveLength(25);
+    const buttons = claims();
+    expect(buttons).toHaveLength(25);
+    // A real <button>, so Enter/Space activation, Space scroll suppression and
+    // key-repeat semantics are the platform's — nothing hand-rolled to drift.
+    for (const b of buttons) expect(b.tagName).toBe('BUTTON');
+    // The tile itself is now an inert positioning shell — no competing role or
+    // tab stop layered over the button inside it.
+    for (const tile of tiles()) {
+      expect(tile).not.toHaveAttribute('role');
+      expect(tile).not.toHaveAttribute('tabindex');
+    }
+    // The ＋ on a marked Square is a SIBLING of the claim button. Nested inside
+    // it, this pattern would be `nested-interactive`.
+    const marked = tiles()[1];
+    const proofBtn = marked.querySelector('.proofbtn');
+    expect(proofBtn).not.toBeNull();
+    expect(proofBtn!.closest('button.cell-claim')).toBeNull();
+  });
+
+  it('names each Square by its Prompt plus the state the tile shows only in CSS', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+
+    // Unmarked, marked, and the admin_confirmed pending tile are three distinct
+    // states a sighted Player reads off the tile; without these names a screen
+    // reader cannot tell a claimed Square from an open one. The prompt leads so
+    // voice control can still target a Square by the text it displays.
+    expect(screen.getByRole('button', { name: 'Prompt i0—not marked' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Prompt i1—marked' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Prompt i2—marked, pending admin confirmation' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'FREE—free space, already marked' })).toBeInTheDocument();
+  });
+
+  it('opens the claim sheet from the keyboard — the twin of the mainline tap', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    // A native button turns Enter/Space into a click; jsdom does not synthesize
+    // that, so the click IS the activation under test here. What this pins is
+    // that the keyboard-reachable control is the one wired to the claim path.
+    const target = claims()[0];
+    expect(target).toBeInstanceOf(HTMLButtonElement);
+    fireEvent.click(target);
+
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+    // The sheet is the claim, not the Mark (issue #181) — same as a tap.
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('unmarks a marked Square instantly, with no sheet', async () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+    fireEvent.click(claims()[1]);
+    await act(async () => {});
+
+    expect(H.setMark).toHaveBeenCalledTimes(1);
+    expect(H.setMark.mock.calls[0][0]).toMatchObject({ index: 1, nextMarked: false });
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the free centre operable — activating it pulses instead of claiming', () => {
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    const free = tiles()[12];
+    expect(free).not.toHaveClass('free-pulse-a');
+
+    fireEvent.click(claims()[12]);
+
+    expect(free).toHaveClass('free-pulse-a');
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('does not claim the Square when its nested ＋ control is used', async () => {
+    // The ＋ opens the proof sheet for an already-marked Square; it must never
+    // also toggle the Square underneath. As a sibling of the claim button there
+    // is no ancestor handler to reach, which is the structural half of the fix.
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: mixedCells() };
+
+    render(<Board />);
+    const proofBtn = tiles()[1].querySelector<HTMLElement>('.proofbtn');
+    expect(proofBtn).not.toBeNull();
+
+    fireEvent.click(proofBtn!);
+    await act(async () => {});
+
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('leaves the locked-Day preview inert — no Square there is a control', () => {
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'glamiators', unlockAt: now + DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    render(<Board />);
+
+    const locked = Array.from(document.querySelectorAll('.locked-grid .cell'));
+    expect(locked).toHaveLength(25);
+    for (const cell of locked) {
+      expect(cell).not.toHaveAttribute('role');
+      expect(cell).not.toHaveAttribute('tabindex');
+      expect(cell.querySelector('button')).toBeNull();
+    }
+  });
+});
+
+// --- The card behind an open overlay -----------------------------------------
+//
+// Every overlay Board mounts is a SIBLING of `.board-area`, and none of them
+// traps focus. Before Squares were controls only the free centre and the badges
+// on marked Squares were reachable behind a scrim; 25 tab stops turned that
+// latent gap into the default, letting a keyboard user Tab past a dialog's CTA
+// into the grid and unmark a hidden Square or open a second sheet from behind an
+// `aria-modal` dialog (Codex P1, round 1).
+//
+// jsdom implements no `inert` behaviour, so these assert the attribute Board
+// applies, not the focus containment the browser derives from it.
+
+describe('board inert while an overlay is up', () => {
+  const boardArea = () => document.querySelector('.board-area');
+
+  // This project's jsdom leaves `window.localStorage` unset, so CoachOverlay's
+  // try/catch falls open and its first-open scrim renders on every mount —
+  // which would make the card inert before a test has done anything. Stub a
+  // store with both one-time flags already written so each test starts from a
+  // card with NO overlay over it and opens exactly the one under test.
+  // EVENT_ID is mocked to 'test-event' at the top of this file.
+  function dismissOneTimeOverlays(): void {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.test-event.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+  }
+
+  it('marks the card inert while the claim sheet is open, and clears it on close', async () => {
+    dismissOneTimeOverlays();
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    expect(boardArea()).not.toHaveAttribute('inert');
+
+    fireEvent.click(
+      document.querySelectorAll<HTMLButtonElement>('.grid .cell > button.cell-claim')[0],
+    );
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+    expect(boardArea()).toHaveAttribute('inert');
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    await act(async () => {});
+    expect(screen.queryByText(/Proof for/)).not.toBeInTheDocument();
+    expect(boardArea()).not.toHaveAttribute('inert');
+  });
+
+  it('hands the claim sheet the control that opened it, captured before the card goes inert', () => {
+    // ProofSheet restores focus on close. Left to its own `document.activeElement`
+    // read it samples in a passive effect, which runs AFTER the commit that marks
+    // this card inert — and the HTML spec has a user agent move focus out of a
+    // subtree that becomes inert, so that read can be `<body>` (Codex P2, round
+    // 6). Board therefore captures the trigger synchronously in the click
+    // handler. jsdom implements no inert behaviour and cannot reproduce the
+    // eviction, so this pins the hand-off itself: the sheet is given the exact
+    // Square button that opened it.
+    dismissOneTimeOverlays();
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    const claim = document.querySelectorAll<HTMLButtonElement>('.grid .cell > button.cell-claim')[0];
+    fireEvent.click(claim);
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+
+    // Focus lands back on the Square that opened the sheet. This is only true
+    // because Board handed the sheet an explicit trigger: `fireEvent.click`
+    // does not move focus in jsdom, so the sheet's own `document.activeElement`
+    // fallback would have captured `<body>` and restored nothing.
+    expect(document.activeElement).toBe(claim);
+  });
+
+  it('releases the card when another tab dismissed an overlay this tab never showed', () => {
+    // The desync that made mirroring the stored flags unsafe (Codex P2, round
+    // 2): a mirror only moves on THIS tab's onDismiss, while the overlay
+    // re-reads storage every render. Another tab dismissing the launch
+    // announcement while this tab sits behind the coach overlay used to strand
+    // the mirror at "open" — leaving the card inert with no visible scrim, and
+    // `inert` blocks pointer events too, so the card was simply dead.
+    const store = new MemoryStorage();
+    vi.stubGlobal('localStorage', store);
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS })],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    // Nothing dismissed yet: the coach overlay is up and the card is inert.
+    expect(boardArea()).toHaveAttribute('inert');
+
+    // Another tab dismisses the launch announcement — a bare storage write,
+    // with no callback into this tab.
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+
+    // Dismissing the coach here is the render on which this tab notices.
+    fireEvent.click(document.querySelector('.coach-overlay-cta')!);
+
+    // No scrim is left, so the card must be live again.
+    expect(document.querySelector('.coach-overlay')).toBeNull();
+    expect(document.querySelector('.launch-intro')).toBeNull();
+    expect(boardArea()).not.toHaveAttribute('inert');
+  });
+
+  it('releases the card when the dismissal cannot be persisted at all', () => {
+    // The other half of the same trap (Codex P2, round 3). CoachOverlay's
+    // `markDismissed` swallows write failures by design — private mode, storage
+    // disabled — and then hides itself on component-local state. Reading ONLY
+    // the stored flag would leave the card inert forever behind no scrim, which
+    // is worse than the stale-mirror case it replaced: it needs no second tab.
+    const readOnly = new MemoryStorage();
+    readOnly.setItem = () => {
+      throw new DOMException('QuotaExceededError');
+    };
+    vi.stubGlobal('localStorage', readOnly);
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    expect(boardArea()).toHaveAttribute('inert');
+
+    fireEvent.click(document.querySelector('.coach-overlay-cta')!);
+
+    // The write failed, so the flag is still unset — but the scrim is gone, so
+    // the card has to be live.
+    expect(document.querySelector('.coach-overlay')).toBeNull();
+    expect(boardArea()).not.toHaveAttribute('inert');
+  });
+
+  it('marks the card inert while the first-open coach overlay is up', () => {
+    // No dismissal flag written: the overlay self-gates on it, so an empty
+    // store means the scrim IS up and the card behind it must leave the tab
+    // order. This is the case a Player hits on their very first open.
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+
+    expect(document.querySelector('.coach-overlay')).not.toBeNull();
+    expect(boardArea()).toHaveAttribute('inert');
+  });
+});
+
+// The Square's decorative glyphs are CSS-only, so their hit-testing behaviour
+// cannot be exercised in jsdom (no layout, no stylesheet cascade). These pin
+// the rules themselves — the same posture as the motion-polish suite.
+describe('decorative Square glyphs never swallow a claim tap', () => {
+  const indexCss = readFileSync('src/index.css', 'utf8');
+
+  it('makes the ✓ and echo ⟲ pseudo-elements ignore pointer events', () => {
+    // Both are positioned children generated around `.cell-claim`, so they
+    // paint over the claim button, and a hit on the glyph targets `.cell` —
+    // which stopped carrying the handler when it moved onto the button. Without
+    // `pointer-events: none` the visible ✓ is a dead spot in the corner of every
+    // marked Square instead of unmarking it (Codex P2, round 2).
+    const check = indexCss.match(/\.cell\.marked::after\s*\{[^}]*\}/)?.[0];
+    const echo = indexCss.match(/\.cell\.echo::before\s*\{[^}]*\}/)?.[0];
+    expect(check).toBeTruthy();
+    expect(echo).toBeTruthy();
+    expect(check).toMatch(/pointer-events:\s*none/);
+    expect(echo).toMatch(/pointer-events:\s*none/);
+  });
+
+  it('keeps the claim button under those glyphs rather than above them', () => {
+    // The fix is deliberately `pointer-events`, NOT restacking: the glyphs must
+    // keep PAINTING over the marked tile's gradient, and the badges (z-index 3)
+    // must keep painting over everything. Raising the claim button would hide
+    // the ✓ behind it.
+    const claim = indexCss.match(/\.cell-claim\s*\{[^}]*\}/)?.[0];
+    expect(claim).toBeTruthy();
+    expect(claim).not.toMatch(/z-index/);
   });
 });
