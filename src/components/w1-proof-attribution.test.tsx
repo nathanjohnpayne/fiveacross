@@ -85,7 +85,9 @@ beforeEach(() => {
 
 function openProof() {
   const { container } = render(<Board />);
-  const square = container.querySelectorAll('.grid .cell')[0] as HTMLElement;
+  // `.cell-claim` is the Square's claim button — the tile div is a positioning
+  // shell, so the handler lives on the button that fills it.
+  const square = container.querySelectorAll('.grid .cell .cell-claim')[0] as HTMLElement;
   fireEvent.click(square);
 }
 
