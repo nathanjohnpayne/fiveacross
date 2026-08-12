@@ -25,10 +25,33 @@
 // anything) so the atomicity contract itself — commit-all-or-commit-nothing
 // — is directly testable with plain filesystem operations, no browser
 // required.
+//
+// Round 6 (#713, id 3762521202 re-raised): the backup path used to be a
+// pure function of the target (`${p}.rollback-tmp`) — deterministic, and
+// therefore IDENTICAL across two invocations racing to commit the same
+// destination. A second invocation's backup write, or its success-path
+// cleanup (which unlinks its own backup once its commit lands), could
+// silently overwrite or delete the first invocation's recovery copy while
+// the first was still mid-commit — so a later failure in the first
+// invocation rolled back from a backup that was no longer its own,
+// restoring the wrong bytes or finding nothing there to restore at all.
+// `rollbackBackupPath` now mixes in a token unique to THIS `commitStaged`
+// call (pid + random suffix, the same recipe `scratchPathFor` uses for
+// scratch files), so two invocations' backups for the same target never
+// share a path — regardless of what order their writes and cleanups land
+// in. One token per CALL (not per entry) is enough: every backup a call
+// writes only needs to be distinguishable from every OTHER call's backups.
+//
+// This is orthogonal to locking. Unique backup names stop one invocation
+// from corrupting another's recovery copy; they do not by themselves make
+// two invocations' rename+copy publication safe to interleave — see the
+// "Concurrency contract" note on `commitStaged` below and
+// og-commit-lock.mjs, which is what actually serializes that.
 import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
-const rollbackBackupPath = (p) => `${p}.rollback-tmp`;
+const rollbackBackupPath = (p, token) => `${p}.rollback-tmp.${token}`;
 
 /** Best-effort delete — used for both rollback cleanup and success cleanup,
  *  where a leftover backup file is a nuisance, not a correctness problem. */
@@ -81,16 +104,36 @@ function rollback(backups) {
  *  scratch files cleaned up on that path should follow with
  *  `discardStaged(staged)`; every scratch file this function DID consume is
  *  already gone (renamed away), so `discardStaged` is safe to call
- *  unconditionally — it silently tolerates the ones that no longer exist. */
+ *  unconditionally — it silently tolerates the ones that no longer exist.
+ *
+ *  Concurrency contract (#713 round 6, id 3762521202 re-raised): this
+ *  function performs NO cross-process locking of its own — it assumes it
+ *  is the sole writer to every destination in `staged` for the duration of
+ *  the call. Two invocations racing to publish the SAME destination can
+ *  still interleave their rename+copy pairs even with round 6's
+ *  per-invocation-unique backup names (those stop one invocation from
+ *  corrupting the other's RECOVERY copy; they say nothing about the two
+ *  invocations' PUBLISH steps racing each other). `render-og-editions.mjs`
+ *  is the only production caller, and it holds `withDestinationLocks`
+ *  (og-commit-lock.mjs) around this ENTIRE commit-or-rollback phase before
+ *  ever calling this — that lock, not anything in this module, is what
+ *  makes concurrent commits to the same destination safe. The lock lives
+ *  one module up deliberately, so this one stays a plain, browser-free
+ *  filesystem primitive a test can drive directly (see the file header) —
+ *  but that means any NEW caller that publishes to a shared destination
+ *  MUST acquire that same lock for the whole call first, or the race
+ *  reopens. See og-stage-commit.test.mjs's "exercised through the locked
+ *  path" tests for the shape that takes. */
 export function commitStaged(staged) {
+  const token = `${process.pid}-${randomBytes(4).toString('hex')}`;
   const backups = [];
   const written = [];
   try {
     for (const s of staged) {
       mkdirSync(dirname(s.mirror), { recursive: true });
 
-      const destBackup = rollbackBackupPath(s.dest);
-      const mirrorBackup = rollbackBackupPath(s.mirror);
+      const destBackup = rollbackBackupPath(s.dest, token);
+      const mirrorBackup = rollbackBackupPath(s.mirror, token);
       const destExisted = existsSync(s.dest);
       const mirrorExisted = existsSync(s.mirror);
       if (destExisted) copyFileSync(s.dest, destBackup);

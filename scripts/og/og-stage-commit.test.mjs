@@ -5,12 +5,24 @@
 // directory — not a reimplementation of the atomicity contract, so a
 // regression to the production code fails this test rather than a parallel
 // copy of it.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { scratchPathFor } from './og-scratch-path.mjs';
 import { commitStaged, discardStaged } from './og-stage-commit.mjs';
+
+/** True if any file in `target`'s directory still starts with
+ *  `${basename(target)}.rollback-tmp` — i.e. a leaked backup for `target`,
+ *  under round 6's per-invocation-token naming (`${p}.rollback-tmp.<token>`)
+ *  where the exact suffix isn't known to the test. Replaces a literal
+ *  `existsSync(`${target}.rollback-tmp`)` check, which the token made
+ *  vacuously false regardless of whether a backup actually leaked. */
+function hasLeakedBackup(target) {
+  const dir_ = dirname(target);
+  const prefix = `${basename(target)}.rollback-tmp`;
+  return existsSync(dir_) && readdirSync(dir_).some((name) => name.startsWith(prefix));
+}
 
 let dir;
 
@@ -113,9 +125,12 @@ describe('commitStaged rollback on a mid-commit failure (id 3762436072, #713 rou
     // byte-identical to what was there before this call.
     expect(readFileSync(gcb.dest, 'utf8')).toBe('old-gcb-bytes');
     expect(readFileSync(gcb.mirror, 'utf8')).toBe('old-gcb-mirror-bytes');
-    // No rollback backup files left behind on disk.
-    expect(existsSync(`${gcb.dest}.rollback-tmp`)).toBe(false);
-    expect(existsSync(`${gcb.mirror}.rollback-tmp`)).toBe(false);
+    // No rollback backup files left behind on disk — checked by prefix
+    // (round 6 mixes a per-call token into the suffix), not the old literal
+    // `${target}.rollback-tmp` path, which is never a real file anymore and
+    // so would pass this assertion vacuously regardless of an actual leak.
+    expect(hasLeakedBackup(gcb.dest)).toBe(false);
+    expect(hasLeakedBackup(gcb.mirror)).toBe(false);
 
     // vacay's mkdir failed before its destination/mirror were ever touched.
     expect(readFileSync(vacay.dest, 'utf8')).toBe('old-vacay-bytes');
@@ -176,3 +191,13 @@ describe('concurrent invocations of the same Edition do not clobber each other (
     expect(readFileSync(dest, 'utf8')).toBe('invocation-b-bytes');
   });
 });
+
+// Both calls above are made serially, from a single invocation's-eye view —
+// they pin round 3's scratch-path uniqueness, not whether `commitStaged`
+// itself tolerates a SECOND invocation publishing to the same destination
+// WHILE the first is still mid-commit. Codex re-raised exactly that gap
+// (id 3762521202, #713 round 6): a serial test can't expose an interleaved
+// commit-phase race. See og-stage-commit-concurrency.test.mjs for the
+// interleaved (deterministic, mocked) and real-worker-thread coverage of
+// that case, and the "Concurrency contract" note on `commitStaged` in
+// og-stage-commit.mjs for why the lock lives in the caller, not here.
