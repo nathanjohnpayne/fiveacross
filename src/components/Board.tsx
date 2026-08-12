@@ -59,7 +59,7 @@ import FarewellPodium from './FarewellPodium';
 import { farewellPinIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
-import LaunchIntro from './LaunchIntro';
+import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
 import ReshuffleSheet from './ReshuffleSheet';
 import { THEMES } from '../theme/themes';
 import { FREE_TEXT } from '../data/seed';
@@ -559,6 +559,27 @@ function firstCompletedLineAt(cells: Cell[]): number | null {
 }
 
 /**
+ * A Square's accessible name: the Prompt text plus the state a sighted Player
+ * reads straight off the tile. Every one of those state cues is CSS-only —
+ * `.cell.marked`'s ::after ✓, `.cell.pending`'s dashed/faded tile,
+ * `.cell.free.marked`'s FREE badge — so without this a screen reader announces
+ * 25 buttons whose names differ only by prompt and gives no way to tell a
+ * claimed Square from an open one.
+ *
+ * Not folded into `aria-pressed` instead: a Square is not a plain toggle. An
+ * unmarked tap OPENS the claim sheet (issue #181) rather than marking, and in
+ * `admin_confirmed` mode a Mark lands in a third, pending state that a boolean
+ * pressed value cannot carry.
+ */
+function squareLabel(c: Cell): string {
+  if (c.free) return `${c.text}—free space, already marked`;
+  if (!c.marked) return `${c.text}—not marked`;
+  // The app's own vocabulary for this state (ProofSheet: "Goes pending until an
+  // admin confirms.").
+  return c.status === 'pending' ? `${c.text}—marked, pending admin confirmation` : `${c.text}—marked`;
+}
+
+/**
  * The locked-Day preview (daily-cards-spec § "Locked Day preview"): full
  * themed chrome for the viewed Day over a 5x5 grid of blank Squares — only
  * the free space (index 12, the same center the live deal uses) is
@@ -742,6 +763,14 @@ export default function Board() {
   // wholesale on a board-identity change (the edgeStateKey adjust block).
   const [stamped, setStamped] = useState<ReadonlySet<number>>(() => new Set());
   const [proofTarget, setProofTarget] = useState<Cell | null>(null);
+  // The control that opened the claim sheet, captured in the click handler —
+  // BEFORE the state update whose commit marks this card `inert`. ProofSheet
+  // restores focus here on close; left to its own `document.activeElement`
+  // read, it samples in a passive effect that runs after that commit, and the
+  // HTML spec has a user agent move focus out of a subtree that becomes inert
+  // (Codex P2, round 6). Null for an open with no trigger — the Feed's
+  // open-this-Square intent — where the sheet's own fallback is right.
+  const proofTriggerRef = useRef<HTMLElement | null>(null);
   const [tallyTarget, setTallyTarget] = useState<Cell | null>(null);
   // The Reshuffle confirm sheet (#378). Parent-owned open flag, like the sheets
   // above; the eligibility gate that decides whether the chip exists at all is
@@ -755,6 +784,13 @@ export default function Board() {
   // at mount and flipped by CoachOverlay's own dismiss — a plain render-time read
   // would never re-render Board when that key is written.
   const [coachSeen, setCoachSeen] = useState(isCoachOverlayDismissed);
+  // Did THIS tab dismiss the launch announcement during this mount? Seeded
+  // false, not from the stored flag: `overlayOpen` below ORs this with the
+  // stored flag, mirroring the child's own `seenThisMount || hasSeen()`, so
+  // this half only has to carry the case storage cannot — a dismissal whose
+  // write silently failed (Codex P2, round 3). Setting it also forces the
+  // re-render that a bare storage write does not trigger.
+  const [launchIntroSeen, setLaunchIntroSeen] = useState(false);
   // A Feed Tally Card's pending "open this Prompt's sheet" request (#261),
   // consumed by the intent effect below once the right Day's board renders.
   const openSquareIntent = useOpenSquareIntent();
@@ -1616,7 +1652,14 @@ export default function Board() {
     }
     if (!cellsAttributable || cells.length === 0) return;
     const cell = cells.find((c) => !c.free && c.itemId === openSquareIntent.itemId);
-    if (cell) setProofTarget(cell);
+    if (cell) {
+      // Opened by a Feed Tally Card, not by a control on this card — clear any
+      // trigger a previous open left behind so the sheet falls back to its own
+      // `document.activeElement` read rather than restoring focus to an
+      // unrelated Square.
+      proofTriggerRef.current = null;
+      setProofTarget(cell);
+    }
     clearOpenSquare();
   }, [openSquareIntent, hasDays, viewedIndex, cells, cellsAttributable]);
 
@@ -2245,6 +2288,46 @@ export default function Board() {
     if (revalidateAfterAwait(uid).isCurrentAccount) drainMoments(res.cells, actedDay);
   };
 
+  /**
+   * Is a modal scrim currently up over the card?
+   *
+   * Load-bearing since the Squares became real controls (Codex P1, round 1):
+   * every overlay below is a sibling of `.board-area`, and none of them traps
+   * focus or marks the card inert, so a keyboard user could Tab straight past
+   * the dialog's CTA into the grid behind it — unmarking a hidden Square, or
+   * opening a SECOND sheet from behind an `aria-modal` dialog. 25 new tab stops
+   * turned a latent gap (only the free centre and the badges on marked Squares
+   * were reachable) into the default experience.
+   *
+   * CoachOverlay and LaunchIntro both self-gate on a stored flag, so their
+   * mount conditions do not say whether a scrim is actually up. Each mirrors
+   * the child's OWN two-part test, because either half alone strands the card
+   * inert with no visible scrim — and `inert` blocks pointer events too, so
+   * that state is not a focus nit, it is a dead card until remount:
+   *
+   *  - Stored flag alone (Codex P2, round 2): another tab writes the key, the
+   *    child re-reads storage every render and stops drawing, but a boolean
+   *    mirrored in this tab only moves on this tab's own `onDismiss`.
+   *  - This tab's dismissal alone (Codex P2, round 3): `markSeen`/
+   *    `markDismissed` swallow write failures by design (private mode, storage
+   *    disabled), so the child hides itself on local state while the stored
+   *    flag stays unset forever.
+   *
+   * Dismissed by EITHER route means no scrim, which is exactly the child's own
+   * `seenThisMount || hasSeen()`. The `*Seen` values are this tab's half; they
+   * also force the re-render that a bare storage write does not trigger.
+   */
+  const coachOverlayUp = cells.length > 0 && !coachSeen && !isCoachOverlayDismissed();
+  const launchIntroUp =
+    hasDays && cells.length > 0 && coachSeen && !launchIntroSeen && !isLaunchIntroDismissed();
+  const overlayOpen =
+    coachOverlayUp ||
+    launchIntroUp ||
+    proofTarget != null ||
+    tallyTarget != null ||
+    reshuffleOpen ||
+    celebrate != null;
+
   const toggle = (c: Cell) => {
     // The shared attribution guard (PR #110 finding 2, widened in round 2):
     // NO action may start from a render still showing another account's board —
@@ -2289,7 +2372,9 @@ export default function Board() {
       {/* `hasDays` too: Reshuffle is a daily-cards feature, so a legacy Event
           (single Board, no `days[]` schedule) must never be told about a chip it
           can never show. */}
-      {hasDays && cells.length > 0 && coachSeen && <LaunchIntro />}
+      {hasDays && cells.length > 0 && coachSeen && (
+        <LaunchIntro onDismiss={() => setLaunchIntroSeen(true)} />
+      )}
       {/* `board-area` is the retint scope (daily-cards-spec § "Day switcher"):
           `data-theme` here — set ONLY when the Event carries a Day schedule —
           follows the VIEWED Day and cascades the theme token set (themes.css)
@@ -2297,7 +2382,14 @@ export default function Board() {
           Player's own Theme choice, ThemeContext) untouched. Absent entirely
           on a not-yet-migrated Event (`hasDays` false), so the pre-Phase-1.5
           single-Board rendering is byte-identical to before. */}
-      <div className="board-area" data-theme={viewedDay?.theme}>
+      {/* `inert` while any overlay is up (see `overlayOpen`): the platform
+          primitive for "this subtree is behind a modal" — it drops the whole
+          card from the tab order AND from the accessibility tree in one
+          attribute, which covers the Squares, the daybar's reshuffle chip and
+          the podium's Share alike, rather than threading a disabled flag
+          through each. Every overlay is a SIBLING of this container, so none of
+          them is ever caught by its own scrim. */}
+      <div className="board-area" data-theme={viewedDay?.theme} inert={overlayOpen}>
         {/* The daybar (#260 — wireframes' day gallery): "Day N · Theme" +
             tutorial tag, port, and the dress-code description, on every
             viewed Day. Absorbs the pre-#260 tutorial-only board-header
@@ -2392,17 +2484,6 @@ export default function Board() {
                   : null),
               } as CSSProperties
             }
-            role={c.free ? 'button' : undefined}
-            tabIndex={c.free ? 0 : undefined}
-            aria-label={c.free ? c.text : undefined}
-            title={c.free ? 'Free space—already marked' : undefined}
-            onClick={() => toggle(c)}
-            onKeyDown={(event) => {
-              if (c.free && (event.key === 'Enter' || event.key === ' ')) {
-                event.preventDefault();
-                toggle(c);
-              }
-            }}
             onAnimationEnd={(event) => {
               if (c.free) setFreePulse(0);
               // The stamp is one-shot: release the class the moment its own
@@ -2411,28 +2492,69 @@ export default function Board() {
               if (event.animationName === 'cell-stamp') clearStamp(c.index);
             }}
           >
-            {c.free ? (
-              <>
-                <span className="free-label" aria-hidden="true">
-                  FREE
-                </span>
-                <span className="free-prompt">{c.text}</span>
-              </>
-            ) : (
-              <SquareText text={c.text} />
-            )}
+            {/* The claim control. Tapping a Square is the mainline path to the
+                claim sheet, and this used to be a bare `onClick` on the tile
+                div — no tabIndex, no role, no key handling — so a keyboard-only
+                or switch-access Player could not claim at all. (The ＋/tally/
+                doubt controls below are real <button>s, which made the
+                proof-add path reachable and the claim path not.)
+
+                A real <button> filling the tile, rather than `role="button"` on
+                the tile div itself: those nested controls would then be
+                interactive descendants of a button role, which ARIA's
+                presentational-children rule leaves under-defined. The
+                focusable-descendant carve-out means a conforming UA still
+                exposes them, but the pattern is not interoperable across
+                screen-reader/browser pairs and is exactly what the
+                `nested-interactive` audit rule flags — a poor trade on a change
+                whose whole purpose is reach (Codex P1, round 1). As siblings of
+                a full-bleed button they are plain, unambiguous controls.
+
+                Being a real <button> also means Enter/Space activation, scroll
+                suppression on Space, and key-repeat semantics are the platform's
+                rather than hand-rolled here. */}
+            <button
+              type="button"
+              className="cell-claim"
+              aria-label={squareLabel(c)}
+              title={c.free ? 'Free space—already marked' : undefined}
+              onClick={(e) => {
+                // Capture BEFORE the state update: the commit that mounts the
+                // claim sheet is the same one that marks this card inert.
+                proofTriggerRef.current = e.currentTarget;
+                toggle(c);
+              }}
+            >
+              {c.free ? (
+                <>
+                  <span className="free-label" aria-hidden="true">
+                    FREE
+                  </span>
+                  <span className="free-prompt">{c.text}</span>
+                </>
+              ) : (
+                <SquareText text={c.text} />
+              )}
+            </button>
             {c.marked && !c.free && (
               <button
                 className="proofbtn"
                 title="Add proof"
                 onClick={(e) => {
-                  // stopPropagation bypasses `toggle`, so this handler needs the
-                  // shared attribution guard itself (PR #110 round 3 finding C):
-                  // during an account switch this cell can belong to the PREVIOUS
-                  // uid's board, and a sheet opened from it would attach a proof
-                  // (and broadcast a Moment) for the current uid off the wrong card.
+                  // The claim control is now a SIBLING button rather than this
+                  // tile div, so nothing here can reach `toggle` by bubbling and
+                  // stopPropagation is no longer what keeps the two apart. Kept
+                  // anyway: the tile sits inside pull-to-refresh / board chrome
+                  // that may take pointer events, and a proof tap is not a
+                  // gesture for them.
                   e.stopPropagation();
+                  // The attribution guard is load-bearing on its own (PR #110
+                  // round 3 finding C): during an account switch this cell can
+                  // belong to the PREVIOUS uid's board, and a sheet opened from
+                  // it would attach a proof (and broadcast a Moment) for the
+                  // current uid off the wrong card.
                   if (!cellsAttributable) return;
+                  proofTriggerRef.current = e.currentTarget;
                   setProofTarget(c);
                 }}
               >
@@ -2607,6 +2729,9 @@ export default function Board() {
                   void doMark(target, true);
                 }
           }
+          // Captured in the opening control's click handler, before the commit
+          // that marks this card inert — see `proofTriggerRef`.
+          restoreFocusTo={proofTriggerRef.current}
           onClose={() => setProofTarget(null)}
         />
       )}

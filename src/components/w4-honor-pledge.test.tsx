@@ -136,7 +136,9 @@ const day = (index: number, over: Partial<DayDef> = {}): DayDef =>
 const PLEDGE = /cross my heart/i;
 
 const clickCell = (index: number) => {
-  fireEvent.click(document.querySelectorAll('.grid .cell')[index]);
+  // `.cell-claim` is the Square's claim button — the tile div is a positioning
+  // shell, so the handler lives on the button that fills it.
+  fireEvent.click(document.querySelectorAll('.grid .cell .cell-claim')[index]);
 };
 
 beforeEach(() => {

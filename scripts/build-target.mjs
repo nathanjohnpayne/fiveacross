@@ -9,6 +9,10 @@ export const REQUIRED_NONBLANK_PRODUCTION_VITE_KEYS = Object.freeze([
   'VITE_POSTHOG_KEY',
 ]);
 
+// Production Firebase web-app identifiers (below) are intentionally public client
+// identifiers. These values are the same as those shipped in the client bundle and
+// are subject to API restrictions. This registry is the canonical source of truth
+// for the deployment targets' configuration.
 export const DEPLOY_TARGETS = Object.freeze({
   gaycruisebingo: Object.freeze({
     envFile: '.env.gaycruisebingo',

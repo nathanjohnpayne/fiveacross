@@ -17,6 +17,7 @@ import EventNotFound from './components/EventNotFound';
 import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
+import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { isSignInReachableOnHost } from './auth-domain';
@@ -62,6 +63,18 @@ function startPostHogAfterResolution(): void {
 // by a one-attempt-per-tab guard so a misconfigured floor cannot reload-loop.
 // Skipped for the uptime synthetic (#142) so a probe run is never a reload.
 if (!isSyntheticProbe()) void enforceBuildFloor(__BUILD_STAMP__);
+
+// The #519 post-update deal grace (src/postUpdateDeal.ts), armed at module scope
+// for the same reason the floor above runs here — and specifically NOT from
+// inside `AuthProvider` (Codex P2 on #719). `ErrorBoundary` below wraps only the
+// auth-gated tree, deliberately leaving `UpdatePrompt` — the only in-app caller
+// of `updateServiceWorker(true)` — alive after a crash. A watcher mounted inside
+// that tree would already be unmounted when the player took the recovery update,
+// so `controllerchange` would write no marker and the incoming document would
+// start with no grace: exactly the reload this exists to cover. Out here nothing
+// ever unsubscribes it, which is what makes "installed for the document's life"
+// literally true.
+watchPostUpdateReload();
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('root element missing');
