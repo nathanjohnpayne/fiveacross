@@ -29,7 +29,7 @@ Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode a
 
 ### 0. File a ticket (adds with no Status)
 
-`gh project item-add` does not set Status on its own. If the "Item added to project → set Status = Backlog" built-in (line 19 above) is enabled on Project #7, GitHub sets Status = Backlog for you and this step is redundant—skip it. If that workflow is disabled (Project #7's state as of this writing), a freshly added item lands with **no Status**, so set it explicitly:
+`gh project item-add` does not set Status on its own. Always run the explicit move below—do not skip it based on whether the "Item added to project → set Status = Backlog" built-in (line 19 above) is enabled. As of this writing that built-in is disabled on Project #7, so a freshly added item lands with **no Status** and the move is required. If a future session enables it, the move becomes a no-op (Status is already Backlog) rather than a skippable step: the workflow's on/off state can drift without every agent's context reflecting it, so a single unconditional command is the only protocol that stays correct in both states.
 
 ```bash
 scripts/gh-as-author.sh -- gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
@@ -37,7 +37,7 @@ PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Backlog"
 ```
 
-With the built-in workflow disabled, skipping this leaves the item in a No Status column—invisible in any Status-grouped board view. Keep the explicit move as a defensive, idempotent step even after enabling the workflow, since it's a no-op once Status is already Backlog.
+Skipping this leaves the item in a No Status column whenever the built-in is off—invisible in any Status-grouped board view—which is why the move above is unconditional rather than gated on the built-in's state.
 
 ### 1. Claim a ticket (Ready → In progress)
 
