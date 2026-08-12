@@ -107,18 +107,54 @@ function createStorageStub(): Storage {
  * `GET_BUILD_STAMP` round trip, not proof that a real waiting worker is
  * reachable — see the honesty note in `src/updateDismissal.test.ts`.
  */
-function stubWaitingBuild(stamp: string, replyDelayMs = 0) {
+function stubWaitingBuild(stamp: string) {
   vi.stubGlobal('navigator', {
     ...window.navigator,
     serviceWorker: {
       getRegistration: async () => ({
         waiting: {
           postMessage: (_message: unknown, ports: MessagePort[]) =>
-            setTimeout(() => ports[0].postMessage({ type: BUILD_STAMP_REPLY, stamp }), replyDelayMs),
+            setTimeout(() => ports[0].postMessage({ type: BUILD_STAMP_REPLY, stamp })),
         },
       }),
     },
   });
+}
+
+/**
+ * Same stub, except the worker HOLDS its reply until the returned
+ * `releaseReply()` is called — which is what makes the tap-before-identified
+ * race below a fact of the test rather than of the machine.
+ *
+ * This used to be a delay: reply after 40ms, tap before it lands. That pitted
+ * a wall-clock delay against RTL's own `findBy*` poll (which only re-checks
+ * every 50ms), so the tap arrived at ~55ms on a cold run and the answer was
+ * already in — the assertion flipped depending on how warm the module cache
+ * happened to be, passing for the whole file and failing for the single test.
+ * Nothing about the component was in question either way, which is precisely
+ * why the ordering must not be left to a timer.
+ */
+function stubWaitingBuildHoldingReply(stamp: string) {
+  const held: MessagePort[] = [];
+  let released = false;
+  const reply = (port: MessagePort) => port.postMessage({ type: BUILD_STAMP_REPLY, stamp });
+  vi.stubGlobal('navigator', {
+    ...window.navigator,
+    serviceWorker: {
+      getRegistration: async () => ({
+        waiting: {
+          postMessage: (_message: unknown, ports: MessagePort[]) =>
+            released ? reply(ports[0]) : void held.push(ports[0]),
+        },
+      }),
+    },
+  });
+  // A query that starts AFTER the release is answered immediately, so the
+  // helper can never strand a component that asks late.
+  return () => {
+    released = true;
+    held.splice(0).forEach((port) => reply(port));
+  };
 }
 
 /** Lets the floor read and the (MessagePort-delivered) stamp reply land. */
@@ -391,12 +427,20 @@ describe('UpdatePrompt', () => {
     // on the identity query — which means the tap can beat the answer. The
     // handler awaits the same in-flight query rather than reading a
     // not-yet-settled value, so the decline still names the right build.
+    //
+    // The worker's reply is held open for the duration of the tap, so "the
+    // answer is still out" is guaranteed rather than raced — see
+    // `stubWaitingBuildHoldingReply`. That first assertion is the load-bearing
+    // one: it is what distinguishes awaiting the in-flight promise from
+    // reading a settled value, and a tap that landed after the answer would
+    // pass either way.
     swState.initialNeedRefresh = true;
-    stubWaitingBuild('2026-08-04T12:00:00.000Z', 40);
+    const releaseReply = stubWaitingBuildHoldingReply('2026-08-04T12:00:00.000Z');
     const user = userEvent.setup();
     render(<UpdatePrompt />);
     await user.click(await screen.findByRole('button', { name: /not now/i }));
     expect(localStorage.getItem(DISMISSED_BUILD_KEY)).toBeNull(); // the answer is still out
+    releaseReply();
     await waitFor(() => expect(localStorage.getItem(DISMISSED_BUILD_KEY)).toBe('2026-08-04T12:00:00.000Z'));
   });
 

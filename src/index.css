@@ -385,6 +385,57 @@ a {
 .cell:active {
   transform: scale(0.95);
 }
+/* The Square's claim control (Board.tsx): a real <button> filling the tile, so
+   the badges that sit on top of it stay plain sibling controls instead of
+   interactive descendants of a button role. Absolutely positioned rather than
+   in flow because those badges and the ✓/⟲ pseudo-elements are positioned
+   against the tile and must keep painting over it.
+
+   `inset: 0` resolves against .cell's PADDING box, so this fills the tile
+   inside its border and carries the same 4px inset the text had when .cell
+   itself was the flex parent. Inherited typography (font, text-align,
+   word-break, hyphens) is not restated — .cell still owns it and a <button>
+   only needs the UA's own font shorthand overridden. .cell keeps its flex
+   centering and padding regardless: the locked-Day preview and the cached-card
+   fallback still render their text as direct in-flow children of .cell. */
+.cell-claim {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: 0;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+/* The free centre stacks its FREE eyebrow over the prompt. .cell.free.marked
+   carries the same pair for the preview/fallback surfaces, where the spans are
+   direct children of the tile; here they are children of the button. */
+.cell.free.marked > .cell-claim {
+  flex-direction: column;
+  gap: 3px;
+}
+/* A focusable control needs a visible focus indicator (WCAG 2.4.7); .cell had
+   no focus style at all before Squares became reachable. The ring is drawn on
+   the TILE, not on this button: .cell sets `overflow: hidden`, which clips a
+   descendant's outline, so a ring on the button itself would be cut off. --ink,
+   not --accent: the ring paints OUTSIDE the tile against the page background,
+   and --ink is the token already tuned to clear WCAG AA against --bg in every
+   theme (see .cell.marked's border-color note below) — an accent ring washes
+   out on the themes where --accent sits close to --bg. Offset 1px + 2px wide
+   reaches 3px out, half the grid's 6px gap, so a ring never crowds its
+   neighbour. */
+.cell:has(> .cell-claim:focus-visible) {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
 .cell.marked {
   /* --on-gradient (issue #72, specs/theme-on-color-contrast.md) replaces the
      literal #fff that used to fail WCAG AA against this gradient in 7 of 8
@@ -462,6 +513,12 @@ a {
      above; the ✓ is a graphical object (WCAG 1.4.11's 3:1 floor), but
      --on-gradient clears the stricter 4.5:1 text floor everywhere anyway. */
   color: var(--on-gradient);
+  /* Decoration only, never a hit target (Codex P2, round 2). This pseudo is a
+     positioned child generated AFTER `.cell-claim`, so it paints over the claim
+     button, and a hit on the glyph would target `.cell` — which no longer
+     carries the handler. Without this, the visible ✓ is a dead spot in the
+     top-right corner of every marked Square instead of unmarking it. */
+  pointer-events: none;
 }
 .cell.pending {
   opacity: 0.7;
@@ -483,6 +540,8 @@ a {
   font-size: 11px;
   color: var(--on-gradient);
   opacity: 0.85;
+  /* Decoration only — same reasoning as `.cell.marked::after` above. */
+  pointer-events: none;
 }
 .cell.echo.marked::after {
   opacity: 0.75;
