@@ -52,7 +52,7 @@ import { cellsToMap, cellsPatch, changedCells, cellsFromData } from '../game/cel
 import { cellsMergeSet } from './cellsMerge';
 import { trustedDayBoardSeed } from './board-freshness';
 import { pinDayFirstBingo } from './dayMeta';
-import { stampMarkAnalyticsTransition } from './markAnalytics';
+import { directMarkAnalyticsRequest } from './markAnalytics';
 import {
   echoAnalyticsTransitions,
   stampEchoAnalyticsTransitions,
@@ -1330,19 +1330,11 @@ export function computeMark(params: {
   // the write path is the single source of truth for "this mark won".
   bingoTransition: boolean;
   blackoutTransition: boolean;
-  // The false→true or true→false edge on THIS cell (Codex P2 on #727), derived
-  // from the SAME `cells` this fold reads — the caller's freshest local
-  // knowledge (runSetMark's cache-read `baseCells`), not a component-lifetime
-  // render snapshot. Mirrors `attachProof`'s `markTransition` (proofs.ts),
-  // which derives it from its own transaction's live `existingCell` read for
-  // the identical reason: another tab can already have folded this Square
-  // into the shared persistent cache (another device's Mark synced in, or
-  // this same tab's own prior write) before this call runs, and `setMark`
-  // deliberately fields that fresher cache — writing a true-to-true (or
-  // false-to-false) rewrite rather than a real transition. Gate the caller's
-  // `mark_square`/`unmark_square` emission on this field, not on the
-  // requested `nextMarked` direction alone, so that stale-render race can
-  // never double-fire the event for a Square that did not actually change.
+  // The false→true or true→false edge on THIS cell, derived from the SAME
+  // freshest cache `runSetMark` folds. It decides whether the client writes a
+  // direct-analytics REQUEST token at all; a server trigger still validates
+  // the final committed before/after edge, so a stale tab can never turn its
+  // cache verdict into an analytics event by itself.
   markTransition: boolean;
 } {
   const { cells, index, nextMarked, claimMode, currentFirstBingoAt, now } = params;
@@ -1356,6 +1348,7 @@ export function computeMark(params: {
       echo: _echo,
       echoOptOut: _echoOptOut,
       echoAnalyticsId: _echoAnalyticsId,
+      echoAnalyticsTrigger: _echoAnalyticsTrigger,
       ...manual
     } = c;
     return {
@@ -1586,17 +1579,14 @@ export async function setMark(params: {
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
-  // The false→true / true→false edge on the ACTED cell (Codex P2 on #727) —
-  // see `computeMark`'s `markTransition` doc. The caller gates its
-  // `mark_square`/`unmark_square` emission on this, not on the requested
-  // `nextMarked` direction, so a stale-cache-fold rewrite never double-fires.
+  // The local false→true / true→false verdict on the acted cell. It gates
+  // whether this write carries a direct-analytics request token; the durable
+  // `mark_square`/`unmark_square` record is derived later from server state.
   markTransition: boolean;
   // A committed server acknowledgement for this specific batch. It stays
   // separate from the immediate UI verdict because offline writes must queue
   // without holding the Board interaction open.
   committed: Promise<void>;
-  // Durable identity stamped in the same cell write as a genuine direct edge.
-  markTransitionId: string | undefined;
 }> {
   const { uid } = params;
   const database = params.database ?? db;
@@ -1645,7 +1635,6 @@ async function runSetMark(
   blackoutTransition: boolean;
   markTransition: boolean;
   committed: Promise<void>;
-  markTransitionId: string | undefined;
 }> {
   const { uid } = params;
   // Daily-cards mode (#246): route the Mark to the DAY-SCOPED board
@@ -1725,17 +1714,20 @@ async function runSetMark(
     currentFirstBingoAt: baseFirstBingoAt,
     now,
   });
-  const stampedMark = stampMarkAnalyticsTransition({
-    before: baseCells,
-    after: computed.cells,
-    eventId: EVENT_ID,
-    uid,
-    dayIndex,
-    boardSeed: markSeed,
-    cellIndex: params.index,
-  });
-  const { cells } = stampedMark;
   const { player, bingo, blackout, bingoTransition, blackoutTransition, markTransition } = computed;
+  const cells = computed.cells;
+  // This token is deliberately NOT the analytics identity. A Firestore
+  // trigger reads the committed board before/after pair and writes the
+  // durable event only when the server really observed this cell edge. That
+  // means an offline queue survives a reload, while a stale tab's true→true
+  // rewrite carries a new request but produces no false second event.
+  const directAnalyticsRequest = markTransition
+    ? directMarkAnalyticsRequest({
+        cellIndex: params.index,
+        marked: params.nextMarked,
+        mode: params.claimMode,
+      })
+    : undefined;
 
   const toggled = cells.find((c) => c.index === params.index);
   const echoDayIndexes =
@@ -1888,6 +1880,7 @@ async function runSetMark(
     boardRef,
     ...cellsMergeSet(cellsPatch(changedCells(baseCells, cells)), {
       ...(typeof markSeed === 'number' ? { markSeed } : {}),
+      ...(directAnalyticsRequest ? { directAnalyticsRequest } : {}),
     }),
   );
   // Echoed sibling boards ride the SAME batch, each carrying ITS OWN board's
@@ -2156,7 +2149,6 @@ async function runSetMark(
     blackoutTransition,
     markTransition,
     committed,
-    markTransitionId: stampedMark.transitionId,
   };
 }
 

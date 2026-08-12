@@ -32,6 +32,7 @@ import {
 } from './unlockDay';
 import { runDailyEmailSweep, type DailyEmailFirestore } from './dailyEmail';
 import { handleUnsubscribeRequest } from './emailOptOut';
+import { recordDirectMarkAnalytics } from './directMarkAnalytics';
 
 initializeApp();
 setGlobalOptions({ region: 'us-central1', maxInstances: 10 });
@@ -248,6 +249,44 @@ export const notifyItemModeration = onDocumentWritten(
       event.data?.before.data(),
       event.data?.after.data(),
     ),
+);
+
+/**
+ * Direct Board marks must be derived from Firestore's committed before/after
+ * state, rather than a browser continuation that can die while an offline
+ * write is queued. The pure edge detector also rejects stale true→true and
+ * false→false rewrites even when they carry a fresh client request token.
+ *
+ * The two paths deliberately have separate exports: daily Boards carry their
+ * canonical path Day, while legacy Boards omit `dayIndex` rather than
+ * inventing a misleading Day 0. The immutable row id is the CloudEvent id, so
+ * Cloud Functions' at-least-once trigger delivery cannot duplicate it.
+ */
+export const recordLegacyDirectMarkAnalytics = onDocumentWritten(
+  { document: 'events/{eventId}/boards/{uid}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (event) =>
+    recordDirectMarkAnalytics(db, {
+      eventId: event.params.eventId,
+      uid: event.params.uid,
+      transitionId: event.id,
+      before: event.data?.before.data(),
+      after: event.data?.after.data(),
+    }),
+);
+
+export const recordDayDirectMarkAnalytics = onDocumentWritten(
+  { document: 'events/{eventId}/days/{dayIndex}/boards/{uid}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  (event) => {
+    const dayIndex = Number(event.params.dayIndex);
+    return recordDirectMarkAnalytics(db, {
+      eventId: event.params.eventId,
+      uid: event.params.uid,
+      transitionId: event.id,
+      before: event.data?.before.data(),
+      after: event.data?.after.data(),
+      ...(Number.isInteger(dayIndex) && dayIndex >= 0 ? { dayIndex } : {}),
+    });
+  },
 );
 
 /**

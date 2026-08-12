@@ -49,7 +49,19 @@ export function stampEchoAnalyticsTransitions(params: {
           typeof cell.echoGeneration === 'number' &&
           Number.isSafeInteger(cell.echoGeneration) &&
           cell.echoGeneration > 0 &&
-          !cell.echoAnalyticsId,
+          // A reversal can retain a prior cell's ID if it passed through a
+          // non-Board writer (for example, proof deletion). The generation is
+          // the transition identity, so replace a stale ID rather than
+          // suppressing the newly-earned Echo behind it.
+          cell.echoAnalyticsId !==
+            echoAnalyticsId({
+              eventId: params.eventId,
+              uid: params.uid,
+              dayIndex: params.dayIndex,
+              boardSeed: params.boardSeed,
+              cellIndex: cell.index,
+              generation: cell.echoGeneration,
+            }),
       )
       .sort((a, b) => a.index - b.index)
       .slice(0, limit)

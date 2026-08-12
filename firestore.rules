@@ -744,6 +744,15 @@ service cloud.firestore {
         allow create, update: if (isOwner(uid) || isAdmin(eventId))
           && reshuffleCounterMonotonic();
         allow delete: if isAdmin(eventId);
+
+        // Immutable, server-authored direct Board transition records. The
+        // owner consumes them to deliver durable analytics after an offline
+        // queue drain or reload; no client may create, modify, or erase a
+        // record (the Cloud Functions Admin SDK bypasses these rules).
+        match /analyticsTransitions/{transitionId} {
+          allow read: if isOwner(uid) || isAdmin(eventId);
+          allow write: if false;
+        }
       }
 
       // Per-spend reshuffle markers (#463 finding 1) — see reshuffleSpendMarked

@@ -441,12 +441,6 @@ export interface Cell {
   // replays this original trigger, rather than reclassifying a deal/mark echo
   // as an `open_reconcile` event merely because another device delivered it.
   echoAnalyticsTrigger?: 'deal' | 'reshuffle' | 'mark' | 'open_reconcile' | 'admin_confirm';
-  // Durable identity for a direct Board mark/unmark transition. It is stamped
-  // in the same batch as the cell, so concurrent stale writers report the
-  // same transitionId after their commits instead of two indistinguishable
-  // analytics rows. The generation survives later reversals.
-  markAnalyticsGeneration?: number;
-  markAnalyticsId?: string;
   // A Player can explicitly unmark an Echo on this card. Keep that choice on
   // the cell so open-time reconciliation does not add the same Echo back.
   echoOptOut?: boolean;
@@ -461,6 +455,17 @@ export interface BoardDoc {
   // exclude repeats across the cruise.
   dayIndex: number;
   seed: number;
+  // The latest direct Board-toggle request. A server trigger compares its
+  // changed token with the committed before/after cell state and records an
+  // analytics transition only when the server actually observed that edge.
+  // This stays on the Board (rather than a cell) so it cannot be mistaken for
+  // a later proof/admin/echo write that happens to reuse the same cell.
+  directAnalyticsRequest?: {
+    id: string;
+    cellIndex: number;
+    marked: boolean;
+    mode: ClaimMode;
+  };
   // Last Board seed a normal Mark write was computed against. Firestore rules use
   // this as a stale-write guard after a Reshuffle; legacy rows may omit it.
   markSeed?: number;

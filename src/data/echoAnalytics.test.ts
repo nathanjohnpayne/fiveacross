@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Cell } from '../types';
 import { applyEchoes } from '../game/logic';
-import { echoAnalyticsIds, stampEchoAnalyticsTransitions } from './echoAnalytics';
+import { echoAnalyticsId, echoAnalyticsIds, stampEchoAnalyticsTransitions } from './echoAnalytics';
 
 const cell = (overrides: Partial<Cell> = {}): Cell => ({
   index: 4,
@@ -57,5 +57,23 @@ describe('persisted Echo analytics identities', () => {
       limit: 0,
     });
     expect(echoAnalyticsIds(suppressed)).toEqual([]);
+  });
+
+  it('replaces an old identity when a non-Board reversal re-earns an Echo', () => {
+    const prior = echoAnalyticsId({
+      eventId: 'event',
+      uid: 'player',
+      dayIndex: 2,
+      boardSeed: 42,
+      cellIndex: 4,
+      generation: 1,
+    });
+    const reechoed = stamped(
+      [cell({ echo: true, echoGeneration: 2, echoAnalyticsId: prior, echoAnalyticsTrigger: 'mark' })],
+      [cell({ echo: true, echoGeneration: 2, echoAnalyticsId: prior, echoAnalyticsTrigger: 'mark' })],
+    );
+
+    expect(echoAnalyticsIds(reechoed)).toEqual([expect.stringContaining(':2')]);
+    expect(echoAnalyticsIds(reechoed)[0]).not.toBe(prior);
   });
 });

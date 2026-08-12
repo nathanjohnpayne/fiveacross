@@ -646,6 +646,27 @@ function LockedDayPreview({
 export default function Board() {
   const { user, retryDeal, dealing } = useAuth();
   const uid = user?.uid;
+  // Direct mark/unmark analytics is server-observed rather than emitted from
+  // an optimistic Board callback: a durable record appears after an offline
+  // queue drains even if this tab was closed before acknowledgement. Dynamic
+  // loading keeps the primary Board interaction independent of this optional
+  // listener in constrained/test environments.
+  useEffect(() => {
+    if (!uid) return;
+    let unsubscribe = () => {};
+    let active = true;
+    void import('../data/directMarkAnalytics')
+      .then(({ subscribeDirectMarkAnalytics }) => {
+        const nextUnsubscribe = subscribeDirectMarkAnalytics(uid);
+        if (active) unsubscribe = nextUnsubscribe;
+        else nextUnsubscribe();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [uid]);
   // The single legacy Board (pre-1.5 events with no `days[]` schedule). In daily-
   // cards mode the rendered Board is the DAY-SCOPED one below; this stays the
   // source only for legacy events (#246).
@@ -2026,42 +2047,11 @@ export default function Board() {
       // defaults to 0 on a legacy board — a value that would misread as a
       // real "Day 1" rather than "no Day schedule".
       //
-      // Gated on `res.markTransition` (Codex P2 on #727), `setMark` folds
-      // onto the FRESHEST cached Board it can read
-      // (`runSetMark`'s `getDocFromCache`), which can already hold this exact
-      // transition when another tab's Mark (or this tab's own earlier Mark)
-      // synced in between this render and the tap landing — a stale-render
-      // race that makes `doMark` run a true-to-true (pledge again on an
-      // already-marked cache) or false-to-false (unmark an already-unmarked
-      // cache) rewrite. `nextMarked` alone can't see that: it is the
-      // REQUESTED direction, not whether the write actually crossed an edge.
-      // `res.markTransition` is derived from the SAME cache read `setMark`
-      // folded onto, so it is never wrong in the direction that matters here.
-      // But that cache verdict is still optimistic: emit only after this
-      // batch's server acknowledgement. The cell carries the same durable
-      // `transitionId` in that batch, so two stale tabs that commit the same
-      // edge are distinguishable as one transition in downstream analysis.
-      if (res.markTransition && res.markTransitionId) {
-        void res.committed
-          .then(() => {
-            if (nextMarked) {
-              track('mark_square', {
-                source: 'pledge',
-                mode: claimMode,
-                marked: true,
-                dayIndex: hasDays ? viewedIndex : undefined,
-                transitionId: res.markTransitionId,
-              });
-            } else {
-              track('unmark_square', {
-                mode: claimMode,
-                dayIndex: hasDays ? viewedIndex : undefined,
-                transitionId: res.markTransitionId,
-              });
-            }
-          })
-          .catch(() => undefined);
-      }
+      // Direct-mark analytics is not emitted from this optimistic client
+      // verdict. `setMark` writes a fresh request token, then the server
+      // observes the committed before/after Board state and records a durable
+      // transition only for a real edge. The Board-wide listener installed
+      // above delivers that record after a reload or offline queue drain.
       if (nextMarked && res.bingo) track('bingo');
       if (nextMarked) {
         // Feed Moment broadcast on the ACTION path (issue #104): the win is tied

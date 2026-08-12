@@ -147,19 +147,14 @@ beforeEach(() => {
   H.event = { claimMode: 'honor' } as EventDoc;
   H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
   H.player = null;
-  // `markTransition: true` is the DEFAULT here (Codex P2 on #727): every
-  // existing test in this suite represents a genuine tap-caused transition —
-  // an unmarked Square getting pledged, or a marked one getting unmarked —
-  // so the default mock must agree with `doMark`'s new gate or the whole
-  // suite would falsely read as "no transition, suppress the event." The one
-  // test that exercises the OPPOSITE case (a stale-cache rewrite) overrides
-  // this per-call.
+  // `markTransition: true` is the default because every tap in this suite is
+  // a genuine local edge. The server's before/after trigger is separately
+  // tested for the final analytics verdict, including stale-cache rewrites.
   H.setMark.mockResolvedValue({
     cells: [],
     bingo: false,
     blackout: false,
     markTransition: true,
-    markTransitionId: 'mark-v1:test',
     committed: Promise.resolve(),
   });
   H.attachProof.mockResolvedValue(undefined);
@@ -187,17 +182,13 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // A pledge writes NO Proof doc — no Feed entry, no Doubt satisfaction.
     expect(H.attachProof).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByText(/proof for/i)).toBeNull());
-    // #721: the pledge is the 'pledge' source of mark_square, never conflated
-    // with a bare boolean — marked: true is explicit and source pins the mode.
-    await waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith(
-        'mark_square',
-        expect.objectContaining({ source: 'pledge', mode: 'honor', marked: true, transitionId: 'mark-v1:test' }),
-      ),
-    );
+    // #727's Phase 4b repair deliberately does NOT dispatch an optimistic
+    // client event here. A server-observed immutable record delivers the
+    // pledge only after Firestore has committed a real state edge.
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
-  it('waits for the mark batch acknowledgement before emitting the direct-transition event', async () => {
+  it('does not let an acknowledgement callback become the direct-transition delivery path', async () => {
     let acknowledge!: () => void;
     const committed = new Promise<void>((resolve) => {
       acknowledge = resolve;
@@ -207,7 +198,6 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
       bingo: false,
       blackout: false,
       markTransition: true,
-      markTransitionId: 'mark-v1:deferred',
       committed,
     });
     const user = userEvent.setup();
@@ -219,12 +209,8 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
 
     acknowledge();
-    await waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith(
-        'mark_square',
-        expect.objectContaining({ transitionId: 'mark-v1:deferred' }),
-      ),
-    );
+    await Promise.resolve();
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('Cancel leaves the Square unmarked; unmarking a marked Square stays instant with no sheet', async () => {
@@ -245,15 +231,10 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
     expect(H.setMark.mock.calls[0][0]).toMatchObject({ index: 1, nextMarked: false });
     expect(screen.queryByText(/proof for/i)).toBeNull();
-    // #721: an unmark fires the distinct unmark_square event, NEVER
-    // mark_square { marked: false } — the fix for the #721 root cause (a raw
-    // mark_square count that mixed unmarks in with real marks).
-    await waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith(
-        'unmark_square',
-        expect.objectContaining({ mode: 'honor', transitionId: 'mark-v1:test' }),
-      ),
-    );
+    // The server emits the distinct unmark_square record only after it sees
+    // the committed true→false edge; Board itself never emits a speculative
+    // mark_square/unmark_square row.
+    expect(H.track).not.toHaveBeenCalledWith('unmark_square', expect.anything());
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
@@ -288,31 +269,19 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // by this fix) — asserted here as the baseline the analytics event must
     // agree with.
     expect(H.setMark.mock.calls[0][0]).toMatchObject({ dayIndex: 0 });
-    // The FIX: mark_square carries the ACTED Day (0), never `today` (1) —
-    // before #727's fix this event carried no `dayIndex` at all and relied
-    // on the app-wide `day_index` default dimension, which is registered
-    // once from `todaysDayIndex` and would misattribute this exact scenario.
-    await waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith(
-        'mark_square',
-        expect.objectContaining({
-          source: 'pledge',
-          mode: 'honor',
-          marked: true,
-          dayIndex: 0,
-          transitionId: 'mark-v1:test',
-        }),
-      ),
-    );
+    // The trigger receives this canonical path Day and writes it into the
+    // durable event record; direct trigger coverage asserts the final event
+    // rather than pretending this client callback is delivery.
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('a stale-cache-fold rewrite (no real transition) fires no mark_square (Codex P2 on #727)', async () => {
     // Another tab already synced this exact Mark into the shared persistent
     // cache before the pledge's tap lands — `setMark` deliberately folds
     // from that fresher cache and performs a true-to-true rewrite, not a
-    // real transition. `res.markTransition: false` is what `runSetMark`
-    // reports for that case; `doMark` must gate the event on it, not on the
-    // requested `nextMarked` direction alone.
+    // real transition. `res.markTransition: false` suppresses even the client
+    // request token; the server-side edge detector independently protects the
+    // same invariant when a local cache is stale.
     const user = userEvent.setup();
     H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: false });
     render(<Board />);

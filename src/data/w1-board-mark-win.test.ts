@@ -334,11 +334,20 @@ describe('setMark (write shape)', () => {
     // The board write's mask (#458 round 8): one FieldPath per changed cell
     // (replace-wholesale, so omission-removed fields die) + the extras.
     const boardOpts = setSpy.mock.calls[0][2] as { mergeFields: Array<{ isEqual?: (o: unknown) => boolean }> };
-    expect(boardOpts.mergeFields).toHaveLength(2);
+    expect(boardOpts.mergeFields).toHaveLength(3);
     expect(boardOpts.mergeFields[0].isEqual!(new FieldPath('cells', '3'))).toBe(true);
     expect(boardOpts.mergeFields[1]).toBe('markSeed');
+    expect(boardOpts.mergeFields[2]).toBe('directAnalyticsRequest');
     expect(setSpy.mock.calls[1][2]).toEqual({ merge: true });
     expect(setSpy.mock.calls[0][1]).toMatchObject({ markSeed: 42 });
+    expect(setSpy.mock.calls[0][1]).toMatchObject({
+      directAnalyticsRequest: {
+        cellIndex: 3,
+        marked: true,
+        mode: 'honor',
+        id: expect.any(String),
+      },
+    });
     expect((setSpy.mock.calls[0][1].cells as Cell[])[3].marked).toBe(true);
     expect(setSpy.mock.calls[1][1]).toMatchObject({
       squaresMarked: 1,
@@ -370,7 +379,6 @@ describe('setMark (write shape)', () => {
       blackoutTransition: false,
       markTransition: true,
       committed: expect.any(Promise),
-      markTransitionId: expect.any(String),
     });
   });
 });
@@ -674,7 +682,6 @@ describe('setMark (surfaces a genuine commit failure instead of swallowing it)',
       blackoutTransition: false,
       markTransition: true,
       committed: expect.any(Promise),
-      markTransitionId: expect.any(String),
     });
 
     // commit() is fire-and-forget, so the .catch runs on a later microtask.

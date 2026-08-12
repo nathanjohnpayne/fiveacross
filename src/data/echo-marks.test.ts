@@ -682,7 +682,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
   });
 
-  it('REGRESSION: with no repeated Prompts the batch is byte-identical to an echo-less call', async () => {
+  it('REGRESSION: with no repeated Prompts the batch has the same shape as an echo-less call', async () => {
     // Pin the clock: the two runs stamp `markedAt: Date.now()`, and crossing a
     // millisecond boundary between them would fail the byte-identity check for
     // the wrong reason (observed CI-only).
@@ -696,7 +696,28 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       vi.clearAllMocks();
       await markShared({ echoDayIndexes: undefined });
       const withoutEchoParam = H.batchSet.mock.calls.map((c) => [segs(c), c[1], c[2]]);
-      expect(withEchoParam).toEqual(withoutEchoParam);
+      // A direct toggle always mints a fresh request token for the
+      // server-observed analytics trigger. Normalize that intentionally unique
+      // value before comparing the no-echo and omitted-param write shapes.
+      const normalizeRequestId = (writes: unknown[][]) =>
+        writes.map(([path, data, options]) => [
+          path,
+          typeof data === 'object' && data !== null
+            ? {
+                ...(data as Record<string, unknown>),
+                ...((data as { directAnalyticsRequest?: unknown }).directAnalyticsRequest
+                  ? {
+                      directAnalyticsRequest: {
+                        ...((data as { directAnalyticsRequest: Record<string, unknown> }).directAnalyticsRequest),
+                        id: '<request>',
+                      },
+                    }
+                  : {}),
+              }
+            : data,
+          options,
+        ]);
+      expect(normalizeRequestId(withEchoParam)).toEqual(normalizeRequestId(withoutEchoParam));
       expect(withEchoParam.some(([a]) => (a as string[])[2] === 'days' && (a as string[])[3] === '3')).toBe(false);
     } finally {
       vi.useRealTimers();
