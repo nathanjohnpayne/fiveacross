@@ -44,6 +44,33 @@ describe('server-observed direct-mark analytics', () => {
     });
   });
 
+  it('preserves the committed proof/admin source instead of attributing every edge to a pledge', () => {
+    expect(
+      directMarkAnalyticsForWrite({
+        before: board(false, { id: 'old' }),
+        after: board(true, request({ source: 'proof', mode: 'proof_required' })),
+        uid: 'u1',
+        transitionId: 'cloud-event-proof',
+        commitOrder: COMMIT_ORDER,
+      }),
+    ).toMatchObject({ name: 'mark_square', source: 'proof', mode: 'proof_required' });
+    expect(
+      directMarkAnalyticsForWrite({
+        before: {
+          cells: { '4': { marked: true, status: 'pending' } },
+          directAnalyticsRequest: { id: 'old' },
+        },
+        after: {
+          cells: { '4': { marked: true, status: 'confirmed' } },
+          directAnalyticsRequest: request({ source: 'admin_confirm', mode: 'admin_confirmed' }),
+        },
+        uid: 'u1',
+        transitionId: 'cloud-event-confirm',
+        commitOrder: COMMIT_ORDER,
+      }),
+    ).toMatchObject({ name: 'mark_square', source: 'admin_confirm', mode: 'admin_confirmed' });
+  });
+
   it('ignores a stale writer that changes its request token but leaves the committed cell marked', () => {
     expect(
       directMarkAnalyticsForWrite({

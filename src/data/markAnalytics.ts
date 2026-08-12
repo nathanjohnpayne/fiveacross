@@ -12,6 +12,7 @@ export interface DirectMarkAnalyticsRequest {
   cellIndex: number;
   marked: boolean;
   mode: ClaimMode;
+  source: 'pledge' | 'proof' | 'admin_confirm';
 }
 
 const localRequestStorageKey = 'five-across:local-direct-mark-requests';
@@ -56,6 +57,7 @@ export function directMarkAnalyticsRequest(params: {
   cellIndex: number;
   marked: boolean;
   mode: ClaimMode;
+  source?: DirectMarkAnalyticsRequest['source'];
   id?: string;
 }): DirectMarkAnalyticsRequest {
   const request = {
@@ -63,6 +65,7 @@ export function directMarkAnalyticsRequest(params: {
     cellIndex: params.cellIndex,
     marked: params.marked,
     mode: params.mode,
+    source: params.source ?? 'pledge',
   };
   if (request.marked) rememberLocalMarkRequest(request.id);
   return request;

@@ -6,7 +6,7 @@ import type { ClaimMode } from '../types';
 
 export type DirectMarkAnalyticsEvent = {
   name: 'mark_square' | 'unmark_square';
-  source?: 'pledge';
+  source?: 'pledge' | 'proof' | 'admin_confirm';
   mode: ClaimMode;
   marked?: true;
   uid: string;
@@ -160,7 +160,7 @@ function dispatch(delivery: PendingDelivery): PendingDelivery {
     acknowledged = trackToAnalyticsSinks(
       event.name,
       {
-        ...(event.name === 'mark_square' ? { source: 'pledge', marked: true } : {}),
+    ...(event.name === 'mark_square' ? { source: event.source, marked: true } : {}),
         mode: event.mode,
         uid: event.uid,
         ...(event.dayIndex === undefined ? {} : { dayIndex: event.dayIndex }),
@@ -221,7 +221,13 @@ export function parseDirectMarkAnalyticsEvent(value: unknown): BoardAnalyticsEve
   ) {
     return null;
   }
-  if (event.name === 'mark_square' && (event.source !== 'pledge' || event.marked !== true)) return null;
+  if (
+    event.name === 'mark_square' &&
+    (event.source !== 'pledge' && event.source !== 'proof' && event.source !== 'admin_confirm')
+  ) {
+    return null;
+  }
+  if (event.name === 'mark_square' && event.marked !== true) return null;
   if (event.name === 'unmark_square' && (event.source !== undefined || event.marked !== undefined)) return null;
   return event as DirectMarkAnalyticsEvent;
 }

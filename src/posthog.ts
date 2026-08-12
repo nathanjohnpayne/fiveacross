@@ -557,7 +557,11 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
       // a proxy is blocked, which is the shipboard case. Module memory would
       // die with that navigation, so the startup crash this queue exists to
       // rescue would still vanish. sessionStorage survives the reload.
-      return persistPendingCaptures();
+      persistPendingCaptures();
+      // Session storage dies when the tab/window closes. A caller with its
+      // own durable outbox must therefore retry after PostHog becomes ready,
+      // rather than treating this pre-init queue as a delivery acknowledgement.
+      return false;
     }
     return false;
   }

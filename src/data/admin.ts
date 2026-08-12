@@ -5,6 +5,7 @@ import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, ap
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
+import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
@@ -373,15 +374,15 @@ export async function adminUpdateItemText(id: string, text: string): Promise<voi
 }
 
 /**
- * What one `resolve()` call performed, for `confirmClaim`'s post-commit
- * analytics to fire off of.
+ * What one `resolve()` call performed, for the server-observed analytics
+ * transition that `confirmClaim` stamps in its Board write.
  */
 interface ResolveResult {
   /** Whether THIS call performed a genuine pending→confirmed transition on
    *  the claim's own cell (#721, Codex round 1 findings 3 & 5) — the moment
    *  `countMarked` (game/logic.ts, which excludes `status: 'pending'`) starts
-   *  crediting the Square, and therefore the ONLY moment `confirmClaim`'s
-   *  `mark_square { source: 'admin_confirm' }` may fire. `false` covers both
+   *  crediting the Square, and therefore the ONLY moment this write may carry
+   *  an `admin_confirm` durable analytics request. `false` covers both
    *  non-credit-changing cases in one signal: a stale claim whose board no
    *  longer exists, or whose cell no longer matches `isClaimCell` (both
    *  no-ops below — no write, no transition), and the concurrent-confirm
@@ -400,6 +401,18 @@ async function resolve(
   adminUid: string,
   status: 'confirmed' | 'rejected',
 ): Promise<ResolveResult> {
+  // One stable identity outside the retryable transaction. The server trigger
+  // observes the actual pending→confirmed edge and ignores this token unless
+  // that edge commits, so a closed admin tab cannot lose or invent an event.
+  const analyticsRequest =
+    status === 'confirmed'
+      ? directMarkAnalyticsRequest({
+          cellIndex: c.cellIndex,
+          marked: true,
+          mode: 'admin_confirmed',
+          source: 'admin_confirm',
+        })
+      : undefined;
   // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
   // its `dayIndex`, so resolve against `days/{dayIndex}/boards/{uid}` and fold the
   // owner's `dayStats[dayIndex]` — the SAME routing attachProof/setMark use. Legacy
@@ -557,6 +570,7 @@ async function resolve(
       // Per-cell merge (#457): only the resolved claim's cell rides the write.
       ...cellsMergeSet(cellsPatch(changedCells(cells, next)), {
         ...(typeof boardData.seed === 'number' ? { markSeed: boardData.seed } : {}),
+        ...(transitionedToConfirmed && analyticsRequest ? { directAnalyticsRequest: analyticsRequest } : {}),
       }),
     );
     for (const write of echoWrites) {
@@ -719,19 +733,9 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // not the claim owner's — there is otherwise no way to recover whose
   // Square this was from the payload alone.
   //
-  void confirmed
-    .then(async ({ transitioned }) => {
-      if (!transitioned) return;
-      const { track } = await import('../analytics');
-      track('mark_square', {
-        source: 'admin_confirm',
-        mode: 'admin_confirmed',
-        marked: true,
-        dayIndex: c.dayIndex,
-        uid: c.uid,
-      });
-    })
-    .catch(() => {});
+  // `resolve` stamps this committed edge with a stable request token. The
+  // server-side recorder, rather than this administrator's browser, delivers
+  // the analytics event for the claim owner's Board transition.
   return confirmed.then(() => undefined);
 }
 

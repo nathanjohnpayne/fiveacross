@@ -465,6 +465,7 @@ export interface BoardDoc {
     cellIndex: number;
     marked: boolean;
     mode: ClaimMode;
+    source: 'pledge' | 'proof' | 'admin_confirm';
   };
   // Last Board seed a normal Mark write was computed against. Firestore rules use
   // this as a stale-write guard after a Reshuffle; legacy rows may omit it.

@@ -1766,25 +1766,18 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     expect(write.dayStats[1].squaresMarked).toBe(1);
     expect(write.dayStats[2].squaresMarked).toBe(1);
     expect(write.squaresMarked).toBe(2);
-    // #721: confirming is the CREDITED transition for an admin_confirmed-mode
-    // Square (countMarked excludes `pending`) — fires mark_square{source:
-    // 'admin_confirm'}, the second of the two mark_square events this Square
-    // produces (the first, source: 'proof', fired at claim-submit time and is
-    // not this suite's concern). This is the CLAIM'S OWN Square, a player
-    // action, so it fires mark_square — never echo_mark, which is asserted
-    // separately below for Day 2's sibling echo.
-    // `dayIndex`/`uid` (Codex round 1 findings 2 & 6): the claim's own Day
-    // and OWNER — this call runs in the ADMIN's session, so without an
-    // explicit `uid` the event would attribute to the admin's distinct id.
-    await vi.waitFor(() =>
-      expect(H.track).toHaveBeenCalledWith('mark_square', {
-        source: 'admin_confirm',
-        mode: 'admin_confirmed',
+    // The committed claim-board edge is labelled for the server recorder;
+    // this administrator browser does not emit a lossy client-side event.
+    const claimBoardWrite = H.txSet.mock.calls.find((call) => isDayBoardWrite(call, 1));
+    expect(claimBoardWrite![1]).toMatchObject({
+      directAnalyticsRequest: {
+        cellIndex: 5,
         marked: true,
-        dayIndex: 1,
-        uid: 'u1',
-      }),
-    );
+        mode: 'admin_confirmed',
+        source: 'admin_confirm',
+        id: expect.any(String),
+      },
+    });
     const siblingWrite = H.txSet.mock.calls.find((call) => isDayBoardWrite(call, 2));
     const siblingCells = cellsFromData((siblingWrite![1] as { cells: unknown }).cells);
     expect(siblingCells.find((cell) => cell.echo)).toMatchObject({

@@ -310,50 +310,9 @@ export default function ProofSheet(props: Props) {
         proof,
       });
       track('attach_proof', { type, ...(type === 'photo' && photoSource ? { source: photoSource } : {}) });
-      // Mark-transition instrumentation (#721): proof-required/admin-confirmed
-      // flows (and an honor-mode Player who attaches proof instead of tapping
-      // the pledge) mark an unmarked square through THIS path, not
-      // `Board.doMark`'s `mark_square` call — so that call site alone misses
-      // them (the root cause of #721: only 6 `mark_square` events for a POC
-      // that marked 25 squares, almost all of them proof attaches).
-      // `res.markTransition` (Codex round 1 finding 6) — NOT the sheet's
-      // opening `cell` snapshot — is exactly "this attach just marked a
-      // previously-unmarked square": `attachProof` derives it from the LIVE
-      // board its own transaction read, so another device marking this
-      // Square in the gap between the sheet opening and this submit no
-      // longer double-fires (attachProof still runs — it merely attaches
-      // proof to an already-marked cell — but that is not a mark transition).
-      // A proof ADDED to an already-marked Square (the ＋ affordance) is
-      // likewise not a transition and fires nothing here. In
-      // `admin_confirmed` mode the cell lands `pending` (uncredited —
-      // `game/logic.ts`'s `countMarked` excludes it), so this event alone is
-      // not 1:1 with `dayStats[*].squaresMarked` in that mode; the later
-      // `admin_confirm` mark_square (`data/admin.ts`) is the one that
-      // corresponds to the credited transition — see specs/w2-ga4-events.md §
-      // Reconciliation. This ALSO subsumes the old direct
-      // `markSquareOccurred()` install-nudge trigger call that used to live
-      // here: `track()`'s own `mark_square` wiring (`useToastStack`'s module
-      // doc) now fires it, so a second direct call would only be duplicate
-      // logic. `dayIndex` (Codex round 1 finding 2): the viewed/proofed Day,
-      // the same value already threaded to `attachProof` above — never the
-      // global `day_index` default dimension, which is wrong for a Player
-      // catching up on an older Day. Gated on `daily` (Codex P2 on #727), NOT
-      // the raw `dayIndex` prop: on a legacy (non-daily) Event that prop
-      // carries the Board doc's OWN `dayIndex`, which defaults to 0 — a value
-      // that would misread as a real "Day 1" rather than "no Day schedule"
-      // (the same `board?.dayIndex`-defaults-to-0 trap `doMark`'s pledge event
-      // above already avoids). The `admin_confirm` source (`data/admin.ts`)
-      // stamps `c.dayIndex`, which is `undefined` for a legacy claim, so
-      // gating here on `daily` keeps all three `mark_square` sources
-      // consistent: a legacy Event's Marks never carry a Day at all.
-      if (res?.markTransition) {
-        track('mark_square', {
-          source: 'proof',
-          mode: claimMode,
-          marked: true,
-          dayIndex: daily ? dayIndex : undefined,
-        });
-      }
+      // `attachProof` stamps a stable request only when its own live
+      // transaction observed the false→true edge; the server recorder then
+      // delivers that proof-source mark durably after the commit.
       // Report the win verdict AFTER the transaction committed and BEFORE closing,
       // so Board enqueues the Moment for a proofed win (PR #110 round 2 finding 1).
       // Truthiness-guarded: suites stub attachProof to resolve undefined.

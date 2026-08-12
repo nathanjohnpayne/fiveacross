@@ -11,7 +11,7 @@
 
 export type DirectMarkAnalyticsEvent = {
   name: 'mark_square' | 'unmark_square';
-  source?: 'pledge';
+  source?: 'pledge' | 'proof' | 'admin_confirm';
   mode: 'honor' | 'proof_required' | 'admin_confirmed';
   marked?: true;
   uid: string;
@@ -35,6 +35,7 @@ export type BoardAnalyticsEvent = DirectMarkAnalyticsEvent | EchoAnalyticsEvent;
 
 type BoardCell = {
   marked?: unknown;
+  status?: unknown;
   echo?: unknown;
   echoAnalyticsId?: unknown;
   echoAnalyticsTrigger?: unknown;
@@ -44,6 +45,7 @@ type DirectRequest = {
   cellIndex?: unknown;
   marked?: unknown;
   mode?: unknown;
+  source?: unknown;
 };
 type BoardWrite = {
   cells?: Record<string, BoardCell>;
@@ -51,6 +53,7 @@ type BoardWrite = {
 };
 
 const CLAIM_MODES = new Set(['honor', 'proof_required', 'admin_confirmed']);
+const DIRECT_SOURCES = new Set(['pledge', 'proof', 'admin_confirm']);
 const ECHO_TRIGGERS = new Set(['deal', 'reshuffle', 'mark', 'open_reconcile', 'admin_confirm']);
 
 /**
@@ -96,18 +99,26 @@ export function directMarkAnalyticsForWrite(params: {
     request.cellIndex > 24 ||
     typeof request.marked !== 'boolean' ||
     typeof request.mode !== 'string' ||
-    !CLAIM_MODES.has(request.mode)
+    !CLAIM_MODES.has(request.mode) ||
+    (request.source !== undefined && (typeof request.source !== 'string' || !DIRECT_SOURCES.has(request.source)))
   ) {
     return null;
   }
 
   const cellKey = String(request.cellIndex);
-  const beforeMarked = params.before?.cells?.[cellKey]?.marked === true;
-  const afterMarked = params.after?.cells?.[cellKey]?.marked === true;
+  const beforeCell = params.before?.cells?.[cellKey];
+  const afterCell = params.after?.cells?.[cellKey];
+  const beforeMarked = beforeCell?.marked === true;
+  const afterMarked = afterCell?.marked === true;
   // Both checks matter: a forged/mismatched request cannot name a different
   // changed cell, and an unchanged server state cannot become an event merely
   // because a stale client wrote a new request token.
-  if (beforeMarked === afterMarked || afterMarked !== request.marked) return null;
+  const source = (request.source ?? 'pledge') as NonNullable<DirectMarkAnalyticsEvent['source']>;
+  const committedEdge =
+    source === 'admin_confirm'
+      ? request.marked === true && beforeCell?.status === 'pending' && afterCell?.status === 'confirmed'
+      : beforeMarked !== afterMarked && afterMarked === request.marked;
+  if (!committedEdge) return null;
 
   const common = {
     mode: request.mode as DirectMarkAnalyticsEvent['mode'],
@@ -118,7 +129,7 @@ export function directMarkAnalyticsForWrite(params: {
     commitOrder: params.commitOrder,
   };
   return afterMarked
-    ? { name: 'mark_square', source: 'pledge', marked: true, ...common }
+    ? { name: 'mark_square', source, marked: true, ...common }
     : { name: 'unmark_square', ...common };
 }
 

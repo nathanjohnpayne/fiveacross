@@ -7,6 +7,7 @@ import { markerDisplayName } from './attribution';
 import { completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
+import { directMarkAnalyticsRequest } from './markAnalytics';
 import type { Cell, ClaimMode, ProofDoc, ProofType } from '../types';
 
 const rawProofs = () => collection(db, 'events', EVENT_ID, 'proofs');
@@ -191,6 +192,15 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
   }
 
   const pending = claimMode === 'admin_confirmed';
+  // Stable across every transaction retry. It is written only for the
+  // committed false→true edge below, where the server observer turns it into
+  // the durable analytics record even if this tab closes immediately after.
+  const analyticsRequest = directMarkAnalyticsRequest({
+    cellIndex,
+    marked: true,
+    mode: claimMode,
+    source: 'proof',
+  });
 
   // Recompute cells from the live board inside a transaction so a concurrent
   // mark from another tab/device isn't clobbered by this caller's stale snapshot.
@@ -273,6 +283,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       boardRef,
       ...cellsMergeSet(cellsPatch(changedCells(liveCells, next)), {
         ...(typeof boardData?.seed === 'number' ? { markSeed: boardData.seed } : {}),
+        ...(markTransition ? { directAnalyticsRequest: analyticsRequest } : {}),
       }),
     );
     // The standings freeze (#265): a post-freeze proofed Mark keeps the card +

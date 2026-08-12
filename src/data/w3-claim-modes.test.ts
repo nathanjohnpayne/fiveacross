@@ -200,9 +200,16 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
     await confirmClaim(pendingClaim(), 'admin-1');
 
     // The board cell is now confirmed (credited by the mask) and the stat rises.
-    const board = setPayload('/boards/') as { cells: Cell[] };
+    const board = setPayload('/boards/') as { cells: Cell[]; directAnalyticsRequest?: Record<string, unknown> };
     expect(board.cells[4].status).toBe('confirmed');
     expect(board.cells[4].markedAt).toBe(1000);
+    expect(board.directAnalyticsRequest).toMatchObject({
+      cellIndex: 4,
+      marked: true,
+      mode: 'admin_confirmed',
+      source: 'admin_confirm',
+      id: expect.any(String),
+    });
     expect(setPayload('/players/')).toMatchObject({ squaresMarked: 1 });
     // The pending (admin-only) Proof becomes publicly visible on confirm.
     expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
