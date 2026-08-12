@@ -40,6 +40,13 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+// The dotenv reader these files are written for. Imported rather than
+// re-implemented because every round of review on PR #730 found the same thing:
+// a hand-written approximation of this parser disagrees with it somewhere, and
+// disagreeing in the accepting direction is a hang. firebase-tools is a
+// devDependency and `npx firebase` runs moments later in the same script, so
+// this adds no dependency the runner did not already have.
+import { parse } from 'firebase-tools/lib/functions/env.js';
 
 /**
  * `defineString('NAME'` / `defineBoolean('NAME'` / `defineSecret('NAME'` …
@@ -245,22 +252,37 @@ export function e2eFunctionsEnv(paramsSource, projectId) {
 }
 
 /**
- * Declared names a dotenv file body fails to assign. Used to hold a developer's
- * OWN pre-existing `functions/.env.local` to the same rule — a file written
- * before a param was added hangs exactly like a missing one, and is the case
- * least likely to be noticed, since the person who has one never sees the bug
- * that a fresh checkout hits.
+ * Declared names a dotenv body does not assign. Used to hold a developer's OWN
+ * pre-existing `functions/.env.local` to the same rule — a file written before a
+ * param was added hangs exactly like a missing one, and is the case least likely
+ * to be noticed, since the person who has one never sees the bug that a fresh
+ * checkout hits.
  *
- * The prefix mirrors firebase-tools' `LINE_RE` (`^\s*(?:export)?\s*KEY\s*=`)
- * rather than a tighter `KEY=`, because THIS check decides whether to abort
- * someone else's run: a file the emulator would read happily must not be
- * rejected here. `export EMAIL_FROM=x` and `EMAIL_FROM = x` are both
- * assignments to that parser (Codex P2 on PR #730).
+ * Delegated to the consumer's parser rather than pattern-matched, after two
+ * rounds of finding that no regex agrees with it (Codex P2 x2 on PR #730). Line
+ * matching was wrong in both directions: it rejected `export KEY=x` and
+ * `KEY = x`, which that parser accepts, and — worse, because this direction
+ * ends in a hang rather than an error — it accepted a `KEY=` that appears
+ * INSIDE a multiline quoted value, which the parser does not treat as an
+ * assignment at all.
  */
 export function unassignedNames(fileBody, names) {
-  return names.filter(
-    (name) => !new RegExp(`^\\s*(?:export)?\\s*${name}\\s*=`, 'm').test(fileBody),
-  );
+  const assigned = parse(fileBody).envs;
+  return names.filter((name) => !Object.hasOwn(assigned, name));
+}
+
+/**
+ * Secret names a `.secret.local` body does not usefully supply — present but
+ * EMPTY counts as missing here, mirroring the emulator's own test.
+ *
+ * `resolveSecretEnvs` filters with `!secretEnvs[s.key]` and reaches for the real
+ * Secret Manager for anything falsey, so a leftover `RESEND_API_KEY=` would send
+ * a supposedly self-contained e2e run looking for live credentials (Codex P2 on
+ * PR #730). A names-only check cannot see that.
+ */
+export function unusableSecretNames(fileBody, names) {
+  const assigned = parse(fileBody).envs;
+  return names.filter((name) => !assigned[name]);
 }
 
 /**
@@ -293,20 +315,18 @@ function mergedDotenvBody(directory, projectId) {
     .join('\n');
 }
 
-function ensureFile(path, names, body, coverageBody) {
+function ensureFile(path, names, body, { coverageBody, unmet, consequence }) {
   if (!existsSync(path)) {
     writeFileSync(path, body);
     return;
   }
-  const missing = unassignedNames(coverageBody ?? readFileSync(path, 'utf8'), names);
+  const missing = unmet(coverageBody ?? readFileSync(path, 'utf8'), names);
   if (missing.length > 0) {
+    const one = missing.length === 1;
     throw new Error(
       `${path} exists, but functions/src/params.ts declares ${missing.join(', ')} — ` +
-        `${missing.length === 1 ? 'that name is' : 'those names are'} not set in any dotenv ` +
-        'file the emulator reads, and it would block forever prompting for ' +
-        `${missing.length === 1 ? 'it' : 'them'}. Add the missing line(s) to ${path} (or to ` +
-        `any file the emulator merges), or delete ${path} to have npm run test:e2e ` +
-        'regenerate it.',
+        `${one ? 'that name is' : 'those names are'} ${consequence}. Add the missing ` +
+        `line(s) to ${path}, or delete ${path} to have npm run test:e2e regenerate it.`,
     );
   }
 }
@@ -327,8 +347,19 @@ function main(argv) {
   // which of these two files it owns before calling here, and removes only
   // those on exit.
   const { env, secret } = e2eFunctionsEnv(source, projectId);
-  ensureFile(envPath, params, env, mergedDotenvBody(dirname(envPath), projectId));
-  ensureFile(secretPath, secrets, secret);
+  ensureFile(envPath, params, env, {
+    coverageBody: mergedDotenvBody(dirname(envPath), projectId),
+    unmet: unassignedNames,
+    consequence:
+      'not set in any dotenv file the emulator merges, and it would block forever ' +
+      'prompting for a value',
+  });
+  ensureFile(secretPath, secrets, secret, {
+    unmet: unusableSecretNames,
+    consequence:
+      'missing or empty here, and the emulator treats an empty secret as absent — it would ' +
+      'go looking for the real Secret Manager secret instead of staying self-contained',
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

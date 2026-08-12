@@ -17,6 +17,7 @@ import {
   emulatorDotenvFiles,
   formatAssignment,
   unassignedNames,
+  unusableSecretNames,
 } from './e2e-functions-env.mjs';
 
 const read = (relative) => readFileSync(new URL(relative, import.meta.url), 'utf8');
@@ -159,6 +160,41 @@ describe('e2e functions dotenv generation', () => {
 
   it('does not count a commented-out key as assigned', () => {
     expect(unassignedNames('# EMAIL_FROM=a\n', ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
+  });
+
+  // Codex P2 on PR #730, and the direction that actually hurts: a false ACCEPT
+  // ends in the hang, where a false reject is only an annoying abort. A `KEY=`
+  // inside a multiline quoted value is not an assignment to the parser.
+  it('does not count a key that only appears inside another value', () => {
+    const decoy = 'OTHER="first\nEMAIL_FROM=not-a-key\nlast"\n';
+
+    expect(Object.keys(parse(decoy).envs)).toEqual(['OTHER']);
+    expect(unassignedNames(decoy, ['EMAIL_FROM'])).toEqual(['EMAIL_FROM']);
+  });
+});
+
+// Codex P2 on PR #730. `resolveSecretEnvs` filters with `!secretEnvs[s.key]`,
+// so an empty value is not a value: the emulator reaches for the real Secret
+// Manager, and a run that is supposed to be self-contained needs credentials.
+describe('secret values the emulator can actually use', () => {
+  it('treats a present-but-empty secret as missing', () => {
+    expect(unusableSecretNames('RESEND_API_KEY=\n', ['RESEND_API_KEY'])).toEqual([
+      'RESEND_API_KEY',
+    ]);
+    expect(unusableSecretNames('RESEND_API_KEY=""\n', ['RESEND_API_KEY'])).toEqual([
+      'RESEND_API_KEY',
+    ]);
+  });
+
+  it('accepts the generated secret file', () => {
+    const { secrets } = declaredParamNames(PARAMS_SOURCE);
+    const { secret } = e2eFunctionsEnv(PARAMS_SOURCE, PROJECT_ID);
+
+    expect(unusableSecretNames(secret, secrets)).toEqual([]);
+  });
+
+  it('still allows an empty PARAM value, which is a legitimate default', () => {
+    expect(unassignedNames('EMAIL_REPLY_TO=\n', ['EMAIL_REPLY_TO'])).toEqual([]);
   });
 });
 
