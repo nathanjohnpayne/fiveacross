@@ -65,7 +65,7 @@
 // new crash.
 
 import { phCapture } from './posthog';
-import { attemptSpent, definitelyOffline, markAttempt } from './shellRecovery';
+import { attemptSpent, definitelyOffline, markAttempt, originReachable } from './shellRecovery';
 
 /**
  * Marks that this tab already spent its ONE automatic poison reload.
@@ -133,6 +133,8 @@ type Disposition =
   | 'reload'
   /** Definitely offline; the reload is armed and waiting for `online`. */
   | 'deferred-offline'
+  /** An uncontrolled shell could not prove the origin is reachable yet. */
+  | 'deferred-unreachable'
   /** The one automatic reload was already spent in this tab. */
   | 'exhausted'
   /** The attempt could not be recorded durably, so it was not taken. */
@@ -146,6 +148,21 @@ export interface PoisonRecoveryOptions {
   target?: ListenerTarget | null;
   /** Defaults to `location.reload()`. Injected so tests can assert the sequence. */
   reload?: () => void;
+  /** Positive origin probe for an uncontrolled page. Injected to keep the recovery testable. */
+  originReachable?: () => Promise<boolean>;
+  /** Whether this document has a service-worker-controlled shell to reload into. */
+  hasControllingServiceWorker?: () => boolean;
+}
+
+/** A controller is the cheap, reliable proof this page has the PWA shell to
+ * reload into. An uncontrolled first visit gets no such promise and must probe
+ * the origin before recovery navigates it away from the rendered page. */
+function hasControllingServiceWorker(): boolean {
+  try {
+    return typeof navigator !== 'undefined' && !!navigator.serviceWorker?.controller;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -165,14 +182,24 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
   const target =
     options.target === undefined ? (typeof window !== 'undefined' ? window : null) : options.target;
   if (!target || typeof target.addEventListener !== 'function') return () => {};
+  // Keep the post-guard non-null type inside the asynchronous callbacks below.
+  const listenerTarget: ListenerTarget = target;
   const reload = options.reload ?? (() => window.location.reload());
+  const canReachOrigin = options.originReachable ?? originReachable;
+  const hasCachedShell = options.hasControllingServiceWorker ?? hasControllingServiceWorker;
 
   /** Set the instant a reload is committed, so the burst that follows is inert. */
   let reloading = false;
+  /** Set while an uncontrolled page is proving that a replacement shell exists. */
+  let recoveryPending = false;
   /** One armed `online` retry per document, never a stack of them. */
   let awaitingOnline = false;
+  /** Retained so uninstall can cancel the deferred retry too. */
+  let onlineRetry: (() => void) | null = null;
   /** Report a refusal once per document; the amplifier below fires it in bursts. */
   let reportedRefusal = false;
+  /** Makes every listener and an in-flight reachability probe inert after teardown. */
+  let disposed = false;
 
   function report(disposition: Disposition, source: string): void {
     phCapture(
@@ -198,11 +225,22 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
     report(disposition, source);
   }
 
-  function recover(source: string): void {
+  function deferUntilOnline(source: string): void {
+    if (awaitingOnline || disposed) return;
+    awaitingOnline = true;
+    onlineRetry = () => {
+      onlineRetry = null;
+      awaitingOnline = false;
+      void recover(`${source}:online`);
+    };
+    listenerTarget.addEventListener('online', onlineRetry, { once: true });
+  }
+
+  async function recover(source: string): Promise<void> {
     // The `storage`-event amplifier means the tombstone can be re-thrown dozens
     // of times a second. Everything below is idempotent, but short-circuiting
     // here keeps the burst from generating a burst of telemetry too.
-    if (reloading) return;
+    if (disposed || reloading || recoveryPending) return;
 
     // BOUND 1 — one automatic reload per tab, checked BEFORE anything else. A
     // poisoning whose underlying cause is persistent local state (the Bodega
@@ -218,21 +256,41 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
     // leave the tab permanently dead even after the network came back. Arming
     // `online` instead means the recovery lands exactly when it can succeed.
     //
-    // (The reason this needs a network check at all is narrow: an offline
-    // reload with no precached shell yet lands on the browser's error page.
-    // Note the deliberate asymmetry with `shellRecovery.resetShell`, which
-    // demands POSITIVE proof of reachability via `originReachable`. That probe
-    // exists there because the teardown DELETES the only copy of the shell.
-    // This path deletes nothing at all — the precached shell and the Firestore
-    // IndexedDB cache both survive a reload — so the far weaker, and cheaper,
-    // `definitelyOffline` check is the whole of what is owed.)
     if (definitelyOffline()) {
-      if (!awaitingOnline) {
-        awaitingOnline = true;
-        target?.addEventListener('online', () => recover(`${source}:online`), { once: true });
-        refuse('deferred-offline', source);
-      }
+      deferUntilOnline(source);
+      refuse('deferred-offline', source);
       return;
+    }
+
+    // A controller means this document can reload through the PWA's precached
+    // shell. An uncontrolled document (a first visit or a post-reset page) has
+    // no cache guarantee: `navigator.onLine` can remain true behind a captive
+    // portal, and reloading it into a browser error page is worse than leaving
+    // the current, readable shell visible. Reuse shellRecovery's strict
+    // redirect/same-origin/payload probe before that navigation. The pending
+    // latch folds the b815 burst into one probe, and a failed probe retries only
+    // on the next real `online` transition.
+    if (!hasCachedShell()) {
+      recoveryPending = true;
+      let reachable = false;
+      try {
+        reachable = await canReachOrigin();
+      } catch {
+        // A probe is a guard, not a new failure path. Its failure is simply a
+        // reason to wait for the next connectivity transition.
+      } finally {
+        recoveryPending = false;
+      }
+      if (disposed || reloading) return;
+      if (!reachable) {
+        deferUntilOnline(source);
+        refuse('deferred-unreachable', source);
+        return;
+      }
+      // The probe awaited. A different recovery could have spent this tab's
+      // shared reload budget while it was in flight, so re-check before taking
+      // the attempt below.
+      if (attemptSpent(ATTEMPT_KEY)) return refuse('exhausted', source);
     }
 
     // BOUND 2 — the attempt must be recorded DURABLY before it is taken. A
@@ -262,18 +320,22 @@ export function installFirestorePoisonRecovery(options: PoisonRecoveryOptions = 
     // `error` first: it is the thrown value. `message` is the fallback because
     // browsers surface it as `"Uncaught Error: <message>"`, which still carries
     // every marker, and some paths deliver one without the other.
-    if (isFirestorePoisonAssertion(error) || isFirestorePoisonAssertion(message)) recover('error');
+    if (isFirestorePoisonAssertion(error) || isFirestorePoisonAssertion(message)) void recover('error');
   };
   const onRejection = (event: Event): void => {
     // The tombstone reaches here whenever it is thrown from an already-enqueued
     // operation rather than straight out of a DOM handler.
-    if (isFirestorePoisonAssertion((event as PromiseRejectionEvent).reason)) recover('unhandledrejection');
+    if (isFirestorePoisonAssertion((event as PromiseRejectionEvent).reason)) void recover('unhandledrejection');
   };
 
-  target.addEventListener('error', onError);
-  target.addEventListener('unhandledrejection', onRejection);
+  listenerTarget.addEventListener('error', onError);
+  listenerTarget.addEventListener('unhandledrejection', onRejection);
   return () => {
-    target.removeEventListener('error', onError);
-    target.removeEventListener('unhandledrejection', onRejection);
+    disposed = true;
+    listenerTarget.removeEventListener('error', onError);
+    listenerTarget.removeEventListener('unhandledrejection', onRejection);
+    if (onlineRetry) listenerTarget.removeEventListener('online', onlineRetry);
+    onlineRetry = null;
+    awaitingOnline = false;
   };
 }

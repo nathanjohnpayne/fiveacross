@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { installFirestorePoisonRecovery, isFirestorePoisonAssertion } from './firestoreRecovery';
+import {
+  installFirestorePoisonRecovery,
+  isFirestorePoisonAssertion,
+  type PoisonRecoveryOptions,
+} from './firestoreRecovery';
 import { markResetAttempted } from './shellRecovery';
 
 // Regression pins for the 2026-08-08 Bodega Bay incident (#722, see
@@ -45,10 +49,18 @@ function rejectionEvent(reason: unknown): Event {
 
 /** A fresh tab-like harness. `target` stands in for `window`; a NEW harness with
  *  the same sessionStorage is exactly what a reload produces. */
-function harness() {
+function harness(options: Omit<PoisonRecoveryOptions, 'target' | 'reload'> = {}) {
   const target = new EventTarget();
   const reload = vi.fn();
-  const uninstall = installFirestorePoisonRecovery({ target, reload });
+  const uninstall = installFirestorePoisonRecovery({
+    target,
+    reload,
+    // The normal recovery tests model the installed PWA: a controller proves a
+    // precached shell is available, so the reload remains synchronous. The
+    // uncontrolled first-visit guard has focused tests below.
+    hasControllingServiceWorker: () => true,
+    ...options,
+  });
   return { target, reload, uninstall, poison: () => target.dispatchEvent(errorEvent({ error: new Error(BODEGA_TOMBSTONE) })) };
 }
 
@@ -164,6 +176,14 @@ describe('installFirestorePoisonRecovery', () => {
     poison();
     expect(reload).not.toHaveBeenCalled();
   });
+
+  it('does not run the origin probe when its service-worker shell controls the page', () => {
+    const canReachOrigin = vi.fn().mockResolvedValue(true);
+    const { reload, poison } = harness({ originReachable: canReachOrigin });
+    poison();
+    expect(reload).toHaveBeenCalledOnce();
+    expect(canReachOrigin).not.toHaveBeenCalled();
+  });
 });
 
 describe('the bound that makes this safe (recovery cannot loop)', () => {
@@ -268,6 +288,17 @@ describe('offline', () => {
     expect(reload).toHaveBeenCalledOnce();
   });
 
+  it('uninstalls the deferred online retry with the rest of the watchdog', () => {
+    offline();
+    const { target, reload, uninstall, poison } = harness();
+    poison();
+    uninstall();
+
+    vi.stubGlobal('navigator', { onLine: true });
+    target.dispatchEvent(new Event('online'));
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   it('does not spend the attempt while merely deferred', () => {
     // Arming is not taking: a deferral that never fires must not burn the one
     // recovery this tab has.
@@ -291,6 +322,23 @@ describe('offline', () => {
     target.dispatchEvent(new Event('online'));
     expect(reload).toHaveBeenCalledOnce();
   });
+
+  it('defers an uncontrolled page until it can prove the origin is reachable', async () => {
+    const canReachOrigin = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const { target, reload, poison } = harness({
+      hasControllingServiceWorker: () => false,
+      originReachable: canReachOrigin,
+    });
+    poison();
+    await vi.waitFor(() => expect(canReachOrigin).toHaveBeenCalledTimes(1));
+    expect(reload).not.toHaveBeenCalled();
+
+    // A new online transition, not a lying `navigator.onLine === true`, is the
+    // recovery trigger. The second strict probe succeeds, so NOW it can reload.
+    target.dispatchEvent(new Event('online'));
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+    expect(canReachOrigin).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('installation', () => {
@@ -306,7 +354,7 @@ describe('installation', () => {
 
   it('recovers from a tombstone dispatched on the real window', () => {
     const reload = vi.fn();
-    const uninstall = installFirestorePoisonRecovery({ reload });
+    const uninstall = installFirestorePoisonRecovery({ reload, hasControllingServiceWorker: () => true });
     window.dispatchEvent(errorEvent({ error: new Error(BODEGA_TOMBSTONE) }));
     uninstall();
     expect(reload).toHaveBeenCalledOnce();
