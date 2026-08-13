@@ -439,6 +439,18 @@ describe('ProfileEditor', () => {
     expect(trigger).toHaveFocus();
   });
 
+  it('marks a changed profile draft as unsaved work so a hidden-tab update cannot discard it', async () => {
+    const user = userEvent.setup();
+    render(<ProfileEditor />);
+    await user.click(screen.getByRole('button', { name: 'Edit profile' }));
+    const dialog = screen.getByRole('dialog', { name: 'Edit profile' });
+    expect(dialog).not.toHaveAttribute('data-unsaved-work');
+
+    await user.clear(screen.getByLabelText('Display name'));
+    await user.type(screen.getByLabelText('Display name'), 'Draft only');
+    expect(dialog).toHaveAttribute('data-unsaved-work');
+  });
+
   it('renders the trigger as the avatar button (tap your photo to edit)', () => {
     render(<ProfileEditor />);
 

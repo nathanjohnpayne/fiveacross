@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { UNREGISTERED_CLIENT_CONFIRM_MS } from './sw-rescue';
 
 // Drives the ACTUAL install/activate handlers in src/sw.ts (#514), not just the
 // pure decision layer in src/sw-rescue.test.ts. The worker is where the rescue
@@ -27,6 +28,7 @@ vi.mock('workbox-cacheable-response', () => ({ CacheableResponsePlugin: vi.fn() 
 const ARMED_FLOOR = '2026-07-24T00:00:00.000Z'; // the cells-map migration deploy
 const FLOOR_PAST_THIS_BUILD = '2099-01-01T00:00:00.000Z';
 const INERT_FLOOR = '1970-01-01T00:00:00.000Z';
+const OLD_SHELL = '2026-07-20T14:17:04.539Z'; // below ARMED_FLOOR — the bundle that crashed
 
 type Handlers = Record<string, (event: unknown) => void>;
 
@@ -34,7 +36,10 @@ type Handlers = Record<string, (event: unknown) => void>;
 function installFakeWorker() {
   const handlers: Handlers = {};
   const navigated: string[] = [];
-  const clients = [{ url: 'https://gaycruisebingo.com/more', navigate: vi.fn(async (u: string) => navigated.push(u) )}];
+  // `id` is what the #516 registry keys on — the browser's own client id.
+  const clients = [
+    { url: 'https://gaycruisebingo.com/more', id: 'tab-1', navigate: vi.fn(async (u: string) => navigated.push(u)) },
+  ];
   const self = {
     // A vi.fn so its `invocationCallOrder` can be compared against the workbox
     // registrations — that ordering is load-bearing, see the #517 test below.
@@ -53,11 +58,16 @@ function installFakeWorker() {
   vi.stubGlobal('self', self);
 
   const cache = {
-    match: vi.fn(async (k: string) => sharedCacheStore.get(k)),
+    match: vi.fn(async (k: string | { url: string }) =>
+      sharedCacheStore.get(typeof k === 'string' ? k : new URL(k.url).pathname)?.clone(),
+    ),
     put: vi.fn(async (k: string, v: Response) => {
       sharedCacheStore.set(k, v);
     }),
     delete: vi.fn(async (k: string) => sharedCacheStore.delete(k)),
+    // The #516 registry keeps one record per window, so reading it enumerates
+    // the cache; the real API hands back Requests carrying an absolute url.
+    keys: vi.fn(async () => [...sharedCacheStore.keys()].map((k) => ({ url: new URL(k, location.origin).href }))),
   };
   const deletedCaches: string[] = [];
   vi.stubGlobal('caches', {
@@ -100,10 +110,12 @@ function stubFloor(floor: string | null) {
   );
 }
 
-/** Fires a lifecycle handler and awaits whatever it passed to waitUntil. */
-async function fire(handlers: Handlers, type: string, data?: unknown) {
+/** Fires a lifecycle handler and awaits whatever it passed to waitUntil.
+ *  `extra` carries event fields only some handlers read — `source` for the
+ *  #516 `CLIENT_BUILD` message, which is how the worker learns the client id. */
+async function fire(handlers: Handlers, type: string, data?: unknown, extra?: Record<string, unknown>) {
   const pending: Promise<unknown>[] = [];
-  handlers[type]?.({ waitUntil: (p: Promise<unknown>) => pending.push(p), data });
+  handlers[type]?.({ waitUntil: (p: Promise<unknown>) => pending.push(p), data, ...extra });
   await Promise.all(pending);
 }
 
@@ -354,6 +366,222 @@ describe('the rescue (#514)', () => {
     await fire(w.handlers, 'install');
     await expect(fire(w.handlers, 'activate')).resolves.toBeUndefined();
     expect(w.self.clients.claim).toHaveBeenCalledOnce();
+  });
+});
+
+describe('the rescue tracks what each tab EXECUTES, not just the served shell (#516)', () => {
+  /** Two tabs, the served shell already current: tab-1 is still running a build
+   *  the floor condemns, tab-2 has already reloaded onto this one. */
+  function twoTabsOnDifferentBuilds() {
+    const w = installFakeWorker();
+    w.clients.push({
+      url: 'https://gaycruisebingo.com/board',
+      id: 'tab-2',
+      navigate: vi.fn(async (u: string) => w.navigated.push(u)),
+    });
+    // The shell being SERVED is current — which is exactly why the pre-#516
+    // decision declined to rescue anyone.
+    w.cacheStore.set('/__gcb-active-build-stamp', new Response(JSON.stringify({ stamp: __BUILD_STAMP__ })));
+    return w;
+  }
+
+  async function nameBuilds(w: ReturnType<typeof twoTabsOnDifferentBuilds>) {
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: OLD_SHELL }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+  }
+
+  it('forces, and navigates ONLY the tab below the floor', async () => {
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await nameBuilds(w);
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('leaves both tabs alone when neither is below the floor', async () => {
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('rescues a live tab that never registered, behind an up-to-date shell and registry', async () => {
+    // Codex P1 round 2 — THE ROLLOUT CASE, and the one this whole ticket is
+    // for. On the deploy that introduces `CLIENT_BUILD`, every open tab is
+    // running a build that cannot post it. Here tab-2 has already reloaded onto
+    // the accepted build, so it updated `activeStamp` AND is the only registry
+    // entry; tab-1 is a pre-#516 tab, live and silent. Deciding over the
+    // registry alone reads "the shell is fine, and every client I know of is
+    // fine", declines to force, and never reaches the claim — so tab-1 is
+    // stranded by the very feature meant to rescue it.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    // Only the silent tab: tab-2 named an accepted build and keeps its work.
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  /** Re-stubs `setTimeout` so the ONE sleep `confirmClientStamps` takes lets a
+   *  racing registration land first — the write that was in flight in the
+   *  ACTIVE worker while this INSTALLING one read the registry. Every other
+   *  timer (the floor probe's timeout and retry backoff) keeps the harness's
+   *  fire-immediately behaviour, so nothing else changes. */
+  function registerDuringTheConfirmationWindow(w: ReturnType<typeof twoTabsOnDifferentBuilds>, clientId: string) {
+    vi.stubGlobal('setTimeout', ((fn: () => void, ms?: number) => {
+      if (ms === UNREGISTERED_CLIENT_CONFIRM_MS) {
+        void fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, {
+          source: { id: clientId },
+        }).then(fn);
+      } else {
+        fn();
+      }
+      return 0;
+    }) as unknown as typeof setTimeout);
+  }
+
+  it('does not condemn a current tab whose registration was merely still in flight', async () => {
+    // Codex P2 round 5. A window posts `CLIENT_BUILD` to the ACTIVE worker
+    // while this decision runs in the INSTALLING one — two globals, nothing
+    // ordering them — so a tab that opened moments ago is in `matchAll()`
+    // before its record is in the cache. Believing that first snapshot
+    // force-activates the fleet with no stale tab anywhere and then navigates
+    // a player who was doing nothing wrong. The sweep grace cannot cover it:
+    // that shields records which EXIST, and this one does not yet.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    registerDuringTheConfirmationWindow(w, 'tab-1');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('still rescues the rollout cohort, which never registers however long it waits', async () => {
+    // The other half of the same knob: the confirmation must not turn the
+    // evidence the rescue exists for into a no-op. tab-1 is a pre-#516 build,
+    // so it stays silent through the wait and is still condemned.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    registerDuringTheConfirmationWindow(w, 'nobody-at-all');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('does not navigate a window that registers between the decision and the claim', async () => {
+    // One level down: `activate` re-reads the registry against a FRESH
+    // `matchAll()`, so a window that opened after the install decision has had
+    // no chance to register either — and here the cost of believing the
+    // absence is not a needless force but a navigation that discards whatever
+    // the player is doing in that window.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await nameBuilds(w);
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    // A third window opens, live and not yet in the registry.
+    w.clients.push({
+      url: 'https://gaycruisebingo.com/feed',
+      id: 'tab-3',
+      navigate: vi.fn(async (u: string) => w.navigated.push(u)),
+    });
+    registerDuringTheConfirmationWindow(w, 'tab-3');
+    await fire(w.handlers, 'activate');
+    // tab-1 is the genuinely stale one; tab-3 named an accepted build in time.
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('does not force when the ONLY unregistered window is one this worker cannot see', async () => {
+    // `clients.matchAll()` failing is not evidence that a stranded tab exists.
+    const w = twoTabsOnDifferentBuilds();
+    w.self.clients.matchAll = vi.fn().mockRejectedValue(new Error('no clients'));
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  /** The same-origin window Firebase opens for Google sign-in. It is not our
+   *  page: it never runs main.tsx, so it can never post `CLIENT_BUILD`. */
+  function withSignInPopup(w: ReturnType<typeof twoTabsOnDifferentBuilds>) {
+    const popup = {
+      url: 'https://gaycruisebingo.com/__/auth/handler?apiKey=x&providerId=google.com',
+      id: 'oauth-popup',
+      navigate: vi.fn(async (u: string) => w.navigated.push(u)),
+    };
+    w.clients.push(popup);
+    return popup;
+  }
+
+  it('does not treat an open sign-in popup as a stranded client', async () => {
+    // Codex P2 round 3. The popup is unregistered by construction, and an
+    // unregistered live window is force evidence — so without the `/__/*`
+    // filter, simply having sign-in open force-activates the whole fleet under
+    // an armed floor with every actual app tab already on the current build.
+    const w = twoTabsOnDifferentBuilds();
+    withSignInPopup(w);
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-1' } });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: __BUILD_STAMP__ }, { source: { id: 'tab-2' } });
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).not.toHaveBeenCalled();
+  });
+
+  it('never navigates the sign-in popup, even on a genuine forced activation', async () => {
+    // `claim()` takes the popup over too, and reloading it mid-flow dead-ends
+    // Google sign-in — a far worse regression than the stale tab being rescued
+    // here. src/sw.ts already refuses to serve the app shell into that
+    // namespace for the same reason (#182).
+    const w = twoTabsOnDifferentBuilds();
+    withSignInPopup(w);
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await nameBuilds(w); // tab-1 stale, tab-2 current
+    await fire(w.handlers, 'install');
+    expect(w.self.skipWaiting).toHaveBeenCalledOnce();
+    await fire(w.handlers, 'activate');
+    expect(w.navigated).toEqual(['https://gaycruisebingo.com/more']);
+  });
+
+  it('ignores a CLIENT_BUILD with no client id or no stamp', async () => {
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(ARMED_FLOOR);
+    await import('./sw');
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD', stamp: OLD_SHELL }, { source: null });
+    await fire(w.handlers, 'message', { type: 'CLIENT_BUILD' }, { source: { id: 'tab-1' } });
+    // Nothing was registered — asserted on the REGISTRY, not on the rescue
+    // decision. Both windows now read as unregistered, and an unregistered live
+    // window IS force evidence (Codex P1 round 2), so a "no rescue" assertion
+    // here would pass for the malformed-message reason and fail for the right
+    // one the moment the rollout case was fixed.
+    expect([...w.cacheStore.keys()].filter((k) => k.startsWith('/__gcb-client-build/'))).toEqual([]);
+  });
+
+  it('keys the registry per window, so nothing a page posts can clobber another', async () => {
+    // Codex P2 round 3, from the worker side: the record the active worker
+    // writes for one tab is a different cache entry from every other tab's, so
+    // an installing worker sweeping concurrently has nothing to lose.
+    const w = twoTabsOnDifferentBuilds();
+    stubFloor(INERT_FLOOR);
+    await import('./sw');
+    await nameBuilds(w);
+    const keys = [...w.cacheStore.keys()].filter((k) => k.startsWith('/__gcb-client-build/')).sort();
+    expect(keys).toEqual(['/__gcb-client-build/tab-1', '/__gcb-client-build/tab-2']);
   });
 });
 

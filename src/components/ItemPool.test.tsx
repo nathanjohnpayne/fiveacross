@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import type { ItemDoc } from '../types';
 
 // specs/d15-approvals.md, component layer (RTL-jsdom). Drives the REAL ItemPool
@@ -38,6 +38,7 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
 import ItemPool from './ItemPool';
+import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
 const item = (id: string, over: Partial<ItemDoc> = {}): ItemDoc =>
   ({
@@ -68,6 +69,20 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false);
+  });
+
+  it('a half-typed suggestion holds back the automatic post-deploy reload', async () => {
+    // Codex P2 round 5, PR #720. The player-facing member of the same class as
+    // Admin → Messages: the draft lives only in React state, and the add bar is
+    // neither a modal nor the claim sheet, so `midInteraction`
+    // (src/swClientBridge.ts) had nothing to defer on and a deploy ate it.
+    render(<ItemPool />);
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    expect(document.querySelector(marker)).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), { target: { value: 'Half typed' } });
+    expect(document.querySelector(marker)).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(document.querySelector(marker)).toBeNull());
   });
 
   it('renders the "goes to admin review" caption alongside the existing pre-sail note', () => {

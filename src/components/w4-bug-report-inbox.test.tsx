@@ -3,6 +3,7 @@ import { useState, type ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import BugReport, { BugReportProvider } from './BugReport';
+import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
 const INDEX_CSS = readFileSync('src/index.css', 'utf8');
 
@@ -311,6 +312,28 @@ describe('W4 pick-a-screen capture (#324)', () => {
       route: '/',
     });
     expect(await screen.findByText('report-324')).toBeInTheDocument();
+  });
+
+  it('marks the whole flow as holding unsaved work, dialog phase AND pick mode (#621)', async () => {
+    // The other half of the `src/swClientBridge.ts` contract (Codex P2 round
+    // 4): an automatic post-deploy reload defers on `[data-unsaved-work]`.
+    // Only the dialog phase carries `role="dialog" aria-modal="true"`, so
+    // without the marker on the flow container, "Capture a different screen"
+    // let the reload through and destroyed the description and the screenshot
+    // — both of which live only in this component's state until submit.
+    captureSpy.mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    renderFlow();
+    expect(document.querySelector(marker)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    await screen.findByAltText('Screenshot that will be submitted with this bug report');
+    expect(document.querySelector(marker)).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Capture a different screen' }));
+    expect(screen.queryByRole('dialog', { name: 'Report a bug' })).not.toBeInTheDocument();
+    expect(document.querySelector(marker)).not.toBeNull();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(document.querySelector(marker)).toBeNull());
   });
 
   it('recalls the parked sheet, draft intact, when a launcher is tapped mid-pick', async () => {

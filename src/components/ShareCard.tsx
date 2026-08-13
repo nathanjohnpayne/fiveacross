@@ -497,23 +497,41 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   return card;
 }
 
+/** How long `img.decode()` may take before the render falls back to the
+ *  photo-less composition (#661) — mirrors `HERO_PHOTO_FETCH_TIMEOUT_MS` in
+ *  FarewellPodium.tsx: the fetch that produces the hero's object URL is
+ *  already bounded, but a stalled decode of an already-fetched image would
+ *  otherwise hang this await forever, wedging both the warmed promise and a
+ *  tapped share action behind an unresolvable render. */
+const HERO_IMAGE_DECODE_TIMEOUT_MS = 8000;
+
 /**
  * The farewell podium as a Share Card (issue #449) — same pipeline, third card
  * kind. #534/#561: with `data.mostLoved` set the node is the photo-hero
  * composition, and the hero image is DECODED before rasterization —
  * html-to-image walks the DOM synchronously, so an undecoded image would
  * raster as an empty box. `decode()` is feature-guarded (jsdom has none), and
- * a decode failure falls back to the photo-less composition rather than ever
- * sharing a broken hero.
+ * a decode failure OR a decode that stalls past the bound (#661) falls back
+ * to the photo-less composition rather than ever sharing a broken hero — or
+ * hanging the share action indefinitely.
  */
 export async function renderFarewellShareCard(data: FarewellShareCardData): Promise<Blob> {
   const node = buildFarewellCardNode(data);
   const img = node.querySelector<HTMLImageElement>('.share-card-ml-img');
   if (img && typeof img.decode === 'function') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('hero image decode timed out')),
+        HERO_IMAGE_DECODE_TIMEOUT_MS,
+      );
+    });
     try {
-      await img.decode();
+      await Promise.race([img.decode(), timeout]);
     } catch {
       return rasterize(buildFarewellCardNode({ ...data, mostLoved: null }));
+    } finally {
+      clearTimeout(timer);
     }
   }
   return rasterize(node);
@@ -543,20 +561,409 @@ if (import.meta.env.MODE === 'e2e') {
 // Leaderboard.tsx so the degrade path lives exactly once.
 // ---------------------------------------------------------------------------
 
-export type ShareOutcome = 'files' | 'text' | 'clipboard' | 'download' | 'cancelled' | 'none';
+export type ShareOutcome =
+  | 'files'
+  | 'text'
+  | 'clipboard'
+  | 'download'
+  | 'cancelled'
+  | 'prompt'
+  | 'none';
 
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
+/**
+ * The ONE place an image is handed to the browser as a download — the chain's
+ * download leg and the fallback sheet's "Save image" button both come through
+ * here (Codex P1, PR #712 round 6).
+ *
+ * It is the only leg in this chain that cannot report its own failure, and
+ * that asymmetry is the whole reason this function exists. `navigator.share`
+ * rejects when it fails; so does `clipboard.writeText`. Their promises ARE the
+ * evidence that something reached the Player. A synthetic `<a download>.click()`
+ * reports nothing at all: it returns identically whether the browser started a
+ * download or dropped the event on the floor — and WebKit drops it, without
+ * throwing, once the transient user activation is spent. "Click, then return
+ * `'download'`" was therefore a success outcome invented out of the absence of
+ * an exception.
+ *
+ * With no signal to read, the only honest substitute is the platform's own
+ * precondition: a synthetic download is honoured while the document still
+ * holds transient activation. So this refuses to click AT ALL once
+ * `shareActivationAlive()` (below, with the share legs) says the activation is
+ * gone, and reports `false`; the caller then falls through to the visible
+ * sheet, whose Save button calls this same function under a FRESH gesture.
+ * Refusing rather than clicking-anyway is deliberate: a browser that DID
+ * honour the blind click would otherwise save the file and then be handed a
+ * sheet telling it to save the file.
+ *
+ * Stated residual: where `navigator.userActivation` does not exist,
+ * `shareActivationAlive` assumes alive and the blind click is still taken on
+ * trust. That default is kept on purpose — the browsers that reach this leg at
+ * all are the ones with neither Web Share nor a usable clipboard, which permit
+ * programmatic downloads outright, and assuming DEAD there would turn a
+ * working automatic download into a mandatory extra tap for browsers that
+ * never had the problem.
+ *
+ * Returns whether the download was actually DISPATCHED — never whether the
+ * file arrived, which no browser will tell us.
+ */
+function deliverImage(blob: Blob, filename: string): boolean {
+  if (!shareActivationAlive()) return false;
+  let url: string;
   try {
-    const a = el('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  } finally {
-    URL.revokeObjectURL(url);
+    url = URL.createObjectURL(blob);
+  } catch {
+    return false;
   }
+  const a = el('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  try {
+    a.click();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    // Both in the `finally`, so a click that throws still leaves no orphaned
+    // anchor in the body and no object URL held open.
+    a.remove();
+    revokeObjectUrl(url);
+  }
+}
+
+/** `URL.revokeObjectURL` that cannot throw. Reclaiming a URL is housekeeping,
+ *  never the point of the call it sits in — and both call sites are on paths
+ *  documented never to throw (`shareCardBlob`, and the sheet's `close()`,
+ *  which runs from event handlers). */
+function revokeObjectUrl(url: string): void {
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    /* nothing to reclaim */
+  }
+}
+
+/** Marks the fallback sheet's own node, so a second dead-ended tap replaces
+ *  the first rather than stacking a second sheet on top of it. */
+const SHARE_FALLBACK_CLASS = 'share-fallback-backdrop';
+
+/** Focus-trap query — the same one every other dialog in the app traps on
+ *  (ProfileEditor.tsx, More.tsx, AdminSheet.tsx, ProofFeed.tsx). */
+const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/**
+ * The single mounted fallback sheet's teardown (Codex P2, PR #712 round 4).
+ *
+ * The sheet is a singleton, and superseding one used to be a bare
+ * `node.remove()` — which skipped the close path entirely, orphaning the
+ * document-level `keydown` listener and leaving a stale opener that a later
+ * Escape would have yanked focus back to. Routing supersession through the
+ * SAME `close()` every other dismissal uses means there is exactly one way a
+ * sheet can go away, so listener removal and focus restoration cannot be
+ * missed by a path that forgot to do them.
+ */
+let closeMountedFallbackSheet: ((restoreFocus: boolean) => void) | null = null;
+
+/**
+ * The chain's TERMINAL, activation-free affordance (Codex P1, PR #712 round
+ * 3) — the leg that makes "the tap did nothing" unreachable.
+ *
+ * Every other leg in this chain depends on the very thing that can be gone by
+ * the time a slow render finishes: `navigator.share` requires transient user
+ * activation, and so does `clipboard.writeText` on Safari and Firefox. So
+ * when a tap arrives with the activation already spent, the API legs can ALL
+ * decline in silence, and with no blob there is not even a download left —
+ * the chain used to return `'none'` and the Player saw nothing happen at all.
+ *
+ * This leg deliberately calls no gated API. It renders a small sheet carrying
+ * the link (selectable, so it is useful even with no Clipboard API at all)
+ * plus the buttons the Player can press: pressing one is a FRESH gesture that
+ * mints FRESH activation, which is exactly what the silent write was missing.
+ * The Player is told what happened and handed the next step, instead of being
+ * left to wonder whether the button works.
+ *
+ * Built as plain DOM on `document.body` rather than as React state in each of
+ * the three callers, for the reason this whole function exists: the degrade
+ * path lives exactly once (and `deliverImage` above already reaches for the
+ * DOM the same way). It owns its own teardown — the Close button, a backdrop
+ * click, Escape, or a second dead-ended tap superseding it — and only one can
+ * ever be mounted.
+ *
+ * Being a real `aria-modal` dialog, it carries the same keyboard contract as
+ * the app's React sheets (Codex P2, PR #712 round 4): the opener is captured
+ * on mount, Tab/Shift+Tab are CONTAINED inside the sheet instead of walking
+ * into the app it covers, and focus is restored to the opener on every close
+ * path — all four of which now run through the one `close()` below.
+ *
+ * Because it is the LAST line of defence, it also has to be able to say when
+ * IT fails (Codex P2, PR #712 round 6). Its two actions are the same two APIs
+ * that already declined once on the way here, so a press can genuinely fail
+ * again — and a final fallback that swallows its own failure is the original
+ * bug wearing a different hat: nothing happens, nobody is told. Every handler
+ * therefore reports through `say()` into a live region, and the sheet shows
+ * the CARD ITSELF whenever there is one, so a Player whose download is refused
+ * (and who has no link to copy either) can still press-and-hold the image the
+ * platform is already rendering for them.
+ *
+ * Returns whether a sheet was actually mounted AND connected: with neither a
+ * link nor an image there is genuinely nothing to offer, and the caller keeps
+ * `'none'`.
+ */
+function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filename: string }): boolean {
+  const { url, blob, filename } = opts;
+  if (!url && !blob) return false;
+  if (typeof document === 'undefined' || !document.body) return false;
+
+  // Supersede through the real close path, not a bare remove (see
+  // `closeMountedFallbackSheet`). No focus restore: the sheet replacing it is
+  // about to take focus itself, and bouncing through the old opener first
+  // would be a visible flicker for no gain.
+  closeMountedFallbackSheet?.(false);
+  // Belt and braces for any node that outlived its closure (a stale sheet
+  // left by an earlier module instance in a test, say) — the class is a
+  // singleton marker, so nothing else may wear it.
+  document.querySelector(`.${SHARE_FALLBACK_CLASS}`)?.remove();
+
+  // The element the tap left focus on — restored when the sheet closes so a
+  // keyboard Player lands back on the Share button rather than at the top of
+  // the document. `document.body` is not a real landing spot; treat it as
+  // "no opener" (a tap on iOS Safari often leaves focus there).
+  const activeOnOpen = document.activeElement;
+  const opener =
+    activeOnOpen instanceof HTMLElement && activeOnOpen !== document.body ? activeOnOpen : null;
+
+  const backdrop = el('div', `sheet-backdrop ${SHARE_FALLBACK_CLASS}`);
+  const sheet = el('div', 'sheet share-fallback');
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-modal', 'true');
+  sheet.setAttribute('aria-label', 'Finish sharing');
+  sheet.appendChild(el('div', 'sheet-title', 'Finish sharing'));
+  // "Wouldn’t finish the share", not "wouldn’t open the share sheet": since
+  // round 6 this sheet is also where an image goes when the download leg
+  // refused to claim a delivery it could not prove, and no share sheet was
+  // attempted on that path at all.
+  sheet.appendChild(
+    el(
+      'p',
+      'share-fallback-note',
+      url && blob
+        ? 'Your browser wouldn’t finish the share. Copy the link, or save the card below.'
+        : url
+          ? 'Your browser wouldn’t finish the share. Here’s the link—copy it and paste it anywhere.'
+          : 'Your browser wouldn’t finish the share. Here’s the card—save it and send it yourself.',
+    ),
+  );
+  /**
+   * The card itself, on screen (Codex P2, PR #712 round 6).
+   *
+   * "Save image" is a real button, but it drives the one leg that cannot
+   * report a failure — so when the browser refuses the download there has to
+   * be something left, and in the image-only case there is no link to fall
+   * back on. A visible image needs no API whatsoever: press-and-hold (or
+   * right-click) is the platform's own save affordance, which makes this the
+   * exact counterpart of the selectable link field below. Object URL created
+   * once and revoked in `close()`; a `createObjectURL` that throws simply
+   * yields no preview rather than taking the sheet down with it.
+   */
+  let previewUrl: string | null = null;
+  if (blob) {
+    try {
+      previewUrl = URL.createObjectURL(blob);
+    } catch {
+      previewUrl = null;
+    }
+  }
+  if (previewUrl) {
+    const preview = el('img', 'share-fallback-preview');
+    preview.src = previewUrl;
+    preview.alt = 'Your share card';
+    sheet.appendChild(preview);
+  }
+  /**
+   * The link as a real, focusable control rather than a bare `<p>` (Codex P2,
+   * PR #712 round 5).
+   *
+   * With no Clipboard API at all there is no Copy button, so this field is the
+   * ONLY way to obtain the URL — and the dialog's Tab trap can reach exactly
+   * what `FOCUSABLE_SELECTOR` matches. A paragraph matches nothing, so a
+   * keyboard-only Player was trapped in a sheet cycling through Close and told
+   * to copy a link they could not reach. `readOnly`, deliberately, not
+   * `disabled`: a disabled control is unfocusable AND filtered out of the trap
+   * above, which would put the link straight back out of reach. Selecting on
+   * focus makes Tab-then-copy the whole manual gesture, and keeps the
+   * tap-and-hold selection the old `user-select: all` paragraph offered.
+   */
+  let urlField: HTMLInputElement | null = null;
+  if (url) {
+    const field = el('input', 'share-fallback-url');
+    field.type = 'text';
+    field.readOnly = true;
+    field.value = url;
+    field.spellcheck = false;
+    field.setAttribute('aria-label', 'Share link');
+    field.addEventListener('focus', () => field.select());
+    sheet.appendChild(field);
+    urlField = field;
+  }
+
+  /**
+   * The sheet's own voice (Codex P2, PR #712 round 6).
+   *
+   * Both actions below can fail — they are the same two APIs that already
+   * declined on the way here — and this sheet is the last thing between a
+   * failure and a Player staring at a button that did nothing. A `role="status"`
+   * live region is announced when it changes without stealing focus from the
+   * control that was just pressed, and it is CSS-hidden while empty so the
+   * sheet keeps its shape until there is something to say.
+   */
+  const status = el('p', 'share-fallback-status');
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  sheet.appendChild(status);
+  const say = (message: string): void => {
+    status.textContent = message;
+  };
+
+  const actions = el('div', 'sheet-actions');
+  /**
+   * The ONE way this sheet goes away — Close, backdrop, Escape, supersession.
+   * Idempotent, so a double-fire (Escape while the click is already in flight)
+   * cannot double-restore focus or clear a successor's teardown handle. Keyed
+   * on its own `closed` flag rather than the node's connectedness, so it still
+   * unbinds the document listener for a sheet whose node was pulled out from
+   * under it.
+   */
+  let closed = false;
+  const close = (restoreFocus = true): void => {
+    if (closed) return;
+    closed = true;
+    if (closeMountedFallbackSheet === close) closeMountedFallbackSheet = null;
+    document.removeEventListener('keydown', onKeydown);
+    if (previewUrl) revokeObjectUrl(previewUrl);
+    // Only reclaim focus the sheet actually holds: if something else has taken
+    // it in the meantime, yanking it back to the opener would be the theft
+    // this restoration exists to prevent.
+    const held = backdrop.contains(document.activeElement);
+    backdrop.remove();
+    if (restoreFocus && held && opener?.isConnected) opener.focus();
+  };
+  function onKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    // Containment, not just edge-wrapping: `aria-modal` is a promise to AT
+    // that nothing outside this dialog is reachable, and Tab is the one key
+    // that can break it. Disabled controls are filtered out for the reason
+    // AdminSheet.tsx filters them — they cannot take focus, so treating one as
+    // the first/last stop makes the wrap a no-op and lets Tab escape.
+    const focusable = Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      (node) => !node.hasAttribute('disabled'),
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    // Focus already outside the sheet (the open-time `focus()` was refused, or
+    // AT moved it) — pull it back in rather than wrapping from a stop that
+    // isn't ours.
+    if (!(active instanceof HTMLElement) || !sheet.contains(active)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+      return;
+    }
+    if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  const button = (className: string, label: string, onClick: () => void): HTMLButtonElement => {
+    const b = el('button', className, label);
+    b.type = 'button';
+    b.addEventListener('click', onClick);
+    actions.appendChild(b);
+    return b;
+  };
+
+  if (url && navigator.clipboard?.writeText) {
+    const copy = button('btn primary', 'Copy link', () => {
+      // A press is a fresh user activation, so this write is allowed where the
+      // chain's own silent one was not. A rejection even here leaves the link
+      // on screen to select by hand — still not a dead end.
+      void navigator.clipboard.writeText(url).then(
+        () => {
+          copy.textContent = 'Link copied';
+          say(''); // clear any earlier failure — the sheet must not contradict itself
+        },
+        () => {
+          // The rejection IS the evidence, so report it rather than leaving a
+          // press that visibly did nothing, and point at the field that needs
+          // no API at all. The label is left alone so the button reads as
+          // pressable again.
+          say('Your browser blocked the copy. Select the link above and copy it by hand.');
+        },
+      );
+    });
+  }
+  if (blob) {
+    const save = button('btn', 'Save image', () => {
+      // Same choke point as the chain's own download leg: a press is a fresh
+      // gesture, so the activation the blind click needs is alive here — but
+      // `deliverImage` still reports, and a `false` must be SAID. This sheet
+      // exists because the leg before it declined; a Save that declines the
+      // same way in silence is that failure repeated one level down (Codex P2,
+      // PR #712 round 6).
+      if (deliverImage(blob, filename)) {
+        save.textContent = 'Saved';
+        say(''); // clear any earlier failure — the sheet must not contradict itself
+        return;
+      }
+      say(
+        'Your browser blocked the download. ' +
+          (previewUrl
+            ? 'Press and hold the card above to save it.'
+            : url
+              ? 'Copy the link above instead.'
+              : 'Try sharing again from the button you tapped.'),
+      );
+    });
+  }
+  // Wrapped, not passed bare: a click listener is called WITH the MouseEvent,
+  // which would land in `close`'s `restoreFocus` parameter.
+  const dismiss = button('btn', 'Close', () => close());
+
+  sheet.appendChild(actions);
+  backdrop.appendChild(sheet);
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) close();
+  });
+  document.body.appendChild(backdrop);
+  // Returning `true` here becomes the caller's `'prompt'` — a claim that
+  // something is now on screen. Read the DOM back rather than assume the
+  // append worked (round 6's rule applied to this leg too): an unconnected
+  // node reports `false`, and the caller degrades to `'none'` honestly instead
+  // of announcing an affordance nobody can see. Listener and teardown handle
+  // are registered only once that is confirmed, so a refused mount leaves
+  // nothing bound.
+  if (!backdrop.isConnected) {
+    if (previewUrl) revokeObjectUrl(previewUrl);
+    return false;
+  }
+  document.addEventListener('keydown', onKeydown);
+  closeMountedFallbackSheet = close;
+  // Focus lands on the primary action when there is one, so a keyboard Player
+  // is inside the sheet rather than back where the dead-ended tap left them.
+  // With no Clipboard API there IS no primary action, and the link field is
+  // the thing the note just told them to copy — landing there (selected) beats
+  // landing on Close, the one control that throws the link away.
+  (actions.querySelector<HTMLButtonElement>('.btn.primary') ?? urlField ?? dismiss).focus();
+  return true;
 }
 
 /**
@@ -587,6 +994,38 @@ function isUserCancelledShare(err: unknown): boolean {
 }
 
 /**
+ * Whether the document still holds the transient user activation that BOTH
+ * `navigator.share` legs require (Codex P1, PR #712 round 2).
+ *
+ * The classifier above deliberately reads a `NotAllowedError` as a dismissal
+ * and stops the chain, which is right when the sheet actually opened — but it
+ * is exactly wrong when the activation window expired before `share()` ran:
+ * the Player saw no sheet, declined nothing, and the tap becomes a silent
+ * no-op with no clipboard or download fallback. `navigator.userActivation`
+ * turns that ambiguity into a fact BEFORE the call: with `isActive === false`
+ * the share is guaranteed to reject, so the chain skips straight to the
+ * clipboard/download legs (neither needs activation) and the Player still
+ * ends up with something they can act on — the ADR 0005 promise.
+ *
+ * Read FRESH immediately BEFORE each leg that needs it, and never after
+ * (Codex P1, PR #712 round 6 corrects round 2's read-once). "Before" is the
+ * load-bearing half: `navigator.share` CONSUMES the activation, so a check
+ * made after a leg cannot tell an expiry apart from a call that ran normally.
+ * Round 2 read it once at the top and reused that value all the way down —
+ * which meant a share that ran, consumed the activation and then failed for a
+ * non-cancellation reason left every later leg reading a value that was true
+ * when it was taken and false by the time it was used. Re-reading costs a
+ * property access and removes a whole class of stale-fact bug.
+ *
+ * Absent on browsers without the User Activation API, where `true` (assume
+ * alive, let the attempt decide) keeps the pre-existing behavior exactly.
+ */
+function shareActivationAlive(): boolean {
+  const activation = navigator.userActivation as UserActivation | undefined;
+  return activation ? activation.isActive : true;
+}
+
+/**
  * Hands a rendered Share Card to the OS share sheet when the platform can
  * take image files (`navigator.canShare({ files })`); otherwise degrades —
  * in order — through a text/URL share, the clipboard, then a direct
@@ -604,11 +1043,52 @@ function isUserCancelledShare(err: unknown): boolean {
  * below); the text/URL leg distinguishes cancellation from a genuine
  * failure via `isUserCancelledShare` (Codex P2, PR #111 finding 3) — a
  * non-cancellation rejection there still falls through to the clipboard and
- * download legs. Either way, callers (`Celebration.tsx`, `Leaderboard.tsx`)
+ * download legs.
+ *
+ * BOTH share legs are skipped outright when `navigator.userActivation` says
+ * the transient activation is already gone (Codex P1, PR #712 round 2): there
+ * is no dismissal to respect when no sheet can open, so the chain degrades to
+ * the clipboard/download legs rather than returning a fallback-less
+ * `'cancelled'`.
+ *
+ * And because the clipboard leg is ALSO activation-gated on Safari and
+ * Firefox (Codex P1, PR #712 round 3), a spent activation with no blob to
+ * download would still have dead-ended at `'none'`. The chain therefore ends
+ * in an affordance that needs no activation at all —
+ * `showShareFallbackSheet`, outcome `'prompt'` — so a tap always leaves the
+ * Player with a sheet, a copied link, a download, or something visible to
+ * press. Either way, callers (`Celebration.tsx`, `Leaderboard.tsx`)
  * fire `share_click` unconditionally from their own `finally`, once per tap,
  * regardless of this function's return value — a cancelled share still
  * counts as a tap; the return value is what distinguishes outcomes for a
  * caller that cares, not whether the analytics event fires.
+ *
+ * ## The rule the legs below obey (Codex P1, PR #712 round 6)
+ *
+ * Five rounds each closed the reported dead end and left the same mistake one
+ * level down, because each fix asked "did the call throw?" when the question
+ * is "did the Player get anything?". Those are not the same question, and the
+ * gap between them is where every round of this bug has lived. So the legs are
+ * now written to ONE rule: **a leg may report success only on evidence that
+ * the platform actually delivered.** That sorts them into two kinds.
+ *
+ * SELF-REPORTING legs — `navigator.share` (both) and `clipboard.writeText` —
+ * signal their own failure by rejecting, so a resolve is real evidence and
+ * they may report success on it. The two share legs additionally get an
+ * activation PRE-check, not because they lack evidence but because their
+ * failure signal is ambiguous: `NotAllowedError` reads as a dismissal, and a
+ * dismissal is terminal, so an expiry misread as one dead-ends the chain.
+ * `clipboard.writeText` deliberately gets NO such gate — its rejection is
+ * unambiguous, and gating it would throw away Chrome's permission-backed
+ * clipboard write, which needs no transient activation.
+ *
+ * BLIND legs — the download — have no failure signal whatsoever, so they get
+ * no benefit of the doubt: `deliverImage` reports success only while the
+ * platform's own precondition for honouring a synthetic click holds, and a
+ * refusal falls through rather than being dressed up as `'download'`.
+ *
+ * Anything that survives both kinds lands on the sheet, where the Player takes
+ * a FRESH gesture — the one thing that reliably restores what expired.
  */
 export async function shareCardBlob(opts: {
   blob: Blob | null;
@@ -619,7 +1099,14 @@ export async function shareCardBlob(opts: {
 }): Promise<ShareOutcome> {
   const { blob, filename, title, text, url } = opts;
 
-  if (blob) {
+  // Every activation check below is a FRESH read taken immediately before the
+  // leg it guards (see `shareActivationAlive`) — round 2's single read at the
+  // top was a fact that the very next leg could invalidate. When the
+  // activation is definitively gone, a share leg would reject
+  // `NotAllowedError` and the file leg's any-rejection-is-a-dismissal rule
+  // would return 'cancelled' with no fallback — a delayed no-op. Skipping it
+  // lands the Player on the legs that follow.
+  if (blob && shareActivationAlive()) {
     const file = new File([blob], filename, { type: blob.type || 'image/png' });
     if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
       try {
@@ -634,7 +1121,10 @@ export async function shareCardBlob(opts: {
     }
   }
 
-  if (navigator.share) {
+  // Re-read, don't reuse: if the file leg above ran at all it has already
+  // consumed the activation, and this leg must see that rather than the value
+  // taken before it.
+  if (navigator.share && shareActivationAlive()) {
     try {
       await navigator.share({ title, text, url });
       return 'text';
@@ -647,6 +1137,10 @@ export async function shareCardBlob(opts: {
     }
   }
 
+  // Self-reporting and UNGATED (see the rule above): a clipboard write that
+  // the platform refuses REJECTS, which is exactly the evidence the download
+  // leg lacks — so the promise decides, and Chrome's permission-backed write
+  // keeps working with the activation long gone.
   if (navigator.clipboard?.writeText && url) {
     try {
       await navigator.clipboard.writeText(url);
@@ -656,14 +1150,23 @@ export async function shareCardBlob(opts: {
     }
   }
 
-  if (blob) {
-    try {
-      downloadBlob(blob, filename);
-      return 'download';
-    } catch {
-      /* nothing left to try */
-    }
-  }
+  // The blind leg. `deliverImage` returns false both when the click threw and
+  // when the platform's precondition for honouring it is gone, and either way
+  // this is NOT a delivery — the image goes to the sheet, whose "Save image"
+  // press mints the activation this one was missing.
+  if (blob && deliverImage(blob, filename)) return 'download';
+
+  // Terminal leg (Codex P1, PR #712 round 3): every leg above needs either an
+  // image or a live user activation, and the case that started this — a
+  // stalled cold render handing over `blob: null` with the activation already
+  // spent — has neither, so all of them decline silently. Rather than return
+  // a `'none'` the Player experiences as a broken button, put the link in
+  // front of them with a press that will mint the activation the silent
+  // clipboard write lacked. Since round 6 this is also where an IMAGE lands
+  // whenever the blind download leg could not prove a delivery, so the sheet
+  // carries the card as well as the link. Only a call with NOTHING to offer —
+  // or one whose sheet could not be put on screen — still reports `'none'`.
+  if (showShareFallbackSheet({ url, blob, filename })) return 'prompt';
 
   return 'none';
 }

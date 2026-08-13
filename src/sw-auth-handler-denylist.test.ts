@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { isAppShellClientUrl } from './sw-rescue';
 
 // Covers specs/sw-auth-handler-denylist.md: the navigation fallback must exclude
 // Firebase Hosting's reserved /__/* namespace, or the service worker serves the
@@ -34,6 +35,18 @@ describe('service worker navigation fallback', () => {
     const navRoute = sw.slice(sw.indexOf('new NavigationRoute('));
     const routeBody = navRoute.slice(0, navRoute.indexOf('registerRoute(', 1));
     expect(routeBody).toContain('denylist: [/^\\/__\\//]');
+  });
+
+  it('applies the SAME exclusion when the #516 rescue enumerates windows', () => {
+    // Serving the app shell into the popup is not the only way to dead-end
+    // sign-in: the rescue can `navigate()` that window out of the OAuth flow,
+    // and it reads an unregistered window as a condemned one. Both halves have
+    // to agree on what the reserved namespace is, so the pattern is pinned in
+    // both places and the behaviour is pinned here.
+    const rescue = readFileSync('src/sw-rescue.ts', 'utf8');
+    expect(rescue).toContain('/^\\/__\\//');
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/__/auth/handler')).toBe(false);
+    expect(isAppShellClientUrl('https://gaycruisebingo.com/board')).toBe(true);
   });
 
   it('no longer configures the fallback through vite.config.ts', () => {

@@ -129,6 +129,11 @@ function Editor({ user }: { user: User }) {
   // optional (UserDoc.handle, unset until a Player sets one) so its row is
   // simply omitted rather than rendering an empty "@".
   const handle = typeof profile?.handle === 'string' ? profile.handle.trim() : '';
+  // A profile sheet is not merely a visible modal: its name draft and selected
+  // avatar live only in this component until their write settles. The update
+  // bridge checks this marker before the hidden-tab shortcut too, so moving to
+  // the background cannot discard an edit while a new worker activates.
+  const hasUnsavedProfileWork = open && (name !== currentName || busy);
 
   return (
     <>
@@ -150,7 +155,15 @@ function Editor({ user }: { user: User }) {
       </button>
       {open && (
         <div className="sheet-backdrop" onClick={() => setOpen(false)}>
-          <div ref={dialogRef} className="sheet" role="dialog" aria-modal="true" aria-label="Edit profile" onClick={(e) => e.stopPropagation()}>
+          <div
+            ref={dialogRef}
+            className="sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Edit profile"
+            data-unsaved-work={hasUnsavedProfileWork || undefined}
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="sheet-title" ref={titleRef} tabIndex={-1}>Edit profile</div>
             <div className="proof-body">
               <button type="button" className="iconbtn" style={{ padding: 0 }} aria-label="Change avatar" disabled={busy} onClick={() => fileRef.current?.click()}>

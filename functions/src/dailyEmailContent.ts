@@ -302,8 +302,56 @@ export function formatDayDate(isoDate: string | undefined): string {
   }).format(new Date(at));
 }
 
-/** "8:00 a.m." — the Day's unlock in the Event's timezone. */
-export function formatUnlockTime(unlockAt: number, timeZone: string): string {
+/**
+ * The largest millisecond offset a JavaScript `Date` can represent (ECMA-262
+ * "time clip", ±100,000,000 days around the epoch).
+ */
+const MAX_TIME_VALUE = 8.64e15;
+
+/**
+ * True when a Day names a REAL unlock instant, rather than the `unlockAt: 0`
+ * "live from Event open" sentinel (#289), a missing value, or a corrupt one.
+ *
+ * ONE question, deliberately not three (#723). Sentinel, absent, `NaN`,
+ * negative, non-numeric and out-of-range all mean the same thing to both
+ * callers — there is no hour to quote and none to schedule against — so they
+ * are one case, and nothing downstream sorts them further. The sender and the
+ * copy must agree on it: a Day the sender mails at the Event's fallback morning
+ * hour is a Day whose copy must not promise an unlock time.
+ *
+ * FINITE IS NOT THE SAME AS REPRESENTABLE, and this predicate is the single
+ * place that difference is caught (Codex #729 P2). `Number.MAX_VALUE` is finite
+ * and positive, but `new Date(Number.MAX_VALUE)` is an Invalid Date and EVERY
+ * `Intl` call on it throws `RangeError` — including the `formatToParts` in
+ * `morningOpensAt`, whose try/catch only re-reads in UTC and so rethrows. One
+ * corrupt future Day would abort the whole Event's due check and silently
+ * suppress that morning's otherwise valid email, which is precisely the
+ * mail-nothing failure the #723 rule exists to remove. Bounding here rather
+ * than at each `new Date` keeps the callers agreeing by construction: an
+ * unlock the sender cannot schedule against is an unlock the copy cannot quote.
+ */
+export function hasScheduledUnlock(day: Pick<EmailDay, 'unlockAt'>): boolean {
+  return (
+    typeof day.unlockAt === 'number' &&
+    Number.isFinite(day.unlockAt) &&
+    day.unlockAt > 0 &&
+    day.unlockAt <= MAX_TIME_VALUE
+  );
+}
+
+/**
+ * "8:00 a.m." — the Day's unlock in the Event's timezone — or `null` when the
+ * Day has no real unlock instant to quote.
+ *
+ * NULL RATHER THAN A FORMATTED SENTINEL (#723). Epoch 0 is a perfectly valid
+ * instant to `Intl`, so the sentinel formats as a plausible clock time —
+ * "4:00 p.m." in `America/Los_Angeles` — and a caller that forgets to branch
+ * ships a confident lie about when the card opens instead of something anybody
+ * would notice. Returning null makes the omission render as the literal `null`,
+ * which a test catches at a glance and a reviewer cannot miss.
+ */
+export function formatUnlockTime(unlockAt: number, timeZone: string): string | null {
+  if (!hasScheduledUnlock({ unlockAt })) return null;
   const fmt = (tz: string): string =>
     new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz }).format(
       new Date(unlockAt),
@@ -468,7 +516,12 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // context line, and a flag mid-sentence reads as decoration rather than data.
   const arrivalPlace = (day.place ?? day.port ?? '').trim();
   const arrival = arrivalPlace ? register.arrivalLine(arrivalPlace) : register.arrivalLineNoPlace;
-  const nudgeLine = `${greeting}${arrival}—your Day ${dayNumber} card is live at ${formatUnlockTime(day.unlockAt, timeZone)}: 24 fresh squares.`;
+  // The opening Day of an Event that uses the open sentinel has no unlock hour
+  // to promise — it is already live — so the copy says so rather than quoting
+  // the epoch (#723).
+  const unlockClock = formatUnlockTime(day.unlockAt, timeZone);
+  const liveWhen = unlockClock ? `live at ${unlockClock}` : 'live now';
+  const nudgeLine = `${greeting}${arrival}—your Day ${dayNumber} card is ${liveWhen}: 24 fresh squares.`;
   const tonight = (day.tonight ?? []).filter((t) => typeof t === 'string' && t.trim() !== '');
   const tonightLine = tonight.length > 0 ? tonight.join(' · ') : null;
 
@@ -483,7 +536,9 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // clients truncate hard and the hook is what earns the open.
   const preheader = played
     ? `Day ${dayNumber}: ${theme.label}—standings through Day ${dayNumber - 1} inside.`
-    : `Day ${dayNumber} is here—your card unlocks at ${formatUnlockTime(day.unlockAt, timeZone)}.`;
+    : unlockClock
+      ? `Day ${dayNumber} is here—your card unlocks at ${unlockClock}.`
+      : `Day ${dayNumber} is here—your card is live now.`;
 
   return {
     edition: args.edition || DEFAULT_EMAIL_EDITION,

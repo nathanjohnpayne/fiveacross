@@ -135,7 +135,10 @@ export default function ItemPool() {
 
   return (
     <div>
-      <div className="addbar">
+      {/* `data-unsaved-work` while a suggestion is half-typed (Codex P2 round 5,
+          PR #720): it lives only in `text`, so an automatic post-deploy reload
+          would eat it. See `midInteraction` in src/swClientBridge.ts. */}
+      <div className="addbar" data-unsaved-work={text !== '' || undefined}>
         <input
           className="input"
           maxLength={80}
