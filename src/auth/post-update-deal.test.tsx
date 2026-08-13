@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthProvider, useAuth } from './AuthContext';
+import { AUTH_BOOTSTRAP_TIMEOUT_MS, AuthProvider, useAuth } from './AuthContext';
 import { resetPostUpdateDealGraceForTest, watchPostUpdateReload } from '../postUpdateDeal';
 
 // Covers the #519 post-update deal grace: a service-worker update reload lands on a
@@ -73,18 +73,29 @@ let emitAuth: (u: unknown) => unknown = () => {};
 let sawDealError = false;
 
 function Harness() {
-  const { dealError, dealing } = useAuth();
+  const { dealError, dealing, canRenderEventContent } = useAuth();
   if (dealError) sawDealError = true;
   return (
     <div>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
+      <span data-testid="authority">{canRenderEventContent ? 'may-render' : 'withheld'}</span>
     </div>
   );
 }
 
+/** AuthProvider renders `<SignIn/>` in place of `children` when the re-prompt gate is
+ *  up, so the Harness is unmounted behind it — the prompt's own copy is the read. */
+const rePromptShown = () => screen.queryByText(/One quick thing/i) !== null;
+/** `queryBy`, for the same reason: a missing Harness is "the Event is not rendering". */
+const mayRenderEventContent = () => screen.queryByTestId('authority')?.textContent === 'may-render';
+
 const mount = () => render(<AuthProvider><Harness /></AuthProvider>);
 const signInUser = () => act(async () => void (await emitAuth(FAKE_USER)));
+/** Same publish, but WITHOUT awaiting the fire-and-forget bootstrap — mirroring
+ *  Firebase, which ignores the callback's return value. Required by the fake-timer
+ *  cases below, where the bootstrap cannot settle until a timer is advanced. */
+const signInUserDetached = () => act(async () => void emitAuth(FAKE_USER));
 
 /** The `navigator.serviceWorker` stand-in: a bare EventTarget is enough, because the
  *  grace only ever listens for `controllerchange` on the container. */
@@ -99,6 +110,12 @@ const controllerChange = () => act(() => void swContainer.dispatchEvent(new Even
 
 function setNavigatorOnline(v: boolean) {
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: v });
+}
+
+function deferred<T>() {
+  let settle!: (v: T) => void;
+  const promise = new Promise<T>((res) => (settle = res));
+  return { promise, settle };
 }
 
 /** Stands in for what `main.tsx` does at module scope: arm the grace for this document
@@ -136,6 +153,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   stopWatching();
   stopWatching = () => {};
   setNavigatorOnline(true);
@@ -301,6 +319,162 @@ describe('post-update BOOTSTRAP grace (#519, Codex P2 on #719)', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/Check your connection/);
     expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Where the #519 grace repeat meets the #521 provisional cache lift. Both live in
+// `bootstrapUser`'s online branch and both fire on the same transient authority
+// failure, so their ORDER is a behavioural choice, not an accident of the merge.
+describe('the #519 grace repeat and the #521 cache lift (ordering)', () => {
+  it('repeats the authority read BEFORE lifting the render gate from cache — a repeat that succeeds never consults the cache and never sets an error', async () => {
+    // If the lift ran first, the Player would get a connection-worded DealError and
+    // a cache-painted card for the instant it takes the repeat to land, and the
+    // repeat would then clear both: a visible flicker on the happy path, and the
+    // exact error frame the #519 grace exists to skip. Repeating first also means
+    // the session settles on REAL authority (`attestedAuthoritative`), which the
+    // provisional lift by construction can never grant — so the deal fires.
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // a stamp IS cached
+    mocks.ensureUserProfile.mockRejectedValueOnce(new Error(CONN_ERR));
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUser();
+
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(2);
+    // The cache was never reached: the repeat landed first and settled authority.
+    expect(mocks.readAdultAttestationFromCache).not.toHaveBeenCalled();
+    expect(sawDealError).toBe(false);
+  });
+
+  it('does not surface the repeat’s failure over an authority read that landed late while it was in flight', async () => {
+    // The interaction the grace repeat newly makes reachable: the FIRST read's
+    // answer is orphaned by the timeout but not cancelled, so it can land during
+    // the repeat. Authority is terminal for the attempt — once it has applied a
+    // definite server answer (and cleared the error, and licensed the deal), the
+    // repeat's own timeout must not paint a DealError back over it.
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    // The first read times out; the grace claims and starts the repeat.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // The ORPHANED first read now lands, confirming the stamp: authority granted,
+    // the deferred deal fires.
+    await act(async () => {
+      first.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // …and only THEN does the repeat time out. It must be a no-op.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(sawDealError).toBe(false);
+    expect(screen.queryByRole('alert')).toBeNull();
+    repeat.settle(null); // drain the orphan so no unhandled promise leaks
+  });
+
+  // The SIBLING of the case above, and the one the merge left open (Phase 4b P1 on
+  // #728). There, the late answer settled and the repeat FAILED — covered by the
+  // explicit `bootstrapFailure && authorityApplied` arm. Here the late answer
+  // settles and the repeat SUCCEEDS, which lands on the in-time settle instead. If
+  // that call is not itself idempotent, one attempt settles twice and the SECOND
+  // answer wins — the exact inversion of the stated contract, in both directions.
+  //
+  // The first of the two is a fail-OPEN of the 18+ gate, which is why it is a P1 and
+  // not a tidiness note: the server has said this User has no attestation, and the
+  // repeat's stamp would authorize the deal anyway.
+  it('a repeat that SUCCEEDS after a late server-NULL cannot re-open the gate that NULL closed — the 18+ re-prompt stands and no deal fires', async () => {
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    // The first read times out; the grace claims and starts the repeat.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // The ORPHANED first read lands while the repeat is still in flight, and it is
+    // definitive: this User has NO stamp. That is terminal for the attempt.
+    await act(async () => {
+      first.settle(null);
+    });
+
+    // …and only THEN does the repeat come back, disagreeing — a stamp. It is the
+    // second settle of one attempt, so it is dropped: the server's NULL stands.
+    await act(async () => {
+      repeat.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(rePromptShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('a repeat that SUCCEEDS with a NULL after a late server-STAMP cannot bounce a confirmed Player to the re-prompt', async () => {
+    // The other direction, and the reason the guard belongs in the settle rather
+    // than in an `if (attestedRead === true)` at the call site: first-settle-wins is
+    // not "prefer the stricter answer", it is "one attempt, one answer". Here the
+    // late answer is the permissive one, and it still wins.
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // The orphaned first read lands CONFIRMING the stamp: authority granted, the
+    // deferred deal fires.
+    await act(async () => {
+      first.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // The repeat then resolves NULL. Applying it would set `attested` false and
+    // hand a dealt, server-confirmed Player the 18+ prompt over their own Board.
+    await act(async () => {
+      repeat.settle(null);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(rePromptShown()).toBe(false);
+    expect(mayRenderEventContent()).toBe(true);
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+    expect(sawDealError).toBe(false);
   });
 });
 
