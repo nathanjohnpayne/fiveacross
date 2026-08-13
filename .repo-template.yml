@@ -76,6 +76,16 @@ spec_test_map:
     - src/components/NoticeBanner.test.tsx
     - src/components/admin-console-ia.test.tsx
     - src/components/MessagesPanel.test.tsx
+  # og-renderer-commit-safety's coverage lives under scripts/og/ as *.test.mjs
+  # (module-named, not spec-basename-named, and outside both test_globs
+  # patterns below), so map every layer explicitly.
+  og-renderer-commit-safety:
+    - scripts/og/og-size-guard.test.mjs
+    - scripts/og/og-scratch-path.test.mjs
+    - scripts/og/og-stage-commit.test.mjs
+    - scripts/og/og-stage-commit-concurrency.test.mjs
+    - scripts/og/og-commit-lock.test.mjs
+    - scripts/og/og-commit-lock-atomicity.test.mjs
 # Glob patterns that identify test files. Supplements the default
 # ("tests/**/*.test.*") which doesn't cover shell-based tests or the
 # Vite app's colocated unit tests under src/.

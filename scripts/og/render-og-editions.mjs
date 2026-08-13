@@ -51,11 +51,15 @@
 //   node scripts/og/render-og-editions.mjs --edition vacay --out /tmp/og
 //   node scripts/og/compare-og.mjs --new /tmp/og --edition vacay
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { transformSync } from 'esbuild';
+import { assertWithinHardCap } from './og-size-guard.mjs';
+import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
+import { commitStaged, discardStaged } from './og-stage-commit.mjs';
+import { withDestinationLocks } from './og-commit-lock.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -350,6 +354,14 @@ const ART = {
 // before a messenger silently drops the preview.
 const SIZE_BUDGET_BYTES = 500 * 1024;
 
+// The hard cap itself (#699): whatever survives quantisation — or the
+// lossless render, if pngquant is missing or fails — MUST clear this before
+// it is allowed to replace a committed copy. Automation checks this script's
+// exit status to decide whether an asset is safe to ship; a link preview that
+// silently fails to unfurl on WhatsApp is exactly what that check exists to
+// catch.
+const HARD_CAP_BYTES = 600 * 1024;
+
 const GOOGLE_FONTS_CSS_PATTERN = /^https:\/\/fonts\.googleapis\.com\/css2\?/;
 const EXPECTED_FACES = [
   { family: 'Anton', weight: 400 },
@@ -413,7 +425,23 @@ for (const id of targets) {
 }
 
 const browser = await chromium.launch();
-const written = [];
+let browserClosed = false;
+async function closeBrowser() {
+  if (browserClosed) return;
+  browserClosed = true;
+  await browser.close();
+}
+// Every edition's render is staged to its scratch path here first (#699) and
+// ONLY moved into its committed destination once every targeted edition has
+// individually cleared the hard cap (#713 on `--all`): if edition 3 of 3
+// fails, editions 1 and 2 must still not have replaced anything in `public/`
+// or the wireframes mirror. Renaming inside the per-edition loop, as the
+// original version of this script did, broke that guarantee for `--all` —
+// it made the earlier passing editions durable before the later ones had
+// even been checked, so a late failure left a partially-updated render set
+// contradicting the fail-before-overwrite behaviour this file exists for.
+const staged = [];
+let written;
 try {
   for (const id of targets) {
     const config = configFor(id);
@@ -465,56 +493,156 @@ try {
 
     const dest = outDir ? join(outDir, ART[id].file) : join(repo, 'public', ART[id].file);
     mkdirSync(dirname(dest), { recursive: true });
-    await page.screenshot({ path: dest });
-    await page.close();
+    // Render to a scratch path next to `dest`, NOT `dest` itself (#699): the
+    // hard-cap check below must be able to refuse a bad render without ever
+    // having touched the committed copy it would otherwise have overwritten.
+    // The path is `.png`-suffixed and `type: 'png'` is passed explicitly
+    // (#713): Playwright infers the screenshot format from `path`'s
+    // extension and throws for anything else unless `type` overrides it, so
+    // a scratch suffix without a recognised image extension fails the
+    // screenshot itself, before the hard-cap guard it was meant to protect
+    // ever runs.
+    // Computed once and reused for both the screenshot write and every later
+    // reference (stage bookkeeping, size checks, commit) — `scratchPathFor`
+    // mints a fresh random token per call (#713 round 3), so calling it
+    // twice for the "same" file would silently produce two different paths.
+    const scratch = scratchPathFor(dest);
+    let stagedScratch = false;
+    try {
+      await page.screenshot(screenshotOptionsFor(scratch));
+      await page.close();
 
-    // Crush ONLY if the lossless render misses the size budget. og-default.png
-    // is quantised because at 2400x1260 it is ~1.6 MB lossless and WhatsApp
-    // caps og:image at 600 KB; at 1200x630 these land near 250 KB, so there is
-    // nothing to buy. And quantising is not free on this artwork: the palette
-    // takes the corner radial washes from ~70 distinct values across a row to
-    // ~16, which is invisible at size but shows as contour rings under
-    // contrast amplification. The #609 originals were truecolor; so are these.
-    const losslessBytes = statSync(dest).size;
-    if (losslessBytes > SIZE_BUDGET_BYTES) {
-      try {
-        execFileSync(
-          'pngquant',
-          ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', `${dest}.quant`, dest],
-          { stdio: 'inherit' },
-        );
-        renameSync(`${dest}.quant`, dest);
-        console.warn(
-          `  ${id}: ${(losslessBytes / 1024).toFixed(0)} KB lossless exceeded the ` +
-            `${(SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB budget — quantised to ` +
-            `${(statSync(dest).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
-        );
-      } catch {
-        console.warn(`  ${id}: over budget and pngquant is unavailable — shipping the lossless PNG.`);
+      // Crush ONLY if the lossless render misses the size budget. og-default.png
+      // is quantised because at 2400x1260 it is ~1.6 MB lossless and WhatsApp
+      // caps og:image at 600 KB; at 1200x630 these land near 250 KB, so there is
+      // nothing to buy. And quantising is not free on this artwork: the palette
+      // takes the corner radial washes from ~70 distinct values across a row to
+      // ~16, which is invisible at size but shows as contour rings under
+      // contrast amplification. The #609 originals were truecolor; so are these.
+      const losslessBytes = statSync(scratch).size;
+      if (losslessBytes > SIZE_BUDGET_BYTES) {
+        try {
+          const quantizedScratch = `${scratch}.quant`;
+          execFileSync(
+            'pngquant',
+            ['--quality=75-95', '--speed', '1', '--strip', '--force', '--output', quantizedScratch, scratch],
+            { stdio: 'inherit' },
+          );
+          renameSync(quantizedScratch, scratch);
+          console.warn(
+            `  ${id}: ${(losslessBytes / 1024).toFixed(0)} KB lossless exceeded the ` +
+              `${(SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB budget — quantised to ` +
+              `${(statSync(scratch).size / 1024).toFixed(0)} KB. Check the washes for banding.`,
+          );
+        } catch {
+          try {
+            unlinkSync(`${scratch}.quant`);
+          } catch {
+            /* pngquant did not leave a partial output */
+          }
+          console.warn(`  ${id}: over budget and pngquant is unavailable — shipping the lossless PNG.`);
+        }
+      }
+
+      // The hard cap (#699): refuse to replace the committed copies with a
+      // render known not to unfurl. Whatever caused it — pngquant missing,
+      // pngquant failing, or the artwork just being too heavy even quantised —
+      // the failure happens BEFORE `dest` or the wireframes mirror is touched,
+      // and the process exits nonzero so automation checking this script's
+      // status does not accept the asset.
+      const finalBytes = statSync(scratch).size;
+      assertWithinHardCap(id, finalBytes, HARD_CAP_BYTES);
+
+      // Stage only — do NOT touch `dest` or the wireframes mirror yet. See the
+      // note above `staged`: committing here, inside the per-edition loop,
+      // is exactly what made `--all` non-atomic (#713).
+      const mirror = outDir
+        ? join(outDir, ART[id].mirror)
+        : join(repo, 'plans', 'og-images', ART[id].mirror);
+      staged.push({ id, scratch, dest, mirror, bytes: finalBytes });
+      stagedScratch = true;
+    } finally {
+      // A screenshot can create a partial file before rejecting, and `close`,
+      // quantization, or the size check can fail before this path reaches the
+      // shared staged list. Delete the current file locally in every one of
+      // those paths; `discardStaged` can only clean entries it was told about.
+      if (!stagedScratch) {
+        try {
+          unlinkSync(scratch);
+        } catch {
+          /* no file was written, or cleanup was already attempted */
+        }
       }
     }
-
-    // The wireframes' reference copy, written from the same bytes so the two
-    // can never disagree (#681 acceptance criterion).
-    const mirror = outDir
-      ? join(outDir, ART[id].mirror)
-      : join(repo, 'plans', 'og-images', ART[id].mirror);
-    mkdirSync(dirname(mirror), { recursive: true });
-    copyFileSync(dest, mirror);
-
-    written.push({ id, dest, mirror, bytes: statSync(dest).size });
   }
+
+  // All browser work is complete before committing. If Chromium shutdown
+  // fails, discard the staged assets rather than report a successful publish
+  // after `commitStaged` has removed its rollback backups.
+  await closeBrowser();
+
+  // Every targeted edition cleared the hard cap — commit them all now, in
+  // one pass, so a run either updates every targeted destination or (per
+  // the catch below) none of them. This runs INSIDE the same try as the
+  // render loop (#713 round 3): `commitStaged` has its own internal
+  // rollback for a failure mid-commit (a mirror going unwritable, the disk
+  // filling), but that rollback only restores destinations/mirrors — it
+  // does not know about scratch files still on disk for editions this call
+  // never reached. Staying inside this try means a commit-phase failure
+  // reaches the same `catch` as a render-phase one, so `discardStaged`
+  // still runs and sweeps those up.
+  //
+  // Locked for the WHOLE commit-or-rollback phase, not just the call to
+  // `commitStaged` — see og-commit-lock.mjs's header (#713 round 4, id
+  // 3762521202). Unique scratch paths (round 3) stop two invocations from
+  // clobbering each other's STAGED bytes, but say nothing about two
+  // invocations publishing the same destination at once: without this,
+  // their rename-then-copy pairs (and their identically-named
+  // `*.rollback-tmp` backups) can interleave, so the destination that
+  // survives can come from one process while the mirror that survives
+  // comes from the other. Acquired only here, not around the render loop
+  // above — staging writes to per-invocation scratch paths that never
+  // touch a shared destination, so there is nothing to serialize before
+  // this point.
+  const releaseLocks = withDestinationLocks(staged);
+  try {
+    // `bytes` was measured and cap-checked while the file was still staged.
+    // Do not perform any fallible reporting read after commitStaged has thrown
+    // away its rollback backups: a successful publish must not later be
+    // reported as a failed, rollbackable run merely because `stat` failed.
+    written = commitStaged(staged).map((w) => ({ ...w, bytes: staged.find((s) => s.id === w.id).bytes }));
+  } finally {
+    releaseLocks();
+  }
+} catch (err) {
+  // Either a later edition failed its hard cap (or a font/render problem
+  // threw first) — every earlier edition in this run already passed its own
+  // guard and is sitting in a scratch file, not yet committed — or
+  // `commitStaged` itself failed partway and already rolled every
+  // destination/mirror it touched back to its pre-commit bytes. Either way,
+  // sweep up whatever scratch files remain (this tolerates the ones
+  // `commitStaged` already consumed) so a failed run doesn't leave stray
+  // `*.render-tmp.*.png` files behind, and rethrow so the process still
+  // exits nonzero and `public/` (and the mirror) stay exactly as they were
+  // before this run started.
+  discardStaged(staged);
+  throw err;
 } finally {
-  await browser.close();
+  if (!browserClosed) {
+    try {
+      await closeBrowser();
+    } catch {
+      // Preserve the rendering/commit failure that brought us here; a browser
+      // process that was already failing to close cannot make a successful
+      // publish look rollbackable because success closes it before commit.
+    }
+  }
 }
 
+// Every entry here already cleared HARD_CAP_BYTES — a render that didn't
+// threw above and never reached `written`, so there is nothing left to warn
+// about post hoc.
 for (const w of written) {
   console.log(`${w.id.padEnd(11)} ${(w.bytes / 1024).toFixed(0).padStart(4)} KB  ${w.dest}`);
   console.log(`${''.padEnd(11)}      mirrored -> ${w.mirror}`);
-}
-const oversize = written.filter((w) => w.bytes > 600 * 1024);
-if (oversize.length > 0) {
-  console.warn(
-    `\nWARNING: over WhatsApp's 600 KB og:image cap: ${oversize.map((w) => w.id).join(', ')}`,
-  );
 }
