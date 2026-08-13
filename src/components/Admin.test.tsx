@@ -128,6 +128,7 @@ vi.mock('../theme/themes', () => {
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user }) }));
 
 import Admin from './Admin';
+import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
 // The console is route-driven now (specs/admin-console-ia.md): each surface
 // mounts at /more/admin[/section], so every render pins the section under test
@@ -313,6 +314,46 @@ describe('Admin Schedule surface (specs/d15-admin-schedule.md, at /more/admin/sc
     fireEvent.change(input, { target: { value: '💦 Splash T-Dance · 🏋️ Get Sporty' } });
     fireEvent.blur(input);
     expect(H.setDayTonight).toHaveBeenCalledWith(days, 0, ['💦 Splash T-Dance', '🏋️ Get Sporty']);
+  });
+
+  it('an uncommitted Tonight edit holds back the automatic post-deploy reload', () => {
+    // Codex P2 round 5, PR #720. This field commits on BLUR, so a line the
+    // admin is still typing exists only in React state — and the schedule row
+    // is neither a modal nor the claim sheet, so the reload watcher
+    // (src/swClientBridge.ts) had nothing to defer on.
+    const days = [dayDef({ index: 0, unlockAt: Date.now() + 3600_000, tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'] })];
+    H.event = { ...H.event, days } as unknown as EventDoc;
+    renderAdmin('/more/admin/schedule');
+
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    const input = screen.getByLabelText('Day 1 tonight') as HTMLInputElement;
+    expect(document.querySelector(marker)).toBeNull();
+    fireEvent.change(input, { target: { value: '💦 Splash T-Dance · 🏋️' } });
+    expect(document.querySelector(marker)).not.toBeNull();
+    fireEvent.change(input, { target: { value: '🪖 Dog Tag T-Dance · ✈️ Duty Free' } });
+    expect(document.querySelector(marker)).toBeNull();
+  });
+
+  it('a formatting-only Tonight edit is not unsaved work, before OR after the blur', () => {
+    // Codex P2 round 6, PR #720. `commitTonight` normalizes the draft before it
+    // compares, so retyping the separator without its spaces writes nothing —
+    // and, having written nothing, resets nothing either. A marker keyed on the
+    // RAW string therefore latches on and can never come off: the draft stays
+    // `A·B`, the stored line stays `A · B`, and because this attribute is
+    // checked ahead of the visibility gate it does not delay the post-deploy
+    // reload for this row, it cancels it for the row's whole life.
+    const days = [dayDef({ index: 0, unlockAt: Date.now() + 3600_000, tonight: ['🪖 Dog Tag T-Dance', '✈️ Duty Free'] })];
+    H.event = { ...H.event, days } as unknown as EventDoc;
+    renderAdmin('/more/admin/schedule');
+
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    const input = screen.getByLabelText('Day 1 tonight') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '🪖 Dog Tag T-Dance·✈️ Duty Free' } });
+    expect(document.querySelector(marker)).toBeNull();
+    fireEvent.blur(input);
+    expect(H.setDayTonight).not.toHaveBeenCalled();
+    expect(input.value).toBe('🪖 Dog Tag T-Dance·✈️ Duty Free'); // the no-op commit leaves the draft alone
+    expect(document.querySelector(marker)).toBeNull();
   });
 
   it('surfaces a failed Tonight save and restores the persisted line', async () => {

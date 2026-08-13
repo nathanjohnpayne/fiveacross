@@ -17,6 +17,7 @@ import EventNotFound from './components/EventNotFound';
 import InstallPrompt from './components/InstallPrompt';
 import UpdatePrompt from './components/UpdatePrompt';
 import { enforceBuildFloor } from './shellRecovery';
+import { armUncontrolledUpdateReload, postClientBuild } from './swClientBridge';
 import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
@@ -63,6 +64,28 @@ function startPostHogAfterResolution(): void {
 // by a one-attempt-per-tab guard so a misconfigured floor cannot reload-loop.
 // Skipped for the uptime synthetic (#142) so a probe run is never a reload.
 if (!isSyntheticProbe()) void enforceBuildFloor(__BUILD_STAMP__);
+
+// The other two out-of-tree halves of the update story (src/swClientBridge.ts),
+// here at module scope for the same reason: #516 needs this page to have named
+// the build it is EXECUTING even if it goes on to crash during render, and #621
+// needs a tab that was uncontrolled at registration to notice a deploy that
+// lands in its own lifetime.
+//
+// ONLY the reload watcher is skipped for the uptime synthetic (#142) — a probe
+// run is never a reload, matching the floor check above. The probe DOES name
+// its build, and that asymmetry is the point (Codex P2 round 4). Naming a build
+// is a `postMessage`; it reloads nothing. Withholding it makes the probe's
+// window a same-origin client that `clients.matchAll()` can see and the
+// registry cannot, which is precisely the shape `shouldForceActivate` reads as
+// an ancient stranded tab (src/sw-rescue.ts). A silent probe would therefore
+// force-activate the fleet on an armed floor with no stale tab anywhere and
+// then navigate the probe out of the very load it is asserting — turning the
+// incident deploy the floor exists for into a false outage alert, the same trap
+// the `/__/*` sign-in-popup filter exists to avoid. The invariant the rescue
+// rests on is "absent from the registry means this module scope never ran", so
+// nothing that DOES run it may opt out of naming itself.
+postClientBuild(__BUILD_STAMP__);
+if (!isSyntheticProbe()) void armUncontrolledUpdateReload();
 
 // The #519 post-update deal grace (src/postUpdateDeal.ts), armed at module scope
 // for the same reason the floor above runs here — and specifically NOT from

@@ -60,8 +60,29 @@ export async function readWaitingBuildStamp(timeoutMs = BUILD_STAMP_TIMEOUT_MS):
     const container = typeof navigator !== 'undefined' ? navigator.serviceWorker : undefined;
     if (!container?.getRegistration) return null;
     const registration = await container.getRegistration();
-    const waiting = registration?.waiting;
-    if (!waiting) return null;
+    return await askWorkerBuildStamp(registration?.waiting ?? null, timeoutMs);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The round trip itself, against ANY worker rather than the waiting one.
+ *
+ * Split out for `src/swClientBridge.ts` (Codex P1 on #621), which has to ask the
+ * worker that just ACTIVATED whether it is serving the build this page is
+ * executing — the first worker on an uncontrolled page is not guaranteed to
+ * match, because a deploy can land between the document load and the `/sw.js`
+ * fetch. Same null-is-fail-open contract as above: an unanswerable worker
+ * (a pre-#605 build, a dropped port, a worker killed mid-question) is not
+ * evidence of anything, and each caller reads null as "change nothing".
+ */
+export async function askWorkerBuildStamp(
+  worker: Pick<ServiceWorker, 'postMessage'> | null | undefined,
+  timeoutMs = BUILD_STAMP_TIMEOUT_MS,
+): Promise<string | null> {
+  try {
+    if (!worker) return null;
     return await new Promise<string | null>((resolve) => {
       const channel = new MessageChannel();
       let settled = false;
@@ -81,7 +102,7 @@ export async function readWaitingBuildStamp(timeoutMs = BUILD_STAMP_TIMEOUT_MS):
         const data = event.data as { type?: unknown; stamp?: unknown } | null;
         finish(data?.type === BUILD_STAMP_REPLY && typeof data.stamp === 'string' ? data.stamp : null);
       };
-      waiting.postMessage({ type: BUILD_STAMP_REQUEST }, [channel.port2]);
+      worker.postMessage({ type: BUILD_STAMP_REQUEST }, [channel.port2]);
     });
   } catch {
     return null;

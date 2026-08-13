@@ -39,6 +39,78 @@ export const FORCED_FLAG_URL = '/__gcb-forced-activation';
 /** Synthetic key holding when the ACTIVE worker last re-read the floor. */
 export const FLOOR_CHECKED_URL = '/__gcb-floor-checked-at';
 
+/**
+ * Synthetic key PREFIX for what each OPEN WINDOW is EXECUTING (#516). Same
+ * cache as the records above, so it survives the worker teardown the lifecycle
+ * permits between events.
+ *
+ * ONE RECORD PER WINDOW, not one map for all of them, and that shape is the
+ * whole concurrency story (Codex P2 round 3 on #516). A single map makes every
+ * registration a read-modify-write, and read-modify-writes on this record are
+ * run by workers that cannot coordinate: a page posts `CLIENT_BUILD` to the
+ * ACTIVE worker while a replacement worker is sweeping the same record from its
+ * `install`, and those are two separate globals. Round 2's promise chain was
+ * module state, so each global had its own copy of it and neither ordered the
+ * other — both read the same map and the later `put` discarded the earlier
+ * entry. Losing the STALE tab's entry costs the install decision its evidence;
+ * losing a CURRENT tab's entry makes it look unregistered, so a forced
+ * activation navigates a player who was doing nothing wrong.
+ *
+ * Per-key records need no coordination at all, in this worker or across worker
+ * versions: a registration writes exactly one key — its own — and a sweep
+ * deletes only keys it has decided are dead. Nothing reads a value in order to
+ * write it back, so there is no update left to lose.
+ */
+export const CLIENT_STAMP_KEY_PREFIX = '/__gcb-client-build/';
+
+/** `clientId -> __BUILD_STAMP__` for every window that has named itself. */
+export type ClientStamps = Record<string, string>;
+
+/**
+ * How recently a record must have been written to be immune from the sweep,
+ * whatever the live set says.
+ *
+ * The sweep runs against an id list enumerated BEFORE it — `clients.matchAll`
+ * is itself async — so a window that opened in between is genuinely alive and
+ * genuinely absent from that snapshot. Deleting its record is the same lost
+ * registration the per-key shape exists to prevent, arriving by a different
+ * road: the tab then reads as unregistered and a forced activation navigates
+ * it. Age is the one signal about a record that a stale snapshot cannot make
+ * wrong, so a young record is simply never swept. The cost is bounded and
+ * harmless — a closed tab lingers for a few minutes, and both consumers of the
+ * registry look entries up by LIVE client id, so a lingering one is ignored.
+ */
+export const CLIENT_STAMP_SWEEP_GRACE_MS = 5 * 60_000;
+
+/** Firebase Hosting's reserved namespace. Mirrors the `denylist` on the
+ *  navigation route in `src/sw.ts` — see `isAppShellClientUrl`. */
+const RESERVED_HOSTING_PATH = /^\/__\//;
+
+/**
+ * Whether a same-origin window is one of OUR pages (Codex P2 round 3 on #516).
+ *
+ * `clients.matchAll({ includeUncontrolled: true })` returns every window on
+ * this origin, and the Google sign-in popup at `/__/auth/handler` is one of
+ * them. That document is Firebase's, not ours: it never runs `main.tsx`, so it
+ * never posts `CLIENT_BUILD` and is therefore absent from the registry — which
+ * is exactly the shape this rescue reads as "an ancient client, condemn it".
+ * Left unfiltered, an open sign-in popup would force-activate the fleet on an
+ * armed floor with no stale app tab anywhere, and then `navigate()` the popup
+ * itself mid-flow. `src/sw.ts` already refuses to serve the app shell into that
+ * namespace for the same reason (#182); breaking sign-in to fix a stale tab is
+ * a far worse trade than missing the rescue.
+ *
+ * An unparseable url reads as NOT ours, so anything we cannot identify is left
+ * strictly alone rather than navigated.
+ */
+export function isAppShellClientUrl(url: string): boolean {
+  try {
+    return !RESERVED_HOSTING_PATH.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** How rarely the active worker re-reads the floor. It wakes on ordinary
  *  navigations, so this is the throttle that keeps an emergency lever from
  *  becoming a request on every page load. */
@@ -127,6 +199,12 @@ export function shouldForceActivate(input: {
   floor: unknown;
   /** False when there is no existing worker at all — a FIRST install. */
   hasActiveWorker?: boolean;
+  /** What the open windows are EXECUTING (#516), keyed by the browser's own
+   *  client id. Not the same thing as the shell being SERVED — see below. */
+  clientStamps?: ClientStamps;
+  /** EVERY open window, registered or not, or null when the live set could not
+   *  be read. The ids are what make an absence visible — see below. */
+  liveClientIds?: readonly string[] | null;
 }): boolean {
   // A first install has no shell to rescue (Phase 4b P2 on #515). Without this,
   // `readActiveStamp()` returning null on a brand-new registration is
@@ -136,9 +214,246 @@ export function shouldForceActivate(input: {
   // precache was still installing, sign-in included.
   if (input.hasActiveWorker === false) return false;
   const active = input.activeStamp ?? UNKNOWN_ACTIVE_STAMP;
-  if (!buildBelowFloor(active, input.floor)) return false;
+  const registry = input.clientStamps ?? {};
+  // Decide over EVERY LIVE WINDOW, not merely the registered ones (Codex P1
+  // round 2 on #516). Deciding over the registry alone loses the rollout case
+  // this ticket exists for: a tab running the build that shipped BEFORE
+  // `CLIENT_BUILD` existed cannot register at all, so on the very deploy that
+  // introduces the registry every stranded tab is invisible to it. Let another
+  // tab reload onto the accepted build — which updates `activeStamp` and adds
+  // the only registry entry there is — and the served shell plus every
+  // registered stamp are then above the floor, so the next worker declines to
+  // force, `activate` never runs the claim, and `shouldNavigateClient` is never
+  // reached to notice the unregistered tab at all. Deciding over the live ids
+  // instead makes the ABSENCE itself the evidence: an id with no entry stands
+  // in as `UNKNOWN_ACTIVE_STAMP`, exactly as an unrecorded shell does, and for
+  // the same reason — a client that has not named itself is running a pre-#516
+  // build or died before its module scope ran, which is the stranded cohort.
+  //
+  // A null/absent live set falls back to the registry, because "the windows
+  // could not be enumerated" is not evidence that an unregistered one exists;
+  // inventing one would force-activate on nothing at all.
+  const clients = (input.liveClientIds ?? Object.keys(registry)).map((id) => registry[id] ?? UNKNOWN_ACTIVE_STAMP);
+  // The OLDEST of the served shell and those clients is what the floor is
+  // tested against (#516). `gcb-shell-meta` records the build that most
+  // recently ACTIVATED, so two tabs on build A, one of which reloads onto B,
+  // leave the record saying B — and a floor set between A and B would then read
+  // "the shell is fine" and never rescue the tab still executing A. A set is
+  // below the floor exactly when its minimum is, so `some` IS the oldest test.
+  //
+  // The inert shipped floor still force-activates nobody: `UNKNOWN_ACTIVE_STAMP`
+  // sits one millisecond after the epoch precisely so a stand-in stamp — for an
+  // unrecorded shell or now for an unregistered window — is not below it.
+  if (![active, ...clients].some((stamp) => buildBelowFloor(stamp, input.floor))) return false;
   if (buildBelowFloor(input.ownStamp, input.floor)) return false;
   return true;
+}
+
+/**
+ * Whether a forced activation should re-navigate THIS window (#516). Only the
+ * clients actually below the floor are targeted: reloading a tab that is
+ * already running a build the floor accepts discards whatever the player was
+ * doing there and rescues nobody.
+ *
+ * An unregistered client navigates. It is either a page running a build from
+ * before this registry existed or one that died before its module scope ran —
+ * i.e. precisely the stranded cohort the rescue exists for — so "unknown" has
+ * to read as "condemned", the same way `UNKNOWN_ACTIVE_STAMP` does. A floor
+ * that is missing or malformed likewise navigates everything, because there is
+ * then nothing to filter by and the `shouldForceActivate` decision that got us
+ * here was made on other evidence.
+ */
+export function shouldNavigateClient(stamp: string | undefined, floor: unknown): boolean {
+  if (stamp === undefined) return true;
+  if (typeof floor !== 'string' || floor.trim() === '') return true;
+  return buildBelowFloor(stamp, floor);
+}
+
+/** The cache key one window's record lives under. Encoded because the id is
+ *  the browser's, not ours, and a key has to be a valid same-origin url. */
+function clientStampKey(clientId: string): string {
+  return `${CLIENT_STAMP_KEY_PREFIX}${encodeURIComponent(clientId)}`;
+}
+
+/** The inverse, or null for any key in this cache that is not one of ours —
+ *  the active stamp, the forced-activation marker, the throttle record. */
+function clientIdFromKey(url: string): string | null {
+  try {
+    const { pathname } = new URL(url, 'https://gcb.invalid');
+    if (!pathname.startsWith(CLIENT_STAMP_KEY_PREFIX)) return null;
+    const id = decodeURIComponent(pathname.slice(CLIENT_STAMP_KEY_PREFIX.length));
+    return id === '' ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+/** One window's record: what it is executing, and when it said so. */
+type ClientRecord = { stamp: string; at: number };
+
+/**
+ * Every stored record, with unreadable ones dropped. Never throws — the empty
+ * map is the safe reading, since an unregistered client navigates.
+ *
+ * ONE BAD RECORD IS ISOLATED, not fatal (Codex P2 round 6). The per-key read is
+ * inside its own `try` because a rejection escaping into the `Promise.all`
+ * would be caught by the outer handler below and replace the ENTIRE registry
+ * with `{}` — and an empty registry is not a lost record, it is a fleet-wide
+ * condemnation. `shouldForceActivate` reads every live client id with no entry
+ * as `UNKNOWN_ACTIVE_STAMP` and `shouldNavigateClient` navigates it, so on an
+ * armed floor a single corrupt body — truncated JSON from a torn-down worker, a
+ * body read that races the `put` writing it — would force-activate and reload
+ * every open tab, including the ones whose own records read back perfectly. The
+ * outer `try` stays for the failures that really are total: the cache handle
+ * and the key enumeration.
+ *
+ * An unreadable record is left in the cache rather than deleted, because the
+ * failure may be transient — a body read that races the `put` writing that same
+ * key reads fine on the next pass, and deleting it would throw away a live
+ * window's registration for a hiccup. Leaving it costs one failed parse per
+ * read: it is absent from this map, so both consumers already ignore it, and
+ * the window it belongs to re-registers on its next load.
+ */
+async function readClientRecords(cacheStorage: CacheStorage): Promise<Record<string, ClientRecord>> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    const keys = await cache.keys();
+    const records: Record<string, ClientRecord> = {};
+    await Promise.all(
+      keys.map(async (key) => {
+        try {
+          const id = clientIdFromKey(typeof key === 'string' ? key : key.url);
+          if (id === null) return;
+          const hit = await cache.match(key);
+          if (!hit) return;
+          const body = (await hit.json()) as { stamp?: unknown; at?: unknown } | null;
+          if (typeof body?.stamp !== 'string' || body.stamp === '') return;
+          // A record with no usable timestamp reads as ancient, so the sweep can
+          // still collect it — the grace below is a shield for FRESH records.
+          records[id] = { stamp: body.stamp, at: typeof body.at === 'number' ? body.at : 0 };
+        } catch {
+          /* this ONE record is unreadable — the others still count */
+        }
+      }),
+    );
+    return records;
+  } catch {
+    return {};
+  }
+}
+
+/** The registry as the decision layer wants it: `clientId -> build stamp`. */
+export async function readClientStamps(cacheStorage: CacheStorage): Promise<ClientStamps> {
+  const records = await readClientRecords(cacheStorage);
+  return Object.fromEntries(Object.entries(records).map(([id, record]) => [id, record.stamp]));
+}
+
+/**
+ * How long a live window with no registry entry is given to produce one before
+ * its absence is believed (Codex P2 round 5).
+ *
+ * Absence is the rescue's strongest evidence — `shouldForceActivate` reads it as
+ * `UNKNOWN_ACTIVE_STAMP` and `shouldNavigateClient` condemns it — and it is
+ * gathered from two reads that nothing orders. A window's `CLIENT_BUILD` goes to
+ * the ACTIVE worker while the decision is taken in the INSTALLING one, which is
+ * a different global with a different microtask queue; a tab that opened a
+ * moment ago is therefore in `clients.matchAll()` before its record is in the
+ * cache. `CLIENT_STAMP_SWEEP_GRACE_MS` cannot cover that gap, because it shields
+ * records that EXIST and the whole problem is one that does not exist yet.
+ *
+ * A genuinely pre-#516 window never produces a record however long it is given,
+ * so the wait costs the real stranded cohort a second of install latency and
+ * nothing else — install is not a navigation, and the same worker already
+ * spends longer than this retrying the floor probe.
+ */
+export const UNREGISTERED_CLIENT_CONFIRM_MS = 1000;
+
+/** Whether any live window is missing from the registry — the only condition
+ *  under which a second read can change an answer. */
+export function hasUnregisteredClient(liveIds: readonly string[] | null | undefined, stamps: ClientStamps): boolean {
+  return (liveIds ?? []).some((id) => stamps[id] === undefined);
+}
+
+/**
+ * A SECOND look at the registry before an absence is treated as evidence.
+ *
+ * Only ever adds entries, so it can only ever talk the rescue OUT of condemning
+ * a window — the safe direction, and the reason it needs no coordination with
+ * whatever wrote them. Callers invoke it lazily, once they know the absence is
+ * about to matter, so a decision that was going to decline anyway pays nothing.
+ */
+export async function confirmClientStamps(
+  cacheStorage: CacheStorage,
+  liveIds: readonly string[] | null | undefined,
+  stamps: ClientStamps,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  delayMs: number = UNREGISTERED_CLIENT_CONFIRM_MS,
+): Promise<ClientStamps> {
+  if (!hasUnregisteredClient(liveIds, stamps)) return stamps;
+  await sleep(delayMs);
+  return { ...stamps, ...(await readClientStamps(cacheStorage)) };
+}
+
+/**
+ * Records what one window is executing, and sweeps in the same call — the
+ * message arrives once per page load, so the registry is swept about as often
+ * as it grows.
+ *
+ * The write touches ONE key, this window's own, so no other worker's write can
+ * be lost to it however the two interleave (see `CLIENT_STAMP_KEY_PREFIX`).
+ */
+export async function recordClientStamp(
+  cacheStorage: CacheStorage,
+  clientId: string,
+  stamp: string,
+  liveIds: readonly string[] | null,
+  now: number = Date.now(),
+): Promise<void> {
+  try {
+    const cache = await cacheStorage.open(SHELL_META_CACHE);
+    await cache.put(clientStampKey(clientId), new Response(JSON.stringify({ stamp, at: now })));
+  } catch {
+    /* storage refused — the client reads as unregistered, i.e. as condemned */
+  }
+  await pruneClientStamps(cacheStorage, liveIds, now);
+}
+
+/**
+ * Sweeps records whose window is gone and returns what survived.
+ *
+ * `liveIds` of null means the live set could not be read at all. Keeping every
+ * record is the safe answer there: forgetting a tab that is still open costs
+ * the rescue its evidence, while remembering a dead one costs at most one
+ * force-activation that then navigates nobody (`shouldNavigateClient`).
+ *
+ * A record younger than `CLIENT_STAMP_SWEEP_GRACE_MS` is kept whatever the live
+ * set says, because that set was enumerated before this sweep ran and a window
+ * that opened in between is absent from it while being perfectly alive.
+ */
+export async function pruneClientStamps(
+  cacheStorage: CacheStorage,
+  liveIds: readonly string[] | null,
+  now: number = Date.now(),
+): Promise<ClientStamps> {
+  const records = await readClientRecords(cacheStorage);
+  const survivors: ClientStamps = {};
+  const doomed: string[] = [];
+  const live = liveIds ? new Set(liveIds) : null;
+  for (const [id, record] of Object.entries(records)) {
+    if (!live || live.has(id) || now - record.at < CLIENT_STAMP_SWEEP_GRACE_MS) survivors[id] = record.stamp;
+    else doomed.push(id);
+  }
+  if (doomed.length > 0) {
+    try {
+      const cache = await cacheStorage.open(SHELL_META_CACHE);
+      // One delete per dead window, so a sweep can never disturb a record it
+      // did not choose — including one written while it was running.
+      await Promise.all(doomed.map((id) => cache.delete(clientStampKey(id))));
+    } catch {
+      /* storage refused — a stale record is ignored by both consumers anyway */
+    }
+  }
+  return survivors;
 }
 
 /**
@@ -203,10 +518,18 @@ export async function writeActiveStamp(cacheStorage: CacheStorage, stamp: string
  * shell — so a stranded player sees the blank screen again and has to reload a
  * second time, which is precisely the dead end they were stuck in.
  */
-export async function markForcedActivation(cacheStorage: CacheStorage, ownStamp: string): Promise<void> {
+export async function markForcedActivation(
+  cacheStorage: CacheStorage,
+  ownStamp: string,
+  // The floor that justified the force, carried alongside the decision (#516)
+  // so `activate` can target the clients it actually condemns. `activate` has
+  // no way to re-read it: the probe is a network call, and by then the worker
+  // is committed either way.
+  floor: string | null = null,
+): Promise<void> {
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
-    await cache.put(FORCED_FLAG_URL, new Response(JSON.stringify({ stamp: ownStamp })));
+    await cache.put(FORCED_FLAG_URL, new Response(JSON.stringify({ stamp: ownStamp, floor })));
   } catch {
     /* storage refused — the caller's in-memory flag is the remaining fallback */
   }
@@ -248,16 +571,21 @@ export async function clearForcedActivation(cacheStorage: CacheStorage): Promise
  * deliberate: an orphaned marker is garbage, and leaving it would let it
  * ambush a different worker later.
  */
-export async function takeForcedActivation(cacheStorage: CacheStorage, ownStamp: string): Promise<boolean> {
+export async function takeForcedActivation(
+  cacheStorage: CacheStorage,
+  ownStamp: string,
+): Promise<{ forced: boolean; floor: string | null }> {
+  const none = { forced: false, floor: null };
   try {
     const cache = await cacheStorage.open(SHELL_META_CACHE);
     const hit = await cache.match(FORCED_FLAG_URL);
-    if (!hit) return false;
+    if (!hit) return none;
     await cache.delete(FORCED_FLAG_URL);
-    const body: unknown = await hit.json();
-    return (body as { stamp?: unknown } | null)?.stamp === ownStamp;
+    const body = (await hit.json()) as { stamp?: unknown; floor?: unknown } | null;
+    if (body?.stamp !== ownStamp) return none;
+    return { forced: true, floor: typeof body.floor === 'string' ? body.floor : null };
   } catch {
-    return false;
+    return none;
   }
 }
 

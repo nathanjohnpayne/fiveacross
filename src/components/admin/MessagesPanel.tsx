@@ -35,6 +35,13 @@ function ComposeNotice({ adminUid, adminName, days }: { adminUid: string; adminN
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const canPost = title.trim().length > 0 && body.trim().length > 0 && !busy;
+  // A half-written broadcast lives in these two `useState`s and nowhere else, so
+  // an automatic post-deploy reload does not interrupt it — it destroys it
+  // (Codex P2 round 5, PR #720). `data-unsaved-work` is the declaration
+  // `midInteraction` asks about (src/swClientBridge.ts); it goes on only while
+  // there IS a draft, because an admin merely sitting on this panel must not
+  // pin the tab to a condemned build forever.
+  const hasDraft = title !== '' || body !== '';
 
   const submit = async () => {
     if (!canPost) return;
@@ -57,7 +64,7 @@ function ComposeNotice({ adminUid, adminName, days }: { adminUid: string; adminN
   };
 
   return (
-    <div className="admin-section">
+    <div className="admin-section" data-unsaved-work={hasDraft || undefined}>
       <h3>New message</h3>
       {/* Fields disable while a post is in flight (Codex P2, PR #440) so a newer
           draft composed mid-write can't be erased by the success-clear below. */}
@@ -121,6 +128,10 @@ function EditNoticeRow({ notice, onDone }: { notice: NoticeDoc; onDone: () => vo
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const canSave = title.trim().length > 0 && body.trim().length > 0 && !busy;
+  // Same declaration as Compose, keyed off the same trimmed comparison `save`
+  // uses to decide an edit even happened — an editor opened and untouched is
+  // not a draft, so it does not hold the tab back.
+  const hasDraft = title.trim() !== notice.title || body.trim() !== notice.body;
 
   const save = async () => {
     if (!canSave) return;
@@ -146,7 +157,7 @@ function EditNoticeRow({ notice, onDone }: { notice: NoticeDoc; onDone: () => vo
   };
 
   return (
-    <div className="row notice-edit-row">
+    <div className="row notice-edit-row" data-unsaved-work={hasDraft || undefined}>
       <div className="grow">
         <input
           className="notice-input"
