@@ -267,6 +267,111 @@ describe('ProofSheet — each capture type produces a valid submit and closes', 
     expect(props.onClose).toHaveBeenCalled();
   });
 
+  it('a submit that marks a previously-unmarked Square delegates its durable proof transition to attachProof (#727)', async () => {
+    const user = userEvent.setup();
+    const props = baseProps(); // cell() defaults marked: false
+    // The transaction's OWN committed read agrees with the sheet's opening
+    // snapshot here — the ordinary case — so `markTransition` is true.
+    H.attachProof.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      bingoTransition: false,
+      blackoutTransition: false,
+      markTransition: true,
+    });
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'saw it happen');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    // `attachProof` writes the proof-sourced durable request in the same
+    // transaction as the mark transition; its data-layer tests prove that
+    // server-observed contract. The component only records the capture here,
+    // avoiding an ephemeral client-only mark event.
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a proof added to an ALREADY-marked Square (the ＋ affordance) does not re-fire mark_square (#721)', async () => {
+    const user = userEvent.setup();
+    const props = { ...baseProps(), cell: cell({ marked: true, markedAt: 1, status: 'confirmed' as const }) };
+    H.attachProof.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      bingoTransition: false,
+      blackoutTransition: false,
+      markTransition: false,
+    });
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'adding evidence');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a concurrent mark that lands BETWEEN the sheet opening and the commit does not double-fire mark_square (Codex round 1 finding 6, #727)', async () => {
+    // The sheet opened on a stale unmarked snapshot (another device marked
+    // this Square in the gap), but attachProof's OWN transaction read sees it
+    // already marked — `markTransition: false` — so this is proof-only, no
+    // transition, and must not fire a second mark_square for a Square
+    // another action already credited.
+    const user = userEvent.setup();
+    const props = baseProps(); // cell() defaults marked: false — the STALE snapshot
+    H.attachProof.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      bingoTransition: false,
+      blackoutTransition: false,
+      markTransition: false, // the transaction's live read: already marked
+    });
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'racing another device');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a legacy (non-daily) Event leaves proof-mark attribution to attachProof even when the caller passes a raw dayIndex prop of 0 (#727)', async () => {
+    // Board stamps ProofSheet's `dayIndex` prop from `board?.dayIndex` on a
+    // legacy Event (Board.tsx: `dayIndex={hasDays ? viewedIndex : board?.dayIndex}`),
+    // and a legacy Board doc's own `dayIndex` defaults to 0. Attribution is
+    // written by `attachProof`'s transaction (whose data-layer coverage
+    // verifies the legacy gate), not by a component-side event that could
+    // misread it as Day 1.
+    const user = userEvent.setup();
+    const props = { ...baseProps(), dayIndex: 0 }; // daily left unset (legacy)
+    H.attachProof.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      bingoTransition: false,
+      blackoutTransition: false,
+      markTransition: true,
+    });
+    render(<ProofSheet {...props} />);
+
+    await user.click(screen.getByRole('button', { name: /callout/i }));
+    await user.type(screen.getByRole('textbox'), 'legacy event, no Day schedule');
+    await user.click(screen.getByRole('button', { name: /mark it/i }));
+
+    await waitFor(() => expect(H.attachProof).toHaveBeenCalledTimes(1));
+    expect(H.track).toHaveBeenCalledWith('attach_proof', { type: 'text' });
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
   it('an audio submit attaches a recorded audio Proof and closes the sheet', async () => {
     const user = userEvent.setup();
     const props = baseProps();

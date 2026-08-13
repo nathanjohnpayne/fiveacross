@@ -52,6 +52,8 @@ import { cellsToMap, cellsPatch, changedCells, cellsFromData } from '../game/cel
 import { cellsMergeSet } from './cellsMerge';
 import { trustedDayBoardSeed } from './board-freshness';
 import { pinDayFirstBingo } from './dayMeta';
+import { directMarkAnalyticsRequest } from './markAnalytics';
+import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
@@ -730,7 +732,19 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
         .filter((snap) => snap.exists())
         .map((snap) => cellsFromData((snap.data() as { cells?: unknown }).cells)),
     );
-    const echoRes = applyEchoes(cells, achieved, now);
+    const rawEchoRes = applyEchoes(cells, achieved, now);
+    const echoRes = {
+      ...rawEchoRes,
+      cells: stampEchoAnalyticsTransitions({
+        cells: rawEchoRes.cells,
+        changed: changedCells(cells, rawEchoRes.cells),
+        eventId: EVENT_ID,
+        uid: u.uid,
+        dayIndex,
+        boardSeed: seed,
+        trigger: 'deal',
+      }),
+    };
     tx.set(boardRef, { uid: u.uid, dayIndex, seed, createdAt: now, cells: cellsToMap(echoRes.cells), easyMixRatio });
     if (echoRes.changed) {
       // The echoed card's REAL opening bucket, folded with the cruise root
@@ -1099,10 +1113,47 @@ export async function reshuffleBoard(params: {
         if (!cell.free && cell.marked && cell.itemId) peerMarkedItems.add(cell.itemId);
       }
     }
-    const echoRes = applyEchoes(cells, achieved, now);
+    const rawEchoRes = applyEchoes(cells, achieved, now);
     const statsAllowed = !standingsFrozen({ frozenAt: eventData?.frozenAt, days }) ||
       ceremonialDayIndexSet(days).has(dayIndex);
     const savedName = typeof player?.displayName === 'string' ? player.displayName : undefined;
+    // Net-new echo count (#721, Codex round 1 finding 4): `echoRes` is derived
+    // against the freshly-dealt REPLACEMENT card, so `echoedItemIds` is every
+    // Prompt the replacement arrives echoing — including one the DISCARDED
+    // card already wore, if the same itemId happens to land on the
+    // replacement again (a pristine reshuffleable card can only carry echoes,
+    // so `priorBoardCells` is entirely free/unmarked/echoed). That re-applied
+    // echo adds nothing to `dayStats[dayIndex].squaresMarked` — the bucket is
+    // RE-DERIVED from the replacement's cells, not incremented — so counting
+    // it here would break the reconciliation identity (specs/w2-ga4-events.md
+    // § Reconciliation): the event would report an echo the bucket never
+    // moved for. Report only the ACTUAL increase over what this Day's board
+    // already carried marked, floored at zero (a reshuffle can only add
+    // echoes back or keep the same count — a pristine card cannot lose a
+    // non-echo Mark it never had — but the floor keeps this robust even if
+    // that invariant is ever relaxed).
+    const priorMarkedCount = countMarked(priorBoardCells);
+    const netNewEchoCount = Math.max(0, rawEchoRes.squaresMarked - priorMarkedCount);
+    // The server trigger compares matching cell indexes in the before/after
+    // Board map. When a reshuffle keeps an Echo at an old marked index, that
+    // position is not a false→true write and cannot carry one of the limited
+    // net-new identities; spend the identity on a replacement position whose
+    // prior index was unmarked instead.
+    const priorMarkedIndexes = new Set(priorBoardCells.filter((cell) => cell.marked).map((cell) => cell.index));
+    const echoRes = {
+      ...rawEchoRes,
+      cells: stampEchoAnalyticsTransitions({
+        cells: rawEchoRes.cells,
+        changed: changedCells(cells, rawEchoRes.cells),
+        eventId: EVENT_ID,
+        uid,
+        dayIndex,
+        boardSeed: seed,
+        trigger: 'reshuffle',
+        limit: netNewEchoCount,
+        excludeMarkedIndexes: priorMarkedIndexes,
+      }),
+    };
     reshuffleEcho = echoRes.changed
       ? {
           bingoTransition: echoRes.bingoTransition,
@@ -1259,14 +1310,27 @@ export function computeMark(params: {
   // the write path is the single source of truth for "this mark won".
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  // The false→true or true→false edge on THIS cell, derived from the SAME
+  // freshest cache `runSetMark` folds. It decides whether the client writes a
+  // direct-analytics REQUEST token at all; a server trigger still validates
+  // the final committed before/after edge, so a stale tab can never turn its
+  // cache verdict into an analytics event by itself.
+  markTransition: boolean;
 } {
   const { cells, index, nextMarked, claimMode, currentFirstBingoAt, now } = params;
+  const wasMarked = cells.find((c) => c.index === index)?.marked === true;
   const next: Cell[] = cells.map((c) => {
     if (c.index !== index) return c;
     // A manual toggle STRIPS the Echo flag. Any manual unmark persists an
     // opt-out so a standing sibling Echo cannot restore the Player's choice;
     // manually marking it again clears that opt-out.
-    const { echo: _echo, echoOptOut: _echoOptOut, ...manual } = c;
+    const {
+      echo: _echo,
+      echoOptOut: _echoOptOut,
+      echoAnalyticsId: _echoAnalyticsId,
+      echoAnalyticsTrigger: _echoAnalyticsTrigger,
+      ...manual
+    } = c;
     return {
       ...manual,
       marked: nextMarked,
@@ -1320,6 +1384,7 @@ export function computeMark(params: {
     // rise on it.
     bingoTransition: previousBingoCount === 0 && bingoCount > 0,
     blackoutTransition: blackout && !isBlackout(cells),
+    markTransition: wasMarked !== nextMarked,
   };
 }
 
@@ -1494,6 +1559,14 @@ export async function setMark(params: {
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  // The local false→true / true→false verdict on the acted cell. It gates
+  // whether this write carries a direct-analytics request token; the durable
+  // `mark_square`/`unmark_square` record is derived later from server state.
+  markTransition: boolean;
+  // A committed server acknowledgement for this specific batch. It stays
+  // separate from the immediate UI verdict because offline writes must queue
+  // without holding the Board interaction open.
+  committed: Promise<void>;
 }> {
   const { uid } = params;
   const database = params.database ?? db;
@@ -1540,6 +1613,8 @@ async function runSetMark(
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  markTransition: boolean;
+  committed: Promise<void>;
 }> {
   const { uid } = params;
   // Daily-cards mode (#246): route the Mark to the DAY-SCOPED board
@@ -1613,12 +1688,26 @@ async function runSetMark(
   }
 
   const now = Date.now();
-  const { cells, player, bingo, blackout, bingoTransition, blackoutTransition } = computeMark({
+  const computed = computeMark({
     ...params,
     cells: baseCells,
     currentFirstBingoAt: baseFirstBingoAt,
     now,
   });
+  const { player, bingo, blackout, bingoTransition, blackoutTransition, markTransition } = computed;
+  const cells = computed.cells;
+  // This token is deliberately NOT the analytics identity. A Firestore
+  // trigger reads the committed board before/after pair and writes the
+  // durable event only when the server really observed this cell edge. That
+  // means an offline queue survives a reload, while a stale tab's true→true
+  // rewrite carries a new request but produces no false second event.
+  const analyticsRequestToken = markTransition
+    ? directMarkAnalyticsRequest({
+        cellIndex: params.index,
+        marked: params.nextMarked,
+        mode: params.claimMode,
+      })
+    : undefined;
 
   const toggled = cells.find((c) => c.index === params.index);
   const echoDayIndexes =
@@ -1708,7 +1797,19 @@ async function runSetMark(
       const sibSeed = typeof sib.seed === 'number' ? sib.seed : undefined;
       if (!trust.trusted || trust.seed !== sibSeed) return;
       const sibCells = cellsFromData(sib.cells);
-      const res = applyEchoes(sibCells, achieved, now);
+      const rawRes = applyEchoes(sibCells, achieved, now);
+      const res = {
+        ...rawRes,
+        cells: stampEchoAnalyticsTransitions({
+          cells: rawRes.cells,
+          changed: changedCells(sibCells, rawRes.cells),
+          eventId: EVENT_ID,
+          uid,
+          dayIndex: sibDay,
+          boardSeed: sibSeed,
+          trigger: 'mark',
+        }),
+      };
       if (!res.changed) return;
       echoBoards.push({
         dayIndex: sibDay,
@@ -1756,6 +1857,7 @@ async function runSetMark(
     boardRef,
     ...cellsMergeSet(cellsPatch(changedCells(baseCells, cells)), {
       ...(typeof markSeed === 'number' ? { markSeed } : {}),
+      ...(analyticsRequestToken ? { directAnalyticsRequest: analyticsRequestToken } : {}),
     }),
   );
   // Echoed sibling boards ride the SAME batch, each carrying ITS OWN board's
@@ -1997,7 +2099,15 @@ async function runSetMark(
   // fold above, computed BEFORE the fire-and-forget commit), which broadcasts
   // the matching Feed Moment off it — the win is tied to the mark that caused
   // it, not to a Board snapshot-diff that dies on unmount (issue #104).
-  return { cells, bingo, blackout, bingoTransition, blackoutTransition };
+  return {
+    cells,
+    bingo,
+    blackout,
+    bingoTransition,
+    blackoutTransition,
+    markTransition,
+    committed,
+  };
 }
 
 /**
@@ -2185,7 +2295,19 @@ async function runReconcileEchoes(
   }
   const achieved = achievedItemIds(allBoards);
   const now = Date.now();
-  const res = applyEchoes(boardCells, achieved, now);
+  const rawRes = applyEchoes(boardCells, achieved, now);
+  const res = {
+    ...rawRes,
+    cells: stampEchoAnalyticsTransitions({
+      cells: rawRes.cells,
+      changed: changedCells(boardCells, rawRes.cells),
+      eventId: EVENT_ID,
+      uid,
+      dayIndex,
+      boardSeed: board.seed,
+      trigger: 'open_reconcile',
+    }),
+  };
 
   const cachedPlayerData =
     playerSnap.status === 'fulfilled' && playerSnap.value.exists()
@@ -2327,6 +2449,9 @@ async function runReconcileEchoes(
             ).catch(() => undefined);
           }
         }
+        // Analytics recovery is independent of stats repair: the persisted
+        // cell IDs above are replayed on every open, whether or not this pass
+        // happened to observe a stale player bucket.
       } catch {
         // Offline again or a transient read failure: the heal must RETRY, so
         // this pass may not settle Board's once-per-board guard (Codex P2 on

@@ -7,6 +7,7 @@ import { markerDisplayName } from './attribution';
 import { completedLines, countMarked, isBlackout, foldDayStat, type DayStats } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
+import { directMarkAnalyticsRequest } from './markAnalytics';
 import type { Cell, ClaimMode, ProofDoc, ProofType } from '../types';
 
 const rawProofs = () => collection(db, 'events', EVENT_ID, 'proofs');
@@ -125,6 +126,16 @@ export interface AttachProofResult {
   blackout: boolean;
   bingoTransition: boolean;
   blackoutTransition: boolean;
+  // The false→true edge on THIS cell (#721, Codex round 1 finding 6), derived
+  // from the transaction's OWN `existingCell` read — the committed board
+  // state, not the caller's sheet-opening snapshot. A concurrent write from
+  // another device (or tab) can mark this Square between the sheet opening
+  // and this transaction's read; `attachProof` still runs and merely attaches
+  // proof to an already-marked cell, so the caller's stale `!cell.marked`
+  // check would wrongly read that as a transition and fire a second
+  // `mark_square` for a Square that was already credited. The caller must gate
+  // its `mark_square` emission on THIS field, not its own opening snapshot.
+  markTransition: boolean;
 }
 
 /**
@@ -181,6 +192,15 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
   }
 
   const pending = claimMode === 'admin_confirmed';
+  // Stable across every transaction retry. It is written only for the
+  // committed false→true edge below, where the server observer turns it into
+  // the durable analytics record even if this tab closes immediately after.
+  const analyticsRequest = directMarkAnalyticsRequest({
+    cellIndex,
+    marked: true,
+    mode: claimMode,
+    source: 'proof',
+  });
 
   // Recompute cells from the live board inside a transaction so a concurrent
   // mark from another tab/device isn't clobbered by this caller's stale snapshot.
@@ -208,6 +228,11 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     const liveRaw = cellsFromData(boardData?.cells);
     const liveCells = liveRaw.length > 0 ? liveRaw : cells;
     const existingCell = liveCells.find((cell) => cell.index === cellIndex);
+    // The COMMITTED false→true edge (#721, Codex round 1 finding 6): derived
+    // from this transaction's own live read, never the caller's
+    // sheet-opening snapshot — see `AttachProofResult.markTransition`'s doc
+    // comment for why the caller's own `cell` prop cannot be trusted here.
+    const markTransition = existingCell?.marked !== true;
     // A confirmed Echo has already passed the original admin confirmation. Adding
     // proof makes it a local mark, but must not create a second pending claim.
     const pendingClaim = pending && !(existingCell?.echo === true && existingCell.status === 'confirmed');
@@ -258,6 +283,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       boardRef,
       ...cellsMergeSet(cellsPatch(changedCells(liveCells, next)), {
         ...(typeof boardData?.seed === 'number' ? { markSeed: boardData.seed } : {}),
+        ...(markTransition ? { directAnalyticsRequest: analyticsRequest } : {}),
       }),
     );
     // The standings freeze (#265): a post-freeze proofed Mark keeps the card +
@@ -345,6 +371,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       blackout,
       bingoTransition: completedLines(liveCells).length === 0 && bingoCount > 0,
       blackoutTransition: blackout && !isBlackout(liveCells),
+      markTransition,
     };
   });
 }

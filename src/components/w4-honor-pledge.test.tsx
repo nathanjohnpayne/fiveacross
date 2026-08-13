@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { BoardDoc, Cell, EventDoc, PlayerDoc } from '../types';
+import type { BoardDoc, Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 
 // specs/w4-honor-pledge.md (issue #181), RTL-jsdom. EVERY claim tap opens the
 // ProofSheet — honor included, which used to mark instantly — and honor mode
@@ -78,6 +78,12 @@ vi.mock('../data/api', () => ({
   reshuffleBoard: vi.fn(async () => 1),
   setMark: H.setMark,
   dealDayCard: vi.fn(() => Promise.resolve(false)),
+  // Daily mode's open-time echo reconcile (#446): inert here — these tests
+  // never exercise Echo Marks — but Board unconditionally calls it once
+  // `hasDays` is true, so the mock needs the export to exist at all.
+  reconcileEchoes: vi.fn(() =>
+    Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+  ),
   resolveDisplayName: (
     profile: { displayName?: unknown } | null | undefined,
     fallback: string | null | undefined,
@@ -111,6 +117,22 @@ function dealt(pool = 'i'): Cell[] {
   }));
 }
 
+// A minimal daily-cards DayDef (daily-cards-spec § "Data model"), for the
+// dayIndex-attribution regression below — mirrors src/data/echo-marks.test.ts's
+// `day()` helper.
+const day = (index: number, over: Partial<DayDef> = {}): DayDef =>
+  ({
+    index,
+    date: '2026-07-16',
+    place: 'Split',
+    placeEmoji: '🇭🇷',
+    theme: 'get-sporty',
+    pool: 'main',
+    tutorial: false,
+    unlockAt: 0,
+    ...over,
+  }) as DayDef;
+
 const PLEDGE = /cross my heart/i;
 
 const clickCell = (index: number) => {
@@ -125,7 +147,16 @@ beforeEach(() => {
   H.event = { claimMode: 'honor' } as EventDoc;
   H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
   H.player = null;
-  H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false });
+  // `markTransition: true` is the default because every tap in this suite is
+  // a genuine local edge. The server's before/after trigger is separately
+  // tested for the final analytics verdict, including stale-cache rewrites.
+  H.setMark.mockResolvedValue({
+    cells: [],
+    bingo: false,
+    blackout: false,
+    markTransition: true,
+    committed: Promise.resolve(),
+  });
   H.attachProof.mockResolvedValue(undefined);
 });
 
@@ -151,6 +182,35 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     // A pledge writes NO Proof doc — no Feed entry, no Doubt satisfaction.
     expect(H.attachProof).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByText(/proof for/i)).toBeNull());
+    // #727's Phase 4b repair deliberately does NOT dispatch an optimistic
+    // client event here. A server-observed immutable record delivers the
+    // pledge only after Firestore has committed a real state edge.
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('does not let an acknowledgement callback become the direct-transition delivery path', async () => {
+    let acknowledge!: () => void;
+    const committed = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    H.setMark.mockResolvedValue({
+      cells: [],
+      bingo: false,
+      blackout: false,
+      markTransition: true,
+      committed,
+    });
+    const user = userEvent.setup();
+    render(<Board />);
+    clickCell(0);
+    await user.click(await screen.findByRole('button', { name: PLEDGE }));
+
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+
+    acknowledge();
+    await Promise.resolve();
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('Cancel leaves the Square unmarked; unmarking a marked Square stays instant with no sheet', async () => {
@@ -171,6 +231,81 @@ describe('honor mode — the claim opens the sheet; the pledge IS the claim', ()
     await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
     expect(H.setMark.mock.calls[0][0]).toMatchObject({ index: 1, nextMarked: false });
     expect(screen.queryByText(/proof for/i)).toBeNull();
+    // The server emits the distinct unmark_square record only after it sees
+    // the committed true→false edge; Board itself never emits a speculative
+    // mark_square/unmark_square row.
+    expect(H.track).not.toHaveBeenCalledWith('unmark_square', expect.anything());
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a pledge on a VIEWED, non-today Day stamps mark_square with the acted Day, not today (Codex round 1 finding 2, #727)', async () => {
+    const user = userEvent.setup();
+    const now = Date.parse('2026-07-17T12:00:00Z');
+    // Day 0 unlocked yesterday (a "past" chip); Day 1 unlocked this morning
+    // ("today"). The Board auto-selects Day 1 on mount (defaultViewedIndex),
+    // so the Player must actively switch BACK to Day 0 to mark it — the
+    // catch-up-marking scenario the bug misattributes.
+    H.event = {
+      claimMode: 'honor',
+      days: [
+        day(0, { date: '2026-07-16', unlockAt: now - 24 * 60 * 60 * 1000 }),
+        day(1, { date: '2026-07-17', unlockAt: now - 60 * 60 * 1000 }),
+      ],
+    } as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    render(<Board />);
+
+    // Switch the viewed Day BACK to Day 0 — the only Day this test's mocked
+    // `useDayBoard` has a board for.
+    const tabs = await screen.findAllByRole('tab');
+    await user.click(tabs[0]);
+
+    clickCell(0);
+    expect(await screen.findByText(/proof for/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: PLEDGE }));
+
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    // The write itself already carries the viewed Day (#216/#246, unchanged
+    // by this fix) — asserted here as the baseline the analytics event must
+    // agree with.
+    expect(H.setMark.mock.calls[0][0]).toMatchObject({ dayIndex: 0 });
+    // The trigger receives this canonical path Day and writes it into the
+    // durable event record; direct trigger coverage asserts the final event
+    // rather than pretending this client callback is delivery.
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('a stale-cache-fold rewrite (no real transition) fires no mark_square (Codex P2 on #727)', async () => {
+    // Another tab already synced this exact Mark into the shared persistent
+    // cache before the pledge's tap lands — `setMark` deliberately folds
+    // from that fresher cache and performs a true-to-true rewrite, not a
+    // real transition. `res.markTransition: false` suppresses even the client
+    // request token; the server-side edge detector independently protects the
+    // same invariant when a local cache is stale.
+    const user = userEvent.setup();
+    H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: false });
+    render(<Board />);
+    clickCell(0);
+
+    expect(await screen.findByText(/proof for/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: PLEDGE }));
+
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByText(/proof for/i)).toBeNull());
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+  });
+
+  it('an unmark of an already-unmarked cached Square (the same stale-cache race) fires no unmark_square (Codex P2 on #727)', async () => {
+    const cells = dealt();
+    cells[1] = { ...cells[1], marked: true, markedAt: 1, status: 'confirmed' };
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells };
+    H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, markTransition: false });
+    render(<Board />);
+
+    clickCell(1); // marked → instant unmark, never a sheet
+    await waitFor(() => expect(H.setMark).toHaveBeenCalledTimes(1));
+    expect(H.track).not.toHaveBeenCalledWith('unmark_square', expect.anything());
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('opens Photo-first (#309) — photo body on first paint, other bodies once chosen — and the pledge row fits one line (nowrap, full width)', async () => {

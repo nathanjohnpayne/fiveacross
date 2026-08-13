@@ -646,6 +646,27 @@ function LockedDayPreview({
 export default function Board() {
   const { user, retryDeal, dealing } = useAuth();
   const uid = user?.uid;
+  // Direct mark/unmark analytics is server-observed rather than emitted from
+  // an optimistic Board callback: a durable record appears after an offline
+  // queue drains even if this tab was closed before acknowledgement. Dynamic
+  // loading keeps the primary Board interaction independent of this optional
+  // listener in constrained/test environments.
+  useEffect(() => {
+    if (!uid) return;
+    let unsubscribe = () => {};
+    let active = true;
+    void import('../data/directMarkAnalytics')
+      .then(({ subscribeDirectMarkAnalytics }) => {
+        const nextUnsubscribe = subscribeDirectMarkAnalytics(uid);
+        if (active) unsubscribe = nextUnsubscribe;
+        else nextUnsubscribe();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [uid]);
   // The single legacy Board (pre-1.5 events with no `days[]` schedule). In daily-
   // cards mode the rendered Board is the DAY-SCOPED one below; this stays the
   // source only for legacy events (#246).
@@ -1996,7 +2017,41 @@ export default function Board() {
         // Day Cards in the same batch. Legacy events pass nothing (no echo).
         echoDayIndexes: hasDays ? days.map((d) => d.index) : undefined,
       });
-      track('mark_square', { mode: claimMode, marked: nextMarked });
+      // Mark-transition instrumentation (#721): `doMark` is reachable from
+      // exactly two call sites — `onPledge` below (always `nextMarked: true`,
+      // the honor pledge) and `toggle`'s unmark branch (always `false`) — so
+      // the direction alone tells us which event applies. Split into two
+      // NAMES, not one event with a `marked` boolean: PostHog/GA4 queries that
+      // count "how many Squares did Players mark" no longer have to filter out
+      // unmarks by hand, and a raw event count is never silently polluted by
+      // pledges-undone (the root cause of #721 — 6 `mark_square` events for a
+      // POC with 25 actually-marked squares). `source: 'pledge'` joins
+      // `'proof'` (ProofSheet.tsx) and `'admin_confirm'` (data/admin.ts) as
+      // the three ways a Square reaches `marked: true`; see
+      // specs/w2-ga4-events.md § Reconciliation for how the three sources
+      // relate to `dayStats[*].squaresMarked`.
+      //
+      // `dayIndex` (Codex round 1 finding 2): the ACTED Day, not whichever Day
+      // the app's global `day_index` GA4/PostHog default dimension happens to
+      // carry — that dimension is registered ONCE from `todaysDayIndex` at
+      // startup (src/analytics.ts's `registerDayIndexDimension`) and never
+      // re-registered per Day switch, so a Player viewing and marking an
+      // OLDER Day (catch-up marking, the exact daily-cards use case) would
+      // have every `mark_square`/`unmark_square` misattributed to today's Day
+      // instead of the Day the write actually landed on — making the
+      // documented per-`(uid, dayIndex)` reconciliation impossible for
+      // exactly the Days most likely to need it. `undefined` on a legacy
+      // (non-daily) Event, matching every other Day-stamped param in this
+      // file (e.g. `broadcastWinVerdict`'s Moment `dayIndex` above): daily-
+      // cards-spec's "Day N" naming does not apply there, and `board?.dayIndex`
+      // defaults to 0 on a legacy board — a value that would misread as a
+      // real "Day 1" rather than "no Day schedule".
+      //
+      // Direct-mark analytics is not emitted from this optimistic client
+      // verdict. `setMark` writes a fresh request token, then the server
+      // observes the committed before/after Board state and records a durable
+      // transition only for a real edge. The Board-wide listener installed
+      // above delivers that record after a reload or offline queue drain.
       if (nextMarked && res.bingo) track('bingo');
       if (nextMarked) {
         // Feed Moment broadcast on the ACTION path (issue #104): the win is tied

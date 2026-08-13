@@ -33,6 +33,12 @@ const H = vi.hoisted(() => ({
   // overrides it can restore EXACTLY this (a lookalike without the tally
   // branch would silently change marker-cache semantics for later tests).
   defaultGetDocFromCache: undefined as unknown as (ref: { args?: unknown[] }) => Promise<unknown>,
+  // #721: api.ts / admin.ts fire echo_mark / mark_square via a DYNAMIC
+  // `import('../analytics')` (mirroring the existing #387 mark_rejected call
+  // site) so this Firestore-only module graph stays free of the eager
+  // analytics/firebase-singleton dependency — mock the module so the dynamic
+  // import resolves to this spy instead of loading the real one.
+  track: vi.fn(),
 }));
 
 vi.mock('../firebase', () => ({
@@ -44,6 +50,8 @@ vi.mock('../firebase', () => ({
   googleProvider: {},
   analytics: null,
 }));
+
+vi.mock('../analytics', () => ({ track: H.track }));
 
 vi.mock('firebase/functions', () => ({ httpsCallable: vi.fn() }));
 
@@ -177,6 +185,10 @@ function trustDayBoard(dayIndex: number, uid: string, seed: number | undefined):
 
 const PAST = Date.now() - 3_600_000;
 
+/** Echo rows are now emitted only after the Functions trigger sees a commit. */
+const expectNoClientEchoTrack = () =>
+  expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.anything());
+
 /** A 25-cell card with explicit per-index item ids and overrides. */
 function card(
   idFor: (i: number) => string,
@@ -307,6 +319,93 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(echoed).toMatchObject({ marked: true, status: 'confirmed', echo: true, itemId: 'shared' });
     // The non-carrier sibling (Day 1) is untouched.
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(false);
+    expect(echoed).toMatchObject({ echoAnalyticsTrigger: 'mark', echoAnalyticsId: expect.any(String) });
+    expectNoClientEchoTrack();
+  });
+
+  it('a Mark that echoes onto TWO siblings stamps one durable identity per receiving Day', async () => {
+    // Day 2 (acted) carries the shared Prompt; Days 1 AND 3 both carry it too
+    // — a Mark on Day 2 must echo onto BOTH, and #721's reconciliation
+    // identity requires one echo_mark per RECEIVING Day, not one aggregated
+    // event under the acted Day.
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: actedCells });
+    H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => (i === 4 ? 'shared' : `c${i}`)) });
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    trustDayBoard(1, 'u1', 111);
+    trustDayBoard(2, 'u1', 222);
+    trustDayBoard(3, 'u1', 333);
+    H.player = {
+      uid: 'u1',
+      displayName: 'Alice',
+      firstBingoAt: null,
+      dayStats: { 2: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+    };
+    await markShared();
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(true);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(true);
+    for (const day of [1, 3]) {
+      const write = H.batchSet.mock.calls.find((c) => isDayBoardWrite(c, day));
+      const cells = cellsFromData((write![1] as { cells: unknown }).cells);
+      expect(cells.find((cell) => cell.echo)?.echoAnalyticsTrigger).toBe('mark');
+      expect(cells.find((cell) => cell.echo)?.echoAnalyticsId).toEqual(expect.any(String));
+    }
+    expectNoClientEchoTrack();
+  });
+
+  it('keeps a committed mark-time identity when only the sibling stats continuation strands', async () => {
+    // The listener only delivers after the server trigger writes its immutable
+    // row. This fixture therefore proves the durable Board identity survives a
+    // reload while the independent stats continuation is still absent.
+    seedBoards();
+    await markShared();
+    const initialWrite = H.batchSet.mock.calls.find((c) => isDayBoardWrite(c, 3));
+    const initialCells = cellsFromData((initialWrite![1] as { cells: unknown }).cells);
+    const transitionId = initialCells.find((cell) => cell.echo)?.echoAnalyticsId;
+    expect(transitionId).toEqual(expect.any(String));
+    H.track.mockClear();
+    // Also clear the mark-time cascade's OWN `reconcileEchoStatsFromServer`
+    // continuation's txSet call (fired off the SAME commit, independently of
+    // the echo_mark send above) — it read Day 3's board BEFORE the
+    // "next open" update below and would otherwise leave an unrelated
+    // squaresMarked:0 call in the mock history ahead of the heal's own
+    // write, which is what THIS test's stats assertion below must observe.
+    H.txSet.mockClear();
+
+    // "Next open" of Day 3: the echoed cell already drained durably (an
+    // offline batch persists regardless of the tab), so the board this
+    // device now reads already carries it — matching what the mark-time
+    // batch actually wrote.
+    H.dayBoards.set(3, {
+      uid: 'u1',
+      seed: 333,
+      dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), {
+        8: {
+          marked: true,
+          markedAt: 5,
+          status: 'confirmed',
+          echo: true,
+          echoGeneration: 1,
+          echoAnalyticsId: transitionId,
+          echoAnalyticsTrigger: 'mark',
+        },
+      }),
+    });
+    // `H.player.dayStats` still has NO Day-3 bucket (seedBoards only seeded
+    // Day 2) — the stranded stats continuation. This is exactly the
+    // `bucketLag` heal's trigger condition.
+    const res = await reconcileEchoes({ uid: 'u1', dayIndex: 3, dayIndexes: [2, 3] });
+    expect(res.changed).toBe(false); // nothing NEW to echo — Day 3's own cells already carry it
+    // The heal DOES repair the stranded stats write (proving the heal ran,
+    // not that it was skipped for some unrelated reason)...
+    await vi.waitFor(() => {
+      const statsWrite = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+      expect(statsWrite).toBeDefined();
+      expect(
+        (statsWrite![1] as { dayStats: Record<number, { squaresMarked: number }> }).dayStats[3].squaresMarked,
+      ).toBe(1);
+    });
+    expectNoClientEchoTrack();
   });
 
   it('#474: SKIPS the echo for a sibling with no server-confirmed seed watch — the acted Mark still commits alone', async () => {
@@ -553,7 +652,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
   });
 
-  it('REGRESSION: with no repeated Prompts the batch is byte-identical to an echo-less call', async () => {
+  it('REGRESSION: with no repeated Prompts the batch has the same shape as an echo-less call', async () => {
     // Pin the clock: the two runs stamp `markedAt: Date.now()`, and crossing a
     // millisecond boundary between them would fail the byte-identity check for
     // the wrong reason (observed CI-only).
@@ -567,7 +666,28 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       vi.clearAllMocks();
       await markShared({ echoDayIndexes: undefined });
       const withoutEchoParam = H.batchSet.mock.calls.map((c) => [segs(c), c[1], c[2]]);
-      expect(withEchoParam).toEqual(withoutEchoParam);
+      // A direct toggle always mints a fresh request token for the
+      // server-observed analytics trigger. Normalize that intentionally unique
+      // value before comparing the no-echo and omitted-param write shapes.
+      const normalizeRequestId = (writes: unknown[][]) =>
+        writes.map(([path, data, options]) => [
+          path,
+          typeof data === 'object' && data !== null
+            ? {
+                ...(data as Record<string, unknown>),
+                ...((data as { directAnalyticsRequest?: unknown }).directAnalyticsRequest
+                  ? {
+                      directAnalyticsRequest: {
+                        ...((data as { directAnalyticsRequest: Record<string, unknown> }).directAnalyticsRequest),
+                        id: '<request>',
+                      },
+                    }
+                  : {}),
+              }
+            : data,
+          options,
+        ]);
+      expect(normalizeRequestId(withEchoParam)).toEqual(normalizeRequestId(withoutEchoParam));
       expect(withEchoParam.some(([a]) => (a as string[])[2] === 'days' && (a as string[])[3] === '3')).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -678,6 +798,8 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
     };
     expect(playerWrite.dayStats[0].squaresMarked).toBe(1);
     expect(playerWrite.squaresMarked).toBe(2); // Day 1 prior bucket + this echo
+    expect(echoed).toMatchObject({ echoAnalyticsTrigger: 'deal', echoAnalyticsId: expect.any(String) });
+    expectNoClientEchoTrack();
   });
 
   it('revalidates achieved prompts inside the deal transaction before it writes Echoes', async () => {
@@ -746,7 +868,7 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     H.player = { uid: 'u1', reshufflesUsed: 0, ...params.playerExtra };
   };
 
-  it('an echo-only card is still reshuffleable, and the replacement re-echoes with its bucket re-derived', async () => {
+  it('an echo-only card is still reshuffleable, and the replacement re-echoes with its bucket re-derived — but fires NO echo_mark (net-new is zero, Codex round 1 finding 4, #727)', async () => {
     seedShuffle({
       // The Day-1 card wears an ECHO of s0 (achieved on Day 0) — pristine.
       day1Cells: { 0: { marked: true, markedAt: 1, status: 'confirmed', echo: true } },
@@ -763,8 +885,34 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     const playerWrite = H.txSet.mock.calls.find(isPlayerWrite)![1] as Record<string, unknown>;
     expect(playerWrite.reshufflesUsed).toBe(1);
     // The Day-1 bucket is RE-DERIVED from the replacement's echoes — the
-    // discarded card's echo stats never survive as phantoms.
+    // discarded card's echo stats never survive as phantoms. Before AND
+    // after the reshuffle the bucket reads 1 — the discarded card already
+    // wore this exact echo (a pristine card can ONLY carry echoes), so the
+    // replacement re-landing the SAME Prompt is not a NEW echo.
     expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
+    // #721, Codex round 1 finding 4: `echo_mark`'s `count` must be the NET-NEW
+    // increase over what this Day's bucket already carried, never the
+    // replacement's raw echo total — firing `count: 1` here (as the
+    // pre-fix code did) would report an echo the bucket never moved for,
+    // breaking the reconciliation identity (specs/w2-ga4-events.md §
+    // Reconciliation: `squaresMarked[d] = markCount[d] + echoCount[d]`).
+    await new Promise((r) => setTimeout(r, 0)); // let every microtask continuation settle
+    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'reshuffle' }));
+  });
+
+  it('a reshuffle that echoes a genuinely new Prompt stamps a server-observed transition', async () => {
+    seedShuffle({
+      // The Day-1 card is pristine and UNMARKED — no echo to trade away.
+      day0Overrides: { 0: { marked: true, markedAt: 1, status: 'confirmed' } },
+      playerExtra: { dayStats: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } } },
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).resolves.toBe(1);
+    const playerWrite = H.txSet.mock.calls.find(isPlayerWrite)![1] as Record<string, unknown>;
+    expect((playerWrite.dayStats as Record<number, { squaresMarked: number }>)[1].squaresMarked).toBe(1);
+    const boardWrite = H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 1));
+    const echoed = cellsFromData((boardWrite![1] as { cells: unknown }).cells).find((cell) => cell.echo);
+    expect(echoed).toMatchObject({ echoAnalyticsTrigger: 'reshuffle', echoAnalyticsId: expect.any(String) });
+    expectNoClientEchoTrack();
   });
 
   it('REGRESSION: a no-echo reshuffle keeps the exact three-write shape (board + counter + spend marker, #463) — the counter write is bare', async () => {
@@ -880,6 +1028,8 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       expect(stats.dayStats[2].squaresMarked).toBe(1);
       expect(stats.squaresMarked).toBe(2); // Day-1 prior bucket + this echo
     });
+    expect(boardWrite.cells['9']).toMatchObject({ echoAnalyticsTrigger: 'open_reconcile', echoAnalyticsId: expect.any(String) });
+    expectNoClientEchoTrack();
   });
 
   it('#491: a stats-lagged board heals on open — cells ahead of the cached bucket trigger a server-derived stats write, stamped from the CELLS and re-pinning the honor', async () => {
@@ -902,7 +1052,15 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         10: { marked: true, markedAt: 3, status: 'confirmed' },
         11: { marked: true, markedAt: 4, status: 'confirmed' },
         13: { marked: true, markedAt: 5, status: 'confirmed' },
-        14: { marked: true, markedAt: 7, status: 'confirmed', echo: true },
+        14: {
+          marked: true,
+          markedAt: 7,
+          status: 'confirmed',
+          echo: true,
+          echoGeneration: 1,
+          echoAnalyticsId: 'echo-v1:test-event:u1:2:222:14:1',
+          echoAnalyticsTrigger: 'deal',
+        },
       }),
     });
     // The cached player row has NO Day-2 bucket — the lost continuation.
@@ -934,6 +1092,9 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         at: 7,
       });
     });
+    // The existing durable identity is consumed from the server-owned record,
+    // not replayed from this cached Board snapshot.
+    expectNoClientEchoTrack();
   });
 
   it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {
@@ -1011,6 +1172,12 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       // The opened Day's bucket rides along unchanged — the heal never
       // fabricates a bucket from anything but the board's committed cells.
       expect(stats.dayStats[1]).toMatchObject({ bingoCount: 0, squaresMarked: 1 });
+      // #721, Codex round 1 finding 7: a ROOT-only lag (this case — Day 1's
+      // OWN bucket already matched its board before the heal ran) must fire
+      // NO echo_mark: nothing NEW echoed onto Day 1, so reporting one here
+      // would claim a count the bucket never actually moved for.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'open_reconcile' }));
     });
 
     it('ignores the ceremonial Day bucket, which the roots never counted (#265)', async () => {
@@ -1599,6 +1766,57 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     expect(write.dayStats[1].squaresMarked).toBe(1);
     expect(write.dayStats[2].squaresMarked).toBe(1);
     expect(write.squaresMarked).toBe(2);
+    // The committed claim-board edge is labelled for the server recorder;
+    // this administrator browser does not emit a lossy client-side event.
+    const claimBoardWrite = H.txSet.mock.calls.find((call) => isDayBoardWrite(call, 1));
+    expect(claimBoardWrite![1]).toMatchObject({
+      directAnalyticsRequest: {
+        cellIndex: 5,
+        marked: true,
+        mode: 'admin_confirmed',
+        source: 'admin_confirm',
+        id: expect.any(String),
+      },
+    });
+    const siblingWrite = H.txSet.mock.calls.find((call) => isDayBoardWrite(call, 2));
+    const siblingCells = cellsFromData((siblingWrite![1] as { cells: unknown }).cells);
+    expect(siblingCells.find((cell) => cell.echo)).toMatchObject({
+      echoAnalyticsTrigger: 'admin_confirm',
+      echoAnalyticsId: expect.any(String),
+    });
+    expectNoClientEchoTrack();
+  });
+
+  it('a stale claim (no matching board/cell) resolves without firing mark_square or echo_mark (Codex round 1 finding 3, #727; round 3)', async () => {
+    seedClaim();
+    // The claim's cellIndex/proofId no longer matches anything on the board —
+    // a reshuffle traded the cell away underneath a still-pending claim. With
+    // no matching cell, `resolve()`'s `confirmedCell` is never found, so
+    // `echoItemId` stays null and no sibling echo — and no `echo_mark` —
+    // fires either (round 3, Codex P2, #727).
+    await confirmClaim(claim({ cellIndex: 99, proofId: null }), 'admin-1');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
+    expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.anything());
+  });
+
+  it('a SECOND confirm racing an already-confirmed claim does not double-fire mark_square (Codex round 1 finding 3, #727)', async () => {
+    // The board is ALREADY confirmed (a first admin's transaction won the
+    // race) — this simulates the loser's transaction replaying against the
+    // winner's committed state.
+    H.dayBoards.set(1, {
+      uid: 'u1',
+      seed: 111,
+      dayIndex: 1,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), {
+        5: { marked: true, markedAt: 1, status: 'confirmed' },
+      }),
+    });
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: card((i) => (i === 7 ? 'shared' : `b${i}`)) });
+    H.player = { uid: 'u1', displayName: 'Alice', dayStats: {} };
+    await confirmClaim(claim(), 'admin-2');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());
   });
 
   it('rejecting echoes NOTHING', async () => {

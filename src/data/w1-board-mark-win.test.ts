@@ -334,11 +334,20 @@ describe('setMark (write shape)', () => {
     // The board write's mask (#458 round 8): one FieldPath per changed cell
     // (replace-wholesale, so omission-removed fields die) + the extras.
     const boardOpts = setSpy.mock.calls[0][2] as { mergeFields: Array<{ isEqual?: (o: unknown) => boolean }> };
-    expect(boardOpts.mergeFields).toHaveLength(2);
+    expect(boardOpts.mergeFields).toHaveLength(3);
     expect(boardOpts.mergeFields[0].isEqual!(new FieldPath('cells', '3'))).toBe(true);
     expect(boardOpts.mergeFields[1]).toBe('markSeed');
+    expect(boardOpts.mergeFields[2]).toBe('directAnalyticsRequest');
     expect(setSpy.mock.calls[1][2]).toEqual({ merge: true });
     expect(setSpy.mock.calls[0][1]).toMatchObject({ markSeed: 42 });
+    expect(setSpy.mock.calls[0][1]).toMatchObject({
+      directAnalyticsRequest: {
+        cellIndex: 3,
+        marked: true,
+        mode: 'honor',
+        id: expect.any(String),
+      },
+    });
     expect((setSpy.mock.calls[0][1].cells as Cell[])[3].marked).toBe(true);
     expect(setSpy.mock.calls[1][1]).toMatchObject({
       squaresMarked: 1,
@@ -361,12 +370,15 @@ describe('setMark (write shape)', () => {
     expect(commitSpy).toHaveBeenCalledTimes(1);
     // The return now also carries the win TRANSITION verdict doMark broadcasts the
     // Feed Moment off (issue #104): a bare non-winning Mark crosses neither edge.
+    // `markTransition: true` (Codex P2 on #727): cell 3 went unmarked → marked.
     expect(res).toEqual({
       cells: expect.any(Array),
       bingo: false,
       blackout: false,
       bingoTransition: false,
       blackoutTransition: false,
+      markTransition: true,
+      committed: expect.any(Promise),
     });
   });
 });
@@ -660,13 +672,16 @@ describe('setMark (surfaces a genuine commit failure instead of swallowing it)',
 
     // Optimistic contract unchanged: setMark still resolves with the locally
     // computed win result (now incl. the transition verdict) even though the
-    // write will be rolled back.
+    // write will be rolled back. `markTransition: true` (Codex P2 on #727):
+    // cell 3 went unmarked → marked.
     expect(res).toEqual({
       cells: expect.any(Array),
       bingo: false,
       blackout: false,
       bingoTransition: false,
       blackoutTransition: false,
+      markTransition: true,
+      committed: expect.any(Promise),
     });
 
     // commit() is fire-and-forget, so the .catch runs on a later microtask.

@@ -466,7 +466,18 @@ export function applyEchoes(cells: Cell[], achieved: ReadonlySet<string>, now: n
   const next = cells.map((c) => {
     if (c.free || c.marked || c.echoOptOut === true || !c.itemId || !achieved.has(c.itemId)) return c;
     echoedItemIds.push(c.itemId);
-    return { ...c, marked: true, markedAt: now, status: 'confirmed' as const, echo: true };
+    const priorGeneration =
+      typeof c.echoGeneration === 'number' && Number.isSafeInteger(c.echoGeneration) && c.echoGeneration > 0
+        ? c.echoGeneration
+        : 0;
+    return {
+      ...c,
+      marked: true,
+      markedAt: now,
+      status: 'confirmed' as const,
+      echo: true,
+      echoGeneration: priorGeneration + 1,
+    };
   });
   const changed = echoedItemIds.length > 0;
   const resultCells = changed ? next : cells;

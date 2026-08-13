@@ -4,6 +4,8 @@ import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
+import { stampEchoAnalyticsTransitions } from './echoAnalytics';
+import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
@@ -371,12 +373,46 @@ export async function adminUpdateItemText(id: string, text: string): Promise<voi
   });
 }
 
+/**
+ * What one `resolve()` call performed, for the server-observed analytics
+ * transition that `confirmClaim` stamps in its Board write.
+ */
+interface ResolveResult {
+  /** Whether THIS call performed a genuine pending→confirmed transition on
+   *  the claim's own cell (#721, Codex round 1 findings 3 & 5) — the moment
+   *  `countMarked` (game/logic.ts, which excludes `status: 'pending'`) starts
+   *  crediting the Square, and therefore the ONLY moment this write may carry
+   *  an `admin_confirm` durable analytics request. `false` covers both
+   *  non-credit-changing cases in one signal: a stale claim whose board no
+   *  longer exists, or whose cell no longer matches `isClaimCell` (both
+   *  no-ops below — no write, no transition), and the concurrent-confirm
+   *  race (two admins resolve the same claim; Firestore replays the loser's
+   *  transaction against the WINNER's already-`confirmed` cell, so its own
+   *  `before` read is 'confirmed', not 'pending' — a rewrite, not a
+   *  transition). Computed generically here (not gated to `status ===
+   *  'confirmed'` internally) so a future confirm-adjacent caller cannot
+   *  forget to ask; `rejectClaim` below simply never reads it. */
+  transitioned: boolean;
+}
+
 async function resolve(
   c: ClaimDoc,
   transform: (cells: Cell[]) => Cell[],
   adminUid: string,
   status: 'confirmed' | 'rejected',
-): Promise<void> {
+): Promise<ResolveResult> {
+  // One stable identity outside the retryable transaction. The server trigger
+  // observes the actual pending→confirmed edge and ignores this token unless
+  // that edge commits, so a closed admin tab cannot lose or invent an event.
+  const analyticsRequest =
+    status === 'confirmed'
+      ? directMarkAnalyticsRequest({
+          cellIndex: c.cellIndex,
+          marked: true,
+          mode: 'admin_confirmed',
+          source: 'admin_confirm',
+        })
+      : undefined;
   // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
   // its `dayIndex`, so resolve against `days/{dayIndex}/boards/{uid}` and fold the
   // owner's `dayStats[dayIndex]` — the SAME routing attachProof/setMark use. Legacy
@@ -415,11 +451,11 @@ async function resolve(
       echoSiblingDays = days.map((d) => d.index).filter((i) => i !== (c.dayIndex as number));
     }
   }
-  await runTransaction(db, async (tx) => {
+  return await runTransaction(db, async (tx): Promise<ResolveResult> => {
     // Read board + player inside the txn so a concurrent mark/proof from the same
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
-    if (!bSnap.exists()) return;
+    if (!bSnap.exists()) return { transitioned: false };
     const pSnap = await tx.get(player(c.uid));
     // The owner's sibling Day Cards, read in the SAME transaction (before any
     // write, per Firestore's reads-first contract) so a retry re-derives the
@@ -429,6 +465,17 @@ async function resolve(
     const boardData = bSnap.data() as { cells?: unknown; seed?: number };
     const cells = cellsFromData(boardData.cells);
     const next = transform(cells);
+    // The transition verdict (#721, Codex round 1 findings 3 & 5): computed
+    // from THIS transaction's own before/after reads of the claim's cell —
+    // see this function's doc comment. `isClaimCell` matches nothing when the
+    // claim's board has moved on (a reshuffle traded the cell's position
+    // away, or the index is simply stale); a `before` that is anything but
+    // 'pending' means either it was never pending (a legacy/malformed claim)
+    // or another confirm already credited it.
+    const claimCellBefore = cells.find((x) => isClaimCell(x, c));
+    const claimCellAfter = next.find((x) => isClaimCell(x, c));
+    const transitionedToConfirmed =
+      status === 'confirmed' && claimCellBefore?.status === 'pending' && claimCellAfter?.status === 'confirmed';
     const bingoCount = completedLines(next).length;
     const bingoTransition = completedLines(cells).length === 0 && bingoCount > 0;
     const squares = countMarked(next);
@@ -480,7 +527,19 @@ async function resolve(
         if (!snap.exists()) return;
         const sib = snap.data() as { cells?: unknown; seed?: number };
         const sibCells = cellsFromData(sib.cells);
-        const res = applyEchoes(sibCells, achieved, echoNow);
+        const rawRes = applyEchoes(sibCells, achieved, echoNow);
+        const res = {
+          ...rawRes,
+          cells: stampEchoAnalyticsTransitions({
+            cells: rawRes.cells,
+            changed: changedCells(sibCells, rawRes.cells),
+            eventId: EVENT_ID,
+            uid: c.uid,
+            dayIndex: echoSiblingDays[idx],
+            boardSeed: typeof sib.seed === 'number' ? sib.seed : undefined,
+            trigger: 'admin_confirm',
+          }),
+        };
         if (!res.changed) return;
         echoWrites.push({
           ref: echoSiblingRefs[idx],
@@ -511,6 +570,7 @@ async function resolve(
       // Per-cell merge (#457): only the resolved claim's cell rides the write.
       ...cellsMergeSet(cellsPatch(changedCells(cells, next)), {
         ...(typeof boardData.seed === 'number' ? { markSeed: boardData.seed } : {}),
+        ...(transitionedToConfirmed && analyticsRequest ? { directAnalyticsRequest: analyticsRequest } : {}),
       }),
     );
     for (const write of echoWrites) {
@@ -618,6 +678,7 @@ async function resolve(
     if (status === 'confirmed' && c.proofId) {
       tx.set(proof(c.proofId), { status: 'active' }, { merge: true });
     }
+    return { transitioned: transitionedToConfirmed };
   });
 }
 
@@ -632,7 +693,7 @@ const isClaimCell = (x: Cell, c: ClaimDoc): boolean =>
 
 export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   const creditedAt = Date.now();
-  return resolve(
+  const confirmed = resolve(
     c,
     (cells) =>
       cells.map((x) =>
@@ -641,9 +702,47 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     adminUid,
     'confirmed',
   );
+  // Mark-transition instrumentation (#721): `confirmClaim` only ever resolves
+  // a PENDING claim (ReviewQueue's "Pending claims" queue is admin_confirmed-
+  // mode only, per its own module comment) reaching `confirmed` — the moment
+  // `countMarked` (game/logic.ts) starts crediting the Square, since it
+  // excludes `status: 'pending'`. The Square itself went `marked: true`
+  // earlier, at proof-attach time (ProofSheet's `source: 'proof'` event), so
+  // one confirmed admin_confirmed-mode Square produces TWO `mark_square`
+  // events before it counts once in `dayStats[*].squaresMarked` — documented
+  // in specs/w2-ga4-events.md § Reconciliation, not a double-count bug. Fired
+  // only after `confirmed` resolves (the transaction committed), via a
+  // dynamic import — matching src/data/api.ts's `mark_rejected` call site —
+  // so this Firestore-only module stays free of an eager
+  // analytics/firebase-singleton dependency; test doubles mock `../firebase`
+  // with only what the writes need.
+  //
+  // Gated on `resolve()`'s own transition verdict (Codex round 1 finding 3):
+  // a stale claim (no board, or `isClaimCell` matches nothing on the current
+  // board — a reshuffle traded the cell away) resolves without moving the
+  // Square from pending to confirmed at all, and two admins racing the SAME
+  // claim have their loser's transaction replay against the winner's
+  // already-confirmed cell — a rewrite, not a transition. Firing here
+  // unconditionally would report a credited Square in both cases even though
+  // `dayStats[*].squaresMarked` never moved, breaking the reconciliation
+  // identity specs/w2-ga4-events.md § Reconciliation documents.
+  //
+  // `uid: c.uid` (Codex round 1 finding 6): `track()` runs in the resolving
+  // ADMIN's own browser/session, so without an explicit target-player
+  // identifier PostHog/GA4 attribute this event to the ADMIN's distinct id,
+  // not the claim owner's — there is otherwise no way to recover whose
+  // Square this was from the payload alone.
+  //
+  // `resolve` stamps this committed edge with a stable request token. The
+  // server-side recorder, rather than this administrator's browser, delivers
+  // the analytics event for the claim owner's Board transition.
+  return confirmed.then(() => undefined);
 }
 
 export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
+  // `resolve()`'s transition verdict is confirm-only instrumentation
+  // (`confirmClaim`'s concern, above) — a reject fires no `mark_square`, so
+  // the boolean is simply discarded here.
   return resolve(
     c,
     (cells) =>
@@ -654,5 +753,5 @@ export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
       ),
     adminUid,
     'rejected',
-  );
+  ).then(() => undefined);
 }

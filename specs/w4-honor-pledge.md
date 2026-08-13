@@ -24,7 +24,7 @@ Issue #181. Claiming a Square is the app's highest-frequency action, and the pro
 
 ## Non-goals / preserved invariants
 
-- No new analytics event: a pledge claim is a `mark_square` (mode `honor`), a proofed claim an `attach_proof`—already distinguishable.
+- **Corrected by #721** (this line originally read "No new analytics event: a pledge claim is a `mark_square` (mode `honor`), a proofed claim an `attach_proof`—already distinguishable," which was wrong: `attach_proof` is not an alternative to `mark_square`, it is a SUBSET — every proofed claim that marks a previously-unmarked Square fires BOTH, and treating them as either/or is what let `mark_square` miss almost every real Mark in production, see specs/w2-ga4-events.md § Reconciliation). The pledge fires `mark_square` with `source: 'pledge'`; a proofed claim fires `attach_proof` for the capture itself AND `mark_square` with `source: 'proof'` for the transition to marked (`ProofSheet.tsx`, gated on `!cell.marked` — the ＋ affordance on an already-marked Square fires only `attach_proof`, correctly, since nothing transitioned).
 - The Moment broadcast pipeline is untouched: the pledge rides `doMark`'s existing verdict path, a proofed claim rides `onAttached` (PR #110).
 - `admin_confirmed` semantics are untouched: a claim still needs a real proof and starts `pending`.
 

@@ -163,6 +163,24 @@ describe('firestore.rules — honor-system invariants', () => {
     await assertFails(setDoc(doc(db(ALICE), at(`players/${BOB}`)), player(BOB)));
   });
 
+  it('keeps direct-mark analytics records server-authored and private to the owner/admin', async () => {
+    const transitionPath = at(`players/${ALICE}/analyticsTransitions/transition-1`);
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), transitionPath), {
+        transitionId: 'transition-1',
+        kind: 'mark',
+        createdAt: NOW(),
+      });
+    });
+
+    await assertSucceeds(getDoc(doc(db(ALICE), transitionPath)));
+    await assertSucceeds(getDoc(doc(db(ADMIN), transitionPath)));
+    await assertFails(getDoc(doc(db(BOB), transitionPath)));
+    await assertFails(setDoc(doc(db(ALICE), transitionPath), { kind: 'forged' }));
+    await assertFails(setDoc(doc(db(ALICE), at(`players/${ALICE}/analyticsTransitions/forged`)), { kind: 'forged' }));
+    await assertFails(deleteDoc(doc(db(ALICE), transitionPath)));
+  });
+
   it('ADR 0002: a Mark publishes an attributed Tally entry; forgery denied; reads public', async () => {
     const entry = (uid: string) => ({ uid, displayName: uid, markedAt: NOW() });
     const mine = doc(db(ALICE), at(`tally/item1/markers/${ALICE}`));

@@ -168,8 +168,15 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     expect(proof.text).toBeNull();
 
     // The backing cell is marked-confirmed and references the proof.
-    const board = setPayload('/boards/') as { cells: Cell[] };
+    const board = setPayload('/boards/') as { cells: Cell[]; directAnalyticsRequest?: Record<string, unknown> };
     expect(board.cells[5]).toMatchObject({ marked: true, markedAt: 1000, status: 'confirmed' });
+    expect(board.directAnalyticsRequest).toMatchObject({
+      cellIndex: 5,
+      marked: true,
+      mode: 'proof_required',
+      source: 'proof',
+      id: expect.any(String),
+    });
     expect(typeof board.cells[5].proofId).toBe('string');
     // proof_required credits the square (not pending), so it counts.
     expect(setPayload('/players/')).toMatchObject({ squaresMarked: 1 });

@@ -14,7 +14,7 @@ import {
 // firebase/analytics + ../firebase mocked (not analytics.ts) so the real
 // track() runs — proves the trigger rides the existing mark_square call site.
 vi.mock('firebase/analytics', () => ({ logEvent: vi.fn() }));
-vi.mock('../firebase', () => ({ analytics: null }));
+vi.mock('../firebase', () => ({ analytics: null, analyticsReady: Promise.resolve(null) }));
 import { track } from '../analytics';
 
 // Covers specs/d15-pwa-toasts.md (#219)'s new shared coordinator/signals in
@@ -141,6 +141,26 @@ describe('first-Mark signal (install nudge trigger)', () => {
   it('is triggered through the real mark_square track() call (analytics.ts), not a new call site', () => {
     render(<HasMarkedProbe />);
     act(() => track('mark_square', { mode: 'honor', marked: true }));
+    expect(screen.getByTestId('marked')).toHaveTextContent('true');
+  });
+
+  it('is NOT triggered by an admin_confirm mark_square — that call runs on the ADMIN device, not the Player who marked (Codex round 1 finding 6, #727)', () => {
+    render(<HasMarkedProbe />);
+    act(() =>
+      track('mark_square', {
+        source: 'admin_confirm',
+        mode: 'admin_confirmed',
+        marked: true,
+        uid: 'the-claim-owner',
+      }),
+    );
+    // Confirming SOMEONE ELSE'S claim must not flip THIS (the admin's own)
+    // device's "has marked a Square" flag and surface the install nudge to
+    // an admin who never tapped a Square themselves.
+    expect(screen.getByTestId('marked')).toHaveTextContent('false');
+    // A real player action still works, proving the guard is source-scoped,
+    // not a general regression of the trigger.
+    act(() => track('mark_square', { source: 'pledge', mode: 'honor', marked: true }));
     expect(screen.getByTestId('marked')).toHaveTextContent('true');
   });
 });
