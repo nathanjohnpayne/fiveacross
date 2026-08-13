@@ -45,6 +45,8 @@ node scripts/og/render-og-editions.mjs --edition vacay
 
 `--edition` is required rather than defaulting to all three, and `--all` is the explicit opt-in. A re-render is never byte-identical to the last one, so rendering the full set for a one-Edition change commits binary diffs to Editions whose artwork nobody asked to change — and each of those is a live link preview. `--out <dir>` writes to a scratch directory instead of the repo, which is what you want for a first look.
 
+Every render is checked against WhatsApp's 600 KB `og:image` hard cap before it touches anything committed: the screenshot lands in a scratch file next to its destination, and only replaces `public/og-*.png` and its `plans/og-images/` mirror once it clears the cap. A render that doesn't clear the cap leaves the previous committed copy untouched and exits nonzero. `--all` extends this to the whole run — every targeted Edition has to individually clear the cap before ANY of them is committed, so a late failure (say, the third Edition of three) cannot leave the first two already replaced and the third still on disk from the last successful run. A failed `--all` either updates every targeted Edition or none of them.
+
 For the same reason, `public/og-fiveacross.png` is still the original #609 binary: #681 and #688 gave it no content change, so it was left alone rather than swapped for a fresh render of the same design. It picks up the generator the first time its own copy actually moves.
 
 Requirements:

@@ -83,6 +83,15 @@ function deferred<T>() {
   return { promise, settle };
 }
 
+// The two failure SHAPES the bootstrap has to tell apart. Firestore rejects with a
+// `FirebaseError` carrying a `code`, and AuthContext classifies on that code — so
+// these model the real thing rather than a bare `new Error(message)`, whose
+// classification would fall through to the uncoded message regex instead.
+const unreachable = () =>
+  Object.assign(new Error('net::ERR_INTERNET_DISCONNECTED'), { code: 'unavailable' });
+const permanent = () =>
+  Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' });
+
 // `loading` is App.tsx's Board gate (App renders "Loading…" while loading is true,
 // the Board only once it is false), so a unit test can read it as the proxy for
 // "would the Board render?". `board` renders only when the re-prompt gate is DOWN;
@@ -92,7 +101,8 @@ let ctxSignIn: (acknowledgedAdultContent: boolean) => Promise<void> = async () =
 let ctxRetryDeal: () => void = () => {};
 let ctxAttest: () => Promise<void> = async () => {};
 function Probe() {
-  const { user, loading, dealError, dealing, signIn, retryDeal, attest } = useAuth();
+  const { user, loading, dealError, dealing, signIn, retryDeal, attest, canRenderEventContent } =
+    useAuth();
   ctxSignIn = signIn;
   ctxRetryDeal = retryDeal;
   ctxAttest = attest;
@@ -103,6 +113,7 @@ function Probe() {
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="board">board</span>
+      <span data-testid="authority">{canRenderEventContent ? 'may-render' : 'withheld'}</span>
     </div>
   );
 }
@@ -114,6 +125,13 @@ const boardRendered = () => screen.getByTestId('loading').textContent === 'ready
 // App.tsx renders the DealError panel over the Board whenever dealError is set, so
 // a stale error observed here means the Board would NOT render (round 4).
 const dealErrorShown = () => screen.queryByRole('alert') !== null;
+// `canRenderEventContent` is the App.tsx authority boundary (#521): App.tsx
+// returns the full-screen DealError and withholds the whole Event — including
+// any durable cached card — whenever this is false, regardless of dealError.
+// `queryBy`, not `getBy`: when the re-prompt gate is UP, AuthProvider renders
+// <SignIn/> in place of `children`, so the Probe is unmounted entirely — which is
+// itself "the Event is not rendering", not a missing element.
+const mayRenderEventContent = () => screen.queryByTestId('authority')?.textContent === 'may-render';
 // `dealing` drives the DealError Retry button's disabled/"Dealing…" state — stuck
 // true would leave Retry unusable through a supersede (round 5, finding B).
 const dealingActive = () => screen.getByTestId('dealing').textContent === 'dealing';
@@ -795,5 +813,281 @@ describe('offline cold boot (#115)', () => {
 
     // The server-confirmed User is NOT rolled back to a re-prompt.
     expect(rePromptShown()).toBe(false);
+  });
+
+  it('#521: an ONLINE bootstrap whose authority reads both FAIL (navigator.onLine lied — captive/ship-Wi-Fi) falls back to the cached attestation so the durable card can paint, but grants no deal authority', async () => {
+    // navigator.onLine says true, but the authority read never lands — the
+    // effectively-offline-with-a-lying-probe case. Neither committedSticky nor
+    // optimisticSticky applies (no in-session attest), so the pre-fix code left
+    // `attested` UNKNOWN forever and App withheld the whole Event, including the
+    // #434 durable card this device already holds. The cache fallback (#521)
+    // proves 18+ from the SAME cached stamp the OFFLINE branch trusts.
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockRejectedValue(unreachable());
+    mocks.readAdultAttestationFromServer.mockRejectedValue(unreachable());
+
+    mount();
+    await coldBoot(RETURNING_USER);
+
+    // The failed bootstrap still surfaces the retryable error…
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    // …but the cache-first fallback lifts the render gate PROVISIONALLY, so the
+    // durable card can paint instead of the full-screen DealError.
+    await waitFor(() => expect(mayRenderEventContent()).toBe(true));
+    // Render-only: no re-prompt (attested is not `false`) and no deal (authority
+    // was never established — attestedAuthoritative stays false).
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521: the same double-failure with a cache MISS never lifts the render gate — the age gate does not fail open', async () => {
+    // Identical failure shape, but this device has no cached attestation at all
+    // (e.g. a brand-new device on the ship's captive Wi-Fi). This is the
+    // important case: it proves the #521 fallback cannot be used to bypass 18+
+    // verification — a miss leaves `canRenderEventContent` false, exactly like
+    // before the fix.
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
+    mocks.ensureUserProfile.mockRejectedValue(unreachable());
+    mocks.readAdultAttestationFromServer.mockRejectedValue(unreachable());
+
+    mount();
+    await coldBoot(RETURNING_USER);
+
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    // Wait for the fallback's cache read to actually resolve (a miss) before
+    // asserting the negative — otherwise a passing assertion could just mean the
+    // fire-and-forget read hadn't settled yet.
+    await waitFor(() =>
+      expect(mocks.readAdultAttestationFromCache).toHaveBeenCalledWith(RETURNING_USER.uid),
+    );
+    expect(mayRenderEventContent()).toBe(false);
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2): a PERMANENT authority failure does NOT lift the render gate from cache — the Event stays withheld behind the retry surface', async () => {
+    // Same cached stamp, same "the authority read failed" shape — but the failure
+    // is `permission-denied`, which reconnecting cannot fix. The #521 fallback
+    // exists for the captive-Wi-Fi/effectively-offline case only; lifting here
+    // would mount Nav/Feed/Ranks/More over a rules/schema fault while App's own
+    // #434 cached-card gate (`dealErrorReason === 'connection'`) still refuses to
+    // paint the card the lift was for. Both decisions read the SAME classifier, so
+    // they cannot disagree.
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    mocks.readAdultAttestationFromServer.mockRejectedValue(permanent());
+
+    mount();
+    await coldBoot(RETURNING_USER);
+
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    // The permanent-class failure never even consults the cache…
+    expect(mocks.readAdultAttestationFromCache).not.toHaveBeenCalled();
+    // …so the whole Event stays withheld: App renders the full-screen DealError.
+    expect(mayRenderEventContent()).toBe(false);
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2): a LATE authoritative NULL that lands after AUTH_BOOTSTRAP_TIMEOUT_MS downgrades the provisional cache lift to the re-prompt', async () => {
+    // `withTimeout` rejects the race but cannot cancel the read. The provisional
+    // cache lift keeps the Event rendering, and no connectivity event ever fires
+    // while navigator.onLine stays true — so a DISCARDED late server-NULL would
+    // leave the stale lift standing forever. The late result must still settle.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+
+    // The timeout surfaced the retryable error and the cache lifted the gate.
+    expect(dealErrorShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(true);
+    expect(rePromptShown()).toBe(false);
+
+    // …and NOW the orphaned server read lands, definitively unstamped.
+    await act(async () => {
+      read.settle(null);
+    });
+
+    // The authority wins: gate closed, stale error cleared, re-prompt shown, and
+    // still no rows created for a User the server has not confirmed.
+    expect(mayRenderEventContent()).toBe(false);
+    expect(rePromptShown()).toBe(true);
+    expect(dealErrorShown()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2): a LATE authoritative STAMP that lands after the timeout clears the stale error and deals — no manual Retry needed', async () => {
+    // The mirror case: the same orphaned read comes back CONFIRMING the stamp.
+    // Routing it through the same settle recovers the session in place, the way
+    // runDeal's late-success net already does for a timed-out deal.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1);
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(dealErrorShown()).toBe(true);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+
+    await act(async () => {
+      read.settle(1);
+    });
+
+    expect(dealErrorShown()).toBe(false);
+    expect(mayRenderEventContent()).toBe(true);
+    expect(rePromptShown()).toBe(false);
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+  });
+
+  it('#521 (Codex P2): a cache read that resolves AFTER a late authoritative NULL cannot re-lift the gate the downgrade closed', async () => {
+    // The one-level-down version of the same bug: the provisional lift is
+    // fire-and-forget, so its `.then` can land after the authoritative settle.
+    // Authority is terminal for the attempt — a slow cache stamp must not undo it.
+    vi.useFakeTimers();
+    setOnline(true);
+    const cache = deferred<number | null>();
+    mocks.readAdultAttestationFromCache.mockReturnValue(cache.promise);
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    // The lift was requested but its cache read is still in flight.
+    expect(mocks.readAdultAttestationFromCache).toHaveBeenCalledWith(RETURNING_USER.uid);
+    expect(mayRenderEventContent()).toBe(false);
+
+    // Authority lands FIRST, definitively unstamped → re-prompt.
+    await act(async () => {
+      read.settle(null);
+    });
+    expect(rePromptShown()).toBe(true);
+
+    // …and only then does the cache come back with a stamp. It must be ignored.
+    await act(async () => {
+      cache.settle(1);
+    });
+    expect(rePromptShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2 on #728): the RETRY path honors a late authoritative NULL too — a provisional lift is not immortal behind Retry', async () => {
+    // The remaining hole in the #521 contract, one level down from the bootstrap
+    // case above: with a provisional cache lift standing, the Player's Retry runs
+    // `retryBootstrap` (not the deal — `mayDeal` is false without authority). That
+    // path had its OWN `withTimeout` and discarded whatever landed after it. Since
+    // `navigator.onLine` never flips on captive Wi-Fi, no connectivity event ever
+    // supersedes the attempt and nothing re-reads authority — so a discarded late
+    // server-NULL left the stale lift up and the #434 durable card painted for a
+    // User the server says has no stamp. Both paths must honor a late answer.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    const boot = deferred<number | null>();
+    const retry = deferred<number | null>();
+    mocks.readAdultAttestationFromServer
+      .mockReturnValueOnce(boot.promise)
+      .mockReturnValueOnce(retry.promise);
+
+    mount();
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    // The bootstrap timed out and the cache lifted the gate provisionally.
+    expect(dealErrorShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(true);
+
+    // The Player taps Retry. No authority was ever established, so this is
+    // `retryBootstrap` — and it times out as well.
+    await act(async () => {
+      ctxRetryDeal();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestationFromServer).toHaveBeenCalledTimes(2);
+    expect(mayRenderEventContent()).toBe(true); // still standing on the stale lift
+
+    // …and NOW the RETRY's orphaned read lands, definitively unstamped.
+    await act(async () => {
+      retry.settle(null);
+    });
+
+    expect(rePromptShown()).toBe(true);
+    expect(mayRenderEventContent()).toBe(false);
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('#521 (Codex P2 on #728): a late authoritative STAMP retires the optimistic-sticky arm’s cached-board probe — no stale error over a dealt Board', async () => {
+    // The optimistic-only arm fires `hasCachedBoard` fire-and-forget to decide
+    // whether a BOARDLESS User needs a retry surface. That probe was guarded on the
+    // attempt alone — but a LATE authority read settles the SAME attempt, so a
+    // stamp landing mid-probe grants authority, clears the error and deals, and the
+    // slower `hasCachedBoard(false)` would then re-post the obsolete timeout error
+    // over the freshly dealt Board with nothing left to clear it.
+    vi.useFakeTimers();
+    setOnline(true);
+    mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
+    mocks.ensureUserProfile.mockResolvedValue(undefined);
+    mocks.attestAdult.mockReturnValue(NEVER); // optimistic-only: never commits
+    const read = deferred<number | null>();
+    mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
+    const boarded = deferred<boolean>();
+    mocks.hasCachedBoard.mockReturnValue(boarded.promise);
+    mocks.auth.currentUser = RETURNING_USER;
+
+    mount();
+    await act(async () => {
+      void ctxAttest(); // optimistic sticky set; attestAdult pending (uncommitted)
+    });
+    await coldBoot(RETURNING_USER);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    // The probe is in flight and no error has been posted yet.
+    expect(mocks.hasCachedBoard).toHaveBeenCalledWith(RETURNING_USER.uid);
+    expect(dealErrorShown()).toBe(false);
+
+    // The orphaned server read lands CONFIRMING the stamp: authority granted, the
+    // deferred deal fires.
+    // (No `waitFor` under fake timers — flush the effect's microtasks by hand.)
+    await act(async () => {
+      read.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+
+    // …and only now does the boardless probe come back. It is retired.
+    await act(async () => {
+      boarded.settle(false);
+    });
+    expect(dealErrorShown()).toBe(false);
+    expect(mayRenderEventContent()).toBe(true);
   });
 });

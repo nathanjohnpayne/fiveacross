@@ -331,7 +331,7 @@
       // would read FIVEACROSS without it.
       wm.querySelector('.lead').textContent = w.lead + ' ';
       wm.querySelector('.bold').textContent = w.bold;
-    } else {
+    } else if (w.lead && w.bold) {
       // Stacked: the lead words sit on line one, the bold word on line two in
       // the Edition's gradient. Text nodes, not innerHTML — the copy comes
       // from the brand table and is never markup.
@@ -342,6 +342,18 @@
       l2.className = 'grad';
       l2.textContent = w.bold;
       wm.append(l1, br, l2);
+    } else {
+      // One segment is empty: `wordmarkSegments()` degraded an invalid or
+      // non-suffix `wordmarkBold` to '' (bold empty), or `wordmarkBold` IS the
+      // whole wordmark (lead empty). A stacked pair here would insert a `<br>`
+      // and leave one line blank, changing the lockup's height. The app's own
+      // fallback (Nav.tsx: `{lead}{bold && <b>{bold}</b>}`) renders a single
+      // unbroken run in that case, so match it: one span, gradient only when
+      // it is carrying the bold segment.
+      const only = document.createElement('span');
+      if (w.bold) only.className = 'grad';
+      only.textContent = w.bold || w.lead;
+      wm.append(only);
     }
 
     // --- endorsement byline (absent on the platform Edition) ---
