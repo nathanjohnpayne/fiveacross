@@ -48,3 +48,17 @@ describe('src/firebase.ts (ADR 0006 offline persistence)', () => {
     expect(source).toMatch(/tabManager:\s*persistentMultipleTabManager\(\)/);
   });
 });
+
+describe('src/firebase.ts (#722 Firestore poison-latch watchdog)', () => {
+  it('installs the b815 recovery watchdog for the instance it creates (source guard)', () => {
+    // Pinned at the source level for the same reason the tab manager above is:
+    // the watchdog registers global listeners as a side effect and exposes no
+    // runtime handle, so nothing else would notice it quietly disappearing —
+    // and without it a poisoned tab is unrecoverable, which is the whole of
+    // #722. The behaviour itself is covered in src/firestoreRecovery.test.ts.
+    const source = readFileSync('src/firebase.ts', 'utf8');
+    expect(source).toMatch(/installFirestorePoisonRecovery\(\)/);
+    // Guarded so an uptime probe never turns into a page reload (#142).
+    expect(source).toMatch(/if\s*\(!isSyntheticProbe\(\)\)\s*installFirestorePoisonRecovery\(\)/);
+  });
+});
