@@ -16,7 +16,7 @@ This is the manual board-update protocol every agent (and human) follows so [Pro
 
 Project → **⋯** → **Workflows**. Enable:
 
-- **Item added to project → set Status = Backlog** (usually on by default).
+- **Item added to project → set Status = Backlog**.
 - **Item reopened → set Status = Backlog** (or In progress).
 - **Pull request merged → set Status = Done**, and/or **Issue closed → set Status = Done**.
 - **Pull request opened / linked (auto-add) → set Status = In review** if your plan offers it.
@@ -26,6 +26,18 @@ The built-ins cannot infer "claimed" or promote `Backlog → Ready` across a dep
 ## The manual protocol
 
 Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode all)"` then `export GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT"` (author identity `nathanjohnpayne`; `move-item.sh` verifies it). All commands assume `REPO=nathanjohnpayne/gaycruisebingo OWNER=nathanjohnpayne PROJECT=7`.
+
+### 0. File a ticket (adds with no Status)
+
+`gh project item-add` does not set Status on its own. Always run the explicit move below—do not skip it based on whether the "Item added to project → set Status = Backlog" built-in (line 19 above) is enabled. As of this writing that built-in is disabled on Project #7, so a freshly added item lands with **no Status** and the move is required. If a future session enables it, the move becomes a no-op (Status is already Backlog) rather than a skippable step: the workflow's on/off state can drift without every agent's context reflecting it, so a single unconditional command is the only protocol that stays correct in both states.
+
+```bash
+scripts/gh-as-author.sh -- gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+  GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Backlog"
+```
+
+Skipping this leaves the item in a No Status column whenever the built-in is off—invisible in any Status-grouped board view—which is why the move above is unconditional rather than gated on the built-in's state.
 
 ### 1. Claim a ticket (Ready → In progress)
 
