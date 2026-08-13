@@ -124,7 +124,7 @@ test('structural parity — every screen against the wireframes', async ({ page 
     await expect(sheet).toContainText(`A fresh 24 squares for Day ${PARITY_TODAY_INDEX + 1}—same day, new luck.`);
     await expect(sheet).toContainText("This can't be undone.");
     await expect(sheet).toContainText("You'll never see this card again—and reshuffles don't come back.");
-    await expect(sheet).toContainText("3 of 3 cruise reshuffles left · available only before you've marked a square");
+    await expect(sheet).toContainText("3 of 3 reshuffles left · available only before you've marked a square");
     await expect(sheet.getByRole('button', { name: 'Keep my card' })).toBeVisible();
     await expect(sheet.getByRole('button', { name: /Reshuffle it/ })).toBeVisible();
 

@@ -45,10 +45,23 @@ function session(): Storage | null {
   }
 }
 
-/** True once this tab has spent its single automatic reset attempt. */
-export function resetAttempted(): boolean {
+/**
+ * The one-attempt latch, generalized over its storage key (#722).
+ *
+ * The shell reset is no longer the only automatic recovery that ends in a
+ * `location.reload()` — `src/firestoreRecovery.ts` adds one for a Firestore
+ * instance killed by the `b815` poison latch. Both need the identical bound and
+ * the identical failure semantics, and the subtle half of this (the read-back
+ * below) was only got right after two review rounds on #513. So the primitive is
+ * shared rather than re-derived; what is NOT shared is the key, and that is
+ * deliberate: separate budgets mean a spent shell reset can never leave a
+ * later, unrelated poisoning with no recovery of its own.
+ *
+ * True once the attempt named by `key` has been spent in this tab.
+ */
+export function attemptSpent(key: string): boolean {
   try {
-    return session()?.getItem(ATTEMPT_KEY) === '1';
+    return session()?.getItem(key) === '1';
   } catch {
     // Unreadable store — claim the attempt is already spent. Failing CLOSED is
     // the safe default: it forgoes an automatic recovery (the player still has
@@ -63,21 +76,31 @@ export function resetAttempted(): boolean {
  *
  * A store can be readable but unwritable — quota exhaustion, storage policy,
  * and some private modes accept `setItem` and silently drop it. In that state a
- * swallowed failure is not a harmless best-effort miss: `resetAttempted()` keeps
+ * swallowed failure is not a harmless best-effort miss: `attemptSpent()` keeps
  * answering false on every load, so each crash re-arms the automatic reset and
  * the "one attempt per tab" bound becomes an unbounded, destructive reload loop
  * — exactly the failure this guard exists to prevent. Hence the read-back: only
  * a value that survives the write counts as an attempt we can actually count.
  */
-export function markResetAttempted(): boolean {
+export function markAttempt(key: string): boolean {
   try {
     const store = session();
     if (!store) return false;
-    store.setItem(ATTEMPT_KEY, '1');
-    return store.getItem(ATTEMPT_KEY) === '1';
+    store.setItem(key, '1');
+    return store.getItem(key) === '1';
   } catch {
     return false;
   }
+}
+
+/** True once this tab has spent its single automatic SHELL reset attempt. */
+export function resetAttempted(): boolean {
+  return attemptSpent(ATTEMPT_KEY);
+}
+
+/** Records the shell reset attempt; see `markAttempt` for the durability contract. */
+export function markResetAttempted(): boolean {
+  return markAttempt(ATTEMPT_KEY);
 }
 
 /**
