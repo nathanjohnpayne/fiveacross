@@ -483,6 +483,38 @@ describe('PostHog init with a key', () => {
     expect(ph.capture).toHaveBeenLastCalledWith('mark_square', { transitionId: 'durable-1' });
   });
 
+  it('keeps a durable transition pending through a failed identity change, then wakes its outbox after recovery (#727)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
+    const mod = await import('./posthog');
+    const initSettled = mod.initPostHog({ waitForAuth: true });
+    mod.phSetAuthState('account-A');
+    await initSettled;
+
+    const retryOutbox = vi.fn();
+    mod.onPostHogReady(retryOutbox);
+    await Promise.resolve();
+    expect(retryOutbox).toHaveBeenCalledTimes(1);
+
+    vi.mocked(ph.reset).mockImplementationOnce(() => {
+      throw new Error('reset failed');
+    });
+    mod.phSetAuthState('account-B');
+
+    expect(mod.phCapture('mark_square', { transitionId: 'durable-auth-gate' }, { durableOutbox: true })).toBe(false);
+    expect(ph.capture).not.toHaveBeenCalledWith('mark_square', { transitionId: 'durable-auth-gate' });
+    expect(retryOutbox).toHaveBeenCalledTimes(1);
+
+    mod.phSetAuthState('account-B');
+
+    expect(retryOutbox).toHaveBeenCalledTimes(2);
+    expect(mod.phCapture('mark_square', { transitionId: 'durable-auth-gate' }, { durableOutbox: true })).toBe(true);
+    expect(ph.capture).toHaveBeenLastCalledWith('mark_square', { transitionId: 'durable-auth-gate' });
+  });
+
   it('replays a queued capture that survived a RECOVERY RELOAD (#513)', async () => {
     // Codex P2 on #513: the queue's main customer reloads the page immediately
     // after queueing, and the same-origin build-floor probe can beat the

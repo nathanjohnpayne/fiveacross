@@ -349,6 +349,11 @@ let ready = false;
 let initInFlight: Promise<void> | null = null;
 let identityGateRequired = false;
 let identityGateReady = false;
+// The gate opens briefly before `identify()` so PostHog can send its own
+// synchronous $identify handshake. Durable Board transitions must wait until
+// that identity operation finishes: sending one in this narrow window would
+// attribute it to the just-reset anonymous identity if identify then throws.
+let identityTransitionPending = false;
 const readyListeners = new Set<() => void>();
 
 export type InitPostHogOptions = { waitForAuth?: boolean };
@@ -515,6 +520,33 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
     }
   }
   replayRegister();
+  notifyPostHogReady();
+}
+
+export const posthogReady = (): boolean => ready;
+
+/** Subscribe to times PostHog can synchronously accept a durable capture. A
+ * durable caller uses this to retry an event it deliberately kept outside
+ * PostHog's pre-init queue, so its own outbox remains the delivery authority.
+ * The subscription stays live across later identity-gate failures/recoveries. */
+export function onPostHogReady(listener: () => void): () => void {
+  readyListeners.add(listener);
+  if (posthogCaptureReady()) {
+    void Promise.resolve().then(() => {
+      if (readyListeners.has(listener) && posthogCaptureReady()) listener();
+    });
+  }
+  return () => readyListeners.delete(listener);
+}
+
+/** A durable record is safe to acknowledge only after its identity transition
+ * has completed, not merely while the narrow $identify handshake is allowed. */
+function posthogCaptureReady(): boolean {
+  return ready && (!identityGateRequired || (identityGateReady && !identityTransitionPending));
+}
+
+function notifyPostHogReady(): void {
+  if (!posthogCaptureReady()) return;
   for (const listener of readyListeners) {
     try {
       listener();
@@ -523,21 +555,6 @@ async function initializePostHog(options: InitPostHogOptions): Promise<void> {
       // a successfully initialized SDK look like a failed app startup.
     }
   }
-  readyListeners.clear();
-}
-
-export const posthogReady = (): boolean => ready;
-
-/** Run once PostHog can synchronously accept a capture. A durable caller uses
- * this to retry an event it deliberately kept outside PostHog's pre-init
- * queue, so its own outbox remains the one delivery authority. */
-export function onPostHogReady(listener: () => void): () => void {
-  if (ready) {
-    void Promise.resolve().then(listener);
-    return () => {};
-  }
-  readyListeners.add(listener);
-  return () => readyListeners.delete(listener);
 }
 
 /** Capture options for events emitted just before the page goes away. */
@@ -596,6 +613,10 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
     }
     return false;
   }
+  // `before_send` would reject this event while an auth transition is still
+  // unsafe. Leave it in the caller's durable outbox rather than reporting a
+  // capture that the SDK will drop, and wake that outbox once auth recovers.
+  if (options?.durableOutbox && !posthogCaptureReady()) return false;
   try {
     // Kept arity-exact for the common path: every existing caller passes no
     // options and must keep producing a two-argument `capture` call.
@@ -840,6 +861,7 @@ export function phIdentify(uid: string): boolean {
     pendingOps.push({ type: 'identify', uid });
     return true;
   }
+  if (identityGateRequired) identityTransitionPending = true;
   // Same A→B protection on the ready path (#613, Phase 4b round-2 P1): an
   // in-session uid change without a sign-out resets first, so B's events
   // never merge onto A's identity.
@@ -852,7 +874,11 @@ export function phIdentify(uid: string): boolean {
   // must also open on a SAME-uid retry after a prior identify exception, not
   // only on the reset-following A→B path above.
   openIdentityGate();
-  if (applyIdentify(uid)) return true;
+  if (applyIdentify(uid)) {
+    identityTransitionPending = false;
+    notifyPostHogReady();
+    return true;
+  }
   closeIdentityGate();
   return false;
 }
@@ -876,7 +902,11 @@ export function phSetAuthState(uid: string | null): void {
     if (phReset()) lastObservedAuthUid = uid;
     return;
   }
-  if (previous !== undefined && previous !== null && previous !== uid && !phReset()) return;
+  if (previous !== undefined && previous !== null && previous !== uid) {
+    // Before init completes, preserve the existing FIFO reset/identify queue;
+    // `resetIdentity` is only for a live SDK and intentionally bypasses it.
+    if (!(ready ? resetIdentity(true) : phReset())) return;
+  }
   if (phIdentify(uid)) lastObservedAuthUid = uid;
 }
 
@@ -936,8 +966,20 @@ export function phReset(): boolean {
     }
     return true;
   }
+  return resetIdentity(false);
+}
+
+/** Reset a live identity. A direct A→B transition defers its durable-capture
+ * wake-up until the following identify succeeds, so a transition cannot be
+ * attributed to the short anonymous interval between reset and identify. */
+function resetIdentity(deferCaptureReady: boolean): boolean {
+  if (identityGateRequired) identityTransitionPending = true;
   closeIdentityGate();
   if (!applyReset()) return false;
   openIdentityGate();
+  if (!deferCaptureReady) {
+    identityTransitionPending = false;
+    notifyPostHogReady();
+  }
   return true;
 }
