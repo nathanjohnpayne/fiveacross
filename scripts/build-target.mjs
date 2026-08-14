@@ -33,6 +33,10 @@ export const DEPLOY_TARGETS = Object.freeze({
     cloudflareZoneId: '8066dd2b105ad564c45bb8c898859343',
     skipCloudflarePurge: false,
     syntheticUrl: 'https://gaycruisebingo.com/',
+    // submitBugReport / emailUnsubscribe's Cloud Run invoker-IAM workaround
+    // (#768) is provisioned only for THIS project — scripts/deploy.sh
+    // reconciles it here automatically.
+    skipInvokerReconcile: false,
   }),
   fiveacross: Object.freeze({
     envFile: '.env.fiveacross',
@@ -52,6 +56,17 @@ export const DEPLOY_TARGETS = Object.freeze({
     }),
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
+    // scripts/set-bug-report-invoker.sh and scripts/set-email-unsubscribe-invoker.sh
+    // default to (and are only documented/provisioned for) the gaycruisebingo
+    // project's Cloud Run services. The fiveacross deploy credential is that
+    // project's own Firebase-vault SA key, which is not provisioned with IAM
+    // access to describe or update a gaycruisebingo Cloud Run service — running
+    // the reconciliation unconditionally here would fail on a permissions error
+    // for a check this target doesn't need, not silently no-op. Opt out until
+    // (if ever) the same org-policy constraint is confirmed and provisioned for
+    // fiveacross; the scripts already support that via BUG_REPORT_PROJECT=fiveacross
+    // / EMAIL_UNSUBSCRIBE_PROJECT=fiveacross for a manual, break-glass run.
+    skipInvokerReconcile: true,
   }),
 });
 

@@ -22,6 +22,9 @@ set -euo pipefail
 #     behind the exit code of the final segment.
 #   - Deploys (`op-firebase-deploy`; any arguments after `--` are passed
 #     through, e.g. `--only hosting`).
+#   - Reconciles the Cloud Run invoker config for submitBugReport and
+#     emailUnsubscribe (#768; see docs/app/bug-reports.md § Repeat-deploy
+#     hardening). Idempotent — no-ops when already correct.
 #   - Purges Cloudflare cache (if CF_API_TOKEN + CF_ZONE_ID are set).
 #
 # Usage:
@@ -31,6 +34,7 @@ set -euo pipefail
 #   scripts/deploy.sh --skip-build          # assume dist/ is already built
 #   scripts/deploy.sh --skip-cf-purge       # skip the Cloudflare purge step
 #   scripts/deploy.sh --skip-synthetic      # skip the post-deploy app-mount check
+#   scripts/deploy.sh --skip-invoker        # skip the Cloud Run invoker reconciliation
 #
 # Environment:
 #   BUILD_CMD            Build command (default: "npm run build").
@@ -49,10 +53,11 @@ FORCE=false
 BUILD_SKIP=false
 CF_PURGE_SKIP=false
 SYNTHETIC_SKIP=false
+INVOKER_SKIP=false
 DEPLOY_ARGS=()
 
 usage() {
-  sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,37p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -61,11 +66,17 @@ while [[ $# -gt 0 ]]; do
     --skip-build)    BUILD_SKIP=true; shift ;;
     --skip-cf-purge) CF_PURGE_SKIP=true; shift ;;
     --skip-synthetic) SYNTHETIC_SKIP=true; shift ;;
+    --skip-invoker)  INVOKER_SKIP=true; shift ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; DEPLOY_ARGS+=("$@"); break ;;
     *)               DEPLOY_ARGS+=("$1"); shift ;;
   esac
 done
+
+# Resolve repo-relative script paths regardless of the caller's CWD (the
+# fixture-repo test harness invokes this script from a throwaway git repo
+# rooted elsewhere, so `scripts/foo.sh` alone is not reliable).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Guard 1: must be on main
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -232,6 +243,43 @@ echo ">> Deploying via op-firebase-deploy"
 # the abort with `--force --skip-build --skip-cf-purge` under bash 3.2.
 op-firebase-deploy ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}
 
+# Step 2.5: Cloud Run invoker reconciliation (#768)
+#
+# gaycruisebingo's GCP project enforces Domain Restricted Sharing
+# (constraints/iam.allowedPolicyMemberDomains), which rejects the `allUsers`
+# Cloud Run invoker binding `firebase deploy` normally adds to make a Function
+# publicly reachable. The org-policy-compatible fix instead DISABLES the
+# invoker IAM check on the backing Cloud Run service — see
+# docs/app/bug-reports.md § Repeat-deploy hardening and
+# docs/app/phase-1-deploy.md § 1a-i. A `firebase deploy --only functions` can
+# reset that annotation and re-try the rejected `allUsers` binding, silently
+# 403ing submitBugReport / emailUnsubscribe until someone notices and re-runs
+# the fix by hand.
+#
+# This used to be a manual post-deploy step an operator had to remember for
+# BOTH endpoints — and at different times, each one was forgotten: #158 for
+# submitBugReport, and #768 found emailUnsubscribe broken in production the
+# same way. Both scripts/set-*-invoker.sh are idempotent (they describe the
+# service first and no-op when the check is already disabled), so running
+# them on every deploy costs one cheap read-only `gcloud` call when nothing
+# regressed, and silently fixes the regression when something did. Prefer
+# that over trying to detect whether this deploy actually touched Functions —
+# guessing wrong toward "always run" costs a no-op; guessing wrong toward
+# "skip" is exactly the silent-breakage class this closes.
+#
+# Not gated per-target: `scripts/deploy-target.mjs` auto-injects
+# --skip-invoker for the fiveacross target (`skipInvokerReconcile: true` in
+# `scripts/build-target.mjs`) because that project's deploy credential is
+# fiveacross-scoped and is not provisioned with IAM access to describe or
+# update a gaycruisebingo Cloud Run service — see the comment there.
+if [[ "$INVOKER_SKIP" == "true" ]]; then
+  echo ">> Invoker reconciliation skipped (--skip-invoker)"
+else
+  echo ">> Reconciling Cloud Run invoker config (bug-report + email-unsubscribe)"
+  "$SCRIPT_DIR/set-bug-report-invoker.sh"
+  "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh"
+fi
+
 # Step 3: Cloudflare cache purge (optional)
 # CF_ZONE_ID is per-repo by design (DEPLOYMENT.md § Cloudflare cache purge:
 # one shared token covers all domains, each domain has its own zone), so the
@@ -302,6 +350,17 @@ else
     "uncaught exception(s) during load" → real: the client threw before paint.
     "the sign-in gate never rendered"   → real IF the page is blank in a browser;
                                           a probe bug if the gate is right there.
+    "emailUnsubscribe 403"              → real, but NOT a rollback case: the
+                                          Cloud Run invoker IAM check regressed
+                                          (#768). Rolling back Hosting does not
+                                          touch Cloud Run IAM, so it will not
+                                          fix this. Step 2.5 above reconciles
+                                          it automatically unless --skip-invoker
+                                          was passed; if it still fails here,
+                                          re-run scripts/set-email-unsubscribe-invoker.sh
+                                          by hand and check its own output for
+                                          the reason (permissions, org policy,
+                                          wrong project).
     anything else (browser launch,
     navigation timeout, DNS/TLS)        → probe or network, not the release.
 

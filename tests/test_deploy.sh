@@ -22,6 +22,12 @@
 #      the deploy to proceed (we assert by reaching the shimmed
 #      op-firebase-deploy step).
 #
+# Later cases (numbered inline below) cover the post-deploy synthetic gate
+# (#142) and, most recently, the Step 2.5 Cloud Run invoker reconciliation
+# (#768, cases 9-11): it runs by default after op-firebase-deploy, is
+# skippable via --skip-invoker, and a failure there fails the deploy rather
+# than being swallowed. Stubbed via a PATH-shimmed `gcloud` — never real.
+#
 # Strategy: build a self-contained fixture git repo per test, run
 # scripts/deploy.sh inside it with --force (to bypass guards 1+2 —
 # branch + freshness — which depend on `origin/main` we don't want
@@ -98,6 +104,40 @@ fi
 exit "${NPX_STUB_EXIT:-0}"
 STUB
 chmod +x "$STUB_DIR/npx"
+
+# Stub `gcloud` so the Step 2.5 invoker reconciliation (#768) is exercised
+# without ever touching real infrastructure — scripts/set-bug-report-invoker.sh
+# and scripts/set-email-unsubscribe-invoker.sh both shell out to `gcloud run
+# services describe/update`, and deploy.sh now runs BOTH by default on every
+# invocation (no test below opts out unless it explicitly passes
+# --skip-invoker), so this stub must exist for every case, not just the ones
+# that assert on it directly. Default behaviour answers "the invoker IAM check
+# is already disabled" for any `describe` call, so both wrapper scripts see a
+# clean idempotent no-op and exit 0 — matching their real documented steady
+# state. GCLOUD_STUB_EXIT lets a test simulate `describe` failing (e.g. a
+# permissions error) instead. Logs to GCLOUD_LOG when set.
+cat >"$STUB_DIR/gcloud" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${GCLOUD_LOG:-}" ]; then
+  {
+    printf 'gcloud'
+    for a in "$@"; do printf '\t%s' "$a"; done
+    printf '\n'
+  } >> "$GCLOUD_LOG"
+fi
+exit_code="${GCLOUD_STUB_EXIT:-0}"
+if [ "$exit_code" != "0" ]; then
+  echo "stub-gcloud: simulated failure (GCLOUD_STUB_EXIT=$exit_code)" >&2
+  exit "$exit_code"
+fi
+# Only `run services describe ... --format=value(metadata.annotations[...])`
+# is exercised by scripts/set-cloud-run-invoker.sh; answering "true"
+# (the invoker-iam-disabled annotation) makes it see the already-correct,
+# idempotent no-op state on every call.
+echo "true"
+exit 0
+STUB
+chmod +x "$STUB_DIR/gcloud"
 
 # Helper: build a throwaway git repo on a non-main branch with one
 # committed file. Caller sets the working dir's dirty/clean state.
@@ -469,6 +509,121 @@ elif ! grep -q 'before publishing' "$ERR8"; then
   cat "$ERR8" >&2
 else
   pass "chromium-fail: a failing pre-deploy Chromium install aborts before publishing (op-firebase-deploy never reached)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 9 (#768): the Cloud Run invoker reconciliation step (Step 2.5) runs by
+# default, after op-firebase-deploy — both scripts/set-bug-report-invoker.sh
+# and scripts/set-email-unsubscribe-invoker.sh are invoked, not just one.
+# ---------------------------------------------------------------------------
+REPO9="$WORKDIR/case9-invoker-runs"
+init_fixture_repo "$REPO9"
+OUT9="$WORKDIR/case9.out"
+ERR9="$WORKDIR/case9.err"
+: >"$WORKDIR/ofd-calls-9.log"
+: >"$WORKDIR/gcloud-calls-9.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-9.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-9.log" \
+  bash -c "cd '$REPO9' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT9" 2>"$ERR9"
+RC9=$?
+set -e
+
+if [[ $RC9 -ne 0 ]]; then
+  fail "invoker-runs: deploy.sh returned $RC9 though the stubbed gcloud reported the check already disabled. stderr was:"
+  cat "$ERR9" >&2
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-9.log"; then
+  fail "invoker-runs: deploy.sh did not reach op-firebase-deploy."
+elif ! grep -q 'Bug-report invoker config' "$OUT9"; then
+  fail "invoker-runs: deploy.sh did not reconcile the bug-report invoker (scripts/set-bug-report-invoker.sh was not reached). stdout was:"
+  cat "$OUT9" >&2
+elif ! grep -q 'Email-unsubscribe invoker config' "$OUT9"; then
+  fail "invoker-runs: deploy.sh did not reconcile the email-unsubscribe invoker (scripts/set-email-unsubscribe-invoker.sh was not reached). stdout was:"
+  cat "$OUT9" >&2
+elif ! grep -q 'describe' "$WORKDIR/gcloud-calls-9.log"; then
+  fail "invoker-runs: the stubbed gcloud was never invoked. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-9.log" >&2
+else
+  pass "invoker-runs: Step 2.5 reconciles BOTH bug-report and email-unsubscribe by default and the deploy completes."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 10 (#768): --skip-invoker skips Step 2.5 entirely — neither invoker
+# script runs, and the deploy still completes.
+# ---------------------------------------------------------------------------
+REPO10="$WORKDIR/case10-invoker-skip"
+init_fixture_repo "$REPO10"
+OUT10="$WORKDIR/case10.out"
+ERR10="$WORKDIR/case10.err"
+: >"$WORKDIR/ofd-calls-10.log"
+: >"$WORKDIR/gcloud-calls-10.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-10.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-10.log" \
+  bash -c "cd '$REPO10' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-invoker" \
+  >"$OUT10" 2>"$ERR10"
+RC10=$?
+set -e
+
+if [[ $RC10 -ne 0 ]]; then
+  fail "invoker-skip: deploy.sh returned $RC10 with --skip-invoker. stderr was:"
+  cat "$ERR10" >&2
+elif ! grep -q 'Invoker reconciliation skipped (--skip-invoker)' "$OUT10"; then
+  fail "invoker-skip: deploy.sh did not log the invoker-skip line. stdout was:"
+  cat "$OUT10" >&2
+elif grep -q 'invoker config:' "$OUT10"; then
+  fail "invoker-skip: deploy.sh ran an invoker script despite --skip-invoker. stdout was:"
+  cat "$OUT10" >&2
+elif [[ -s "$WORKDIR/gcloud-calls-10.log" ]]; then
+  fail "invoker-skip: the stubbed gcloud was invoked despite --skip-invoker. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-10.log" >&2
+else
+  pass "invoker-skip: --skip-invoker skips Step 2.5 entirely (no gcloud call) and the deploy still completes."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 11 (#768): a failing invoker reconciliation fails the deploy rather
+# than being swallowed. GCLOUD_STUB_EXIT simulates `gcloud run services
+# describe` erroring (e.g. a permissions/config problem) on the FIRST
+# reconciled service (bug-report) — deploy.sh's `set -euo pipefail` must
+# abort immediately rather than continuing on to Cloudflare purge / the
+# synthetic / "Deploy complete.".
+# ---------------------------------------------------------------------------
+REPO11="$WORKDIR/case11-invoker-fail"
+init_fixture_repo "$REPO11"
+OUT11="$WORKDIR/case11.out"
+ERR11="$WORKDIR/case11.err"
+: >"$WORKDIR/ofd-calls-11.log"
+: >"$WORKDIR/npm-calls-11.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-11.log" \
+NPM_LOG="$WORKDIR/npm-calls-11.log" \
+GCLOUD_STUB_EXIT=1 \
+  bash -c "cd '$REPO11' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT11" 2>"$ERR11"
+RC11=$?
+set -e
+
+if [[ $RC11 -eq 0 ]]; then
+  fail "invoker-fail: deploy.sh returned 0 though the invoker reconciliation failed — the failure was swallowed."
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-11.log"; then
+  fail "invoker-fail: deploy.sh never reached op-firebase-deploy (Step 2 runs before Step 2.5; this changes the ordering assumption)."
+elif ! grep -q 'FAIL: could not describe Cloud Run service' "$ERR11"; then
+  fail "invoker-fail: deploy.sh did not surface set-cloud-run-invoker.sh's own failure diagnostic. stderr was:"
+  cat "$ERR11" >&2
+elif grep -q 'test:synthetic' "$WORKDIR/npm-calls-11.log"; then
+  fail "invoker-fail: deploy.sh continued on to the post-deploy synthetic despite the invoker step failing."
+elif grep -q 'Deploy complete.' "$OUT11"; then
+  fail "invoker-fail: deploy.sh printed 'Deploy complete.' despite the invoker step failing."
+else
+  pass "invoker-fail: a failing invoker reconciliation fails the deploy (rc=$RC11) rather than being swallowed, after op-firebase-deploy already ran."
 fi
 
 # ---------------------------------------------------------------------------
