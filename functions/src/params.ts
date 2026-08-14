@@ -47,23 +47,33 @@ export const BUG_REPORT_APP_CHECK = defineBoolean('BUG_REPORT_APP_CHECK', { defa
  * DEPLOYMENT fact, not a code fact: the same source deploys to two Firebase
  * projects (ADR 0008) and may sit behind a hosting rewrite or a custom domain.
  *
- * The default goes through Firebase HOSTING (`/unsubscribe`, rewritten to
- * `emailUnsubscribe` in `firebase.json`), not the bare Cloud Functions URL,
- * because the `gaycruisebingo` GCP project enforces Domain Restricted Sharing
- * (`constraints/iam.allowedPolicyMemberDomains`): granting `allUsers` the
- * Cloud Run invoker role on the function directly fails closed with
- * `perhaps due to an organization policy`, so the function can never be made
- * public on its own. Hosting proxies the request under its own
- * Firebase-managed identity — which the org policy does not gate — so the
- * rewrite is the only way this endpoint answers a mail client's GET/POST at
- * all. Do not "simplify" this back to the direct `cloudfunctions.net` URL;
- * that reintroduces the 403.
+ * Reachability is NOT solved by picking this URL over the raw Cloud Functions
+ * one. Both addresses hit the SAME backing Cloud Run service, and the
+ * `gaycruisebingo` GCP project's Domain Restricted Sharing org policy
+ * (`constraints/iam.allowedPolicyMemberDomains`) rejects granting `allUsers`
+ * the Cloud Run invoker role on that service either way — a Hosting rewrite
+ * FORWARDS the unauthenticated request into the same invoker check, it does
+ * not bypass it. What actually makes the endpoint answer is
+ * `scripts/set-email-unsubscribe-invoker.sh`, run once after every Functions
+ * deploy: it DISABLES the invoker IAM check on the backing service (the exact
+ * mechanism `scripts/set-bug-report-invoker.sh` already uses for
+ * `submitBugReport`, #158) — see `docs/app/bug-reports.md` § Repeat-deploy
+ * hardening and `docs/app/phase-1-deploy.md` § 1a-i. Skip that step and every
+ * emailed unsubscribe link 403s, rewrite or no rewrite.
+ *
+ * Given that, the default still goes through Firebase HOSTING (`/unsubscribe`,
+ * rewritten to `emailUnsubscribe` in `firebase.json`) rather than the bare
+ * Cloud Functions URL — but that choice is COSMETIC, not load-bearing: a
+ * first-party `gaycruisebingo.com` link is materially better for email
+ * deliverability and looks less like phishing in a mail client's UI than a
+ * raw `*.cloudfunctions.net` URL in a `List-Unsubscribe` header.
  *
  * The default names the `gaycruisebingo` project's own canonical host, so a
- * deployment that sets nothing still mails a link that works. Any OTHER
- * project MUST set its own hosted `/unsubscribe` URL (its own canonical host
- * plus the same rewrite, deployed from this same `firebase.json`) in
- * `functions/.env.<projectId>` — the default is not portable.
+ * deployment that sets nothing still mails a link that works (once the
+ * invoker script above has run). Any OTHER project MUST set its own hosted
+ * `/unsubscribe` URL (its own canonical host plus the same rewrite, deployed
+ * from this same `firebase.json`) in `functions/.env.<projectId>` — the
+ * default is not portable.
  */
 export const EMAIL_UNSUBSCRIBE_URL = defineString('EMAIL_UNSUBSCRIBE_URL', {
   default: 'https://gaycruisebingo.com/unsubscribe',

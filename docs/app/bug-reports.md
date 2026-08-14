@@ -19,6 +19,8 @@ scripts/set-bug-report-invoker.sh --dry-run  # preview only
 
 The script targets `submitbugreport` / `us-central1` / `gaycruisebingo` by default (override with `BUG_REPORT_SERVICE` / `BUG_REPORT_REGION` / `BUG_REPORT_PROJECT`) and runs through the 1Password-backed `gcloud`—load deploy credentials first (`eval "$(scripts/op-preflight.sh --agent <agent> --mode deploy)"`).
 
+`scripts/set-bug-report-invoker.sh` is a thin wrapper over the shared `scripts/set-cloud-run-invoker.sh` (#616): the `emailUnsubscribe` endpoint hit the exact same org-policy constraint, so it reuses this mechanism through its own wrapper, `scripts/set-email-unsubscribe-invoker.sh`, rather than duplicating the gcloud logic. This file's documented interface—the env vars above, `--dry-run`, `--help`—is unchanged.
+
 **Verify reachability with the production smoke check.** After a deploy (and after `set-bug-report-invoker.sh`), assert that an unauthenticated request reaches application code and returns `UNAUTHENTICATED`:
 
 ```bash
