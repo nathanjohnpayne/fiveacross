@@ -7,6 +7,7 @@ export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
   '--skip-cf-purge',
   '--skip-synthetic',
+  '--skip-invoker',
 ]);
 
 function deployArguments(args) {
@@ -54,6 +55,7 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
   const config = configForTarget(target);
   const args = [...wrapperArgs];
   if (config.skipCloudflarePurge && !args.includes('--skip-cf-purge')) args.push('--skip-cf-purge');
+  if (config.skipInvokerReconcile && !args.includes('--skip-invoker')) args.push('--skip-invoker');
   args.push('--', config.firebaseProject, ...deployArgs);
 
   const environment = {
