@@ -46,10 +46,25 @@ export const BUG_REPORT_APP_CHECK = defineBoolean('BUG_REPORT_APP_CHECK', { defa
  * A param rather than a derived string because the endpoint's address is a
  * DEPLOYMENT fact, not a code fact: the same source deploys to two Firebase
  * projects (ADR 0008) and may sit behind a hosting rewrite or a custom domain.
- * The default is the conventional Gen2 Cloud Functions URL for the
- * `gaycruisebingo` project, so a deployment that sets nothing still mails a
- * link that works; any other project MUST set it in `functions/.env.<projectId>`.
+ *
+ * The default goes through Firebase HOSTING (`/unsubscribe`, rewritten to
+ * `emailUnsubscribe` in `firebase.json`), not the bare Cloud Functions URL,
+ * because the `gaycruisebingo` GCP project enforces Domain Restricted Sharing
+ * (`constraints/iam.allowedPolicyMemberDomains`): granting `allUsers` the
+ * Cloud Run invoker role on the function directly fails closed with
+ * `perhaps due to an organization policy`, so the function can never be made
+ * public on its own. Hosting proxies the request under its own
+ * Firebase-managed identity — which the org policy does not gate — so the
+ * rewrite is the only way this endpoint answers a mail client's GET/POST at
+ * all. Do not "simplify" this back to the direct `cloudfunctions.net` URL;
+ * that reintroduces the 403.
+ *
+ * The default names the `gaycruisebingo` project's own canonical host, so a
+ * deployment that sets nothing still mails a link that works. Any OTHER
+ * project MUST set its own hosted `/unsubscribe` URL (its own canonical host
+ * plus the same rewrite, deployed from this same `firebase.json`) in
+ * `functions/.env.<projectId>` — the default is not portable.
  */
 export const EMAIL_UNSUBSCRIBE_URL = defineString('EMAIL_UNSUBSCRIBE_URL', {
-  default: 'https://us-central1-gaycruisebingo.cloudfunctions.net/emailUnsubscribe',
+  default: 'https://gaycruisebingo.com/unsubscribe',
 });
