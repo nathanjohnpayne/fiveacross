@@ -323,7 +323,9 @@ export async function applyOptOut(
 // --- Link construction ----------------------------------------------------------
 
 export interface UnsubscribeLinkArgs {
-  /** The endpoint's own base URL, e.g. `https://us-central1-p.cloudfunctions.net/emailUnsubscribe`. */
+  /** The endpoint's own base URL — normally a Hosting-fronted address, e.g.
+   *  `https://gaycruisebingo.com/unsubscribe` (see `EMAIL_UNSUBSCRIBE_URL` in
+   *  `functions/src/params.ts` for why it goes through Hosting). */
   baseUrl: string;
   eventId: string;
   uid: string;

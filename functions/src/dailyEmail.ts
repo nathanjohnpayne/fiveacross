@@ -426,7 +426,8 @@ export interface DailyEmailDeps extends OptOutDeps {
    *  `APP_BASE_URL` param. */
   appBaseUrl?: string;
   /** Base URL of the unsubscribe endpoint; defaults to the `EMAIL_UNSUBSCRIBE_URL`
-   *  param, or the endpoint's conventional Cloud Functions URL. */
+   *  param, or the project's hosted `/unsubscribe` URL (a Firebase Hosting
+   *  rewrite to the `emailUnsubscribe` function — see `functions/src/params.ts`). */
   unsubscribeBaseUrl?: string;
   /** Milliseconds to wait between sends. Resend's default account limit is a
    *  couple of requests a second, so an unpaced fan-out to a full roster would
