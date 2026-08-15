@@ -225,8 +225,42 @@ describe('build target selection', () => {
       validateTargetOperationalMetadata('future', {
         syntheticUrl: 'https://future.example/',
         skipCloudflarePurge: false,
+        skipInvokerReconcile: false,
       }),
     ).toThrow('cloudflareZoneId');
+  });
+
+  it('requires every registered target to state its invoker-reconciliation choice (#768)', () => {
+    // Omitting it reads as `false`, which points scripts/deploy.sh at
+    // gaycruisebingo's Cloud Run services with the new target's own
+    // project-scoped credential and fails the deploy on a permissions error.
+    // A silently-wrong default is exactly what this refuses.
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: true,
+      }),
+    ).toThrow('skipInvokerReconcile');
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: true,
+        skipInvokerReconcile: 'true',
+      }),
+    ).toThrow('skipInvokerReconcile');
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: true,
+        skipInvokerReconcile: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it('states the invoker-reconciliation choice on every shipped target (#768)', () => {
+    for (const [target, config] of Object.entries(DEPLOY_TARGETS)) {
+      expect(typeof config.skipInvokerReconcile, target).toBe('boolean');
+    }
   });
 
   it('ignores future target files without hiding the committed template', () => {

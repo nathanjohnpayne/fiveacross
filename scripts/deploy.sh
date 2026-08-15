@@ -20,11 +20,19 @@ set -euo pipefail
 #     compound command (e.g. `npm run lint && npm run build`) fails
 #     closed if any step errors, rather than masking earlier failures
 #     behind the exit code of the final segment.
+#   - Verifies the Cloud Run invoker credential BEFORE publishing, with a
+#     read-only dry run of both reconciliation scripts, so a missing or
+#     expired deploy credential fails the script while nothing is live.
 #   - Deploys (`op-firebase-deploy`; any arguments after `--` are passed
-#     through, e.g. `--only hosting`).
+#     through, e.g. `--only hosting`). Its exit status is CAPTURED rather
+#     than allowed to abort at `set -e`, because Firebase reports the
+#     org-policy rejection of the `allUsers` invoker binding as a partial
+#     FAILURE — the exact case the reconciliation below exists to repair.
 #   - Reconciles the Cloud Run invoker config for submitBugReport and
 #     emailUnsubscribe (#768; see docs/app/bug-reports.md § Repeat-deploy
-#     hardening). Idempotent — no-ops when already correct.
+#     hardening). Idempotent — no-ops when already correct. Runs after a
+#     successful deploy AND after that specific partial failure; a deploy
+#     that failed for any other reason still fails closed, unreconciled.
 #   - Purges Cloudflare cache (if CF_API_TOKEN + CF_ZONE_ID are set).
 #
 # Usage:
@@ -34,7 +42,8 @@ set -euo pipefail
 #   scripts/deploy.sh --skip-build          # assume dist/ is already built
 #   scripts/deploy.sh --skip-cf-purge       # skip the Cloudflare purge step
 #   scripts/deploy.sh --skip-synthetic      # skip the post-deploy app-mount check
-#   scripts/deploy.sh --skip-invoker        # skip the Cloud Run invoker reconciliation
+#   scripts/deploy.sh --skip-invoker        # skip the Cloud Run invoker credential
+#                                           # check AND the reconciliation
 #
 # Environment:
 #   BUILD_CMD            Build command (default: "npm run build").
@@ -47,6 +56,21 @@ set -euo pipefail
 #                        Break-glass only — never set during routine deploys.
 #                        See DEPLOYMENT.md § Deploy guards.
 #
+# Credentials:
+#   The invoker steps (1.6 and 2.5) shell out to `gcloud`, which resolves its
+#   OWN credential chain — NOT the temporary one `op-firebase-deploy`
+#   materializes and deletes on exit. Two things to know:
+#     1. Run deploy preflight so a credential exists at all:
+#          eval "$(scripts/op-preflight.sh --agent <agent> --mode deploy)"
+#     2. If that preflight exported GOOGLE_APPLICATION_CREDENTIALS pointing at
+#        the per-project Firebase-vault SERVICE-ACCOUNT key, the 1Password-
+#        backed `scripts/gcloud/gcloud` wrapper rejects it outright
+#        ("points to an unusable credential file") — it mints tokens from an
+#        authorized_user ADC only. `unset GOOGLE_APPLICATION_CREDENTIALS` so
+#        the wrapper resolves its normal ADC chain, exactly as
+#        docs/agents/deployment-process.md prescribes for non-deploy gcloud
+#        work. Step 1.6 surfaces this before anything is published.
+#
 # See DEPLOYMENT.md § Deploy flow for full documentation.
 
 FORCE=false
@@ -57,7 +81,7 @@ INVOKER_SKIP=false
 DEPLOY_ARGS=()
 
 usage() {
-  sed -n '3,37p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,46p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -229,6 +253,71 @@ if [[ "$SYNTHETIC_SKIP" != "true" ]]; then
   fi
 fi
 
+# Step 1.6: Cloud Run invoker credential check, BEFORE we publish (#768 Codex
+# P1 r2 — credential chain mismatch).
+#
+# Step 2.5 below shells out to `gcloud`, which does NOT share
+# `op-firebase-deploy`'s credential. That wrapper resolves a per-project
+# Firebase-vault SA key into a TEMPORARY file and deletes it in its own EXIT
+# trap; `gcloud` resolves its own chain (GOOGLE_APPLICATION_CREDENTIALS, the
+# shared 1Password ADC item, then the local ADC file). So a deploy started
+# without `op-preflight.sh --mode deploy` can authenticate to Firebase
+# perfectly and still have no usable credential left for the reconciliation —
+# and the reconciliation is the half that keeps submitBugReport and
+# emailUnsubscribe answering.
+#
+# Running that check here instead of only at Step 2.5 is the whole point: the
+# failure it catches used to land AFTER Firebase had already published, which
+# is precisely the "published but 403" outage #768 is closing. Both scripts
+# are read-only in --dry-run (they `gcloud run services describe` and print
+# what they WOULD do), so this costs two cheap reads and mutates nothing.
+#
+# Not a substitute for Step 2.5's own error handling: a credential can still
+# expire between here and there, and describe-permission does not prove
+# update-permission. It converts the common case from "fails after publishing"
+# into "fails before publishing", and names the cause.
+if [[ "$INVOKER_SKIP" == "true" ]]; then
+  echo ">> Invoker credential check skipped (--skip-invoker)"
+else
+  echo ">> Checking the Cloud Run invoker credential before publishing (read-only)"
+  if ! "$SCRIPT_DIR/set-bug-report-invoker.sh" --dry-run ||
+     ! "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" --dry-run; then
+    cat >&2 <<EOF
+
+✗ Could not read the Cloud Run invoker config. NOTHING HAS BEEN PUBLISHED.
+
+  Step 2.5 of this deploy reconciles the invoker IAM check on submitBugReport
+  and emailUnsubscribe (#768). It runs \`gcloud\`, which resolves its own
+  credential chain — NOT the temporary one op-firebase-deploy materializes and
+  deletes on exit. If that chain is empty or expired, the reconciliation would
+  fail AFTER Firebase had published, leaving both endpoints 403ing.
+
+  Read the gcloud error printed above, then match it here:
+
+    • "No GCP source credential found" — nothing is loaded. Run:
+        eval "\$(scripts/op-preflight.sh --agent <agent> --mode deploy)"
+    • "GOOGLE_APPLICATION_CREDENTIALS points to an unusable credential file"
+      — almost always the per-project Firebase-vault SERVICE-ACCOUNT key that
+      deploy preflight exports. The 1Password-backed gcloud wrapper mints
+      tokens from an authorized_user ADC only and rejects a service-account
+      key outright. Drop it for the gcloud calls and re-run:
+        unset GOOGLE_APPLICATION_CREDENTIALS
+      (This is what docs/agents/deployment-process.md means by using review
+      preflight, or unsetting the var, for non-deploy gcloud work.)
+    • "PERMISSION_DENIED" / 403 — the identity lacks run.services.get on the
+      project. Grant it, or use one that has it.
+    • "NOT_FOUND" — the service really was renamed. The message above lists
+      the services this credential can see.
+
+  To deploy without touching the invoker config at all (the endpoints keep
+  whatever state they are already in):
+
+    scripts/deploy.sh --skip-invoker
+EOF
+    exit 1
+  fi
+fi
+
 # Step 2: Deploy
 echo ">> Deploying via op-firebase-deploy"
 # Bash 3.2 + `set -u`: expanding an empty `${DEPLOY_ARGS[@]}` aborts
@@ -241,7 +330,27 @@ echo ">> Deploying via op-firebase-deploy"
 # tolerates the bare form; Bash 3.2 (still the macOS system shell)
 # does not. nathanpayne-codex Phase 4b r3 on PR #296 reproduced
 # the abort with `--force --skip-build --skip-cf-purge` under bash 3.2.
-op-firebase-deploy ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}
+#
+# The exit status is CAPTURED rather than left to `set -e` (#768 Codex P1 r2 —
+# ordering). Firebase reports the org-policy rejection of the `allUsers`
+# invoker binding as a partial FAILURE: `op-firebase-deploy` returns nonzero,
+# and with `set -e` the script aborted right here — so Step 2.5, the recovery
+# built for exactly this failure, never ran. Capturing the status lets the
+# reconciliation run before the script returns; the status is then honoured at
+# Step 2.6 so a genuinely failed deploy still fails.
+#
+# Output is teed to a log so Step 2.5 can CLASSIFY the failure. `2>&1` merges
+# the streams deliberately: firebase-tools prints the invoker report through
+# its own logger (stdout) while the terminal error goes to stderr, and the
+# classifier needs to see both. `${PIPESTATUS[0]}` is op-firebase-deploy's own
+# status, not tee's.
+DEPLOY_LOG="$(mktemp "${TMPDIR:-/tmp}/deploy-firebase-XXXXXX")"
+trap 'rm -f "$DEPLOY_LOG"' EXIT
+
+set +e
+op-firebase-deploy ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"} 2>&1 | tee "$DEPLOY_LOG"
+DEPLOY_STATUS="${PIPESTATUS[0]}"
+set -e
 
 # Step 2.5: Cloud Run invoker reconciliation (#768)
 #
@@ -272,12 +381,111 @@ op-firebase-deploy ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}
 # `scripts/build-target.mjs`) because that project's deploy credential is
 # fiveacross-scoped and is not provisioned with IAM access to describe or
 # update a gaycruisebingo Cloud Run service — see the comment there.
+#
+# Runs on TWO deploy outcomes, not one:
+#
+#   • the deploy succeeded — the ordinary path;
+#   • the deploy failed AND the failure is the org policy rejecting the
+#     `allUsers` invoker binding. That is a PARTIAL failure: the function is
+#     published and serving, only its public reachability was refused, so it
+#     is both the case reconciliation repairs and — before this — the one case
+#     where reconciliation never got to run.
+#
+# Any other nonzero deploy still skips reconciliation and fails closed at
+# Step 2.6: an unrelated failure means we do not know what state the project
+# is in, and reconciling into that is guesswork.
+#
+# The classifier greps for firebase-tools' own invoker report
+# ("Unable to set the invoker for the IAM policy on the following functions:",
+# node_modules/firebase-tools/lib/deploy/functions/release/reporter.js) plus
+# the two org-policy strings GCP itself returns for a Domain Restricted
+# Sharing rejection. Matching is deliberately one-directional: a match only
+# ever grants the reconciliation permission to RUN. It never suppresses the
+# nonzero exit — Step 2.6 honours DEPLOY_STATUS regardless — so a false
+# positive here costs one idempotent no-op, never a false success.
+INVOKER_PARTIAL_FAILURE=false
+if [[ "$DEPLOY_STATUS" -ne 0 ]] &&
+   grep -qiE 'Unable to set the invoker for the IAM policy|do not belong to a permitted customer|allowedPolicyMemberDomains' \
+     "$DEPLOY_LOG"; then
+  INVOKER_PARTIAL_FAILURE=true
+fi
+
+RECONCILE_STATUS=0
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (--skip-invoker)"
+elif [[ "$DEPLOY_STATUS" -ne 0 && "$INVOKER_PARTIAL_FAILURE" != "true" ]]; then
+  echo ">> Invoker reconciliation skipped (the deploy failed for an unrelated reason)" >&2
 else
+  if [[ "$INVOKER_PARTIAL_FAILURE" == "true" ]]; then
+    cat >&2 <<EOF
+
+⚠️  Firebase rejected the \`allUsers\` invoker binding (org policy) and reported
+    the deploy as FAILED. Reconciling the invoker check anyway — this is the
+    failure mode Step 2.5 exists for, and skipping it here is what left
+    submitBugReport (#158) and emailUnsubscribe (#768) 403ing in production.
+EOF
+  fi
   echo ">> Reconciling Cloud Run invoker config (bug-report + email-unsubscribe)"
-  "$SCRIPT_DIR/set-bug-report-invoker.sh"
-  "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh"
+  "$SCRIPT_DIR/set-bug-report-invoker.sh" || RECONCILE_STATUS=$?
+  "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" || RECONCILE_STATUS=$?
+  if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
+    cat >&2 <<EOF
+
+✗ The Cloud Run invoker reconciliation FAILED and the deploy is already live.
+  submitBugReport and/or emailUnsubscribe may be returning 403 right now.
+
+  The read-only check before publishing passed, so this is not a plain
+  "no credential" case. Most likely, in order:
+
+    • The credential can describe but not UPDATE the service (needs
+      run.services.update / roles/run.admin on the project).
+    • The deploy credential expired between publishing and now — reload it:
+        eval "\$(scripts/op-preflight.sh --agent <agent> --mode deploy)"
+    • The org policy also blocks the annotation (it should not — that is a
+      service setting, not an IAM binding — but read the gcloud error above).
+
+  Re-run by hand once fixed; both are idempotent, so a re-run is safe:
+
+    scripts/set-bug-report-invoker.sh
+    scripts/set-email-unsubscribe-invoker.sh
+EOF
+  fi
+fi
+
+# Step 2.6: honour the deploy's own exit status.
+#
+# Deliberately AFTER the reconciliation, and deliberately still fatal. Running
+# the reconciliation first means a partial-failure deploy no longer leaves a
+# published-but-403 endpoint behind. Returning success afterwards would be a
+# different bug: a nonzero `firebase deploy` means at least one resource did
+# not reach its intended state, we cannot prove from out here that the
+# rejected binding was the only casualty, and a script that prints "Deploy
+# complete." over a failed deploy teaches operators to ignore it. So the
+# endpoint is repaired, the failure is still reported, and the Cloudflare
+# purge + post-deploy synthetic are skipped exactly as they were before.
+if [[ "$DEPLOY_STATUS" -ne 0 ]]; then
+  if [[ "$INVOKER_PARTIAL_FAILURE" == "true" && "$RECONCILE_STATUS" -eq 0 ]]; then
+    cat >&2 <<EOF
+
+✗ op-firebase-deploy exited $DEPLOY_STATUS. The invoker reconciliation ran and
+  succeeded, so the endpoints are NOT left 403ing — but the deploy itself
+  reported an error, so this run is a failure and the Cloudflare purge and the
+  post-deploy synthetic did NOT run.
+
+  Read the Firebase output above. If the rejected \`allUsers\` invoker binding
+  was the ONLY thing it complained about, the project is in the state you
+  wanted and re-running \`scripts/deploy.sh\` is a cheap, idempotent way to
+  finish the purge + synthetic. If it named anything else, fix that first.
+EOF
+  elif [[ "$INVOKER_PARTIAL_FAILURE" != "true" ]]; then
+    echo "" >&2
+    echo "✗ op-firebase-deploy exited $DEPLOY_STATUS. Nothing further ran." >&2
+  fi
+  exit "$DEPLOY_STATUS"
+fi
+
+if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
+  exit "$RECONCILE_STATUS"
 fi
 
 # Step 3: Cloudflare cache purge (optional)
