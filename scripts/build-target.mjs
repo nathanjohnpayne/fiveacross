@@ -77,6 +77,17 @@ export function validateTargetOperationalMetadata(target, config) {
   if (typeof config.skipCloudflarePurge !== 'boolean') {
     throw new Error(`Refusing target ${target}: register skipCloudflarePurge as an explicit boolean.`);
   }
+  // Required rather than defaulted (#768). An omitted skipInvokerReconcile
+  // reads as `false`, which is the DANGEROUS default for a new target: it
+  // sends scripts/deploy.sh at gaycruisebingo's Cloud Run services carrying
+  // the new target's own project-scoped deploy credential, which cannot
+  // describe them — so the deploy fails on a permissions error for a check
+  // that target never needed. The choice is per-project (does this project's
+  // org policy impose the same invoker constraint, and is its credential
+  // provisioned for it?), so it has to be stated, not inherited.
+  if (typeof config.skipInvokerReconcile !== 'boolean') {
+    throw new Error(`Refusing target ${target}: register skipInvokerReconcile as an explicit boolean.`);
+  }
   if (config.skipCloudflarePurge) {
     if (config.cloudflareZoneId !== undefined) {
       throw new Error(`Refusing target ${target}: a skipped Cloudflare purge must not carry a cloudflareZoneId.`);

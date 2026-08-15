@@ -23,10 +23,22 @@
 #      op-firebase-deploy step).
 #
 # Later cases (numbered inline below) cover the post-deploy synthetic gate
-# (#142) and, most recently, the Step 2.5 Cloud Run invoker reconciliation
-# (#768, cases 9-11): it runs by default after op-firebase-deploy, is
-# skippable via --skip-invoker, and a failure there fails the deploy rather
-# than being swallowed. Stubbed via a PATH-shimmed `gcloud` — never real.
+# (#142) and, most recently, the Cloud Run invoker reconciliation (#768,
+# cases 9-14): it runs by default after op-firebase-deploy, is skippable via
+# --skip-invoker, and a failure fails the deploy rather than being swallowed.
+# Cases 11-14 are the r2 review round and are the load-bearing ones:
+#
+#   11. An unusable gcloud credential aborts BEFORE publishing, so the deploy
+#       can never leave a published-but-403 endpoint behind.
+#   12. A deploy that fails with Firebase's org-policy invoker rejection STILL
+#       reconciles — that partial failure is the exact case the automation
+#       exists for, and `set -e` used to abort before it ran.
+#   13. …and that run still FAILS the script: the endpoint is repaired, the
+#       deploy error is not converted into a false success.
+#   14. A deploy that fails for an unrelated reason does NOT reconcile and
+#       still fails closed.
+#
+# Stubbed via a PATH-shimmed `gcloud` — never real.
 #
 # Strategy: build a self-contained fixture git repo per test, run
 # scripts/deploy.sh inside it with --force (to bypass guards 1+2 —
@@ -60,6 +72,11 @@ fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 STUB_DIR="$WORKDIR/stub-bin"
 mkdir -p "$STUB_DIR"
 
+#
+# OFD_STUB_EXIT (default 0) simulates a failed / partially-failed deploy, and
+# OFD_STUB_OUTPUT is printed to stderr first so a test can reproduce the exact
+# text deploy.sh classifies against (#768 r2). One line is enough — deploy.sh
+# greps line-wise.
 cat >"$STUB_DIR/op-firebase-deploy" <<'STUB'
 #!/usr/bin/env bash
 echo "stub-op-firebase-deploy: invoked with args: $*" >&2
@@ -69,7 +86,10 @@ echo "stub-op-firebase-deploy: invoked with args: $*" >&2
   for a in "$@"; do printf '\t%s' "$a"; done
   printf '\n'
 } >> "$OFD_LOG"
-exit 0
+if [ -n "${OFD_STUB_OUTPUT:-}" ]; then
+  printf '%s\n' "$OFD_STUB_OUTPUT" >&2
+fi
+exit "${OFD_STUB_EXIT:-0}"
 STUB
 chmod +x "$STUB_DIR/op-firebase-deploy"
 
@@ -105,17 +125,27 @@ exit "${NPX_STUB_EXIT:-0}"
 STUB
 chmod +x "$STUB_DIR/npx"
 
-# Stub `gcloud` so the Step 2.5 invoker reconciliation (#768) is exercised
-# without ever touching real infrastructure — scripts/set-bug-report-invoker.sh
-# and scripts/set-email-unsubscribe-invoker.sh both shell out to `gcloud run
-# services describe/update`, and deploy.sh now runs BOTH by default on every
-# invocation (no test below opts out unless it explicitly passes
-# --skip-invoker), so this stub must exist for every case, not just the ones
-# that assert on it directly. Default behaviour answers "the invoker IAM check
-# is already disabled" for any `describe` call, so both wrapper scripts see a
-# clean idempotent no-op and exit 0 — matching their real documented steady
-# state. GCLOUD_STUB_EXIT lets a test simulate `describe` failing (e.g. a
-# permissions error) instead. Logs to GCLOUD_LOG when set.
+# Stub `gcloud` so the Step 1.6 credential check and the Step 2.5 invoker
+# reconciliation (#768) are exercised without ever touching real
+# infrastructure — scripts/set-bug-report-invoker.sh and
+# scripts/set-email-unsubscribe-invoker.sh both shell out to `gcloud run
+# services describe/update`, and deploy.sh now runs BOTH before publishing (as
+# a read-only --dry-run) and again after (no test below opts out unless it
+# explicitly passes --skip-invoker), so this stub must exist for every case,
+# not just the ones that assert on it directly. Default behaviour answers "the
+# invoker IAM check is already disabled" for any `describe` call, so both
+# wrapper scripts see a clean idempotent no-op and exit 0 — matching their real
+# documented steady state.
+#
+# Two failure knobs:
+#   GCLOUD_STUB_EXIT   fail EVERY call (an absent credential — the pre-publish
+#                      check catches this before op-firebase-deploy runs).
+#   GCLOUD_FAIL_AFTER  fail only calls after the Nth, counted in
+#                      GCLOUD_CALL_COUNTER. This is how a test reaches the
+#                      case where the pre-publish check passes and the
+#                      post-publish reconciliation then fails — a credential
+#                      that expired mid-deploy, or describe-permission without
+#                      update-permission.
 cat >"$STUB_DIR/gcloud" <<'STUB'
 #!/usr/bin/env bash
 if [ -n "${GCLOUD_LOG:-}" ]; then
@@ -124,6 +154,18 @@ if [ -n "${GCLOUD_LOG:-}" ]; then
     for a in "$@"; do printf '\t%s' "$a"; done
     printf '\n'
   } >> "$GCLOUD_LOG"
+fi
+if [ -n "${GCLOUD_CALL_COUNTER:-}" ]; then
+  gcloud_calls=0
+  if [ -s "$GCLOUD_CALL_COUNTER" ]; then
+    read -r gcloud_calls < "$GCLOUD_CALL_COUNTER"
+  fi
+  gcloud_calls=$((gcloud_calls + 1))
+  printf '%s\n' "$gcloud_calls" > "$GCLOUD_CALL_COUNTER"
+  if [ -n "${GCLOUD_FAIL_AFTER:-}" ] && [ "$gcloud_calls" -gt "$GCLOUD_FAIL_AFTER" ]; then
+    echo "stub-gcloud: simulated failure (call $gcloud_calls > GCLOUD_FAIL_AFTER=$GCLOUD_FAIL_AFTER)" >&2
+    exit 1
+  fi
 fi
 exit_code="${GCLOUD_STUB_EXIT:-0}"
 if [ "$exit_code" != "0" ]; then
@@ -514,7 +556,8 @@ fi
 # ---------------------------------------------------------------------------
 # Case 9 (#768): the Cloud Run invoker reconciliation step (Step 2.5) runs by
 # default, after op-firebase-deploy — both scripts/set-bug-report-invoker.sh
-# and scripts/set-email-unsubscribe-invoker.sh are invoked, not just one.
+# and scripts/set-email-unsubscribe-invoker.sh are invoked, not just one — and
+# the read-only credential check (Step 1.6) runs on the happy path too.
 # ---------------------------------------------------------------------------
 REPO9="$WORKDIR/case9-invoker-runs"
 init_fixture_repo "$REPO9"
@@ -546,8 +589,14 @@ elif ! grep -q 'Email-unsubscribe invoker config' "$OUT9"; then
 elif ! grep -q 'describe' "$WORKDIR/gcloud-calls-9.log"; then
   fail "invoker-runs: the stubbed gcloud was never invoked. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-9.log" >&2
+elif ! grep -q 'Checking the Cloud Run invoker credential before publishing' "$OUT9"; then
+  fail "invoker-runs: deploy.sh skipped the pre-publish invoker credential check (Step 1.6). stdout was:"
+  cat "$OUT9" >&2
+elif ! grep -q 'Reconciling Cloud Run invoker config' "$OUT9"; then
+  fail "invoker-runs: deploy.sh did not reach the Step 2.5 reconciliation banner. stdout was:"
+  cat "$OUT9" >&2
 else
-  pass "invoker-runs: Step 2.5 reconciles BOTH bug-report and email-unsubscribe by default and the deploy completes."
+  pass "invoker-runs: Step 1.6 checks the credential before publishing, Step 2.5 reconciles BOTH endpoints, and the deploy completes."
 fi
 
 # ---------------------------------------------------------------------------
@@ -583,18 +632,25 @@ elif [[ -s "$WORKDIR/gcloud-calls-10.log" ]]; then
   fail "invoker-skip: the stubbed gcloud was invoked despite --skip-invoker. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-10.log" >&2
 else
-  pass "invoker-skip: --skip-invoker skips Step 2.5 entirely (no gcloud call) and the deploy still completes."
+  pass "invoker-skip: --skip-invoker skips both the pre-publish check and Step 2.5 (no gcloud call) and the deploy still completes."
 fi
 
 # ---------------------------------------------------------------------------
-# Case 11 (#768): a failing invoker reconciliation fails the deploy rather
-# than being swallowed. GCLOUD_STUB_EXIT simulates `gcloud run services
-# describe` erroring (e.g. a permissions/config problem) on the FIRST
-# reconciled service (bug-report) — deploy.sh's `set -euo pipefail` must
-# abort immediately rather than continuing on to Cloudflare purge / the
-# synthetic / "Deploy complete.".
+# Case 11 (#768 r2 — Codex P1, credential chain): an unusable `gcloud`
+# credential must abort BEFORE publishing.
+#
+# `gcloud` does not inherit op-firebase-deploy's credential — that wrapper
+# materializes a per-project Firebase-vault SA key into a temp file and
+# deletes it in its own EXIT trap — so a deploy started without
+# `op-preflight --mode deploy` can authenticate to Firebase and still have
+# nothing usable left for the reconciliation. Discovering that AFTER Firebase
+# published is the published-but-403 outage this whole change closes.
+#
+# GCLOUD_STUB_EXIT=1 fails every gcloud call, which is what an absent
+# credential looks like from here. deploy.sh's read-only Step 1.6 must catch
+# it and exit with op-firebase-deploy NEVER invoked.
 # ---------------------------------------------------------------------------
-REPO11="$WORKDIR/case11-invoker-fail"
+REPO11="$WORKDIR/case11-invoker-cred-fail"
 init_fixture_repo "$REPO11"
 OUT11="$WORKDIR/case11.out"
 ERR11="$WORKDIR/case11.err"
@@ -612,18 +668,175 @@ RC11=$?
 set -e
 
 if [[ $RC11 -eq 0 ]]; then
-  fail "invoker-fail: deploy.sh returned 0 though the invoker reconciliation failed — the failure was swallowed."
-elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-11.log"; then
-  fail "invoker-fail: deploy.sh never reached op-firebase-deploy (Step 2 runs before Step 2.5; this changes the ordering assumption)."
+  fail "invoker-cred-fail: deploy.sh returned 0 though no usable gcloud credential was available."
+elif grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-11.log"; then
+  fail "invoker-cred-fail: deploy.sh PUBLISHED (reached op-firebase-deploy) with a credential that cannot reconcile the invoker config. That is the published-but-403 case."
 elif ! grep -q 'FAIL: could not describe Cloud Run service' "$ERR11"; then
-  fail "invoker-fail: deploy.sh did not surface set-cloud-run-invoker.sh's own failure diagnostic. stderr was:"
+  fail "invoker-cred-fail: deploy.sh did not surface set-cloud-run-invoker.sh's own failure diagnostic. stderr was:"
   cat "$ERR11" >&2
-elif grep -q 'test:synthetic' "$WORKDIR/npm-calls-11.log"; then
-  fail "invoker-fail: deploy.sh continued on to the post-deploy synthetic despite the invoker step failing."
+elif ! grep -q 'NOTHING HAS BEEN PUBLISHED' "$ERR11"; then
+  fail "invoker-cred-fail: deploy.sh did not tell the operator nothing was published. stderr was:"
+  cat "$ERR11" >&2
+elif ! grep -q 'op-preflight.sh --agent <agent> --mode deploy' "$ERR11"; then
+  fail "invoker-cred-fail: the abort diagnostic did not name the credential fix (op-preflight --mode deploy). stderr was:"
+  cat "$ERR11" >&2
 elif grep -q 'Deploy complete.' "$OUT11"; then
-  fail "invoker-fail: deploy.sh printed 'Deploy complete.' despite the invoker step failing."
+  fail "invoker-cred-fail: deploy.sh printed 'Deploy complete.' despite aborting."
 else
-  pass "invoker-fail: a failing invoker reconciliation fails the deploy (rc=$RC11) rather than being swallowed, after op-firebase-deploy already ran."
+  pass "invoker-cred-fail: an unusable gcloud credential aborts BEFORE publishing (rc=$RC11), naming op-preflight --mode deploy."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 11b (#768 r2): a credential that reads fine before publishing but fails
+# afterwards still fails the deploy loudly — the pre-publish check is not a
+# licence to swallow a later failure. GCLOUD_FAIL_AFTER=2 lets the two
+# read-only Step 1.6 describes through and fails everything after, which is
+# what an expired credential (or describe-without-update permission) looks
+# like from Step 2.5.
+# ---------------------------------------------------------------------------
+REPO11B="$WORKDIR/case11b-invoker-late-fail"
+init_fixture_repo "$REPO11B"
+OUT11B="$WORKDIR/case11b.out"
+ERR11B="$WORKDIR/case11b.err"
+: >"$WORKDIR/ofd-calls-11b.log"
+: >"$WORKDIR/npm-calls-11b.log"
+: >"$WORKDIR/gcloud-counter-11b"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-11b.log" \
+NPM_LOG="$WORKDIR/npm-calls-11b.log" \
+GCLOUD_CALL_COUNTER="$WORKDIR/gcloud-counter-11b" \
+GCLOUD_FAIL_AFTER=2 \
+  bash -c "cd '$REPO11B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
+  >"$OUT11B" 2>"$ERR11B"
+RC11B=$?
+set -e
+
+if [[ $RC11B -eq 0 ]]; then
+  fail "invoker-late-fail: deploy.sh returned 0 though the post-publish reconciliation failed — the failure was swallowed."
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-11b.log"; then
+  fail "invoker-late-fail: deploy.sh never published, so this case did not exercise the post-publish path."
+elif ! grep -q 'reconciliation FAILED and the deploy is already live' "$ERR11B"; then
+  fail "invoker-late-fail: deploy.sh did not print the already-live reconciliation-failure banner. stderr was:"
+  cat "$ERR11B" >&2
+elif grep -q 'test:synthetic' "$WORKDIR/npm-calls-11b.log"; then
+  fail "invoker-late-fail: deploy.sh continued on to the post-deploy synthetic despite the invoker step failing."
+elif grep -q 'Deploy complete.' "$OUT11B"; then
+  fail "invoker-late-fail: deploy.sh printed 'Deploy complete.' despite the invoker step failing."
+else
+  pass "invoker-late-fail: a reconciliation that fails after publishing still fails the deploy (rc=$RC11B) with an already-live banner."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 12 (#768 r2 — Codex P1, ordering): THE case this automation exists for.
+#
+# When a Functions deploy re-tries the `allUsers` invoker binding the org
+# policy rejects, firebase-tools reports the whole deploy as FAILED (exit 2)
+# while the function is published and serving — only its public reachability
+# was refused. Before this round, `set -e` aborted at Step 2 and Step 2.5
+# never ran, so the automatic recovery was skipped in precisely the failure
+# mode it was written for and the endpoint stayed 403ing.
+#
+# The stub reproduces firebase-tools' own report line
+# (lib/deploy/functions/release/reporter.js) and exits nonzero. Both invoker
+# scripts must still run.
+# ---------------------------------------------------------------------------
+REPO12="$WORKDIR/case12-partial-failure-reconciles"
+init_fixture_repo "$REPO12"
+OUT12="$WORKDIR/case12.out"
+ERR12="$WORKDIR/case12.err"
+: >"$WORKDIR/ofd-calls-12.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-12.log" \
+NPM_LOG="$WORKDIR/npm-calls-12.log" \
+OFD_STUB_EXIT=2 \
+OFD_STUB_OUTPUT='Unable to set the invoker for the IAM policy on the following functions: emailUnsubscribe(us-central1)' \
+  bash -c "cd '$REPO12' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT12" 2>"$ERR12"
+RC12=$?
+set -e
+
+if ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-12.log"; then
+  fail "partial-failure-reconciles: deploy.sh never published, so this case did not exercise the partial-failure path."
+elif ! grep -q 'Reconciling Cloud Run invoker config' "$OUT12"; then
+  fail "partial-failure-reconciles: Step 2.5 did NOT run after the org-policy partial failure — the recovery is still skipped in exactly the case it exists for. stdout was:"
+  cat "$OUT12" >&2
+  echo "--- stderr ---" >&2
+  cat "$ERR12" >&2
+elif ! grep -q 'Bug-report invoker config' "$OUT12"; then
+  fail "partial-failure-reconciles: set-bug-report-invoker.sh did not run after the partial failure. stdout was:"
+  cat "$OUT12" >&2
+elif ! grep -q 'Email-unsubscribe invoker config' "$OUT12"; then
+  fail "partial-failure-reconciles: set-email-unsubscribe-invoker.sh did not run after the partial failure. stdout was:"
+  cat "$OUT12" >&2
+elif ! grep -q 'Reconciling the invoker check anyway' "$ERR12"; then
+  fail "partial-failure-reconciles: deploy.sh reconciled but did not say why, so the operator cannot tell this from a clean run. stderr was:"
+  cat "$ERR12" >&2
+else
+  pass "partial-failure-reconciles: an org-policy invoker partial failure still reaches Step 2.5 and reconciles BOTH endpoints."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 13 (#768 r2): …and that same run must still FAIL. Repairing the
+# endpoint is not the same as the deploy having succeeded: a nonzero
+# `firebase deploy` means at least one resource missed its intended state, and
+# printing "Deploy complete." over it would convert a real failure into a
+# false success. Same fixture run as case 12, asserted from the other side.
+# ---------------------------------------------------------------------------
+if [[ $RC12 -eq 0 ]]; then
+  fail "partial-failure-still-fails: deploy.sh returned 0 after op-firebase-deploy exited 2 — a real deploy failure was converted into a false success."
+elif grep -q 'Deploy complete.' "$OUT12"; then
+  fail "partial-failure-still-fails: deploy.sh printed 'Deploy complete.' over a failed deploy. stdout was:"
+  cat "$OUT12" >&2
+elif [[ $RC12 -ne 2 ]]; then
+  fail "partial-failure-still-fails: deploy.sh returned $RC12; expected op-firebase-deploy's own exit status (2)."
+elif ! grep -q 'op-firebase-deploy exited 2' "$ERR12"; then
+  fail "partial-failure-still-fails: deploy.sh did not report the deploy's own failure. stderr was:"
+  cat "$ERR12" >&2
+else
+  pass "partial-failure-still-fails: the reconciliation runs but the deploy failure still fails the script (rc=$RC12), no 'Deploy complete.'."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 14 (#768 r2): a deploy that fails for an UNRELATED reason must not
+# reconcile. An unclassified failure means the project's state is unknown, so
+# reconciling into it is guesswork — and it must still fail closed, exactly as
+# it did before this round.
+# ---------------------------------------------------------------------------
+REPO14="$WORKDIR/case14-unrelated-failure"
+init_fixture_repo "$REPO14"
+OUT14="$WORKDIR/case14.out"
+ERR14="$WORKDIR/case14.err"
+: >"$WORKDIR/ofd-calls-14.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-14.log" \
+NPM_LOG="$WORKDIR/npm-calls-14.log" \
+OFD_STUB_EXIT=1 \
+OFD_STUB_OUTPUT='Error: HTTP Error: 403, The caller does not have permission to deploy Hosting' \
+  bash -c "cd '$REPO14' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT14" 2>"$ERR14"
+RC14=$?
+set -e
+
+if [[ $RC14 -eq 0 ]]; then
+  fail "unrelated-failure: deploy.sh returned 0 though op-firebase-deploy exited 1."
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-14.log"; then
+  fail "unrelated-failure: deploy.sh never published, so this case did not exercise the failure path."
+elif grep -q 'Reconciling Cloud Run invoker config' "$OUT14"; then
+  fail "unrelated-failure: Step 2.5 reconciled after an unrelated deploy failure. stdout was:"
+  cat "$OUT14" >&2
+elif ! grep -q 'unrelated reason' "$ERR14"; then
+  fail "unrelated-failure: deploy.sh did not say why it skipped the reconciliation. stderr was:"
+  cat "$ERR14" >&2
+elif grep -q 'Deploy complete.' "$OUT14"; then
+  fail "unrelated-failure: deploy.sh printed 'Deploy complete.' over a failed deploy."
+else
+  pass "unrelated-failure: an unrelated deploy failure skips reconciliation and still fails closed (rc=$RC14)."
 fi
 
 # ---------------------------------------------------------------------------

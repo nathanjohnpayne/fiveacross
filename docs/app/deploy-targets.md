@@ -16,6 +16,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Baked `VITE_POSTHOG_HOST` | blank (explicit) | blank (explicit) |
 | Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
 | Cache purge | Gay Cruise Bingo zone `8066dd2b105ad564c45bb8c898859343` | explicitly skipped (no Five Across zone configured) |
+| Cloud Run invoker reconciliation | runs (`skipInvokerReconcile: false`) | explicitly skipped (`skipInvokerReconcile: true`) |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
 ### Which hosts to verify
@@ -71,7 +72,14 @@ The named target still supplies the Firebase project, target build command, cach
 
 ### Registering a future target
 
-There is intentionally no ambient “new Event” deploy. Register a named target in a reviewed change: add its complete identity, a nonblank `syntheticUrl`, and an explicit `skipCloudflarePurge` choice (a zone id is required when false) to `scripts/build-target.mjs`; create its ignored `.env.<target>` from `.env.example`; and add the matching `build:<target>` / `deploy:<target>` package commands. The Firebase API and production PostHog keys must be nonblank; the PostHog host override must be explicitly blank. Only then use `npm run deploy -- <target>` (or `npm run deploy:hosting -- <target>`). This keeps a future Event from silently rebuilding and publishing an existing target.
+There is intentionally no ambient “new Event” deploy. Register a named target in a reviewed change: add its complete identity, a nonblank `syntheticUrl`, an explicit `skipCloudflarePurge` choice (a zone id is required when false), and an explicit `skipInvokerReconcile` choice to `scripts/build-target.mjs`; create its ignored `.env.<target>` from `.env.example`; and add the matching `build:<target>` / `deploy:<target>` package commands. The Firebase API and production PostHog keys must be nonblank; the PostHog host override must be explicitly blank. Only then use `npm run deploy -- <target>` (or `npm run deploy:hosting -- <target>`). This keeps a future Event from silently rebuilding and publishing an existing target.
+
+`validateTargetOperationalMetadata` refuses a target that omits any of those three, so a missing field fails the build rather than picking a default. `skipInvokerReconcile` is required for the same reason `skipCloudflarePurge` is, only sharper: omitting it reads as `false`, and `false` sends `scripts/deploy.sh` at **`gaycruisebingo`'s** Cloud Run services (`submitbugreport`, `emailunsubscribe`) carrying the new target's own project-scoped deploy credential, which cannot describe them — so the deploy fails on a permissions error for a check that target never needed. Answer two questions to choose:
+
+- **Does this project's org policy impose the same Domain Restricted Sharing constraint** that makes `emailUnsubscribe` / `submitBugReport` unreachable without disabling the Cloud Run invoker IAM check (`docs/app/phase-1-deploy.md` § Cloud Run invoker reconciliation)?
+- **Is this project's deploy credential provisioned** with `run.services.get` / `run.services.update` on it?
+
+Both yes ⇒ `skipInvokerReconcile: false`, **and** wire that target's `BUG_REPORT_PROJECT` / `EMAIL_UNSUBSCRIBE_PROJECT` overrides into its deploy environment in `scripts/deploy-target.mjs`: the scripts default to `gaycruisebingo`, so without those overrides a `false` here reconciles the wrong project's services no matter which one was just deployed. Anything else ⇒ `skipInvokerReconcile: true`, with a comment saying why (`fiveacross` is the worked example).
 
 ### Verify the deployed target
 
