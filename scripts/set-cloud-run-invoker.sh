@@ -49,16 +49,46 @@ set -euo pipefail
 #   GCLOUD_BIN   gcloud binary (default: gcloud; the 1Password-backed wrapper
 #                on PATH resolves credentials)
 #
-# Credentials: `gcloud` resolves its OWN chain and does NOT inherit
-# op-firebase-deploy's per-project Firebase-vault SA key, which that wrapper
-# materializes into a temp file and deletes on exit. Load deploy credentials
-# before running this inside or after a deploy:
+# CREDENTIALS (#768 r4 — this used to abort routine deploys)
+#
+# `gcloud` resolves its OWN chain and does NOT inherit op-firebase-deploy's
+# per-project Firebase-vault SA key, which that wrapper materializes into a
+# temp file and deletes on exit. Load deploy credentials before running this
+# inside or after a deploy:
 #   eval "$(scripts/op-preflight.sh --agent <agent> --mode deploy)"
-# If that leaves GOOGLE_APPLICATION_CREDENTIALS pointing at a SERVICE-ACCOUNT
-# key, the 1Password-backed gcloud wrapper rejects it ("unusable credential
-# file") — it mints tokens from an authorized_user ADC only. `unset
-# GOOGLE_APPLICATION_CREDENTIALS` so it resolves its normal ADC chain, per
-# docs/agents/deployment-process.md.
+#
+# That preflight exports GOOGLE_APPLICATION_CREDENTIALS pointing at the
+# per-project Firebase-vault SERVICE-ACCOUNT key — which is exactly the
+# credential this script wants, and exactly the one neither `gcloud` path could
+# previously use. Two facts, both verified rather than assumed:
+#
+#   1. The key is the RIGHT identity. `scripts/firebase/op-firebase-setup`
+#      grants the `firebase-deployer` SA `roles/run.admin` on the project, so
+#      it is guaranteed to be able to describe and update these very services —
+#      it is the identity that just deployed them and attempted the rejected
+#      `allUsers` invoker binding in the first place.
+#   2. Neither gcloud path can AUTHENTICATE from that env var.
+#      `scripts/gcloud/gcloud` mints tokens from an `authorized_user` refresh
+#      token and rejects a `service_account` file outright ("points to an
+#      unusable credential file"). And bypassing that wrapper does not help:
+#      the real gcloud CLI ignores GOOGLE_APPLICATION_CREDENTIALS for its own
+#      auth — it is an ADC variable for client libraries, and
+#      `googlecloudsdk/core/credentials/store.py` never reads it — so a bypass
+#      would silently run as whatever account happens to be active, or as none.
+#      The wrapper's rejection is a capability gap, not a security boundary
+#      (its own comment says "fall back to gcloud"), but "bypass it" is not a
+#      fix on its own.
+#
+# So this script takes the ONE path gcloud supports for a service-account key:
+# `gcloud auth activate-service-account`, run against a THROWAWAY
+# `CLOUDSDK_CONFIG` directory that is deleted on exit. The machine-global
+# gcloud account selection, active configuration, and ADC file are never
+# touched, and the deploy's own credential is reused rather than requiring a
+# second, separately-maintained ADC.
+#
+# When GOOGLE_APPLICATION_CREDENTIALS is absent or holds an `authorized_user` /
+# `impersonated_service_account` credential, nothing changes: the calls go
+# through the wrapper exactly as before, because the wrapper handles those.
 
 SERVICE=""
 REGION=""
@@ -79,7 +109,7 @@ while [[ $# -gt 0 ]]; do
     --verify-hint) VERIFY_HINT="${2:?--verify-hint needs a value}"; shift 2 ;;
     --service-env-hint) SERVICE_ENV_HINT="${2:?--service-env-hint needs a value}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) sed -n '3,61p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,91p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -88,9 +118,86 @@ done
 [[ -n "$REGION" ]] || { echo "FAIL: --region is required" >&2; exit 2; }
 [[ -n "$PROJECT" ]] || { echo "FAIL: --project is required" >&2; exit 2; }
 
-run_gcloud() { "$GCLOUD_BIN" "$@"; }
+SA_CONFIG_DIR=""
+DESCRIBE_ERR=""
+ACTIVATE_ERR=""
+CREDENTIAL_MODE="the gcloud wrapper's own credential chain"
+
+cleanup() {
+  [[ -n "$DESCRIBE_ERR" && -f "$DESCRIBE_ERR" ]] && rm -f "$DESCRIBE_ERR"
+  [[ -n "$ACTIVATE_ERR" && -f "$ACTIVATE_ERR" ]] && rm -f "$ACTIVATE_ERR"
+  [[ -n "$SA_CONFIG_DIR" && -d "$SA_CONFIG_DIR" ]] && rm -rf "$SA_CONFIG_DIR"
+  return 0
+}
+trap cleanup EXIT
+
+# Env prefix applied to every gcloud call. Always non-empty (a bare `env`) so
+# the array expansion is safe under bash 3.2 + `set -u`.
+GCLOUD_ENV=(env)
+run_gcloud() { "${GCLOUD_ENV[@]}" "$GCLOUD_BIN" "$@"; }
+
+# A service-account key is the ONE credential type `scripts/gcloud/gcloud`
+# refuses. Detected by the JSON `type` field. `"impersonated_service_account"`
+# deliberately does NOT match — the leading quote in the pattern anchors on the
+# whole value — because the wrapper unwraps that form to its authorized_user
+# source and mints a token from it perfectly well.
+credential_is_service_account() {
+  local file="${1:-}"
+  [[ -n "$file" && -f "$file" ]] || return 1
+  grep -q '"type"[[:space:]]*:[[:space:]]*"service_account"' "$file" 2>/dev/null
+}
+
+# Resolve the credential BEFORE the first call (see § CREDENTIALS above).
+#
+# `GCLOUD_BYPASS_ADC_WRAPPER=1` is `scripts/gcloud/gcloud`'s own first-class
+# passthrough — the wrapper sets it on every call it makes to the real binary.
+# It is correct to use here precisely because we are supplying a BETTER
+# credential than the wrapper could resolve, in an isolated config the wrapper
+# knows nothing about. Using it without activating the key first would be the
+# bug: gcloud would silently fall back to the machine's active account.
+resolve_credential() {
+  local key_file="${GOOGLE_APPLICATION_CREDENTIALS:-}"
+
+  if ! credential_is_service_account "$key_file"; then
+    return 0
+  fi
+
+  SA_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/invoker-gcloud-config-XXXXXX")"
+  ACTIVATE_ERR="$(mktemp "${TMPDIR:-/tmp}/invoker-activate-XXXXXX")"
+
+  if env GCLOUD_BYPASS_ADC_WRAPPER=1 CLOUDSDK_CONFIG="$SA_CONFIG_DIR" \
+       CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true \
+       CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
+       "$GCLOUD_BIN" auth activate-service-account --key-file="$key_file" --quiet \
+       >/dev/null 2>"$ACTIVATE_ERR"; then
+    GCLOUD_ENV=(env
+      GCLOUD_BYPASS_ADC_WRAPPER=1
+      CLOUDSDK_CONFIG="$SA_CONFIG_DIR"
+      CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true
+      CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true
+    )
+    CREDENTIAL_MODE="the deploy service-account key from GOOGLE_APPLICATION_CREDENTIALS (isolated gcloud config)"
+    return 0
+  fi
+
+  # Activation failed (malformed key, gcloud too old, revoked key). Fall back
+  # to the wrapper's own chain — but DROP the service-account key from the
+  # child environment first, or the wrapper rejects it outright and this step
+  # aborts a deploy that had nothing else wrong with it. Clearing the variable
+  # for the gcloud child only is exactly what
+  # docs/agents/deployment-process.md tells an operator to do by hand for
+  # non-deploy gcloud work; doing it here removes the manual step.
+  rm -rf "$SA_CONFIG_DIR"
+  SA_CONFIG_DIR=""
+  GCLOUD_ENV=(env -u GOOGLE_APPLICATION_CREDENTIALS)
+  CREDENTIAL_MODE="the gcloud wrapper's own ADC chain (the deploy service-account key could not be activated)"
+  echo "   Note: could not activate the deploy service-account key; falling back to the gcloud ADC chain." >&2
+  sed 's/^/     /' "$ACTIVATE_ERR" >&2
+}
 
 echo ">> $LABEL invoker config: service=$SERVICE region=$REGION project=$PROJECT"
+resolve_credential
+echo "   Credential: $CREDENTIAL_MODE"
 
 # Confirm the service exists before mutating anything — a wrong/renamed service
 # should fail with a helpful list, not a confusing update error.
@@ -100,7 +207,6 @@ echo ">> $LABEL invoker config: service=$SERVICE region=$REGION project=$PROJECT
 # substitution so a stray warning cannot end up inside `$current` and defeat
 # the `== "true"` idempotence check below.
 DESCRIBE_ERR="$(mktemp "${TMPDIR:-/tmp}/invoker-describe-XXXXXX")"
-trap 'rm -f "$DESCRIBE_ERR"' EXIT
 
 if ! current="$(run_gcloud run services describe "$SERVICE" \
       --region "$REGION" --project "$PROJECT" \
@@ -114,20 +220,25 @@ if ! current="$(run_gcloud run services describe "$SERVICE" \
   # "no credential" is the LIKELIER of the two. Print gcloud's own error and
   # name both causes.
   echo "FAIL: could not describe Cloud Run service '$SERVICE' in $REGION ($PROJECT)." >&2
+  echo "      Credential used: $CREDENTIAL_MODE" >&2
   echo "      gcloud said:" >&2
   sed 's/^/        /' "$DESCRIBE_ERR" >&2
   echo "      Causes, likeliest first:" >&2
-  echo "        1. No gcloud credential. gcloud does NOT inherit" >&2
+  echo "        1. No gcloud credential at all. gcloud does NOT inherit" >&2
   echo "           op-firebase-deploy's credential — that wrapper deletes its" >&2
   echo "           temporary key on exit. Load one and re-run:" >&2
   echo "             eval \"\$(scripts/op-preflight.sh --agent <agent> --mode deploy)\"" >&2
-  echo "        2. \"points to an unusable credential file\" above means" >&2
-  echo "           GOOGLE_APPLICATION_CREDENTIALS holds a SERVICE-ACCOUNT key (what" >&2
-  echo "           deploy preflight exports). The 1Password-backed gcloud wrapper" >&2
-  echo "           mints tokens from an authorized_user ADC only. Drop it:" >&2
-  echo "             unset GOOGLE_APPLICATION_CREDENTIALS" >&2
-  echo "        3. A 403 means the identity lacks run.services.get on $PROJECT." >&2
-  echo "        4. A 404 means the service was renamed. Set $SERVICE_ENV_HINT and re-run." >&2
+  echo "        2. A 403 means the identity lacks run.services.get on $PROJECT." >&2
+  echo "           The project Firebase-vault SA key carries roles/run.admin when" >&2
+  echo "           provisioned by scripts/firebase/op-firebase-setup, so a 403 on" >&2
+  echo "           that credential means the grant is missing or the key belongs" >&2
+  echo "           to a DIFFERENT project than $PROJECT." >&2
+  echo "        3. A 404 means the service was renamed. Set $SERVICE_ENV_HINT and re-run." >&2
+  echo "        4. \"points to an unusable credential file\" should no longer be" >&2
+  echo "           reachable — this script activates a service-account key into an" >&2
+  echo "           isolated gcloud config rather than handing it to the wrapper." >&2
+  echo "           If you see it, GOOGLE_APPLICATION_CREDENTIALS holds something" >&2
+  echo "           that is neither an authorized_user ADC nor a service-account key." >&2
   echo "      Services visible to this credential in $REGION ($PROJECT):" >&2
   run_gcloud run services list --project "$PROJECT" --region "$REGION" \
     --format='value(metadata.name)' 2>/dev/null >&2 ||
