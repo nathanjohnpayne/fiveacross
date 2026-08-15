@@ -27,32 +27,51 @@ import { test, expect } from '@playwright/test';
 // token is ever sent, so this probe has no side effect on any participant's
 // opt-out state.
 //
-// ROLLOUT-COMPATIBLE BY CONSTRUCTION (#768 r2 review). This file is matched by
-// `playwright.synthetic.config.ts` (`testDir: ./tests/synthetic`), and
-// `.github/workflows/synthetic-uptime.yml` runs `npm run test:synthetic` from
-// `main` every 15 minutes — so the assertion goes live the moment the commit
-// merges, which is BEFORE the manually-run Hosting deploy that ships the
-// `/unsubscribe` rewrite. A bare `expect(400)` would therefore page for the
-// whole merge-to-deploy window (and again on any project whose Hosting has not
-// yet received the rewrite) while the deployed app is unchanged and perfectly
-// healthy. Rather than gate this behind a flag someone has to remember to flip
-// after the rollout — the same remember-to-do-it failure #768 exists to
-// delete — the probe reads the rollout state off the response itself:
+// THE ROLLOUT WINDOW IS TIME-BOXED, NOT PERMANENT (#768 r3 → r4).
 //
-//   200 + the SPA shell → the rewrite is NOT deployed at this origin yet.
-//                         Firebase Hosting's `**` → /index.html catch-all
-//                         answered instead. Skip: there is no endpoint to
-//                         regress, and nothing an operator can act on.
-//   403                  → the rewrite IS live and the Cloud Run invoker check
-//                         is blocking. Real regression, fail loudly.
+// This file is matched by `playwright.synthetic.config.ts` (`testDir:
+// ./tests/synthetic`), and `.github/workflows/synthetic-uptime.yml` runs `npm
+// run test:synthetic` from `main` every 15 minutes — so the assertion goes
+// live the moment the commit merges, which is BEFORE the manually-run Hosting
+// deploy that ships the `/unsubscribe` rewrite. A bare `expect(400)` would
+// page for the whole merge-to-deploy window while the deployed app is
+// unchanged and perfectly healthy.
+//
+// The three observable states are:
+//
+//   403                  → the Cloud Run invoker check is blocking. Real
+//                          regression, fail loudly, always.
 //   400                  → healthy: the request reached application code.
+//   200 + the SPA shell  → Firebase Hosting's `**` → /index.html catch-all
+//                          answered, so `/unsubscribe` is not routed to the
+//                          function at this origin.
 //
-// The self-healing property is the point: the first deploy that ships the
-// rewrite flips this probe from skipping to enforcing with no second commit.
-// The cost is that a regression which REMOVED the rewrite would skip rather
-// than fail — that case is covered structurally instead, by
-// src/recon-share-og.test.ts, which parses firebase.json and fails if the
-// `/unsubscribe` rewrite is missing or ordered after the SPA catch-all.
+// That third state is genuinely AMBIGUOUS from outside: "the rewrite has not
+// been deployed here yet" and "the rewrite was deployed and has since been
+// rolled back, dropped from a scoped deploy, or otherwise lost" produce a
+// byte-identical response. No header, status, or body distinguishes them —
+// which is why r3's unconditional skip was a permanent blind spot: after
+// emails start carrying `/unsubscribe` links, every one of them opens the SPA
+// instead of the opt-out page and this probe stays green forever.
+//
+// Since no signal in the RESPONSE separates the two, the separator has to be
+// TIME. Before ROLLOUT_ENFORCE_FROM the ambiguity resolves toward "not
+// deployed yet" and the probe skips; after it, the shell is a FAILURE naming
+// both possible causes, because by then either one is a real problem an
+// operator must act on — a rewrite that never shipped is as broken as one that
+// regressed. The window is deliberately short and deliberately hard-coded
+// rather than env-configurable: an override would be set once during rollout
+// and never unset, recreating the permanent skip through a different door.
+//
+// Once a deploy has been confirmed to serve 400 here, this whole branch can be
+// deleted and the probe reduced to `expect(400)`.
+//
+// `src/recon-share-og.test.ts` remains the structural half — it parses
+// firebase.json and fails if the `/unsubscribe` rewrite is missing or ordered
+// after the SPA catch-all — but it can only see the SOURCE, never what Hosting
+// is actually serving, which is precisely the drift this deadline covers.
+const ROLLOUT_ENFORCE_FROM = Date.parse('2026-08-28T00:00:00Z');
+
 const SYNTHETIC_URL = process.env.SYNTHETIC_URL ?? 'https://gaycruisebingo.com/';
 const UNSUBSCRIBE_URL = new URL('/unsubscribe', SYNTHETIC_URL).toString();
 
@@ -79,12 +98,29 @@ test('the unsubscribe endpoint is reachable (no Cloud Run invoker regression)', 
   }
 
   if (status === 200 && (await response.text()).includes(SPA_SHELL_MARKER)) {
+    const enforceFrom = new Date(ROLLOUT_ENFORCE_FROM).toISOString();
+
+    if (Date.now() >= ROLLOUT_ENFORCE_FROM) {
+      throw new Error(
+        `${UNSUBSCRIBE_URL} served the SPA shell, not the opt-out page — Firebase Hosting's ** catch-all ` +
+          'answered, so /unsubscribe is not routed to emailUnsubscribe at this origin. Emails already carry ' +
+          `this link (EMAIL_UNSUBSCRIBE_URL in functions/src/params.ts), and the rollout window closed at ` +
+          `${enforceFrom}, so every unsubscribe link opens the app instead of the opt-out page right now.\n\n` +
+          'Two causes, both real:\n' +
+          '  • Hosting was rolled back, or deployed with a scope that excluded it, after the rewrite shipped.\n' +
+          '  • The rewrite never shipped to this origin at all.\n\n' +
+          'Either way: confirm the /unsubscribe rewrite is present and ordered BEFORE the ** catch-all in ' +
+          'firebase.json, then deploy Hosting (npm run deploy:gaycruisebingo:hosting). ' +
+          'Rolling back will not fix this. See docs/app/phase-1-deploy.md § 1a-i.',
+      );
+    }
+
     test.skip(
       true,
       `${UNSUBSCRIBE_URL} served the SPA shell, so the /unsubscribe Hosting rewrite is not deployed at this ` +
-        'origin yet — there is no endpoint here to regress. This check starts enforcing by itself on the ' +
-        'first Hosting deploy that ships the rewrite (firebase.json). If it is STILL skipping well after ' +
-        'that deploy, the rewrite did not ship: check firebase.json and re-deploy Hosting.',
+        `origin yet. This grace lasts until ${enforceFrom}; after that the same response FAILS, because by ` +
+        'then a shell here means either the rewrite never shipped or it regressed, and both need a human. ' +
+        'Deploy Hosting to clear it.',
     );
     return;
   }

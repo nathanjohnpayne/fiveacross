@@ -79,7 +79,7 @@ There is intentionally no ambient “new Event” deploy. Register a named targe
 - **Does this project's org policy impose the same Domain Restricted Sharing constraint** that makes `emailUnsubscribe` / `submitBugReport` unreachable without disabling the Cloud Run invoker IAM check (`docs/app/phase-1-deploy.md` § Cloud Run invoker reconciliation)?
 - **Is this project's deploy credential provisioned** with `run.services.get` / `run.services.update` on it?
 
-Both yes ⇒ `skipInvokerReconcile: false`, **and** wire that target's `BUG_REPORT_PROJECT` / `EMAIL_UNSUBSCRIBE_PROJECT` overrides into its deploy environment in `scripts/deploy-target.mjs`: the scripts default to `gaycruisebingo`, so without those overrides a `false` here reconciles the wrong project's services no matter which one was just deployed. Anything else ⇒ `skipInvokerReconcile: true`, with a comment saying why (`fiveacross` is the worked example).
+Both yes ⇒ `skipInvokerReconcile: false`. The project is wired automatically: `scripts/deploy-target.mjs` stamps `DEPLOY_TARGET_PROJECT` from the selected target, and `scripts/deploy.sh` clears every ambient `BUG_REPORT_*` / `EMAIL_UNSUBSCRIBE_*` override and re-pins the project from it, so the reconciliation follows the target rather than the scripts' `gaycruisebingo` default or a stale export. A target whose Cloud Run services are named or regioned differently still needs its own wiring. Anything else ⇒ `skipInvokerReconcile: true`, with a comment saying why (`fiveacross` is the worked example).
 
 ### Verify the deployed target
 

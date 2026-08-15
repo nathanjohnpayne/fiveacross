@@ -67,6 +67,22 @@ describe('deploy target selection', () => {
     });
   });
 
+  // #768 r4 (Codex P2): a stale override from an earlier manual invoker repair
+  // must not survive into an automatic reconciliation. deployInvocation is the
+  // one place that knows which target was selected, so it stamps the project
+  // and scripts/deploy.sh clears the rest.
+  it('pins the invoker reconciliation project to the selected target, overriding a stale export', () => {
+    const gcb = deployInvocation('gaycruisebingo', [], {
+      EMAIL_UNSUBSCRIBE_PROJECT: 'fiveacross',
+      BUG_REPORT_PROJECT: 'fiveacross',
+      DEPLOY_TARGET_PROJECT: 'fiveacross',
+    });
+    expect(gcb.environment.DEPLOY_TARGET_PROJECT).toBe('gaycruisebingo');
+
+    const five = deployInvocation('fiveacross', [], { DEPLOY_TARGET_PROJECT: 'gaycruisebingo' });
+    expect(five.environment.DEPLOY_TARGET_PROJECT).toBe('fiveacross');
+  });
+
   it('accepts --skip-invoker as a deploy-wrapper flag and keeps it before the separator', () => {
     expect(deployRequest(['gaycruisebingo', '--skip-invoker', '--', '--only', 'hosting'])).toEqual({
       target: 'gaycruisebingo',

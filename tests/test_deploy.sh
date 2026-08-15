@@ -35,10 +35,26 @@
 #       exists for, and `set -e` used to abort before it ran.
 #   13. …and that run still FAILS the script: the endpoint is repaired, the
 #       deploy error is not converted into a false success.
-#   14. A deploy that fails for an unrelated reason does NOT reconcile and
-#       still fails closed.
 #
-# Stubbed via a PATH-shimmed `gcloud` — never real.
+# Cases 14-17 are the r4 review round:
+#
+#   14. A deploy that fails for an UNRELATED reason still reconciles. Inverted
+#       from r2: a successful Functions release resets the invoker annotation
+#       no matter what errors afterwards, so keying the recovery on the final
+#       error text skipped it in exactly the state it repairs.
+#   15. THE REGRESSION GUARD. A normal, documented, preflighted deploy —
+#       GOOGLE_APPLICATION_CREDENTIALS holding the per-project Firebase-vault
+#       SERVICE-ACCOUNT key, exactly as `op-preflight.sh --mode deploy`
+#       exports it — must publish. r3 aborted it at Step 1.6.
+#   16. A `--only hosting` deploy neither checks nor reconciles: it cannot
+#       reset the invoker annotation, so it must not be gated on gcloud.
+#   17. Stale BUG_REPORT_* / EMAIL_UNSUBSCRIBE_* exports do not redirect the
+#       automatic reconciliation away from the selected deploy target.
+#
+# Stubbed via a PATH-shimmed `gcloud` — never real. Case 15 additionally runs
+# the REAL scripts/gcloud/gcloud wrapper (with its real binary stubbed), so the
+# service-account rejection under test is the wrapper's own logic rather than
+# this file's imitation of it.
 #
 # Strategy: build a self-contained fixture git repo per test, run
 # scripts/deploy.sh inside it with --force (to bypass guards 1+2 —
@@ -53,6 +69,15 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/scripts/deploy.sh"
+
+# Start from a known ambient state. A developer shell that has run
+# `op-preflight.sh --mode deploy` exports GOOGLE_APPLICATION_CREDENTIALS, and a
+# shell that has done a manual invoker repair may still carry BUG_REPORT_* /
+# EMAIL_UNSUBSCRIBE_* overrides — both of which change what the code under test
+# does. Every case that cares sets them explicitly.
+unset GOOGLE_APPLICATION_CREDENTIALS GCLOUD_BIN GCLOUD_REAL_BIN DEPLOY_TARGET_PROJECT
+unset BUG_REPORT_PROJECT BUG_REPORT_REGION BUG_REPORT_SERVICE
+unset EMAIL_UNSUBSCRIBE_PROJECT EMAIL_UNSUBSCRIBE_REGION EMAIL_UNSUBSCRIBE_SERVICE
 
 [[ -x "$SCRIPT" ]] || { echo "missing or non-executable $SCRIPT" >&2; exit 1; }
 
@@ -801,16 +826,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 14 (#768 r2): a deploy that fails for an UNRELATED reason must not
-# reconcile. An unclassified failure means the project's state is unknown, so
-# reconciling into it is guesswork — and it must still fail closed, exactly as
-# it did before this round.
+# Case 14 (#768 r4 — Codex P1, classifier too narrow). INVERTED from r2.
+#
+# r2 skipped reconciliation on any failure that did not carry the org-policy
+# invoker text, reasoning that an unclassified failure leaves the project in an
+# unknown state. That reasoning runs the wrong way: the invoker annotation is
+# reset by a SUCCESSFUL Functions release, which can complete long before the
+# overall command fails on something else entirely (Hosting, a second
+# function). The skip therefore left BOTH endpoints 403ing merely because an
+# unrelated resource also failed — the exact outage this automation prevents.
+#
+# The reconciliation is idempotent and one-directional, so running it here
+# costs a no-op read. The deploy must still fail closed.
 # ---------------------------------------------------------------------------
 REPO14="$WORKDIR/case14-unrelated-failure"
 init_fixture_repo "$REPO14"
 OUT14="$WORKDIR/case14.out"
 ERR14="$WORKDIR/case14.err"
 : >"$WORKDIR/ofd-calls-14.log"
+: >"$WORKDIR/npm-calls-14.log"
 
 set +e
 PATH="$STUB_DIR:$PATH" \
@@ -827,16 +861,276 @@ if [[ $RC14 -eq 0 ]]; then
   fail "unrelated-failure: deploy.sh returned 0 though op-firebase-deploy exited 1."
 elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-14.log"; then
   fail "unrelated-failure: deploy.sh never published, so this case did not exercise the failure path."
-elif grep -q 'Reconciling Cloud Run invoker config' "$OUT14"; then
-  fail "unrelated-failure: Step 2.5 reconciled after an unrelated deploy failure. stdout was:"
+elif ! grep -q 'Reconciling Cloud Run invoker config' "$OUT14"; then
+  fail "unrelated-failure: Step 2.5 did NOT reconcile after a non-invoker deploy failure. A successful Functions release resets the annotation regardless of what failed afterwards, so this leaves both endpoints 403ing. stdout was:"
   cat "$OUT14" >&2
-elif ! grep -q 'unrelated reason' "$ERR14"; then
-  fail "unrelated-failure: deploy.sh did not say why it skipped the reconciliation. stderr was:"
+  echo "--- stderr ---" >&2
+  cat "$ERR14" >&2
+elif ! grep -q 'Email-unsubscribe invoker config' "$OUT14"; then
+  fail "unrelated-failure: set-email-unsubscribe-invoker.sh did not run. stdout was:"
+  cat "$OUT14" >&2
+elif ! grep -q 'could still have released' "$ERR14"; then
+  fail "unrelated-failure: deploy.sh reconciled but did not explain why it reconciled over a failed deploy. stderr was:"
   cat "$ERR14" >&2
 elif grep -q 'Deploy complete.' "$OUT14"; then
   fail "unrelated-failure: deploy.sh printed 'Deploy complete.' over a failed deploy."
+elif [[ $RC14 -ne 1 ]]; then
+  fail "unrelated-failure: deploy.sh returned $RC14; expected op-firebase-deploy's own exit status (1)."
 else
-  pass "unrelated-failure: an unrelated deploy failure skips reconciliation and still fails closed (rc=$RC14)."
+  pass "unrelated-failure: an unrelated deploy failure still reconciles (idempotent) and still fails closed (rc=$RC14)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 15 (#768 r4 — Codex P1, credential chain). THE REGRESSION GUARD.
+#
+# This is the case r3 broke and this round exists to fix: the NORMAL,
+# documented, preflighted deploy. `op-preflight.sh --agent <a> --mode deploy`
+# exports GOOGLE_APPLICATION_CREDENTIALS pointing at the per-project
+# Firebase-vault SERVICE-ACCOUNT key (docs/agents/deployment-process.md § 24),
+# and r3's new pre-publish Step 1.6 handed that key to `scripts/gcloud/gcloud`,
+# which rejects service-account files outright — so every standard deploy
+# aborted before publishing. That is strictly worse than the 403 it prevents:
+# it converts a broken unsubscribe link into a broken deploy.
+#
+# The stubbing here is deliberately one layer deeper than the other cases.
+# `gcloud` on PATH is the REAL scripts/gcloud/gcloud wrapper, with
+# GCLOUD_REAL_BIN pointing at a recording stub — so the rejection this case
+# guards against is the wrapper's own `try_token_from_source` /
+# "unusable credential file" logic, not a re-implementation of it here that
+# could drift from the real thing. Nothing touches a network or real
+# infrastructure: the wrapper either aborts locally (the pre-fix behaviour) or
+# hands off to the stub via its own GCLOUD_BYPASS_ADC_WRAPPER passthrough.
+# ---------------------------------------------------------------------------
+REPO15="$WORKDIR/case15-preflighted-sa-key"
+init_fixture_repo "$REPO15"
+OUT15="$WORKDIR/case15.out"
+ERR15="$WORKDIR/case15.err"
+: >"$WORKDIR/ofd-calls-15.log"
+: >"$WORKDIR/gcloud-real-15.log"
+
+# A structurally-valid Firebase-vault SA key. The private key is a placeholder:
+# nothing here ever signs or authenticates, because the real gcloud binary is
+# stubbed. What matters is the `"type": "service_account"` discriminator, which
+# is what both the wrapper and set-cloud-run-invoker.sh branch on.
+SA_KEY_15="$WORKDIR/case15-firebase-deployer-key.json"
+cat >"$SA_KEY_15" <<'JSON'
+{
+  "type": "service_account",
+  "project_id": "gaycruisebingo",
+  "private_key_id": "placeholder",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nplaceholder\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-deployer@gaycruisebingo.iam.gserviceaccount.com",
+  "client_id": "000000000000000000000",
+  "token_uri": "https://oauth2.googleapis.com/token"
+}
+JSON
+
+# The real gcloud binary the wrapper delegates to. Answers
+# `auth activate-service-account` with success and `run services describe` with
+# the already-disabled annotation, and records every call so the assertions can
+# prove the SA key was actually activated rather than quietly ignored.
+cat >"$STUB_DIR/gcloud-real" <<'STUB'
+#!/usr/bin/env bash
+{
+  printf 'gcloud-real'
+  for a in "$@"; do printf '\t%s' "$a"; done
+  printf '\tCLOUDSDK_CONFIG=%s' "${CLOUDSDK_CONFIG:-}"
+  printf '\n'
+} >> "${GCLOUD_REAL_LOG:?GCLOUD_REAL_LOG must be set by the test}"
+for a in "$@"; do
+  if [ "$a" = "activate-service-account" ]; then
+    exit 0
+  fi
+done
+echo "true"
+exit 0
+STUB
+chmod +x "$STUB_DIR/gcloud-real"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-15.log" \
+GCLOUD_BIN="$ROOT/scripts/gcloud/gcloud" \
+GCLOUD_REAL_BIN="$STUB_DIR/gcloud-real" \
+GCLOUD_REAL_LOG="$WORKDIR/gcloud-real-15.log" \
+GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_15" \
+  bash -c "cd '$REPO15' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT15" 2>"$ERR15"
+RC15=$?
+set -e
+
+if [[ $RC15 -ne 0 ]]; then
+  fail "preflighted-sa-key: a NORMAL preflighted deploy (GOOGLE_APPLICATION_CREDENTIALS = Firebase-vault SA key) returned $RC15. The invoker feature is breaking routine deploys. stderr was:"
+  cat "$ERR15" >&2
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-15.log"; then
+  fail "preflighted-sa-key: deploy.sh never published — Step 1.6 aborted a deploy that had nothing wrong with it. stderr was:"
+  cat "$ERR15" >&2
+elif grep -q 'unusable credential file' "$ERR15"; then
+  fail "preflighted-sa-key: the gcloud wrapper still rejected the deploy service-account key. stderr was:"
+  cat "$ERR15" >&2
+elif ! grep -q 'activate-service-account' "$WORKDIR/gcloud-real-15.log"; then
+  fail "preflighted-sa-key: the deploy service-account key was never activated, so the reconciliation did not actually use it. gcloud log was:"
+  cat "$WORKDIR/gcloud-real-15.log" >&2
+elif ! grep -q 'invoker-gcloud-config' "$WORKDIR/gcloud-real-15.log"; then
+  fail "preflighted-sa-key: the key was activated into the machine's own gcloud config rather than a throwaway CLOUDSDK_CONFIG. gcloud log was:"
+  cat "$WORKDIR/gcloud-real-15.log" >&2
+elif ! grep -q 'describe' "$WORKDIR/gcloud-real-15.log"; then
+  fail "preflighted-sa-key: no describe call reached the real gcloud, so the reconciliation never ran. gcloud log was:"
+  cat "$WORKDIR/gcloud-real-15.log" >&2
+elif ! grep -q 'Deploy complete.' "$OUT15"; then
+  fail "preflighted-sa-key: deploy.sh did not complete. stdout was:"
+  cat "$OUT15" >&2
+else
+  pass "preflighted-sa-key: a normal preflighted deploy publishes, activating the deploy SA key into a throwaway gcloud config (rc=$RC15)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 15b (#768 r4): the same fixture proves the guard is REAL — i.e. that
+# handing the SA key to the wrapper would abort. If `scripts/gcloud/gcloud`
+# ever stopped rejecting service-account keys, case 15 would pass for the wrong
+# reason and silently stop guarding anything, so assert the rejection directly.
+# ---------------------------------------------------------------------------
+WRAPPER_ERR15="$WORKDIR/case15b-wrapper.err"
+set +e
+GCLOUD_REAL_BIN="$STUB_DIR/gcloud-real" \
+GCLOUD_REAL_LOG="$WORKDIR/gcloud-real-15b.log" \
+GOOGLE_APPLICATION_CREDENTIALS="$SA_KEY_15" \
+  "$ROOT/scripts/gcloud/gcloud" run services describe emailunsubscribe \
+    --region us-central1 --project gaycruisebingo \
+  >/dev/null 2>"$WRAPPER_ERR15"
+RC15B=$?
+set -e
+
+if [[ $RC15B -eq 0 ]]; then
+  fail "sa-key-rejection-is-real: scripts/gcloud/gcloud accepted a service-account key, so case 15 no longer guards anything. Re-check the wrapper's credential chain."
+elif ! grep -q 'unusable credential file' "$WRAPPER_ERR15"; then
+  fail "sa-key-rejection-is-real: the wrapper failed (rc=$RC15B) but not with the service-account rejection this case pins. stderr was:"
+  cat "$WRAPPER_ERR15" >&2
+else
+  pass "sa-key-rejection-is-real: scripts/gcloud/gcloud does reject a service-account key (rc=$RC15B), so case 15 is a real guard."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 16 (#768 r4): `--only hosting` neither checks nor reconciles.
+#
+# A Hosting-only deploy cannot reset the Cloud Run invoker annotation, so there
+# is nothing for the reconciliation to repair — and no reason to let a gcloud
+# credential problem block a deploy that never needed gcloud. This is the other
+# half of the "must not break normal deploys" property: GCLOUD_STUB_EXIT=1
+# simulates an entirely absent credential, and the deploy must still publish.
+# ---------------------------------------------------------------------------
+REPO16="$WORKDIR/case16-hosting-only"
+init_fixture_repo "$REPO16"
+OUT16="$WORKDIR/case16.out"
+ERR16="$WORKDIR/case16.err"
+: >"$WORKDIR/ofd-calls-16.log"
+: >"$WORKDIR/gcloud-calls-16.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-16.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-16.log" \
+GCLOUD_STUB_EXIT=1 \
+  bash -c "cd '$REPO16' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only hosting" \
+  >"$OUT16" 2>"$ERR16"
+RC16=$?
+set -e
+
+if [[ $RC16 -ne 0 ]]; then
+  fail "hosting-only: a --only hosting deploy returned $RC16 because gcloud was unavailable, though it cannot touch the invoker config at all. stderr was:"
+  cat "$ERR16" >&2
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-16.log"; then
+  fail "hosting-only: deploy.sh never published."
+elif [[ -s "$WORKDIR/gcloud-calls-16.log" ]]; then
+  fail "hosting-only: gcloud was invoked for a Hosting-only deploy. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16.log" >&2
+elif ! grep -q 'does not release Functions' "$OUT16"; then
+  fail "hosting-only: deploy.sh did not log why it skipped the invoker steps. stdout was:"
+  cat "$OUT16" >&2
+else
+  pass "hosting-only: a --only hosting deploy skips both invoker steps and publishes even with no gcloud credential (rc=$RC16)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 16b (#768 r4): …but `--only functions:emailUnsubscribe` DOES reconcile.
+# The allowlist parse must recognise a per-function selector, not just the bare
+# `functions` token — a single-function deploy is the most common way to reset
+# the annotation.
+# ---------------------------------------------------------------------------
+REPO16B="$WORKDIR/case16b-single-function"
+init_fixture_repo "$REPO16B"
+OUT16B="$WORKDIR/case16b.out"
+ERR16B="$WORKDIR/case16b.err"
+: >"$WORKDIR/ofd-calls-16b.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-16b.log" \
+  bash -c "cd '$REPO16B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:emailUnsubscribe" \
+  >"$OUT16B" 2>"$ERR16B"
+RC16B=$?
+set -e
+
+if [[ $RC16B -ne 0 ]]; then
+  fail "single-function: deploy.sh returned $RC16B. stderr was:"
+  cat "$ERR16B" >&2
+elif ! grep -q 'Reconciling Cloud Run invoker config' "$OUT16B"; then
+  fail "single-function: --only functions:emailUnsubscribe did NOT reconcile — the allowlist parse missed the per-function selector. stdout was:"
+  cat "$OUT16B" >&2
+else
+  pass "single-function: --only functions:emailUnsubscribe still reconciles (rc=$RC16B)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 17 (#768 r4 — Codex P2): stale overrides must not redirect the automatic
+# reconciliation.
+#
+# scripts/set-*-invoker.sh honour BUG_REPORT_* / EMAIL_UNSUBSCRIBE_* so an
+# operator can point a MANUAL repair at another project. Those exports survive
+# in a shell, and an automatic call that inherited them would reconcile
+# whatever the last manual repair named — a leftover
+# `EMAIL_UNSUBSCRIBE_PROJECT=fiveacross` during a gaycruisebingo deploy makes
+# both prechecks pass against Five Across while the just-reset gaycruisebingo
+# services keep 403ing, with every log line claiming success.
+# ---------------------------------------------------------------------------
+REPO17="$WORKDIR/case17-pinned-coordinates"
+init_fixture_repo "$REPO17"
+OUT17="$WORKDIR/case17.out"
+ERR17="$WORKDIR/case17.err"
+: >"$WORKDIR/ofd-calls-17.log"
+: >"$WORKDIR/gcloud-calls-17.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-17.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-17.log" \
+DEPLOY_TARGET_PROJECT=gaycruisebingo \
+BUG_REPORT_PROJECT=fiveacross \
+EMAIL_UNSUBSCRIBE_PROJECT=fiveacross \
+EMAIL_UNSUBSCRIBE_REGION=europe-west1 \
+EMAIL_UNSUBSCRIBE_SERVICE=someoldname \
+  bash -c "cd '$REPO17' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT17" 2>"$ERR17"
+RC17=$?
+set -e
+
+if [[ $RC17 -ne 0 ]]; then
+  fail "pinned-coordinates: deploy.sh returned $RC17. stderr was:"
+  cat "$ERR17" >&2
+elif grep -q 'fiveacross' "$WORKDIR/gcloud-calls-17.log"; then
+  fail "pinned-coordinates: the automatic reconciliation targeted fiveacross because a stale export leaked through. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-17.log" >&2
+elif grep -qE 'europe-west1|someoldname' "$WORKDIR/gcloud-calls-17.log"; then
+  fail "pinned-coordinates: a stale region/service override leaked into the automatic reconciliation. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-17.log" >&2
+elif ! grep -q 'project=gaycruisebingo' "$OUT17"; then
+  fail "pinned-coordinates: the reconciliation did not report the selected target's project. stdout was:"
+  cat "$OUT17" >&2
+elif ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-17.log"; then
+  fail "pinned-coordinates: the default emailunsubscribe service was not the one described. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-17.log" >&2
+else
+  pass "pinned-coordinates: stale BUG_REPORT_* / EMAIL_UNSUBSCRIBE_* exports are cleared and the project is re-pinned from the deploy target (rc=$RC17)."
 fi
 
 # ---------------------------------------------------------------------------

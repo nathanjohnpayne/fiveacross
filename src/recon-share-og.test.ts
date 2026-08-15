@@ -99,11 +99,12 @@ describe('recon: firebase.json drops the /s/** rewrite and header rule, keeps th
 // AFTER it would be silently dead on arrival — nothing would fail until
 // someone noticed unsubscribe links serving the SPA shell in production. This
 // guards the ordering structurally, parsed as JSON rather than trusted to a
-// human re-checking array position on every future rewrite. It is also the
-// backstop for the one thing the production synthetic deliberately does not
-// fail on: `tests/synthetic/unsubscribe-invoker.spec.ts` SKIPS when
-// `/unsubscribe` answers with the SPA shell (the pre-rollout state), so a
-// regression that DELETED this rewrite has to be caught here instead.
+// human re-checking array position on every future rewrite. It is the SOURCE
+// half of a pair: `tests/synthetic/unsubscribe-invoker.spec.ts` watches what
+// Hosting actually serves and treats an SPA shell at `/unsubscribe` as a
+// failure once its rollout window closes, but it cannot see this file; this
+// test cannot see what is deployed. A regression that deleted the rewrite
+// fails here immediately, before it can ever reach a deploy.
 describe('recon: firebase.json routes /unsubscribe to emailUnsubscribe ahead of the SPA catch-all (#616)', () => {
   const config = JSON.parse(firebaseJson) as {
     hosting: {

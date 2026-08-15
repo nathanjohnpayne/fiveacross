@@ -1,18 +1,30 @@
 name: synthetic-uptime
 
-# Scheduled synthetic that asserts the DEPLOYED app actually mounts and renders
-# its root — not merely that Firebase Hosting returns 200 for the shell (issue
-# #142). The 2026-07-09 outage (#141) was invisible to a 200-only check: the
-# shell + <title> loaded (200 OK) and only the client JS crashed on init
+# Scheduled synthetic that asserts the DEPLOYED production surface is healthy —
+# not merely that Firebase Hosting returns 200 for the shell (issue #142). The
+# 2026-07-09 outage (#141) was invisible to a 200-only check: the shell +
+# <title> loaded (200 OK) and only the client JS crashed on init
 # (auth/invalid-api-key), leaving a blank page. This catches an outage from ANY
 # cause (bad deploy, rotated key, rules regression that blocks first paint), not
 # just a deploy — the post-deploy gate in scripts/deploy.sh covers the deploy
-# path. It is load-and-assert only (tests/synthetic/app-mounts.spec.ts): it never
-# signs in or writes, so it creates no Auth/Firestore/Storage side effects.
+# path. Every spec under tests/synthetic runs: the app-mount probe
+# (app-mounts.spec.ts) and the unsubscribe-endpoint probe
+# (unsubscribe-invoker.spec.ts, #768). All are load-and-assert only: nothing
+# signs in or writes, so there are no Auth/Firestore/Storage side effects.
 #
 # Failures surface as: a red workflow run, GitHub's scheduled-failure email, AND
 # a single deduplicated tracking issue (opened on first failure, commented on
 # continued failure, auto-closed on recovery).
+#
+# The tracking issue CARRIES THE FAILING TEST'S OWN DIAGNOSTIC (#768 r4). It
+# used to hard-code the app-mount story — title "the app is not mounting", body
+# advising that a rendering sign-in gate means the release is healthy. Once a
+# second spec joined the suite that advice became actively misleading: an
+# emailUnsubscribe 403 leaves the app rendering perfectly, so the boilerplate
+# told the operator the release was fine and to go fix the probe, while every
+# emailed unsubscribe link was broken. The title is now derived from which
+# probe failed, and the Playwright output is quoted in the body so the
+# instructions the spec itself prints reach the person triaging.
 
 on:
   schedule:
@@ -30,7 +42,6 @@ permissions:
 
 env:
   SYNTHETIC_URL: https://gaycruisebingo.com/
-  ISSUE_TITLE: 'Synthetic uptime check failing: the app is not mounting'
   ISSUE_LABEL: synthetic-uptime
 
 jobs:
@@ -63,10 +74,15 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run synthetic (assert the app mounts)
+      # Output is teed so the failure step below can quote Playwright's own
+      # diagnostic. `pipefail` keeps npm's exit status rather than tee's, so
+      # `continue-on-error` still sees a real failure.
+      - name: Run synthetic probes
         id: synthetic
         continue-on-error: true
-        run: npm run test:synthetic
+        run: |
+          set -o pipefail
+          npm run test:synthetic 2>&1 | tee "$RUNNER_TEMP/synthetic.log"
 
       # On FAILURE: open the tracking issue if none is open, else add a comment
       # to the existing one — so a continued outage stays a single issue.
@@ -78,16 +94,43 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          log="$RUNNER_TEMP/synthetic.log"
+          [ -f "$log" ] || : > "$log"
+
+          # Name the failing surface so the title and the rollback advice match
+          # what actually broke. emailUnsubscribe 403s while the app renders
+          # perfectly, so the app-mount wording would send the operator the
+          # wrong way entirely (#768 r4).
+          if grep -q 'emailUnsubscribe 403' "$log"; then
+            subject='the unsubscribe endpoint is returning 403'
+            advice='**Do not roll back.** Rolling back Hosting does not touch Cloud Run IAM, so it cannot fix this. Restore the endpoint with `scripts/set-email-unsubscribe-invoker.sh` (idempotent), then re-run this workflow. See docs/app/phase-1-deploy.md § 1a-i.'
+          elif grep -q 'served the SPA shell' "$log"; then
+            subject='/unsubscribe is serving the app shell, not the opt-out page'
+            advice='**Do not roll back.** The `/unsubscribe` Hosting rewrite is missing from the live release, so every emailed unsubscribe link opens the app. Confirm the rewrite is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
+          else
+            subject='the app is not mounting'
+            advice="**Confirm before rolling back.** Open $SYNTHETIC_URL: if the sign-in gate renders, the PROBE failed and the release is healthy — do not roll back, fix the probe. If the page is blank or spins forever, it is a real outage: roll back per DEPLOYMENT.md § Rollback Procedure."
+          fi
+
+          # Quote the tail of the run. The specs print their own remediation
+          # steps in the failure message, and that is the text worth carrying.
+          # Capped so a pathological run cannot blow the issue-body limit.
+          diagnostic="$(tail -c 4000 "$log")"
+
           gh label create "$ISSUE_LABEL" --repo "$GITHUB_REPOSITORY" \
             --color B60205 --description "Synthetic uptime check failure" --force
           existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --label "$ISSUE_LABEL" --json number --jq '.[0].number // empty')"
-          body="$(printf 'The synthetic uptime check failed at %s (blank page, a Firebase init error such as auth/invalid-api-key, or an uncaught exception on load).\n\nRun: %s\n\n**Confirm before rolling back.** Open %s: if the sign-in gate renders, the PROBE failed and the release is healthy — do not roll back, fix the probe. If the page is blank or spins forever, it is a real outage: roll back per DEPLOYMENT.md § Rollback Procedure. This issue auto-closes when a later run passes.' "$SYNTHETIC_URL" "$RUN_URL" "$SYNTHETIC_URL")"
+
+          body="$(printf 'The synthetic uptime check failed against %s: %s\n\nRun: %s\n\n%s\n\nThis issue auto-closes when a later run passes.\n\n<details><summary>Playwright output (tail)</summary>\n\n```\n%s\n```\n\n</details>' \
+            "$SYNTHETIC_URL" "$subject" "$RUN_URL" "$advice" "$diagnostic")"
+
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing. $body"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing — $subject. $body"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" \
-              --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body "$body"
+              --title "Synthetic uptime check failing: $subject" \
+              --label "$ISSUE_LABEL" --body "$body"
           fi
 
       # On SUCCESS: if a tracking issue is open, comment recovery and close it.
@@ -103,7 +146,7 @@ jobs:
           if [ -n "$existing" ]; then
             gh issue close "$existing" --repo "$GITHUB_REPOSITORY" \
               --reason completed \
-              --comment "Recovered — the app mounts again. Run: ${RUN_URL}"
+              --comment "Recovered — every synthetic probe passes again. Run: ${RUN_URL}"
           fi
 
       # Make the run itself red so the Actions view and the scheduled-failure
