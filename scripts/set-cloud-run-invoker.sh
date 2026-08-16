@@ -32,7 +32,7 @@ set -euo pipefail
 # Usage:
 #   scripts/set-cloud-run-invoker.sh --service <name> --region <region> \
 #     --project <project> [--label <text>] [--verify-hint <text>] \
-#     [--service-env-hint <text>] [--dry-run]
+#     [--service-env-hint <text>] [--dry-run] [--allow-missing]
 #
 # Flags:
 #   --service            Cloud Run service name (required)
@@ -44,6 +44,19 @@ set -euo pipefail
 #   --service-env-hint    Text suggested in the "service not found" failure
 #                          message (default: "the correct service name")
 #   --dry-run             Print the action, change nothing
+#   --allow-missing       Treat a NOT_FOUND on the describe call as a distinct,
+#                          non-fatal outcome (exit 0) instead of a FAIL. For a
+#                          brand-new target's first deploy, the Cloud Run
+#                          service does not exist until Functions creates it,
+#                          so "not found yet" is expected, not an error (#768
+#                          r5 Codex P2). Every OTHER describe failure — no
+#                          credential, PERMISSION_DENIED, an unusable key file
+#                          — still exits 1: this flag narrows what counts as
+#                          "absent", it does not widen what counts as "fine".
+#                          Intended for the PRE-PUBLISH check only; the
+#                          post-deploy reconciliation omits it on purpose, so
+#                          a 404 there (service should exist by now) still
+#                          fails loud.
 #
 # Environment:
 #   GCLOUD_BIN   gcloud binary (default: gcloud; the 1Password-backed wrapper
@@ -97,8 +110,14 @@ LABEL="Cloud Run"
 VERIFY_HINT=""
 SERVICE_ENV_HINT="the correct service name"
 DRY_RUN=false
+ALLOW_MISSING=false
 GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
 INVOKER_ANNOTATION='run.googleapis.com/invoker-iam-disabled'
+# GCP's own status enum for a missing resource — matched case-insensitively
+# below, but always with the underscore, so a shell-level "command not found"
+# (missing gcloud binary — a real tooling failure, must stay fatal) can never
+# false-positive as "service not found yet".
+NOT_FOUND_PATTERN='NOT_FOUND'
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -109,7 +128,8 @@ while [[ $# -gt 0 ]]; do
     --verify-hint) VERIFY_HINT="${2:?--verify-hint needs a value}"; shift 2 ;;
     --service-env-hint) SERVICE_ENV_HINT="${2:?--service-env-hint needs a value}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) sed -n '3,91p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-missing) ALLOW_MISSING=true; shift ;;
+    -h|--help) sed -n '3,103p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -211,6 +231,23 @@ DESCRIBE_ERR="$(mktemp "${TMPDIR:-/tmp}/invoker-describe-XXXXXX")"
 if ! current="$(run_gcloud run services describe "$SERVICE" \
       --region "$REGION" --project "$PROJECT" \
       --format="value(metadata.annotations[\"$INVOKER_ANNOTATION\"])" 2>"$DESCRIBE_ERR")"; then
+  # --allow-missing (#768 r5 Codex P2): a NOT_FOUND describe on a brand-new
+  # target is expected, not broken — the Cloud Run service does not exist
+  # until the FIRST Functions deploy creates it, so a pre-publish check that
+  # treats "absent" as fatal makes that first deploy impossible without
+  # --skip-invoker. Narrow: only the GCP NOT_FOUND status enum qualifies (not
+  # a bare "not found" — that also matches a shell-level "gcloud: command not
+  # found", which is a real tooling failure and must stay fatal), and only
+  # when the CALLER opted in. Every other describe failure — no credential,
+  # PERMISSION_DENIED, a malformed key — falls through to the FAIL block
+  # below exactly as before, so the credential check this step exists for is
+  # not weakened.
+  if [[ "$ALLOW_MISSING" == "true" ]] && grep -qi "$NOT_FOUND_PATTERN" "$DESCRIBE_ERR"; then
+    echo "   Service '$SERVICE' does not exist yet in $REGION ($PROJECT) — expected on a" >&2
+    echo "   first deploy (nothing has released Functions there yet). Not a failure:" >&2
+    echo "   there is nothing to reconcile until the first Functions deploy creates it." >&2
+    exit 0
+  fi
   # `describe` fails for two unrelated reasons, and the older message named
   # only one of them ("set <VAR> to the correct name"), which sent an operator
   # hunting a renamed service when the real cause was an absent or expired
@@ -233,7 +270,10 @@ if ! current="$(run_gcloud run services describe "$SERVICE" \
   echo "           provisioned by scripts/firebase/op-firebase-setup, so a 403 on" >&2
   echo "           that credential means the grant is missing or the key belongs" >&2
   echo "           to a DIFFERENT project than $PROJECT." >&2
-  echo "        3. A 404 means the service was renamed. Set $SERVICE_ENV_HINT and re-run." >&2
+  echo "        3. A 404 means the service was renamed — or, on a brand-new target's" >&2
+  echo "           first deploy, simply does not exist yet (pass --allow-missing to" >&2
+  echo "           the pre-publish check to treat that as expected). Otherwise set" >&2
+  echo "           $SERVICE_ENV_HINT and re-run." >&2
   echo "        4. \"points to an unusable credential file\" should no longer be" >&2
   echo "           reachable — this script activates a service-account key into an" >&2
   echo "           isolated gcloud config rather than handing it to the wrapper." >&2

@@ -23,7 +23,10 @@ set -euo pipefail
 #   - Verifies the Cloud Run invoker credential BEFORE publishing, with a
 #     read-only dry run of both reconciliation scripts, so a missing or
 #     expired deploy credential fails the script while nothing is live.
-#     Skipped entirely when this deploy does not release Functions.
+#     Skipped entirely when this deploy does not release Functions. A
+#     NOT_FOUND here is not fatal — a brand-new target's first deploy has no
+#     Cloud Run service yet, so this check tolerates "absent" and only still
+#     fails closed on a real credential/permission problem (#768 r5).
 #   - Deploys (`op-firebase-deploy`; any arguments after `--` are passed
 #     through, e.g. `--only hosting`). Its exit status is CAPTURED rather
 #     than allowed to abort at `set -e`, because Firebase reports the
@@ -33,7 +36,11 @@ set -euo pipefail
 #     emailUnsubscribe (#768; see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
 #     this deploy could have RELEASED Functions, on success or failure; the
-#     deploy's own exit status is honoured afterwards either way.
+#     deploy's own exit status is honoured afterwards either way. Skipped —
+#     mutates nothing — when the caller passed Firebase's own `--dry-run`
+#     (#768 r5): nothing was released, so there is nothing to reconcile, and
+#     running it anyway would let a supposedly no-op validation run flip live
+#     Cloud Run IAM state.
 #   - Purges Cloudflare cache (if CF_API_TOKEN + CF_ZONE_ID are set).
 #
 # Usage:
@@ -86,7 +93,7 @@ INVOKER_SKIP=false
 DEPLOY_ARGS=()
 
 usage() {
-  sed -n '3,47p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,54p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -123,7 +130,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # that does not depend on what went wrong. Matching stays one-directional:
 # reconciling when Functions were untouched costs one idempotent read; not
 # reconciling when they were is the published-but-403 outage.
+#
+# The same pass also detects Firebase's OWN `--dry-run` (#768 r5 Codex P2): a
+# boolean flag `firebase deploy` supports directly ("perform a dry run of your
+# deployment ... without deploying any changes"), forwarded here verbatim as
+# part of DEPLOY_ARGS. It is unrelated to FUNCTIONS_ATTEMPTED — a dry run can
+# still name `functions` in its scope — but it gates Step 2.5 below: a dry run
+# never actually releases anything, so nothing there needs reconciling, and
+# running the (mutating) reconciliation anyway is the footgun a dry run exists
+# to prevent.
 FUNCTIONS_ATTEMPTED=true
+FIREBASE_DRY_RUN=false
 ONLY_VALUE=""
 EXCEPT_VALUE=""
 EXPECT_ARG=""
@@ -141,6 +158,7 @@ for arg in ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}; do
     --only=*)  ONLY_VALUE="${arg#*=}" ;;
     --except)  EXPECT_ARG="except" ;;
     --except=*) EXCEPT_VALUE="${arg#*=}" ;;
+    --dry-run) FIREBASE_DRY_RUN=true ;;
   esac
 done
 
@@ -364,14 +382,27 @@ fi
 # Gated on FUNCTIONS_ATTEMPTED: a `--only hosting` run cannot reset the invoker
 # annotation, so there is nothing for Step 2.5 to repair and no reason to let a
 # gcloud problem block a deploy that never needed gcloud (#768 r4).
+#
+# --allow-missing (#768 r5 Codex P2): for a brand-new target's FIRST deploy,
+# neither Cloud Run service exists yet — Functions has not created them —
+# so `describe` here 404s unconditionally and would abort every first deploy
+# before Firebase ever got a chance to create the services, with only
+# --skip-invoker (which also disables Step 2.5) as a workaround. --allow-missing
+# makes a NOT_FOUND describe a non-fatal, distinct outcome ONLY here, at the
+# pre-publish stage, where "the service isn't there yet" is the expected first-
+# deploy state. It narrows what counts as absent, not what counts as fine: a
+# missing credential, PERMISSION_DENIED, or any other describe failure still
+# aborts below exactly as before. Step 2.5's post-deploy reconciliation omits
+# this flag on purpose — by then the service should exist, so a 404 there
+# stays a real, fatal signal.
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker credential check skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker credential check skipped (this deploy does not release Functions)"
 else
   echo ">> Checking the Cloud Run invoker credential before publishing (read-only)"
-  if ! run_invoker "$SCRIPT_DIR/set-bug-report-invoker.sh" --dry-run ||
-     ! run_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" --dry-run; then
+  if ! run_invoker "$SCRIPT_DIR/set-bug-report-invoker.sh" --dry-run --allow-missing ||
+     ! run_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" --dry-run --allow-missing; then
     cat >&2 <<EOF
 
 ✗ Could not read the Cloud Run invoker config. NOTHING HAS BEEN PUBLISHED.
@@ -394,8 +425,11 @@ else
       project. The Firebase-vault SA key carries roles/run.admin when
       provisioned by scripts/firebase/op-firebase-setup, so a 403 on it means
       the grant is missing or the key belongs to a different project.
-    • "NOT_FOUND" — the service really was renamed. The message above lists
-      the services this credential can see.
+    • "NOT_FOUND" — this check already tolerates an absent service (expected
+      on a brand-new target's first deploy, before Functions has created it),
+      so reaching THIS abort with a NOT_FOUND above means something else is
+      also wrong — most likely cause 1 or 2. The message above lists the
+      services this credential can see.
 
   To deploy without touching the invoker config at all (the endpoints keep
   whatever state they are already in):
@@ -495,6 +529,19 @@ set -e
 # the two org-policy strings GCP returns for a Domain Restricted Sharing
 # rejection. It never suppresses the nonzero exit — Step 2.6 honours
 # DEPLOY_STATUS regardless.
+#
+# ONE exception to "runs whenever Functions were in scope": FIREBASE_DRY_RUN
+# (#768 r5 Codex P2). Firebase's own `--dry-run` "[validates] your changes and
+# builds your code without deploying any changes to your project" — nothing is
+# ever released, success or failure, so the premise this step repairs (a
+# release that may have reset the invoker annotation) never applies. Running
+# the reconciliation anyway would be the exact footgun a dry run exists to
+# rule out: `op-firebase-deploy --dry-run` could still exit 0 (validation
+# passed), FUNCTIONS_ATTEMPTED would still be true, and without this gate
+# `gcloud run services update --no-invoker-iam-check` would fire for real
+# against production during a call whose entire point was to change nothing.
+# Step 1.6's own --dry-run is unrelated and unaffected — it is always
+# read-only regardless of whether the caller also passed Firebase's.
 INVOKER_PARTIAL_FAILURE=false
 if [[ "$DEPLOY_STATUS" -ne 0 ]] &&
    grep -qiE 'Unable to set the invoker for the IAM policy|do not belong to a permitted customer|allowedPolicyMemberDomains' \
@@ -508,6 +555,8 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
+elif [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
+  echo ">> Invoker reconciliation skipped (Firebase --dry-run: nothing was deployed, so nothing could have been released — mutating the invoker config here would be the exact footgun a dry run exists to rule out)"
 else
   if [[ "$DEPLOY_STATUS" -ne 0 ]]; then
     if [[ "$INVOKER_PARTIAL_FAILURE" == "true" ]]; then
