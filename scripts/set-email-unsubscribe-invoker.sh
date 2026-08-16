@@ -31,8 +31,12 @@ set -euo pipefail
 # invoker IAM check is already disabled it no-ops.
 #
 # Usage:
-#   scripts/set-email-unsubscribe-invoker.sh              # apply to prod (default)
-#   scripts/set-email-unsubscribe-invoker.sh --dry-run    # print the action, change nothing
+#   scripts/set-email-unsubscribe-invoker.sh                 # apply to prod (default)
+#   scripts/set-email-unsubscribe-invoker.sh --dry-run       # print the action, change nothing
+#   scripts/set-email-unsubscribe-invoker.sh --allow-missing # a NOT_FOUND
+#                                                             # describe is
+#                                                             # non-fatal
+#                                                             # (first deploy)
 #
 # Environment / overrides (defaults target this project's prod endpoint):
 #   EMAIL_UNSUBSCRIBE_PROJECT   GCP project      (default: gaycruisebingo)
@@ -50,11 +54,13 @@ PROJECT="${EMAIL_UNSUBSCRIBE_PROJECT:-gaycruisebingo}"
 REGION="${EMAIL_UNSUBSCRIBE_REGION:-us-central1}"
 SERVICE="${EMAIL_UNSUBSCRIBE_SERVICE:-emailunsubscribe}"
 DRY_RUN=false
+ALLOW_MISSING=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) sed -n '3,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-missing) ALLOW_MISSING=true; shift ;;
+    -h|--help) sed -n '3,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -68,5 +74,6 @@ ARGS=(
   --service-env-hint "EMAIL_UNSUBSCRIBE_SERVICE"
 )
 [[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
+[[ "$ALLOW_MISSING" == "true" ]] && ARGS+=(--allow-missing)
 
 exec "$SCRIPT_DIR/set-cloud-run-invoker.sh" "${ARGS[@]}"

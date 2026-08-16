@@ -162,7 +162,7 @@ chmod +x "$STUB_DIR/npx"
 # wrapper scripts see a clean idempotent no-op and exit 0 — matching their real
 # documented steady state.
 #
-# Two failure knobs:
+# Three failure knobs:
 #   GCLOUD_STUB_EXIT   fail EVERY call (an absent credential — the pre-publish
 #                      check catches this before op-firebase-deploy runs).
 #   GCLOUD_FAIL_AFTER  fail only calls after the Nth, counted in
@@ -171,6 +171,13 @@ chmod +x "$STUB_DIR/npx"
 #                      post-publish reconciliation then fails — a credential
 #                      that expired mid-deploy, or describe-permission without
 #                      update-permission.
+#   GCLOUD_STUB_ERROR_TEXT  the stderr line printed alongside a simulated
+#                      failure (default: the generic "simulated failure"
+#                      line above). Set to a real gcloud NOT_FOUND error
+#                      (e.g. "ERROR: (gcloud.run.services.describe)
+#                      NOT_FOUND: Requested entity was not found.") to
+#                      exercise the --allow-missing / first-deploy path
+#                      (#768 r5) distinctly from a credential failure.
 cat >"$STUB_DIR/gcloud" <<'STUB'
 #!/usr/bin/env bash
 if [ -n "${GCLOUD_LOG:-}" ]; then
@@ -194,14 +201,18 @@ if [ -n "${GCLOUD_CALL_COUNTER:-}" ]; then
 fi
 exit_code="${GCLOUD_STUB_EXIT:-0}"
 if [ "$exit_code" != "0" ]; then
-  echo "stub-gcloud: simulated failure (GCLOUD_STUB_EXIT=$exit_code)" >&2
+  echo "${GCLOUD_STUB_ERROR_TEXT:-stub-gcloud: simulated failure (GCLOUD_STUB_EXIT=$exit_code)}" >&2
   exit "$exit_code"
 fi
 # Only `run services describe ... --format=value(metadata.annotations[...])`
 # is exercised by scripts/set-cloud-run-invoker.sh; answering "true"
 # (the invoker-iam-disabled annotation) makes it see the already-correct,
-# idempotent no-op state on every call.
-echo "true"
+# idempotent no-op state on every call. GCLOUD_STUB_ANNOTATION overrides this
+# to "false" so a test can prove whether a MUTATING `update` call would have
+# followed — with the default "true", set-cloud-run-invoker.sh's own
+# idempotence check would short-circuit before ever reaching `update`, which
+# would make a dry-run regression test pass for the wrong reason (#768 r5).
+echo "${GCLOUD_STUB_ANNOTATION:-true}"
 exit 0
 STUB
 chmod +x "$STUB_DIR/gcloud"
@@ -1131,6 +1142,167 @@ elif ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-17.log"; then
   cat "$WORKDIR/gcloud-calls-17.log" >&2
 else
   pass "pinned-coordinates: stale BUG_REPORT_* / EMAIL_UNSUBSCRIBE_* exports are cleared and the project is re-pinned from the deploy target (rc=$RC17)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 18 (#768 r5 — Codex P2, dry-run footgun). Firebase's OWN `--dry-run`
+# must not let Step 2.5 mutate the Cloud Run invoker config.
+#
+# `firebase deploy --dry-run` is a real, documented flag ("perform a dry run
+# of your deployment ... without deploying any changes to your project"),
+# forwarded here through DEPLOY_ARGS exactly like `--only hosting` is. Before
+# this round, only FUNCTIONS_ATTEMPTED gated Step 2.5, so
+# `scripts/deploy.sh -- --dry-run` — a call whose entire purpose is to change
+# nothing — still ran the MUTATING reconciliation for real once
+# op-firebase-deploy's own dry run reported success (DEPLOY_STATUS=0).
+#
+# GCLOUD_STUB_ANNOTATION=false makes every `describe` answer "not yet
+# disabled" — the state that would otherwise require a real `gcloud run
+# services update ... --no-invoker-iam-check` call. With the default
+# annotation ("true", already disabled) this test would pass for the wrong
+# reason: set-cloud-run-invoker.sh's own idempotence check short-circuits
+# before ever reaching `update`, regardless of whether Step 2.5 ran. Forcing
+# "false" means the ONLY thing standing between this test and a real mutation
+# attempt is deploy.sh's own dry-run gate — exactly what's under test.
+#
+# Step 1.6's own `--dry-run` (always passed, unrelated to Firebase's) is
+# unaffected and still runs read-only, so a `describe` call IS expected in
+# the gcloud log — only `update` must be absent.
+# ---------------------------------------------------------------------------
+REPO18="$WORKDIR/case18-firebase-dry-run"
+init_fixture_repo "$REPO18"
+OUT18="$WORKDIR/case18.out"
+ERR18="$WORKDIR/case18.err"
+: >"$WORKDIR/ofd-calls-18.log"
+: >"$WORKDIR/gcloud-calls-18.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-18.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-18.log" \
+GCLOUD_STUB_ANNOTATION=false \
+  bash -c "cd '$REPO18' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --dry-run" \
+  >"$OUT18" 2>"$ERR18"
+RC18=$?
+set -e
+
+if [[ $RC18 -ne 0 ]]; then
+  fail "firebase-dry-run: deploy.sh returned $RC18 for a Firebase --dry-run. stderr was:"
+  cat "$ERR18" >&2
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-18.log"; then
+  fail "firebase-dry-run: deploy.sh never reached op-firebase-deploy."
+elif ! grep -q -- '--dry-run' "$WORKDIR/ofd-calls-18.log"; then
+  fail "firebase-dry-run: op-firebase-deploy was not called with --dry-run. Call log was:"
+  cat "$WORKDIR/ofd-calls-18.log" >&2
+elif grep -qw 'update' "$WORKDIR/gcloud-calls-18.log"; then
+  fail "firebase-dry-run: gcloud was invoked with 'update' during a Firebase --dry-run — a supposedly no-op validation run mutated live Cloud Run invoker config. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-18.log" >&2
+elif ! grep -q 'describe' "$WORKDIR/gcloud-calls-18.log"; then
+  fail "firebase-dry-run: Step 1.6's own read-only pre-publish check did not run. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-18.log" >&2
+elif ! grep -q 'Invoker reconciliation skipped (Firebase --dry-run' "$OUT18"; then
+  fail "firebase-dry-run: deploy.sh did not log why Step 2.5 was skipped. stdout was:"
+  cat "$OUT18" >&2
+elif grep -q 'Reconciling Cloud Run invoker config' "$OUT18"; then
+  fail "firebase-dry-run: deploy.sh ran the Step 2.5 reconciliation banner despite the Firebase --dry-run. stdout was:"
+  cat "$OUT18" >&2
+elif ! grep -q 'Deploy complete.' "$OUT18"; then
+  fail "firebase-dry-run: deploy.sh did not complete. stdout was:"
+  cat "$OUT18" >&2
+else
+  pass "firebase-dry-run: a Firebase --dry-run runs the read-only pre-publish check but skips the mutating Step 2.5 reconciliation entirely (rc=$RC18, no gcloud update call)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 19a (#768 r5 — Codex P2, chicken-and-egg). A first deploy against a
+# brand-new target — neither Cloud Run service exists yet — must not be
+# aborted at the Step 1.6 pre-publish check, and the SAME condition must
+# still fail the deploy if it persists at Step 2.5 post-deploy (proving a 404
+# stays meaningful there, since by then the service should exist).
+#
+# GCLOUD_STUB_ERROR_TEXT reproduces gcloud's real NOT_FOUND status enum for a
+# missing Cloud Run service. Every gcloud call fails identically here (the
+# stub cannot tell Step 1.6's calls from Step 2.5's), which models the
+# pessimistic case: the service is STILL missing after "deploy" (op-firebase-
+# deploy is stubbed and never actually creates anything). Step 1.6 must let
+# that through; Step 2.5 must not.
+# ---------------------------------------------------------------------------
+REPO19A="$WORKDIR/case19a-first-deploy-not-found"
+init_fixture_repo "$REPO19A"
+OUT19A="$WORKDIR/case19a.out"
+ERR19A="$WORKDIR/case19a.err"
+: >"$WORKDIR/ofd-calls-19a.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-19a.log" \
+NPM_LOG="$WORKDIR/npm-calls-19a.log" \
+GCLOUD_STUB_EXIT=1 \
+GCLOUD_STUB_ERROR_TEXT='ERROR: (gcloud.run.services.describe) NOT_FOUND: Requested entity was not found.' \
+  bash -c "cd '$REPO19A' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT19A" 2>"$ERR19A"
+RC19A=$?
+set -e
+
+if ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-19a.log"; then
+  fail "first-deploy-not-found: deploy.sh never reached op-firebase-deploy — Step 1.6 wrongly aborted a first deploy just because the Cloud Run service does not exist yet. stderr was:"
+  cat "$ERR19A" >&2
+elif grep -q 'NOTHING HAS BEEN PUBLISHED' "$ERR19A"; then
+  fail "first-deploy-not-found: deploy.sh printed the pre-publish abort banner for a plain NOT_FOUND, though op-firebase-deploy was (impossibly) also reached. stderr was:"
+  cat "$ERR19A" >&2
+elif ! grep -q 'does not exist yet' "$ERR19A"; then
+  fail "first-deploy-not-found: set-cloud-run-invoker.sh did not print the expected first-deploy explanation for the NOT_FOUND. stderr was:"
+  cat "$ERR19A" >&2
+elif [[ $RC19A -eq 0 ]]; then
+  fail "first-deploy-not-found: deploy.sh returned 0 though the Cloud Run service is STILL missing after \"deploy\" — Step 2.5 should have failed the run, not silently accepted a persistent 404."
+elif ! grep -q 'reconciliation FAILED and the deploy is already live' "$ERR19A"; then
+  fail "first-deploy-not-found: Step 2.5 did not fail loudly on the still-missing service post-deploy — a 404 there must stay fatal. stderr was:"
+  cat "$ERR19A" >&2
+elif grep -q 'Deploy complete.' "$OUT19A"; then
+  fail "first-deploy-not-found: deploy.sh printed 'Deploy complete.' despite the post-deploy reconciliation failing."
+else
+  pass "first-deploy-not-found: Step 1.6 tolerates a NOT_FOUND before publishing (op-firebase-deploy reached, rc=$RC19A), and Step 2.5 still fails loud if the service is STILL missing after deploy."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 19b (#768 r5 — Codex P2): --allow-missing narrows what counts as
+# "absent", not what counts as "fine" — a NON-NOT_FOUND describe failure
+# (credential/permission) at Step 1.6 must still abort BEFORE publishing,
+# exactly as before this round. Same shape as case 19a but with a
+# PERMISSION_DENIED-flavored error instead of NOT_FOUND, to prove the new
+# --allow-missing flag added in this round does not accidentally widen its
+# net to swallow a real credential problem.
+# ---------------------------------------------------------------------------
+REPO19B="$WORKDIR/case19b-permission-denied"
+init_fixture_repo "$REPO19B"
+OUT19B="$WORKDIR/case19b.out"
+ERR19B="$WORKDIR/case19b.err"
+: >"$WORKDIR/ofd-calls-19b.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-19b.log" \
+NPM_LOG="$WORKDIR/npm-calls-19b.log" \
+GCLOUD_STUB_EXIT=1 \
+GCLOUD_STUB_ERROR_TEXT="ERROR: (gcloud.run.services.describe) PERMISSION_DENIED: Permission 'run.services.get' denied on resource." \
+  bash -c "cd '$REPO19B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT19B" 2>"$ERR19B"
+RC19B=$?
+set -e
+
+if [[ $RC19B -eq 0 ]]; then
+  fail "permission-denied-still-aborts: deploy.sh returned 0 though every gcloud call was denied — --allow-missing should not have swallowed a PERMISSION_DENIED. stdout was:"
+  cat "$OUT19B" >&2
+elif grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-19b.log"; then
+  fail "permission-denied-still-aborts: deploy.sh PUBLISHED despite a PERMISSION_DENIED on the pre-publish check — --allow-missing widened what counts as fine, not just what counts as absent."
+elif ! grep -q 'NOTHING HAS BEEN PUBLISHED' "$ERR19B"; then
+  fail "permission-denied-still-aborts: deploy.sh did not print the pre-publish abort banner. stderr was:"
+  cat "$ERR19B" >&2
+elif ! grep -q 'FAIL: could not describe Cloud Run service' "$ERR19B"; then
+  fail "permission-denied-still-aborts: set-cloud-run-invoker.sh's own FAIL diagnostic did not surface. stderr was:"
+  cat "$ERR19B" >&2
+else
+  pass "permission-denied-still-aborts: a non-NOT_FOUND describe failure still aborts BEFORE publishing (rc=$RC19B) — --allow-missing did not widen the credential check."
 fi
 
 # ---------------------------------------------------------------------------

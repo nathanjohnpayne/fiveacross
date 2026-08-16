@@ -26,8 +26,10 @@ set -euo pipefail
 # no-ops.
 #
 # Usage:
-#   scripts/set-bug-report-invoker.sh              # apply to prod (default)
-#   scripts/set-bug-report-invoker.sh --dry-run    # print the action, change nothing
+#   scripts/set-bug-report-invoker.sh                 # apply to prod (default)
+#   scripts/set-bug-report-invoker.sh --dry-run       # print the action, change nothing
+#   scripts/set-bug-report-invoker.sh --allow-missing # a NOT_FOUND describe is
+#                                                      # non-fatal (first deploy)
 #
 # Environment / overrides (defaults target this project's prod callable):
 #   BUG_REPORT_PROJECT   GCP project      (default: gaycruisebingo)
@@ -43,11 +45,13 @@ PROJECT="${BUG_REPORT_PROJECT:-gaycruisebingo}"
 REGION="${BUG_REPORT_REGION:-us-central1}"
 SERVICE="${BUG_REPORT_SERVICE:-submitbugreport}"
 DRY_RUN=false
+ALLOW_MISSING=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) sed -n '3,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-missing) ALLOW_MISSING=true; shift ;;
+    -h|--help) sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -61,5 +65,6 @@ ARGS=(
   --service-env-hint "BUG_REPORT_SERVICE"
 )
 [[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
+[[ "$ALLOW_MISSING" == "true" ]] && ARGS+=(--allow-missing)
 
 exec "$SCRIPT_DIR/set-cloud-run-invoker.sh" "${ARGS[@]}"
