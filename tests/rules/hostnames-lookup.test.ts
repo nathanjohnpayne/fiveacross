@@ -19,7 +19,13 @@ import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, updateDoc } from '
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
 const CANONICAL = 'bodega-bay.vacaybingo.com';
-const ALIAS = 'bodega-bay.fiveacrossbingo.com';
+// A real serving alias, deliberately: `bodega-bay.fiveacrossbingo.com` was never
+// one. No Event has been dealt from that origin — it is a redirect hostname on a
+// zone being retired (#630) — so using it here taught the opposite of the domain
+// model (BRAND.md, CONTEXT.md § Alias). `bodega-bay.vacaybingo.com` still names
+// itself canonical until the post-Event repoint (#601), which is why it is the
+// CANONICAL here and the fiveacross.app host is the alias pointing at it.
+const ALIAS = 'bodega-bay.fiveacross.app';
 
 let testEnv: RulesTestEnvironment;
 const authed = (uid: string) => testEnv.authenticatedContext(uid).firestore();
