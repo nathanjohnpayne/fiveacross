@@ -8,6 +8,7 @@ export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--skip-cf-purge',
   '--skip-synthetic',
   '--skip-invoker',
+  '--skip-env-check',
 ]);
 
 function deployArguments(args) {
