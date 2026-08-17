@@ -19,13 +19,18 @@ import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, updateDoc } from '
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
 const CANONICAL = 'bodega-bay.vacaybingo.com';
-// A real serving alias, deliberately: `bodega-bay.fiveacrossbingo.com` was never
-// one. No Event has been dealt from that origin — it is a redirect hostname on a
-// zone being retired (#630) — so using it here taught the opposite of the domain
-// model (BRAND.md, CONTEXT.md § Alias). `bodega-bay.vacaybingo.com` still names
-// itself canonical until the post-Event repoint (#601), which is why it is the
-// CANONICAL here and the fiveacross.app host is the alias pointing at it.
-const ALIAS = 'bodega-bay.fiveacross.app';
+// Deliberately a reserved-TLD name (RFC 2606) rather than a production hostname.
+// This fixture needs an address that is non-canonical *by construction*, and no
+// real Bodega host qualifies: `bodega-bay.fiveacross.app` is the designated
+// canonical (README, docs/app/deploy-targets.md), `bodega-bay.vacaybingo.com`
+// still names itself canonical until the #601 repoint, and
+// `bodega-bay.fiveacrossbingo.com` — used here previously — is a redirect
+// hostname on a zone being retired (#630) that never served an Event at all.
+// Seeding any of them as `isCanonical: false` would teach the opposite of the
+// deployed migration state. The rule under test cares only that a second
+// document resolves and names its canonical elsewhere, so a name that can never
+// be a real serving host is the honest fixture.
+const ALIAS = 'bodega-bay.alias.test';
 
 let testEnv: RulesTestEnvironment;
 const authed = (uid: string) => testEnv.authenticatedContext(uid).firestore();
