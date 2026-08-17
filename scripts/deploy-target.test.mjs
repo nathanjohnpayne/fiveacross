@@ -91,6 +91,17 @@ describe('deploy target selection', () => {
     });
   });
 
+  // #767: the break-glass escape for the functions/.env.<projectId>
+  // param-coverage guard must reach scripts/deploy.sh the same way the other
+  // deploy-wrapper flags do.
+  it('accepts --skip-env-check as a deploy-wrapper flag and keeps it before the separator', () => {
+    expect(deployRequest(['gaycruisebingo', '--skip-env-check', '--', '--only', 'hosting'])).toEqual({
+      target: 'gaycruisebingo',
+      wrapperArgs: ['--skip-env-check'],
+      deployArgs: ['--only', 'hosting'],
+    });
+  });
+
   it('preserves the target environment when a wrapper flag is needed', () => {
     const invocation = deployInvocation(
       'gaycruisebingo',
