@@ -197,10 +197,11 @@ The canonical helper scripts live in this template repo. Install them once per m
 
 ```bash
 # From the mergepath directory:
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.local/bin/lib
 cp scripts/gcloud/gcloud ~/.local/bin/gcloud
 cp scripts/firebase/op-firebase-deploy ~/.local/bin/
 cp scripts/firebase/op-firebase-setup ~/.local/bin/
+cp scripts/firebase/lib/credential-materialization.sh ~/.local/bin/lib/
 chmod +x ~/.local/bin/gcloud ~/.local/bin/op-firebase-deploy ~/.local/bin/op-firebase-setup
 ```
 

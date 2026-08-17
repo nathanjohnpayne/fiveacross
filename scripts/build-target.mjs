@@ -33,6 +33,10 @@ export const DEPLOY_TARGETS = Object.freeze({
     cloudflareZoneId: '8066dd2b105ad564c45bb8c898859343',
     skipCloudflarePurge: false,
     syntheticUrl: 'https://gaycruisebingo.com/',
+    // submitBugReport / emailUnsubscribe's Cloud Run invoker-IAM workaround
+    // (#768) is provisioned only for THIS project — scripts/deploy.sh
+    // reconciles it here automatically.
+    skipInvokerReconcile: false,
   }),
   fiveacross: Object.freeze({
     envFile: '.env.fiveacross',
@@ -52,6 +56,17 @@ export const DEPLOY_TARGETS = Object.freeze({
     }),
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
+    // scripts/set-bug-report-invoker.sh and scripts/set-email-unsubscribe-invoker.sh
+    // default to (and are only documented/provisioned for) the gaycruisebingo
+    // project's Cloud Run services. The fiveacross deploy credential is that
+    // project's own Firebase-vault SA key, which is not provisioned with IAM
+    // access to describe or update a gaycruisebingo Cloud Run service — running
+    // the reconciliation unconditionally here would fail on a permissions error
+    // for a check this target doesn't need, not silently no-op. Opt out until
+    // (if ever) the same org-policy constraint is confirmed and provisioned for
+    // fiveacross; the scripts already support that via BUG_REPORT_PROJECT=fiveacross
+    // / EMAIL_UNSUBSCRIBE_PROJECT=fiveacross for a manual, break-glass run.
+    skipInvokerReconcile: true,
   }),
 });
 
@@ -61,6 +76,17 @@ export function validateTargetOperationalMetadata(target, config) {
   }
   if (typeof config.skipCloudflarePurge !== 'boolean') {
     throw new Error(`Refusing target ${target}: register skipCloudflarePurge as an explicit boolean.`);
+  }
+  // Required rather than defaulted (#768). An omitted skipInvokerReconcile
+  // reads as `false`, which is the DANGEROUS default for a new target: it
+  // sends scripts/deploy.sh at gaycruisebingo's Cloud Run services carrying
+  // the new target's own project-scoped deploy credential, which cannot
+  // describe them — so the deploy fails on a permissions error for a check
+  // that target never needed. The choice is per-project (does this project's
+  // org policy impose the same invoker constraint, and is its credential
+  // provisioned for it?), so it has to be stated, not inherited.
+  if (typeof config.skipInvokerReconcile !== 'boolean') {
+    throw new Error(`Refusing target ${target}: register skipInvokerReconcile as an explicit boolean.`);
   }
   if (config.skipCloudflarePurge) {
     if (config.cloudflareZoneId !== undefined) {

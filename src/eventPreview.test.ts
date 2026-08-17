@@ -3,6 +3,7 @@ import {
   activeEventPreview,
   applyResolvedEventPreview,
   coerceEventPreview,
+  previewDayEmoji,
   previewDayLine,
   previewMetaLine,
   type EventPreview,
@@ -142,6 +143,64 @@ describe('previewDayLine — computed live, never stored', () => {
   });
 });
 
+// #776: the postcard's stamp postage. Read through the SAME Day selection as
+// the line above, so the two can never describe different Days — and returning
+// `null` on the three no-postage shapes is what makes the empty dashed box
+// unreachable in the component.
+describe('previewDayEmoji — the stamp postage, or nothing', () => {
+  it('is the previewed Day’s own emoji, tracking the same Day as the line', () => {
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 6))).toBe('🐦');
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 7))).toBe('🐦');
+  });
+
+  it('is null on a Day the seed gave no emoji — Bodega’s Days 2 and 3', () => {
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 8))).toBeNull();
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 9))).toBeNull();
+  });
+
+  it('is null once the trip is over, like the Day line it follows', () => {
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 10))).toBeNull();
+  });
+
+  it('is null on a missing or empty schedule — the loading and pre-#647 shapes', () => {
+    expect(previewDayEmoji(undefined)).toBeNull();
+    expect(previewDayEmoji([])).toBeNull();
+  });
+
+  // Codex P2, round 3: `asText` accepts up to 200 characters because that cap
+  // guards a malformed seed, not this layout. The stamp is content-sized
+  // against a FIXED reserved corner, so an over-wide value would grow the box
+  // back over the copy — the exact overlap #776 removes. Postage that is not
+  // one glyph is declined, and the card falls back to its unstamped layout.
+  const dayWith = (emoji: string) => [{ date: '2026-08-07', title: 'Day', emoji }];
+
+  it.each([
+    ['a whole sentence', 'The Birds Have Entered the Chat'],
+    ['several emoji', '🐦🐦🐦'],
+    ['an emoji with trailing text', '🐦 Day one'],
+    ['a long malformed value', 'x'.repeat(200)],
+  ])('declines postage that is not a single glyph: %s', (_label, emoji) => {
+    expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBeNull();
+  });
+
+  it.each([
+    ['a plain emoji', '🐦'],
+    ['a variation-selector emoji', '🌫️'],
+    ['a flag (two code points, one glyph)', '🇮🇹'],
+    ['a skin-toned emoji', '👋🏽'],
+    ['a ZWJ family sequence', '👨‍👩‍👧‍👦'],
+    ['a non-emoji single character', '★'],
+  ])('accepts genuine single-glyph postage: %s', (_label, emoji) => {
+    expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBe(emoji);
+  });
+
+  it('leaves the Day LINE alone — inline text wraps, so it costs nothing there', () => {
+    // Only the STAMP has a layout constraint. A multi-glyph value still leads
+    // the line rather than being silently dropped from the card entirely.
+    expect(previewDayLine(dayWith('🐦🐦🐦'), localNoon(2026, 8, 6))).toBe('🐦🐦🐦 Day 1: Day');
+  });
+});
+
 describe('previewMetaLine — the fragments that exist, joined', () => {
   it('joins dates, host and Day line the way the wireframe does', () => {
     expect(previewMetaLine(PREVIEW, localNoon(2026, 8, 6))).toBe(
@@ -152,6 +211,23 @@ describe('previewMetaLine — the fragments that exist, joined', () => {
   it('renders the achievable subset when fragments are absent', () => {
     expect(previewMetaLine({ eventName: 'X', hostedBy: 'Kim' })).toBe('hosted by Kim');
     expect(previewMetaLine({ eventName: 'X' })).toBeNull();
+  });
+
+  // #776: the emoji MOVES to the stamp, it is not removed — so the Day stays
+  // named in words and the glyph is never printed twice on one card.
+  it('yields the Day’s emoji to the stamp without losing the Day itself', () => {
+    expect(previewMetaLine(PREVIEW, localNoon(2026, 8, 6), 'stamp')).toBe(
+      'Aug 7–9 · hosted by Kim · Day 1: The Birds Have Entered the Chat',
+    );
+    expect(previewDayLine(PREVIEW.days, localNoon(2026, 8, 6), 'stamp')).toBe(
+      'Day 1: The Birds Have Entered the Chat',
+    );
+  });
+
+  it('changes nothing on a Day with no emoji — there is no stamp to yield to', () => {
+    const line = previewDayLine(PREVIEW.days, localNoon(2026, 8, 8), 'stamp');
+    expect(line).toBe('Day 2: Side Quests');
+    expect(line).toBe(previewDayLine(PREVIEW.days, localNoon(2026, 8, 8)));
   });
 });
 

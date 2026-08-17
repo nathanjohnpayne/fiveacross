@@ -187,10 +187,21 @@
   .vlock .vb{font-family:'Bebas Neue','Arial Narrow',sans-serif;font-size:27px;letter-spacing:.06em;color:var(--ink)}
   .vlock .by{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
   .vlock .tag{font-size:10.5px;font-style:italic;color:var(--primary);margin-top:2px}
+  /* Postcard spacing contract (two built-screen bugs observed, both structural):
+     1. the stamp box is CONTENT-SIZED — padding wraps the postage emoji, never a
+        fixed width/height the emoji can overflow; line-height 1 keeps it tight.
+     2. the postcard reserves its stamp corner via padding-right, so text wraps
+        short of the stamp and can never run beneath it.
+     The Day's emoji IS the postage; with no Day emoji, render no stamp at all
+     (an empty dashed box reads as a rendering bug) and drop the reserved padding.
+     3. the glyph is drawn ONCE: when the stamp carries it, the Day line drops its
+        leading emoji and keeps naming the Day in words. With no stamp the line
+        leads with the emoji, as it did before the postcard existed. */
   .postcard{border:1.5px solid var(--border);border-radius:4px;background:var(--panel);
-    padding:10px 12px;position:relative;font-size:10.5px;color:var(--dim);line-height:1.45}
-  .postcard::after{content:"";position:absolute;top:7px;right:8px;width:26px;height:20px;
-    border:1.5px dashed var(--border);border-radius:2px}
+    padding:10px 46px 10px 12px;position:relative;font-size:10.5px;color:var(--dim);line-height:1.45}
+  .postcard::after{content:"🐦";position:absolute;top:6px;right:8px;padding:4px 6px;
+    border:1.5px dashed var(--border);border-radius:2px;font-size:12px;line-height:1;
+    transform:rotate(3deg)}
   .suggestcard{border:1.5px dashed var(--primary);border-radius:12px;padding:8px 11px;
     display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--dim)}
   .suggestcard b{color:var(--ink);display:block;font-size:11.5px}
@@ -1036,13 +1047,13 @@
     <div class="mini" data-theme="birds-group-chat">
       <div class="board" style="gap:10px;justify-content:center">
         <div class="vlock"><div class="vb">VACAY BINGO</div><div class="by">by Five Across</div><div class="tag">Take the detour. <span style="opacity:.75">For the story.</span></div></div>
-        <div class="postcard"><b style="color:var(--ink)">Weekend in Bodega Bay</b><br>Aug 7–9 · hosted by Kim · 🐦 Day 1: The Birds Have Entered the Chat<br><span style="font-size:9.5px">bodega-bay.vacaybingo.com</span></div>
+        <div class="postcard"><b style="color:var(--ink)">Weekend in Bodega Bay</b><br>Aug 7–9 · hosted by Kim · Day 1: The Birds Have Entered the Chat<br><span style="font-size:9.5px">bodega-bay.vacaybingo.com</span></div>
         <div class="btnrow"><span class="btn ok">Continue with Google</span></div>
         <div class="note" style="text-align:left">Prompts are invitations, not chores. Take the fun detour, share the story if you want—five across earns a BINGO.</div>
         <div class="note">Patchy signal? Your card keeps working offline—marks sync when you reconnect.</div>
       </div>
     </div>
-    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through either hostname lands here after canonicalization: one identity, the Vacay lockup with the <b>BY FIVE ACROSS</b> endorsement line, the trip as a postcard (dashed stamp corner), the same Google sign-in. <b>No 18+ attestation</b>—Bodega's pool holds no active spicy Prompts, so <code>adultContent</code> derives <code>false</code> and the button is enabled on load; the same Edition would draw the gate for a spicier trip. Moderate camp: no decorative lead-in emoji, offline stated plainly. <b>One deliberate divergence from the lexicon, flagged, not smuggled:</b> the offline line drawn here is a <b>proposed</b> vacay <code>offlineNote</code> override—the #608 table marks that row <i>unchanged</i> from GCB, but GCB's "Lost signal at sea? The printed cards and PDF still work." would put a cruise noun (and a printed-cards claim no road trip has) on the trip gate. Feed back to #608 before implementation; the annotation table carries the same flag. Splash reads "Checking your trip pass…"; installed-PWA name <b>Vacay Bingo</b>.</p>
+    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through either hostname lands here after canonicalization: one identity, the Vacay lockup with the <b>BY FIVE ACROSS</b> endorsement line, the trip as a postcard whose stamp corner carries the current Day's emoji as its postage (slightly rotated, like it was pressed on; the box is content-sized so the postage can never overflow it, and the postcard reserves its corner so text never runs beneath the stamp; an empty stamp box reads as a rendering bug—if no Day emoji exists, render no stamp and no reserved corner; and the glyph is drawn <i>once</i>—the stamp takes it, so the Day line below drops its leading emoji and names the Day in words instead), the same Google sign-in. <b>No 18+ attestation</b>—Bodega's pool holds no active spicy Prompts, so <code>adultContent</code> derives <code>false</code> and the button is enabled on load; the same Edition would draw the gate for a spicier trip. Moderate camp: no decorative lead-in emoji, offline stated plainly. <b>One deliberate divergence from the lexicon, flagged, not smuggled:</b> the offline line drawn here is a <b>proposed</b> vacay <code>offlineNote</code> override—the #608 table marks that row <i>unchanged</i> from GCB, but GCB's "Lost signal at sea? The printed cards and PDF still work." would put a cruise noun (and a printed-cards claim no road trip has) on the trip gate. Feed back to #608 before implementation; the annotation table carries the same flag. Splash reads "Checking your trip pass…"; installed-PWA name <b>Vacay Bingo</b>.</p>
   </div>
 
   <!-- ---------- Join · Five Across ---------- -->

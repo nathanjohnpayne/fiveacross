@@ -72,6 +72,65 @@ describe('recon: firebase.json drops the /s/** rewrite and header rule, keeps th
   });
 });
 
+// #616 follow-up: the `gaycruisebingo` GCP project's Domain Restricted Sharing
+// org policy refuses to grant `allUsers` the Cloud Run invoker role on
+// `emailUnsubscribe`'s backing service, so an unauthenticated request is
+// rejected with a 403 before application code sees it.
+//
+// A Hosting rewrite does NOT get around that, and an earlier version of this
+// comment claimed it did — that the `/unsubscribe` rewrite proxies under
+// Firebase Hosting's own identity and so escapes the org policy. #768
+// disproved it in production: Hosting FORWARDS the unauthenticated request
+// into the same Cloud Run invoker check, so the hosted URL 403s exactly like
+// the raw `*.cloudfunctions.net` one. What makes BOTH answer is disabling the
+// invoker IAM check on the backing service — a service setting, not an IAM
+// binding, which is why the org policy permits it (`scripts/deploy.sh` Step
+// 2.5, via `scripts/set-email-unsubscribe-invoker.sh`; see
+// `functions/src/params.ts`'s EMAIL_UNSUBSCRIBE_URL and
+// `docs/app/phase-1-deploy.md` § Cloud Run invoker reconciliation).
+//
+// So the rewrite this file guards is a DELIVERABILITY choice, not a
+// reachability one: `EMAIL_UNSUBSCRIBE_URL` mails a first-party
+// `gaycruisebingo.com` link rather than a raw Cloud Functions URL. The
+// ordering below still has to hold or that link breaks outright — Firebase
+// Hosting evaluates rewrites in ARRAY ORDER and applies the first match, and
+// the pre-existing `{ "source": "**", "destination": "/index.html" }` SPA
+// catch-all matches every path, so a later edit that appended a new rewrite
+// AFTER it would be silently dead on arrival — nothing would fail until
+// someone noticed unsubscribe links serving the SPA shell in production. This
+// guards the ordering structurally, parsed as JSON rather than trusted to a
+// human re-checking array position on every future rewrite. It is the SOURCE
+// half of a pair: `tests/synthetic/unsubscribe-invoker.spec.ts` watches what
+// Hosting actually serves and treats an SPA shell at `/unsubscribe` as a
+// failure once its rollout window closes, but it cannot see this file; this
+// test cannot see what is deployed. A regression that deleted the rewrite
+// fails here immediately, before it can ever reach a deploy.
+describe('recon: firebase.json routes /unsubscribe to emailUnsubscribe ahead of the SPA catch-all (#616)', () => {
+  const config = JSON.parse(firebaseJson) as {
+    hosting: {
+      rewrites: Array<{
+        source?: string;
+        destination?: string;
+        function?: { functionId?: string; region?: string };
+      }>;
+    };
+  };
+  const rewrites = config.hosting.rewrites;
+
+  it('places /unsubscribe before the ** catch-all, so the catch-all cannot swallow it', () => {
+    const unsubscribeIndex = rewrites.findIndex((r) => r.source === '/unsubscribe');
+    const catchAllIndex = rewrites.findIndex((r) => r.source === '**' && r.destination === '/index.html');
+    expect(unsubscribeIndex, 'the /unsubscribe rewrite must exist').toBeGreaterThanOrEqual(0);
+    expect(catchAllIndex, 'the SPA catch-all must exist').toBeGreaterThanOrEqual(0);
+    expect(unsubscribeIndex, '/unsubscribe must be ordered before the SPA catch-all').toBeLessThan(catchAllIndex);
+  });
+
+  it('targets the emailUnsubscribe function in us-central1', () => {
+    const rewrite = rewrites.find((r) => r.source === '/unsubscribe');
+    expect(rewrite?.function).toEqual({ functionId: 'emailUnsubscribe', region: 'us-central1' });
+  });
+});
+
 describe('recon: storage.rules drops the inert /og/** block', () => {
   it('storage.rules has no /og/ match block', () => {
     expect(storageRules).not.toMatch(/match \/og\//);
