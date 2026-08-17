@@ -52,6 +52,8 @@ set -euo pipefail
 #   scripts/deploy.sh --skip-synthetic      # skip the post-deploy app-mount check
 #   scripts/deploy.sh --skip-invoker        # skip the Cloud Run invoker credential
 #                                           # check AND the reconciliation
+#   scripts/deploy.sh --skip-env-check      # skip the functions/.env.<projectId>
+#                                           # param-coverage guard (#767)
 #
 # Environment:
 #   BUILD_CMD            Build command (default: "npm run build").
@@ -91,10 +93,11 @@ BUILD_SKIP=false
 CF_PURGE_SKIP=false
 SYNTHETIC_SKIP=false
 INVOKER_SKIP=false
+ENV_CHECK_SKIP=false
 DEPLOY_ARGS=()
 
 usage() {
-  sed -n '3,54p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,89p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -104,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --skip-cf-purge) CF_PURGE_SKIP=true; shift ;;
     --skip-synthetic) SYNTHETIC_SKIP=true; shift ;;
     --skip-invoker)  INVOKER_SKIP=true; shift ;;
+    --skip-env-check) ENV_CHECK_SKIP=true; shift ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; DEPLOY_ARGS+=("$@"); break ;;
     *)               DEPLOY_ARGS+=("$1"); shift ;;
@@ -277,6 +281,13 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
       functions:default)
+        # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
+        # excluding it excludes Functions entirely, exactly like the plain
+        # `functions)` case above. Leaving FUNCTIONS_ATTEMPTED=true here
+        # (the pre-existing gap) made Guard 4 below demand a complete
+        # functions/.env.<projectId> for a deploy that never touches
+        # Functions params at all.
+        FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         BUG_REPORT_INVOKER_CONSERVATIVE=false
@@ -456,6 +467,60 @@ the merged-on-main state that reviewers approved (see mergepath#77 for
 the class of failure this guard closes).
 
 To override (break-glass only): DEPLOY_ALLOW_DIRTY=1 scripts/deploy.sh
+EOF
+    exit 1
+  fi
+fi
+
+# Guard 4: functions/.env.<projectId> covers every param.ts-declared param
+# (#767).
+#
+# `resolveParams` (firebase-tools) partitions purely on whether a declared
+# param's NAME is present in the dotenv files it merges — a `default:` does
+# NOT exempt it, it only supplies the interactive prompt's default answer,
+# and `firebase deploy --non-interactive` cannot answer that prompt. A
+# drifted, hand-maintained functions/.env.<projectId> therefore hard-fails
+# MID-DEPLOY, possibly after other targets in the same run have already
+# published — production, 2026-08-13: EMAIL_REPLY_TO and
+# EMAIL_UNSUBSCRIBE_URL were declared in params.ts but missing from
+# functions/.env.gaycruisebingo.
+#
+# scripts/validate-functions-env.mjs derives the required key set from
+# params.ts (reusing scripts/e2e-functions-env.mjs's reachable-module scan,
+# PR #730) and checks it against the same files firebase-tools merges at
+# deploy time. Gated on FUNCTIONS_ATTEMPTED: a `--only hosting` deploy never
+# touches Functions param resolution. See docs/app/phase-1-deploy.md §
+# Deploy-time param-coverage guard.
+if [[ "$ENV_CHECK_SKIP" == "true" ]]; then
+  echo ">> functions/.env.<projectId> param-coverage check skipped (--skip-env-check)"
+elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
+  echo ">> functions/.env.<projectId> param-coverage check skipped (this deploy does not release Functions)"
+elif [[ ! -f functions/src/index.ts ]]; then
+  # No Functions source to scan for declared params — nothing to validate.
+  # In this repo's real checkout functions/src/index.ts is always committed,
+  # so this only matters for a deliberately minimal checkout (e.g. the
+  # tests/test_deploy.sh fixture repos, which exercise deploy.sh's OTHER
+  # guards from a bare git repo with no functions/ tree at all).
+  echo ">> functions/.env.<projectId> param-coverage check skipped (functions/src/index.ts not present)"
+elif [[ -z "$DEPLOY_PROJECT" ]]; then
+  echo ">> functions/.env.<projectId> param-coverage check skipped (no project id resolved)"
+else
+  echo ">> Checking functions/.env.$DEPLOY_PROJECT covers every declared param"
+  if ! node "$SCRIPT_DIR/validate-functions-env.mjs" functions/src/index.ts functions "$DEPLOY_PROJECT"; then
+    cat >&2 <<EOF
+
+✗ functions/.env.$DEPLOY_PROJECT is missing one or more params. NOTHING HAS
+  BEEN PUBLISHED.
+
+  Add the missing key(s) named above to functions/.env.$DEPLOY_PROJECT (see
+  functions/.env.example for the documented default/rationale of each param),
+  then re-run this deploy.
+
+  To deploy anyway (break-glass only — the deploy will hard-fail mid-way at
+  Firebase's own param resolution instead, per the 2026-08-13 incident this
+  guard exists to prevent):
+
+    scripts/deploy.sh --skip-env-check
 EOF
     exit 1
   fi
