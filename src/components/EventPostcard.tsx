@@ -81,11 +81,18 @@ export default function EventPostcard() {
   }, []);
   if (!preview) return null;
   const stamped = editionBrand().signinCardVariant === 'postcard';
-  const postage = stamped ? previewDayEmoji(preview.days) : null;
+  // ONE timestamp for both reads (Codex P3, round 2). Letting each helper take
+  // its own `Date.now()` makes the single-Day selection atomic only in the
+  // common case: a render that straddles local midnight could stamp the old
+  // Day's emoji beside the new Day's line, or suppress the new Day's emoji on
+  // the strength of the old Day's postage — and the card would hold that
+  // mismatch until some later render. The seam is only as good as its callers.
+  const now = Date.now();
+  const postage = stamped ? previewDayEmoji(preview.days, now) : null;
   // The Day's emoji is drawn ONCE. When the corner takes it, the Day line
   // gives it up; with no stamp — no postage, or an Edition with no postcard
   // variant — the line keeps leading with it exactly as it always has.
-  const meta = previewMetaLine(preview, Date.now(), postage ? 'stamp' : 'inline');
+  const meta = previewMetaLine(preview, now, postage ? 'stamp' : 'inline');
   const host = typeof window === 'undefined' ? null : window.location.hostname;
   return (
     <div
