@@ -32,7 +32,7 @@ The decision logic and every idempotent write live in `functions/src/unlockDay.t
 - **Given** function lag past a Day's `unlockAt`, **when** an admin triggers "unlock now" for that Day, **then** the same idempotent snapshot logic runs and produces the identical result the scheduled path would; a non-admin caller is denied.
 - **Given** a Day whose `unlockAt` is still in the future, **when** the scheduled function runs, **then** that Day is left untouched.
 - **Given** 20:00 on Day 9, **when** the scheduler runs, **then** exactly one `last_call` Moment posts and `frozenAt` is untouched; **given** 08:00 on Day 10, **then** `frozenAt` is set and exactly one `podium` Moment posts.
-- **Given** a schedule where the closing Day shares its calendar date with the preceding Day (#784, e.g. a same-day wrap-up), **when** `finaleTimes` resolves the boundaries, **then** `lastCallAt` is derived backwards from the closing Day's `unlockAt` instead of forward from the preceding Day's, and `lastCallAt` strictly precedes `closingUnlockAt`—so the last-call posting window is never empty.
+- **Given** a schedule where the preceding Day's `unlockAt + 12h` would land at-or-after the closing Day's own `unlockAt` (#784—same-date wrap-ups are the common case, but the gate is the instant comparison, not the calendar date), **when** `finaleTimes` resolves the boundaries, **then** `lastCallAt` is derived backwards from the closing Day's `unlockAt` instead of forward from the preceding Day's, and `lastCallAt` strictly precedes `closingUnlockAt`—so the last-call posting window is never empty.
 
 ## Test coverage
 
