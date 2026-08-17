@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -8,6 +8,7 @@ import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
+import { routeApprovalToDay, isUsableTarget } from './communityPrompts';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = () => doc(db, 'events', EVENT_ID);
@@ -42,8 +43,95 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
 // that can still see WHY a Prompt was turned down. Both writes are unconstrained
 // by `firestore.rules` under the `isAdmin(eventId)` arm — no client-side field
 // allowlist needed beyond what the rule already checks.
-export const approveItem = (id: string, adminUid: string) =>
-  updateDoc(item(id), { status: 'active', approvedBy: adminUid, approvedAt: Date.now() });
+/**
+ * Where one approval landed (#557). `dayIndex` is the Day the Prompt is now
+ * scheduled for; `retained: true` means no eligible Day remained, so the Prompt
+ * is approved and kept in the pool but is dealt nowhere. An untargeted Prompt
+ * (no `targetDayIndex` — the organiser pool and every pre-#557 row) reports
+ * `dayIndex: null, retained: false`: it is not scheduled for one Day because it
+ * is eligible for all of them.
+ */
+export interface ApprovalPlacement {
+  itemId: string;
+  dayIndex: number | null;
+  retained: boolean;
+}
+
+/** The queue row fields an approval needs. The Approvals queue already holds
+ *  both, so routing costs no extra read. */
+export type ApprovableItem = Pick<ItemDoc, 'id'> & Partial<Pick<ItemDoc, 'targetDayIndex'>>;
+
+/**
+ * Approve one or more pending Prompts, routing each to its intended Day (#557,
+ * specs/community-prompt-targeting.md).
+ *
+ * The routing rule, per Prompt: a Prompt targeted at a Day that can still take
+ * it keeps that Day; one whose Day's cutoff has passed rolls FORWARD to the next
+ * Day that can; one with nowhere left to go is retained — still `active`, still
+ * in the pool for the recap or a reusable pack, but aimed at a Day that has been
+ * and gone, so no snapshot will ever admit it. It is never deleted and never
+ * re-aimed at a Day that has already dealt.
+ *
+ * WHY A TRANSACTION, when every write here is to an ITEM and none to a Day. The
+ * Event doc is read inside it purely to make the schedule part of the read set.
+ * The scheduler stamps snapshots by updating that same doc
+ * (`stampDaySnapshot`), so if a Day freezes while this approval is in flight,
+ * Firestore retries and the routing is recomputed against the schedule that
+ * actually won. Without that, an approval could commit "scheduled for Day 4"
+ * microseconds after Day 4 froze, and the Prompt would silently be retained
+ * while the organiser was told it was placed. The transaction closes that window
+ * rather than mutating anything on the Day side — the already-frozen Day is left
+ * strictly alone either way, which is the invariant that matters most here.
+ *
+ * Bulk shares ONE transaction and one `approvedAt` instant (the pre-existing
+ * `bulkApproveItems` contract: one click is one approval event). That also keeps
+ * the whole batch on the same side of every Day's cutoff, so a bulk approve can
+ * never split across a freeze.
+ */
+export async function approveItems(
+  items: readonly ApprovableItem[],
+  adminUid: string,
+): Promise<ApprovalPlacement[]> {
+  if (items.length === 0) return [];
+  return runTransaction(db, async (tx) => {
+    const evSnap = await tx.get(evt());
+    const days = evSnap.exists() ? ((evSnap.data().days as DayDef[] | undefined) ?? []) : [];
+    const approvedAt = Date.now();
+    const placements: ApprovalPlacement[] = [];
+    for (const it of items) {
+      const base = { status: 'active' as const, approvedBy: adminUid, approvedAt };
+      if (!isUsableTarget(it.targetDayIndex)) {
+        // Untargeted (or malformed): approve exactly as before this feature. No
+        // target is invented — inferring one would quietly narrow an organiser
+        // Prompt that is meant for every Day.
+        tx.update(item(it.id), base);
+        placements.push({ itemId: it.id, dayIndex: null, retained: false });
+        continue;
+      }
+      const routed = routeApprovalToDay(days, it.targetDayIndex, approvedAt);
+      if (routed == null) {
+        // Retained: the original target is LEFT in place. Clearing it would make
+        // the Prompt untargeted, which reads as "every Day" — the one outcome
+        // this ticket exists to prevent.
+        tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+        placements.push({ itemId: it.id, dayIndex: null, retained: true });
+        continue;
+      }
+      tx.update(item(it.id), { ...base, targetDayIndex: routed });
+      placements.push({ itemId: it.id, dayIndex: routed, retained: false });
+    }
+    return placements;
+  });
+}
+
+/**
+ * Approve one Prompt. Takes the queue ROW, not an id, on purpose: routing needs
+ * `targetDayIndex`, and an id-only signature would silently approve a targeted
+ * Community Prompt as untargeted — putting it back on every Day, the exact
+ * failure #557 removes. The Approvals queue always has the row in hand.
+ */
+export const approveItem = (row: ApprovableItem, adminUid: string) =>
+  approveItems([row], adminUid).then((placements) => placements[0]);
 export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
@@ -54,23 +142,25 @@ export const rejectItem = (id: string, adminUid: string) =>
 export const setItemSpicy = (id: string, spicy: boolean) => updateDoc(item(id), { spicy });
 
 /**
- * Bulk-approve every row in `items` (the Approvals queue's full pending list) in
- * ONE batched write — "Bulk approve works on the full pending list in one action"
- * (#210 AC). A `writeBatch` (not N sequential `updateDoc` calls) so the queue
- * clears atomically from the caller's perspective and the console does not fire
- * an update per row. Each row is stamped with the SAME `approvedAt` instant, on
- * the reasoning that a single bulk click is one approval EVENT even though it
- * touches many rows — mirrors how a single admin action elsewhere (e.g. a batch
- * resolve) reads as one moment in the audit trail, not many micro-timestamps.
+ * Bulk-approve every row in `items` (the Approvals queue's full pending list) —
+ * "Bulk approve works on the full pending list in one action" (#210 AC). One
+ * atomic write covering every row, so the queue clears in one go rather than
+ * firing an update per row, and every row carries the SAME `approvedAt` instant:
+ * a single bulk click is one approval EVENT even though it touches many rows,
+ * mirroring how any other single admin action reads as one moment in the audit
+ * trail rather than many micro-timestamps.
+ *
+ * Since #557 this is a thin alias for `approveItems`, so a bulk approve routes
+ * each Prompt to its intended Day exactly as a single approve does. It moved
+ * from `writeBatch` to that function's transaction to gain the schedule read set
+ * — see `approveItems` for why routing has to be serialized against the
+ * scheduler. The shared `approvedAt` survives the move.
  */
-export function bulkApproveItems(items: Pick<ItemDoc, 'id'>[], adminUid: string): Promise<void> {
-  if (items.length === 0) return Promise.resolve();
-  const batch = writeBatch(db);
-  const approvedAt = Date.now();
-  for (const it of items) {
-    batch.update(item(it.id), { status: 'active', approvedBy: adminUid, approvedAt });
-  }
-  return batch.commit();
+export function bulkApproveItems(
+  items: readonly ApprovableItem[],
+  adminUid: string,
+): Promise<ApprovalPlacement[]> {
+  return approveItems(items, adminUid);
 }
 export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden' });
 export const restoreProof = (id: string) => updateDoc(proof(id), { status: 'active' });

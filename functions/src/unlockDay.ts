@@ -103,6 +103,8 @@ export interface SnapshotItem {
   createdBy?: string;
   createdAt?: number;
   approvedAt?: number;
+  /** The Day this Prompt is intended for (#557). Absent = every Day. */
+  targetDayIndex?: number;
 }
 
 /** The item pools a Day's snapshot draws from (specs/easy-mix.md § "Snapshot carries
@@ -138,6 +140,13 @@ export interface SnapshotFilter {
    * snapshot and retroactively change an already-open Day's pool.
    */
   cutoff: number;
+  /**
+   * The index of the Day being snapshotted (#557). Community Prompts name the
+   * Day they are meant for; this is what that name is matched against. OPTIONAL
+   * so a caller that omits it keeps the pre-#557 behaviour (no targeting filter
+   * at all) — every existing caller in this file passes it.
+   */
+  dayIndex?: number;
   reportHideThreshold?: number;
   bannedUids?: readonly string[];
 }
@@ -162,6 +171,36 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
 }
 
 /**
+ * Day targeting (#557, specs/community-prompt-targeting.md) — the snapshot-side
+ * half of the rule `src/data/communityPrompts.ts` states for the client. Local
+ * mirror rather than a shared import, exactly like `isReportHidden`/`isBanned`
+ * above: this module deliberately imports nothing from the app package.
+ *
+ * Three cases, and the middle one is the whole feature:
+ *   - target ABSENT → admitted to EVERY Day. The organiser/seed pool, and every
+ *     Prompt written before this field existed, so nothing about the existing
+ *     Event changes. This default is why the change needs no backfill.
+ *   - target === this Day → admitted here, and (by the same rule) to no other.
+ *   - anything else → admitted NOWHERE. That covers both a Prompt aimed at a
+ *     different Day and one whose target is present but malformed. The malformed
+ *     case fails CLOSED, against this module's usual fail-open posture, and the
+ *     asymmetry is deliberate: failing open on moderation risks showing one
+ *     item that should have been hidden, whereas failing open here would put an
+ *     unresolvable Prompt on every single card — precisely the bug this feature
+ *     removes. An excluded Prompt is retained, not lost: it stays `active` and
+ *     admin-visible, and no Day is harmed by its absence.
+ */
+function targetsDay(targetDayIndex: unknown, dayIndex: number | undefined): boolean {
+  if (targetDayIndex == null) return true;
+  if (dayIndex == null) return true; // caller opted out of targeting entirely
+  return (
+    typeof targetDayIndex === 'number' &&
+    Number.isInteger(targetDayIndex) &&
+    targetDayIndex === dayIndex
+  );
+}
+
+/**
  * The ids that make up a Day's snapshot: the `status: 'active'` items in that Day's
  * pool that the LIVE deal pool would also deal. Items are pre-filtered to `active`
  * by the query; this applies the SAME predicates `src/data/api.ts` applies before
@@ -172,6 +211,9 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
  *   - drop `isFreeSpace` sentinels (the free center is dealt separately; the create
  *     rule does not constrain the flag, so a raw client write could carry it);
  *   - drop community-hidden (`isReportHidden`) and banned-author (`isBanned`) items;
+ *   - drop items targeted at a DIFFERENT Day (`targetsDay`, #557) — a Community
+ *     Prompt names the one Day it is meant for, so it joins that Day's snapshot and
+ *     no other; an untargeted item still joins every Day's;
  *   - drop items that entered the pool AFTER the Day's `unlockAt` cutoff — a snapshot
  *     is the active pool AS OF the unlock moment, even when the run is delayed. An
  *     item's pool-entry time is `approvedAt` (Phase 1.5 approval flow) falling back to
@@ -181,7 +223,7 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
  *     cutoff at all (#289) — see inside.
  */
 export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter): string[] {
-  const { pool, cutoff, reportHideThreshold, bannedUids } = filter;
+  const { pool, cutoff, dayIndex, reportHideThreshold, bannedUids } = filter;
   // The admitted pools: the explicit set when given (a main day → main + embark), else
   // just the single `pool` (pre-easy-mix behavior). Order of `items` is preserved, so
   // the deal path can re-split by pool while the main items keep their relative order.
@@ -203,6 +245,7 @@ export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter)
     .filter((it) => !it.isFreeSpace)
     .filter((it) => !isReportHidden(it.reportCount ?? 0, reportHideThreshold))
     .filter((it) => !isBanned(it.createdBy, bannedUids))
+    .filter((it) => targetsDay(it.targetDayIndex, dayIndex))
     .filter((it) => {
       if (!cutoffApplies) return true;
       const enteredAt = it.approvedAt ?? it.createdAt;
@@ -360,6 +403,10 @@ function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
       createdBy: data.createdBy as string | undefined,
       createdAt: data.createdAt as number | undefined,
       approvedAt: data.approvedAt as number | undefined,
+      // Read RAW, not coerced: `targetsDay` needs to tell a malformed target
+      // apart from an absent one, and coercing here would erase that difference
+      // and silently promote a broken target to "every Day".
+      targetDayIndex: data.targetDayIndex as number | undefined,
     };
   });
 }
@@ -528,6 +575,8 @@ export async function stampDaySnapshot(
       // snapshot (specs/easy-mix.md); tutorial days freeze only their own pool.
       pools: snapshotPoolsFor(arr[i].pool),
       cutoff: arr[i].unlockAt,
+      // #557: admit Community Prompts aimed at THIS Day, and no others.
+      dayIndex: arr[i].index,
       reportHideThreshold: ev.settings?.reportHideThreshold,
       bannedUids: ev.bannedUids,
     });
@@ -881,6 +930,7 @@ export async function resnapshotDayIfNoBoards(
     pool: day.pool,
     pools: snapshotPoolsFor(day.pool),
     cutoff: day.unlockAt,
+    dayIndex: day.index,
     reportHideThreshold: pre?.settings?.reportHideThreshold,
     bannedUids: pre?.bannedUids,
   });

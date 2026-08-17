@@ -23,7 +23,8 @@ import { db, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
 import { adultContentRequired } from '../adultContent';
-import { itemsCol } from './paths';
+import { itemsCol, eventRef } from './paths';
+import { defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { FREE_TEXT } from './seed';
 import { normalizePool } from '../game/pool';
 import {
@@ -2624,9 +2625,23 @@ export function itemRateLimitRemainingMs(key: string, now: number = Date.now()):
  * `spicy` defaults to `false`: a user-added Prompt is tame unless the ItemPool
  * 🔞 toggle was checked when they submitted it.
  */
-export async function addItem(uid: string, text: string, spicy = false): Promise<void> {
+export async function addItem(
+  uid: string,
+  text: string,
+  spicy = false,
+  // The Day this suggestion is meant for (#557, specs/community-prompt-targeting.md).
+  // OMITTED is the normal player path and means "put it on tomorrow's card": the
+  // schedule is read here and the earliest still-targetable Day is recorded, so a
+  // suggestion carries its intended Day from the moment it is written rather than
+  // being aimed later at approval time. An explicit value is the override seam for
+  // a Day picker (#559). When the Event has no schedule, or no Day can still take
+  // one, NO target is written at all and the Prompt keeps the untargeted every-Day
+  // behaviour that predates this feature — see `targetDayIndex` in ItemDoc.
+  targetDayIndex?: number,
+): Promise<void> {
   const t = text.trim();
   if (!t) return;
+  const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex());
   await addDoc(rawItems(), {
     text: t.slice(0, 80),
     createdBy: uid,
@@ -2644,7 +2659,29 @@ export async function addItem(uid: string, text: string, spicy = false): Promise
     // Honor the now-required ItemDoc.pool: a player prompt-submission lands in
     // the main game pool. Embark/farewell pools are seeded directly (#207).
     pool: 'main',
+    // Written only when a Day can actually take it. The field is ABSENT rather
+    // than null when there is no target, because absent is the untargeted
+    // contract every pre-#557 Prompt already satisfies — writing an explicit
+    // null would mint a third state the snapshot filter would have to know about.
+    ...(isUsableTarget(target) ? { targetDayIndex: target } : {}),
   });
+}
+
+/**
+ * The Day a fresh suggestion defaults to — the earliest Day that can still take
+ * one (#557). Reads the Event's schedule at submission time. Best-effort by
+ * design: a read failure or a schedule-less Event yields `null`, and the caller
+ * writes an untargeted Prompt rather than failing the submission. Losing the
+ * targeting on one suggestion is a far smaller harm than refusing to accept it.
+ */
+async function resolveDefaultTargetDayIndex(): Promise<number | null> {
+  try {
+    const snap = await getDoc(eventRef());
+    const days = snap.exists() ? snap.data().days : undefined;
+    return Array.isArray(days) ? defaultTargetDayIndex(days, Date.now()) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

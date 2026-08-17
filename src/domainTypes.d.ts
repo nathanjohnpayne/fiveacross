@@ -407,6 +407,23 @@ export interface ItemDoc {
   pool: 'main' | 'easy' | 'closing';
   approvedBy?: string; // uid of the approving admin
   approvedAt?: number; // ms epoch
+  // The Day this Prompt is intended for (#557, specs/community-prompt-targeting.md).
+  // ABSENT is the untargeted case and means EVERY not-yet-snapshotted Day — the
+  // organiser/seed pool, and every Prompt written before this field existed, so
+  // the grandfathered behaviour is exactly what it always was. PRESENT means this
+  // Prompt is a Community Prompt aimed at that one Day and is admitted to that
+  // Day's snapshot alone. A Player sets it at submission ("put it on tomorrow's
+  // card"); an organiser re-points it forward at approval when the intended Day's
+  // cutoff has already passed. It is never re-pointed backwards, and re-pointing
+  // it never touches a Day — a Day that has already frozen its snapshot is
+  // immutable, so an unreachable target is how retention is expressed.
+  targetDayIndex?: number;
+  // Stamped at approval when NO eligible Day remained (#557). The Prompt stays
+  // `active` with its original — now unreachable — `targetDayIndex`, so it is
+  // retained in the pool for the recap or a reusable pack and is never dealt and
+  // never deleted. Presence is the durable "approved but not selected" fact, so
+  // no consumer has to re-derive it from the Day schedule.
+  retainedAt?: number; // ms epoch
 }
 
 export interface Cell {
