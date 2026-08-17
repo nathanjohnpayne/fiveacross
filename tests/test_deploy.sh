@@ -205,11 +205,12 @@ chmod +x "$STUB_DIR/npx"
 #                      update-permission.
 #   GCLOUD_STUB_ERROR_TEXT  the stderr line printed alongside a simulated
 #                      failure (default: the generic "simulated failure"
-#                      line above). Set to a real gcloud NOT_FOUND error
-#                      (e.g. "ERROR: (gcloud.run.services.describe)
-#                      NOT_FOUND: Requested entity was not found.") to
-#                      exercise the --allow-missing / first-deploy path
-#                      (#768 r5) distinctly from a credential failure.
+#                      line above). Set to either real gcloud missing-service
+#                      diagnostic (e.g. "ERROR: (gcloud.run.services.describe)
+#                      NOT_FOUND: Requested entity was not found." or
+#                      "Cannot find service [name]") to exercise the
+#                      --allow-missing / first-deploy path (#768 r5)
+#                      distinctly from a credential failure.
 cat >"$STUB_DIR/gcloud" <<'STUB'
 #!/usr/bin/env bash
 if [ -n "${GCLOUD_LOG:-}" ]; then
@@ -1133,6 +1134,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 16c (#768 Phase 4b P1): `functions:<selector>` can name a Firebase
+# codebase or function group, not only one exported function. An unfamiliar
+# selector must therefore reconcile BOTH protected endpoints rather than
+# silently leaving one released service 403ing. Exact known endpoint names
+# remain precisely scoped (case 21).
+# ---------------------------------------------------------------------------
+REPO16C="$WORKDIR/case16c-codebase-selector"
+init_fixture_repo "$REPO16C"
+OUT16C="$WORKDIR/case16c.out"
+ERR16C="$WORKDIR/case16c.err"
+: >"$WORKDIR/ofd-calls-16c.log"
+: >"$WORKDIR/gcloud-calls-16c.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-16c.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-16c.log" \
+  bash -c "cd '$REPO16C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default" \
+  >"$OUT16C" 2>"$ERR16C"
+RC16C=$?
+set -e
+
+if [[ $RC16C -ne 0 ]]; then
+  fail "codebase-selector: --only functions:default returned $RC16C. stderr was:"
+  cat "$ERR16C" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-16c.log" || ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-16c.log"; then
+  fail "codebase-selector: an unfamiliar functions: selector did not reconcile both protected endpoints. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16c.log" >&2
+else
+  pass "codebase-selector: an unfamiliar functions: selector conservatively reconciles both protected endpoints (rc=$RC16C)."
+fi
+
+# ---------------------------------------------------------------------------
 # Case 17 (#768 r4 — Codex P2): stale overrides must not redirect the automatic
 # reconciliation.
 #
@@ -1302,6 +1336,41 @@ elif grep -q 'Deploy complete.' "$OUT19A"; then
   fail "first-deploy-not-found: deploy.sh printed 'Deploy complete.' despite the post-deploy reconciliation failing."
 else
   pass "first-deploy-not-found: Step 1.6 tolerates a NOT_FOUND before publishing (op-firebase-deploy reached, rc=$RC19A), and Step 2.5 still fails loud if the service is STILL missing after deploy."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 19a2 (#768 Phase 4b P2): gcloud also reports a missing Cloud Run
+# service as `Cannot find service [name]` rather than the structured NOT_FOUND
+# enum. The pre-publish first-deploy allowance must recognise that actual
+# diagnostic without treating a generic shell "command not found" as safe.
+# ---------------------------------------------------------------------------
+REPO19A2="$WORKDIR/case19a2-first-deploy-cannot-find-service"
+init_fixture_repo "$REPO19A2"
+OUT19A2="$WORKDIR/case19a2.out"
+ERR19A2="$WORKDIR/case19a2.err"
+: >"$WORKDIR/ofd-calls-19a2.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-19a2.log" \
+NPM_LOG="$WORKDIR/npm-calls-19a2.log" \
+GCLOUD_STUB_EXIT=1 \
+GCLOUD_STUB_ERROR_TEXT='ERROR: (gcloud.run.services.describe) Cannot find service [emailunsubscribe]' \
+  bash -c "cd '$REPO19A2' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic" \
+  >"$OUT19A2" 2>"$ERR19A2"
+RC19A2=$?
+set -e
+
+if ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-19a2.log"; then
+  fail "first-deploy-cannot-find-service: deploy.sh never reached op-firebase-deploy — Step 1.6 rejected gcloud's normal missing-service diagnostic. stderr was:"
+  cat "$ERR19A2" >&2
+elif [[ $RC19A2 -eq 0 ]]; then
+  fail "first-deploy-cannot-find-service: deploy.sh returned 0 even though the service remained missing after the stubbed deploy — Step 2.5 must still fail loud."
+elif ! grep -q 'does not exist yet' "$ERR19A2"; then
+  fail "first-deploy-cannot-find-service: the normal gcloud missing-service diagnostic was not explained as a first deploy. stderr was:"
+  cat "$ERR19A2" >&2
+else
+  pass "first-deploy-cannot-find-service: Step 1.6 accepts gcloud's normal missing-service diagnostic, while Step 2.5 still fails if it persists (rc=$RC19A2)."
 fi
 
 # ---------------------------------------------------------------------------

@@ -1415,6 +1415,36 @@ else
 fi
 
 echo
+echo "synthetic-uptime.yml multi-surface classification (#768 Phase 4b)"
+synthetic_uptime_workflow=".github/workflows/synthetic-uptime.yml"
+
+# These are intentionally source-level assertions: the GitHub Actions `run:`
+# block owns the classifier, so copying it into a local helper would give the
+# tests a second implementation that can drift. Pin the ordering that prevents
+# a simultaneous app-mount outage from being hidden behind the unsubscribe-403
+# advice, and pin the title update on a reused tracking issue.
+multi_surface_line=$(grep -nF 'if [[ "$failure_count" -gt 1 ]]; then' "$synthetic_uptime_workflow" | head -1 | cut -d: -f1 || true)
+single_unsubscribe_line=$(grep -nF 'elif [[ "$unsubscribe_403" == "true" ]]; then' "$synthetic_uptime_workflow" | head -1 | cut -d: -f1 || true)
+if [[ -n "$multi_surface_line" && -n "$single_unsubscribe_line" && "$multi_surface_line" -lt "$single_unsubscribe_line" ]] && \
+   grep -Fq 'failure_count=$((failure_count + 1))' "$synthetic_uptime_workflow" && \
+   grep -Fq 'app did not mount|Firebase init error|uncaught exception|sign-in gate never rendered' "$synthetic_uptime_workflow"; then
+  pass=$((pass + 1))
+  echo "  PASS: combined failures are classified before single-surface unsubscribe advice"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: synthetic uptime must classify combined app/unsubscribe failures before single-surface advice" >&2
+fi
+
+if grep -Fq 'gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \' "$synthetic_uptime_workflow" && \
+   grep -Fq -- '--title "Synthetic uptime check failing: $subject"' "$synthetic_uptime_workflow"; then
+  pass=$((pass + 1))
+  echo "  PASS: an existing synthetic issue is retitled for the current failing surface"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: synthetic uptime must retitle an existing tracking issue from the current subject" >&2
+fi
+
+echo
 if [ "$fail" -gt 0 ]; then
   echo "check_workflow_parsers: $fail FAIL / $pass PASS" >&2
   exit 1

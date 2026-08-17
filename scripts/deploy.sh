@@ -211,7 +211,19 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           FUNCTIONS_ATTEMPTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           ;;
-        functions:*) FUNCTIONS_ATTEMPTED=true ;;
+        # A selector after `functions:` is not necessarily a single exported
+        # function. Firebase also accepts codebase and function-group selectors
+        # in this position. We cannot prove that an unfamiliar selector excludes
+        # either protected endpoint from this wrapper, so include both
+        # conservatively. The invoker helpers are idempotent, and their
+        # pre-publish `--allow-missing` path keeps a genuinely new/unrelated
+        # function deploy from failing just because either service has not been
+        # created yet. Skipping one here risks a released endpoint remaining 403.
+        functions:*)
+          FUNCTIONS_ATTEMPTED=true
+          BUG_REPORT_INVOKER_SELECTED=true
+          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          ;;
       esac
     done
   done

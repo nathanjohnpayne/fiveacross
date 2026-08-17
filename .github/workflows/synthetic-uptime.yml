@@ -97,14 +97,43 @@ jobs:
           log="$RUNNER_TEMP/synthetic.log"
           [ -f "$log" ] || : > "$log"
 
-          # Name the failing surface so the title and the rollback advice match
-          # what actually broke. emailUnsubscribe 403s while the app renders
-          # perfectly, so the app-mount wording would send the operator the
-          # wrong way entirely (#768 r4).
+          # Classify every failing surface before choosing advice. A single
+          # scheduled run can catch both an unsubscribe 403 and an app-mount
+          # outage; prioritising the first match would wrongly promise that a
+          # rollback cannot help while the application is also down.
+          unsubscribe_403=false
+          unsubscribe_rewrite=false
+          app_mount=false
+          failure_count=0
           if grep -q 'emailUnsubscribe 403' "$log"; then
+            unsubscribe_403=true
+            failure_count=$((failure_count + 1))
+          fi
+          if grep -q 'served the SPA shell' "$log"; then
+            unsubscribe_rewrite=true
+            failure_count=$((failure_count + 1))
+          fi
+          if grep -qE 'app did not mount|Firebase init error|uncaught exception|sign-in gate never rendered' "$log"; then
+            app_mount=true
+            failure_count=$((failure_count + 1))
+          fi
+
+          if [[ "$failure_count" -gt 1 ]]; then
+            subject='multiple production surfaces are failing'
+            advice='**Do not roll back yet.** More than one independent probe failed, so no single diagnosis—or rollback instruction—fits the evidence. Restore each named surface, then assess the app separately before rolling back.'
+            if [[ "$unsubscribe_403" == "true" ]]; then
+              advice+=$'\n\n- **Unsubscribe endpoint:** restore it with `scripts/set-email-unsubscribe-invoker.sh` (idempotent), then re-run this workflow. A Hosting rollback cannot repair Cloud Run IAM. See docs/app/phase-1-deploy.md § 1a-i.'
+            fi
+            if [[ "$unsubscribe_rewrite" == "true" ]]; then
+              advice+=$'\n\n- **Unsubscribe rewrite:** confirm `/unsubscribe` is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
+            fi
+            if [[ "$app_mount" == "true" ]]; then
+              advice+=$'\n\n- **App mount:** open the production URL. If it is blank or spins forever, follow DEPLOYMENT.md § Rollback Procedure; if the sign-in gate renders, investigate the synthetic diagnostic instead.'
+            fi
+          elif [[ "$unsubscribe_403" == "true" ]]; then
             subject='the unsubscribe endpoint is returning 403'
             advice='**Do not roll back.** Rolling back Hosting does not touch Cloud Run IAM, so it cannot fix this. Restore the endpoint with `scripts/set-email-unsubscribe-invoker.sh` (idempotent), then re-run this workflow. See docs/app/phase-1-deploy.md § 1a-i.'
-          elif grep -q 'served the SPA shell' "$log"; then
+          elif [[ "$unsubscribe_rewrite" == "true" ]]; then
             subject='/unsubscribe is serving the app shell, not the opt-out page'
             advice='**Do not roll back.** The `/unsubscribe` Hosting rewrite is missing from the live release, so every emailed unsubscribe link opens the app. Confirm the rewrite is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
           else
@@ -126,6 +155,11 @@ jobs:
             "$SYNTHETIC_URL" "$subject" "$RUN_URL" "$advice" "$diagnostic")"
 
           if [ -n "$existing" ]; then
+            # The same label intentionally deduplicates a continuing outage,
+            # but its title must continue to describe the CURRENT failing
+            # surface rather than preserving a stale first-run diagnosis.
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \
+              --title "Synthetic uptime check failing: $subject"
             gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing — $subject. $body"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" \

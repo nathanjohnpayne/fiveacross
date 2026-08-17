@@ -113,11 +113,12 @@ DRY_RUN=false
 ALLOW_MISSING=false
 GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
 INVOKER_ANNOTATION='run.googleapis.com/invoker-iam-disabled'
-# GCP's own status enum for a missing resource — matched case-insensitively
-# below, but always with the underscore, so a shell-level "command not found"
-# (missing gcloud binary — a real tooling failure, must stay fatal) can never
-# false-positive as "service not found yet".
-NOT_FOUND_PATTERN='NOT_FOUND'
+# `gcloud run services describe` has two observed missing-service diagnostics:
+# the structured `NOT_FOUND` status and `Cannot find service [<name>]`. Match
+# the latter's complete, bracketed gcloud phrase rather than a generic "not
+# found" so a shell-level `gcloud: command not found` remains a fatal tooling
+# error instead of being mistaken for a first deploy.
+MISSING_SERVICE_PATTERN='NOT_FOUND|Cannot[[:space:]]+find[[:space:]]+service[[:space:]]+\['
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -231,18 +232,19 @@ DESCRIBE_ERR="$(mktemp "${TMPDIR:-/tmp}/invoker-describe-XXXXXX")"
 if ! current="$(run_gcloud run services describe "$SERVICE" \
       --region "$REGION" --project "$PROJECT" \
       --format="value(metadata.annotations[\"$INVOKER_ANNOTATION\"])" 2>"$DESCRIBE_ERR")"; then
-  # --allow-missing (#768 r5 Codex P2): a NOT_FOUND describe on a brand-new
-  # target is expected, not broken — the Cloud Run service does not exist
+  # --allow-missing (#768 r5 Codex P2): a missing-service describe on a
+  # brand-new target is expected, not broken — the Cloud Run service does not exist
   # until the FIRST Functions deploy creates it, so a pre-publish check that
   # treats "absent" as fatal makes that first deploy impossible without
-  # --skip-invoker. Narrow: only the GCP NOT_FOUND status enum qualifies (not
-  # a bare "not found" — that also matches a shell-level "gcloud: command not
-  # found", which is a real tooling failure and must stay fatal), and only
-  # when the CALLER opted in. Every other describe failure — no credential,
+  # --skip-invoker. Narrow: only gcloud's structured NOT_FOUND status or its
+  # complete `Cannot find service [<name>]` diagnostic qualifies (not a bare
+  # "not found" — that also matches a shell-level "gcloud: command not found",
+  # which is a real tooling failure and must stay fatal), and only when the
+  # CALLER opted in. Every other describe failure — no credential,
   # PERMISSION_DENIED, a malformed key — falls through to the FAIL block
   # below exactly as before, so the credential check this step exists for is
   # not weakened.
-  if [[ "$ALLOW_MISSING" == "true" ]] && grep -qi "$NOT_FOUND_PATTERN" "$DESCRIBE_ERR"; then
+  if [[ "$ALLOW_MISSING" == "true" ]] && grep -Eqi "$MISSING_SERVICE_PATTERN" "$DESCRIBE_ERR"; then
     echo "   Service '$SERVICE' does not exist yet in $REGION ($PROJECT) — expected on a" >&2
     echo "   first deploy (nothing has released Functions there yet). Not a failure:" >&2
     echo "   there is nothing to reconcile until the first Functions deploy creates it." >&2
