@@ -49,13 +49,12 @@ Every open issue. P0 = production health, dispatch alone and immediately. P1 = u
 | #132 → #133 | Cloud Vision proof scan → auto-hide | **P2 (sequenced)** | Hardening pair; #132's region blocker resolved, needs API enablement + env flip + deploy; #133 consumes #132's flags. |
 | #44 | App Check enforcement | **P2 (human-gated)** | Client scaffold shipped; remaining work is key provisioning + enforcement — console-side, plus a deploy env change. |
 | #743, #769 | [error-tracking] NS_ERROR_FAILURE | **P2 (triage)** | Empty bodies, zero comments — genuinely untriaged (checked, per the pre-triage rule). One investigation pass via PostHog before any code. |
-| #626 | Path-based Events on mirror hosts | **Park (decision)** | Overlaps #766's root/path decision; designing both independently guarantees a collision. Hold behind the #766 decision. |
-| #604 | Leaderboard proof chips union | **Park (decision)** | Shipped-by-design vs. reporter expectation; `decision-needed` already applied — Nathan picks a side first. |
-| #766 | Park Events at /eventname, root = create page | **Park (decision)** | Crosses a stated PRD non-goal and reverses a recorded rejection; explicitly a Decision for Nathan, not a build ticket yet. |
-| #599 | Decision: fiveacross.app canonical | **Park (close)** | Decision made and owner-confirmed 2026-08-17; amendments propagated into #545/#546/#547/#549/#600/#630. Close as a completed decision record. |
-| #537 | Create Five Across Firebase project | **Park (close)** | The project exists and served the entire Bodega POC in production. Close after a checklist spot-check. |
-| #540 | PostHog proxy d.vacaybingo.com | **Park (close)** | Its own body says the ingest half moved to #578 and this proxy is now unused. Close as superseded. |
-| #541 | Five Across build target | **Park (verify-close)** | Deploys to `fiveacross` demonstrably work (Bodega shipped); `.firebaserc` aliases were deliberately *removed* (#592), inverting an acceptance item. Verify DEPLOYMENT.md documents the path, then close or re-scope. |
+| #766 + #626 | Root create page + path addressing | **P1 (spec first)** | Decided 2026-08-17: proceed, designed together — one combined design/spec ticket (incl. the PRD non-goal amendment); implementation follows the spec. |
+| #604 | Leaderboard proof chips union | **P2** | Decided 2026-08-17: union of proof types. XS–S, Sonnet 5 · low, any free lane. |
+| #599 | Decision: fiveacross.app canonical | **Close (approved)** | Decision made and owner-confirmed 2026-08-17; amendments propagated into #545/#546/#547/#549/#600/#630. Close approved — completed decision record. |
+| #537 | Create Five Across Firebase project | **Close (approved)** | The project exists and served the entire Bodega POC in production. |
+| #540 | PostHog proxy d.vacaybingo.com | **Close (approved)** | Its own body says the ingest half moved to #578 and this proxy is now unused. |
+| #541 | Five Across build target | **Close (approved)** | Deploys to `fiveacross` demonstrably work (Bodega shipped); `.firebaserc` aliases were deliberately *removed* (#592). Closer verifies DEPLOYMENT.md coverage in the close comment. |
 | #538, #539, #547, #578, #600, #630 | Domains/DNS/OAuth/PostHog console work | **Human** | `human-action` console/DNS batch — grouped runbook below. #630 stays blocked until #600 completes. |
 | #558, #559 | Community squares quota; entry point | **P2 (blocked)** | Both depend on #557's targeting model (derived link — being added to the board). #558 is additionally spec-first (Decisions). |
 | #630 | Redirect fiveacrossbingo.com zone | **Human (blocked)** | Explicitly deferred until #600's migration completes. |
@@ -131,7 +130,9 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 - **#793 provisioner + #794 Step 5**: HOLD until #545, #548–#550 and a membership gate exist (the epic's own platform prerequisite). #793 is Opus 4.8 · xhigh, Phase 4.
 - **#550 sign-in device matrix**: verification gate after #549 + #547; evidence-gathering, Sonnet 5 · medium.
-- **#632 email-UTM leg** (Sonnet 5 · medium, Phase 4), **#134 archive** (Sonnet 5 · high, Phase 4), **#132 → #133 Vision** (Sonnet 5 · medium each, Phase 4, sequenced), **#743/#769 triage** (Sonnet 5 · low, PostHog investigation, no code until diagnosed).
+- **#632 email-UTM + GA4-stream env leg** (Sonnet 5 · medium, Phase 4; the stream itself is human runbook item 8), **#134 archive** (Sonnet 5 · high, Phase 4), **#132 → #133 Vision** (Sonnet 5 · medium each, Phase 4, sequenced), **#743/#769 triage** (Sonnet 5 · low, PostHog investigation, no code until diagnosed), **#604 proof-chip union** (Sonnet 5 · low, XS–S).
+- **#766/#626 combined design spec** (Opus 4.8 · high, spec + PRD-amendment ticket to be filed — decided 2026-08-17, § 5.2): root create-Event page + path-addressed historical Events + mirror-host path addressing in one design; implementation tickets follow it.
+- **Phase 3 epic drafting** (authorized § 5.6): Claude drafts the isolation epic + spec-first sub-issues (membership, invitations, rules enforcement, event-aware caches/listeners, archived-event behavior, two-cohort tests) and files them as Backlog for review.
 - **Post-review sweeps** — four batched lanes, each one runner (Sonnet 5 · medium), each producing one PR per area, closing its issues with dispositions: (a) SW/update cluster #750–#758 + #726; (b) `firestoreRecovery` cluster #744–#749; (c) e2e-env cluster #738–#742; (d) singles #759–#764, #774, #779, #780.
 
 ## 3 · Runner prompts
@@ -225,17 +226,18 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 6. **#578** PostHog managed reverse proxy at `d.fiveacross.app` + CNAME.
 7. **#630** stays blocked until #600 completes.
 8. **#44** reCAPTCHA Enterprise key provisioning when hardening gets scheduled.
+9. **#632** create the fiveacross GA4 stream (decided 2026-08-17, § 5.4); hand the measurement id to the env-plumbing leg.
 
-## 5 · Decisions for Nathan
+## 5 · Decisions — asked and answered by Nathan, 2026-08-17
 
-1. **Close-as-done/superseded (approve the batch):** #537 (project exists, served Bodega), #540 (superseded by #578, per its own body), #599 (decision made + propagated 2026-08-17), #541 (verify DEPLOYMENT.md first — its `.firebaserc`-alias acceptance item was deliberately inverted by #592).
-2. **#766 root/path parking + #626 mirror paths** — one combined decision, explicitly flagged in both issues as crossing a PRD non-goal / a recorded rejection. Until decided, both stay parked; nothing in Waves 0–5 conflicts with either outcome.
-3. **#604 proof chips** — union-of-types vs. latest-proof-by-design. One-line answer unblocks an XS ticket (or a wontfix close).
-4. **#632 fiveacross GA4 stream** — "decide, don't inherit": create a GA4 stream for the fiveacross project or record that PostHog is sufficient. The email-UTM leg proceeds regardless (Wave 6+).
-5. **Phase-gate judgement I made (review it):** the wizard epic (#786) is PRD Phase 5 and Phase 3 (isolation) hasn't started, but I scheduled the *client-side* wizard chain (#787–#792, #795) anyway because it is genuinely unblocked, was filed by you two days ago (intent signal), and its provisioner (#793) — the only piece that makes real Events — stays held behind #529/#530/membership. If you'd rather sequence strictly by phase, pull #787+ out of Waves 1–5 and the auth/router chain fills the width.
-6. **Phase 3 has no tickets.** Membership/invitations/rules-isolation (the Phase 3 exit condition) exists only as PRD prose. Filing that epic + sub-issues is the single highest-leverage backlog gap; recommend a spec-first epic filing session (I did not file these — scoping them is product work, not derivable mechanically).
-7. **#558 spec-first override:** stamped Opus · xhigh (deal-path invariants); per the dispatch policy anything Opus-high-without-spec gets a spec sub-step — its launch prompt must start with a `specs/community-squares-quota.md` extension before touching the dealer. Blocked on #557 regardless.
-8. **Runner overrides recorded:** #765 unstamped → Sonnet 5 · high (M, decision + guardrails already written; auth sensitivity handled by the two-PR split + Phase 4, not by model size). #671/#670 unstamped → Sonnet 5 medium/high per the matrix. #767/#784 → Sonnet 5 medium (enumerated causes, pinned oracles). All stamped tickets keep their stamps (#557/#787/#551/#689/#545/#546/#548/#549/#791–#793 Opus; #544/#550/#559/#788–#790/#794/#795 Sonnet).
+1. **Close batch — APPROVED, close all four.** #537 (project exists, served Bodega), #540 (superseded by #578), #599 (decision made + propagated), #541 (deploys work; the `.firebaserc`-alias acceptance item was deliberately inverted by #592 — the closer verifies DEPLOYMENT.md documents the fiveacross path in the close comment). Each close carries a comment saying why — never silent.
+2. **#766 + #626 — PROCEED, design both together.** The premise is accepted: the root becomes a create-Event page and historical Events live at path addresses; mirror-host path addressing rides the same design. One combined design/spec ticket covers both, and the PRD non-goal ("full multi-event") gets formally amended as part of it. Un-parked → a P1 spec ticket (Wave 6+ sketch below); implementation tickets follow the spec.
+3. **#604 proof chips — union of types.** Chips become "what this player has used". Un-parked → P2, XS–S, Sonnet 5 · low (pinned expectation, single component + test file), dispatchable in any later wave with a free lane.
+4. **#632 GA4 — CREATE a fiveacross GA4 stream.** Added to the human runbook (§ 4); the agent leg grows env plumbing (`.env` stream id + parity with the GCB GA4 wiring) alongside the email-UTM leg.
+5. **Wizard phase-gate — KEEP the wizard chain in Waves 1–5** as scheduled; #793/#794 stay held behind #529/#530/membership.
+6. **Phase 3 gap — Claude drafts the epic + sub-issues** (spec-first: contract facts, sizes, suggested runners, filed as Backlog for Nathan's review — same shape as the wizard epic). This is an authorized follow-up work item, not yet started with this plan.
+7. **#558 spec-first override — APPROVED**: its launch prompt must start with a `specs/community-squares-quota.md` extension before touching the dealer. Blocked on #557 regardless.
+8. **Runner overrides — APPROVED as recorded:** #765 → Sonnet 5 · high; #671 → Sonnet 5 · medium; #670 → Sonnet 5 · high; #767/#784 → Sonnet 5 · medium; all stamped tickets keep their stamps (#557/#787/#551/#689/#545/#546/#548/#549/#791–#793 Opus; #544/#550/#559/#788–#790/#794/#795 Sonnet).
 
 ## 6 · Board updates
 
