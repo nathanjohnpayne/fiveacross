@@ -2518,22 +2518,35 @@ textarea.input {
   font-size: 11px;
   margin-top: 2px;
 }
-/* The postcard treatment (vacay): tighter corners and the dashed stamp box in
-   the top-right — the wireframes' .postcard::after. Padding clears the stamp
-   so a long Event name wraps under it instead of through it. */
+/* The postcard treatment (vacay): tighter corners, and the dashed stamp corner
+   in the top-right — the wireframes' `#frame-vacay-join` `.postcard .stamp`.
+   Three rules carry the whole spacing contract (#776):
+
+   1. The stamp is CONTENT-SIZED — padding wraps the Day-emoji postage at
+      `line-height: 1`, never a fixed width/height a glyph can overflow. The
+      fixed 34x26 box this replaces shipped text running UNDER the stamp the
+      moment an emoji was put in it.
+   2. The reserved right padding lives on `.event-postcard-franked`, applied
+      only when the stamp actually renders, so an unstamped card reclaims the
+      full width instead of holding open a gap for nothing.
+   3. There is no `::after`. The postage is a real element the component emits
+      only for a non-empty emoji — a bordered pseudo-element with `content: ''`
+      is exactly how the empty dashed box shipped three times. */
 .event-postcard-stamped {
   border-radius: 4px;
+}
+.event-postcard-franked {
   padding-right: 58px;
 }
-.event-postcard-stamped::after {
-  content: '';
+.event-postcard-stamp {
   position: absolute;
   top: 9px;
   right: 10px;
-  width: 34px;
-  height: 26px;
+  padding: 5px 6px;
   border: 1.5px dashed var(--border);
   border-radius: 2px;
+  font-size: 15px;
+  line-height: 1;
 }
 /* The invitation copy block under the CTA — left-set, unlike the centered
    offline footnote below it. */

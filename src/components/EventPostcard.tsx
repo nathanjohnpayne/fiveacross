@@ -1,5 +1,10 @@
 import { useEffect, useReducer, useSyncExternalStore } from 'react';
-import { activeEventPreview, previewMetaLine, subscribeEventPreview } from '../eventPreview';
+import {
+  activeEventPreview,
+  previewDayEmoji,
+  previewMetaLine,
+  subscribeEventPreview,
+} from '../eventPreview';
 import { editionBrand } from '../editions';
 
 // The sign-in gate's Event-preview card (#647, wireframes § "Join—the
@@ -31,6 +36,15 @@ import { editionBrand } from '../editions';
 // `signinCardVariant: 'postcard'`, which draws the dashed stamp corner; gcb
 // and fiveacross render the same card as a plain panel (their Join frames'
 // `.banner`).
+//
+// The stamp's POSTAGE is the previewed Day's emoji, and the stamp exists only
+// when that emoji does (#776). It shipped three times as a bordered CSS
+// `::after` with `content: ''` — a box whose content path did not exist, so
+// the frame always drew and the postage never did. An empty dashed rectangle
+// is now unreachable rather than merely unlikely: no emoji resolves (the
+// COMMON case — Bodega seeds one on Day 1 only, and after the last Day no Day
+// resolves at all) → no element, and the card drops the right padding it
+// reserves for the corner so the copy reclaims the full width.
 export default function EventPostcard() {
   const preview = useSyncExternalStore(subscribeEventPreview, activeEventPreview, activeEventPreview);
   // "Live" has to survive the gate being LEFT OPEN (Codex P2 round 1): the Day
@@ -61,9 +75,21 @@ export default function EventPostcard() {
   if (!preview) return null;
   const stamped = editionBrand().signinCardVariant === 'postcard';
   const meta = previewMetaLine(preview);
+  const postage = stamped ? previewDayEmoji(preview.days) : null;
   const host = typeof window === 'undefined' ? null : window.location.hostname;
   return (
-    <div className={`event-postcard${stamped ? ' event-postcard-stamped' : ''}`}>
+    <div
+      className={`event-postcard${stamped ? ' event-postcard-stamped' : ''}${
+        postage ? ' event-postcard-franked' : ''
+      }`}
+    >
+      {/* Decorative: the same emoji is already spoken in the meta line below,
+          so the stamp is a second rendering of it, not a second fact. */}
+      {postage && (
+        <span className="event-postcard-stamp" aria-hidden="true">
+          {postage}
+        </span>
+      )}
       <b className="event-postcard-name">{preview.eventName}</b>
       {meta && <span className="event-postcard-meta">{meta}</span>}
       {/* The ENTRY hostname, same identity rule as share links (#607): the

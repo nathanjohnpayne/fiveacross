@@ -3,6 +3,7 @@ import {
   activeEventPreview,
   applyResolvedEventPreview,
   coerceEventPreview,
+  previewDayEmoji,
   previewDayLine,
   previewMetaLine,
   type EventPreview,
@@ -139,6 +140,31 @@ describe('previewDayLine — computed live, never stored', () => {
   it('goes quiet on a missing or empty schedule', () => {
     expect(previewDayLine(undefined)).toBeNull();
     expect(previewDayLine([])).toBeNull();
+  });
+});
+
+// #776: the postcard's stamp postage. Read through the SAME Day selection as
+// the line above, so the two can never describe different Days — and returning
+// `null` on the three no-postage shapes is what makes the empty dashed box
+// unreachable in the component.
+describe('previewDayEmoji — the stamp postage, or nothing', () => {
+  it('is the previewed Day’s own emoji, tracking the same Day as the line', () => {
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 6))).toBe('🐦');
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 7))).toBe('🐦');
+  });
+
+  it('is null on a Day the seed gave no emoji — Bodega’s Days 2 and 3', () => {
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 8))).toBeNull();
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 9))).toBeNull();
+  });
+
+  it('is null once the trip is over, like the Day line it follows', () => {
+    expect(previewDayEmoji(PREVIEW.days, localNoon(2026, 8, 10))).toBeNull();
+  });
+
+  it('is null on a missing or empty schedule — the loading and pre-#647 shapes', () => {
+    expect(previewDayEmoji(undefined)).toBeNull();
+    expect(previewDayEmoji([])).toBeNull();
   });
 });
 

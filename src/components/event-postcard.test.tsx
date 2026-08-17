@@ -114,6 +114,103 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
   });
 });
 
+// #776. The stamp corner shipped three times as a bordered `::after` with
+// `content: ''` — a frame with no content path — so production drew an EMPTY
+// dashed box. These two cases are the invariant the wireframe's stamp-corner
+// contract states: the Day's emoji IS the postage, and with no postage there
+// is no element and no reserved corner. Together they make the empty box
+// unreachable rather than merely unlikely.
+describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
+  /** Every no-postage shape production can reach. Each must yield the SAME
+   *  outcome: no stamp element at all. */
+  const UNFRANKED: [string, EventPreview][] = [
+    // Bodega's own Days 2 and 3: the seed carries `emoji` on Day 1 only, so a
+    // Day with no emoji field is the common case, not a malformed document.
+    [
+      'a Day the seed gave no emoji',
+      { eventName: 'Weekend in Bodega Bay', days: [{ date: '2999-08-08', title: 'Side Quests' }] },
+    ],
+    // Post-trip: `previewDayEmoji` resolves no Day at all, the state the LIVE
+    // Bodega card sits in once the last Day has passed.
+    [
+      'a schedule whose last Day has passed',
+      {
+        eventName: 'Weekend in Bodega Bay',
+        days: [{ date: '2000-08-07', title: 'The Birds Have Entered the Chat', emoji: '🐦' }],
+      },
+    ],
+    // Loading, or a hostname document seeded before the schedule landed.
+    ['no schedule at all', { eventName: 'Weekend in Bodega Bay' }],
+  ];
+
+  it('franks the corner with the previewed Day’s emoji, and reserves the corner for it', () => {
+    setActiveEdition('vacay');
+    applyResolvedEventPreview(PREVIEW);
+    const { container } = render(<EventPostcard />);
+    const stamp = container.querySelector('.event-postcard-stamp');
+    expect(stamp).not.toBeNull();
+    // Non-whitespace, and the DAY's emoji specifically — the same
+    // `days[].emoji` field the meta line renders, not a second seeded field.
+    expect(stamp!.textContent).toBe('🐦');
+    // …and only a card that actually drew a stamp holds the corner open.
+    expect(container.querySelector('.event-postcard-franked')).not.toBeNull();
+  });
+
+  it.each(UNFRANKED)('draws NO stamp element and no reserved corner given %s', (_label, preview) => {
+    setActiveEdition('vacay');
+    applyResolvedEventPreview(preview);
+    const { container } = render(<EventPostcard />);
+    // The card itself still renders in its postcard treatment…
+    expect(container.querySelector('.event-postcard-stamped')).not.toBeNull();
+    // …with nothing in the corner and no padding reserving one. An empty
+    // dashed rectangle has no way to exist.
+    expect(container.querySelector('.event-postcard-stamp')).toBeNull();
+    expect(container.querySelector('.event-postcard-franked')).toBeNull();
+  });
+
+  it('never stamps a non-postcard Edition, even on a Day that has postage', () => {
+    // The stamp is vacay's `signinCardVariant: 'postcard'` treatment; gcb and
+    // fiveacross draw the same slice as a plain panel, and an emoji-bearing
+    // Day must not sneak a stamp onto either.
+    for (const edition of ['gcb', 'fiveacross']) {
+      setActiveEdition(edition);
+      applyResolvedEventPreview(PREVIEW);
+      const { container } = render(<EventPostcard />);
+      expect(container.querySelector('.event-postcard')).not.toBeNull();
+      expect(container.querySelector('.event-postcard-stamp')).toBeNull();
+      expect(container.querySelector('.event-postcard-franked')).toBeNull();
+      cleanup();
+    }
+  });
+
+  it('drops the stamp across local midnight when the next Day carries no emoji', () => {
+    // The postage reads through the SAME Day selection as the Day line, so a
+    // gate left open overnight moves from stamped Day 1 to unstamped Day 2 —
+    // and lands on absence, not on an empty box.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 7, 7, 23, 59, 0)); // local Aug 7, 23:59
+      setActiveEdition('vacay');
+      applyResolvedEventPreview({
+        eventName: 'Weekend in Bodega Bay',
+        days: [
+          { date: '2026-08-07', title: 'The Birds Have Entered the Chat', emoji: '🐦' },
+          { date: '2026-08-08', title: 'Side Quests' },
+        ],
+      });
+      const { container } = render(<EventPostcard />);
+      expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe('🐦');
+      act(() => {
+        vi.advanceTimersByTime(2 * 60 * 1000); // past midnight + the arm slack
+      });
+      expect(container.querySelector('.event-postcard-stamp')).toBeNull();
+      expect(container.querySelector('.event-postcard-franked')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('SignIn — the Join frame around the card', () => {
   it('draws the vacay lockup: byline, voice chip instead of the plain tagline, invite note', () => {
     setActiveEdition('vacay');

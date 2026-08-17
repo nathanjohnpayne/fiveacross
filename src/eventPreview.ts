@@ -115,6 +115,22 @@ function localIsoDate(now: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** The Day the gate is previewing: the first Day on or after today (the gate
+ *  previews what is COMING, so tonight-before-Day-1 shows Day 1), or `null`
+ *  after the last Day, when there is nothing left to preview. One seam, so the
+ *  Day line and the postcard's stamp can never disagree about which Day they
+ *  are describing (#776). */
+function previewDay(
+  days: EventPreviewDay[] | undefined,
+  now: number,
+): { day: EventPreviewDay; ordinal: number } | null {
+  if (!days?.length) return null;
+  const today = localIsoDate(now);
+  const index = days.findIndex((d) => d.date >= today);
+  if (index === -1) return null;
+  return { day: days[index]!, ordinal: index + 1 };
+}
+
 /**
  * The live "Day N" fragment ("🐦 Day 1: The Birds Have Entered the Chat"), or
  * `null` when the schedule offers nothing to say.
@@ -122,20 +138,33 @@ function localIsoDate(now: number): string {
  * ALWAYS computed from the seeded schedule, never a stored string — the
  * wireframe frame itself proves why: its literal Day-1 copy predates the #637
  * title trim, so a baked line would have shipped a stale title on day one.
- * Picks the first Day on or after today (the gate previews what is coming:
- * tonight-before-Day-1 shows Day 1); after the last Day there is nothing left
- * to preview, so the fragment drops rather than pointing at a finished Day.
+ * Day selection (and the post-trip drop) lives in `previewDay` above.
  */
 export function previewDayLine(
   days: EventPreviewDay[] | undefined,
   now: number = Date.now(),
 ): string | null {
-  if (!days?.length) return null;
-  const today = localIsoDate(now);
-  const index = days.findIndex((d) => d.date >= today);
-  if (index === -1) return null;
-  const day = days[index]!;
-  return `${day.emoji ? `${day.emoji} ` : ''}Day ${index + 1}: ${day.title}`;
+  const current = previewDay(days, now);
+  if (!current) return null;
+  const { day, ordinal } = current;
+  return `${day.emoji ? `${day.emoji} ` : ''}Day ${ordinal}: ${day.title}`;
+}
+
+/**
+ * The previewed Day's emoji — the postcard stamp's POSTAGE (#776) — or `null`.
+ *
+ * Deliberately the same `days[].emoji` field the Day line above renders, read
+ * through the same `previewDay` selection: the stamp is the Day's emoji, not a
+ * second seeded field. `null` is the COMMON case, not an edge — the Bodega
+ * seed carries an emoji on Day 1 only, and after the last Day no Day resolves
+ * at all — which is why the caller must render no stamp element rather than an
+ * empty one.
+ */
+export function previewDayEmoji(
+  days: EventPreviewDay[] | undefined,
+  now: number = Date.now(),
+): string | null {
+  return previewDay(days, now)?.day.emoji ?? null;
 }
 
 /**
