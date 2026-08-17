@@ -115,6 +115,29 @@ function localIsoDate(now: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** The Day the gate is previewing: the first Day on or after today (the gate
+ *  previews what is COMING, so tonight-before-Day-1 shows Day 1), or `null`
+ *  after the last Day, when there is nothing left to preview. One seam, so the
+ *  Day line and the postcard's stamp can never disagree about which Day they
+ *  are describing (#776). */
+function previewDay(
+  days: EventPreviewDay[] | undefined,
+  now: number,
+): { day: EventPreviewDay; ordinal: number } | null {
+  if (!days?.length) return null;
+  const today = localIsoDate(now);
+  const index = days.findIndex((d) => d.date >= today);
+  if (index === -1) return null;
+  return { day: days[index]!, ordinal: index + 1 };
+}
+
+/** Where the previewed Day's emoji is being drawn, so it is drawn ONCE.
+ *  `'inline'` leads the Day line with it, the shape every Edition used before
+ *  the postcard existed. `'stamp'` says the postcard's stamp corner has taken
+ *  the glyph, so the line must not repeat it — the emoji MOVED to the corner,
+ *  it was not removed (#776). */
+export type DayEmojiPlacement = 'inline' | 'stamp';
+
 /**
  * The live "Day N" fragment ("🐦 Day 1: The Birds Have Entered the Chat"), or
  * `null` when the schedule offers nothing to say.
@@ -122,32 +145,89 @@ function localIsoDate(now: number): string {
  * ALWAYS computed from the seeded schedule, never a stored string — the
  * wireframe frame itself proves why: its literal Day-1 copy predates the #637
  * title trim, so a baked line would have shipped a stale title on day one.
- * Picks the first Day on or after today (the gate previews what is coming:
- * tonight-before-Day-1 shows Day 1); after the last Day there is nothing left
- * to preview, so the fragment drops rather than pointing at a finished Day.
+ * Day selection (and the post-trip drop) lives in `previewDay` above.
  */
 export function previewDayLine(
   days: EventPreviewDay[] | undefined,
   now: number = Date.now(),
+  emojiPlacement: DayEmojiPlacement = 'inline',
 ): string | null {
-  if (!days?.length) return null;
-  const today = localIsoDate(now);
-  const index = days.findIndex((d) => d.date >= today);
-  if (index === -1) return null;
-  const day = days[index]!;
-  return `${day.emoji ? `${day.emoji} ` : ''}Day ${index + 1}: ${day.title}`;
+  const current = previewDay(days, now);
+  if (!current) return null;
+  const { day, ordinal } = current;
+  const lead = day.emoji && emojiPlacement === 'inline' ? `${day.emoji} ` : '';
+  return `${lead}Day ${ordinal}: ${day.title}`;
+}
+
+/** Is this ONE rendered glyph? The stamp is absolutely positioned and
+ *  content-sized against a fixed reserved corner, so its width is a layout
+ *  input, not just a cosmetic detail — while `asText` accepts any string up to
+ *  `MAX_TEXT`, because that cap guards a malformed seed rather than this
+ *  layout (Codex P2, round 3). A long `emoji` would grow the box leftward and
+ *  downward over the copy, recreating the very overlap #776 removes.
+ *
+ *  Grapheme clusters, not code points: a flag, a skin-toned hand, or a family
+ *  ZWJ sequence is several code points and one glyph, and all three are
+ *  legitimate postage. `Intl.Segmenter` is the correct instrument; where it is
+ *  missing the fallback bounds code points instead, which over-accepts a
+ *  little (it cannot tell one ZWJ sequence from two adjacent emoji) but still
+ *  keeps the box near stamp-sized. */
+function isSingleGlyph(value: string): boolean {
+  // Typed locally rather than via `lib.esnext`: this module is deliberately
+  // dependency-free and compiled against the repo's existing lib target, which
+  // does not declare `Intl.Segmenter`.
+  type GraphemeSegmenter = new (
+    locales: undefined,
+    options: { granularity: 'grapheme' },
+  ) => { segment(input: string): Iterable<unknown> };
+  const Segmenter = (Intl as unknown as { Segmenter?: GraphemeSegmenter }).Segmenter;
+  if (Segmenter) {
+    return [...new Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].length === 1;
+  }
+  return [...value].length <= 8;
+}
+
+/**
+ * The previewed Day's emoji — the postcard stamp's POSTAGE (#776) — or `null`.
+ *
+ * Deliberately the same `days[].emoji` field the Day line above renders, read
+ * through the same `previewDay` selection: the stamp is the Day's emoji, not a
+ * second seeded field. `null` is the COMMON case, not an edge — the Bodega
+ * seed carries an emoji on Day 1 only, and after the last Day no Day resolves
+ * at all — which is why the caller must render no stamp element rather than an
+ * empty one.
+ *
+ * A value that is not a single glyph resolves to `null` too, so the card falls
+ * back to the unstamped layout it already draws correctly rather than to an
+ * oversized box laid over its own copy. The Day LINE keeps such a value: it is
+ * inline text that wraps, so it costs nothing there.
+ */
+export function previewDayEmoji(
+  days: EventPreviewDay[] | undefined,
+  now: number = Date.now(),
+): string | null {
+  const emoji = previewDay(days, now)?.day.emoji;
+  return emoji && isSingleGlyph(emoji) ? emoji : null;
 }
 
 /**
  * The postcard's middle line: "Aug 7–9 · hosted by Kim · 🐦 Day 1: …".
  * Whichever fragments exist, joined the way the wireframe joins them; `null`
  * when none do, so the card can skip the line entirely.
+ *
+ * `emojiPlacement: 'stamp'` is how the caller says the stamp corner is already
+ * showing the Day's emoji, so this line drops its copy of it and the glyph
+ * appears exactly once on the card.
  */
-export function previewMetaLine(preview: EventPreview, now: number = Date.now()): string | null {
+export function previewMetaLine(
+  preview: EventPreview,
+  now: number = Date.now(),
+  emojiPlacement: DayEmojiPlacement = 'inline',
+): string | null {
   const parts = [
     preview.dateRange,
     preview.hostedBy ? `hosted by ${preview.hostedBy}` : undefined,
-    previewDayLine(preview.days, now) ?? undefined,
+    previewDayLine(preview.days, now, emojiPlacement) ?? undefined,
   ].filter((p): p is string => Boolean(p));
   return parts.length ? parts.join(' · ') : null;
 }

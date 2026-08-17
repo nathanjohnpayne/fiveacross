@@ -29,6 +29,19 @@ This ticket owns the collection and its rules only. Consuming it at startup—pa
 
 `edition` rides here rather than on the Event document for the reason ADR 0009 gives: `events/{eventId}` requires `signedIn()`, so an Edition read from it arrives after the surface that most needs it has already rendered. `preview` (#647) rides here for the same reason: the wireframes' Join frame draws the Event's name, dates, host and Day line on the sign-in screen itself, which renders before any authenticated read is possible.
 
+### What the gate renders from `preview`
+
+The gate picks ONE Day out of `days`—the first whose `date` is on or after the device-local today, so the night before Day 1 previews Day 1, and after the last Day no Day is selected at all. Every Day-derived surface reads through that single selection (`previewDay`, src/eventPreview.ts), so they cannot disagree about which Day is current:
+
+- **The Day line** (`previewDayLine`): `"{emoji} Day {N}: {title}"`, `N` being the Day's position in `days`. Omits the emoji when the Day has none; omits the whole fragment when no Day is selected.
+- **The stamp** (`previewDayEmoji`, #776): on the Vacay Edition only—the Edition whose brand row sets `signinCardVariant: 'postcard'`—the selected Day's `emoji` is drawn as the postcard's postage, inside the dashed stamp corner. **When the selected Day has no `emoji`, or no Day is selected, the gate renders no stamp element and drops the postcard's reserved stamp-corner padding.** An empty stamp box is not a permitted state: the box exists only to frame postage that exists. Editions without the postcard variant draw the same slice as a plain panel and never render a stamp.
+
+**Postage must be a single glyph.** `coerceEventPreview` accepts any `emoji` string up to `MAX_TEXT`, because that cap guards a malformed seed, not the postcard's layout. The stamp is content-sized against a *fixed* reserved corner, so an over-wide value would grow the box back over the copy—the same overlap the fixed-size box caused. `previewDayEmoji` therefore declines any value that is not one grapheme cluster (`Intl.Segmenter`, falling back to a code-point bound), and the card draws its unstamped layout instead. Genuine multi-code-point glyphs—flags, skin-tone modifiers, ZWJ sequences—are single clusters and remain valid postage. The Day *line* keeps such a value regardless: it is inline text that wraps, so an odd value costs nothing there.
+
+**The Day's emoji is drawn once per card.** The two surfaces above are alternative placements of one glyph, not two independent renderings of it: when the stamp takes the postage, the Day line drops its leading emoji and keeps naming the Day in words (`previewDayLine(..., 'stamp')`); when no stamp renders, the line leads with the emoji as it did before the postcard existed. The stamp is `aria-hidden`, which costs assistive tech nothing precisely because the Day line still carries the Day's title as text.
+
+`emoji` is therefore optional in a way that has a visible consequence, not merely a cosmetic one, and the no-emoji path is the ordinary case rather than a degraded one—the live Bodega schedule carries `emoji` on Day 1 alone. A future change that makes the stamp unconditional, or that sources its postage from any field other than the selected Day's `emoji`, reintroduces the empty-box defect #776 fixed.
+
 ## Rules contract
 
 ```
