@@ -2562,8 +2562,17 @@ textarea.input {
      fixed 58px: postage wider than the reserve would grow leftward over the
      copy, which is the overlap this whole change removes. The JS check is the
      real guard; this caps the damage of any glyph that passes it and still
-     renders unusually wide, clipping rather than colliding. */
-  max-width: 44px;
+     renders unusually wide, clipping rather than colliding.
+
+     `border-box` is load-bearing, not tidiness (CodeRabbit, round 4): under
+     the default content-box the cap bounds only the GLYPH, so the element's
+     outer width was max-width + 14px padding + 3px border = 61px against a
+     58px reserve — a backstop that could itself overlap the copy. The cap now
+     measures what the reserve measures. 40px outer + the 10px offset = 50px,
+     inside the 58px reserve even once the 3deg tilt widens the box, and its
+     ~23px content area still clears any real single glyph at 15px. */
+  box-sizing: border-box;
+  max-width: 40px;
   overflow: hidden;
   white-space: nowrap;
 }
