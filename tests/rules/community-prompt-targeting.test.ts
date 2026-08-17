@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteField, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 
 // specs/community-prompt-targeting.md (#557) — the firestore.rules contract for
 // Day-targeted Community Prompts. Three claims:
@@ -207,6 +207,43 @@ describe('update — only an admin re-targets or approves', () => {
   it('ALLOWS this Event’s admin to stamp retainedAt instead of a new Day', async () => {
     await assertSucceeds(
       updateDoc(doc(db(ADMIN), at('items/p1')), {
+        status: 'active',
+        approvedBy: ADMIN,
+        approvedAt: NOW(),
+        retainedAt: NOW(),
+      }),
+    );
+  });
+
+  it('DENIES even an ADMIN moving a Prompt to a MALFORMED Day', async () => {
+    // The create rule has always rejected these shapes; the update arm now
+    // matches it, so a malformed target cannot be minted through the rules at
+    // all (CodeRabbit, PR #812). No legitimate admin operation needs to: an
+    // approval writes a routed integer, and a repair writes a real Day.
+    for (const bad of [null, -1, 1.5, '4']) {
+      await assertFails(updateDoc(doc(db(ADMIN), at('items/p1')), { targetDayIndex: bad }));
+    }
+  });
+
+  it('ALLOWS an admin to REMOVE the target — repair is not the same as corruption', async () => {
+    await assertSucceeds(updateDoc(doc(db(ADMIN), at('items/p1')), { targetDayIndex: deleteField() }));
+  });
+
+  it('ALLOWS RETAINING a row that ALREADY carries a malformed target', async () => {
+    // The interaction the new bound has to survive. `approveItems` retains such a
+    // row by stamping `retainedAt` and deliberately NOT touching the malformed
+    // value (guessing the intended Day would be inventing one), so the check is
+    // conditioned on the field CHANGING. An unconditional check would deny this
+    // write and strand the very row it exists to retain — the row can predate the
+    // rule, arriving through an import on the Admin SDK, which bypasses rules.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at('items/malformed')), {
+        ...pendingPayload(ALICE),
+        targetDayIndex: null,
+      });
+    });
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), at('items/malformed')), {
         status: 'active',
         approvedBy: ADMIN,
         approvedAt: NOW(),

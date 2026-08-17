@@ -34,6 +34,26 @@ service cloud.firestore {
         || (request.resource.data.targetDayIndex is int
             && request.resource.data.targetDayIndex >= 0);
     }
+    // The update-side companion. An admin may write anything else on an item,
+    // but there is no legitimate admin operation that MOVES a Prompt to a
+    // malformed Day: approval writes a routed integer, retention leaves the
+    // field alone, and a repair either writes a real Day or removes the field.
+    // So the one field this otherwise-unconstrained arm bounds is the target
+    // (CodeRabbit, PR #812) — the client and snapshot both fail closed on a
+    // malformed value already, and this stops one being minted through the rules
+    // in the first place.
+    //
+    // Conditioned on the field actually CHANGING, which is load-bearing: the
+    // approval of a row that ALREADY carries a malformed target stamps
+    // `retainedAt` WITHOUT touching `targetDayIndex` (see `approveItems` — the
+    // value is left in place rather than guessed at), and an unconditional check
+    // would deny exactly that write, stranding the row it is meant to retain.
+    // Removing the field stays allowed: `validTargetDayIndex()` reads an absent
+    // field as valid.
+    function targetDayIndexUnchangedOrValid() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['targetDayIndex'])
+        || validTargetDayIndex();
+    }
     function nonAdminPendingMainItemCreate() {
       return request.resource.data.status == 'pending'
         && request.resource.data.pool == 'main';
@@ -729,7 +749,7 @@ service cloud.firestore {
         // manual hide/restore via the `isAdmin(eventId)` branch. This is the
         // authoritative promotion of the Phase-0 presentational `isReportHidden`
         // filter — pinned by tests/rules/w4-server-authoritative-hide.test.ts.
-        allow update: if isAdmin(eventId)
+        allow update: if (isAdmin(eventId) && targetDayIndexUnchangedOrValid())
           || (signedIn()
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
               && request.resource.data.reportCount == resource.data.reportCount + 1);
