@@ -250,6 +250,13 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
 fi
 
 # `--except` removes whole Functions releases or one known invoker service.
+# An unfamiliar `functions:<selector>` can be a codebase/group containing an
+# endpoint, so it must be treated as excluding both protected endpoints: do
+# not let an effective Hosting-only deploy be blocked by gcloud or mutate Cloud
+# Run IAM for an endpoint Firebase was told not to release. This is deliberately
+# the complement of unfamiliar `--only`: the allowlist includes a possible
+# endpoint defensively; the subtractive selector excludes a possible endpoint
+# defensively. Exact endpoint selectors keep their precise behavior below.
 for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
   IFS=',' read -r -a except_selectors <<< "$except_value"
   for selector in "${except_selectors[@]}"; do
@@ -267,6 +274,12 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         ;;
       functions:emailUnsubscribe)
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        ;;
+      functions:*)
+        BUG_REPORT_INVOKER_SELECTED=false
+        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        BUG_REPORT_INVOKER_CONSERVATIVE=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
     esac
@@ -845,6 +858,10 @@ fi
 # Hosting-200 check misses. The 2026-07-09 outage (#141) returned 200 for the
 # shell while the client JS crashed on init (`auth/invalid-api-key`), leaving a
 # blank page; a rules regression that blocks first paint fails the same way.
+# `SYNTHETIC_DEPLOYMENT_CHECK=true` also tells the unsubscribe probe that this
+# is post-release evidence, not the scheduled monitor's unchanged pre-rollout
+# baseline: `/unsubscribe` serving the SPA here is a failed deploy, never a
+# grace-worthy state.
 # Runs against the live origin (SYNTHETIC_URL, default the production domain)
 # AFTER the cache purge above, so it sees what users will get. This is the
 # deploy-to-live-then-verify posture: on failure it exits non-zero and points at
@@ -854,7 +871,7 @@ if [[ "$SYNTHETIC_SKIP" == "true" ]]; then
 else
   SYNTHETIC_URL="${SYNTHETIC_URL:-https://gaycruisebingo.com/}"
   echo ">> Post-deploy synthetic: asserting the app mounts at $SYNTHETIC_URL"
-  if ! SYNTHETIC_URL="$SYNTHETIC_URL" npm run --silent test:synthetic; then
+  if ! SYNTHETIC_DEPLOYMENT_CHECK=true SYNTHETIC_URL="$SYNTHETIC_URL" npm run --silent test:synthetic; then
     cat >&2 <<EOF
 
 ✗ Post-deploy synthetic FAILED at $SYNTHETIC_URL. The deploy is live.

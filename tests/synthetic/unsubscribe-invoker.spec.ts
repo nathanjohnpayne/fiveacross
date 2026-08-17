@@ -27,50 +27,22 @@ import { test } from '@playwright/test';
 // token is ever sent, so this probe has no side effect on any participant's
 // opt-out state.
 //
-// THE ROLLOUT WINDOW IS TIME-BOXED, NOT PERMANENT (#768 r3 → r4).
+// The scheduled monitor starts running as soon as this change merges, before
+// the first Hosting deploy can ship the rewrite. In that unchanged pre-rollout
+// state the shell response is ambiguous, so the scheduled run checks the RAW
+// function URL for IAM health and records a skip rather than opening a false
+// Hosting-outage issue. A deployment check is different evidence: deploy.sh
+// marks it with SYNTHETIC_DEPLOYMENT_CHECK=true, so a shell response there is a
+// real failed release and must fail immediately. No calendar deadline can
+// reliably distinguish these states; the deployment context does.
 //
-// This file is matched by `playwright.synthetic.config.ts` (`testDir:
-// ./tests/synthetic`), and `.github/workflows/synthetic-uptime.yml` runs `npm
-// run test:synthetic` from `main` every 15 minutes — so the assertion goes
-// live the moment the commit merges, which is BEFORE the manually-run Hosting
-// deploy that ships the `/unsubscribe` rewrite. A bare `expect(400)` would
-// page for the whole merge-to-deploy window while the deployed app is
-// unchanged and perfectly healthy.
-//
-// The three observable states are:
-//
-//   403                  → the Cloud Run invoker check is blocking. Real
-//                          regression, fail loudly, always.
-//   400                  → healthy: the request reached application code.
-//   200 + the SPA shell  → Firebase Hosting's `**` → /index.html catch-all
-//                          answered, so `/unsubscribe` is not routed to the
-//                          function at this origin.
-//
-// That third state is genuinely AMBIGUOUS from outside: "the rewrite has not
-// been deployed here yet" and "the rewrite was deployed and has since been
-// rolled back, dropped from a scoped deploy, or otherwise lost" produce a
-// byte-identical response. No header, status, or body distinguishes them —
-// which is why r3's unconditional skip was a permanent blind spot: after
-// emails start carrying `/unsubscribe` links, every one of them opens the SPA
-// instead of the opt-out page and this probe stays green forever.
-//
-// Since no signal in the RESPONSE separates the two, the separator has to be
-// TIME. Before ROLLOUT_ENFORCE_FROM the ambiguity resolves toward "not
-// deployed yet" and the probe skips; after it, the shell is a FAILURE naming
-// both possible causes, because by then either one is a real problem an
-// operator must act on — a rewrite that never shipped is as broken as one that
-// regressed. The window is deliberately short and deliberately hard-coded
-// rather than env-configurable: an override would be set once during rollout
-// and never unset, recreating the permanent skip through a different door.
-//
-// Once a deploy has been confirmed to serve 400 here, this whole branch can be
-// deleted and the probe reduced to `expect(400)`.
-//
-// `src/recon-share-og.test.ts` remains the structural half — it parses
-// firebase.json and fails if the `/unsubscribe` rewrite is missing or ordered
-// after the SPA catch-all — but it can only see the SOURCE, never what Hosting
-// is actually serving, which is precisely the drift this deadline covers.
-const ROLLOUT_ENFORCE_FROM = Date.parse('2026-08-28T00:00:00Z');
+// The raw URL is deliberately limited to this scheduled grace path. Email
+// links use the first-party Hosting URL, and a deploy must prove that exact
+// address routes correctly. The raw function check merely ensures the grace
+// cannot hide a Cloud Run IAM regression while Hosting has not been released.
+const DEPLOYMENT_CHECK = process.env.SYNTHETIC_DEPLOYMENT_CHECK === 'true';
+const RAW_UNSUBSCRIBE_URL =
+  process.env.EMAIL_UNSUBSCRIBE_RAW_URL ?? 'https://us-central1-gaycruisebingo.cloudfunctions.net/emailUnsubscribe';
 
 const SYNTHETIC_URL = process.env.SYNTHETIC_URL ?? 'https://gaycruisebingo.com/';
 const UNSUBSCRIBE_URL = new URL('/unsubscribe', SYNTHETIC_URL).toString();
@@ -98,14 +70,12 @@ test('the unsubscribe endpoint is reachable (no Cloud Run invoker regression)', 
   }
 
   if (status === 200 && (await response.text()).includes(SPA_SHELL_MARKER)) {
-    const enforceFrom = new Date(ROLLOUT_ENFORCE_FROM).toISOString();
-
-    if (Date.now() >= ROLLOUT_ENFORCE_FROM) {
+    if (DEPLOYMENT_CHECK) {
       throw new Error(
         `${UNSUBSCRIBE_URL} served the SPA shell, not the opt-out page — Firebase Hosting's ** catch-all ` +
           'answered, so /unsubscribe is not routed to emailUnsubscribe at this origin. Emails already carry ' +
-          `this link (EMAIL_UNSUBSCRIBE_URL in functions/src/params.ts), and the rollout window closed at ` +
-          `${enforceFrom}, so every unsubscribe link opens the app instead of the opt-out page right now.\n\n` +
+          `this link (EMAIL_UNSUBSCRIBE_URL in functions/src/params.ts), and this deploy's post-release ` +
+          `check proves Hosting did not ship the rewrite, so every unsubscribe link opens the app right now.\n\n` +
           'Two causes, both real:\n' +
           '  • Hosting was rolled back, or deployed with a scope that excluded it, after the rewrite shipped.\n' +
           '  • The rewrite never shipped to this origin at all.\n\n' +
@@ -115,12 +85,31 @@ test('the unsubscribe endpoint is reachable (no Cloud Run invoker regression)', 
       );
     }
 
+    // The scheduled monitor sees the unchanged pre-rollout deployment until
+    // Hosting is first released. It must not treat that known baseline as a
+    // page, but it also must not let the grace conceal a Cloud Run IAM 403.
+    const rawResponse = await request.get(RAW_UNSUBSCRIBE_URL);
+    const rawStatus = rawResponse.status();
+    if (rawStatus === 403) {
+      throw new Error(
+        `emailUnsubscribe 403 at ${RAW_UNSUBSCRIBE_URL} — the raw function is blocked at the Cloud Run ` +
+          'invoker IAM layer while the scheduled pre-rollout Hosting grace is active. Restore it with ' +
+          '`scripts/set-email-unsubscribe-invoker.sh`, then re-run this workflow.',
+      );
+    }
+    if (rawStatus !== 400) {
+      throw new Error(
+        `emailUnsubscribe probe failed at ${RAW_UNSUBSCRIBE_URL}: expected HTTP 400 from the raw function ` +
+          `(endpoint reached, no token supplied); got HTTP ${rawStatus}. The scheduled Hosting grace cannot ` +
+          'treat that endpoint failure as healthy.',
+      );
+    }
+
     test.skip(
       true,
-      `${UNSUBSCRIBE_URL} served the SPA shell, so the /unsubscribe Hosting rewrite is not deployed at this ` +
-        `origin yet. This grace lasts until ${enforceFrom}; after that the same response FAILS, because by ` +
-        'then a shell here means either the rewrite never shipped or it regressed, and both need a human. ' +
-        'Deploy Hosting to clear it.',
+      `${UNSUBSCRIBE_URL} served the SPA shell in the unchanged scheduled pre-rollout state; the raw function ` +
+        `answered HTTP 400, so Cloud Run IAM is healthy. A deploy-time synthetic check does not grant this ` +
+        'grace and will fail until Hosting ships the /unsubscribe rewrite.',
     );
     return;
   }

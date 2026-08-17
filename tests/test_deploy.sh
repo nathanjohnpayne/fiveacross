@@ -162,6 +162,9 @@ cat >"$STUB_DIR/npm" <<'STUB'
   for a in "$@"; do printf '\t%s' "$a"; done
   printf '\n'
 } >> "$NPM_LOG"
+if [ -n "${NPM_DEPLOYMENT_CHECK_LOG:-}" ]; then
+  printf '%s\n' "${SYNTHETIC_DEPLOYMENT_CHECK:-}" >> "$NPM_DEPLOYMENT_CHECK_LOG"
+fi
 exit "${NPM_STUB_EXIT:-0}"
 STUB
 chmod +x "$STUB_DIR/npm"
@@ -501,11 +504,13 @@ OUT6="$WORKDIR/case6.out"
 ERR6="$WORKDIR/case6.err"
 : >"$WORKDIR/ofd-calls-6.log"
 : >"$WORKDIR/npm-calls-6.log"
+: >"$WORKDIR/npm-deployment-check-6.log"
 
 set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-6.log" \
 NPM_LOG="$WORKDIR/npm-calls-6.log" \
+NPM_DEPLOYMENT_CHECK_LOG="$WORKDIR/npm-deployment-check-6.log" \
   bash -c "cd '$REPO6' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
   >"$OUT6" 2>"$ERR6"
 RC6=$?
@@ -516,8 +521,11 @@ if [[ $RC6 -ne 0 ]]; then
   cat "$ERR6" >&2
 elif ! grep -q 'test:synthetic' "$WORKDIR/npm-calls-6.log"; then
   fail "synthetic-runs: deploy.sh did not invoke the post-deploy synthetic (npm run test:synthetic)."
+elif ! grep -qx 'true' "$WORKDIR/npm-deployment-check-6.log"; then
+  fail "synthetic-runs: deploy.sh did not mark the post-deploy probe as deployment evidence. log was:"
+  cat "$WORKDIR/npm-deployment-check-6.log" >&2
 else
-  pass "synthetic-runs: deploy.sh runs the post-deploy synthetic and completes when it passes."
+  pass "synthetic-runs: deploy.sh runs the post-deploy synthetic as deployment evidence and completes when it passes."
 fi
 
 # ---------------------------------------------------------------------------
@@ -1199,6 +1207,41 @@ elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-16d.log"; then
   cat "$WORKDIR/gcloud-calls-16d.log" >&2
 else
   pass "unrelated-selector-first-deploy: an unfamiliar scoped selector tolerates an absent conservatively inferred service before and after publish (rc=$RC16D)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 16e (#768 Phase 4b P2): `--except functions:<selector>` can exclude a
+# codebase/group. Treat an unfamiliar exclusion as excluding both protected
+# endpoints, so its effective Hosting-only scope neither needs gcloud nor
+# mutates Cloud Run IAM.
+# ---------------------------------------------------------------------------
+REPO16E="$WORKDIR/case16e-unfamiliar-except"
+init_fixture_repo "$REPO16E"
+OUT16E="$WORKDIR/case16e.out"
+ERR16E="$WORKDIR/case16e.err"
+: >"$WORKDIR/ofd-calls-16e.log"
+: >"$WORKDIR/gcloud-calls-16e.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-16e.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-16e.log" \
+GCLOUD_STUB_EXIT=1 \
+  bash -c "cd '$REPO16E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions --except functions:default" \
+  >"$OUT16E" 2>"$ERR16E"
+RC16E=$?
+set -e
+
+if [[ $RC16E -ne 0 ]]; then
+  fail "unfamiliar-except: an excluded codebase/group scope returned $RC16E because gcloud was invoked. stderr was:"
+  cat "$ERR16E" >&2
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-16e.log"; then
+  fail "unfamiliar-except: deploy.sh never reached Firebase."
+elif [[ -s "$WORKDIR/gcloud-calls-16e.log" ]]; then
+  fail "unfamiliar-except: deploy.sh invoked gcloud for endpoints excluded by functions:default. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16e.log" >&2
+else
+  pass "unfamiliar-except: an unfamiliar functions exclusion skips protected-endpoint prechecks and mutations (rc=$RC16E)."
 fi
 
 # ---------------------------------------------------------------------------
