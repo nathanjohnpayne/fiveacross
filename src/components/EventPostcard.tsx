@@ -1,5 +1,10 @@
 import { useEffect, useReducer, useSyncExternalStore } from 'react';
-import { activeEventPreview, previewMetaLine, subscribeEventPreview } from '../eventPreview';
+import {
+  activeEventPreview,
+  previewDayEmoji,
+  previewMetaLine,
+  subscribeEventPreview,
+} from '../eventPreview';
 import { editionBrand } from '../editions';
 
 // The sign-in gate's Event-preview card (#647, wireframes § "Join—the
@@ -31,6 +36,22 @@ import { editionBrand } from '../editions';
 // `signinCardVariant: 'postcard'`, which draws the dashed stamp corner; gcb
 // and fiveacross render the same card as a plain panel (their Join frames'
 // `.banner`).
+//
+// The stamp's POSTAGE is the previewed Day's emoji, and the stamp exists only
+// when that emoji does (#776). It shipped three times as a bordered CSS
+// `::after` with `content: ''` — a box whose content path did not exist, so
+// the frame always drew and the postage never did. An empty dashed rectangle
+// is now unreachable rather than merely unlikely: no emoji resolves (the
+// COMMON case — Bodega seeds one on Day 1 only, and after the last Day no Day
+// resolves at all) → no element, and the card drops the right padding it
+// reserves for the corner so the copy reclaims the full width.
+//
+// The glyph appears exactly ONCE. The Day line has always led with the Day's
+// emoji, so a stamp that repeats it prints the same glyph twice on one small
+// card; when the corner takes the postage the line gives it up
+// (`emojiPlacement: 'stamp'`) and keeps the Day named in words. With no stamp
+// — no postage, or an Edition with no postcard variant — the line leads with
+// the emoji exactly as it did before the stamp existed.
 export default function EventPostcard() {
   const preview = useSyncExternalStore(subscribeEventPreview, activeEventPreview, activeEventPreview);
   // "Live" has to survive the gate being LEFT OPEN (Codex P2 round 1): the Day
@@ -60,10 +81,33 @@ export default function EventPostcard() {
   }, []);
   if (!preview) return null;
   const stamped = editionBrand().signinCardVariant === 'postcard';
-  const meta = previewMetaLine(preview);
+  // ONE timestamp for both reads (Codex P3, round 2). Letting each helper take
+  // its own `Date.now()` makes the single-Day selection atomic only in the
+  // common case: a render that straddles local midnight could stamp the old
+  // Day's emoji beside the new Day's line, or suppress the new Day's emoji on
+  // the strength of the old Day's postage — and the card would hold that
+  // mismatch until some later render. The seam is only as good as its callers.
+  const now = Date.now();
+  const postage = stamped ? previewDayEmoji(preview.days, now) : null;
+  // The Day's emoji is drawn ONCE. When the corner takes it, the Day line
+  // gives it up; with no stamp — no postage, or an Edition with no postcard
+  // variant — the line keeps leading with it exactly as it always has.
+  const meta = previewMetaLine(preview, now, postage ? 'stamp' : 'inline');
   const host = typeof window === 'undefined' ? null : window.location.hostname;
   return (
-    <div className={`event-postcard${stamped ? ' event-postcard-stamped' : ''}`}>
+    <div
+      className={`event-postcard${stamped ? ' event-postcard-stamped' : ''}${
+        postage ? ' event-postcard-franked' : ''
+      }`}
+    >
+      {/* Decorative: the Day line below still NAMES the Day in words ("Day 1:
+          The Birds Have Entered the Chat"), so hiding the glyph costs a
+          screen reader nothing — it is postage, not information. */}
+      {postage && (
+        <span className="event-postcard-stamp" aria-hidden="true">
+          {postage}
+        </span>
+      )}
       <b className="event-postcard-name">{preview.eventName}</b>
       {meta && <span className="event-postcard-meta">{meta}</span>}
       {/* The ENTRY hostname, same identity rule as share links (#607): the
