@@ -2777,8 +2777,6 @@
         <div class="menurow"><div class="grow">Strip location data<span class="who">Library photos are far likelier to carry geotags than live captures.</span></div><span class="tgl"></span></div>
         <div class="menurow"><div class="grow">AI image screen</div><span class="tgl"></span></div>
         <div class="menurow"><div class="grow">Auto-hide after reports<span class="who">Reports needed before a Prompt or Proof self-hides.</span></div><span class="dd">4 ▾</span></div>
-        <div class="secthead">Marking</div>
-        <div class="seg"><span class="segbtn on">Honor</span><span class="segbtn">Proof</span><span class="segbtn">Admin OK</span></div>
         <div class="secthead">Audience</div>
         <div class="menurow"><div class="grow">Adults-only posture<span class="who">On — derived from 12 active spicy Prompts in the main pool. Monotone: cannot be turned back off.</span></div><span class="pill">18+ on</span></div>
         <div class="menurow"><div class="grow">Force 18+ regardless of Prompts<span class="who">For mature content the spicy flag cannot see—violence, drugs, self-harm. Confirmed before it takes effect.</span></div><span class="tgl"></span></div>
@@ -2894,9 +2892,7 @@
       <div class="cmpcol">
         <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
-          <div class="secthead">Marking</div>
-        <div class="seg"><span class="segbtn on">Honor</span><span class="segbtn">Proof</span><span class="segbtn">Admin OK</span></div>
-        <div class="secthead">Audience</div>
+          <div class="secthead">Audience</div>
           <div class="menurow"><div class="grow">Adults-only posture<span class="who">On — 12 active spicy Prompts</span></div><span class="pill">locked on</span></div>
           <div class="menurow"><div class="grow">Force 18+<span class="who">Redundant while derived on</span></div><span class="tgl"></span></div>
           <div class="secthead">Appearance</div>
@@ -2906,9 +2902,7 @@
       <div class="cmpcol">
         <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
-          <div class="secthead">Marking</div>
-        <div class="seg"><span class="segbtn on">Honor</span><span class="segbtn">Proof</span><span class="segbtn">Admin OK</span></div>
-        <div class="secthead">Audience</div>
+          <div class="secthead">Audience</div>
           <div class="menurow"><div class="grow">Adults-only posture<span class="who">Off — no active spicy Prompts</span></div><span class="pill">18+ off</span></div>
           <div class="menurow"><div class="grow">Force 18+<span class="who">Available · confirm before it takes effect</span></div><span class="tgl"></span></div>
           <div class="secthead">Appearance</div>
@@ -2918,9 +2912,7 @@
       <div class="cmpcol">
         <span class="brand-chip brand-fa">✳ Five Across</span>
         <div class="cmpbody" data-theme="fiveacross-slate">
-          <div class="secthead">Marking</div>
-        <div class="seg"><span class="segbtn on">Honor</span><span class="segbtn">Proof</span><span class="segbtn">Admin OK</span></div>
-        <div class="secthead">Audience</div>
+          <div class="secthead">Audience</div>
           <div class="menurow"><div class="grow">Adults-only posture<span class="who">Off — no active spicy Prompts</span></div><span class="pill">18+ off</span></div>
           <div class="menurow"><div class="grow">Force 18+<span class="who">Available · confirm before it takes effect</span></div><span class="tgl"></span></div>
           <div class="secthead">Appearance</div>
@@ -4087,23 +4079,27 @@
         <div class="promptrow">Sat · main day<span class="act"><span class="dd">06:00 ▾</span></span></div>
         <div class="promptrow">Sun · last full day<span class="act"><span class="dd">06:00 ▾</span></span></div>
         <div class="promptrow">Sun · wrap-up (closing)<span class="act"><span class="dd">11:00 ▾</span></span></div>
-        <div class="note" style="margin-top:0">America/Los_Angeles. Last call is <b>derived</b>, never typed: 12h <b>after</b> the unlock of the Day preceding the closing Day—Sat 06:00 here, so <b>18:00 Sat</b>. Standings freeze at Sunday's open. Defaults to 06:00 local—change any Day and this line recomputes.</div>
+        <div class="note" style="margin-top:0">America/Los_Angeles. Last call is <b>derived</b>, never typed: <code>finaleTimes</code> adds 12h to the unlock of the Day <i>immediately preceding</i> the closing Day. Here that is Sun 06:00, so it derives <b>Sun 18:00</b>—<b>after</b> the 11:00 closing unlock, so it can never fire. Shown as the scheduler computes it, flagged, not silently corrected. Defaults to 06:00 local—change any Day and this line recomputes.</div>
         <div class="secthead">Theme per day</div>
         <div class="menurow"><div class="grow">Fri · arrival<span class="who"><span class="sw" style="background:#7fb8a4"></span><span class="sw" style="background:#c94f3d"></span> The Birds Have Entered the Chat</span></div><span class="dd">Change ▾</span></div>
         <div class="menurow"><div class="grow">Sat · main day<span class="who"><span class="sw" style="background:#2e7fa8"></span><span class="sw" style="background:#e8862e"></span> Bodega Bay Side Quests</span></div><span class="dd">Change ▾</span></div>
-        <div class="menurow"><div class="grow">Sun · farewell<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sun · last full day<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sun · wrap-up<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
         <div class="secthead">Place &amp; tonight, per day</div>
         <div class="promptrow">Fri<span class="act"><span class="cls">🌊 Bodega Bay</span></span></div>
         <div class="msgbox" style="font-size:10px">Tonight: 🦀 Crab shack · 🔥 Fire pit</div>
         <div class="promptrow">Sat<span class="act"><span class="cls">🌅 Bodega Bay</span></span></div>
         <div class="msgbox" style="font-size:10px">Tonight: 🎣 Dock walk · 🍷 Porch wine</div>
-        <div class="promptrow">Sun<span class="act"><span class="cls">🌫️ The drive home</span></span></div>
+        <div class="promptrow">Sun · last full day<span class="act"><span class="cls">🌅 Bodega Bay</span></span></div>
         <div class="msgbox" style="font-size:10px">Tonight: ☕ Last coffee · 🧳 The slow pack</div>
+        <div class="promptrow">Sun · wrap-up<span class="act"><span class="cls">🌫️ The drive home</span></span></div>
+        <div class="msgbox" style="font-size:10px">Tonight: 👋 Goodbyes · 🚗 The long way back</div>
         <div class="note" style="margin-top:0">Place, its emoji, and <b>exactly two</b> Tonight entries are required per Day—they render on the card, the locked tease, the schedule and share copy, and only Tonight is editable in Admin afterwards.</div>
         <div class="secthead">Free space, per day</div>
         <div class="msgbox">Fri: The flock has landed</div>
         <div class="msgbox">Sat: Main character on the coast</div>
-        <div class="msgbox">Sun: We did it for the story</div>
+        <div class="msgbox">Sun (last full day): We did it for the story</div>
+        <div class="msgbox">Sun (wrap-up): Take the long way home</div>
         <div class="secthead">Daily mix</div>
         <div class="menurow" style="display:block">
           <div class="grow">Share of each <b>main-Day</b> card from the easy pool<span class="who">Main Days only—arrival and farewell cards deal from their own pool unstratified. Same slider as Admin · Game settings; change it any time.</span></div>
@@ -4117,7 +4113,7 @@
         <div class="btnrow"><span class="btn ok">Continue</span></div>
       </div>
     </div>
-    <p class="cap"><b>Step 4 · Look—emotion per day, contract underneath</b>Swatch pairs make each day's palette legible at a glance; picking only ever swaps token sets, so contrast checks and mechanics are untouched. <b>Only registered Themes are offered—there is deliberately no "Custom".</b> Every `DayDef.theme` must be a `ThemeId` backed by `THEMES` metadata and a `themes.css` token block; there is no custom-theme value and no persisted custom-token shape, so a Custom option would give an implementation nothing valid to save and no contrast-audited palette to render. Free-space text per day is the cheapest personality lever an organizer has, so it gets first-class placement. The Daily mix slider is the same control as Admin · Game settings (identical <code>.slwrap</code> anatomy)—set here as a starting value, adjustable mid-event there. <b>The unlock times are not a look choice; they are here because nothing else in the wizard sets them.</b> Each Day's <code>unlockAt</code> is an absolute instant that drives snapshot publication, card availability, daily email timing and the finale beats—and a date range plus an auto-detected timezone does not determine it. Bodega opens at <b>06:00</b>, not the old 08:00 default, which is exactly the kind of cadence an Event would otherwise launch wrong while the intro promises every default is changeable before launch. Per-Day controls with a reviewed summary, rather than an invisible default. <b>Last call is shown but not editable, because it is derived:</b> <code>finaleTimes</code> takes the Day before the closing Day and <i>adds</i> <code>LAST_CALL_LEAD_MS</code> (12h) — an offset <b>after</b> that unlock, not before it — so a Sat 06:00 unlock lands at 18:00 Sat. Typing a last-call time here would advertise an hour the scheduler never honors—the frame recomputes it from the unlocks instead. Note also that the Daily mix applies to <b>main-Day</b> cards only: <code>dealBoard</code> stratifies just the main-pool path, so the arrival and closing Days deal from their own pools untouched by this slider. <b>Place, its emoji and the Tonight pair are collected here because <code>DayDef</code> requires them</b>—they render on the Day Card, the locked tease, the schedule, the leaderboard and share copy, and <code>tonight</code> takes <i>exactly two</i> entries. Only <code>tonight</code> has an Admin editor after creation and <code>place</code> has none, so a wizard that skipped them would force a provisioner to invent or blank player-facing data with no way to correct it—which the "every default is changeable before launch" promise cannot survive.</p>
+    <p class="cap"><b>Step 4 · Look—emotion per day, contract underneath</b>Swatch pairs make each day's palette legible at a glance; picking only ever swaps token sets, so contrast checks and mechanics are untouched. <b>Only registered Themes are offered—there is deliberately no "Custom".</b> Every `DayDef.theme` must be a `ThemeId` backed by `THEMES` metadata and a `themes.css` token block; there is no custom-theme value and no persisted custom-token shape, so a Custom option would give an implementation nothing valid to save and no contrast-audited palette to render. Free-space text per day is the cheapest personality lever an organizer has, so it gets first-class placement. The Daily mix slider is the same control as Admin · Game settings (identical <code>.slwrap</code> anatomy)—set here as a starting value, adjustable mid-event there. <b>The unlock times are not a look choice; they are here because nothing else in the wizard sets them.</b> Each Day's <code>unlockAt</code> is an absolute instant that drives snapshot publication, card availability, daily email timing and the finale beats—and a date range plus an auto-detected timezone does not determine it. Bodega opens at <b>06:00</b>, not the old 08:00 default, which is exactly the kind of cadence an Event would otherwise launch wrong while the intro promises every default is changeable before launch. Per-Day controls with a reviewed summary, rather than an invisible default. <b>Last call is shown but not editable, because it is derived:</b> <code>finaleTimes</code> takes the Day immediately before the closing Day and <i>adds</i> <code>LAST_CALL_LEAD_MS</code> (12h) — an offset <b>after</b> that unlock, not before it. <b>And on this schedule that exposes a real contract gap worth surfacing rather than hiding:</b> Bodega's tail is two Days on one date (main 06:00, closing 11:00), so the preceding Day is Sunday's 06:00 and last call derives to <b>Sun 18:00 — seven hours after the standings already froze at 11:00</b>, which means it can never post. The 12h offset assumes a closing Day on its own calendar date. The frame prints what the scheduler actually computes and flags it, because a wireframe that quietly displayed a plausible time would hide the mismatch from whoever implements this. Note also that the Daily mix applies to <b>main-Day</b> cards only: <code>dealBoard</code> stratifies just the main-pool path, so the arrival and closing Days deal from their own pools untouched by this slider. <b>Place, its emoji and the Tonight pair are collected here because <code>DayDef</code> requires them</b>—they render on the Day Card, the locked tease, the schedule, the leaderboard and share copy, and <code>tonight</code> takes <i>exactly two</i> entries. Only <code>tonight</code> has an Admin editor after creation and <code>place</code> has none, so a wizard that skipped them would force a provisioner to invent or blank player-facing data with no way to correct it—which the "every default is changeable before launch" promise cannot survive.</p>
   </div>
 
   <div class="unit" id="fx-setup-launch-fa">
@@ -4130,17 +4126,18 @@
         <div class="promptrow">✓ Weekend in Bodega Bay · Aug 7–9<span class="act btn" style="font-size:9.5px">Edit</span></div>
         <div class="promptrow">✓ bodega-bay.fiveacross.app · canonical, claimed at launch<span class="act btn" style="font-size:9.5px">Edit</span></div>
         <div class="promptrow">✓ 86 squares · every pool ≥ 24 ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="promptrow">✓ 3 days unlock 06:00 local · closing pool set ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ 4 Days scheduled · closing pool set ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
         <div class="promptrow">✓ First unlock is still ahead (Fri 06:00) — required<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="promptrow">✓ 3 day themes · free spaces · contrast ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ 4 Days themed · places · tonight · free spaces ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
         <div class="promptrow">✓ Honor system · photos on · you are Admin<span class="act btn" style="font-size:9.5px">Edit</span></div>
         <div class="promptrow">⚠︎ 18+ acknowledgement: <b>on</b> — forceAdult off, 4 spicy main Prompts<span class="act btn" style="font-size:9.5px">Review</span></div>
         <div class="promptrow">⚠︎ Create runs server-side (Admin SDK) — clients cannot claim hostnames<span class="act btn" style="font-size:9.5px">Why</span></div>
         <div class="warnbox" style="font-size:9.5px"><b>Launch is gated on platform work that does not exist yet.</b> No wildcard router serves a new hostname (#545), so this address routes nowhere. Sign-in must be registered for this exact host (Firebase Auth + the Google OAuth client take no wildcard) or the page renders <b>auth-unconfigured</b>. Anyone signed in who reaches the address can join—the link is an <b>address, not an invitation</b>. And the share unfurl and installed app name still come from the bundle's Edition, not this Event.</div>
-        <div class="btnrow"><span class="btn ok">Create event</span></div>
-        <div class="qrbox"></div>
+        <div class="btnrow"><span class="btn" style="opacity:.45">Create event — blocked</span></div>
+        <div class="note" style="font-size:9.5px">Invite link and QR appear once creation is unblocked.</div>
+        <div class="qrbox" style="opacity:.25"></div>
         <div class="note" style="font-size:11px;color:var(--ink)">bodega-bay.fiveacross.app</div>
-        <div class="btnrow"><span class="btn">Copy link</span><span class="btn">Share invite</span></div>
+        <div class="btnrow" style="opacity:.35"><span class="btn">Copy link</span><span class="btn">Share invite</span></div>
       </div>
     </div>
     <p class="cap"><b>Step 5 · Launch—checklist, then the QR is the confetti</b>Every row is a verified gate (mirroring the POC launch-gate discipline) with an Edit escape hatch; Create is a <b>trusted server-side provisioner</b>, not a client transaction, and that is a rules fact rather than a preference: <code>firestore.rules</code> gates Event creation on <code>isAdmin(eventId)</code>, which reads the Event document that does not exist yet, so a client cannot bootstrap its own first Admin grant; and <code>hostnames/{host}</code> denies create/update to <b>every</b> client including admins, because routing is global state no per-Event admin has authority over. A callable with platform-level authorization claims the canonical slug and its Edition alternate atomically via the Admin SDK, seeds the Event, grants the creator Admin, and returns the invite QR + link + share. The creator is granted <b>Admin</b> on the new Event—that grant, not the Host field, is what authorizes every setup write; <code>hostedBy</code> stays player-facing display metadata (<a href="../CONTEXT.md">CONTEXT</a>: “a Host is a social identity, not a permission”). The organizer lands in the familiar Admin hub afterward—setup ends where operations begin. <b>Two rows are honesty, not decoration.</b> The <b>first-unlock row is a hard gate, not a nicety</b>: every Prompt seeded at creation gets a <code>createdAt</code>, and <code>activeSnapshotIds</code> excludes Prompts created after a Day's cutoff—so launching <i>after</i> Friday's 06:00 has already passed permanently stamps an empty arrival snapshot. (The Bodega seed dodges exactly this with an <code>unlockAt: 0</code> sentinel and a pre-stamped snapshot.) Launch therefore requires a first unlock still in the future, or must atomically pre-stamp an already-open first Day. The 18+ row is <i>derived server-side</i> from the pool's spicy Prompts and is authoritative over the Step 2 audience choice, so it can contradict what the organizer picked—shown here rather than silently overriding. And the dashed warning carries the two real blockers, because a QR is worth nothing if either holds. <b>Sign-in is per-exact-host, not wildcard:</b> a hostname must be registered in Firebase Auth's authorized domains and as <code>/__/auth/handler</code> on the Google OAuth client, so a freshly claimed slug fails <code>isSignInReachableOnHost</code> and the app renders <code>auth-unconfigured</code>—an Event nobody can sign in to. Claiming the routing documents in a transaction does not help; <a href="../docs/adr/0010-centralised-auth-origin-with-handoff.md">ADR 0010</a>'s centralised origin is what makes this wildcard-safe, and today's handoff covers exactly one host. <b>And there is no admission boundary:</b> current rules give path scoping, not membership isolation, so any signed-in account that reaches the hostname is in whether invited or not. <b>This flow stays blocked until both land</b>—the frame draws the dependencies instead of pretending them away.</p>
