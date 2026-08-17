@@ -191,8 +191,14 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
  *     admin-visible, and no Day is harmed by its absence.
  */
 function targetsDay(targetDayIndex: unknown, dayIndex: number | undefined): boolean {
-  if (targetDayIndex == null) return true;
-  if (dayIndex == null) return true; // caller opted out of targeting entirely
+  // STRICTLY undefined, not `== null`. An absent Firestore field arrives here as
+  // `undefined`; an explicit `targetDayIndex: null` is a stored VALUE, and it is
+  // a malformed one. `firestore.rules` reject null on create, but the admin
+  // update arm is deliberately unconstrained and an imported or repaired row can
+  // carry one — so this path is reachable, and treating null as "absent" would
+  // put that Prompt back on every Day (Codex P2, PR #812).
+  if (targetDayIndex === undefined) return true;
+  if (dayIndex === undefined) return true; // caller opted out of targeting entirely
   return (
     typeof targetDayIndex === 'number' &&
     Number.isInteger(targetDayIndex) &&

@@ -147,6 +147,17 @@ describe('activeSnapshotIds — Day targeting decides what a Day freezes (#557)'
     }
   });
 
+  it('excludes an EXPLICIT null target — a stored null is a value, not an absence', () => {
+    // Codex P2 (PR #812). The rules reject null on create, but the admin update
+    // arm is deliberately unconstrained and an imported or repaired row can
+    // carry one, so this path is reachable. Reading null as "absent" would put
+    // that Prompt back on every Day.
+    const withNull = [{ id: 'nulled', pool: 'main', targetDayIndex: null }];
+    for (const dayIndex of [0, 3, 4]) {
+      expect(activeSnapshotIds(withNull, mainDayFilter(dayIndex))).toEqual([]);
+    }
+  });
+
   it('applies NO targeting filter when the caller omits dayIndex (pre-#557 callers)', () => {
     const { dayIndex: _omitted, ...noTargeting } = mainDayFilter(3);
     expect(activeSnapshotIds(items, noTargeting)).toEqual([

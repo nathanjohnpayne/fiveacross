@@ -23,30 +23,55 @@
  * "scheduled for Day N" a promise the snapshot actually keeps.
  */
 
+import { normalizePool } from '../game/pool';
+
 /** The subset of a `DayDef` targeting reads. Structural on purpose, so callers
- *  can pass a `DayDef` straight through and tests can pass a two-field literal. */
+ *  can pass a `DayDef` straight through and tests can pass a small literal. */
 export interface TargetableDay {
   index: number;
   unlockAt: number;
+  /** Which item set the Day deals from. Legacy persisted spellings are
+   *  normalized here, so a Day storing 'embark'/'farewell' behaves identically. */
+  pool?: string;
   snapshotItemIds?: string[];
 }
 
 /**
  * Can this Day still accept a Community Prompt?
  *
- * Both halves are load-bearing:
+ * Three halves, all load-bearing:
  *   - `snapshotItemIds == null` — the Day has not frozen. An empty array is a
  *     REAL stamp (a Day whose pool held nothing at unlock), matching
  *     `isDueForSnapshot`'s idempotency rule; treating `[]` as unstamped would
  *     promise placement into a Day that is already closed.
  *   - `unlockAt > now` — the Day's cutoff is still ahead. See the module note:
  *     a due-but-unstamped Day would drop the Prompt at freeze time.
+ *   - the Day deals the MAIN pool. A Community Prompt is always a main-pool
+ *     submission — `addItem` writes `pool: 'main'` and `firestore.rules` admits
+ *     nothing else from a non-admin — while a curated Day freezes only its own
+ *     pool (`snapshotPoolsFor`: main → main+easy, easy → easy, closing →
+ *     closing). So a suggestion aimed at a Tutorial or closing Day would be
+ *     dropped by the snapshot's POOL filter even though its Day, timing and
+ *     moderation state were all fine. Without this check, every suggestion made
+ *     during the run-up to a closing Day would be reported as scheduled and
+ *     then quietly deal nowhere — the same broken promise the `unlockAt` bar
+ *     exists to prevent, arriving by a different route (Codex P1, PR #812).
  *
  * The `unlockAt: 0` "open from the start" sentinel is therefore never targetable,
  * which is correct — that Day is open, not upcoming.
  */
 export function isDayTargetable(day: TargetableDay, now: number): boolean {
-  return day.snapshotItemIds == null && day.unlockAt > now;
+  return day.snapshotItemIds == null && day.unlockAt > now && dealsMainPool(day);
+}
+
+/**
+ * Does this Day deal the main pool — the pool every Community Prompt lives in?
+ * Normalized, so the legacy persisted spellings ('embark'/'farewell', CONTEXT.md
+ * § Pool) resolve the same as the canonical ones. A Day with NO pool reads as
+ * main, matching `migratePool`/`normalizePool`'s default for legacy docs.
+ */
+function dealsMainPool(day: TargetableDay): boolean {
+  return normalizePool(day.pool) === 'main';
 }
 
 /** Every still-targetable Day, in schedule order. */

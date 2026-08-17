@@ -122,6 +122,25 @@ describe('isDayTargetable — which Days can still take a Community Prompt', () 
   it('rejects the unlockAt: 0 "open from the start" sentinel Day', () => {
     expect(isDayTargetable({ index: 0, unlockAt: 0 }, NOW)).toBe(false);
   });
+
+  // Codex P1 (PR #812): a curated Day freezes only its OWN pool, and every
+  // Community Prompt is a main-pool submission. Aiming one at a Tutorial or
+  // closing Day would pass the snapshot's Day and cutoff checks and then be
+  // dropped by its POOL filter — a placement promised and silently not kept.
+  it('rejects a Day that does NOT deal the main pool', () => {
+    expect(isDayTargetable(openDay(3, { pool: 'closing' }), NOW)).toBe(false);
+    expect(isDayTargetable(openDay(3, { pool: 'easy' }), NOW)).toBe(false);
+  });
+
+  it('rejects a curated Day persisting the LEGACY pool spellings too', () => {
+    expect(isDayTargetable(openDay(3, { pool: 'farewell' }), NOW)).toBe(false);
+    expect(isDayTargetable(openDay(3, { pool: 'embark' }), NOW)).toBe(false);
+  });
+
+  it('accepts a main Day, and a legacy Day with no pool at all (reads as main)', () => {
+    expect(isDayTargetable(openDay(3, { pool: 'main' }), NOW)).toBe(true);
+    expect(isDayTargetable(openDay(3), NOW)).toBe(true);
+  });
 });
 
 describe('defaultTargetDayIndex — "put it on tomorrow\'s card"', () => {
@@ -180,6 +199,26 @@ describe('routeApprovalToDay — approval routing and roll-forward', () => {
     expect(routeApprovalToDay(schedule(), 4, NOW)).toBeNull();
     expect(routeApprovalToDay([], 1, NOW)).toBeNull();
   });
+
+  it('rolls PAST a curated Day to the next Day that deals the main pool', () => {
+    const days = [
+      { index: 1, unlockAt: NOW - HOUR, pool: 'main' as const },
+      openDay(2, { pool: 'closing' }),
+      openDay(3, { pool: 'main' }),
+    ];
+    expect(routeApprovalToDay(days, 1, NOW)).toBe(3);
+  });
+
+  it('RETAINS rather than promising a closing Day when only curated Days remain', () => {
+    // The med-2026 shape: a suggestion made in the run-up to the closing Day has
+    // nowhere left that can actually deal it, so it is retained for the recap —
+    // not reported as scheduled for a Day whose snapshot would drop it.
+    const days = [
+      { index: 8, unlockAt: NOW - HOUR, pool: 'main' as const },
+      openDay(9, { pool: 'farewell' }),
+    ];
+    expect(routeApprovalToDay(days, 8, NOW)).toBeNull();
+  });
 });
 
 describe('isUsableTarget — a malformed target is not a target', () => {
@@ -198,8 +237,12 @@ describe('isUsableTarget — a malformed target is not a target', () => {
 describe('addItem — a submission records the Day it is meant for', () => {
   const payload = () => (addDocMock.mock.calls[0] as [Ref, Record<string, unknown>])[1];
   // addItem reads the real clock, so these fixtures are wall-clock relative.
-  const past = (index: number) => ({ index, unlockAt: Date.now() - HOUR });
-  const future = (index: number) => ({ index, unlockAt: Date.now() + (index + 1) * HOUR });
+  const past = (index: number) => ({ index, unlockAt: Date.now() - HOUR, pool: 'main' });
+  const future = (index: number) => ({
+    index,
+    unlockAt: Date.now() + (index + 1) * HOUR,
+    pool: 'main',
+  });
 
   it('stamps the earliest still-open Day when no target is given', async () => {
     eventDataMock.mockReturnValue({ days: [past(0), future(1)] });
@@ -218,6 +261,14 @@ describe('addItem — a submission records the Day it is meant for', () => {
     // snapshot filter needs no third state.
     eventDataMock.mockReturnValue({ days: [past(0)] });
     await addItem('u1', 'Too late for this one', false);
+    expect(payload()).not.toHaveProperty('targetDayIndex');
+  });
+
+  it('OMITS the field when only a curated Day remains — no false promise', async () => {
+    eventDataMock.mockReturnValue({
+      days: [past(0), { index: 1, unlockAt: Date.now() + HOUR, pool: 'farewell' }],
+    });
+    await addItem('u1', 'Only the closing Day left', false);
     expect(payload()).not.toHaveProperty('targetDayIndex');
   });
 
@@ -246,10 +297,10 @@ describe('approveItems — routing an approval into one Day', () => {
   beforeEach(() => {
     eventDataMock.mockReturnValue({
       days: [
-        { index: 0, unlockAt: NOW - 2 * HOUR, snapshotItemIds: ['a'] },
-        { index: 1, unlockAt: NOW - HOUR, snapshotItemIds: [] },
-        { index: 2, unlockAt: Date.now() + 10 * HOUR },
-        { index: 3, unlockAt: Date.now() + 20 * HOUR },
+        { index: 0, unlockAt: NOW - 2 * HOUR, pool: 'main', snapshotItemIds: ['a'] },
+        { index: 1, unlockAt: NOW - HOUR, pool: 'main', snapshotItemIds: [] },
+        { index: 2, unlockAt: Date.now() + 10 * HOUR, pool: 'main' },
+        { index: 3, unlockAt: Date.now() + 20 * HOUR, pool: 'main' },
       ],
     });
   });
