@@ -779,3 +779,276 @@ export interface NoticeDoc {
 export interface DayMetaDoc {
   firstBingo?: { uid: string; displayName: string; at: number };
 }
+
+// ---- Phase 5: self-service Event setup (specs/event-setup-wizard.md) ----
+//
+// The organizer wizard's working state. Deliberately appended as its own
+// section rather than woven in beside `EventDoc`: nothing here is a Firestore
+// document, and #531 (ADR 0011 `DayDef.scoring` / `EventDoc.standingsFreezeAt`)
+// is editing this file mid-body at the same time.
+//
+// SCOPE NOTE (#787, coordinating with #531). `DayDef.scoring` and
+// `EventDoc.standingsFreezeAt` are absent from the contract above even though
+// `scripts/seed-data/bodega-bay-2026.mjs` already writes both, so `DraftDayDef`
+// carries NEITHER — stating them here would fork the Scoring Policy vocabulary
+// ahead of the ADR that owns it. This is a recorded deferral, not an oversight:
+// when #531 lands, both land on the draft too, behind a
+// `DRAFT_SCHEMA_VERSION` bump (an older stored draft then reads as a miss).
+
+/** Which wizard step a draft was last standing on, so Resume is lossless.
+ *  Named for the frames (`#frame-setup-occasion` … `#frame-setup-launch`)
+ *  rather than numbered, so re-ordering the rail is not a data migration. */
+export type SetupStep = 'occasion' | 'basics' | 'squares' | 'look' | 'launch';
+
+/** The six occasions of `#frame-setup-occasion`. `custom` starts bare. */
+export type OccasionId =
+  | 'weekend-away'
+  | 'city-break'
+  | 'wedding'
+  | 'conference'
+  | 'cruise'
+  | 'custom';
+
+/**
+ * Step 3's "Card format" segment. `daily_cards` is an Event with an ordered
+ * `days[]`; `one_card` is an Event with an EMPTY `days[]` — the legacy
+ * single-Board shape ("One card, one celebration", the Wedding occasion).
+ * The distinction is load-bearing for validation: every Day-shaped predicate
+ * (the ten-Day ceiling, the closing-pool finale, the future first unlock,
+ * per-Day completeness) is scoped to `daily_cards`, because a one-card Event
+ * has no Day to fail them.
+ */
+export type DraftCardFormat = 'one_card' | 'daily_cards';
+
+/**
+ * One authored main-pool Prompt. `spicy` is REQUIRED here and representable
+ * ONLY here (#785): `adminAddItem` forces `spicy: false` outside the main pool
+ * and the 18+ posture derivation ignores non-main pools, so a spicy toggle
+ * offered on an easy/closing Prompt is silently dropped — an explicit Square
+ * reaching a card with no 18+ gate.
+ */
+export interface DraftMainPrompt {
+  text: string;
+  spicy: boolean;
+}
+
+/**
+ * One authored easy- or closing-pool Prompt. `spicy?: never` is the type-level
+ * half of the same #785 rule: `{ text, spicy: true }` does not typecheck as a
+ * curated Prompt at all. The runtime half is `promptPoolIssues`, which guards
+ * the JSON-parse path a type cannot reach.
+ */
+export interface DraftCuratedPrompt {
+  text: string;
+  spicy?: never;
+}
+
+/**
+ * The draft's Prompts, keyed BY pool — the key is the pool, so no entry
+ * carries a redundant `pool` field that could disagree with the list it sits
+ * in. Every pool is present even when empty, so `assignedPoolIssues` can count
+ * a pool a Day names but nobody filled.
+ */
+export interface DraftPromptPools {
+  main: DraftMainPrompt[];
+  easy: DraftCuratedPrompt[];
+  closing: DraftCuratedPrompt[];
+}
+
+/**
+ * One Day under construction. A Day is NOT a calendar date (#785): Bodega runs
+ * two Days on 2026-08-09 (competitive main at 06:00, closing wrap-up at
+ * 11:00), so `date` is deliberately NOT unique across the list and `index` is
+ * the identity.
+ *
+ * `pool` and `theme` are DERIVED from `DayDef` rather than re-declared, so the
+ * draft's vocabulary cannot drift from the launched Day's — the same posture
+ * `CardSnapshotDay` takes with its `Pick<DayDef, …>`.
+ */
+export interface DraftDayDef {
+  /** Position in the schedule, 0-based and contiguous. Not a date. */
+  index: number;
+  /** ISO date, event-local. Two Days MAY share one date. */
+  date: string;
+  /**
+   * The absolute unlock instant (ms epoch), or `null` while unset. Interpreted
+   * in `EventDraft.timezone`, never the organizer's own zone (#785).
+   * The `0` open sentinel is representable but not launchable from the wizard:
+   * it only works alongside an atomically pre-stamped snapshot, which no
+   * client can write — see `firstUnlockIssues`.
+   */
+  unlockAt: number | null;
+  /** Required per Day, and has NO Admin editor after creation (#785). */
+  place: string;
+  placeEmoji: string;
+  /** A REGISTERED `ThemeId` (`THEMES` + a `themes.css` block); `null` until
+   *  picked. There is deliberately no custom-theme value. */
+  theme: DayDef['theme'] | null;
+  /** What this Day deals from. Independent of `tutorial`. */
+  pool: DayDef['pool'];
+  /**
+   * Excludes the Day from the Event-wide First to BINGO honour — and NOTHING
+   * else. INDEPENDENT of `pool` (#785: Bodega's easy-pool Friday is
+   * `tutorial: false`; only the wrap-up is `true`), and a different set from
+   * "ceremonial" for standings (`ceremonialDayIndexSet`), which the wizard
+   * does not author. One control labelled for both would set neither.
+   */
+  tutorial: boolean;
+  /** EXACTLY two entries at launch (#785) — the card, locked tease, schedule,
+   *  leaderboard and share copy all render them. */
+  tonight: string[];
+  /** This Day's Free Space override; falls back to `EventDraft.freeSpaceText`. */
+  freeText?: string;
+}
+
+/**
+ * The `EventDoc.settings` block the launch provisioner writes.
+ *
+ * DERIVED from `EventDoc['settings']` — so a draft can never carry a setting
+ * the Event contract has no home for — and `Required`, because "absent means
+ * apply the call-site default" is a posture for documents seeded before a
+ * field existed, not for a flow whose entire job is to decide. In particular
+ * `dailyEmailEnabled` is here precisely because it defaults false and has NO
+ * Admin control (#785): an Event created through a flow that never collects it
+ * can never send the documented daily email without a direct Firestore write.
+ */
+export type EventDraftSettings = Required<
+  Pick<
+    EventDoc['settings'],
+    | 'reportHideThreshold'
+    | 'spicyRatio'
+    | 'easyMixRatio'
+    | 'forceAdult'
+    | 'photoProofSource'
+    | 'stripPhotoExif'
+    | 'visionGate'
+    | 'dailyEmailEnabled'
+  >
+>;
+
+/**
+ * A device-local, unlaunched Event under construction (#786 Decision 1, PRD
+ * § Event creation flow). Not a Firestore document: `EventDoc.status` admits
+ * only `active`/`archived`, there is no draft collection, and a client cannot
+ * bootstrap its own Admin grant — so this shape is persisted through
+ * `EventDraftStore` (`src/data/eventDraft.ts`) and never through the network
+ * seam.
+ *
+ * A draft NEVER HOLDS A CLAIMED SLUG. There is no `slug`, `eventId`, or
+ * `hostname` field, and `parseEventDraft` reads a stored blob carrying any of
+ * those as a MISS rather than repairing it — the transactional claim happens
+ * once, at launch, in the provisioner (#793).
+ */
+export interface EventDraft {
+  /** Stored-shape version. A blob written by another version reads as a MISS,
+   *  never as a mis-shaped draft — the ADR 0009 / `CardSnapshot.v` convention. */
+  v: number;
+  /** Device-local identity. NOT an Event id: no Event exists until launch. */
+  draftId: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Where Resume reopens. */
+  step: SetupStep;
+  /** `null` until Step 1 picks one. */
+  occasion: OccasionId | null;
+  /** The Edition the players will see, COPIED from the occasion at selection
+   *  time rather than re-derived on read, so editing the matrix cannot restyle
+   *  a draft that is already half-built. */
+  edition: string;
+  name: string;
+  /** ISO dates. The Event's window; the Day schedule is authored separately
+   *  and is not derived from it (a Day is not a calendar date). */
+  startsOn: string;
+  endsOn: string;
+  /**
+   * The IANA zone the whole schedule is interpreted in. Organizer-EDITABLE and
+   * only auto-SUGGESTED (#785): auto-detecting the organizer's own zone
+   * silently provisions a destination Event hours off, which is the common
+   * case for a trip planned from home.
+   */
+  timezone: string;
+  /** The address the organizer is TRYING for — checked live, claimed only at
+   *  launch. Never a claim, and never renamed to a silent variant. Format and
+   *  reserved-name validation are #790's shared contract, not this type's. */
+  slugCandidate: string;
+  /** Required, three real values — a flow that never asks hard-codes Honor. */
+  claimMode: ClaimMode;
+  cardFormat: DraftCardFormat;
+  /** Player-facing social metadata only. The CREATOR is granted Admin, and
+   *  that grant — not this string — authorizes every setup write (#785). */
+  hostedBy: string;
+  /** Required on the launched Event, independent of every `DayDef.theme`, and
+   *  what a new player sees first. `null` until picked. */
+  defaultTheme: ThemeId | null;
+  /** The Event's Free Space copy; a Day may override it. */
+  freeSpaceText: string;
+  prompts: DraftPromptPools;
+  /** Empty for `one_card`; 1..10 Days for `daily_cards`. */
+  days: DraftDayDef[];
+  settings: EventDraftSettings;
+}
+
+/** The schedule an occasion PROPOSES. Shape only — turning it into absolute
+ *  `unlockAt` instants needs the Event timezone and belongs to Step 4 (#792). */
+export interface OccasionScheduleShape {
+  /** 1..10. The ceiling is a rules fact (`daysThemeLockOk` unrolls 0–9). */
+  dayCount: number;
+  /** Local time-of-day each Day opens, `HH:MM` in the Event's timezone. */
+  unlockTime: string;
+  /** The opener's pool — `easy` for a warm-up card, else `main`. */
+  firstDayPool: DayDef['pool'];
+  /** The finale's pool. `closing` or `finaleTimes` returns null and there is
+   *  no standings freeze, no podium and no Most-Loved. */
+  finalDayPool: DayDef['pool'];
+  /** Whether the opener is excluded from Event-wide First to BINGO.
+   *  SEPARATE from `firstDayPool` on purpose (#785). */
+  firstDayTutorial: boolean;
+  finalDayTutorial: boolean;
+}
+
+/** Everything an occasion pre-fills. Every one of them is changeable before
+ *  launch — the occasion is a starting point, not a mode. */
+export interface OccasionDefaults {
+  cardFormat: DraftCardFormat;
+  claimMode: ClaimMode;
+  /** `null` when the occasion proposes NO Days at all — a one-card Event has
+   *  no schedule, and "Custom" starts bare on purpose. */
+  schedule: OccasionScheduleShape | null;
+  /** The Event's `defaultTheme`. Must be registered AND in this occasion's
+   *  Edition (`themesForEdition`). */
+  defaultTheme: ThemeId;
+  /** Proposed per-Day Themes, in Day order. Empty when `schedule` is `null`.
+   *  May be SHORTER than `dayCount` (Step 4 repeats the tail, exactly as
+   *  Bodega's two Sunday Days share one Theme). */
+  dayThemes: readonly ThemeId[];
+  settings: EventDraftSettings;
+}
+
+/**
+ * One row of `#frame-setup-occasion`, and the matrix entry behind it.
+ *
+ * CONTENT OWNERSHIP IS OPEN (#786 Decision 2): who authors and maintains the
+ * starter packs is an owner call, so `starterPackId` is `null` for every
+ * occasion whose pack does not exist yet. `null` is the honest value — an
+ * invented id would read as a promise that something is there.
+ */
+export interface OccasionDef {
+  id: OccasionId;
+  /** Row label, verbatim from the frame. */
+  label: string;
+  /** Row subtitle, verbatim from the frame. */
+  blurb: string;
+  emoji: string;
+  /**
+   * The Edition an Event created from this occasion wears — what the PLAYERS
+   * see. The wizard chrome stays Five Across regardless (the one-identity
+   * rule). Whether that Edition also owns an alternate Namespace is an Edition
+   * fact and deliberately NOT modelled here: the alternate is optional, not
+   * guaranteed (#785), and the namespace table belongs to Steps 2/5 (#790,
+   * #793).
+   */
+  edition: string;
+  /** The seeded pack, or `null` while unowned. */
+  starterPackId: string | null;
+  defaults: OccasionDefaults;
+}

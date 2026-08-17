@@ -1,0 +1,389 @@
+/**
+ * The shared setup-wizard validation predicates
+ * (specs/event-setup-wizard.md § Validation).
+ *
+ * Pure functions over an `EventDraft`, importable by Steps 3–5 (#791, #792,
+ * #794) and by the launch provisioner (#793) so the live gauge on Step 3, the
+ * checklist row on Step 5 and the server's final refusal all agree by
+ * construction instead of by three careful re-implementations.
+ *
+ * Every rule here is a fact the code already enforces somewhere the organizer
+ * cannot see until it is too late — `dealBoard`'s `MIN_POOL` throw, the
+ * `daysThemeLockOk` index unroll in `firestore.rules`, `finaleTimes` returning
+ * null, `activeSnapshotIds` excluding Prompts newer than a Day's cutoff. The
+ * job of this module is to move those failures forward to a moment when they
+ * are still editable.
+ *
+ * No Firebase, no React, no clock of its own: `now` is always passed in.
+ */
+
+import type { DraftDayDef, EventDraft, ThemeId } from '../types';
+import { MIN_POOL } from '../game/logic';
+import { normalizePool, type PoolId } from '../game/pool';
+import { THEMES } from '../theme/themes';
+
+/**
+ * The ten-Day ceiling. `daysThemeLockOk` (`firestore.rules`) unrolls its
+ * schedule lock over indexes 0–9 ONLY, so an eleventh Day sits outside the
+ * lock and stays editable after it has unlocked. A rules fact, not a
+ * preference (#785).
+ */
+export const MAX_DAYS = 10;
+
+export type DraftIssueCode =
+  | 'pool-below-minimum'
+  | 'no-closing-day'
+  | 'first-unlock-missing'
+  | 'first-unlock-sentinel'
+  | 'first-unlock-past'
+  | 'too-many-days'
+  | 'no-days'
+  | 'day-index-out-of-order'
+  | 'day-missing-place'
+  | 'day-missing-theme'
+  | 'day-unregistered-theme'
+  | 'day-missing-unlock'
+  | 'day-missing-date'
+  | 'day-tonight-not-two'
+  | 'one-card-has-days'
+  | 'event-missing-field'
+  | 'event-unregistered-theme'
+  | 'curated-prompt-is-spicy';
+
+/** One reason a draft cannot launch. `dayIndex`/`pool` anchor the issue to the
+ *  control that fixes it, so a checklist row can deep-link to its own Edit. */
+export interface DraftIssue {
+  code: DraftIssueCode;
+  message: string;
+  dayIndex?: number;
+  pool?: PoolId;
+  field?: string;
+}
+
+const REGISTERED_THEME_IDS: ReadonlySet<string> = new Set(THEMES.map((t) => t.id));
+
+/** Whether a Theme is backed by `THEMES` metadata (and therefore by a
+ *  `themes.css` token block). There is no custom-theme value in the contract,
+ *  so an unregistered id is not a styling miss — it is an unrenderable Day. */
+export function isRegisteredTheme(theme: ThemeId | null | undefined): boolean {
+  return typeof theme === 'string' && REGISTERED_THEME_IDS.has(theme);
+}
+
+function daysInOrder(draft: EventDraft): DraftDayDef[] {
+  return [...draft.days].sort((a, b) => a.index - b.index);
+}
+
+/**
+ * The pools this draft actually deals from.
+ *
+ * A `daily_cards` Event deals each Day from its own pool, so the assigned set
+ * is the Days' pools. A `one_card` Event has no Days and deals its single
+ * Board from the main pool.
+ *
+ * The Easy Mix is deliberately NOT counted as an assignment: on a main Day it
+ * blends easy-pool Squares in, but a short easy pool backfills from tame main
+ * (specs/easy-mix.md), so a thin easy pool there is a degraded card, not an
+ * undealable one — and this gate exists for undealable.
+ */
+export function assignedPools(draft: EventDraft): PoolId[] {
+  if (draft.cardFormat === 'one_card') return ['main'];
+  const seen = new Set<PoolId>();
+  for (const day of draft.days) seen.add(normalizePool(day.pool));
+  return [...seen];
+}
+
+const POOL_LABEL: Record<PoolId, string> = {
+  main: 'main',
+  easy: 'easy',
+  closing: 'closing',
+};
+
+/**
+ * Every ASSIGNED pool independently holds at least `MIN_POOL` (24) Prompts.
+ *
+ * The 24-Prompt minimum is per assigned pool, NEVER per Event (#785). A
+ * closing Day snapshots only its closing pool and `dealBoard` rejects an
+ * unstratified pool below `MIN_POOL`, so a pack with 62 Prompts of which 4 are
+ * closing yields an undealable farewell card while every total-based check
+ * reports success.
+ *
+ * The count is of authored Prompts alone. The Free Space is not in any pool —
+ * it is `freeSpaceText` plus per-Day overrides — so this is already the
+ * non-free count `MIN_POOL` means.
+ */
+export function assignedPoolIssues(draft: EventDraft): DraftIssue[] {
+  const issues: DraftIssue[] = [];
+  for (const pool of assignedPools(draft)) {
+    const count = draft.prompts[pool].length;
+    if (count < MIN_POOL) {
+      issues.push({
+        code: 'pool-below-minimum',
+        pool,
+        message: `The ${POOL_LABEL[pool]} pool has ${count} Prompts; a Day that deals from it needs at least ${MIN_POOL}.`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
+ * A `daily_cards` draft's FINAL Day carries the closing pool.
+ *
+ * `finaleTimes` returns null when no Day is assigned the closing pool: no
+ * standings freeze, no podium, no Most-Loved Photo. The finale is not an
+ * automatic consequence of the schedule ending — it is a pool assignment.
+ * Inert for `one_card`, which has no finale to run.
+ */
+export function finaleClosingPoolIssues(draft: EventDraft): DraftIssue[] {
+  if (draft.cardFormat === 'one_card') return [];
+  const ordered = daysInOrder(draft);
+  const finalDay = ordered[ordered.length - 1];
+  if (!finalDay) return [];
+  if (normalizePool(finalDay.pool) === 'closing') return [];
+  return [
+    {
+      code: 'no-closing-day',
+      dayIndex: finalDay.index,
+      message: `Day ${finalDay.index + 1} is the final Day but deals from the ${POOL_LABEL[normalizePool(finalDay.pool)]} pool; assign it the closing pool or the finale never runs.`,
+    },
+  ];
+}
+
+/**
+ * The FIRST Day's unlock is still ahead.
+ *
+ * Prompts seeded at creation carry `createdAt`, and `activeSnapshotIds`
+ * excludes Prompts newer than a Day's cutoff — so creating an Event after Day
+ * 1's unlock has passed permanently stamps an EMPTY arrival snapshot (#785).
+ *
+ * The `0` open sentinel is reported separately rather than lumped in with a
+ * past instant: the Bodega seed uses it legitimately, but only alongside a
+ * pre-stamped snapshot written atomically by the Admin SDK. No client can do
+ * that, so from the wizard the sentinel is a provisioner capability request,
+ * not an organizer mistake — and the message says which.
+ */
+export function firstUnlockIssues(draft: EventDraft, now: number): DraftIssue[] {
+  if (draft.cardFormat === 'one_card') return [];
+  const first = daysInOrder(draft)[0];
+  if (!first) return [];
+  if (first.unlockAt === null) {
+    return [
+      {
+        code: 'first-unlock-missing',
+        dayIndex: first.index,
+        message: 'Day 1 has no unlock time yet.',
+      },
+    ];
+  }
+  if (first.unlockAt === 0) {
+    return [
+      {
+        code: 'first-unlock-sentinel',
+        dayIndex: first.index,
+        message:
+          'Day 1 uses the open-immediately sentinel, which needs a pre-stamped snapshot the wizard cannot write. Give Day 1 a future unlock time.',
+      },
+    ];
+  }
+  if (first.unlockAt <= now) {
+    return [
+      {
+        code: 'first-unlock-past',
+        dayIndex: first.index,
+        message:
+          "Day 1's unlock has already passed; launching now would stamp an empty first-Day snapshot. Move it into the future.",
+      },
+    ];
+  }
+  return [];
+}
+
+/**
+ * The schedule has between one and `MAX_DAYS` Days, and a `one_card` draft has
+ * none at all.
+ */
+export function dayCountIssues(draft: EventDraft): DraftIssue[] {
+  if (draft.cardFormat === 'one_card') {
+    if (draft.days.length === 0) return [];
+    return [
+      {
+        code: 'one-card-has-days',
+        message: 'A one-card Event has no Day schedule, but this draft carries Days.',
+      },
+    ];
+  }
+  if (draft.days.length === 0) {
+    return [{ code: 'no-days', message: 'A daily-cards Event needs at least one Day.' }];
+  }
+  if (draft.days.length > MAX_DAYS) {
+    return [
+      {
+        code: 'too-many-days',
+        message: `An Event can have at most ${MAX_DAYS} Days; this schedule has ${draft.days.length}. The Firestore schedule lock only covers Day indexes 0–${MAX_DAYS - 1}.`,
+      },
+    ];
+  }
+  return [];
+}
+
+/**
+ * Every Day carries the fields a launched `DayDef` requires.
+ *
+ * `place`, `placeEmoji` and EXACTLY TWO `tonight` entries render on the card,
+ * the locked tease, the schedule, the leaderboard and the share copy — and of
+ * the three, only `tonight` has an Admin editor after creation, so a Day that
+ * launches without a `place` has no repair path (#785).
+ *
+ * `tutorial` and `pool` are not checked: the type makes both total, and both
+ * are meaningful in every combination. That independence is the point — a
+ * curated-pool Day whose wins count is Bodega's Friday, not a mistake.
+ */
+export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
+  if (draft.cardFormat === 'one_card') return [];
+  const issues: DraftIssue[] = [];
+  const ordered = daysInOrder(draft);
+  ordered.forEach((day, position) => {
+    if (day.index !== position) {
+      issues.push({
+        code: 'day-index-out-of-order',
+        dayIndex: day.index,
+        message: `Day indexes must be contiguous from 0; found index ${day.index} in position ${position}.`,
+      });
+    }
+    if (!day.date.trim()) {
+      issues.push({
+        code: 'day-missing-date',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} has no date.`,
+      });
+    }
+    if (!day.place.trim() || !day.placeEmoji.trim()) {
+      issues.push({
+        code: 'day-missing-place',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} needs a place and its emoji; neither can be edited after launch.`,
+      });
+    }
+    if (day.theme === null) {
+      issues.push({
+        code: 'day-missing-theme',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} has no Theme.`,
+      });
+    } else if (!isRegisteredTheme(day.theme)) {
+      issues.push({
+        code: 'day-unregistered-theme',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} uses an unregistered Theme; only Themes in the registry can be rendered.`,
+      });
+    }
+    if (day.unlockAt === null) {
+      issues.push({
+        code: 'day-missing-unlock',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} has no unlock time.`,
+      });
+    }
+    const tonight = day.tonight.filter((entry) => entry.trim().length > 0);
+    if (tonight.length !== 2) {
+      issues.push({
+        code: 'day-tonight-not-two',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} needs exactly two Tonight entries; it has ${tonight.length}.`,
+      });
+    }
+  });
+  return issues;
+}
+
+/** The Event-level fields a launched `EventDoc` requires. `slugCandidate` is
+ *  checked for presence only: its format and the reserved-name list are the
+ *  shared contract #790 introduces, and duplicating a weaker version of them
+ *  here would be a second answer to a question that needs one. */
+export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
+  const issues: DraftIssue[] = [];
+  const required: [keyof EventDraft, string][] = [
+    ['name', 'an Event name'],
+    ['startsOn', 'a start date'],
+    ['endsOn', 'an end date'],
+    ['timezone', 'a timezone'],
+    ['slugCandidate', 'an address'],
+  ];
+  for (const [field, label] of required) {
+    if (!String(draft[field] ?? '').trim()) {
+      issues.push({
+        code: 'event-missing-field',
+        field: String(field),
+        message: `This Event still needs ${label}.`,
+      });
+    }
+  }
+  if (draft.defaultTheme === null) {
+    issues.push({
+      code: 'event-missing-field',
+      field: 'defaultTheme',
+      message:
+        'This Event still needs a default Theme — it is what a new player sees when no Day is current.',
+    });
+  } else if (!isRegisteredTheme(draft.defaultTheme)) {
+    issues.push({
+      code: 'event-unregistered-theme',
+      field: 'defaultTheme',
+      message: 'The default Theme is not in the registry.',
+    });
+  }
+  return issues;
+}
+
+/**
+ * No easy- or closing-pool Prompt carries `spicy`.
+ *
+ * The type already makes this unrepresentable (`DraftCuratedPrompt['spicy']:
+ * never`) and `parseEventDraft` reads a stored blob that breaks it as a miss.
+ * This is the third layer, for a draft that reached memory through an untyped
+ * path — an imported pack, a fixture, a future server draft. `adminAddItem`
+ * forces `spicy: false` outside main and the 18+ posture derivation ignores
+ * non-main pools, so a spicy curated Prompt is silently de-flagged: an
+ * explicit Square reaching a card with no 18+ gate (#785).
+ */
+export function promptPoolIssues(draft: EventDraft): DraftIssue[] {
+  const issues: DraftIssue[] = [];
+  for (const pool of ['easy', 'closing'] as const) {
+    for (const prompt of draft.prompts[pool]) {
+      if ('spicy' in (prompt as object)) {
+        issues.push({
+          code: 'curated-prompt-is-spicy',
+          pool,
+          message: `A ${POOL_LABEL[pool]}-pool Prompt carries a spicy flag; spicy is main-pool only and would be dropped without raising the 18+ gate.`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+/**
+ * Every reason this draft cannot launch, in checklist order.
+ *
+ * Returns issues rather than a boolean because Step 5 renders each one as its
+ * own row with its own Edit link — a single "not ready" would be exactly the
+ * total-based reporting #785 warns about.
+ */
+export function validateEventDraft(draft: EventDraft, now: number): DraftIssue[] {
+  return [
+    ...eventCompletenessIssues(draft),
+    ...assignedPoolIssues(draft),
+    ...promptPoolIssues(draft),
+    ...dayCountIssues(draft),
+    ...finaleClosingPoolIssues(draft),
+    ...firstUnlockIssues(draft, now),
+    ...dayCompletenessIssues(draft),
+  ];
+}
+
+/** Whether the draft clears every gate this module knows about. NOT the whole
+ *  launch gate: the live slug claim, the derived 18+ posture and the last-call
+ *  derivation (#784) are checked where they are resolved, not here. */
+export function isDraftLaunchable(draft: EventDraft, now: number): boolean {
+  return validateEventDraft(draft, now).length === 0;
+}
