@@ -168,6 +168,33 @@ describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
     expect(container.querySelector('.event-postcard-franked')).toBeNull();
   });
 
+  it('prints the Day’s emoji exactly once on the card — the corner, not both', () => {
+    // The Day line has always led with the Day's emoji. A stamp that repeats
+    // it prints the same glyph twice on one small card, so the corner takes
+    // the postage and the line gives it up — still naming the Day in words.
+    setActiveEdition('vacay');
+    applyResolvedEventPreview(PREVIEW);
+    const { container } = render(<EventPostcard />);
+    expect(container.querySelector('.event-postcard-stamp')!.textContent).toBe('🐦');
+    expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
+      'Aug 7–9 · hosted by Kim · Day 1: The Birds Have Entered the Chat',
+    );
+    expect(container.textContent!.split('🐦').length - 1).toBe(1);
+  });
+
+  it('leaves the Day line leading with the emoji when no stamp takes it', () => {
+    // An Edition with no postcard variant draws no stamp, so the line keeps
+    // the glyph exactly as it did before the stamp existed — the emoji must
+    // not vanish from the card just because the corner is absent.
+    setActiveEdition('gcb');
+    applyResolvedEventPreview(PREVIEW);
+    const { container } = render(<EventPostcard />);
+    expect(container.querySelector('.event-postcard-stamp')).toBeNull();
+    expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
+      'Aug 7–9 · hosted by Kim · 🐦 Day 1: The Birds Have Entered the Chat',
+    );
+  });
+
   it('never stamps a non-postcard Edition, even on a Day that has postage', () => {
     // The stamp is vacay's `signinCardVariant: 'postcard'` treatment; gcb and
     // fiveacross draw the same slice as a plain panel, and an emoji-bearing

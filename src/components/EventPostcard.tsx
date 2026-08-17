@@ -45,6 +45,13 @@ import { editionBrand } from '../editions';
 // COMMON case — Bodega seeds one on Day 1 only, and after the last Day no Day
 // resolves at all) → no element, and the card drops the right padding it
 // reserves for the corner so the copy reclaims the full width.
+//
+// The glyph appears exactly ONCE. The Day line has always led with the Day's
+// emoji, so a stamp that repeats it prints the same glyph twice on one small
+// card; when the corner takes the postage the line gives it up
+// (`emojiPlacement: 'stamp'`) and keeps the Day named in words. With no stamp
+// — no postage, or an Edition with no postcard variant — the line leads with
+// the emoji exactly as it did before the stamp existed.
 export default function EventPostcard() {
   const preview = useSyncExternalStore(subscribeEventPreview, activeEventPreview, activeEventPreview);
   // "Live" has to survive the gate being LEFT OPEN (Codex P2 round 1): the Day
@@ -74,8 +81,11 @@ export default function EventPostcard() {
   }, []);
   if (!preview) return null;
   const stamped = editionBrand().signinCardVariant === 'postcard';
-  const meta = previewMetaLine(preview);
   const postage = stamped ? previewDayEmoji(preview.days) : null;
+  // The Day's emoji is drawn ONCE. When the corner takes it, the Day line
+  // gives it up; with no stamp — no postage, or an Edition with no postcard
+  // variant — the line keeps leading with it exactly as it always has.
+  const meta = previewMetaLine(preview, Date.now(), postage ? 'stamp' : 'inline');
   const host = typeof window === 'undefined' ? null : window.location.hostname;
   return (
     <div
@@ -83,8 +93,9 @@ export default function EventPostcard() {
         postage ? ' event-postcard-franked' : ''
       }`}
     >
-      {/* Decorative: the same emoji is already spoken in the meta line below,
-          so the stamp is a second rendering of it, not a second fact. */}
+      {/* Decorative: the Day line below still NAMES the Day in words ("Day 1:
+          The Birds Have Entered the Chat"), so hiding the glyph costs a
+          screen reader nothing — it is postage, not information. */}
       {postage && (
         <span className="event-postcard-stamp" aria-hidden="true">
           {postage}

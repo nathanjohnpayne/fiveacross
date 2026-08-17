@@ -131,6 +131,13 @@ function previewDay(
   return { day: days[index]!, ordinal: index + 1 };
 }
 
+/** Where the previewed Day's emoji is being drawn, so it is drawn ONCE.
+ *  `'inline'` leads the Day line with it, the shape every Edition used before
+ *  the postcard existed. `'stamp'` says the postcard's stamp corner has taken
+ *  the glyph, so the line must not repeat it — the emoji MOVED to the corner,
+ *  it was not removed (#776). */
+export type DayEmojiPlacement = 'inline' | 'stamp';
+
 /**
  * The live "Day N" fragment ("🐦 Day 1: The Birds Have Entered the Chat"), or
  * `null` when the schedule offers nothing to say.
@@ -143,11 +150,13 @@ function previewDay(
 export function previewDayLine(
   days: EventPreviewDay[] | undefined,
   now: number = Date.now(),
+  emojiPlacement: DayEmojiPlacement = 'inline',
 ): string | null {
   const current = previewDay(days, now);
   if (!current) return null;
   const { day, ordinal } = current;
-  return `${day.emoji ? `${day.emoji} ` : ''}Day ${ordinal}: ${day.title}`;
+  const lead = day.emoji && emojiPlacement === 'inline' ? `${day.emoji} ` : '';
+  return `${lead}Day ${ordinal}: ${day.title}`;
 }
 
 /**
@@ -171,12 +180,20 @@ export function previewDayEmoji(
  * The postcard's middle line: "Aug 7–9 · hosted by Kim · 🐦 Day 1: …".
  * Whichever fragments exist, joined the way the wireframe joins them; `null`
  * when none do, so the card can skip the line entirely.
+ *
+ * `emojiPlacement: 'stamp'` is how the caller says the stamp corner is already
+ * showing the Day's emoji, so this line drops its copy of it and the glyph
+ * appears exactly once on the card.
  */
-export function previewMetaLine(preview: EventPreview, now: number = Date.now()): string | null {
+export function previewMetaLine(
+  preview: EventPreview,
+  now: number = Date.now(),
+  emojiPlacement: DayEmojiPlacement = 'inline',
+): string | null {
   const parts = [
     preview.dateRange,
     preview.hostedBy ? `hosted by ${preview.hostedBy}` : undefined,
-    previewDayLine(preview.days, now) ?? undefined,
+    previewDayLine(preview.days, now, emojiPlacement) ?? undefined,
   ].filter((p): p is string => Boolean(p));
   return parts.length ? parts.join(' · ') : null;
 }

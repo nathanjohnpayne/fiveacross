@@ -1,8 +1,6 @@
 # Bug: join postcard renders an empty stamp box in production
 
-**Track:** play/UI · **Severity:** cosmetic, but on the entry surface of the live Bodega Bay event — every new player sees it before sign-in. Ship as a hotfix-sized PR. **Size:** XS
-**Refs:** `plans/daily-cards-wireframes.html` § `#frame-vacay-join` (the parity target — its CSS comment and caption now carry the spacing contract), fiveacrossbingo PRD § Brand Identity and Expression.
-**Suggested runner:** Claude Sonnet 5, low reasoning effort (conditional-render fix with a pinned parity target and enumerated root-cause candidates).
+**Track:** play/UI · **Severity:** cosmetic, but on the entry surface of the live Bodega Bay event — every new player sees it before sign-in. Ship as a hotfix-sized PR. **Size:** XS **Refs:** `plans/daily-cards-wireframes.html` § `#frame-vacay-join` (the parity target — its CSS comment and caption now carry the spacing contract), fiveacrossbingo PRD § Brand Identity and Expression. **Suggested runner:** Claude Sonnet 5, low reasoning effort (conditional-render fix with a pinned parity target and enumerated root-cause candidates).
 
 ## Problem
 

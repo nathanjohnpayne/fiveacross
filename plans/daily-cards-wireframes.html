@@ -193,7 +193,10 @@
      2. the postcard reserves its stamp corner via padding-right, so text wraps
         short of the stamp and can never run beneath it.
      The Day's emoji IS the postage; with no Day emoji, render no stamp at all
-     (an empty dashed box reads as a rendering bug) and drop the reserved padding. */
+     (an empty dashed box reads as a rendering bug) and drop the reserved padding.
+     3. the glyph is drawn ONCE: when the stamp carries it, the Day line drops its
+        leading emoji and keeps naming the Day in words. With no stamp the line
+        leads with the emoji, as it did before the postcard existed. */
   .postcard{border:1.5px solid var(--border);border-radius:4px;background:var(--panel);
     padding:10px 46px 10px 12px;position:relative;font-size:10.5px;color:var(--dim);line-height:1.45}
   .postcard::after{content:"🐦";position:absolute;top:6px;right:8px;padding:4px 6px;
@@ -209,36 +212,6 @@
     justify-content:flex-end;padding:6px;font-size:12px}
   .lovewin .cap2{font-size:10px;color:var(--dim);margin-top:5px}
   .lovewin .hearts{font-size:12px;color:var(--accent)}
-
-  /* Five Across organizer chrome (event-setup wizard): the HOST brand — ink,
-     cream, grids, crisp. Setup is a Five Across surface; the event under
-     construction previews in its own edition skin (one-identity rule). */
-  [data-theme='five-across']{--bg:#f2efe6;--panel:#fbf9f2;--ink:#1c1b18;--dim:#87837a;
-    --primary:#1c1b18;--secondary:#55524a;--accent:#c96a3a;--cell:#fbf9f2;
-    --border:rgba(28,27,24,.16);--on-gradient:#f6f3ea}
-  .wizsteps{display:flex;gap:10px;align-items:center;justify-content:center;
-    font-size:8.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);padding:2px 0 4px}
-  .wizsteps .st{display:flex;align-items:center;gap:4px}
-  .wizsteps .dot{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--border);
-    display:flex;align-items:center;justify-content:center;font-size:9px;color:var(--dim)}
-  .wizsteps .st.on{color:var(--ink)}
-  .wizsteps .st.on .dot{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-  .wizsteps .st.done .dot{border-color:var(--ink);color:var(--ink)}
-  .prevbar{display:flex;gap:9px;align-items:center;border:1px solid var(--border);
-    border-radius:12px;padding:7px 10px;font-size:10px;color:var(--dim);background:var(--panel);margin-top:auto}
-  .prevbar .pvcard{width:34px;height:42px;border-radius:6px;flex:none;
-    background:linear-gradient(145deg,var(--primary),var(--secondary));border:1px solid var(--border)}
-  .slugbox{border:1px solid var(--border);border-radius:8px;background:var(--panel);
-    padding:6px 9px;font-size:11px;color:var(--ink)}
-  .slugbox .ok{color:var(--accent);font-size:10px;margin-left:6px}
-  .slugbox .host{display:block;font-size:9.5px;color:var(--dim);margin-top:2px}
-  .promptrow{display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border);
-    padding:5px 2px;font-size:10.5px;color:var(--ink)}
-  .promptrow .cls{font-size:8.5px;border:1px solid var(--border);border-radius:10px;
-    padding:1px 6px;color:var(--dim);flex:none}
-  .promptrow .act{margin-left:auto;color:var(--dim);font-size:11px;flex:none}
-  .qrbox{width:92px;height:92px;margin:6px auto 2px;border:1.5px solid var(--ink);border-radius:8px;
-    background:repeating-conic-gradient(var(--ink) 0% 25%,transparent 0% 50%) 0 0/14px 14px;opacity:.85}
 
   /* ---------- phone frame: iPhone 15 Pro canvas (393×852pt, 19.5:9), themed via tokens ---------- */
   .mini{width:393px;min-height:852px;background:var(--bg);color:var(--ink);border:2px solid #2a2a2e;
@@ -1041,13 +1014,13 @@
     <div class="mini" data-theme="birds-group-chat">
       <div class="board" style="gap:10px;justify-content:center">
         <div class="vlock"><div class="vb">VACAY BINGO</div><div class="by">by Five Across</div><div class="tag">Take the detour. <span style="opacity:.75">For the story.</span></div></div>
-        <div class="postcard"><b style="color:var(--ink)">Weekend in Bodega Bay</b><br>Aug 7–9 · hosted by Kim · 🐦 Day 1: The Birds Have Entered the Chat<br><span style="font-size:9.5px">bodega-bay.vacaybingo.com</span></div>
+        <div class="postcard"><b style="color:var(--ink)">Weekend in Bodega Bay</b><br>Aug 7–9 · hosted by Kim · Day 1: The Birds Have Entered the Chat<br><span style="font-size:9.5px">bodega-bay.vacaybingo.com</span></div>
         <div class="btnrow"><span class="btn ok">Continue with Google</span></div>
         <div class="note" style="text-align:left">Prompts are invitations, not chores. Take the fun detour, share the story if you want—five across earns a BINGO.</div>
         <div class="note">Patchy signal? Your card keeps working offline—marks sync when you reconnect.</div>
       </div>
     </div>
-    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through either hostname lands here after canonicalization: one identity, the Vacay lockup with the <b>BY FIVE ACROSS</b> endorsement line, the trip as a postcard whose stamp corner carries the current Day's emoji as its postage (slightly rotated, like it was pressed on; the box is content-sized so the postage can never overflow it, and the postcard reserves its corner so text never runs beneath the stamp; an empty stamp box reads as a rendering bug—if no Day emoji exists, render no stamp and no reserved corner), the same Google sign-in. <b>No 18+ attestation</b>—Bodega's pool holds no active spicy Prompts, so <code>adultContent</code> derives <code>false</code> and the button is enabled on load; the same Edition would draw the gate for a spicier trip. Moderate camp: no decorative lead-in emoji, offline stated plainly. <b>One deliberate divergence from the lexicon, flagged, not smuggled:</b> the offline line drawn here is a <b>proposed</b> vacay <code>offlineNote</code> override—the #608 table marks that row <i>unchanged</i> from GCB, but GCB's "Lost signal at sea? The printed cards and PDF still work." would put a cruise noun (and a printed-cards claim no road trip has) on the trip gate. Feed back to #608 before implementation; the annotation table carries the same flag. Splash reads "Checking your trip pass…"; installed-PWA name <b>Vacay Bingo</b>.</p>
+    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through either hostname lands here after canonicalization: one identity, the Vacay lockup with the <b>BY FIVE ACROSS</b> endorsement line, the trip as a postcard whose stamp corner carries the current Day's emoji as its postage (slightly rotated, like it was pressed on; the box is content-sized so the postage can never overflow it, and the postcard reserves its corner so text never runs beneath the stamp; an empty stamp box reads as a rendering bug—if no Day emoji exists, render no stamp and no reserved corner; and the glyph is drawn <i>once</i>—the stamp takes it, so the Day line below drops its leading emoji and names the Day in words instead), the same Google sign-in. <b>No 18+ attestation</b>—Bodega's pool holds no active spicy Prompts, so <code>adultContent</code> derives <code>false</code> and the button is enabled on load; the same Edition would draw the gate for a spicier trip. Moderate camp: no decorative lead-in emoji, offline stated plainly. <b>One deliberate divergence from the lexicon, flagged, not smuggled:</b> the offline line drawn here is a <b>proposed</b> vacay <code>offlineNote</code> override—the #608 table marks that row <i>unchanged</i> from GCB, but GCB's "Lost signal at sea? The printed cards and PDF still work." would put a cruise noun (and a printed-cards claim no road trip has) on the trip gate. Feed back to #608 before implementation; the annotation table carries the same flag. Splash reads "Checking your trip pass…"; installed-PWA name <b>Vacay Bingo</b>.</p>
   </div>
 
   <!-- ---------- Join · Five Across ---------- -->
@@ -3985,122 +3958,6 @@
   <tr><td>CTA</td><td class="inv" colspan="3">brand-invariant—"Open the Feed", Theme-gradient bulletproof button, deep link to the Event's canonical host (#599)</td></tr>
   <tr><td>Unsubscribe</td><td class="inv" colspan="3">brand-invariant—visible link + <code>List-Unsubscribe</code> headers; per-user opt-out persisted, suppressed before send; Event-level admin toggle</td></tr>
 </table>
-
-<h2>Five Across · New event setup—the organizer wizard</h2>
-<p class="sub">Everything required to create an event from scratch: occasion, name, dates, URL, squares, look, and invite—in five guided steps with a live preview, targeting the PRD's under-15-minutes goal. The wizard wears the Five Across host brand (ink, cream, grids, crisp type); the event under construction previews in its own edition skin, so the one-identity rule holds for organizers too: you build with Five Across, your players see Vacay Bingo (or the occasion's edition). Occasion selection picks the edition, starter pack, and defaults; nothing here requires a developer or a DNS record—the slug claim rides the wildcard namespaces.</p>
-<div class="frames">
-
-  <div class="unit" id="frame-setup-occasion">
-    <div class="mini" data-theme="five-across">
-      <div class="sheethead"><span class="shback">✕ Cancel</span><div class="shtitle">New event</div><span class="shdone">Save draft</span></div>
-      <div class="board" style="gap:8px">
-        <div class="wizsteps"><span class="st on"><span class="dot">1</span>Occasion</span><span class="st"><span class="dot">2</span>Basics</span><span class="st"><span class="dot">3</span>Squares</span><span class="st"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
-        <div class="secthead">What's the occasion?</div>
-        <div class="menurow" style="border:1.5px solid var(--ink);border-radius:12px"><span class="mi">🏝</span><div class="grow">Weekend away<span class="who">Trips &amp; getaways · plays as Vacay Bingo</span></div><span class="pill">Vacay edition</span></div>
-        <div class="menurow"><span class="mi">🏙</span><div class="grow">City break<span class="who">Short urban trips · Vacay edition</span></div></div>
-        <div class="menurow"><span class="mi">💍</span><div class="grow">Wedding<span class="who">One card, one celebration</span></div></div>
-        <div class="menurow"><span class="mi">🎤</span><div class="grow">Conference or offsite<span class="who">Mingle-and-discover defaults</span></div></div>
-        <div class="menurow"><span class="mi">🚢</span><div class="grow">Cruise<span class="who">Multi-day, themed nights</span></div></div>
-        <div class="menurow"><span class="mi">✨</span><div class="grow">Custom<span class="who">Start empty, choose everything</span></div></div>
-        <div class="note">The occasion sets the edition your players see, the starter square pack, and sensible defaults—every one of them changeable before launch.</div>
-        <div class="btnrow"><span class="btn ok">Continue</span></div>
-      </div>
-    </div>
-    <p class="cap"><b>Step 1 · Occasion—one choice sets smart defaults</b>Ink-and-cream Five Across chrome (the host runs setup). Selecting "Weekend away" quietly commits the player-facing edition (Vacay), the starter pack, and daily-card defaults—shown, not hidden, via the edition pill. Custom starts bare for tinkerers.</p>
-  </div>
-
-  <div class="unit" id="frame-setup-basics">
-    <div class="mini" data-theme="five-across">
-      <div class="sheethead"><span class="shback">‹ Occasion</span><div class="shtitle">New event</div><span class="shdone">Save draft</span></div>
-      <div class="board" style="gap:8px">
-        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st on"><span class="dot">2</span>Basics</span><span class="st"><span class="dot">3</span>Squares</span><span class="st"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
-        <div class="secthead">Name &amp; dates</div>
-        <div class="msgbox" style="color:var(--ink)">Weekend in Bodega Bay</div>
-        <div class="msgbox">Fri Aug 7 → Sun Aug 9 · America/Los_Angeles (auto)</div>
-        <div class="secthead">Your event's address</div>
-        <div class="slugbox">bodega-bay<span class="ok">✓ available</span><span class="host">bodega-bay.vacaybingo.com · canonical</span><span class="host">bodega-bay.fiveacrossbingo.com · platform alias</span></div>
-        <div class="secthead">Audience</div>
-        <div class="seg"><span class="segbtn on">All ages</span><span class="segbtn">18+</span></div>
-        <div class="note">The address is generated from the name—edit it once, live-checked against reserved and taken slugs. Claiming it at launch registers both namespaces in one transaction; no DNS, no certificates, no waiting.</div>
-        <div class="prevbar"><span class="pvcard" data-theme="bodega-side-quests"></span>Live preview · updates as you build<span style="margin-left:auto" class="pill">Open ›</span></div>
-        <div class="btnrow"><span class="btn ok">Continue</span></div>
-      </div>
-    </div>
-    <p class="cap"><b>Step 2 · Basics—the URL is a text field, not a ticket</b>Name auto-generates the slug; availability is checked live with reserved names blocked; both hostnames preview inline so the organizer sees exactly what the group will type. Audience rating is a first-class basic (it gates packs and the 18+ advisory), and the live-preview strip appears from here on, wearing the event's edition skin.</p>
-  </div>
-
-  <div class="unit" id="frame-setup-squares">
-    <div class="mini" data-theme="five-across">
-      <div class="sheethead"><span class="shback">‹ Basics</span><div class="shtitle">New event</div><span class="shdone">Save draft</span></div>
-      <div class="board" style="gap:8px">
-        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st done"><span class="dot">✓</span>Basics</span><span class="st on"><span class="dot">3</span>Squares</span><span class="st"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
-        <div class="secthead">Card format</div>
-        <div class="seg"><span class="segbtn">One card</span><span class="segbtn on">Daily cards · 3 days</span></div>
-        <div class="secthead">Squares</div>
-        <div class="menurow"><span class="mi">🌊</span><div class="grow">Coastal weekend pack<span class="who">62 squares seeded · 28 easy · 34 exploratory</span></div><span class="btn">Change</span></div>
-        <div class="promptrow"><span class="cls">easy</span>Windblown group selfie<span class="act">✎ ✕</span></div>
-        <div class="promptrow"><span class="cls">explore</span>Walk to a Bodega Head viewpoint<span class="act">✎ ✕</span></div>
-        <div class="promptrow"><span class="cls">explore</span>Original suspense-movie still<span class="act">✎ ✕</span></div>
-        <div class="promptrow"><span class="cls">easy</span>Best boat name in the harbor<span class="act">✎ ✕</span></div>
-        <div class="addbar" style="margin:2px 0 0"><span class="msgbox grow" style="flex:1">Add your own… ask a local for a favorite detour</span><span class="btn">Add</span></div>
-        <div class="note">Minimum 24 to deal a card—you have 62 ✓. Each square is easy or exploratory; the daily mix slider lives in Look. Players can suggest more during the event through your approval queue.</div>
-        <div class="prevbar"><span class="pvcard" data-theme="bodega-side-quests"></span>62 squares · deals 24 per day<span style="margin-left:auto" class="pill">Open ›</span></div>
-        <div class="btnrow"><span class="btn ok">Continue</span></div>
-      </div>
-    </div>
-    <p class="cap"><b>Step 3 · Squares—pack first, personality second</b>The pack seeds a working pool in one tap (min-24 check runs live against the deal guard); rows edit or delete inline; the add bar invites the organizer's own inside jokes with easy/exploratory classification on save. Daily-vs-one-card sits here because it decides how many squares you realistically need.</p>
-  </div>
-
-  <div class="unit" id="frame-setup-look">
-    <div class="mini" data-theme="five-across">
-      <div class="sheethead"><span class="shback">‹ Squares</span><div class="shtitle">New event</div><span class="shdone">Save draft</span></div>
-      <div class="board" style="gap:8px">
-        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st done"><span class="dot">✓</span>Basics</span><span class="st done"><span class="dot">✓</span>Squares</span><span class="st on"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
-        <div class="secthead">Theme per day</div>
-        <div class="menurow"><div class="grow">Fri · arrival<span class="who"><span class="sw" style="background:#7fb8a4"></span><span class="sw" style="background:#c94f3d"></span> The Birds Have Entered the Group Chat</span></div><span class="dd">Change ▾</span></div>
-        <div class="menurow"><div class="grow">Sat · main day<span class="who"><span class="sw" style="background:#2e7fa8"></span><span class="sw" style="background:#e8862e"></span> Bodega Bay Side Quests</span></div><span class="dd">Change ▾</span></div>
-        <div class="menurow"><div class="grow">Sun · farewell<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
-        <div class="secthead">Free space, per day</div>
-        <div class="msgbox">Fri: The flock has landed</div>
-        <div class="msgbox">Sat: Main character on the coast</div>
-        <div class="msgbox">Sun: We did it for the story</div>
-        <div class="secthead">Daily mix</div>
-        <div class="menurow" style="display:block">
-          <div class="grow">Share of each card from the easy pool<span class="who">Same slider as Admin · Game settings; change it any time.</span></div>
-          <div class="slwrap">
-            <div class="sltrack"><div class="slfill"></div><div class="slthumb"><span class="slbubble">50% · 12 of 24 squares</span></div></div>
-            <div class="sldets"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
-          </div>
-        </div>
-        <div class="note">Themes come from the edition's palette library (or Custom); every choice passes the contrast checks automatically. The free space is each day's motto—make it yours.</div>
-        <div class="prevbar"><span class="pvcard" data-theme="fog-froth-farewells"></span>Sunday preview · light theme ✓<span style="margin-left:auto" class="pill">Open ›</span></div>
-        <div class="btnrow"><span class="btn ok">Continue</span></div>
-      </div>
-    </div>
-    <p class="cap"><b>Step 4 · Look—emotion per day, contract underneath</b>Swatch pairs make each day's palette legible at a glance; picking only ever swaps token sets, so contrast checks and mechanics are untouched. Free-space text per day is the cheapest personality lever an organizer has, so it gets first-class placement. The Daily mix slider is the same control as Admin · Game settings (identical <code>.slwrap</code> anatomy)—set here as a starting value, adjustable mid-event there.</p>
-  </div>
-
-  <div class="unit" id="frame-setup-launch">
-    <div class="mini" data-theme="five-across">
-      <div class="sheethead"><span class="shback">‹ Look</span><div class="shtitle">New event</div><span class="shdone"> </span></div>
-      <div class="board" style="gap:8px">
-        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st done"><span class="dot">✓</span>Basics</span><span class="st done"><span class="dot">✓</span>Squares</span><span class="st done"><span class="dot">✓</span>Look</span><span class="st on"><span class="dot">5</span>Launch</span></div>
-        <div class="secthead">Ready when you are</div>
-        <div class="promptrow">✓ Weekend in Bodega Bay · Aug 7–9<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="promptrow">✓ bodega-bay.vacaybingo.com · claimed at launch<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="promptrow">✓ 62 squares · daily cards · min 24 ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="promptrow">✓ 3 day themes · free spaces · contrast ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="promptrow">✓ Honor system · All ages · photos on<span class="act btn" style="font-size:9.5px">Edit</span></div>
-        <div class="btnrow"><span class="btn ok">Create event</span></div>
-        <div class="qrbox"></div>
-        <div class="note" style="font-size:11px;color:var(--ink)">bodega-bay.vacaybingo.com</div>
-        <div class="btnrow"><span class="btn">Copy link</span><span class="btn">Share invite</span></div>
-      </div>
-    </div>
-    <p class="cap"><b>Step 5 · Launch—checklist, then the QR is the confetti</b>Every row is a verified gate (mirroring the POC launch-gate discipline) with an Edit escape hatch; Create claims the slug across both namespaces in one transaction, seeds the event, and reveals the invite QR + link + share. The organizer lands in the familiar Admin hub afterward—setup ends where operations begin.</p>
-  </div>
-
-</div>
 
 <script>
 // ---------- pools (samples of the real seed + the curated tutorial lists) ----------

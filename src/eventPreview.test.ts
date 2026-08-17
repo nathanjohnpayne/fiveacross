@@ -179,6 +179,23 @@ describe('previewMetaLine — the fragments that exist, joined', () => {
     expect(previewMetaLine({ eventName: 'X', hostedBy: 'Kim' })).toBe('hosted by Kim');
     expect(previewMetaLine({ eventName: 'X' })).toBeNull();
   });
+
+  // #776: the emoji MOVES to the stamp, it is not removed — so the Day stays
+  // named in words and the glyph is never printed twice on one card.
+  it('yields the Day’s emoji to the stamp without losing the Day itself', () => {
+    expect(previewMetaLine(PREVIEW, localNoon(2026, 8, 6), 'stamp')).toBe(
+      'Aug 7–9 · hosted by Kim · Day 1: The Birds Have Entered the Chat',
+    );
+    expect(previewDayLine(PREVIEW.days, localNoon(2026, 8, 6), 'stamp')).toBe(
+      'Day 1: The Birds Have Entered the Chat',
+    );
+  });
+
+  it('changes nothing on a Day with no emoji — there is no stamp to yield to', () => {
+    const line = previewDayLine(PREVIEW.days, localNoon(2026, 8, 8), 'stamp');
+    expect(line).toBe('Day 2: Side Quests');
+    expect(line).toBe(previewDayLine(PREVIEW.days, localNoon(2026, 8, 8)));
+  });
 });
 
 describe('resolved-state singleton', () => {
