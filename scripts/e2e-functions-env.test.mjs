@@ -456,7 +456,18 @@ describe('dotenv layering the emulator merges', () => {
       writeFileSync(join(dir, file), `${layerKey(file)}=1\n`);
     }
 
-    const loaded = loadUserEnvs({ functionsSource: dir, projectId: PROJECT_ID, isEmulator: true });
+    // `projectDir` is only used to render the "Loaded environment variables
+    // from ..." log line relative to the project root, but firebase-tools 15.27
+    // made it load-bearing: it passes the value straight to `path.relative`,
+    // which throws on `undefined`. It was optional through 15.26, so the call
+    // predates the requirement. `dir` is both roots here — the temp dir IS the
+    // functions source — which keeps the logged paths bare filenames.
+    const loaded = loadUserEnvs({
+      functionsSource: dir,
+      projectDir: dir,
+      projectId: PROJECT_ID,
+      isEmulator: true,
+    });
 
     // Every file this module merges is one the emulator actually reads...
     expect(Object.keys(loaded).sort()).toEqual(
