@@ -2519,8 +2519,10 @@ textarea.input {
   margin-top: 2px;
 }
 /* The postcard treatment (vacay): tighter corners, and the dashed stamp corner
-   in the top-right — the wireframes' `#frame-vacay-join` `.postcard .stamp`.
-   Three rules carry the whole spacing contract (#776):
+   in the top-right. The wireframes' `#frame-vacay-join` states the spacing
+   contract normatively in its own CSS comment and caption; these rules are its
+   app-side implementation, scaled from the frame's 10.5px mock type to the
+   card's 13px (#776).
 
    1. The stamp is CONTENT-SIZED — padding wraps the Day-emoji postage at
       `line-height: 1`, never a fixed width/height a glyph can overflow. The
@@ -2528,10 +2530,17 @@ textarea.input {
       moment an emoji was put in it.
    2. The reserved right padding lives on `.event-postcard-franked`, applied
       only when the stamp actually renders, so an unstamped card reclaims the
-      full width instead of holding open a gap for nothing.
-   3. There is no `::after`. The postage is a real element the component emits
-      only for a non-empty emoji — a bordered pseudo-element with `content: ''`
-      is exactly how the empty dashed box shipped three times. */
+      full width instead of holding open a gap for nothing. The frame's mock
+      can hold its padding unconditionally — it only ever draws the franked
+      state — but the card reaches both.
+   3. A real element, not the frame's `::after`. A static mock can bake its
+      postage into `content`; the card's postage is DATA (the previewed Day's
+      emoji, absent more often than present), and a pseudo-element renders its
+      border whether or not that data exists. `content: ''` under this border
+      is exactly how an empty dashed box shipped three times.
+
+   The 3deg tilt is the frame's own "pressed on by hand" detail — the one part
+   of the stamp that is decoration rather than contract. */
 .event-postcard-stamped {
   border-radius: 4px;
 }
@@ -2540,13 +2549,14 @@ textarea.input {
 }
 .event-postcard-stamp {
   position: absolute;
-  top: 9px;
+  top: 8px;
   right: 10px;
-  padding: 5px 6px;
+  padding: 5px 7px;
   border: 1.5px dashed var(--border);
   border-radius: 2px;
   font-size: 15px;
   line-height: 1;
+  transform: rotate(3deg);
 }
 /* The invitation copy block under the CTA — left-set, unlike the centered
    offline footnote below it. */
