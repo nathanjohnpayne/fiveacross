@@ -16,6 +16,7 @@ import {
   isRegisteredTheme,
   isSupportedTimezone,
   promptPoolIssues,
+  promptTextIssues,
   validateEventDraft,
 } from './draftValidation';
 
@@ -467,5 +468,143 @@ describe('validateEventDraft', () => {
     expect(codes).toContain('first-unlock-past');
     expect(codes).toContain('day-missing-place');
     expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+});
+
+describe('day date validity (#787 review)', () => {
+  it('rejects a Day whose date is not a real calendar date', () => {
+    // `2026-02-30` parses as March 2nd in a `Date`, so a format check alone
+    // would pass it — and `coerceEventPreview` then drops the ENTIRE pre-auth
+    // schedule preview over the one malformed entry.
+    const codes = dayCompletenessIssues(launchableDraft({ days: [day(0, { date: '2026-02-30' })] })).map(
+      (i) => i.code,
+    );
+    expect(codes).toContain('day-invalid-date');
+  });
+
+  it('rejects unparseable Day date text', () => {
+    const issues = dayCompletenessIssues(launchableDraft({ days: [day(0, { date: 'not-a-date' })] }));
+    expect(issues.map((i) => i.code)).toContain('day-invalid-date');
+    expect(issues.find((i) => i.code === 'day-invalid-date')?.dayIndex).toBe(0);
+  });
+
+  it('still reports a BLANK date as missing rather than invalid', () => {
+    // The two are different repairs, so they stay different rows.
+    const codes = dayCompletenessIssues(launchableDraft({ days: [day(0, { date: '   ' })] })).map(
+      (i) => i.code,
+    );
+    expect(codes).toContain('day-missing-date');
+    expect(codes).not.toContain('day-invalid-date');
+  });
+
+  it('accepts the real dates the baseline fixture uses', () => {
+    expect(
+      dayCompletenessIssues(launchableDraft()).filter((i) => i.code === 'day-invalid-date'),
+    ).toEqual([]);
+  });
+});
+
+describe('occasion-to-Edition binding (#787 review)', () => {
+  it('rejects a recognized occasion sitting beside a stale Edition', () => {
+    // A half-applied rebind: the occasion is what BINDS the Edition, so the
+    // pair disagreeing means the launched Event carries a player-facing
+    // identity the organizer never chose.
+    const draft = launchableDraft({
+      occasion: 'weekend-away' as OccasionId, // binds 'vacay'
+      edition: 'fiveacross',
+      // Themes that ARE registered for the stale Edition, so nothing else fires.
+      defaultTheme: 'marquee' as ThemeId,
+      days: [day(0, { theme: 'marquee' as ThemeId, pool: 'closing' })],
+    });
+    const issues = eventCompletenessIssues(draft);
+    expect(issues.map((i) => i.code)).toContain('event-occasion-edition-mismatch');
+    expect(issues.find((i) => i.code === 'event-occasion-edition-mismatch')?.field).toBe('edition');
+  });
+
+  it('is silent when the occasion and Edition agree', () => {
+    expect(
+      eventCompletenessIssues(launchableDraft()).filter(
+        (i) => i.code === 'event-occasion-edition-mismatch',
+      ),
+    ).toEqual([]);
+  });
+
+  it('does not fire when there is no occasion yet — that is already its own issue', () => {
+    const codes = eventCompletenessIssues(launchableDraft({ occasion: null })).map((i) => i.code);
+    expect(codes).toContain('event-missing-field');
+    expect(codes).not.toContain('event-occasion-edition-mismatch');
+  });
+});
+
+describe('promptTextIssues — the persisted 1–80 contract (#787 review)', () => {
+  it('rejects blank Prompt text that would otherwise count toward the minimum', () => {
+    // `assignedPoolIssues` counts entries; it does not read them. So a blank
+    // Prompt satisfies the 24-minimum and clears the gate.
+    const draft = launchableDraft({
+      prompts: {
+        main: [...mainPrompts(31), { text: '   ', spicy: false }],
+        easy: curatedPrompts(28, 'easy'),
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    expect(assignedPoolIssues(draft)).toEqual([]);
+    const issues = promptTextIssues(draft);
+    expect(issues.map((i) => i.code)).toContain('prompt-text-out-of-bounds');
+    expect(issues[0].pool).toBe('main');
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('rejects text past the 80-character rules limit, in any pool', () => {
+    const draft = launchableDraft({
+      prompts: {
+        main: mainPrompts(32),
+        easy: [...curatedPrompts(27, 'easy'), { text: 'x'.repeat(81) }],
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    const issues = promptTextIssues(draft);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].pool).toBe('easy');
+    expect(issues[0].message).toContain('81');
+  });
+
+  it('accepts text exactly at the boundary', () => {
+    const draft = launchableDraft({
+      prompts: {
+        main: [...mainPrompts(31), { text: 'x'.repeat(80), spicy: false }],
+        easy: curatedPrompts(28, 'easy'),
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    expect(promptTextIssues(draft)).toEqual([]);
+    expect(isDraftLaunchable(draft, NOW)).toBe(true);
+  });
+});
+
+describe('curated spicy is judged by VALUE, so a save/load cannot flip it', () => {
+  it('treats spicy:undefined as an absent key on both sides of a round trip', () => {
+    const draft = launchableDraft({
+      prompts: {
+        main: mainPrompts(32),
+        easy: [...curatedPrompts(27, 'easy'), { text: 'calm', spicy: undefined }],
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    expect(promptPoolIssues(draft)).toEqual([]);
+    // The same draft after serialization, where the key no longer exists.
+    const roundTripped = JSON.parse(JSON.stringify(draft)) as EventDraft;
+    expect(promptPoolIssues(roundTripped)).toEqual([]);
+    expect(isDraftLaunchable(draft, NOW)).toBe(isDraftLaunchable(roundTripped, NOW));
+  });
+
+  it('still refuses a DEFINED spicy flag on a curated Prompt', () => {
+    const draft = launchableDraft({
+      prompts: {
+        main: mainPrompts(32),
+        easy: [...curatedPrompts(27, 'easy'), { text: 'nope', spicy: true } as never],
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    expect(promptPoolIssues(draft).map((i) => i.code)).toEqual(['curated-prompt-is-spicy']);
   });
 });

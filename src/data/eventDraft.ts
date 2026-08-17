@@ -114,15 +114,44 @@ function isPool(v: unknown): v is DraftDayDef['pool'] {
   return v === 'main' || v === 'easy' || v === 'closing';
 }
 
-function isMainPrompt(v: unknown): v is DraftMainPrompt {
-  return isRecord(v) && typeof v.text === 'string' && typeof v.spicy === 'boolean';
+/**
+ * The persisted Prompt-text bounds, mirroring the item-write contract in
+ * `firestore.rules` (`text.size() > 0 && text.size() <= 80`) and the
+ * `maxLength={80}` on every authoring input.
+ *
+ * Enforced HERE rather than only at launch because a draft that stores blank
+ * or over-long text still counts toward `MIN_POOL` in `assignedPoolIssues`, so
+ * it can clear the shared launch gate and then either be refused by rules or —
+ * through a trusted provisioner that bypasses them — create blank board
+ * content that no Admin editor can repair.
+ */
+export const MAX_PROMPT_TEXT = 80;
+
+function isPromptText(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const trimmed = v.trim();
+  return trimmed.length > 0 && trimmed.length <= MAX_PROMPT_TEXT;
 }
 
-/** The runtime half of the main-pool-only `spicy` rule (#785). The type half
- *  is `DraftCuratedPrompt['spicy']: never`; this closes the JSON-parse path a
- *  type cannot reach. */
+function isMainPrompt(v: unknown): v is DraftMainPrompt {
+  return isRecord(v) && isPromptText(v.text) && typeof v.spicy === 'boolean';
+}
+
+/**
+ * The runtime half of the main-pool-only `spicy` rule (#785). The type half is
+ * `DraftCuratedPrompt['spicy']: never`, whose ONLY assignable value is
+ * `undefined`.
+ *
+ * The check is on the VALUE, not on key presence, so that the rule survives a
+ * JSON round-trip. `JSON.stringify` drops an explicitly-undefined property, so
+ * a presence check would reject `{ text, spicy: undefined }` in memory and
+ * accept the very same draft after a save/load — launch validity changing
+ * across serialization. Treating `spicy: undefined` as equivalent to an absent
+ * key makes the two readings identical, while any DEFINED spicy value is still
+ * refused on both sides of the round-trip.
+ */
 function isCuratedPrompt(v: unknown): v is DraftCuratedPrompt {
-  return isRecord(v) && typeof v.text === 'string' && !('spicy' in v);
+  return isRecord(v) && isPromptText(v.text) && v.spicy === undefined;
 }
 
 function isPromptPools(v: unknown): v is DraftPromptPools {
@@ -153,12 +182,24 @@ function isDraftDay(v: unknown): v is DraftDayDef {
   );
 }
 
+/** A share of a Board, as `dealBoard` reads it. Values outside 0–1 are not a
+ *  stronger preference — `dealBoard` clamps them — so accepting one stores a
+ *  setting the organizer will never actually receive. */
+function isRatio(v: unknown): v is number {
+  return isFiniteNumber(v) && v >= 0 && v <= 1;
+}
+
 function isDraftSettings(v: unknown): v is EventDraftSettings {
   if (!isRecord(v)) return false;
   return (
+    // STRICTLY positive: `isReportHidden` and the server auto-hide path both
+    // treat a non-positive threshold as "report-based hiding is off", so a
+    // stored `0` would silently launch an Event without the moderation the
+    // organizer believes they configured.
     isFiniteNumber(v.reportHideThreshold) &&
-    isFiniteNumber(v.spicyRatio) &&
-    isFiniteNumber(v.easyMixRatio) &&
+    v.reportHideThreshold > 0 &&
+    isRatio(v.spicyRatio) &&
+    isRatio(v.easyMixRatio) &&
     typeof v.forceAdult === 'boolean' &&
     (v.photoProofSource === 'camera_or_library' || v.photoProofSource === 'camera_only') &&
     typeof v.stripPhotoExif === 'boolean' &&
@@ -323,6 +364,30 @@ export function createLocalDraftStore(
     }
   }
 
+  /**
+   * Whether an unreadable blob was written by a FUTURE schema version.
+   *
+   * Unreadable is not one condition. An obsolete or corrupt blob is dead
+   * bytes, but a blob whose `v` exceeds this build's is a draft the organizer
+   * can still open — in the newer bundle they were using before a cached
+   * service worker or a rolled-back deployment served them this one. Deleting
+   * it would destroy live work to reclaim quota, so reclamation stops at the
+   * version boundary and lets the newer build reclaim its own.
+   */
+  function isFutureVersion(key: string): boolean {
+    const ls = store(storage);
+    if (!ls) return false;
+    try {
+      const raw = ls.getItem(key);
+      if (!raw) return false;
+      const parsed: unknown = JSON.parse(raw);
+      return isRecord(parsed) && isFiniteNumber(parsed.v) && parsed.v > DRAFT_SCHEMA_VERSION;
+    } catch {
+      // A blob that will not even parse carries no version to respect.
+      return false;
+    }
+  }
+
   return {
     async list(): Promise<EventDraftSummary[]> {
       const ls = store(storage);
@@ -352,11 +417,17 @@ export function createLocalDraftStore(
       } catch {
         return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
       }
-      // Reclaim drafts this build can no longer read — a retired schema
+      // Reclaim drafts this build can no longer read — a RETIRED schema
       // version, or a corrupted blob. They are invisible to the organizer
       // either way, so leaving them would only consume the quota that makes
       // the NEXT save fail silently.
+      //
+      // Drafts written by a NEWER version are deliberately exempt: they are
+      // not dead bytes but live work belonging to a build the organizer may
+      // return to, and destroying them would make a rollback or a stale cached
+      // bundle permanently delete a draft (#787 review).
       for (const key of unreadable) {
+        if (isFutureVersion(key)) continue;
         try {
           ls.removeItem(key);
         } catch {

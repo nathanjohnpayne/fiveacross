@@ -169,7 +169,9 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     clock = NOW + 60_000;
     await store.save(draft({ draftId: 'newer', name: 'Newer', step: 'squares' }));
 
-    // A blob from a retired schema version, and one that is not JSON at all.
+    // A blob from a schema version this build does not read, and one that is
+    // not JSON at all. Both are misses for listing purposes; whether they are
+    // also RECLAIMED is a separate question the reclamation tests below cover.
     storage.setItem('gcb:event-draft:future', JSON.stringify({ ...draft(), v: 99 }));
     storage.setItem('gcb:event-draft:junk', 'not json');
     // Somebody else's key in the same origin.
@@ -184,7 +186,8 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     const storage = fakeStorage();
     const store = createLocalDraftStore(storage, () => NOW);
     await store.save(draft({ draftId: 'live' }));
-    storage.setItem('gcb:event-draft:retired', JSON.stringify({ ...draft(), v: 99 }));
+    // A RETIRED version — below the current one, so no build will read it again.
+    storage.setItem('gcb:event-draft:retired', JSON.stringify({ ...draft(), v: 0 }));
     storage.setItem('gcb:event-draft:junk', 'not json');
     storage.setItem('gcb:card-snapshot:med-2026:uid:day-1', 'unrelated');
 
@@ -197,6 +200,40 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     expect(storage.raw.has('gcb:event-draft:junk')).toBe(false);
     expect(storage.raw.has('gcb:event-draft:live')).toBe(true);
     expect(storage.raw.has('gcb:card-snapshot:med-2026:uid:day-1')).toBe(true);
+  });
+
+  it('never reclaims a draft written by a NEWER schema version', async () => {
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    // The rollback case: a cached older bundle, or a reverted deployment,
+    // enumerating a draft the organizer wrote in the newer build. It is
+    // unreadable HERE but still live THERE, so deleting it to reclaim quota
+    // would destroy work the organizer can otherwise still open (#787 review).
+    storage.setItem('gcb:event-draft:newer', JSON.stringify({ ...draft(), v: DRAFT_SCHEMA_VERSION + 1 }));
+
+    const list = await store.list();
+
+    // Invisible to this build...
+    expect(list.map((s) => s.draftId)).toEqual([]);
+    expect(await store.load('newer')).toBeNull();
+    // ...but still on the device, intact, for the build that can read it.
+    expect(storage.raw.has('gcb:event-draft:newer')).toBe(true);
+    expect(JSON.parse(storage.raw.get('gcb:event-draft:newer') as string).v).toBe(
+      DRAFT_SCHEMA_VERSION + 1,
+    );
+  });
+
+  it('still reclaims a blob whose version is unreadable garbage', async () => {
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    // A non-numeric version carries no version to respect, so the
+    // future-version exemption must not become a way for any malformed blob to
+    // survive reclamation forever.
+    storage.setItem('gcb:event-draft:bogus', JSON.stringify({ ...draft(), v: 'tomorrow' }));
+
+    await store.list();
+
+    expect(storage.raw.has('gcb:event-draft:bogus')).toBe(false);
   });
 
   it('discards one draft and leaves the rest, and discarding twice is not an error', async () => {
@@ -249,5 +286,77 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     const store = createLocalDraftStore(fakeStorage(), () => NOW);
     const saved = await store.save({ ...draft(), v: 99 });
     expect(saved.v).toBe(DRAFT_SCHEMA_VERSION);
+  });
+});
+
+describe('parseEventDraft — persisted value bounds (#787 review)', () => {
+  const settings = (over: Partial<EventDraft['settings']>): EventDraft => ({
+    ...draft(),
+    settings: { ...draft().settings, ...over },
+  });
+
+  it('rejects a non-positive report-hide threshold', () => {
+    // `isReportHidden` and the server auto-hide path both read a non-positive
+    // threshold as "off", so accepting one launches an Event whose moderation
+    // is silently disabled.
+    expect(parseEventDraft(settings({ reportHideThreshold: 0 }))).toBeNull();
+    expect(parseEventDraft(settings({ reportHideThreshold: -3 }))).toBeNull();
+    expect(parseEventDraft(settings({ reportHideThreshold: 1 }))).not.toBeNull();
+  });
+
+  it('rejects ratios outside the inclusive 0–1 range', () => {
+    // `dealBoard` clamps, so an out-of-range value is not a stronger
+    // preference — it is a stored setting the organizer never receives.
+    expect(parseEventDraft(settings({ spicyRatio: -0.1 }))).toBeNull();
+    expect(parseEventDraft(settings({ spicyRatio: 1.5 }))).toBeNull();
+    expect(parseEventDraft(settings({ easyMixRatio: -1 }))).toBeNull();
+    expect(parseEventDraft(settings({ easyMixRatio: 2 }))).toBeNull();
+    // The boundaries themselves are legitimate.
+    expect(parseEventDraft(settings({ spicyRatio: 0, easyMixRatio: 1 }))).not.toBeNull();
+  });
+
+  it('rejects Prompt text outside the persisted 1–80 contract', () => {
+    const withMain = (text: string): EventDraft => ({
+      ...draft(),
+      prompts: { ...draft().prompts, main: [{ text, spicy: false }] },
+    });
+    expect(parseEventDraft(withMain(''))).toBeNull();
+    expect(parseEventDraft(withMain('   '))).toBeNull();
+    expect(parseEventDraft(withMain('x'.repeat(81)))).toBeNull();
+    expect(parseEventDraft(withMain('x'.repeat(80)))).not.toBeNull();
+  });
+
+  it('applies the same text bounds to curated Prompts', () => {
+    const withEasy = (text: string): EventDraft => ({
+      ...draft(),
+      prompts: { ...draft().prompts, easy: [{ text }] },
+    });
+    expect(parseEventDraft(withEasy(''))).toBeNull();
+    expect(parseEventDraft(withEasy('x'.repeat(81)))).toBeNull();
+    expect(parseEventDraft(withEasy('Order a round'))).not.toBeNull();
+  });
+
+  it('treats a curated Prompt spicy:undefined exactly like an absent key', () => {
+    // The round-trip invariant: `JSON.stringify` drops the undefined property,
+    // so a key-presence rule would flip launch validity across one save/load.
+    const explicitUndefined = {
+      ...draft(),
+      prompts: { ...draft().prompts, easy: [{ text: 'Sunset swim', spicy: undefined }] },
+    };
+    const absent = {
+      ...draft(),
+      prompts: { ...draft().prompts, easy: [{ text: 'Sunset swim' }] },
+    };
+    expect(parseEventDraft(explicitUndefined)).not.toBeNull();
+    expect(parseEventDraft(absent)).not.toBeNull();
+    // The round trip does not change the verdict.
+    expect(parseEventDraft(JSON.parse(JSON.stringify(explicitUndefined)))).not.toBeNull();
+    // A DEFINED spicy flag is still refused on both sides.
+    const defined = {
+      ...draft(),
+      prompts: { ...draft().prompts, easy: [{ text: 'Sunset swim', spicy: true }] },
+    };
+    expect(parseEventDraft(defined)).toBeNull();
+    expect(parseEventDraft(JSON.parse(JSON.stringify(defined)))).toBeNull();
   });
 });

@@ -27,6 +27,9 @@ import { THEMES, themesForEdition } from '../theme/themes';
 // firebase as `import type` only, which erases at build.
 import { normalizeTimezone } from './converters';
 import { occasionById } from './occasions';
+// The SAME bound `parseEventDraft` enforces on the stored blob, so the
+// in-memory gate and the persistence gate cannot drift apart.
+import { MAX_PROMPT_TEXT } from './eventDraft';
 
 /**
  * The ten-Day ceiling. `daysThemeLockOk` (`firestore.rules`) unrolls its
@@ -50,6 +53,7 @@ export type DraftIssueCode =
   | 'day-unregistered-theme'
   | 'day-missing-unlock'
   | 'day-missing-date'
+  | 'day-invalid-date'
   | 'day-tonight-not-two'
   | 'day-off-edition-theme'
   | 'one-card-has-days'
@@ -58,7 +62,9 @@ export type DraftIssueCode =
   | 'event-off-edition-theme'
   | 'event-unsupported-timezone'
   | 'event-invalid-date-window'
-  | 'curated-prompt-is-spicy';
+  | 'event-occasion-edition-mismatch'
+  | 'curated-prompt-is-spicy'
+  | 'prompt-text-out-of-bounds';
 
 /** One reason a draft cannot launch. `dayIndex`/`pool` anchor the issue to the
  *  control that fixes it, so a checklist row can deep-link to its own Edit. */
@@ -306,6 +312,18 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
         dayIndex: day.index,
         message: `Day ${day.index + 1} has no date.`,
       });
+    } else if (!isIsoDate(day.date)) {
+      // Presence is not enough, for the same reason the Event window is
+      // date-checked: a resumed or imported Day carrying `2026-02-30` or
+      // `not-a-date` renders `Invalid Date` in `DaySwitcher.weekday`, and
+      // `coerceEventPreview` rejects the malformed entry and drops the ENTIRE
+      // pre-auth schedule preview — one bad Day silently costing the whole
+      // schedule its shopfront.
+      issues.push({
+        code: 'day-invalid-date',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} has a date that is not a real calendar date in YYYY-MM-DD form.`,
+      });
     }
     if (!day.place.trim() || !day.placeEmoji.trim()) {
       issues.push({
@@ -381,11 +399,25 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
       });
     }
   }
-  if (occasionById(draft.occasion) === null) {
+  const occasion = occasionById(draft.occasion);
+  if (occasion === null) {
     issues.push({
       code: 'event-missing-field',
       field: 'occasion',
       message: 'This Event still needs an occasion — it is what binds the Edition your players see.',
+    });
+  } else if (occasion.edition !== draft.edition) {
+    // The occasion is what BINDS the Edition, so the two agreeing is the whole
+    // content of that claim. A resumed or imported draft can carry a
+    // recognized occasion beside a stale `edition` — re-picking an occasion
+    // rebinds it, and a half-applied rebind leaves the pair disagreeing. Such
+    // a draft still passes the Theme checks by using the stale Edition's
+    // Themes, so nothing else here would catch it, and it would launch with a
+    // player-facing identity the organizer never chose (#785).
+    issues.push({
+      code: 'event-occasion-edition-mismatch',
+      field: 'edition',
+      message: `This Event's occasion (${occasion.label}) plays as the ${occasion.edition} Edition, but the draft carries ${draft.edition}. Re-pick the occasion to rebind the Edition.`,
     });
   }
   // Presence is not enough for either of these: both have a downstream contract
@@ -450,7 +482,12 @@ export function promptPoolIssues(draft: EventDraft): DraftIssue[] {
   const issues: DraftIssue[] = [];
   for (const pool of ['easy', 'closing'] as const) {
     for (const prompt of draft.prompts[pool]) {
-      if ('spicy' in (prompt as object)) {
+      // The VALUE, not the key: `JSON.stringify` drops an explicitly-undefined
+      // property, so a presence check would call a draft unlaunchable in
+      // memory and launchable after one save/load. `spicy: undefined` is
+      // exactly equivalent to an absent key, and only a DEFINED flag is the
+      // silently-dropped 18+ hazard this guards (matching `isCuratedPrompt`).
+      if ((prompt as { spicy?: unknown }).spicy !== undefined) {
         issues.push({
           code: 'curated-prompt-is-spicy',
           pool,
@@ -458,6 +495,42 @@ export function promptPoolIssues(draft: EventDraft): DraftIssue[] {
         });
       }
     }
+  }
+  return issues;
+}
+
+/**
+ * Every authored Prompt's text fits the persisted item-write contract.
+ *
+ * `firestore.rules` requires `text.size()` in 1–80 and every authoring input
+ * caps at 80, but `assignedPoolIssues` counts entries rather than reading
+ * them — so a pack with blank or over-long text can satisfy the 24-Prompt
+ * minimum and clear the launch gate, only to be refused by rules at
+ * provisioning or, through a trusted provisioner that bypasses them, create
+ * blank Squares no Admin editor can repair (#785).
+ *
+ * Checked across ALL THREE pools: the contract is a property of an item
+ * document, not of the pool it belongs to.
+ */
+export function promptTextIssues(draft: EventDraft): DraftIssue[] {
+  const issues: DraftIssue[] = [];
+  for (const pool of ['main', 'easy', 'closing'] as const) {
+    draft.prompts[pool].forEach((prompt, position) => {
+      const text = typeof prompt.text === 'string' ? prompt.text.trim() : '';
+      if (text.length === 0) {
+        issues.push({
+          code: 'prompt-text-out-of-bounds',
+          pool,
+          message: `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool has no text; a blank Square cannot be created or repaired later.`,
+        });
+      } else if (text.length > MAX_PROMPT_TEXT) {
+        issues.push({
+          code: 'prompt-text-out-of-bounds',
+          pool,
+          message: `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool is ${text.length} characters; the limit is ${MAX_PROMPT_TEXT}.`,
+        });
+      }
+    });
   }
   return issues;
 }
@@ -474,6 +547,7 @@ export function validateEventDraft(draft: EventDraft, now: number): DraftIssue[]
     ...eventCompletenessIssues(draft),
     ...assignedPoolIssues(draft),
     ...promptPoolIssues(draft),
+    ...promptTextIssues(draft),
     ...dayCountIssues(draft),
     ...finaleClosingPoolIssues(draft),
     ...firstUnlockIssues(draft, now),

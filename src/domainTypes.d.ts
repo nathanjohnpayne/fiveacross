@@ -837,6 +837,14 @@ export interface DraftMainPrompt {
  * half of the same #785 rule: `{ text, spicy: true }` does not typecheck as a
  * curated Prompt at all. The runtime half is `promptPoolIssues`, which guards
  * the JSON-parse path a type cannot reach.
+ *
+ * `never` here means "no DEFINED value", not "no key". Because this project
+ * does not enable `exactOptionalPropertyTypes`, `{ text, spicy: undefined }`
+ * still typechecks — and `JSON.stringify` drops that property, so a key-
+ * presence rule would change the draft's launch validity across a save/load
+ * round-trip. Both runtime guards (`isCuratedPrompt`, `promptPoolIssues`)
+ * therefore test the VALUE, making `spicy: undefined` and an absent key
+ * identical on either side of serialization (#787 review).
  */
 export interface DraftCuratedPrompt {
   text: string;
