@@ -2557,6 +2557,15 @@ textarea.input {
   font-size: 15px;
   line-height: 1;
   transform: rotate(3deg);
+  /* Backstop under `previewDayEmoji`'s single-glyph check (Codex P2, round 3).
+     "Content-sized" cannot mean "unbounded" when the reserved corner is a
+     fixed 58px: postage wider than the reserve would grow leftward over the
+     copy, which is the overlap this whole change removes. The JS check is the
+     real guard; this caps the damage of any glyph that passes it and still
+     renders unusually wide, clipping rather than colliding. */
+  max-width: 44px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 /* The invitation copy block under the CTA — left-set, unlike the centered
    offline footnote below it. */

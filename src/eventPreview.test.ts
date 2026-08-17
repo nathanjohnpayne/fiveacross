@@ -166,6 +166,39 @@ describe('previewDayEmoji — the stamp postage, or nothing', () => {
     expect(previewDayEmoji(undefined)).toBeNull();
     expect(previewDayEmoji([])).toBeNull();
   });
+
+  // Codex P2, round 3: `asText` accepts up to 200 characters because that cap
+  // guards a malformed seed, not this layout. The stamp is content-sized
+  // against a FIXED reserved corner, so an over-wide value would grow the box
+  // back over the copy — the exact overlap #776 removes. Postage that is not
+  // one glyph is declined, and the card falls back to its unstamped layout.
+  const dayWith = (emoji: string) => [{ date: '2026-08-07', title: 'Day', emoji }];
+
+  it.each([
+    ['a whole sentence', 'The Birds Have Entered the Chat'],
+    ['several emoji', '🐦🐦🐦'],
+    ['an emoji with trailing text', '🐦 Day one'],
+    ['a long malformed value', 'x'.repeat(200)],
+  ])('declines postage that is not a single glyph: %s', (_label, emoji) => {
+    expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBeNull();
+  });
+
+  it.each([
+    ['a plain emoji', '🐦'],
+    ['a variation-selector emoji', '🌫️'],
+    ['a flag (two code points, one glyph)', '🇮🇹'],
+    ['a skin-toned emoji', '👋🏽'],
+    ['a ZWJ family sequence', '👨‍👩‍👧‍👦'],
+    ['a non-emoji single character', '★'],
+  ])('accepts genuine single-glyph postage: %s', (_label, emoji) => {
+    expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBe(emoji);
+  });
+
+  it('leaves the Day LINE alone — inline text wraps, so it costs nothing there', () => {
+    // Only the STAMP has a layout constraint. A multi-glyph value still leads
+    // the line rather than being silently dropped from the card entirely.
+    expect(previewDayLine(dayWith('🐦🐦🐦'), localNoon(2026, 8, 6))).toBe('🐦🐦🐦 Day 1: Day');
+  });
 });
 
 describe('previewMetaLine — the fragments that exist, joined', () => {

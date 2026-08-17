@@ -159,6 +159,34 @@ export function previewDayLine(
   return `${lead}Day ${ordinal}: ${day.title}`;
 }
 
+/** Is this ONE rendered glyph? The stamp is absolutely positioned and
+ *  content-sized against a fixed reserved corner, so its width is a layout
+ *  input, not just a cosmetic detail — while `asText` accepts any string up to
+ *  `MAX_TEXT`, because that cap guards a malformed seed rather than this
+ *  layout (Codex P2, round 3). A long `emoji` would grow the box leftward and
+ *  downward over the copy, recreating the very overlap #776 removes.
+ *
+ *  Grapheme clusters, not code points: a flag, a skin-toned hand, or a family
+ *  ZWJ sequence is several code points and one glyph, and all three are
+ *  legitimate postage. `Intl.Segmenter` is the correct instrument; where it is
+ *  missing the fallback bounds code points instead, which over-accepts a
+ *  little (it cannot tell one ZWJ sequence from two adjacent emoji) but still
+ *  keeps the box near stamp-sized. */
+function isSingleGlyph(value: string): boolean {
+  // Typed locally rather than via `lib.esnext`: this module is deliberately
+  // dependency-free and compiled against the repo's existing lib target, which
+  // does not declare `Intl.Segmenter`.
+  type GraphemeSegmenter = new (
+    locales: undefined,
+    options: { granularity: 'grapheme' },
+  ) => { segment(input: string): Iterable<unknown> };
+  const Segmenter = (Intl as unknown as { Segmenter?: GraphemeSegmenter }).Segmenter;
+  if (Segmenter) {
+    return [...new Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].length === 1;
+  }
+  return [...value].length <= 8;
+}
+
 /**
  * The previewed Day's emoji — the postcard stamp's POSTAGE (#776) — or `null`.
  *
@@ -168,12 +196,18 @@ export function previewDayLine(
  * seed carries an emoji on Day 1 only, and after the last Day no Day resolves
  * at all — which is why the caller must render no stamp element rather than an
  * empty one.
+ *
+ * A value that is not a single glyph resolves to `null` too, so the card falls
+ * back to the unstamped layout it already draws correctly rather than to an
+ * oversized box laid over its own copy. The Day LINE keeps such a value: it is
+ * inline text that wraps, so it costs nothing there.
  */
 export function previewDayEmoji(
   days: EventPreviewDay[] | undefined,
   now: number = Date.now(),
 ): string | null {
-  return previewDay(days, now)?.day.emoji ?? null;
+  const emoji = previewDay(days, now)?.day.emoji;
+  return emoji && isSingleGlyph(emoji) ? emoji : null;
 }
 
 /**
