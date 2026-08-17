@@ -71,10 +71,11 @@ set -euo pipefail
 #                        EMAIL_UNSUBSCRIBE_PROJECT override decide.
 #
 # Credentials:
-#   The invoker steps (1.6 and 2.5) shell out to `gcloud`, which resolves its
-#   OWN credential chain — NOT the temporary one `op-firebase-deploy`
-#   materializes and deletes on exit. Run deploy preflight so a credential
-#   exists at all:
+#   The invoker steps (1.6 and 2.5) shell out to `gcloud`. When a named deploy
+#   has no preloaded credential, this wrapper materializes the same
+#   project-specific Firebase-vault service-account key that
+#   `op-firebase-deploy` uses before its own work starts. Deploy preflight is
+#   still useful when you want to load all credentials in one biometric burst:
 #     eval "$(scripts/op-preflight.sh --agent <agent> --mode deploy)"
 #   That exports GOOGLE_APPLICATION_CREDENTIALS pointing at the per-project
 #   Firebase-vault SERVICE-ACCOUNT key, and `scripts/set-cloud-run-invoker.sh`
@@ -113,6 +114,16 @@ done
 # fixture-repo test harness invokes this script from a throwaway git repo
 # rooted elsewhere, so `scripts/foo.sh` alone is not reliable).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=firebase/lib/credential-materialization.sh
+source "$SCRIPT_DIR/firebase/lib/credential-materialization.sh"
+
+DEPLOY_SOURCE_CRED_TMPFILE=""
+DEPLOY_LOG=""
+cleanup_deploy_artifacts() {
+  [[ -n "$DEPLOY_SOURCE_CRED_TMPFILE" && -f "$DEPLOY_SOURCE_CRED_TMPFILE" ]] && rm -f "$DEPLOY_SOURCE_CRED_TMPFILE"
+  [[ -n "$DEPLOY_LOG" && -f "$DEPLOY_LOG" ]] && rm -f "$DEPLOY_LOG"
+}
+trap cleanup_deploy_artifacts EXIT
 
 # Could this deploy have RELEASED Functions? (#768 r4 Codex P1)
 #
@@ -141,40 +152,86 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # to prevent.
 FUNCTIONS_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
-ONLY_VALUE=""
-EXCEPT_VALUE=""
+BUG_REPORT_INVOKER_SELECTED=true
+EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+ONLY_VALUES=()
+EXCEPT_VALUES=()
+DEPLOY_PROJECT="${DEPLOY_TARGET_PROJECT:-}"
 EXPECT_ARG=""
 for arg in ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}; do
   if [[ -n "$EXPECT_ARG" ]]; then
     case "$EXPECT_ARG" in
-      only)   ONLY_VALUE="$arg" ;;
-      except) EXCEPT_VALUE="$arg" ;;
+      only)   ONLY_VALUES=("$arg") ;;
+      except) EXCEPT_VALUES=("$arg") ;;
     esac
     EXPECT_ARG=""
     continue
   fi
   case "$arg" in
-    --only)    EXPECT_ARG="only" ;;
-    --only=*)  ONLY_VALUE="${arg#*=}" ;;
-    --except)  EXPECT_ARG="except" ;;
-    --except=*) EXCEPT_VALUE="${arg#*=}" ;;
+    --only)     EXPECT_ARG="only" ;;
+    --only=*)   ONLY_VALUES=("${arg#*=}") ;;
+    --except)   EXPECT_ARG="except" ;;
+    --except=*) EXCEPT_VALUES=("${arg#*=}") ;;
+    --message) EXPECT_ARG="message" ;;
     --dry-run) FIREBASE_DRY_RUN=true ;;
+    --*) ;;
+    *)
+      if [[ -z "$DEPLOY_PROJECT" ]]; then
+        DEPLOY_PROJECT="$arg"
+      fi
+      ;;
   esac
 done
 
-# `--only` is an allowlist: Functions run only when named, either whole
-# (`--only functions`) or per-function (`--only functions:emailUnsubscribe`).
-if [[ -n "$ONLY_VALUE" ]]; then
-  if [[ ",$ONLY_VALUE," == *",functions,"* || "$ONLY_VALUE" == *"functions:"* ]]; then
-    FUNCTIONS_ATTEMPTED=true
-  else
-    FUNCTIONS_ATTEMPTED=false
-  fi
+if [[ -z "$DEPLOY_PROJECT" && -f .firebaserc ]]; then
+  DEPLOY_PROJECT="$(python3 -c "import json; print(json.load(open('.firebaserc'))['projects']['default'])")"
 fi
-# `--except functions` removes them regardless of what `--only` said.
-if [[ ",$EXCEPT_VALUE," == *",functions,"* ]]; then
+
+# `--only` is an allowlist. It also tells us which of the two Cloud Run
+# services could have changed: an unrelated first function deployment must not
+# fail because the other service has not been created yet.
+if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   FUNCTIONS_ATTEMPTED=false
+  BUG_REPORT_INVOKER_SELECTED=false
+  EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+  for only_value in "${ONLY_VALUES[@]}"; do
+    IFS=',' read -r -a only_selectors <<< "$only_value"
+    for selector in "${only_selectors[@]}"; do
+      case "$selector" in
+        functions)
+          FUNCTIONS_ATTEMPTED=true
+          BUG_REPORT_INVOKER_SELECTED=true
+          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          ;;
+        functions:submitBugReport)
+          FUNCTIONS_ATTEMPTED=true
+          BUG_REPORT_INVOKER_SELECTED=true
+          ;;
+        functions:emailUnsubscribe)
+          FUNCTIONS_ATTEMPTED=true
+          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          ;;
+        functions:*) FUNCTIONS_ATTEMPTED=true ;;
+      esac
+    done
+  done
 fi
+
+# `--except` removes whole Functions releases or one known invoker service.
+for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
+  IFS=',' read -r -a except_selectors <<< "$except_value"
+  for selector in "${except_selectors[@]}"; do
+    case "$selector" in
+      functions)
+        FUNCTIONS_ATTEMPTED=false
+        BUG_REPORT_INVOKER_SELECTED=false
+        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        ;;
+      functions:submitBugReport) BUG_REPORT_INVOKER_SELECTED=false ;;
+      functions:emailUnsubscribe) EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false ;;
+    esac
+  done
+done
 
 # Reconciliation coordinates are PINNED to the selected deploy target, never
 # inherited (#768 r4 Codex P2).
@@ -203,6 +260,27 @@ if [[ -n "${DEPLOY_TARGET_PROJECT:-}" ]]; then
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
+
+INVOKER_SCRIPTS=()
+if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-bug-report-invoker.sh")
+fi
+if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-email-unsubscribe-invoker.sh")
+fi
+
+resolve_invoker_deploy_credential() {
+  [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]] && return 0
+  [[ -n "$DEPLOY_PROJECT" ]] || return 0
+
+  local credential=""
+  credential="$(firebase_materialize_vault_sa_key "$DEPLOY_PROJECT" || true)"
+  if [[ -n "$credential" ]]; then
+    DEPLOY_SOURCE_CRED_TMPFILE="$credential"
+    export GOOGLE_APPLICATION_CREDENTIALS="$credential"
+    echo "   Loaded the project Firebase-vault deploy credential for the invoker check." >&2
+  fi
+}
 
 # Guard 1: must be on main
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -399,10 +477,16 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker credential check skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker credential check skipped (this deploy does not release Functions)"
+elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
+  echo ">> Invoker credential check skipped (the selected Function scope does not include submitBugReport or emailUnsubscribe)"
 else
   echo ">> Checking the Cloud Run invoker credential before publishing (read-only)"
-  if ! run_invoker "$SCRIPT_DIR/set-bug-report-invoker.sh" --dry-run --allow-missing ||
-     ! run_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" --dry-run --allow-missing; then
+  resolve_invoker_deploy_credential
+  PRECHECK_STATUS=0
+  for invoker_script in "${INVOKER_SCRIPTS[@]}"; do
+    run_invoker "$invoker_script" --dry-run --allow-missing || PRECHECK_STATUS=$?
+  done
+  if [[ "$PRECHECK_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 
 ✗ Could not read the Cloud Run invoker config. NOTHING HAS BEEN PUBLISHED.
@@ -467,7 +551,6 @@ echo ">> Deploying via op-firebase-deploy"
 # classifier needs to see both. `${PIPESTATUS[0]}` is op-firebase-deploy's own
 # status, not tee's.
 DEPLOY_LOG="$(mktemp "${TMPDIR:-/tmp}/deploy-firebase-XXXXXX")"
-trap 'rm -f "$DEPLOY_LOG"' EXIT
 
 set +e
 op-firebase-deploy ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"} 2>&1 | tee "$DEPLOY_LOG"
@@ -555,6 +638,8 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
+elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
+  echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport or emailUnsubscribe)"
 elif [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (Firebase --dry-run: nothing was deployed, so nothing could have been released — mutating the invoker config here would be the exact footgun a dry run exists to rule out)"
 else
@@ -579,10 +664,11 @@ EOF
 EOF
     fi
   fi
-  echo ">> Reconciling Cloud Run invoker config (bug-report + email-unsubscribe)"
+  echo ">> Reconciling Cloud Run invoker config for selected Functions"
   RECONCILE_RAN=true
-  run_invoker "$SCRIPT_DIR/set-bug-report-invoker.sh" || RECONCILE_STATUS=$?
-  run_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" || RECONCILE_STATUS=$?
+  for invoker_script in "${INVOKER_SCRIPTS[@]}"; do
+    run_invoker "$invoker_script" || RECONCILE_STATUS=$?
+  done
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 

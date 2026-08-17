@@ -111,12 +111,44 @@ echo "stub-op-firebase-deploy: invoked with args: $*" >&2
   for a in "$@"; do printf '\t%s' "$a"; done
   printf '\n'
 } >> "$OFD_LOG"
+if [ -n "${OFD_CREDENTIAL_LOG:-}" ]; then
+  printf '%s\n' "${GOOGLE_APPLICATION_CREDENTIALS:-}" >> "$OFD_CREDENTIAL_LOG"
+fi
 if [ -n "${OFD_STUB_OUTPUT:-}" ]; then
   printf '%s\n' "$OFD_STUB_OUTPUT" >&2
 fi
 exit "${OFD_STUB_EXIT:-0}"
 STUB
 chmod +x "$STUB_DIR/op-firebase-deploy"
+
+# `deploy.sh` materializes the project Firebase-vault key before its invoker
+# check when a named deployment starts without deploy-mode preflight. The real
+# command writes a document to --out-file; this stub copies the fixture key
+# there, or reports that the item is absent so all unrelated tests retain their
+# credential-free state.
+cat >"$STUB_DIR/op" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${OP_LOG:-}" ]; then
+  {
+    printf 'op'
+    for a in "$@"; do printf '\t%s' "$a"; done
+    printf '\n'
+  } >> "$OP_LOG"
+fi
+out_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out-file) out_file="${2:?--out-file needs a value}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "${OP_VAULT_SA_KEY:-}" ] && [ -n "$out_file" ]; then
+  cp "$OP_VAULT_SA_KEY" "$out_file"
+  exit 0
+fi
+exit 1
+STUB
+chmod +x "$STUB_DIR/op"
 
 # Stub `npm` so the post-deploy synthetic step (issue #142) is exercised without
 # a real app / Playwright. Records each invocation to NPM_LOG and exits with
@@ -198,6 +230,14 @@ if [ -n "${GCLOUD_CALL_COUNTER:-}" ]; then
     echo "stub-gcloud: simulated failure (call $gcloud_calls > GCLOUD_FAIL_AFTER=$GCLOUD_FAIL_AFTER)" >&2
     exit 1
   fi
+fi
+if [ -n "${GCLOUD_MISSING_SERVICE:-}" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "$GCLOUD_MISSING_SERVICE" ]; then
+      echo "ERROR: (gcloud.run.services.describe) NOT_FOUND: Requested entity was not found." >&2
+      exit 1
+    fi
+  done
 fi
 exit_code="${GCLOUD_STUB_EXIT:-0}"
 if [ "$exit_code" != "0" ]; then
@@ -1303,6 +1343,97 @@ elif ! grep -q 'FAIL: could not describe Cloud Run service' "$ERR19B"; then
   cat "$ERR19B" >&2
 else
   pass "permission-denied-still-aborts: a non-NOT_FOUND describe failure still aborts BEFORE publishing (rc=$RC19B) — --allow-missing did not widen the credential check."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 20 (#768 Codex P1): a named deploy without deploy-mode preflight must
+# still reuse the canonical project Firebase-vault key before Step 1.6. The
+# regular deploy wrapper already finds that key itself; making the precheck
+# depend on a separate ambient ADC chain would abort the ordinary path before
+# the wrapper gets that chance.
+# ---------------------------------------------------------------------------
+REPO20="$WORKDIR/case20-vault-key-before-precheck"
+init_fixture_repo "$REPO20"
+OUT20="$WORKDIR/case20.out"
+ERR20="$WORKDIR/case20.err"
+OP_KEY20="$WORKDIR/case20-firebase-deployer-key.json"
+: >"$WORKDIR/ofd-calls-20.log"
+: >"$WORKDIR/ofd-credential-20.log"
+: >"$WORKDIR/op-calls-20.log"
+cat >"$OP_KEY20" <<'JSON'
+{
+  "type": "service_account",
+  "project_id": "gaycruisebingo",
+  "private_key_id": "placeholder",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nplaceholder\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-deployer@gaycruisebingo.iam.gserviceaccount.com",
+  "client_id": "000000000000000000000",
+  "token_uri": "https://oauth2.googleapis.com/token"
+}
+JSON
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-20.log" \
+OFD_CREDENTIAL_LOG="$WORKDIR/ofd-credential-20.log" \
+OP_LOG="$WORKDIR/op-calls-20.log" \
+OP_VAULT_SA_KEY="$OP_KEY20" \
+  bash -c "cd '$REPO20' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo" \
+  >"$OUT20" 2>"$ERR20"
+RC20=$?
+set -e
+MATERIALIZED_KEY20="$(tail -n 1 "$WORKDIR/ofd-credential-20.log")"
+
+if [[ $RC20 -ne 0 ]]; then
+  fail "vault-key-before-precheck: a named deploy without deploy preflight returned $RC20. stderr was:"
+  cat "$ERR20" >&2
+elif ! grep -q 'document' "$WORKDIR/op-calls-20.log" || ! grep -q 'gaycruisebingo' "$WORKDIR/op-calls-20.log"; then
+  fail "vault-key-before-precheck: deploy.sh did not request gaycruisebingo's Firebase-vault key before the invoker check. op log was:"
+  cat "$WORKDIR/op-calls-20.log" >&2
+elif [[ -z "$MATERIALIZED_KEY20" ]]; then
+  fail "vault-key-before-precheck: op-firebase-deploy did not inherit the materialized credential."
+elif [[ -e "$MATERIALIZED_KEY20" ]]; then
+  fail "vault-key-before-precheck: the temporary Firebase-vault key was not removed after deploy.sh exited: $MATERIALIZED_KEY20"
+elif ! grep -q 'Loaded the project Firebase-vault deploy credential' "$ERR20"; then
+  fail "vault-key-before-precheck: deploy.sh did not report that it loaded the canonical deploy credential. stderr was:"
+  cat "$ERR20" >&2
+else
+  pass "vault-key-before-precheck: a named deploy without preflight reuses and removes the project Firebase-vault key before checking the invoker (rc=$RC20)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 21 (#768 Codex P2): a first scoped emailUnsubscribe deploy must never
+# inspect submitbugreport. If that unrelated service has not been created yet,
+# its NOT_FOUND would otherwise make a successful targeted deployment fail.
+# ---------------------------------------------------------------------------
+REPO21="$WORKDIR/case21-scoped-email-first-deploy"
+init_fixture_repo "$REPO21"
+OUT21="$WORKDIR/case21.out"
+ERR21="$WORKDIR/case21.err"
+: >"$WORKDIR/ofd-calls-21.log"
+: >"$WORKDIR/gcloud-calls-21.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-21.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-21.log" \
+GCLOUD_MISSING_SERVICE=submitbugreport \
+  bash -c "cd '$REPO21' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:emailUnsubscribe" \
+  >"$OUT21" 2>"$ERR21"
+RC21=$?
+set -e
+
+if [[ $RC21 -ne 0 ]]; then
+  fail "scoped-email-first-deploy: a targeted emailUnsubscribe deployment returned $RC21 because submitbugreport is absent. stderr was:"
+  cat "$ERR21" >&2
+elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-21.log"; then
+  fail "scoped-email-first-deploy: deploy.sh inspected unrelated submitbugreport despite --only functions:emailUnsubscribe. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-21.log" >&2
+elif ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-21.log"; then
+  fail "scoped-email-first-deploy: deploy.sh did not inspect the selected emailunsubscribe service. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-21.log" >&2
+else
+  pass "scoped-email-first-deploy: an emailUnsubscribe-only first deploy never touches unrelated submitbugreport (rc=$RC21)."
 fi
 
 # ---------------------------------------------------------------------------
