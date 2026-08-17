@@ -1,18 +1,30 @@
 name: synthetic-uptime
 
-# Scheduled synthetic that asserts the DEPLOYED app actually mounts and renders
-# its root — not merely that Firebase Hosting returns 200 for the shell (issue
-# #142). The 2026-07-09 outage (#141) was invisible to a 200-only check: the
-# shell + <title> loaded (200 OK) and only the client JS crashed on init
+# Scheduled synthetic that asserts the DEPLOYED production surface is healthy —
+# not merely that Firebase Hosting returns 200 for the shell (issue #142). The
+# 2026-07-09 outage (#141) was invisible to a 200-only check: the shell +
+# <title> loaded (200 OK) and only the client JS crashed on init
 # (auth/invalid-api-key), leaving a blank page. This catches an outage from ANY
 # cause (bad deploy, rotated key, rules regression that blocks first paint), not
 # just a deploy — the post-deploy gate in scripts/deploy.sh covers the deploy
-# path. It is load-and-assert only (tests/synthetic/app-mounts.spec.ts): it never
-# signs in or writes, so it creates no Auth/Firestore/Storage side effects.
+# path. Every spec under tests/synthetic runs: the app-mount probe
+# (app-mounts.spec.ts) and the unsubscribe-endpoint probe
+# (unsubscribe-invoker.spec.ts, #768). All are load-and-assert only: nothing
+# signs in or writes, so there are no Auth/Firestore/Storage side effects.
 #
 # Failures surface as: a red workflow run, GitHub's scheduled-failure email, AND
 # a single deduplicated tracking issue (opened on first failure, commented on
 # continued failure, auto-closed on recovery).
+#
+# The tracking issue CARRIES THE FAILING TEST'S OWN DIAGNOSTIC (#768 r4). It
+# used to hard-code the app-mount story — title "the app is not mounting", body
+# advising that a rendering sign-in gate means the release is healthy. Once a
+# second spec joined the suite that advice became actively misleading: an
+# emailUnsubscribe 403 leaves the app rendering perfectly, so the boilerplate
+# told the operator the release was fine and to go fix the probe, while every
+# emailed unsubscribe link was broken. The title is now derived from which
+# probe failed, and the Playwright output is quoted in the body so the
+# instructions the spec itself prints reach the person triaging.
 
 on:
   schedule:
@@ -30,7 +42,6 @@ permissions:
 
 env:
   SYNTHETIC_URL: https://gaycruisebingo.com/
-  ISSUE_TITLE: 'Synthetic uptime check failing: the app is not mounting'
   ISSUE_LABEL: synthetic-uptime
 
 jobs:
@@ -51,6 +62,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The bounded pre-rollout grace derives from the commit that added
+          # the unsubscribe probe, so its deadline survives scheduled runs and
+          # cannot be extended accidentally by a later unrelated commit.
+          fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -63,10 +78,26 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run synthetic (assert the app mounts)
+      - name: Bound scheduled unsubscribe-rewrite grace
+        run: |
+          set -euo pipefail
+          rollout_epoch="$(git log --diff-filter=A --format=%ct --reverse -- tests/synthetic/unsubscribe-invoker.spec.ts | head -n 1)"
+          if [[ -z "$rollout_epoch" ]]; then
+            echo "Could not find the commit that added tests/synthetic/unsubscribe-invoker.spec.ts." >&2
+            exit 1
+          fi
+          grace_until="$(node -e 'const epoch = Number(process.argv[1]); if (!Number.isFinite(epoch)) process.exit(1); console.log(new Date((epoch + 72 * 60 * 60) * 1000).toISOString())' "$rollout_epoch")"
+          echo "UNSUBSCRIBE_REWRITE_GRACE_UNTIL=$grace_until" >> "$GITHUB_ENV"
+
+      # Output is teed so the failure step below can quote Playwright's own
+      # diagnostic. `pipefail` keeps npm's exit status rather than tee's, so
+      # `continue-on-error` still sees a real failure.
+      - name: Run synthetic probes
         id: synthetic
         continue-on-error: true
-        run: npm run test:synthetic
+        run: |
+          set -o pipefail
+          npm run test:synthetic 2>&1 | tee "$RUNNER_TEMP/synthetic.log"
 
       # On FAILURE: open the tracking issue if none is open, else add a comment
       # to the existing one — so a continued outage stays a single issue.
@@ -78,16 +109,92 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          log="$RUNNER_TEMP/synthetic.log"
+          [ -f "$log" ] || : > "$log"
+
+          # Classify every failing surface before choosing advice. A single
+          # scheduled run can catch both an unsubscribe 403 and an app-mount
+          # outage; prioritising the first match would wrongly promise that a
+          # rollback cannot help while the application is also down.
+          unsubscribe_failure=false
+          unsubscribe_403=false
+          unsubscribe_rewrite=false
+          unsubscribe_other=false
+          app_mount=false
+          failure_count=0
+          if grep -q 'emailUnsubscribe 403' "$log"; then
+            unsubscribe_failure=true
+            unsubscribe_403=true
+          fi
+          if grep -q 'served the SPA shell' "$log"; then
+            unsubscribe_failure=true
+            unsubscribe_rewrite=true
+          fi
+          if grep -q 'emailUnsubscribe probe failed' "$log"; then
+            unsubscribe_failure=true
+            unsubscribe_other=true
+          fi
+          if [[ "$unsubscribe_failure" == "true" ]]; then
+            failure_count=$((failure_count + 1))
+          fi
+          if grep -qE 'app did not mount|Firebase init error|uncaught exception|sign-in gate never rendered' "$log"; then
+            app_mount=true
+            failure_count=$((failure_count + 1))
+          fi
+
+          if [[ "$failure_count" -gt 1 ]]; then
+            subject='multiple production surfaces are failing'
+            advice='**Do not roll back yet.** More than one independent probe failed, so no single diagnosis—or rollback instruction—fits the evidence. Restore each named surface, then assess the app separately before rolling back.'
+            if [[ "$unsubscribe_403" == "true" ]]; then
+              advice+=$'\n\n- **Unsubscribe endpoint:** restore it with `scripts/set-email-unsubscribe-invoker.sh` (idempotent), then re-run this workflow. A Hosting rollback cannot repair Cloud Run IAM. See docs/app/phase-1-deploy.md § 1a-i.'
+            fi
+            if [[ "$unsubscribe_rewrite" == "true" ]]; then
+              advice+=$'\n\n- **Unsubscribe rewrite:** confirm `/unsubscribe` is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
+            fi
+            if [[ "$unsubscribe_other" == "true" ]]; then
+              advice+=$'\n\n- **Unsubscribe endpoint:** the probe reached an unexpected status. Inspect its diagnostic, Cloud Run service, and `/unsubscribe` Hosting rewrite; do not treat this as a healthy app merely because the sign-in gate renders.'
+            fi
+            if [[ "$app_mount" == "true" ]]; then
+              advice+=$'\n\n- **App mount:** open the production URL. If it is blank or spins forever, follow DEPLOYMENT.md § Rollback Procedure; if the sign-in gate renders, investigate the synthetic diagnostic instead.'
+            fi
+          elif [[ "$unsubscribe_403" == "true" ]]; then
+            subject='the unsubscribe endpoint is returning 403'
+            advice='**Do not roll back.** Rolling back Hosting does not touch Cloud Run IAM, so it cannot fix this. Restore the endpoint with `scripts/set-email-unsubscribe-invoker.sh` (idempotent), then re-run this workflow. See docs/app/phase-1-deploy.md § 1a-i.'
+          elif [[ "$unsubscribe_rewrite" == "true" ]]; then
+            subject='/unsubscribe is serving the app shell, not the opt-out page'
+            advice='**Do not roll back.** The `/unsubscribe` Hosting rewrite is missing from the live release, so every emailed unsubscribe link opens the app. Confirm the rewrite is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
+          elif [[ "$unsubscribe_other" == "true" ]]; then
+            subject='the unsubscribe endpoint is failing'
+            advice='**Do not treat this as an app-mount failure.** The `/unsubscribe` probe reached an unexpected status instead of the healthy HTTP 400. Inspect the quoted diagnostic, Cloud Run service, and `/unsubscribe` Hosting rewrite before deciding whether any rollback is appropriate.'
+          else
+            subject='the app is not mounting'
+            advice="**Confirm before rolling back.** Open $SYNTHETIC_URL: if the sign-in gate renders, the PROBE failed and the release is healthy — do not roll back, fix the probe. If the page is blank or spins forever, it is a real outage: roll back per DEPLOYMENT.md § Rollback Procedure."
+          fi
+
+          # Quote the tail of the run. The specs print their own remediation
+          # steps in the failure message, and that is the text worth carrying.
+          # Capped so a pathological run cannot blow the issue-body limit.
+          diagnostic="$(tail -c 4000 "$log")"
+
           gh label create "$ISSUE_LABEL" --repo "$GITHUB_REPOSITORY" \
             --color B60205 --description "Synthetic uptime check failure" --force
           existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --label "$ISSUE_LABEL" --json number --jq '.[0].number // empty')"
-          body="$(printf 'The synthetic uptime check failed at %s (blank page, a Firebase init error such as auth/invalid-api-key, or an uncaught exception on load).\n\nRun: %s\n\n**Confirm before rolling back.** Open %s: if the sign-in gate renders, the PROBE failed and the release is healthy — do not roll back, fix the probe. If the page is blank or spins forever, it is a real outage: roll back per DEPLOYMENT.md § Rollback Procedure. This issue auto-closes when a later run passes.' "$SYNTHETIC_URL" "$RUN_URL" "$SYNTHETIC_URL")"
+
+          body="$(printf 'The synthetic uptime check failed against %s: %s\n\nRun: %s\n\n%s\n\nThis issue auto-closes when a later run passes.\n\n<details><summary>Playwright output (tail)</summary>\n\n```\n%s\n```\n\n</details>' \
+            "$SYNTHETIC_URL" "$subject" "$RUN_URL" "$advice" "$diagnostic")"
+
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing. $body"
+            # The same label intentionally deduplicates a continuing outage,
+            # but its title must continue to describe the CURRENT failing
+            # surface rather than preserving a stale first-run diagnosis.
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \
+              --title "Synthetic uptime check failing: $subject"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Still failing — $subject. $body"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" \
-              --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body "$body"
+              --title "Synthetic uptime check failing: $subject" \
+              --label "$ISSUE_LABEL" --body "$body"
           fi
 
       # On SUCCESS: if a tracking issue is open, comment recovery and close it.
@@ -103,7 +210,7 @@ jobs:
           if [ -n "$existing" ]; then
             gh issue close "$existing" --repo "$GITHUB_REPOSITORY" \
               --reason completed \
-              --comment "Recovered — the app mounts again. Run: ${RUN_URL}"
+              --comment "Recovered — every synthetic probe passes again. Run: ${RUN_URL}"
           fi
 
       # Make the run itself red so the Actions view and the scheduled-failure

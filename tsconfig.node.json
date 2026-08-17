@@ -2,8 +2,8 @@
   "// why": "Separate program for the root config files that run in Node rather than the browser (#598). vite.config.ts imports src/editions.ts and src/build-config.ts for load-bearing build-time logic (buildTimeEdition, the blank-Firebase-key guard), but tsconfig.json's `include: [\"src\"]` never reaches it, so `npm run typecheck` was blind to it — a type error there surfaces only as a runtime failure at config load, or not at all. This program adds `@types/node` for `process`/`execFileSync` without touching the app program's `include`, so it cannot retype any global for `src/**` the way pulling `src/sw.ts` into the main program would (see tsconfig.json's own note). `vite/client` is also needed here, not for DOM globals, but because src/editions.ts's deferred `seedEdition()` reads `import.meta.env` — that type only exists once `vite/client`'s ambient `ImportMeta` augmentation is in scope, which the app program gets from `tsconfig.json`'s own `types` list.",
   "// scope": "playwright.config.ts, playwright.synthetic.config.ts and vitest.*.config.ts deliberately stay OUT of this program. Unlike vite.config.ts they hold no build-time logic of their own — they are wiring for their own test runners, which typecheck and execute them directly on every run (`npx playwright test` / `npx vitest`), so a type error there cannot ship silently the way a Vite-only config error could. Pulling them in would also drag in tests/e2e/support/** for no coverage this issue is about. Revisit if one of them grows logic that only a `tsc` pass would catch.",
   "compilerOptions": {
-    "target": "ES2021",
-    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "bundler",
