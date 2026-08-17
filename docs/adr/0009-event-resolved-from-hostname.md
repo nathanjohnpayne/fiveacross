@@ -16,6 +16,17 @@ A world-readable collection in an app whose intended posture is membership isola
 - **Static slug→ID map compiled into the bundle**—rejected: every new Event would need a code edit and redeploy, which is precisely what "make event addresses automatic" forbids.
 - **Worker injects the Event ID into the served HTML**—rejected: it makes the Worker an authority rather than a router, and the app can no longer boot on the direct-to-Hosting fallback path.
 - **Slug-keyed rather than hostname-keyed**—rejected: the client would have to duplicate the Worker's namespace rules to know whether it is on a valid alias.
+- **A path prefix on one shared origin (`fiveacross.app/<slug>`)**—rejected: it trades a bounded one-time build for a permanent ceiling on installed-PWA isolation. Reasoning below, because this is the option a future reader is most likely to re-open.
+
+## Why not one origin with a path prefix
+
+Addressing Events by path rather than by subdomain is genuinely attractive for one reason, and it is not the URL: it would make [ADR 0010](0010-centralised-auth-origin-with-handoff.md) unnecessary. Google's exact-redirect-URI rule stops binding when there is one origin per Namespace instead of one per Event, so the central auth origin, the `authHandoffs` collection, the transactional consuming Function, and the four-platform verification all evaporate. That is real work avoided, and the client-side churn on the other side of the ledger is small—a `BrowserRouter` `basename`, the wildcard fallback in `src/App.tsx`, the NavLink table, and a sweep of prefix-unaware absolute URLs. Routing churn was never the deciding cost.
+
+What decides it is that **installed-PWA isolation is a property of the origin and cannot be recovered by application code.** On one origin, every Event shares cookies, `localStorage`, IndexedDB, and Cache Storage; they share one storage quota, so eviction crosses Event boundaries; there is no way to wipe one Event's local data without wiping every Event's; and permissions are origin-scoped, so a camera denial at one Event denies proof capture at every Event on that origin ([web.dev, on hosting multiple PWAs per domain](https://web.dev/articles/building-multiple-pwas-on-the-same-domain), which ranks separate origins first and same-origin nested paths last). Three of those land on this app rather than on a generic PWA: it is offline-first by design ([ADR 0006](0006-offline-resilience.md), `specs/x-offline-cold-boot.md`, the durable card cache), proof capture needs the camera, and an app carrying photo proof and an 18+ posture has to be able to express "delete my data for this Event."
+
+Two mitigations exist and are worth naming so they are not mistaken for a way out. The manifest `id` member does distinguish multiple web apps under one domain (WWDC23, "What's new in web apps"), so per-Event home-screen icons are achievable—but `id` is install *identity*, not isolation, and iOS separates storage only between a home-screen web app and the browser, never between two web apps on one origin. And the nested-install breakage—suppressed install banners, no `beforeinstallprompt`—is avoidable by never making the origin root installable. Neither mitigation touches the shared storage, quota, or permission grants.
+
+So the handoff is the cheaper side: bounded work whose cost does not grow with the number of Events, against a ceiling that never rises.
 
 ## What shipped
 
