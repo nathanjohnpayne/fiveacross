@@ -235,7 +235,7 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 3. **#604 proof chips — union of types.** Chips become "what this player has used". Un-parked → P2, XS–S, Sonnet 5 · low (pinned expectation, single component + test file), dispatchable in any later wave with a free lane.
 4. **#632 GA4 — CREATE a fiveacross GA4 stream.** Added to the human runbook (§ 4); the agent leg grows env plumbing (`.env` stream id + parity with the GCB GA4 wiring) alongside the email-UTM leg.
 5. **Wizard phase-gate — KEEP the wizard chain in Waves 1–5** as scheduled; #793/#794 stay held behind #529/#530/membership.
-6. **Phase 3 gap — Claude drafts the epic + sub-issues** (spec-first: contract facts, sizes, suggested runners, filed as Backlog for Nathan's review — same shape as the wizard epic). This is an authorized follow-up work item, not yet started with this plan.
+6. **Phase 3 gap — Claude drafts the epic + sub-issues** (spec-first: contract facts, sizes, suggested runners, filed as Backlog for Nathan's review — same shape as the wizard epic). **Executed 2026-08-17:** filed as epic #801 with sub-issues #802 (membership spec + data model) → #803 (invitations) → #804 (Firestore rules enforcement behind a per-Event switch) → #805 (backfill + rollout) → #806 (Storage rules + download tokens) → #807 (event-aware client) → #808 (archived read posture) → #809 (two-cohort isolation gate, the exit condition), native blocked-by edges included. The epic surfaces nine unresolved product decisions (membership record shape, grandfathering, GCB enforcement posture, invitation shape, revocation semantics, download-token mitigation, event switching, who invites, users/avatars coverage) — those are Nathan's next review pass.
 7. **#558 spec-first override — APPROVED**: its launch prompt must start with a `specs/community-squares-quota.md` extension before touching the dealer. Blocked on #557 regardless.
 8. **Runner overrides — APPROVED as recorded:** #765 → Sonnet 5 · high; #671 → Sonnet 5 · medium; #670 → Sonnet 5 · high; #767/#784 → Sonnet 5 · medium; all stamped tickets keep their stamps (#557/#787/#551/#689/#545/#546/#548/#549/#791–#793 Opus; #544/#550/#559/#788–#790/#794/#795 Sonnet).
 
@@ -247,9 +247,12 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 ```bash
 eval "$(scripts/op-preflight.sh --agent claude --mode all)" && \
-scripts/gh-as-author.sh -- gh project item-add 7 --owner nathanjohnpayne --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/799 && \
+for n in 799 801 802 803 804 805 806 807 808 809; do \
+  scripts/gh-as-author.sh -- gh project item-add 7 --owner nathanjohnpayne --url "https://github.com/nathanjohnpayne/gaycruisebingo/issues/$n"; done && \
 for pair in "790 Backlog" "791 Backlog" "792 Backlog" "793 Backlog" "794 Backlog" "795 Backlog" \
-            "767 Ready" "784 Ready" "787 Ready" "765 Ready" "544 Ready" "545 Ready" "799 Ready" \
+            "801 Backlog" "802 Backlog" "803 Backlog" "804 Backlog" "805 Backlog" "806 Backlog" \
+            "807 Backlog" "808 Backlog" "809 Backlog" \
+            "765 Ready" "544 Ready" "545 Ready" "799 Ready" \
             "767 In progress" "784 In progress" "787 In progress" "557 In progress" "671 In progress"; do \
   set -- $pair; PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
     GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh "$1" "$2"; done
