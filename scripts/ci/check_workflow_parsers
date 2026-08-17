@@ -1449,12 +1449,15 @@ fi
 if grep -Fq 'SYNTHETIC_DEPLOYMENT_CHECK=true' scripts/deploy.sh && \
    grep -Fq 'SYNTHETIC_DEPLOYMENT_CHECK' "$unsubscribe_probe" && \
    grep -Fq 'RAW_UNSUBSCRIBE_URL' "$unsubscribe_probe" && \
+   grep -Fq 'UNSUBSCRIBE_REWRITE_GRACE_UNTIL' "$unsubscribe_probe" && \
+   grep -Fq 'UNSUBSCRIBE_REWRITE_GRACE_UNTIL=$grace_until' "$synthetic_uptime_workflow" && \
+   grep -Fq 'fetch-depth: 0' "$synthetic_uptime_workflow" && \
    ! grep -Fq 'ROLLOUT_ENFORCE_FROM' "$unsubscribe_probe"; then
   pass=$((pass + 1))
-  echo "  PASS: deploy-time unsubscribe checks enforce Hosting while scheduled pre-rollout grace probes raw IAM"
+  echo "  PASS: deploy-time checks enforce Hosting while scheduled raw-IAM grace has a commit-derived expiry"
 else
   fail=$((fail + 1))
-  echo "  FAIL: unsubscribe grace must be deployment-contextual, raw-IAM-protected, and free of a fixed deadline" >&2
+  echo "  FAIL: unsubscribe grace must be deployment-contextual, raw-IAM-protected, and bounded by commit-derived state" >&2
 fi
 
 if grep -Fq 'gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \' "$synthetic_uptime_workflow" && \

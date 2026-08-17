@@ -250,13 +250,13 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
 fi
 
 # `--except` removes whole Functions releases or one known invoker service.
-# An unfamiliar `functions:<selector>` can be a codebase/group containing an
-# endpoint, so it must be treated as excluding both protected endpoints: do
-# not let an effective Hosting-only deploy be blocked by gcloud or mutate Cloud
-# Run IAM for an endpoint Firebase was told not to release. This is deliberately
-# the complement of unfamiliar `--only`: the allowlist includes a possible
-# endpoint defensively; the subtractive selector excludes a possible endpoint
-# defensively. Exact endpoint selectors keep their precise behavior below.
+# This repo has one Firebase default codebase, so `functions:default` excludes
+# both protected endpoints. Any OTHER unfamiliar selector might be a single
+# unrelated function; it must leave the endpoints selected because Firebase may
+# still release them and reset their annotations. The reconciliation is
+# idempotent, while skipping a released endpoint can leave it 403ing. If this
+# repo later adds named codebases/groups, register their endpoint membership
+# here rather than treating every unknown exclusion as an all-Functions scope.
 for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
   IFS=',' read -r -a except_selectors <<< "$except_value"
   for selector in "${except_selectors[@]}"; do
@@ -276,7 +276,7 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
-      functions:*)
+      functions:default)
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         BUG_REPORT_INVOKER_CONSERVATIVE=false

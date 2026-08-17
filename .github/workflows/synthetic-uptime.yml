@@ -62,6 +62,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The bounded pre-rollout grace derives from the commit that added
+          # the unsubscribe probe, so its deadline survives scheduled runs and
+          # cannot be extended accidentally by a later unrelated commit.
+          fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -73,6 +77,17 @@ jobs:
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+
+      - name: Bound scheduled unsubscribe-rewrite grace
+        run: |
+          set -euo pipefail
+          rollout_epoch="$(git log --diff-filter=A --format=%ct --reverse -- tests/synthetic/unsubscribe-invoker.spec.ts | head -n 1)"
+          if [[ -z "$rollout_epoch" ]]; then
+            echo "Could not find the commit that added tests/synthetic/unsubscribe-invoker.spec.ts." >&2
+            exit 1
+          fi
+          grace_until="$(node -e 'const epoch = Number(process.argv[1]); if (!Number.isFinite(epoch)) process.exit(1); console.log(new Date((epoch + 72 * 60 * 60) * 1000).toISOString())' "$rollout_epoch")"
+          echo "UNSUBSCRIBE_REWRITE_GRACE_UNTIL=$grace_until" >> "$GITHUB_ENV"
 
       # Output is teed so the failure step below can quote Playwright's own
       # diagnostic. `pipefail` keeps npm's exit status rather than tee's, so

@@ -1210,10 +1210,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 16e (#768 Phase 4b P2): `--except functions:<selector>` can exclude a
-# codebase/group. Treat an unfamiliar exclusion as excluding both protected
-# endpoints, so its effective Hosting-only scope neither needs gcloud nor
-# mutates Cloud Run IAM.
+# Case 16e (#768 Phase 4b P2): this repo's `functions:default` exclusion
+# removes its sole Firebase codebase, so its effective Hosting-only scope
+# neither needs gcloud nor mutates Cloud Run IAM.
 # ---------------------------------------------------------------------------
 REPO16E="$WORKDIR/case16e-unfamiliar-except"
 init_fixture_repo "$REPO16E"
@@ -1233,15 +1232,47 @@ RC16E=$?
 set -e
 
 if [[ $RC16E -ne 0 ]]; then
-  fail "unfamiliar-except: an excluded codebase/group scope returned $RC16E because gcloud was invoked. stderr was:"
+  fail "default-codebase-except: the excluded default-codebase scope returned $RC16E because gcloud was invoked. stderr was:"
   cat "$ERR16E" >&2
 elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-16e.log"; then
-  fail "unfamiliar-except: deploy.sh never reached Firebase."
+  fail "default-codebase-except: deploy.sh never reached Firebase."
 elif [[ -s "$WORKDIR/gcloud-calls-16e.log" ]]; then
-  fail "unfamiliar-except: deploy.sh invoked gcloud for endpoints excluded by functions:default. gcloud log was:"
+  fail "default-codebase-except: deploy.sh invoked gcloud for endpoints excluded by functions:default. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-16e.log" >&2
 else
-  pass "unfamiliar-except: an unfamiliar functions exclusion skips protected-endpoint prechecks and mutations (rc=$RC16E)."
+  pass "default-codebase-except: functions:default skips protected-endpoint prechecks and mutations (rc=$RC16E)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 16f (#768 Phase 4b P1): an unknown exclusion can name a single
+# unrelated function. It must NOT suppress the protected-endpoint
+# reconciliation, because a full Functions deploy still releases those
+# endpoints and can reset their invoker annotations.
+# ---------------------------------------------------------------------------
+REPO16F="$WORKDIR/case16f-unknown-except"
+init_fixture_repo "$REPO16F"
+OUT16F="$WORKDIR/case16f.out"
+ERR16F="$WORKDIR/case16f.err"
+: >"$WORKDIR/ofd-calls-16f.log"
+: >"$WORKDIR/gcloud-calls-16f.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-16f.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-16f.log" \
+  bash -c "cd '$REPO16F' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions --except functions:someUnrelatedFunction" \
+  >"$OUT16F" 2>"$ERR16F"
+RC16F=$?
+set -e
+
+if [[ $RC16F -ne 0 ]]; then
+  fail "unknown-except: a full Functions deploy excluding an unrelated function returned $RC16F. stderr was:"
+  cat "$ERR16F" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-16f.log" || ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-16f.log"; then
+  fail "unknown-except: deploy.sh skipped protected-endpoint reconciliation for an unrelated exclusion. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16f.log" >&2
+else
+  pass "unknown-except: an unrelated function exclusion still reconciles both protected endpoints (rc=$RC16F)."
 fi
 
 # ---------------------------------------------------------------------------

@@ -33,8 +33,10 @@ import { test } from '@playwright/test';
 // function URL for IAM health and records a skip rather than opening a false
 // Hosting-outage issue. A deployment check is different evidence: deploy.sh
 // marks it with SYNTHETIC_DEPLOYMENT_CHECK=true, so a shell response there is a
-// real failed release and must fail immediately. No calendar deadline can
-// reliably distinguish these states; the deployment context does.
+// real failed release and must fail immediately. The workflow supplies a
+// bounded grace deadline derived from the commit that introduced this probe;
+// after it expires, the same shell response fails so a later Hosting rollback
+// cannot remain hidden forever.
 //
 // The raw URL is deliberately limited to this scheduled grace path. Email
 // links use the first-party Hosting URL, and a deploy must prove that exact
@@ -43,6 +45,9 @@ import { test } from '@playwright/test';
 const DEPLOYMENT_CHECK = process.env.SYNTHETIC_DEPLOYMENT_CHECK === 'true';
 const RAW_UNSUBSCRIBE_URL =
   process.env.EMAIL_UNSUBSCRIBE_RAW_URL ?? 'https://us-central1-gaycruisebingo.cloudfunctions.net/emailUnsubscribe';
+const SCHEDULED_GRACE_UNTIL = Date.parse(process.env.UNSUBSCRIBE_REWRITE_GRACE_UNTIL ?? '');
+const SCHEDULED_GRACE_ACTIVE =
+  !DEPLOYMENT_CHECK && Number.isFinite(SCHEDULED_GRACE_UNTIL) && Date.now() < SCHEDULED_GRACE_UNTIL;
 
 const SYNTHETIC_URL = process.env.SYNTHETIC_URL ?? 'https://gaycruisebingo.com/';
 const UNSUBSCRIBE_URL = new URL('/unsubscribe', SYNTHETIC_URL).toString();
@@ -70,12 +75,17 @@ test('the unsubscribe endpoint is reachable (no Cloud Run invoker regression)', 
   }
 
   if (status === 200 && (await response.text()).includes(SPA_SHELL_MARKER)) {
-    if (DEPLOYMENT_CHECK) {
+    if (!SCHEDULED_GRACE_ACTIVE) {
+      const graceState = DEPLOYMENT_CHECK
+        ? 'this deploy-time check does not permit a Hosting grace'
+        : Number.isFinite(SCHEDULED_GRACE_UNTIL)
+          ? `the bounded scheduled rollout grace expired at ${new Date(SCHEDULED_GRACE_UNTIL).toISOString()}`
+          : 'the scheduled workflow did not supply a valid bounded rollout grace';
       throw new Error(
         `${UNSUBSCRIBE_URL} served the SPA shell, not the opt-out page — Firebase Hosting's ** catch-all ` +
           'answered, so /unsubscribe is not routed to emailUnsubscribe at this origin. Emails already carry ' +
-          `this link (EMAIL_UNSUBSCRIBE_URL in functions/src/params.ts), and this deploy's post-release ` +
-          `check proves Hosting did not ship the rewrite, so every unsubscribe link opens the app right now.\n\n` +
+          `this link (EMAIL_UNSUBSCRIBE_URL in functions/src/params.ts), and ${graceState}, so every unsubscribe ` +
+          `link opens the app right now.\n\n` +
           'Two causes, both real:\n' +
           '  • Hosting was rolled back, or deployed with a scope that excluded it, after the rewrite shipped.\n' +
           '  • The rewrite never shipped to this origin at all.\n\n' +
@@ -108,8 +118,9 @@ test('the unsubscribe endpoint is reachable (no Cloud Run invoker regression)', 
     test.skip(
       true,
       `${UNSUBSCRIBE_URL} served the SPA shell in the unchanged scheduled pre-rollout state; the raw function ` +
-        `answered HTTP 400, so Cloud Run IAM is healthy. A deploy-time synthetic check does not grant this ` +
-        'grace and will fail until Hosting ships the /unsubscribe rewrite.',
+        `answered HTTP 400, so Cloud Run IAM is healthy. This bounded grace expires at ` +
+        `${new Date(SCHEDULED_GRACE_UNTIL).toISOString()}; a deploy-time synthetic check never grants it and ` +
+        'will fail until Hosting ships the /unsubscribe rewrite.',
     );
     return;
   }
