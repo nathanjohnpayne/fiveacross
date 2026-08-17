@@ -49,7 +49,7 @@ Every open issue. P0 = production health, dispatch alone and immediately. P1 = u
 | #132 → #133 | Cloud Vision proof scan → auto-hide | **P2 (sequenced)** | Hardening pair; #132's region blocker resolved, needs API enablement + env flip + deploy; #133 consumes #132's flags. |
 | #44 | App Check enforcement | **P2 (human-gated)** | Client scaffold shipped; remaining work is key provisioning + enforcement — console-side, plus a deploy env change. |
 | #743, #769 | [error-tracking] NS_ERROR_FAILURE | **P2 (triage)** | Empty bodies, zero comments — genuinely untriaged (checked, per the pre-triage rule). One investigation pass via PostHog before any code. |
-| #766 + #626 | Root create page + path addressing | **P1 (spec first)** | Decided 2026-08-17: proceed, designed together — one combined design/spec ticket (incl. the PRD non-goal amendment); implementation follows the spec. |
+| #766 + #626 | Root create page + path addressing | **P1 (spec first)** | Decided 2026-08-17: proceed, designed together — filed as #799 (the combined design spec incl. the PRD non-goal amendment; Opus 4.8 · high, dispatchable in any free lane). #766/#626 carry native blocked-by links to #799; implementation follows the spec. |
 | #604 | Leaderboard proof chips union | **P2** | Decided 2026-08-17: union of proof types. XS–S, Sonnet 5 · low, any free lane. |
 | #599 | Decision: fiveacross.app canonical | **Close (approved)** | Decision made and owner-confirmed 2026-08-17; amendments propagated into #545/#546/#547/#549/#600/#630. Close approved — completed decision record. |
 | #537 | Create Five Across Firebase project | **Close (approved)** | The project exists and served the entire Bodega POC in production. |
@@ -88,6 +88,8 @@ Nothing waits behind Wave 0, and Wave 0 waits on nothing. #781's green rerun add
 
 No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules; #787 is spec + new pure modules. The three Phase 4 tickets form one review batch.
 
+Sequencing edges recorded as native blocked-by links (per the board rule that Ready means all dependencies Done): #551 ← #784 (same `unlockDay.ts` derivation) and #689 ← #551 (`src/types.ts` rebase); both stay Backlog until their blocker merges, then promote.
+
 ### Wave 2 — contract land + auth start
 
 | Ticket | Runner | Hot files | Phase 4 |
@@ -107,6 +109,8 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 | #545 Worker router | Opus 4.8 · high | none (new `worker/` code; deploy gated on #539) | Likely (cross-cutting classifier) |
 | #789 wizard Step 1 | Sonnet 5 · medium | none (`src/components/setup/`) | No |
 | #790 wizard Step 2 | Sonnet 5 · high | none (`src/components/setup/`, new `src/slug.ts` pure module) | No |
+
+Shared-module rule for this wave: #790 and #545 both need the slug-normalization/reserved-names module. Whichever PR merges first establishes `src/slug.ts` as the single source; the other rebases onto it and consumes it — neither forks a second list. Both runner prompts carry this instruction.
 
 ### Wave 4 — auth functions + router consumers
 
@@ -130,8 +134,8 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 - **#793 provisioner + #794 Step 5**: HOLD until #545, #548–#550 and a membership gate exist (the epic's own platform prerequisite). #793 is Opus 4.8 · xhigh, Phase 4.
 - **#550 sign-in device matrix**: verification gate after #549 + #547; evidence-gathering, Sonnet 5 · medium.
-- **#632 email-UTM + GA4-stream env leg** (Sonnet 5 · medium, Phase 4; the stream itself is human runbook item 8), **#134 archive** (Sonnet 5 · high, Phase 4), **#132 → #133 Vision** (Sonnet 5 · medium each, Phase 4, sequenced), **#743/#769 triage** (Sonnet 5 · low, PostHog investigation, no code until diagnosed), **#604 proof-chip union** (Sonnet 5 · low, XS–S).
-- **#766/#626 combined design spec** (Opus 4.8 · high, spec + PRD-amendment ticket to be filed — decided 2026-08-17, § 5.2): root create-Event page + path-addressed historical Events + mirror-host path addressing in one design; implementation tickets follow it.
+- **#632 email-UTM + GA4-stream env leg** (Sonnet 5 · medium, Phase 4; the stream itself is human runbook item 9), **#134 archive** (Sonnet 5 · high, Phase 4), **#132 → #133 Vision** (Sonnet 5 · medium each, Phase 4, sequenced), **#743/#769 triage** (Sonnet 5 · low, PostHog investigation, no code until diagnosed), **#604 proof-chip union** (Sonnet 5 · low, XS–S).
+- **#799 root/paths combined design spec** (filed 2026-08-17 per § 5.2; Opus 4.8 · high): root create-Event page + path-addressed historical Events + mirror-host path addressing in one spec plus the PRD non-goal amendment; #766/#626 are natively blocked-by it, and their implementation tickets get filed from its seams. Dispatchable in any free lane — no blockers.
 - **Phase 3 epic drafting** (authorized § 5.6): Claude drafts the isolation epic + spec-first sub-issues (membership, invitations, rules enforcement, event-aware caches/listeners, archived-event behavior, two-cohort tests) and files them as Backlog for review.
 - **Post-review sweeps** — four batched lanes, each one runner (Sonnet 5 · medium), each producing one PR per area, closing its issues with dispositions: (a) SW/update cluster #750–#758 + #726; (b) `firestoreRecovery` cluster #744–#749; (c) e2e-env cluster #738–#742; (d) singles #759–#764, #774, #779, #780.
 
@@ -139,13 +143,13 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 **Standard preamble (prepend to every prompt below, substituting `<slug>`, `<issue>`):**
 
-> Work in a fresh worktree: `git -C ~/GitHub/gaycruisebingo worktree add ~/GitHub/.gaycruisebingo-worktrees/<slug> -b feat/<slug> origin/main` (hidden folder, never a visible sibling). Run `npm install` there (plus `npm --prefix functions install` if you touch `functions/**` or run e2e); never copy `.env.local` into the worktree; `GITHUB_ACTIONS=1 npm run build` is the local build gate. Session prelude: `eval "$(scripts/op-preflight.sh --agent claude --check)"`; reads use the cached PAT, guarded writes go through `scripts/gh-as-author.sh` / `scripts/gh-as-reviewer.sh`. Board choreography per `docs/agents/ticket-workflow.md`: claim atomically (assign `nathanjohnpayne` + move to In progress via `scripts/gh-projects/move-item.sh <issue> "In progress"` + claim comment under `nathanpayne-claude`); back off if already assigned. PR body carries `Closes #<issue>`; move to In review; drive review per AGENTS.md (under-threshold → reviewer-identity approve; Phase 4 paths → `@codex review` loop, up to 10 rounds before phase-4b fallback, record 👍/👎 + resolve every thread). DoD: `npm run typecheck` · `npm test` · `npm run build` green, repo gates (`repo_lint`, `md-prose-wrap` — soft-passes without markdown-it-py, so reflow prose by hand), spec↔test alignment, conventional commit. Stop after merge + board Done + promoting newly unblocked dependents to Ready.
+> Work in a fresh worktree: `git -C ~/GitHub/gaycruisebingo worktree add ~/GitHub/.gaycruisebingo-worktrees/<slug> -b feat/<slug> origin/main` (hidden folder, never a visible sibling). Run `npm install` there (plus `npm --prefix functions install` if you touch `functions/**` or run e2e); never copy `.env.local` into the worktree; `GITHUB_ACTIONS=1 npm run build` is the local build gate. Session prelude: `eval "$(scripts/op-preflight.sh --agent claude --mode review)"` at session start (`--check` only re-validates an existing cache and fails without one; in a no-biometrics session skip the preflight — reads fall back to `GH_TOKEN="$(gh auth token --user nathanpayne-claude)"` and the write wrappers fall back to the gh keyring on their own). Guarded writes go through `scripts/gh-as-author.sh` / `scripts/gh-as-reviewer.sh`. Board choreography per `docs/agents/ticket-workflow.md`: claim atomically (assign `nathanjohnpayne` + move to In progress via `scripts/gh-projects/move-item.sh <issue> "In progress"` + claim comment under `nathanpayne-claude`); back off if already assigned. PR body carries `Closes #<issue>` — except on an explicitly multi-PR ticket (#765, #689), where intermediate PRs reference the issue without a closing keyword (`Part of #<issue>`) and only the final leg carries `Closes`, so the card doesn't jump to Done mid-ticket. Move to In review; drive review per AGENTS.md (under-threshold → reviewer-identity approve; Phase 4 paths → `@codex review` loop, up to 10 rounds per Nathan's standing 2026-08-11 directive — which deliberately overrides `codex.max_review_rounds` in `.github/review-policy.yml` — before the phase-4b fallback; record 👍/👎 + resolve every thread). DoD: `npm run typecheck` · `npm test` · `npm run build` green — plus `npm run test:functions` when you touch `functions/**` and `npm run test:rules` when you touch `firestore.rules`/`storage.rules` (the root `npm test` does not run those suites) — repo gates (`repo_lint`, `md-prose-wrap` — soft-passes without markdown-it-py, so reflow prose by hand), spec↔test alignment, conventional commit. Stop after merge + board Done + promoting newly unblocked dependents to Ready.
 
 ### Wave 0
 
 **#767 — deploy-env validation** · Sonnet 5 · medium · slug `deploy-env-param-guard`
 
-> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/767. Apply PR #730's derive-don't-hand-maintain approach to the deploy path: derive the required param set from `functions/src/params.ts` (reuse/extend `scripts/gen-functions-env.mjs`'s extraction) and validate `functions/.env.<projectId>` against it before `firebase deploy` starts, failing loudly with the missing key names. Wire it into the deploy scripts (`package.json` deploy targets / `docs/app/phase-1-deploy.md` § preflight). Remember firebase `resolveParams` partitions on env presence, not code defaults — a param with a `default:` still hard-fails non-interactive deploys. The real `functions/.env.gaycruisebingo` is untracked and machine-local: your PR ships the guard + docs + a documented remediation line naming `EMAIL_REPLY_TO` and `EMAIL_UNSUBSCRIBE_URL`; the human deploy session fixes the local file. Keep the guard in `scripts/**` to stay off Phase 4 paths. Tests: unit-test the extraction + validation against a fixture params file (drifted, complete, extra-keys cases).
+> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/767. Apply PR #730's derive-don't-hand-maintain approach to the deploy path: derive the required param set from `functions/src/params.ts` (reuse/extend the extraction in `scripts/e2e-functions-env.mjs` — the module PR #730 built, tested in `scripts/e2e-functions-env.test.mjs`) and validate `functions/.env.<projectId>` against it before `firebase deploy` starts, failing loudly with the missing key names. Wire it into the deploy scripts (`package.json` deploy targets / `docs/app/phase-1-deploy.md` § preflight). Remember firebase `resolveParams` partitions on env presence, not code defaults — a param with a `default:` still hard-fails non-interactive deploys. The real `functions/.env.gaycruisebingo` is untracked and machine-local: your PR ships the guard + docs + a documented remediation line naming `EMAIL_REPLY_TO` and `EMAIL_UNSUBSCRIBE_URL`; the human deploy session fixes the local file. Keep the guard in `scripts/**` to stay off Phase 4 paths. Tests: unit-test the extraction + validation against a fixture params file (drifted, complete, extra-keys cases).
 
 **#781 — unsubscribe 403 (HUMAN RUNBOOK — no model dispatch)**
 
@@ -177,7 +181,7 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 **#765 — redirect-only sign-in** · Sonnet 5 · high · slug `redirect-sign-in`
 
-> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/765 — implement the recorded decision (issue comment `decision-comment-765-2026-08-14`, read it first): one top-level `signInWithRedirect` on every same-origin-handler surface, `signInWithPopup` only as the cross-origin fallback (local dev / Auth Emulator). Two PRs in sequence per the decision's guardrails: (1) harden the redirect-return completion path; (2) flip the surfaces. `src/auth/**` — Phase 4 on both PRs; keep each small. Verify against `src/auth-domain.ts`'s host allowlist and the OAuth-client memory (redirect URIs are console-managed — flag any missing `__/auth/handler` URI to the human rather than assuming). Device-matrix caveats live in #550; note residual verification there.
+> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/765 — implement the recorded decision (issue comment `decision-comment-765-2026-08-14`, read it first): one top-level `signInWithRedirect` on every same-origin-handler surface, `signInWithPopup` only as the cross-origin fallback (local dev / Auth Emulator). Two PRs in sequence per the decision's guardrails: (1) harden the redirect-return completion path — PR body says `Part of #765`, NOT `Closes` (multi-PR ticket; see preamble); (2) flip the surfaces — this final leg carries `Closes #765`. `src/auth/**` — Phase 4 on both PRs; keep each small. Verify against `src/auth-domain.ts`'s host allowlist and the OAuth-client memory (redirect URIs are console-managed — flag any missing `__/auth/handler` URI to the human rather than assuming). Device-matrix caveats live in #550; note residual verification there.
 
 **#670 — abuse-kind bug reports** · Sonnet 5 · high · slug `bug-report-kind`
 
@@ -191,11 +195,11 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 **#689 — player-level blocking** · Opus 4.8 · high · slug `player-blocking` · **spec sub-step first**
 
-> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/689. Step 1 (same PR series, first commit/PR): author `specs/player-blocking.md` — reciprocal-by-default model, block-list data shape, the full shared-read-path inventory (Feed, proofs, hearts, doubts, tally markers, moments, leaderboard, avatars), rules-enforcement strategy vs. client filtering split, and unblock semantics — with matching test enumeration; get it reviewed before the enforcement PR(s). Step 2: implement, rules-enforced (not display-only), every listed surface honoring the block. You own `firestore.rules` and `src/types.ts` this wave (rebase on #551's merged types). Keep PRs under 300 lines each where possible; Phase 4 regardless (rules). This is the App Store/Play blocking gate — required independent of Phase 7.
+> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/689. Multi-PR ticket: intermediate PRs (the spec, and any split enforcement legs) say `Part of #689`; only the final enforcement PR carries `Closes #689` (see preamble). Step 1 (same PR series, first commit/PR): author `specs/player-blocking.md` — reciprocal-by-default model, block-list data shape, the full shared-read-path inventory (Feed, proofs, hearts, doubts, tally markers, moments, leaderboard, avatars), rules-enforcement strategy vs. client filtering split, and unblock semantics — with matching test enumeration; get it reviewed before the enforcement PR(s). Step 2: implement, rules-enforced (not display-only), every listed surface honoring the block. You own `firestore.rules` and `src/types.ts` this wave (rebase on #551's merged types). Keep PRs under 300 lines each where possible; Phase 4 regardless (rules). This is the App Store/Play blocking gate — required independent of Phase 7.
 
 **#545 — Worker Event router** · Opus 4.8 · high · slug `worker-event-router`
 
-> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/545 (epic #529; read the 2026-08-17 corrections in-body: namespaces are `*.fiveacross.app` + `*.vacaybingo.com`, NOT `*.fiveacrossbingo.com`; the Worker is a router/namespace guard, never a canonicaliser and never authorization). One versioned Worker: slug validation, reserved labels, fail-closed unknown-Event handling, origin proxy to Firebase Hosting. New top-level `worker/` dir — document its justification in AGENTS.md § Repository Layout per code-modification rules. Wrangler-testable locally (miniflare/vitest); DNS attach (#539) and cutover are human steps — Gates 1–3 of the PRD ladder govern rollout; your deliverable ends at "deployable + tested", not "live". Expect the cross-cutting Phase 4 classifier. On merge, promote #546 → Ready.
+> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/545 (epic #529; read the 2026-08-17 corrections in-body: namespaces are `*.fiveacross.app` + `*.vacaybingo.com`, NOT `*.fiveacrossbingo.com`; the Worker is a router/namespace guard, never a canonicaliser and never authorization). One versioned Worker: slug validation, reserved labels, fail-closed unknown-Event handling, origin proxy to Firebase Hosting. Reserved-label/slug rules: if #790's `src/slug.ts` module has merged, consume it as the single source; if not, establish it yourself in that dependency-free shape and #790 rebases — whichever lands first owns it, never two lists. New top-level `worker/` dir — document its justification in AGENTS.md § Repository Layout per code-modification rules. Wrangler-testable locally (miniflare/vitest); DNS attach (#539) and cutover are human steps — Gates 1–3 of the PRD ladder govern rollout; your deliverable ends at "deployable + tested", not "live". Expect the cross-cutting Phase 4 classifier. On merge, promote #546 → Ready.
 
 **#789 — wizard Step 1 · Occasion** · Sonnet 5 · medium · slug `setup-step-occasion`
 
@@ -203,7 +207,7 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 **#790 — wizard Step 2 · Basics** · Sonnet 5 · high · slug `setup-step-basics`
 
-> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/790, frame `#frame-setup-basics`, contract #785. Name/dates/timezone, live slug availability, marking mode, audience. New `StepBasics.tsx`; the slug normalization + reserved-names pure module (`src/slug.ts`-style, dependency-free — #545 and #793 consume it, so keep it framework-clean); availability helper over `fetchHostnameDoc` in `src/data/hostnames.ts` (read-only). A draft never holds a slug — availability is advisory until launch. Consume #787's validators. No hot files, no Phase 4.
+> Ticket: https://github.com/nathanjohnpayne/gaycruisebingo/issues/790, frame `#frame-setup-basics`, contract #785. Name/dates/timezone, live slug availability, marking mode, audience. New `StepBasics.tsx`; the slug normalization + reserved-names pure module (`src/slug.ts`-style, dependency-free — #545 and #793 consume it, so keep it framework-clean; if #545 merged such a module first, consume and extend theirs instead of forking — whichever lands first owns the shape); availability helper over `fetchHostnameDoc` in `src/data/hostnames.ts` (read-only). A draft never holds a slug — availability is advisory until launch. Consume #787's validators. No hot files, no Phase 4.
 
 ### Waves 4–5 (dispatch prompts to be refreshed at dispatch time against merged state)
 
@@ -241,24 +245,52 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 ## 6 · Board updates
 
-**Done with this plan (native GitHub blocked-by dependency links, author-attributed):** #558 ← #557, #559 ← #557, #546 ← #545, #549 ← #548, #550 ← #549, #630 ← #600, #133 ← #132, #788 ← #787 (chain links #789–#795 were already present in-body).
+**Done with this plan (native GitHub blocked-by dependency links, author-attributed):** #558 ← #557, #559 ← #557, #546 ← #545, #549 ← #548, #550 ← #549, #630 ← #600, #133 ← #132, #788 ← #787, #551 ← #784, #689 ← #551, #766 ← #799, #626 ← #799 (chain links #789–#795 were already present in-body; the Phase-3 chain #802–#809 carries its own twelve links).
 
 **Pending — needs the op-preflight author PAT (the keyring OAuth token lacks the `project` scope, and refreshing the 1Password cache prompts biometrics, so it waits for a human-present session).** Run once, then the block below:
 
 ```bash
-eval "$(scripts/op-preflight.sh --agent claude --mode all)" && \
-for n in 799 801 802 803 804 805 806 807 808 809; do \
-  scripts/gh-as-author.sh -- gh project item-add 7 --owner nathanjohnpayne --url "https://github.com/nathanjohnpayne/gaycruisebingo/issues/$n"; done && \
-for pair in "790 Backlog" "791 Backlog" "792 Backlog" "793 Backlog" "794 Backlog" "795 Backlog" \
-            "801 Backlog" "802 Backlog" "803 Backlog" "804 Backlog" "805 Backlog" "806 Backlog" \
-            "807 Backlog" "808 Backlog" "809 Backlog" \
-            "765 Ready" "544 Ready" "545 Ready" "799 Ready" \
-            "767 In progress" "784 In progress" "787 In progress" "557 In progress" "671 In progress"; do \
-  set -- $pair; PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
-    GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh "$1" "$2"; done
+eval "$(scripts/op-preflight.sh --agent claude --mode all)" && (
+  set -euo pipefail
+  for n in 799 801 802 803 804 805 806 807 808 809; do
+    scripts/gh-as-author.sh -- gh project item-add 7 --owner nathanjohnpayne --url "https://github.com/nathanjohnpayne/gaycruisebingo/issues/$n"
+  done
+  while IFS='|' read -r num status; do
+    [ -n "$num" ] || continue
+    PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+      GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh "$num" "$status"
+  done <<'MOVES'
+790|Backlog
+791|Backlog
+792|Backlog
+793|Backlog
+794|Backlog
+795|Backlog
+801|Backlog
+802|Backlog
+803|Backlog
+804|Backlog
+805|Backlog
+806|Backlog
+807|Backlog
+808|Backlog
+809|Backlog
+551|Backlog
+689|Backlog
+765|Ready
+544|Ready
+545|Ready
+799|Ready
+767|In progress
+784|In progress
+787|In progress
+557|In progress
+671|In progress
+MOVES
+)
 ```
 
-(The trailing In-progress moves reflect the Wave 0/1 runners dispatched 2026-08-17; skip any whose PR already merged — its card is Done via the built-in workflow.)
+(The subshell + `set -euo pipefail` makes the batch fail closed without killing the interactive shell; the `|` delimiter survives the two-word statuses. The trailing In-progress moves reflect the Wave 0/1 runners dispatched 2026-08-17 — skip any whose PR already merged (its card is Done via the built-in workflow). #551 and #689 move to Backlog because their native blocked-by links (#551 ← #784, #689 ← #551) now gate them; promote each to Ready when its blocker merges.)
 
 - #790–#795 sit in **No Status** (added without the unconditional Backlog move the ticket workflow mandates) → **Backlog**.
 - Dispatch-ready promotions → **Ready**: #767, #784, #787, #765, #544, #545 (already Ready: #551, #557, #670, #671, #689, #578, #538, #539).
