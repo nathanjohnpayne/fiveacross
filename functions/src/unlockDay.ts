@@ -224,12 +224,25 @@ export interface FinaleTimes {
 /**
  * Resolve the finale clock boundaries from the Day schedule. The farewell Day
  * (pool `'farewell'`, Day 10) anchors the freeze/podium at its own `unlockAt`
- * (08:00 disembark morning, the standard rule). The last-call beat is Day 9's
- * 08:00 `unlockAt` + 12h = 20:00 Day 9 (a same-day forward offset, so no
- * midnight/DST cross); if Day 9 is somehow absent it falls back to
- * `farewellUnlockAt - 12h` (the 08:00→08:00 gap less the last night). Returns
- * `null` when there is no farewell Day (a non-Phase-1.5 event), so callers skip
- * the finale entirely.
+ * (08:00 disembark morning, the standard rule). The last-call beat PREFERS Day
+ * 9's 08:00 `unlockAt` + 12h = 20:00 Day 9 (a same-day forward offset, so no
+ * midnight/DST cross) — but that offset is only meaningful when the closing
+ * Day sits on its OWN calendar date. When Day 9 is absent, OR the forward
+ * candidate would land at-or-after `farewellUnlockAt` (#784 — a schedule shape
+ * that puts the closing Day on the SAME date as the preceding Day, as Bodega's
+ * tail does, makes 08:00+12h fall past the very freeze it's supposed to
+ * precede), this derives backwards instead: `farewellUnlockAt - 12h` (the
+ * 08:00→08:00 gap less the last night). Returns `null` when there is no
+ * farewell Day (a non-Phase-1.5 event), so callers skip the finale entirely.
+ *
+ * GUARD (#784): whichever branch runs, `lastCallAt` is asserted to precede
+ * `farewellUnlockAt` before returning. `LAST_CALL_LEAD_MS` is a positive
+ * constant, so the backward branch is always safe on its own — the guard
+ * exists because the issue's postmortem was exactly this: the forward branch
+ * silently produced an empty `[lastCallAt, farewellUnlockAt)` window with no
+ * throw, no log, and no visible symptom until someone read the numbers by
+ * hand. If a future schedule shape ever re-empties the window, this logs
+ * loudly instead of failing silently again.
  *
  * NO DST CAVEAT (#552). This used to warn that the 12h wall gap assumed the
  * event window did not cross a `Europe/Rome` DST switch, and that the 20:00 cron
@@ -245,7 +258,22 @@ export function finaleTimes(days: DayLike[]): FinaleTimes | null {
   const farewell = days.find((d) => normalizePool(d.pool) === 'closing');
   if (!farewell) return null;
   const dayNine = days.find((d) => d.index === farewell.index - 1);
-  const lastCallAt = dayNine ? dayNine.unlockAt + LAST_CALL_LEAD_MS : farewell.unlockAt - LAST_CALL_LEAD_MS;
+  const forwardLastCallAt = dayNine ? dayNine.unlockAt + LAST_CALL_LEAD_MS : null;
+  const lastCallAt =
+    forwardLastCallAt !== null && forwardLastCallAt < farewell.unlockAt
+      ? forwardLastCallAt
+      : farewell.unlockAt - LAST_CALL_LEAD_MS;
+
+  // #784: the last-call posting gate is `[lastCallAt, farewellUnlockAt)` — an
+  // empty or inverted window means the beat can never fire, and nothing else
+  // in the finale path would notice. Log loudly rather than let it slide by.
+  if (!(lastCallAt < farewell.unlockAt)) {
+    console.error(
+      `[finaleTimes] last-call window is empty or inverted for farewell Day index ${farewell.index}: ` +
+        `lastCallAt=${lastCallAt} >= farewellUnlockAt=${farewell.unlockAt}. The last-call beat will never post.`,
+    );
+  }
+
   return {
     lastCallAt,
     farewellUnlockAt: farewell.unlockAt,
