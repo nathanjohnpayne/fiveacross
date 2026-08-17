@@ -213,6 +213,36 @@
   .lovewin .cap2{font-size:10px;color:var(--dim);margin-top:5px}
   .lovewin .hearts{font-size:12px;color:var(--accent)}
 
+  /* Five Across organizer chrome (event-setup wizard): the HOST brand — ink,
+     cream, grids, crisp. Setup is a Five Across surface; the event under
+     construction previews in its own edition skin (one-identity rule). */
+  [data-theme='five-across']{--bg:#f2efe6;--panel:#fbf9f2;--ink:#1c1b18;--dim:#6b6860;
+    --primary:#1c1b18;--secondary:#55524a;--accent:#9c4a1f;--cell:#fbf9f2;
+    --border:rgba(28,27,24,.16);--on-gradient:#f6f3ea}
+  .wizsteps{display:flex;gap:10px;align-items:center;justify-content:center;
+    font-size:8.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);padding:2px 0 4px}
+  .wizsteps .st{display:flex;align-items:center;gap:4px}
+  .wizsteps .dot{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--border);
+    display:flex;align-items:center;justify-content:center;font-size:9px;color:var(--dim)}
+  .wizsteps .st.on{color:var(--ink)}
+  .wizsteps .st.on .dot{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  .wizsteps .st.done .dot{border-color:var(--ink);color:var(--ink)}
+  .prevbar{display:flex;gap:9px;align-items:center;border:1px solid var(--border);
+    border-radius:12px;padding:7px 10px;font-size:10px;color:var(--dim);background:var(--panel);margin-top:auto}
+  .prevbar .pvcard{width:34px;height:42px;border-radius:6px;flex:none;
+    background:linear-gradient(145deg,var(--primary),var(--secondary));border:1px solid var(--border)}
+  .slugbox{border:1px solid var(--border);border-radius:8px;background:var(--panel);
+    padding:6px 9px;font-size:11px;color:var(--ink)}
+  .slugbox .ok{color:var(--accent);font-size:10px;margin-left:6px}
+  .slugbox .host{display:block;font-size:9.5px;color:var(--dim);margin-top:2px}
+  .promptrow{display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border);
+    padding:5px 2px;font-size:10.5px;color:var(--ink)}
+  .promptrow .cls{font-size:8.5px;border:1px solid var(--border);border-radius:10px;
+    padding:1px 6px;color:var(--dim);flex:none}
+  .promptrow .act{margin-left:auto;color:var(--dim);font-size:11px;flex:none}
+  .qrbox{width:92px;height:92px;margin:6px auto 2px;border:1.5px solid var(--ink);border-radius:8px;
+    background:repeating-conic-gradient(var(--ink) 0% 25%,transparent 0% 50%) 0 0/14px 14px;opacity:.85}
+
   /* ---------- phone frame: iPhone 15 Pro canvas (393×852pt, 19.5:9), themed via tokens ---------- */
   .mini{width:393px;min-height:852px;background:var(--bg);color:var(--ink);border:2px solid #2a2a2e;
     border-radius:47px;overflow:hidden;display:flex;flex-direction:column;position:relative}
@@ -872,6 +902,9 @@
 <li><a href="#sec-social-more">More / profile</a>
 <span class="vars"><a href="#fx-more-gcb">🚢 fx-more-gcb</a><a href="#fx-more-vacay">🧳 fx-more-vacay</a><a href="#fx-more-fa">✳ fx-more-fa</a></span>
 </li></ol>
+</li>
+<li><a href="#sec-setup">Five Across · New event setup—the organizer wizard</a> <span style="font-size:9px;color:var(--dim)">🧪 exploratory</span>
+<span class="vars"><a href="#fx-setup-occasion-fa">✳ fx-setup-occasion-fa</a><a href="#fx-setup-basics-fa">✳ fx-setup-basics-fa</a><a href="#fx-setup-squares-fa">✳ fx-setup-squares-fa</a><a href="#fx-setup-look-fa">✳ fx-setup-look-fa</a><a href="#fx-setup-launch-fa">✳ fx-setup-launch-fa</a></span>
 </li>
 <li><a href="#sec-system">Five Across · System surfaces—install, update, utility states</a>
 <ol>
@@ -3958,6 +3991,164 @@
   <tr><td>CTA</td><td class="inv" colspan="3">brand-invariant—"Open the Feed", Theme-gradient bulletproof button, deep link to the Event's canonical host (#599)</td></tr>
   <tr><td>Unsubscribe</td><td class="inv" colspan="3">brand-invariant—visible link + <code>List-Unsubscribe</code> headers; per-user opt-out persisted, suppressed before send; Event-level admin toggle</td></tr>
 </table>
+
+<h2 id="sec-setup">Five Across · New event setup—the organizer wizard <span class="brand-chip" style="vertical-align:middle">🧪 Exploratory</span></h2>
+<p class="sub" style="border-left:3px solid var(--dim);padding-left:10px"><b>Status: exploratory, not a parity target.</b> Every other section of this document describes a surface that ships, and downstream tickets implement against those frames. <b>This one does not.</b> Self-service Event creation is blocked on four pieces of platform work that do not exist (below), so these five frames are a design sketch of a flow nobody can build yet—read them for shape and intent, not as a specification to match pixel-for-pixel. They will drift as the platform moves, and that is expected. <b>The durable output of designing this is <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/785">#785</a></b>, which extracts the hard contract facts any implementation must satisfy—the 24-minimum being per pool rather than per Event, <code>spicy</code> being main-pool only, a Day not being a calendar date, and the rest. If you are about to build this, start there; this section is the picture, that issue is the constraints.</p>
+<p class="sub">Everything required to create an event from scratch: occasion, name, dates, URL, squares, look, and invite—in five guided steps with a live preview, targeting the PRD's under-15-minutes goal. The wizard wears the Five Across host brand (ink, cream, grids, crisp type); the event under construction previews in its own edition skin, so the one-identity rule holds for organizers too: you build with Five Across, your players see Vacay Bingo (or the occasion's edition). Occasion selection picks the edition, starter pack, and defaults; the slug claim itself needs no DNS record, riding the wildcard namespaces with <code>&lt;slug&gt;.fiveacross.app</code> as the canonical address and the Edition namespace (e.g. <code>vacaybingo.com</code>) as an alternate serving host. <b>Self-service is blocked on platform work that does not exist yet. The list below is what is known, not a closed set</b>—each round of review against the code has turned up another, so treat it as open and re-check before scheduling this. <b>(1) Sign-in is not wildcard-capable.</b> A hostname must be registered individually in Firebase Auth's authorized domains <i>and</i> as <code>https://&lt;host&gt;/__/auth/handler</code> on the Google OAuth web client—neither accepts a pattern—so a freshly claimed slug lands on an origin where <code>isSignInReachableOnHost</code> is false and the app renders <code>auth-unconfigured</code>. Writing routing documents in a transaction does not change that; only <a href="../docs/adr/0010-centralised-auth-origin-with-handoff.md">ADR 0010</a>'s centralised auth origin makes it wildcard-safe (today's handoff covers exactly one host). Until then, provisioning includes exact-host registration plus a redeploy, which is developer work. <b>(2) There is no admission boundary.</b> Current rules give path scoping, not membership isolation, so any signed-in account reaching the hostname can enter. A wizard whose final step hands out a QR would create ostensibly group-scoped Events that are not scoped at all. <b>(3) Share and install identity are baked per bundle, not per host.</b> <code>index.html</code> stamps <code>og:title</code> / <code>og:image</code> from the build-time Edition and the PWA manifest takes <code>brand.appName</code> the same way, so until the per-host edge work covers them a new Event's link unfurls with another Event's name and artwork, and a cross-Edition install inherits the wrong app name. Crawlers run no JavaScript, so runtime repair cannot reach the unfurl—this one outlives fixing auth and admission. <b>(4) Nothing serves a new hostname yet.</b> Today's Five Across deployment is a set of <i>exact</i> Firebase Hosting custom domains, one Event each; the shared multi-Event wildcard-router build is still future work (<a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/545">#545</a>, see <code>docs/app/deploy-targets.md</code>). Writing the two Firestore hostname documents maps an address to an Event—it does not make that address route, terminate TLS, or serve the bundle. So "no DNS, no certificates, no waiting" is the end state the router buys, not today's. These are prerequisites, not caveats; Step 5 states them on the frame. Two model rules the frames hold to throughout: the creator is granted <b>Admin</b> (Host stays display metadata), and a Prompt's <b>pool</b> (main / easy / closing) is independent of its <b>spicy</b> flag, which is what the server-derived 18+ posture reads.</p>
+<div class="frames">
+
+  <div class="unit" id="fx-setup-occasion-fa">
+    <a class="alias" id="frame-setup-occasion"></a><span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="mini" data-theme="five-across">
+      <div class="sheethead"><span class="shback">✕ Cancel</span><div class="shtitle">New event</div><span class="shdone">Save draft (local)</span></div>
+      <div class="board" style="gap:8px">
+        <div class="wizsteps"><span class="st on"><span class="dot">1</span>Occasion</span><span class="st"><span class="dot">2</span>Basics</span><span class="st"><span class="dot">3</span>Squares</span><span class="st"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
+        <div class="secthead">What's the occasion?</div>
+        <div class="menurow" style="border:1.5px solid var(--ink);border-radius:12px"><span class="mi">🏝</span><div class="grow">Weekend away<span class="who">Trips &amp; getaways · plays as Vacay Bingo</span></div><span class="pill">Vacay edition</span></div>
+        <div class="menurow"><span class="mi">🏙</span><div class="grow">City break<span class="who">Short urban trips · Vacay edition</span></div></div>
+        <div class="menurow"><span class="mi">💍</span><div class="grow">Wedding<span class="who">One card, one celebration</span></div></div>
+        <div class="menurow"><span class="mi">🎤</span><div class="grow">Conference or offsite<span class="who">Mingle-and-discover defaults</span></div></div>
+        <div class="menurow"><span class="mi">🚢</span><div class="grow">Cruise<span class="who">Multi-day, themed nights</span></div></div>
+        <div class="menurow"><span class="mi">✨</span><div class="grow">Custom<span class="who">Start empty, choose everything</span></div></div>
+        <div class="note">The occasion sets the edition your players see, the starter square pack, and sensible defaults—every one of them changeable before launch.</div>
+        <div class="btnrow"><span class="btn ok">Continue</span></div>
+      </div>
+    </div>
+    <p class="cap"><b>Step 1 · Occasion—one choice sets smart defaults</b>Ink-and-cream Five Across chrome: setup is a platform surface, run by an <b>Admin</b>. That word is load-bearing—<b>Host is not the privileged actor</b>. In this model a Host is player-facing social metadata with no permissions at all, so "the organizer" who creates an Event is authorized by an Admin grant, not by being named the Host; a Host who runs their own Event holds both. Gating setup by social identity would authorize the wrong thing. Selecting "Weekend away" quietly commits the player-facing edition (Vacay), the starter pack, and daily-card defaults—shown, not hidden, via the edition pill. Custom starts bare for tinkerers. <b>"Save draft (local)" is labelled that way deliberately:</b> there is no server-side draft today—<code>EventDoc.status</code> admits only <code>active</code> or <code>archived</code>, there is no draft collection, and a client cannot bootstrap its own Admin grant—so persisting a half-built Event server-side would either fail rules or publish a malformed one. Until a separately authorized draft model exists, the draft is device-local and the frames say so rather than implying a resumable server draft.</p>
+  </div>
+
+  <div class="unit" id="fx-setup-basics-fa">
+    <a class="alias" id="frame-setup-basics"></a><span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="mini" data-theme="five-across">
+      <div class="sheethead"><span class="shback">‹ Occasion</span><div class="shtitle">New event</div><span class="shdone">Save draft (local)</span></div>
+      <div class="board" style="gap:8px">
+        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st on"><span class="dot">2</span>Basics</span><span class="st"><span class="dot">3</span>Squares</span><span class="st"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
+        <div class="secthead">Name &amp; dates</div>
+        <div class="msgbox" style="color:var(--ink)">Weekend in Point Reyes</div>
+        <div class="msgbox">Fri Aug 7 → Sun Aug 9 · America/Los_Angeles (auto)</div>
+        <div class="secthead">Your event's address</div>
+        <div class="slugbox">point-reyes<span class="ok">✓ available</span><span class="host">point-reyes.fiveacross.app · canonical</span><span class="host">point-reyes.vacaybingo.com · Edition alternate</span></div>
+        <div class="secthead">Marking</div>
+        <div class="seg"><span class="segbtn on">Honor</span><span class="segbtn">Proof</span><span class="segbtn">Admin OK</span></div>
+        <div class="secthead">Audience</div>
+        <div class="seg"><span class="segbtn on">All ages</span><span class="segbtn">18+ (sets forceAdult)</span></div>
+        <div class="note">The address is generated from the name—edit it once, live-checked against reserved and taken slugs. Claiming it at launch registers both namespaces in one transaction; no DNS, no certificates, no waiting.</div>
+        <div class="prevbar"><span class="pvcard" data-theme="bodega-side-quests"></span>Live preview · updates as you build<span style="margin-left:auto" class="pill">Open ›</span></div>
+        <div class="btnrow"><span class="btn ok">Continue</span></div>
+      </div>
+    </div>
+    <p class="cap"><b>Step 2 · Basics—the URL is a text field, not a ticket</b>Name auto-generates the slug; availability is checked live with reserved names blocked; both hostnames preview inline—<b>canonical first, Edition alternate second</b>—so the organizer sees exactly what the group will type and which address the platform will treat as primary. Marking mode is here because <code>EventDoc.claimMode</code> is required and has three real values—<code>honor</code>, <code>proof_required</code>, <code>admin_confirmed</code>—so a wizard that never asks silently hard-codes Honor for every Event. Audience is a first-class basic because it picks which packs are offered, and it is <b>half</b> the verdict, not none of it: the derivation is <code>settings.forceAdult || any active spicy main-pool Prompt</code>, so selecting 18+ must persist <code>forceAdult: true</code>—otherwise an Event that is mature but not sexually explicit publishes <code>adultContent: false</code> and shows no gate at all. The other half runs the opposite way: choosing "All ages" and then adding an explicit Prompt in Step 3 raises the acknowledgement regardless. Step 5 shows the resolved posture with the reason, so neither half can be silently lost. The live-preview strip appears from here on, wearing the event's edition skin. <b>The slug shown is deliberately an unclaimed one:</b> <code>bodega-bay</code> already serves <code>bodega-bay-2026</code> on both namespaces, so a creation frame using it could never show <code>✓ available</code>—an illustrative example has to be a name the availability check would actually pass.</p>
+  </div>
+
+  <div class="unit" id="fx-setup-squares-fa">
+    <a class="alias" id="frame-setup-squares"></a><span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="mini" data-theme="five-across">
+      <div class="sheethead"><span class="shback">‹ Basics</span><div class="shtitle">New event</div><span class="shdone">Save draft (local)</span></div>
+      <div class="board" style="gap:8px">
+        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st done"><span class="dot">✓</span>Basics</span><span class="st on"><span class="dot">3</span>Squares</span><span class="st"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
+        <div class="secthead">Card format</div>
+        <div class="seg"><span class="segbtn">One card</span><span class="segbtn on">Daily cards · 4 Days</span></div>
+        <div class="note" style="margin-top:0">Maximum 10 Days—the Firestore schedule lock only covers indexes 0–9.</div>
+        <div class="secthead">Squares</div>
+        <div class="menurow"><span class="mi">🌊</span><div class="grow">Coastal weekend pack<span class="who">86 squares seeded · 32 main ✓ · 28 easy ✓ · 26 closing ✓</span></div><span class="btn">Change</span></div>
+        <div class="promptrow"><span class="cls">easy</span>Windblown group selfie<span class="act">✎ ✕</span></div>
+        <div class="promptrow"><span class="cls">main</span>Walk to a Chimney Rock viewpoint<span class="act">✎ ✕</span></div>
+        <div class="promptrow"><span class="cls">main</span>Original suspense-movie still<span class="act">✎ ✕</span></div>
+        <div class="promptrow"><span class="cls">closing</span>Say the thing you'll actually miss<span class="act">✎ ✕</span></div>
+        <div class="addbar" style="margin:2px 0 0"><span class="msgbox grow" style="flex:1">Add your own… ask a local for a favorite detour</span><span class="btn">Add</span></div>
+        <div class="promptrow" style="border-bottom:none"><span class="cls">main</span>New square · pool<span class="dd">main ▾</span><span class="cls" style="border-color:var(--accent);color:var(--accent)">🔞 spicy</span><span class="act">off · main only</span></div>
+        <div class="secthead">Days &amp; pools</div>
+        <div class="promptrow">Fri · arrival<span class="act"><span class="cls">easy</span> <span class="cls">counts ✓</span></span></div>
+        <div class="promptrow">Sat · main day<span class="act"><span class="cls">main</span> <span class="cls">counts ✓</span></span></div>
+        <div class="promptrow">Sun 06:00 · last full day<span class="act"><span class="cls">main</span> <span class="cls">counts ✓</span></span></div>
+        <div class="promptrow">Sun 11:00 · wrap-up<span class="act"><span class="cls">closing</span> <span class="cls">warm-up</span></span></div>
+        <div class="note">Minimum 24 <b>per assigned pool</b>, checked separately—main 32 ✓, easy 28 ✓, closing 26 ✓. A total is not enough: a Day deals from its own pool alone. <b>counts ✓ / warm-up</b> is <code>DayDef.tutorial</code>, set per Day and <i>independent of pool</i>—it governs exclusion from Event-wide First-to-BINGO only. Whether a Day is <i>ceremonial</i> for standings is a separate set (<code>ceremonialDayIndexSet</code>, currently derived from the closing pool), so the two must not be collapsed into one control. Every Prompt belongs to one pool (main, easy, closing) and main-pool Prompts carry a separate <b>spicy</b> flag; the final Day must be assigned the closing pool or the finale never runs. The daily mix slider lives in Look. Players can suggest more during the event through your approval queue.</div>
+        <div class="prevbar"><span class="pvcard" data-theme="bodega-side-quests"></span>86 squares · deals 24 per day<span style="margin-left:auto" class="pill">Open ›</span></div>
+        <div class="btnrow"><span class="btn ok">Continue</span></div>
+      </div>
+    </div>
+    <p class="cap"><b>Step 3 · Squares—pack first, personality second</b>The pack seeds a working pool in one tap (min-24 check runs live against the deal guard); rows edit or delete inline; the add bar invites the organizer's own inside jokes. Daily-vs-one-card sits here because it decides how many squares you realistically need, and the <b>10-Day ceiling is a rules fact, not a product opinion</b>: <code>daysThemeLockOk</code> in <code>firestore.rules</code> unrolls its schedule lock over indexes 0–9 only, so a Day 11 would sit outside the lock and stay editable after it unlocked. Fixed seed data has never exceeded ten; an arbitrary self-service date range easily would. <b>Two model facts the wizard must not paper over.</b> <b>Pool is a three-way choice, not two:</b> main, easy, and <b>closing</b>, and the closing pool belongs to a final Day. <code>finaleTimes</code> returns <code>null</code> when no Day carries that pool, so a wizard offering only easy/exploratory leaves the farewell Day either undealable or quietly assigned a main pool—no standings freeze, no podium, no Most-Loved. Hence the explicit Days &amp; pools assignment and the seeded closing Prompts. <b>And a Day is not a calendar date:</b> Bodega's Sunday is <i>two</i> Days—a competitive main-pool Day at 06:00 and a closing wrap-up at 11:00—so collapsing the last date into one closing Day would delete Sunday's competitive card and freeze standings at the wrong boundary. The rows are per <b>Day</b>, and two may share a date. <b>And <code>tutorial</code> is its own required field, not a consequence of pool</b>—the "counts ✓ / ceremonial" chip. Bodega's easy-pool Friday is <code>tutorial: false</code> and only the closing wrap-up is <code>true</code>, so a provisioner that inferred tutorial status from easy/closing membership would wrongly exclude Friday's wins from Event-wide First-to-BINGO. Pool decides what a Day deals; <code>tutorial</code> decides whether its wins count. <b><code>spicy</code> is independent of pool</b>, not a synonym for exploratory: it tracks sexual explicitness specifically, and the Event's 18+ posture is <i>derived server-side</i> from whether any active Prompt carries it. A custom Prompt added here therefore needs its own spicy control—defaulted off, as <code>addItem</code> does—because an organizer who picked "All ages" in Basics and then adds an explicit inside joke must still raise the public acknowledgement. <b>But the control is main-pool only, and the row says so:</b> <code>adminAddItem</code> forces <code>spicy: false</code> outside the main pool and the posture derivation ignores non-main pools, so a spicy toggle offered on an easy or closing Prompt would let an explicit square reach a card with no 18+ gate raised—the toggle would look honoured and be silently dropped. And <b>the minimum is per pool, not per Event:</b> a closing Day snapshots only its closing pool, and <code>dealBoard</code> rejects an unstratified pool below <code>MIN_POOL</code> (24), so a pack with 62 total but 4 closing yields a farewell card that cannot deal while every total-based check reports success. Each assigned pool is counted and gated on its own.</p>
+  </div>
+
+  <div class="unit" id="fx-setup-look-fa">
+    <a class="alias" id="frame-setup-look"></a><span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="mini" data-theme="five-across">
+      <div class="sheethead"><span class="shback">‹ Squares</span><div class="shtitle">New event</div><span class="shdone">Save draft (local)</span></div>
+      <div class="board" style="gap:8px">
+        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st done"><span class="dot">✓</span>Basics</span><span class="st done"><span class="dot">✓</span>Squares</span><span class="st on"><span class="dot">4</span>Look</span><span class="st"><span class="dot">5</span>Launch</span></div>
+        <div class="secthead">When each day opens</div>
+        <div class="promptrow">Fri · arrival<span class="act"><span class="dd">06:00 ▾</span></span></div>
+        <div class="promptrow">Sat · main day<span class="act"><span class="dd">06:00 ▾</span></span></div>
+        <div class="promptrow">Sun · last full day<span class="act"><span class="dd">06:00 ▾</span></span></div>
+        <div class="promptrow">Sun · wrap-up (closing)<span class="act"><span class="dd">11:00 ▾</span></span></div>
+        <div class="note" style="margin-top:0">America/Los_Angeles. Last call is <b>derived</b>, never typed: <code>finaleTimes</code> adds 12h to the unlock of the Day <i>immediately preceding</i> the closing Day. Here that is Sun 06:00, so it derives <b>Sun 18:00</b>—<b>after</b> the 11:00 closing unlock, so it can never fire. Shown as the scheduler computes it, flagged, not silently corrected. Defaults to 06:00 local—change any Day and this line recomputes.</div>
+        <div class="secthead">Theme per day</div>
+        <div class="menurow"><div class="grow">Fri · arrival<span class="who"><span class="sw" style="background:#7fb8a4"></span><span class="sw" style="background:#c94f3d"></span> The Birds Have Entered the Chat</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sat · main day<span class="who"><span class="sw" style="background:#2e7fa8"></span><span class="sw" style="background:#e8862e"></span> Bodega Bay Side Quests</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sun · last full day<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sun · wrap-up<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
+        <div class="secthead">Place &amp; tonight, per day</div>
+        <div class="promptrow">Fri<span class="act"><span class="cls">🌊 Point Reyes</span></span></div>
+        <div class="msgbox" style="font-size:10px">Tonight: 🦀 Crab shack · 🔥 Fire pit</div>
+        <div class="promptrow">Sat<span class="act"><span class="cls">🌅 Point Reyes</span></span></div>
+        <div class="msgbox" style="font-size:10px">Tonight: 🎣 Dock walk · 🍷 Porch wine</div>
+        <div class="promptrow">Sun · last full day<span class="act"><span class="cls">🌅 Point Reyes</span></span></div>
+        <div class="msgbox" style="font-size:10px">Tonight: ☕ Last coffee · 🧳 The slow pack</div>
+        <div class="promptrow">Sun · wrap-up<span class="act"><span class="cls">🌫️ The drive home</span></span></div>
+        <div class="msgbox" style="font-size:10px">Tonight: 👋 Goodbyes · 🚗 The long way back</div>
+        <div class="note" style="margin-top:0">Place, its emoji, and <b>exactly two</b> Tonight entries are required per Day—they render on the card, the locked tease, the schedule and share copy, and only Tonight is editable in Admin afterwards.</div>
+        <div class="secthead">Event default theme</div>
+        <div class="menurow"><div class="grow">Fog, Froth &amp; Farewells<span class="who">Shown on Auto when no Day is current—what a new player sees first.</span></div><span class="dd">Change ▾</span></div>
+        <div class="secthead">Free space, per day</div>
+        <div class="msgbox">Fri: The flock has landed</div>
+        <div class="msgbox">Sat: Main character on the coast</div>
+        <div class="msgbox">Sun (last full day): We did it for the story</div>
+        <div class="msgbox">Sun (wrap-up): Take the long way home</div>
+        <div class="secthead">Daily mix</div>
+        <div class="menurow" style="display:block">
+          <div class="grow">Share of each <b>main-Day</b> card from the easy pool<span class="who">Main Days only—arrival and farewell cards deal from their own pool unstratified. Same slider as Admin · Game settings; change it any time.</span></div>
+          <div class="slwrap">
+            <div class="sltrack"><div class="slfill"></div><div class="slthumb"><span class="slbubble">50% · 12 of 24 squares</span></div></div>
+            <div class="sldets"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+          </div>
+        </div>
+        <div class="note">Themes are picked from the Edition's <b>registered</b> Theme list—every one is contrast-audited, so any choice is safe. There is no custom-palette option. The free space is each day's motto—make it yours.</div>
+        <div class="prevbar"><span class="pvcard" data-theme="fog-froth-farewells"></span>Sunday preview · light theme ✓<span style="margin-left:auto" class="pill">Open ›</span></div>
+        <div class="btnrow"><span class="btn ok">Continue</span></div>
+      </div>
+    </div>
+    <p class="cap"><b>Step 4 · Look—emotion per day, contract underneath</b>Swatch pairs make each day's palette legible at a glance; picking only ever swaps token sets, so contrast checks and mechanics are untouched. <b>Only registered Themes are offered—there is deliberately no "Custom".</b> Every `DayDef.theme` must be a `ThemeId` backed by `THEMES` metadata and a `themes.css` token block; there is no custom-theme value and no persisted custom-token shape, so a Custom option would give an implementation nothing valid to save and no contrast-audited palette to render. Free-space text per day is the cheapest personality lever an organizer has, so it gets first-class placement. The Daily mix slider is the same control as Admin · Game settings (identical <code>.slwrap</code> anatomy)—set here as a starting value, adjustable mid-event there. <b>The unlock times are not a look choice; they are here because nothing else in the wizard sets them.</b> Each Day's <code>unlockAt</code> is an absolute instant that drives snapshot publication, card availability, daily email timing and the finale beats—and a date range plus an auto-detected timezone does not determine it. Bodega opens at <b>06:00</b>, not the old 08:00 default, which is exactly the kind of cadence an Event would otherwise launch wrong while the intro promises every default is changeable before launch. Per-Day controls with a reviewed summary, rather than an invisible default. <b><code>EventDoc.defaultTheme</code> is collected separately</b> because it is a required field independent of every <code>DayDef.theme</code>: it dresses Auto when no Day is current, so it is what a new player sees first and no amount of per-Day theming supplies it. <b>Last call is shown but not editable, because it is derived:</b> <code>finaleTimes</code> takes the Day immediately before the closing Day and <i>adds</i> <code>LAST_CALL_LEAD_MS</code> (12h) — an offset <b>after</b> that unlock, not before it. <b>And on this schedule that exposes a real contract gap worth surfacing rather than hiding:</b> Bodega's tail is two Days on one date (main 06:00, closing 11:00), so the preceding Day is Sunday's 06:00 and last call derives to <b>Sun 18:00 — seven hours after the standings already froze at 11:00</b>, which means it can never post. The 12h offset assumes a closing Day on its own calendar date. The frame prints what the scheduler actually computes and flags it, because a wireframe that quietly displayed a plausible time would hide the mismatch from whoever implements this. Note also that the Daily mix applies to <b>main-Day</b> cards only: <code>dealBoard</code> stratifies just the main-pool path, so the arrival and closing Days deal from their own pools untouched by this slider. <b>Place, its emoji and the Tonight pair are collected here because <code>DayDef</code> requires them</b>—they render on the Day Card, the locked tease, the schedule, the leaderboard and share copy, and <code>tonight</code> takes <i>exactly two</i> entries. Only <code>tonight</code> has an Admin editor after creation and <code>place</code> has none, so a wizard that skipped them would force a provisioner to invent or blank player-facing data with no way to correct it—which the "every default is changeable before launch" promise cannot survive.</p>
+  </div>
+
+  <div class="unit" id="fx-setup-launch-fa">
+    <a class="alias" id="frame-setup-launch"></a><span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="mini" data-theme="five-across">
+      <div class="sheethead"><span class="shback">‹ Look</span><div class="shtitle">New event</div><span class="shdone"> </span></div>
+      <div class="board" style="gap:8px">
+        <div class="wizsteps"><span class="st done"><span class="dot">✓</span>Occasion</span><span class="st done"><span class="dot">✓</span>Basics</span><span class="st done"><span class="dot">✓</span>Squares</span><span class="st done"><span class="dot">✓</span>Look</span><span class="st on"><span class="dot">5</span>Launch</span></div>
+        <div class="secthead">Ready when you are</div>
+        <div class="promptrow">✓ Weekend in Point Reyes · Aug 7–9<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ point-reyes.fiveacross.app · canonical, claimed at launch<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ 86 squares · every pool ≥ 24 ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ 4 Days scheduled · closing pool set ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✕ Last call derives to Sun 18:00 — after the 11:00 close, so it never fires<span class="act btn" style="font-size:9.5px">Fix</span></div>
+        <div class="promptrow">✓ First unlock is still ahead (Fri 06:00) — required<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ 4 Days themed · places · tonight · free spaces ✓<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">✓ Honor · camera or library · EXIF stripped · you are Admin<span class="act btn" style="font-size:9.5px">Edit</span></div>
+        <div class="promptrow">⚠︎ 18+ acknowledgement: <b>on</b> — forceAdult off, 4 spicy main Prompts<span class="act btn" style="font-size:9.5px">Review</span></div>
+        <div class="promptrow">⚠︎ Create runs server-side (Admin SDK) — clients cannot claim hostnames<span class="act btn" style="font-size:9.5px">Why</span></div>
+        <div class="warnbox" style="font-size:9.5px"><b>Launch is gated on platform work that does not exist yet.</b> No wildcard router serves a new hostname (#545), so this address routes nowhere. Sign-in must be registered for this exact host (Firebase Auth + the Google OAuth client take no wildcard) or the page renders <b>auth-unconfigured</b>. Anyone signed in who reaches the address can join—the link is an <b>address, not an invitation</b>. And the share unfurl and installed app name still come from the bundle's Edition, not this Event.</div>
+        <div class="btnrow"><span class="btn" style="opacity:.45">Create event — blocked</span></div>
+        <div class="note" style="font-size:9.5px">Invite link and QR appear once creation is unblocked.</div>
+        <div class="qrbox" style="opacity:.25"></div>
+        <div class="note" style="font-size:11px;color:var(--ink)">point-reyes.fiveacross.app</div>
+        <div class="btnrow" style="opacity:.35"><span class="btn">Copy link</span><span class="btn">Share invite</span></div>
+      </div>
+    </div>
+    <p class="cap"><b>Step 5 · Launch—checklist, then the QR is the confetti</b>Every row is a verified gate (mirroring the POC launch-gate discipline) with an Edit escape hatch; Create is a <b>trusted server-side provisioner</b>, not a client transaction, and that is a rules fact rather than a preference: <code>firestore.rules</code> gates Event creation on <code>isAdmin(eventId)</code>, which reads the Event document that does not exist yet, so a client cannot bootstrap its own first Admin grant; and <code>hostnames/{host}</code> denies create/update to <b>every</b> client including admins, because routing is global state no per-Event admin has authority over. A callable with platform-level authorization claims the canonical slug and its Edition alternate atomically via the Admin SDK, seeds the Event, grants the creator Admin, and returns the invite QR + link + share. The creator is granted <b>Admin</b> on the new Event—that grant, not the Host field, is what authorizes every setup write; <code>hostedBy</code> stays player-facing display metadata (<a href="../CONTEXT.md">CONTEXT</a>: “a Host is a social identity, not a permission”). The organizer lands in the familiar Admin hub afterward—setup ends where operations begin. <b>Two rows are deliberately not what they were:</b> there is no photo-enabled boolean in the Event contract—capture is always available, and the real knobs are <code>photoProofSource</code>, <code>stripPhotoExif</code> and <code>visionGate</code>—so the row names those rather than inviting a parallel setting no proof consumer reads. And the <b>failing</b> last-call row is the point: a checklist that reported this schedule valid would let the provisioner create an Event whose last call can never fire. <b>Two rows are honesty, not decoration.</b> The <b>first-unlock row is a hard gate, not a nicety</b>: every Prompt seeded at creation gets a <code>createdAt</code>, and <code>activeSnapshotIds</code> excludes Prompts created after a Day's cutoff—so launching <i>after</i> Friday's 06:00 has already passed permanently stamps an empty arrival snapshot. (The Bodega seed dodges exactly this with an <code>unlockAt: 0</code> sentinel and a pre-stamped snapshot.) Launch therefore requires a first unlock still in the future, or must atomically pre-stamp an already-open first Day. The 18+ row is <i>derived server-side</i> from the pool's spicy Prompts and is authoritative over the Step 2 audience choice, so it can contradict what the organizer picked—shown here rather than silently overriding. And the dashed warning carries the two real blockers, because a QR is worth nothing if either holds. <b>Sign-in is per-exact-host, not wildcard:</b> a hostname must be registered in Firebase Auth's authorized domains and as <code>/__/auth/handler</code> on the Google OAuth client, so a freshly claimed slug fails <code>isSignInReachableOnHost</code> and the app renders <code>auth-unconfigured</code>—an Event nobody can sign in to. Claiming the routing documents in a transaction does not help; <a href="../docs/adr/0010-centralised-auth-origin-with-handoff.md">ADR 0010</a>'s centralised origin is what makes this wildcard-safe, and today's handoff covers exactly one host. <b>And there is no admission boundary:</b> current rules give path scoping, not membership isolation, so any signed-in account that reaches the hostname is in whether invited or not. <b>This flow stays blocked until both land</b>—the frame draws the dependencies instead of pretending them away.</p>
+  </div>
+
+</div>
 
 <script>
 // ---------- pools (samples of the real seed + the curated tutorial lists) ----------
