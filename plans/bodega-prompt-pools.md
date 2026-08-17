@@ -189,7 +189,7 @@ Keeping Sunday on `main` and adding a ceremonial wrap-up Day at 11:00 resolves b
 
 This needs **no code change**, and it stays correct after the scoring migration lands: `standingsFreezeAt` is seeded to the same instant as the wrap-up's `unlockAt`, so the inferred and stated freeze agree.
 
-The last-call Moment does not fire on this shape—`finaleTimes` computes it as Sunday's unlock + 12h, which lands after the freeze, so the window is empty. Harmless on a weekend.
+The last-call Moment DOES fire on this shape (#784 fixed a bug where it silently didn't). The naive forward offset—Sunday's unlock + 12h—lands after the freeze, so `finaleTimes` falls back to deriving backwards from the close instead: `farewellUnlockAt - 12h` = **Saturday 23:00**, before the 11:00 Sunday freeze.
 
 The 40 closing prompts sit on the wrap-up card rather than Sunday's, which suits them: they are read in the car, not over the last coffee. Sunday morning deals `main` + `embark` at the usual 50/50.
 
