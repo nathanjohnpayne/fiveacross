@@ -100,12 +100,24 @@ export async function approveItems(
     const placements: ApprovalPlacement[] = [];
     for (const it of items) {
       const base = { status: 'active' as const, approvedBy: adminUid, approvedAt };
-      if (!isUsableTarget(it.targetDayIndex)) {
-        // Untargeted (or malformed): approve exactly as before this feature. No
+      if (it.targetDayIndex === undefined) {
+        // Genuinely untargeted: approve exactly as before this feature. No
         // target is invented — inferring one would quietly narrow an organiser
         // Prompt that is meant for every Day.
         tx.update(item(it.id), base);
         placements.push({ itemId: it.id, dayIndex: null, retained: false });
+        continue;
+      }
+      if (!isUsableTarget(it.targetDayIndex)) {
+        // Present but MALFORMED. The snapshot already excludes such a row from
+        // every Day (`targetsDay` fails closed), so it will be dealt nowhere —
+        // which is retention, and must be REPORTED as retention. Reporting it as
+        // ordinary untargeted content would tell the organiser it is live on
+        // every Day while it is live on none (Phase 4b P2, PR #812). The
+        // malformed value is left in place rather than repaired: this write is a
+        // merge, and guessing which Day was meant would be inventing one.
+        tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+        placements.push({ itemId: it.id, dayIndex: null, retained: true });
         continue;
       }
       const routed = routeApprovalToDay(days, it.targetDayIndex, approvedAt);

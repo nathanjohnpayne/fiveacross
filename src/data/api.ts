@@ -2641,6 +2641,20 @@ export async function addItem(
 ): Promise<void> {
   const t = text.trim();
   if (!t) return;
+  // An OMITTED argument means "resolve the default"; an argument that is present
+  // but malformed is a caller bug, and it must not be quietly dropped. Dropping
+  // it would write an UNTARGETED row, which means every future main Day — the
+  // precise failure this feature exists to prevent, arriving through the one
+  // path that is supposed to set the target (Phase 4b P1, PR #812). `NaN`, `-1`
+  // and `1.5` are all valid TypeScript `number`s, so the type does not catch
+  // this; fail closed and loudly instead. `firestore.rules` would reject the
+  // value anyway — throwing here turns a silent mis-placement into an obvious
+  // programming error at the call site.
+  if (targetDayIndex !== undefined && !isUsableTarget(targetDayIndex)) {
+    throw new Error(
+      `addItem: targetDayIndex must be a non-negative integer, received ${String(targetDayIndex)}`,
+    );
+  }
   const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex());
   await addDoc(rawItems(), {
     text: t.slice(0, 80),

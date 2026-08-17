@@ -256,6 +256,22 @@ describe('addItem — a submission records the Day it is meant for', () => {
     expect(payload()).toMatchObject({ targetDayIndex: 2 });
   });
 
+  it('REJECTS an explicit malformed target rather than writing an untargeted row', async () => {
+    // An omitted argument means "resolve the default"; a present-but-malformed
+    // one is a caller bug. Dropping it would write an UNTARGETED row — every
+    // future main Day, the precise failure this feature exists to prevent,
+    // arriving through the one path that is supposed to SET the target (Phase 4b
+    // P1, PR #812). `NaN`, `-1` and `1.5` are all valid TypeScript `number`s, so
+    // only a runtime check catches them.
+    eventDataMock.mockReturnValue({ days: [future(1), future(2)] });
+    for (const bad of [-1, 1.5, Number.NaN]) {
+      await expect(addItem('u1', 'Malformed target', false, bad)).rejects.toThrow(
+        /targetDayIndex/,
+      );
+    }
+    expect(addDocMock).not.toHaveBeenCalled();
+  });
+
   it('OMITS the field entirely when no Day can take one — the untargeted contract', async () => {
     // Absent, not null: absent is what every pre-#557 Prompt already is, so the
     // snapshot filter needs no third state.
@@ -345,13 +361,35 @@ describe('approveItems — routing an approval into one Day', () => {
     });
   });
 
-  it('treats a malformed target as untargeted-and-unroutable rather than re-aiming it', async () => {
+  it('reports a malformed target as RETAINED — dealt nowhere, so described as nowhere', async () => {
+    // The snapshot's `targetsDay` already excludes a malformed row from every
+    // Day, so it IS retained; reporting it as ordinary untargeted content would
+    // tell the organiser it is live on every Day while it is live on none
+    // (Phase 4b P2, PR #812). It is never re-aimed: guessing the intended Day
+    // would be inventing one.
     const placements = await approveItems(
       [{ id: 'bad', targetDayIndex: -3 as number }],
       'admin-uid',
     );
-    expect(placements).toEqual([{ itemId: 'bad', dayIndex: null, retained: false }]);
-    expect(written()[0].data).not.toHaveProperty('targetDayIndex');
+    expect(placements).toEqual([{ itemId: 'bad', dayIndex: null, retained: true }]);
+    const { data } = written()[0];
+    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
+    expect(data).toHaveProperty('retainedAt');
+    // The write is a MERGE, so leaving the field out of it leaves the malformed
+    // value on the document — untouched, not repaired and not cleared.
+    expect(data).not.toHaveProperty('targetDayIndex');
+  });
+
+  it('reports a stored NULL target as retained too — a null is a value, not an absence', async () => {
+    // The mirror of `targetsDay`'s strict-`undefined` rule: the rules reject a
+    // null on create, but the admin update arm is unconstrained, so an imported
+    // or repaired row can carry one. It must not read as untargeted here either.
+    const placements = await approveItems(
+      [{ id: 'nulled', targetDayIndex: null as unknown as number }],
+      'admin-uid',
+    );
+    expect(placements).toEqual([{ itemId: 'nulled', dayIndex: null, retained: true }]);
+    expect(written()[0].data).toHaveProperty('retainedAt');
   });
 
   it('never writes to a Day — an approval touches only the Prompt', async () => {
