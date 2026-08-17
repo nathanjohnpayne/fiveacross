@@ -1,10 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { THEMES, defaultThemeForEdition } from '../../src/theme/themes';
 import { EMAIL_THEME_TOKENS, emailThemeTokens, fallbackThemeForEdition } from '../../functions/src/dailyEmailTheme';
 import {
   buildDailyEmailModel,
+  fromAddressFor,
   registerFor,
   standingsThrough,
   formatDayDate,
@@ -19,6 +20,7 @@ import {
   dailyEmailEnabled,
   DEFAULT_SEND_LOCAL_HOUR,
   dueDayForDailyEmail,
+  resolveEmailFrom,
   resolveEventOrigin,
   readEmailRoster,
   runDailyEmailSweep,
@@ -388,6 +390,85 @@ describe('Edition registers (#608 lexicon)', () => {
     expect(registerFor('nope').brandLine).toBe('Gay Cruise Bingo · by Five Across');
     expect(registerFor(null).brandLine).toBe('Gay Cruise Bingo · by Five Across');
     expect(registerFor('constructor').brandLine).toBe('Gay Cruise Bingo · by Five Across');
+  });
+});
+
+// --- ③b Edition-aware sender (#671) ---------------------------------------------
+
+describe('fromAddressFor (#671)', () => {
+  it('resolves the configured override for a known Edition', () => {
+    expect(fromAddressFor('vacay', { vacay: 'Vacay Bingo <hello@vacaybingo.com>' })).toBe(
+      'Vacay Bingo <hello@vacaybingo.com>',
+    );
+    expect(fromAddressFor('gcb', { gcb: 'Gay Cruise Bingo <bingo@gaycruisebingo.com>' })).toBe(
+      'Gay Cruise Bingo <bingo@gaycruisebingo.com>',
+    );
+    expect(fromAddressFor('fiveacross', { fiveacross: 'Five Across <hello@fiveacross.app>' })).toBe(
+      'Five Across <hello@fiveacross.app>',
+    );
+  });
+
+  it('falls back (returns undefined) when a known Edition has no configured or a blank override', () => {
+    expect(fromAddressFor('gcb', {})).toBeUndefined();
+    expect(fromAddressFor('gcb', { gcb: '' })).toBeUndefined();
+    expect(fromAddressFor('gcb', { gcb: '   ' })).toBeUndefined();
+  });
+
+  it('falls back for a null, absent, or unrecognized Edition even if the key is present', () => {
+    expect(fromAddressFor(null, { gcb: 'x <x@example.com>' })).toBeUndefined();
+    expect(fromAddressFor(undefined, { gcb: 'x <x@example.com>' })).toBeUndefined();
+    // An override object cannot inject an address for an Edition this file
+    // does not recognize — the REGISTERS membership check gates it first.
+    expect(fromAddressFor('some-future-edition', { 'some-future-edition': 'x <x@example.com>' })).toBeUndefined();
+  });
+
+  it('is immune to prototype pollution, matching registerFor (#597)', () => {
+    expect(fromAddressFor('constructor', {})).toBeUndefined();
+    expect(fromAddressFor('toString', {})).toBeUndefined();
+  });
+});
+
+describe('resolveEmailFrom (#671)', () => {
+  it('prefers the configured per-Edition override over the EMAIL_FROM fallback', async () => {
+    await expect(resolveEmailFrom('vacay', { vacay: 'Vacay Bingo <hello@vacaybingo.com>' })).resolves.toBe(
+      'Vacay Bingo <hello@vacaybingo.com>',
+    );
+  });
+
+  // The `EMAIL_FROM` fallback always goes through the REAL `firebase-functions`
+  // param (`resolveEmailFrom` reads it unconditionally, same as every other
+  // caller in `dailyEmail.ts`/`adminAlerts.ts`), and that param's `.value()`
+  // reads `process.env.EMAIL_FROM` directly — its `default` is a deploy-time
+  // resolution concern, never consulted outside the CLI, so an unset env var
+  // resolves to `''` rather than the documented default. Mock the module, the
+  // same technique `w4-email-resend-admin-notify.test.ts` uses, so these
+  // assertions are about the FALLBACK WIRING, not about firebase-functions'
+  // param-resolution internals.
+  const mockParams = (emailFrom: string) =>
+    vi.doMock('../../functions/src/params', () => ({
+      EMAIL_FROM: { value: () => emailFrom },
+      EMAIL_FROM_GCB: { value: () => '' },
+      EMAIL_FROM_VACAY: { value: () => '' },
+      EMAIL_FROM_FIVEACROSS: { value: () => '' },
+    }));
+
+  it('falls back to the EMAIL_FROM param when no override is configured', async () => {
+    mockParams('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
+    await expect(resolveEmailFrom('gcb', {})).resolves.toBe(
+      'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
+    );
+    vi.doUnmock('../../functions/src/params');
+  });
+
+  it('falls back to EMAIL_FROM for a null or unrecognized Edition, so an unknown Edition still sends', async () => {
+    mockParams('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
+    await expect(resolveEmailFrom(null, {})).resolves.toBe(
+      'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
+    );
+    await expect(
+      resolveEmailFrom('some-future-edition', { 'some-future-edition': 'Should Not <use@example.com>' }),
+    ).resolves.toBe('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
+    vi.doUnmock('../../functions/src/params');
   });
 });
 
@@ -1082,6 +1163,52 @@ describe('sendDailyEmailForEvent', () => {
     ]);
     // The Feed CTA deep-links the Event's CANONICAL host, not the fallback.
     expect(sent[0].text).toContain('Open the Feed: https://gaycruisebingo.com/feed');
+  });
+
+  // #671: the sender is Edition-aware, resolved from the SAME host lookup the
+  // Feed CTA above uses — not the deps.from override, which these three cases
+  // deliberately omit (baseDeps() always sets it, so `from: undefined` here
+  // exercises resolveEmailFrom for real).
+  it('sends from the Edition-configured address when the host resolves a known Edition', async () => {
+    const docs = seedEvent();
+    docs['hostnames/gaycruisebingo.com'] = { ...docs['hostnames/gaycruisebingo.com'], edition: 'vacay' };
+    const { sent } = await run(docs, {
+      from: undefined,
+      fromOverrides: { vacay: 'Vacay Bingo <hello@vacaybingo.com>' },
+    });
+    expect(sent[0].from).toBe('Vacay Bingo <hello@vacaybingo.com>');
+  });
+
+  // The real EMAIL_FROM param's `.value()` reads `process.env.EMAIL_FROM`
+  // directly (its `default` is a deploy-time-only concern — see the
+  // `resolveEmailFrom` describe block above for the full explanation), so
+  // these two mock the params module for a deterministic fallback value.
+  const mockEmailFromParam = () =>
+    vi.doMock('../../functions/src/params', () => ({
+      EMAIL_FROM: { value: () => 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>' },
+      EMAIL_FROM_GCB: { value: () => '' },
+      EMAIL_FROM_VACAY: { value: () => '' },
+      EMAIL_FROM_FIVEACROSS: { value: () => '' },
+    }));
+
+  it('falls back to EMAIL_FROM when the resolved Edition has no configured override', async () => {
+    mockEmailFromParam();
+    const { sent } = await run(seedEvent(), { from: undefined, fromOverrides: {} }); // edition: 'gcb'
+    expect(sent[0].from).toBe('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
+    vi.doUnmock('../../functions/src/params');
+  });
+
+  it('falls back to EMAIL_FROM for an unrecognized Edition rather than failing the send', async () => {
+    mockEmailFromParam();
+    const docs = seedEvent();
+    docs['hostnames/gaycruisebingo.com'] = { ...docs['hostnames/gaycruisebingo.com'], edition: 'some-future-edition' };
+    const { result, sent } = await run(docs, {
+      from: undefined,
+      fromOverrides: { 'some-future-edition': 'Should Not <use@example.com>' },
+    });
+    expect(result.sent).toBe(2);
+    expect(sent[0].from).toBe('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
+    vi.doUnmock('../../functions/src/params');
   });
 
   it('sends nothing when the Event-level admin toggle is off (the shipped default)', async () => {

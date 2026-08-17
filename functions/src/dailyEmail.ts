@@ -41,6 +41,7 @@
 import {
   buildDailyEmailModel,
   firstBingoUid,
+  fromAddressFor,
   hasScheduledUnlock,
   standingsThrough,
   type EmailDay,
@@ -411,6 +412,34 @@ export async function resolveEventOrigin(
   return { origin: fallbackOrigin, edition: null };
 }
 
+/**
+ * Resolve the Edition-aware `From:` for one send (#671): the matching
+ * `EMAIL_FROM_*` override if one is configured for `edition`, else the
+ * project-wide `EMAIL_FROM` fallback. `overrides`, when supplied, replaces
+ * the real param lookup — the injection point tests use so a case can assert
+ * "a Vacay host resolves to the Vacay override" or "an unconfigured/unknown
+ * Edition falls back to `EMAIL_FROM`" without touching `firebase-functions`
+ * params at all.
+ *
+ * Shared by `sendDailyEmailForEvent` below and `sendAdminDigestForEvent`
+ * (`adminAlerts.ts`) so the two email families can never resolve a brand's
+ * sender differently.
+ */
+export async function resolveEmailFrom(
+  edition: string | null | undefined,
+  overrides?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  const params = await import('./params');
+  const editionOverrides =
+    overrides ??
+    {
+      gcb: params.EMAIL_FROM_GCB.value(),
+      vacay: params.EMAIL_FROM_VACAY.value(),
+      fiveacross: params.EMAIL_FROM_FIVEACROSS.value(),
+    };
+  return fromAddressFor(edition, editionOverrides) ?? params.EMAIL_FROM.value();
+}
+
 // --- The send -------------------------------------------------------------------
 
 export interface DailyEmailDeps extends OptOutDeps {
@@ -419,9 +448,13 @@ export interface DailyEmailDeps extends OptOutDeps {
   /** Resolve a uid to its verified email, or null. Defaults to a Firebase Auth
    *  lookup, matching `notify.ts`'s verified-only policy. */
   getEmailForUid?: (uid: string) => Promise<string | null>;
-  /** Sender identity; defaults to the `EMAIL_FROM` param (Edition-aware per
-   *  #554, which this reads through rather than duplicating). */
+  /** Sender identity override; wins outright over Edition resolution. Defaults
+   *  to `resolveEmailFrom(edition)` — the Edition's `EMAIL_FROM_*` override if
+   *  one is configured, else the project-wide `EMAIL_FROM` param (#671). */
   from?: string;
+  /** Test-only injection point for `resolveEmailFrom`'s per-Edition lookup —
+   *  see its doc comment. Ignored when `from` is set. */
+  fromOverrides?: Readonly<Record<string, string | undefined>>;
   /** Fallback origin when the Event has no hostname documents; defaults to the
    *  `APP_BASE_URL` param. */
   appBaseUrl?: string;
@@ -508,14 +541,16 @@ export async function sendDailyEmailForEvent(
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
   const unsubscribeBaseUrl =
     deps.unsubscribeBaseUrl ?? (await import('./params')).EMAIL_UNSUBSCRIBE_URL.value();
-  const from = deps.from ?? (await import('./params')).EMAIL_FROM.value();
   const send = deps.send ?? (await import('./email')).sendEmail;
   const getEmailForUid = deps.getEmailForUid ?? defaultGetEmailForUid;
   const sleep = deps.sleep ?? defaultSleep;
   const pacingMs = deps.pacingMs ?? DEFAULT_PACING_MS;
   const maxRecipients = deps.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
 
+  // Resolved before `from`: the sender is Edition-aware (#671), and the
+  // Edition only becomes known once the Event's host resolves.
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
+  const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
   const feedUrl = `${origin.replace(/\/+$/, '')}/feed`;
 
   const rosterPage = await readEmailRosterPage(db, eventId, event.bannedUids ?? [], maxRecipients + 1);

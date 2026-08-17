@@ -152,6 +152,37 @@ export function registerFor(edition: string | null | undefined): EditionRegister
   return REGISTERS[DEFAULT_EMAIL_EDITION];
 }
 
+/**
+ * The per-Edition `From:` override for one send, or `undefined` meaning "fall
+ * back to the project-wide `EMAIL_FROM` default" (#671). Every email family
+ * currently sends from a single per-PROJECT param even though one project can
+ * serve several brands (ADR 0008 splits projects by cohort, not brand) — this
+ * is the resolution that lets a Vacay host use a Vacay sender and a Five
+ * Across host use a Five Across sender, without regressing an Edition whose
+ * sending domain is not Resend-verified yet into a silently dropped send
+ * (`sendEmail` swallows a Resend rejection into a logged `false`, never a
+ * thrown error, per ADR 0001).
+ *
+ * `overrides` is keyed like `REGISTERS`. Three cases all resolve to
+ * `undefined` — a `null`/absent edition, an edition unrecognized here, and a
+ * recognized edition with no configured (or blank) override — so an unknown
+ * or unconfigured Edition degrades to a working sender exactly like the
+ * `registerFor` content fallback, rather than failing the send. The
+ * `hasOwnProperty` guard mirrors `registerFor`'s prototype-pollution defense
+ * (#597): a plain object inherits `Object.prototype`, so an edition literally
+ * named `"toString"` must not read `Object.prototype.toString` as if it were
+ * a configured address.
+ */
+export function fromAddressFor(
+  edition: string | null | undefined,
+  overrides: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  if (!edition || !Object.prototype.hasOwnProperty.call(REGISTERS, edition)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(overrides, edition)) return undefined;
+  const value = overrides[edition];
+  return value && value.trim() !== '' ? value : undefined;
+}
+
 // --- Standings ------------------------------------------------------------------
 
 /**

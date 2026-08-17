@@ -1109,6 +1109,84 @@ describe('sendAdminDigestForEvent', () => {
     expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
     spy.mockRestore();
   });
+
+  // #671: the digest's sender is Edition-aware too, resolved from the same
+  // `resolveEventOrigin` hostname lookup the brand line already uses — not the
+  // `deps.from` override, which these three cases deliberately omit.
+  describe('Edition-aware sender (#671)', () => {
+    const editionDeps = (send: ReturnType<typeof vi.fn>, fromOverrides: Record<string, string>) => {
+      const { from: _from, ...rest } = deps(send);
+      return { ...rest, fromOverrides };
+    };
+
+    // The real EMAIL_FROM param's `.value()` reads `process.env.EMAIL_FROM`
+    // directly — its `default` is a deploy-time-only concern the firebase-tools
+    // CLI resolves, never consulted at plain runtime — so an unset env var
+    // resolves to `''`, not the documented default. Mock the module, the same
+    // technique `tests/functions/w4-email-resend-admin-notify.test.ts` uses,
+    // for a deterministic fallback value in the three "falls back" cases below.
+    const mockEmailFromParam = () =>
+      vi.doMock('../../functions/src/params', () => ({
+        EMAIL_FROM: { value: () => 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>' },
+        EMAIL_FROM_GCB: { value: () => '' },
+        EMAIL_FROM_VACAY: { value: () => '' },
+        EMAIL_FROM_FIVEACROSS: { value: () => '' },
+      }));
+
+    it('sends from the Edition-configured address when the host resolves a known Edition', async () => {
+      const send = vi.fn(async () => true);
+      const db = seeded(
+        [pendingAlert('a1')],
+        [{ eventId: 'med-2026', canonicalHost: 'bodega-bay.vacaybingo.com', edition: 'vacay', isCanonical: true, status: 'active' }],
+      );
+      await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, { vacay: 'Vacay Bingo <hello@vacaybingo.com>' }));
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe('Vacay Bingo <hello@vacaybingo.com>');
+    });
+
+    it('falls back to EMAIL_FROM when the resolved Edition has no configured override', async () => {
+      mockEmailFromParam();
+      const send = vi.fn(async () => true);
+      const db = seeded(
+        [pendingAlert('a1')],
+        [{ eventId: 'med-2026', canonicalHost: 'gaycruisebingo.com', edition: 'gcb', isCanonical: true, status: 'active' }],
+      );
+      await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, {}));
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(
+        'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
+      );
+      vi.doUnmock('../../functions/src/params');
+    });
+
+    it('falls back to EMAIL_FROM for an unrecognized Edition rather than failing the send', async () => {
+      mockEmailFromParam();
+      const send = vi.fn(async () => true);
+      const db = seeded(
+        [pendingAlert('a1')],
+        [{ eventId: 'med-2026', canonicalHost: 'green-valley.fiveacross.app', edition: 'some-future-edition', isCanonical: true, status: 'active' }],
+      );
+      const result = await sendAdminDigestForEvent(
+        db,
+        'med-2026',
+        editionDeps(send, { 'some-future-edition': 'Should Not <use@example.com>' }),
+      );
+      expect(result.sent).toBe(1);
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(
+        'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
+      );
+      vi.doUnmock('../../functions/src/params');
+    });
+
+    it('falls back to EMAIL_FROM when the Event has no hostname documents at all', async () => {
+      mockEmailFromParam();
+      const send = vi.fn(async () => true);
+      const db = seeded([pendingAlert('a1')], []); // no hostnames → edition: null
+      await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, { gcb: 'Should Not <use@example.com>' }));
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(
+        'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
+      );
+      vi.doUnmock('../../functions/src/params');
+    });
+  });
 });
 
 describe('claimed-batch retries and exclusivity', () => {
