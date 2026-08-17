@@ -247,11 +247,15 @@ No file overlap: #784 and #671 touch disjoint functions modules; #557 owns rules
 
 ```bash
 eval "$(scripts/op-preflight.sh --agent claude --mode all)" && \
+scripts/gh-as-author.sh -- gh project item-add 7 --owner nathanjohnpayne --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/799 && \
 for pair in "790 Backlog" "791 Backlog" "792 Backlog" "793 Backlog" "794 Backlog" "795 Backlog" \
-            "767 Ready" "784 Ready" "787 Ready" "765 Ready" "544 Ready" "545 Ready"; do \
+            "767 Ready" "784 Ready" "787 Ready" "765 Ready" "544 Ready" "545 Ready" "799 Ready" \
+            "767 In progress" "784 In progress" "787 In progress" "557 In progress" "671 In progress"; do \
   set -- $pair; PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
     GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh "$1" "$2"; done
 ```
+
+(The trailing In-progress moves reflect the Wave 0/1 runners dispatched 2026-08-17; skip any whose PR already merged — its card is Done via the built-in workflow.)
 
 - #790–#795 sit in **No Status** (added without the unconditional Backlog move the ticket workflow mandates) → **Backlog**.
 - Dispatch-ready promotions → **Ready**: #767, #784, #787, #765, #544, #545 (already Ready: #551, #557, #670, #671, #689, #578, #538, #539).
