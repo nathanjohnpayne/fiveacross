@@ -21,6 +21,19 @@ service cloud.firestore {
     function validItemPool() {
       return request.resource.data.pool in ['main', 'easy', 'closing', 'embark', 'farewell'];
     }
+    // Day targeting (#557, specs/community-prompt-targeting.md): a Community
+    // Prompt may name the Day it is meant for. OPTIONAL — an absent field is the
+    // untargeted every-Day contract every pre-#557 Prompt already satisfies — but
+    // when present it must be a non-negative int, because the snapshot matches it
+    // against `DayDef.index`. A malformed value is rejected at the door rather
+    // than left for the snapshot filter to reason about. Re-TARGETING is not
+    // constrained here: the update rule already bounds a non-admin to
+    // `hasOnly(['reportCount'])`, so only an admin can ever move a Prompt's Day.
+    function validTargetDayIndex() {
+      return !('targetDayIndex' in request.resource.data)
+        || (request.resource.data.targetDayIndex is int
+            && request.resource.data.targetDayIndex >= 0);
+    }
     function nonAdminPendingMainItemCreate() {
       return request.resource.data.status == 'pending'
         && request.resource.data.pool == 'main';
@@ -702,6 +715,7 @@ service cloud.firestore {
           && validItemPool()
           && request.resource.data.reportCount == 0
           && request.resource.data.spicy is bool
+          && validTargetDayIndex()
           && (nonAdminPendingMainItemCreate() || adminActiveItemCreate(eventId));
         // Report = increment reportCount by 1 only; admins can do anything.
         //
