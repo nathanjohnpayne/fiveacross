@@ -7,6 +7,7 @@ export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
   '--skip-cf-purge',
   '--skip-synthetic',
+  '--skip-invoker',
 ]);
 
 function deployArguments(args) {
@@ -54,6 +55,7 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
   const config = configForTarget(target);
   const args = [...wrapperArgs];
   if (config.skipCloudflarePurge && !args.includes('--skip-cf-purge')) args.push('--skip-cf-purge');
+  if (config.skipInvokerReconcile && !args.includes('--skip-invoker')) args.push('--skip-invoker');
   args.push('--', config.firebaseProject, ...deployArgs);
 
   const environment = {
@@ -62,6 +64,15 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
   };
   environment.CF_ZONE_ID = config.cloudflareZoneId ?? '';
   environment.SYNTHETIC_URL = config.syntheticUrl;
+  // Pins the Cloud Run invoker reconciliation to the SELECTED target (#768).
+  // scripts/deploy.sh clears every ambient BUG_REPORT_* / EMAIL_UNSUBSCRIBE_*
+  // override on the automatic path and re-pins the project from this value, so
+  // a stale export from an earlier manual repair — `EMAIL_UNSUBSCRIBE_PROJECT=
+  // fiveacross` left over in the shell — cannot silently redirect a
+  // gaycruisebingo deploy's reconciliation at Five Across while the
+  // just-reset gaycruisebingo services keep 403ing. Assigned unconditionally
+  // so an inherited value is overwritten, never merged.
+  environment.DEPLOY_TARGET_PROJECT = config.firebaseProject;
 
   return {
     command: resolve(process.cwd(), 'scripts', 'deploy.sh'),

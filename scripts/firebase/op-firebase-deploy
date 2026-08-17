@@ -24,6 +24,10 @@ SOURCE_CRED_FILE=""
 SOURCE_CRED_TMPFILE=""
 FIREBASE_CONFIG_TMPDIR=""
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/credential-materialization.sh
+source "$SCRIPT_DIR/lib/credential-materialization.sh"
+
 PROJECT=""
 EXTRA_ARGS=()
 EXPECT_VALUE=false
@@ -107,35 +111,6 @@ materialize_op_source_cred() {
   return 1
 }
 
-materialize_firebase_vault_sa_key() {
-  # Try to pull the project-specific SA key from the 1Password Firebase vault.
-  # Falls back silently if op is unavailable, vault doesn't exist, or item is
-  # not found (returns 1 so the caller continues down the chain).
-  #
-  # Unlike materialize_op_source_cred (which backgrounds op read), this runs
-  # op document get in the foreground so biometric/session auth can prompt.
-  local project="${1:-}"
-  local tmpfile=""
-
-  if [[ -z "$project" ]] || ! command -v op >/dev/null 2>&1; then
-    return 1
-  fi
-
-  umask 077
-  tmpfile="$(mktemp "${TMPDIR:-/tmp}/firebase-sa-XXXXXX")"
-
-  if op document get "${project} — Firebase Deployer SA Key" \
-       --vault Firebase --out-file "$tmpfile" --force >/dev/null 2>&1 \
-     && [[ -s "$tmpfile" ]]; then
-    SOURCE_CRED_TMPFILE="$tmpfile"
-    printf '%s\n' "$tmpfile"
-    return 0
-  fi
-
-  rm -f "$tmpfile"
-  return 1
-}
-
 resolve_source_cred_file() {
   # Precedence (#154 — codified policy decision):
   #
@@ -206,7 +181,7 @@ resolve_source_cred_file() {
     return 0
   fi
 
-  resolved="$(materialize_firebase_vault_sa_key "$PROJECT" || true)"
+  resolved="$(firebase_materialize_vault_sa_key "$PROJECT" || true)"
   if [[ -n "$resolved" ]]; then
     SOURCE_CRED_FILE="$resolved"
     SOURCE_CRED_TMPFILE="$resolved"
@@ -337,7 +312,7 @@ if ! source_cred_is_usable "$SOURCE_CRED_FILE"; then
   # Rank 2 retry: if the preflight-cached Firebase SA tempfile was
   # stale/corrupt, re-read the project item before dropping to the
   # RAPT-prone shared ADC fallbacks.
-  resolved="$(materialize_firebase_vault_sa_key "$PROJECT" || true)"
+  resolved="$(firebase_materialize_vault_sa_key "$PROJECT" || true)"
   if [[ -n "$resolved" ]] && source_cred_is_usable "$resolved"; then
     SOURCE_CRED_FILE="$resolved"
     SOURCE_CRED_TMPFILE="$resolved"

@@ -3,6 +3,13 @@ set -euo pipefail
 
 # Reproducible invoker configuration for the submitBugReport callable (#158).
 #
+# Thin wrapper over the shared scripts/set-cloud-run-invoker.sh — #616
+# generalized this mechanism into that shared script so the emailUnsubscribe
+# endpoint could reuse it (see scripts/set-email-unsubscribe-invoker.sh)
+# instead of duplicating the gcloud logic. This file's documented interface —
+# the BUG_REPORT_* env vars, `--dry-run`, `--help` — is unchanged; only the
+# implementation moved.
+#
 # The org policy on this project rejects an `allUsers` Cloud Run invoker IAM
 # binding (Domain Restricted Sharing), which is the binding `firebase deploy`
 # normally adds to make a callable publicly reachable. The org-policy-compatible
@@ -19,8 +26,10 @@ set -euo pipefail
 # no-ops.
 #
 # Usage:
-#   scripts/set-bug-report-invoker.sh              # apply to prod (default)
-#   scripts/set-bug-report-invoker.sh --dry-run    # print the action, change nothing
+#   scripts/set-bug-report-invoker.sh                 # apply to prod (default)
+#   scripts/set-bug-report-invoker.sh --dry-run       # print the action, change nothing
+#   scripts/set-bug-report-invoker.sh --allow-missing # a NOT_FOUND describe is
+#                                                      # non-fatal (first deploy)
 #
 # Environment / overrides (defaults target this project's prod callable):
 #   BUG_REPORT_PROJECT   GCP project      (default: gaycruisebingo)
@@ -35,48 +44,27 @@ set -euo pipefail
 PROJECT="${BUG_REPORT_PROJECT:-gaycruisebingo}"
 REGION="${BUG_REPORT_REGION:-us-central1}"
 SERVICE="${BUG_REPORT_SERVICE:-submitbugreport}"
-GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
 DRY_RUN=false
-INVOKER_ANNOTATION='run.googleapis.com/invoker-iam-disabled'
+ALLOW_MISSING=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-missing) ALLOW_MISSING=true; shift ;;
+    -h|--help) sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-run_gcloud() { "$GCLOUD_BIN" "$@"; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo ">> Bug-report invoker config: service=$SERVICE region=$REGION project=$PROJECT"
+ARGS=(
+  --service "$SERVICE" --region "$REGION" --project "$PROJECT"
+  --label "Bug-report"
+  --verify-hint "scripts/smoke-bug-report-callable.sh"
+  --service-env-hint "BUG_REPORT_SERVICE"
+)
+[[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
+[[ "$ALLOW_MISSING" == "true" ]] && ARGS+=(--allow-missing)
 
-# Confirm the service exists before mutating anything — a wrong/renamed service
-# should fail with a helpful list, not a confusing update error.
-if ! current="$(run_gcloud run services describe "$SERVICE" \
-      --region "$REGION" --project "$PROJECT" \
-      --format="value(metadata.annotations[\"$INVOKER_ANNOTATION\"])" 2>/dev/null)"; then
-  echo "FAIL: could not describe Cloud Run service '$SERVICE' in $REGION ($PROJECT)." >&2
-  echo "      Available services:" >&2
-  run_gcloud run services list --project "$PROJECT" --region "$REGION" \
-    --format='value(metadata.name)' >&2 || true
-  echo "      Set BUG_REPORT_SERVICE to the correct name and re-run." >&2
-  exit 1
-fi
-
-if [[ "$current" == "true" ]]; then
-  echo "   Invoker IAM check already disabled — nothing to do (idempotent)."
-  exit 0
-fi
-
-if [[ "$DRY_RUN" == "true" ]]; then
-  echo "   [dry-run] would run: gcloud run services update $SERVICE \\"
-  echo "             --region $REGION --project $PROJECT --no-invoker-iam-check"
-  exit 0
-fi
-
-echo "   Disabling the Cloud Run invoker IAM check (org-policy-compatible reachability)…"
-run_gcloud run services update "$SERVICE" \
-  --region "$REGION" --project "$PROJECT" --no-invoker-iam-check
-
-echo "   Done. Verify with: scripts/smoke-bug-report-callable.sh"
+exec "$SCRIPT_DIR/set-cloud-run-invoker.sh" "${ARGS[@]}"
