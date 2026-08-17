@@ -44,9 +44,17 @@ export const DRAFT_SCHEMA_VERSION = 1;
  * One localStorage key per draft. The `gcb:` prefix matches the established
  * storage namespace (`gcb:card-snapshot:…`) — it is a key namespace, not
  * branding, and a second prefix would fragment the origin's storage for no
- * gain. Version-scoped so a future bump cannot collide with a live key.
+ * gain.
+ *
+ * The key deliberately carries NO schema version. Versioning the key would
+ * make a bump orphan every existing draft: `list()` would stop matching them
+ * and `discard()` could never reach them, so they would sit in localStorage
+ * forever — and the version check in `parseEventDraft` would be reduced to a
+ * guard against hand-edited blobs rather than the migration path it claims to
+ * be. With one stable namespace, a version bump makes a stale draft read as a
+ * miss AND leaves it reachable, so `list()` can reclaim its bytes.
  */
-const KEY_PREFIX = `gcb:event-draft:v${DRAFT_SCHEMA_VERSION}:`;
+const KEY_PREFIX = 'gcb:event-draft:';
 
 /**
  * Fields a draft MUST NOT carry. A draft never holds a claimed slug (PRD
@@ -192,7 +200,6 @@ export function parseEventDraft(value: unknown): EventDraft | null {
     !(value.cardFormat === 'one_card' || value.cardFormat === 'daily_cards') ||
     typeof value.hostedBy !== 'string' ||
     !(value.defaultTheme === null || typeof value.defaultTheme === 'string') ||
-    typeof value.freeSpaceText !== 'string' ||
     !isPromptPools(value.prompts) ||
     !Array.isArray(value.days) ||
     !value.days.every(isDraftDay) ||
@@ -265,7 +272,6 @@ export function createEventDraft(init: CreateEventDraftInit = {}): EventDraft {
     cardFormat: 'daily_cards',
     hostedBy: '',
     defaultTheme: null,
-    freeSpaceText: '',
     prompts: { main: [], easy: [], closing: [] },
     days: [],
     settings: init.settings ? { ...init.settings } : { ...BARE_SETTINGS },
@@ -322,17 +328,40 @@ export function createLocalDraftStore(
       const ls = store(storage);
       if (!ls) return [];
       const summaries: EventDraftSummary[] = [];
-      for (let i = 0; i < ls.length; i++) {
-        const key = ls.key(i);
-        if (!key || !key.startsWith(KEY_PREFIX)) continue;
-        const draft = readAt(key);
-        if (!draft) continue;
-        summaries.push({
-          draftId: draft.draftId,
-          name: draft.name,
-          step: draft.step,
-          updatedAt: draft.updatedAt,
-        });
+      const unreadable: string[] = [];
+      try {
+        // `length` and `key()` can THROW in a restricted Storage, not just
+        // return nothing — so the enumeration is guarded as a whole. A store
+        // that will not be read is "no drafts on this device", never a crash
+        // in the middle of rendering the resume list.
+        for (let i = 0; i < ls.length; i++) {
+          const key = ls.key(i);
+          if (!key || !key.startsWith(KEY_PREFIX)) continue;
+          const draft = readAt(key);
+          if (!draft) {
+            unreadable.push(key);
+            continue;
+          }
+          summaries.push({
+            draftId: draft.draftId,
+            name: draft.name,
+            step: draft.step,
+            updatedAt: draft.updatedAt,
+          });
+        }
+      } catch {
+        return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
+      }
+      // Reclaim drafts this build can no longer read — a retired schema
+      // version, or a corrupted blob. They are invisible to the organizer
+      // either way, so leaving them would only consume the quota that makes
+      // the NEXT save fail silently.
+      for (const key of unreadable) {
+        try {
+          ls.removeItem(key);
+        } catch {
+          /* best-effort reclamation */
+        }
       }
       return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
     },

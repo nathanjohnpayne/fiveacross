@@ -243,9 +243,16 @@ export function occasionById(id: OccasionId | null | undefined): OccasionDef | n
  * 3's job, and no pack exists to seed yet.
  */
 export function applyOccasionDefaults(draft: EventDraft, occasion: OccasionDef): EventDraft {
+  // A one-card Event IS an Event with an empty `days[]`. Re-picking a one-card
+  // occasion after authoring a schedule has to drop those Days: `dayCountIssues`
+  // refuses a one-card draft that carries any, and every Day-authoring surface
+  // is scoped to `daily_cards`, so the organizer would be left holding rows
+  // nothing can edit and nothing will launch.
+  const days = occasion.defaults.cardFormat === 'one_card' ? [] : draft.days;
   return {
     ...draft,
     occasion: occasion.id,
+    days,
     // Copied, never re-derived on read: editing the matrix must not restyle a
     // draft that is already half-built.
     edition: occasion.edition,

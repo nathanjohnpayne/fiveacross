@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DraftDayDef, EventDraft, ThemeId } from '../types';
+import type { DraftDayDef, EventDraft, OccasionId, ThemeId } from '../types';
 import { MIN_POOL } from '../game/logic';
 import { createEventDraft } from './eventDraft';
 import {
@@ -12,7 +12,9 @@ import {
   finaleClosingPoolIssues,
   firstUnlockIssues,
   isDraftLaunchable,
+  isIsoDate,
   isRegisteredTheme,
+  isSupportedTimezone,
   promptPoolIssues,
   validateEventDraft,
 } from './draftValidation';
@@ -47,6 +49,7 @@ function day(index: number, over: Partial<DraftDayDef> = {}): DraftDayDef {
 function launchableDraft(over: Partial<EventDraft> = {}): EventDraft {
   return {
     ...createEventDraft({ now: NOW, draftId: 'draft-1', timezone: 'America/Los_Angeles' }),
+    occasion: 'weekend-away',
     name: 'Weekend in Point Reyes',
     startsOn: '2026-08-07',
     endsOn: '2026-08-09',
@@ -296,6 +299,36 @@ describe('dayCompletenessIssues', () => {
     expect(isRegisteredTheme('custom-palette' as ThemeId)).toBe(false);
   });
 
+  it('counts tonight ARRAY entries, not just the non-blank ones', () => {
+    // `tonight` is persisted verbatim and consumers join it, so a trailing
+    // blank is a rendering defect even though two entries are filled.
+    const draft = launchableDraft({
+      days: [day(0, { tonight: ['🦀 Crab shack', '🔥 Fire pit', '  '] }), day(1, { pool: 'closing' })],
+    });
+    const issues = dayCompletenessIssues(draft);
+    expect(issues.map((i) => i.code)).toEqual(['day-tonight-not-two']);
+    expect(issues[0].message).toContain('3');
+  });
+
+  it('rejects a non-finite unlock time, not only a missing one', () => {
+    const draft = launchableDraft({
+      days: [day(0, { unlockAt: Number.NaN }), day(1, { unlockAt: Infinity, pool: 'closing' })],
+    });
+    expect(dayCompletenessIssues(draft).map((i) => [i.code, i.dayIndex])).toEqual([
+      ['day-missing-unlock', 0],
+      ['day-missing-unlock', 1],
+    ]);
+  });
+
+  it('flags a Day Theme the bound Edition does not offer, separately from an unregistered one', () => {
+    const draft = launchableDraft({
+      // Registered, but a Five Across Theme on a Vacay Event — the state a
+      // re-picked occasion leaves behind.
+      days: [day(0, { theme: 'marquee' as ThemeId }), day(1, { pool: 'closing' })],
+    });
+    expect(dayCompletenessIssues(draft).map((i) => i.code)).toEqual(['day-off-edition-theme']);
+  });
+
   it('requires contiguous indexes from zero', () => {
     const draft = launchableDraft({ days: [day(1), day(2, { pool: 'closing' })] });
     expect(dayCompletenessIssues(draft).map((i) => i.code)).toEqual([
@@ -327,8 +360,58 @@ describe('eventCompletenessIssues', () => {
       'endsOn',
       'timezone',
       'slugCandidate',
+      'occasion',
       'defaultTheme',
     ]);
+  });
+
+  it('requires an occasion — it is what binds the Edition', () => {
+    expect(eventCompletenessIssues(launchableDraft({ occasion: null })).map((i) => i.field)).toEqual([
+      'occasion',
+    ]);
+    expect(
+      eventCompletenessIssues(launchableDraft({ occasion: 'festival' as OccasionId })).map((i) => i.field),
+    ).toEqual(['occasion']);
+  });
+
+  it('rejects a zone the read-side contract would silently rewrite', () => {
+    // `normalizeTimezone` substitutes Europe/Rome for UTC, Etc/*, bare offsets
+    // and anything without a region prefix — so accepting them here would
+    // launch a schedule that runs hours away from where it was authored.
+    for (const zone of ['UTC', 'Etc/UTC', 'GMT', '+05:30', 'PST']) {
+      const issues = eventCompletenessIssues(launchableDraft({ timezone: zone }));
+      expect(issues.map((i) => i.code)).toEqual(['event-unsupported-timezone']);
+    }
+    expect(isSupportedTimezone('America/Los_Angeles')).toBe(true);
+    expect(isSupportedTimezone('Europe/Rome')).toBe(true);
+    expect(isSupportedTimezone('UTC')).toBe(false);
+  });
+
+  it('rejects a reversed or impossible date window', () => {
+    expect(
+      eventCompletenessIssues(launchableDraft({ startsOn: '2026-08-09', endsOn: '2026-08-07' })).map(
+        (i) => i.code,
+      ),
+    ).toEqual(['event-invalid-date-window']);
+    expect(
+      eventCompletenessIssues(launchableDraft({ startsOn: '2026-02-30' })).map((i) => i.code),
+    ).toEqual(['event-invalid-date-window']);
+    expect(isIsoDate('2026-02-30')).toBe(false);
+    expect(isIsoDate('2026-02-28')).toBe(true);
+    expect(isIsoDate('7 Aug 2026')).toBe(false);
+  });
+
+  it('accepts a single-day window', () => {
+    expect(
+      eventCompletenessIssues(launchableDraft({ startsOn: '2026-08-07', endsOn: '2026-08-07' })),
+    ).toEqual([]);
+  });
+
+  it('rejects a default Theme the bound Edition does not offer', () => {
+    // Marquee is registered, but it belongs to the Five Across Edition — this
+    // is the state a re-picked occasion leaves behind.
+    const issues = eventCompletenessIssues(launchableDraft({ defaultTheme: 'marquee' as ThemeId }));
+    expect(issues.map((i) => i.code)).toEqual(['event-off-edition-theme']);
   });
 
   it('requires a default Theme independently of every Day Theme', () => {

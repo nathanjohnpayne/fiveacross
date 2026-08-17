@@ -980,8 +980,14 @@ export interface EventDraft {
   /** Required on the launched Event, independent of every `DayDef.theme`, and
    *  what a new player sees first. `null` until picked. */
   defaultTheme: ThemeId | null;
-  /** The Event's Free Space copy; a Day may override it. */
-  freeSpaceText: string;
+  //
+  // THERE IS NO EVENT-LEVEL FREE SPACE FIELD, deliberately. The Free Space
+  // text is the build-time `FREE_TEXT` constant in `src/data/seed.ts`
+  // (`dealBoard(pool, day.freeText ?? FREE_TEXT, …)`); `EventDoc` has no
+  // per-Event home for it, so a draft field would have nowhere to land at
+  // launch. `#frame-setup-look` agrees — it offers "Free space, per day" and
+  // nothing Event-wide. Per-Day copy lives on `DraftDayDef.freeText`.
+  //
   prompts: DraftPromptPools;
   /** Empty for `one_card`; 1..10 Days for `daily_cards`. */
   days: DraftDayDef[];

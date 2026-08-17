@@ -154,6 +154,47 @@ describe('applyOccasionDefaults', () => {
     expect(applied.prompts).toEqual({ main: [], easy: [], closing: [] });
   });
 
+  it('drops an authored schedule when the re-picked occasion is one-card', () => {
+    const scheduled = applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('cruise')!);
+    scheduled.days = [
+      {
+        index: 0,
+        date: '2026-08-07',
+        unlockAt: NOW + 86_400_000,
+        place: 'Point Reyes',
+        placeEmoji: '🌊',
+        theme: 'the-birds',
+        pool: 'easy',
+        tutorial: false,
+        tonight: ['a', 'b'],
+      },
+    ];
+
+    const applied = applyOccasionDefaults(scheduled, occasionById('wedding')!);
+    // Otherwise the draft carries `one_card` plus Days that no Day-authoring
+    // step can reach and that `dayCountIssues` refuses to launch.
+    expect(applied.cardFormat).toBe('one_card');
+    expect(applied.days).toEqual([]);
+  });
+
+  it('keeps an authored schedule when the re-picked occasion still deals daily cards', () => {
+    const scheduled = applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('cruise')!);
+    scheduled.days = [
+      {
+        index: 0,
+        date: '2026-08-07',
+        unlockAt: NOW + 86_400_000,
+        place: 'Point Reyes',
+        placeEmoji: '🌊',
+        theme: 'the-birds',
+        pool: 'easy',
+        tutorial: false,
+        tonight: ['a', 'b'],
+      },
+    ];
+    expect(applyOccasionDefaults(scheduled, occasionById('conference')!).days).toHaveLength(1);
+  });
+
   it('returns a new draft rather than mutating the one passed in', () => {
     const before = createEventDraft({ now: NOW, draftId: 'd' });
     const applied = applyOccasionDefaults(before, occasionById('wedding')!);

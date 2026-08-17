@@ -20,7 +20,13 @@
 import type { DraftDayDef, EventDraft, ThemeId } from '../types';
 import { MIN_POOL } from '../game/logic';
 import { normalizePool, type PoolId } from '../game/pool';
-import { THEMES } from '../theme/themes';
+import { THEMES, themesForEdition } from '../theme/themes';
+// `normalizeTimezone` is the SAME contract `eventConverter` applies on read, so
+// importing it is what makes "the zone you typed is the zone you get" checkable
+// instead of hopeful. It costs no Firebase dependency: `converters.ts` imports
+// firebase as `import type` only, which erases at build.
+import { normalizeTimezone } from './converters';
+import { occasionById } from './occasions';
 
 /**
  * The ten-Day ceiling. `daysThemeLockOk` (`firestore.rules`) unrolls its
@@ -45,9 +51,13 @@ export type DraftIssueCode =
   | 'day-missing-unlock'
   | 'day-missing-date'
   | 'day-tonight-not-two'
+  | 'day-off-edition-theme'
   | 'one-card-has-days'
   | 'event-missing-field'
   | 'event-unregistered-theme'
+  | 'event-off-edition-theme'
+  | 'event-unsupported-timezone'
+  | 'event-invalid-date-window'
   | 'curated-prompt-is-spicy';
 
 /** One reason a draft cannot launch. `dayIndex`/`pool` anchor the issue to the
@@ -67,6 +77,46 @@ const REGISTERED_THEME_IDS: ReadonlySet<string> = new Set(THEMES.map((t) => t.id
  *  so an unregistered id is not a styling miss — it is an unrenderable Day. */
 export function isRegisteredTheme(theme: ThemeId | null | undefined): boolean {
   return typeof theme === 'string' && REGISTERED_THEME_IDS.has(theme);
+}
+
+/**
+ * Whether a Theme is one the draft's Edition actually offers.
+ *
+ * A stricter question than `isRegisteredTheme`, and a separate failure:
+ * `#frame-setup-look` picks Themes from "the Edition's registered Theme list",
+ * and re-picking an occasion rebinds the Edition under Days that were themed
+ * before it. An off-Edition Theme still renders — `THEMES` lookups and the
+ * `themes.css` blocks are global — so this is reported as its own issue the
+ * organizer can resolve in Step 4, never silently reset over their choice.
+ */
+export function isEditionTheme(theme: ThemeId | null | undefined, edition: string): boolean {
+  if (typeof theme !== 'string') return false;
+  return themesForEdition(edition).some((t) => t.id === theme);
+}
+
+/**
+ * Whether the zone survives the contract `eventConverter` applies on read.
+ *
+ * `normalizeTimezone` rejects UTC/GMT/`Etc/*`, bare offsets and anything
+ * without a region prefix, substituting `Europe/Rome` — so a draft that merely
+ * checks "non-blank" can launch a schedule authored in UTC and have every
+ * unlock instant, email time and finale beat re-interpreted at Rome wall-clock.
+ * The device zone `createEventDraft` suggests is exactly where an unsupported
+ * value comes from: plenty of runtimes report `UTC`.
+ */
+export function isSupportedTimezone(timezone: string): boolean {
+  const trimmed = timezone.trim();
+  return trimmed.length > 0 && normalizeTimezone(trimmed) === trimmed;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A real ISO calendar date — `2026-02-30` parses as March 2nd in a `Date`, so
+ *  the round-trip is what proves the day actually exists. */
+export function isIsoDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 function daysInOrder(draft: EventDraft): DraftDayDef[] {
@@ -276,20 +326,33 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
         dayIndex: day.index,
         message: `Day ${day.index + 1} uses an unregistered Theme; only Themes in the registry can be rendered.`,
       });
+    } else if (!isEditionTheme(day.theme, draft.edition)) {
+      issues.push({
+        code: 'day-off-edition-theme',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} uses a Theme this Event's Edition does not offer; pick one from its list.`,
+      });
     }
-    if (day.unlockAt === null) {
+    if (day.unlockAt === null || !Number.isFinite(day.unlockAt)) {
       issues.push({
         code: 'day-missing-unlock',
         dayIndex: day.index,
-        message: `Day ${day.index + 1} has no unlock time.`,
+        // A NaN or Infinity reaches here from schedule arithmetic over a
+        // malformed date, and would otherwise pass a bare `!== null` check and
+        // launch a Day that never unlocks.
+        message: `Day ${day.index + 1} has no usable unlock time.`,
       });
     }
-    const tonight = day.tonight.filter((entry) => entry.trim().length > 0);
-    if (tonight.length !== 2) {
+    // The ARRAY length is what matters, not the non-blank count: `tonight` is
+    // persisted verbatim and consumers join it or assume `length === 2`, so a
+    // trailing blank entry would render a dangling separator on a Day this
+    // validator had called complete.
+    const filled = day.tonight.filter((entry) => entry.trim().length > 0);
+    if (day.tonight.length !== 2 || filled.length !== 2) {
       issues.push({
         code: 'day-tonight-not-two',
         dayIndex: day.index,
-        message: `Day ${day.index + 1} needs exactly two Tonight entries; it has ${tonight.length}.`,
+        message: `Day ${day.index + 1} needs exactly two non-blank Tonight entries; it has ${day.tonight.length}.`,
       });
     }
   });
@@ -318,6 +381,37 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
       });
     }
   }
+  if (occasionById(draft.occasion) === null) {
+    issues.push({
+      code: 'event-missing-field',
+      field: 'occasion',
+      message: 'This Event still needs an occasion — it is what binds the Edition your players see.',
+    });
+  }
+  // Presence is not enough for either of these: both have a downstream contract
+  // that silently rewrites a value this validator would otherwise call done.
+  if (draft.timezone.trim() && !isSupportedTimezone(draft.timezone)) {
+    issues.push({
+      code: 'event-unsupported-timezone',
+      field: 'timezone',
+      message: `"${draft.timezone}" is not a named IANA zone the app can schedule in; it would be read back as a different zone. Pick a region zone such as America/Los_Angeles.`,
+    });
+  }
+  if (draft.startsOn.trim() && draft.endsOn.trim()) {
+    if (!isIsoDate(draft.startsOn) || !isIsoDate(draft.endsOn)) {
+      issues.push({
+        code: 'event-invalid-date-window',
+        field: 'startsOn',
+        message: 'The Event dates must be real calendar dates in YYYY-MM-DD form.',
+      });
+    } else if (draft.startsOn > draft.endsOn) {
+      issues.push({
+        code: 'event-invalid-date-window',
+        field: 'endsOn',
+        message: 'The Event ends before it starts.',
+      });
+    }
+  }
   if (draft.defaultTheme === null) {
     issues.push({
       code: 'event-missing-field',
@@ -330,6 +424,12 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
       code: 'event-unregistered-theme',
       field: 'defaultTheme',
       message: 'The default Theme is not in the registry.',
+    });
+  } else if (!isEditionTheme(draft.defaultTheme, draft.edition)) {
+    issues.push({
+      code: 'event-off-edition-theme',
+      field: 'defaultTheme',
+      message: "The default Theme is not one this Event's Edition offers.",
     });
   }
   return issues;

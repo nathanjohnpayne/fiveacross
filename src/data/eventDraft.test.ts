@@ -169,15 +169,34 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     clock = NOW + 60_000;
     await store.save(draft({ draftId: 'newer', name: 'Newer', step: 'squares' }));
 
-    // A blob from a future schema version, and one that is not JSON at all.
-    storage.setItem(`gcb:event-draft:v${DRAFT_SCHEMA_VERSION}:future`, JSON.stringify({ ...draft(), v: 99 }));
-    storage.setItem(`gcb:event-draft:v${DRAFT_SCHEMA_VERSION}:junk`, 'not json');
+    // A blob from a retired schema version, and one that is not JSON at all.
+    storage.setItem('gcb:event-draft:future', JSON.stringify({ ...draft(), v: 99 }));
+    storage.setItem('gcb:event-draft:junk', 'not json');
     // Somebody else's key in the same origin.
     storage.setItem('gcb:card-snapshot:med-2026:uid:day-1', 'unrelated');
 
     const list = await store.list();
     expect(list.map((s) => s.draftId)).toEqual(['newer', 'older']);
     expect(list[0]).toEqual({ draftId: 'newer', name: 'Newer', step: 'squares', updatedAt: NOW + 60_000 });
+  });
+
+  it('reclaims drafts it can no longer read, and leaves foreign keys alone', async () => {
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    await store.save(draft({ draftId: 'live' }));
+    storage.setItem('gcb:event-draft:retired', JSON.stringify({ ...draft(), v: 99 }));
+    storage.setItem('gcb:event-draft:junk', 'not json');
+    storage.setItem('gcb:card-snapshot:med-2026:uid:day-1', 'unrelated');
+
+    await store.list();
+
+    // Versioning the KEY would have orphaned these forever: invisible to
+    // list(), unreachable by discard(), and still consuming the quota that
+    // makes the next save fail silently.
+    expect(storage.raw.has('gcb:event-draft:retired')).toBe(false);
+    expect(storage.raw.has('gcb:event-draft:junk')).toBe(false);
+    expect(storage.raw.has('gcb:event-draft:live')).toBe(true);
+    expect(storage.raw.has('gcb:card-snapshot:med-2026:uid:day-1')).toBe(true);
   });
 
   it('discards one draft and leaves the rest, and discarding twice is not an error', async () => {
@@ -200,8 +219,14 @@ describe('createLocalDraftStore — create, resume, discard', () => {
 
   it('degrades to no persistence when the store throws, instead of crashing', async () => {
     const hostile: Storage = {
-      length: 0,
-      key: () => null,
+      // `length` and `key()` throw too in a restricted Storage — a fake that
+      // only throws on getItem would let the enumeration pass vacuously.
+      get length(): number {
+        throw new Error('blocked');
+      },
+      key: () => {
+        throw new Error('blocked');
+      },
       getItem: () => {
         throw new Error('blocked');
       },
