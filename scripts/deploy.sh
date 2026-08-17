@@ -281,6 +281,13 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
       functions:default)
+        # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
+        # excluding it excludes Functions entirely, exactly like the plain
+        # `functions)` case above. Leaving FUNCTIONS_ATTEMPTED=true here
+        # (the pre-existing gap) made Guard 4 below demand a complete
+        # functions/.env.<projectId> for a deploy that never touches
+        # Functions params at all.
+        FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         BUG_REPORT_INVOKER_CONSERVATIVE=false
@@ -488,6 +495,13 @@ if [[ "$ENV_CHECK_SKIP" == "true" ]]; then
   echo ">> functions/.env.<projectId> param-coverage check skipped (--skip-env-check)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> functions/.env.<projectId> param-coverage check skipped (this deploy does not release Functions)"
+elif [[ ! -f functions/src/index.ts ]]; then
+  # No Functions source to scan for declared params — nothing to validate.
+  # In this repo's real checkout functions/src/index.ts is always committed,
+  # so this only matters for a deliberately minimal checkout (e.g. the
+  # tests/test_deploy.sh fixture repos, which exercise deploy.sh's OTHER
+  # guards from a bare git repo with no functions/ tree at all).
+  echo ">> functions/.env.<projectId> param-coverage check skipped (functions/src/index.ts not present)"
 elif [[ -z "$DEPLOY_PROJECT" ]]; then
   echo ">> functions/.env.<projectId> param-coverage check skipped (no project id resolved)"
 else
