@@ -1435,6 +1435,17 @@ else
   echo "  FAIL: synthetic uptime must classify combined app/unsubscribe failures before single-surface advice" >&2
 fi
 
+unsubscribe_probe="tests/synthetic/unsubscribe-invoker.spec.ts"
+if grep -Fq 'emailUnsubscribe probe failed' "$unsubscribe_probe" && \
+   grep -Fq 'emailUnsubscribe probe failed' "$synthetic_uptime_workflow" && \
+   grep -Fq 'elif [[ "$unsubscribe_other" == "true" ]]; then' "$synthetic_uptime_workflow"; then
+  pass=$((pass + 1))
+  echo "  PASS: every non-400 unsubscribe response carries a classifier marker and endpoint-specific advice"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: synthetic uptime must not misclassify generic unsubscribe failures as app-mount failures" >&2
+fi
+
 if grep -Fq 'gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \' "$synthetic_uptime_workflow" && \
    grep -Fq -- '--title "Synthetic uptime check failing: $subject"' "$synthetic_uptime_workflow"; then
   pass=$((pass + 1))

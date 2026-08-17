@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test } from '@playwright/test';
 
 // Production synthetic (issue #768): assert the deployed `/unsubscribe`
 // endpoint is reachable — the signal a passing app-mount check (app-mounts.spec.ts)
@@ -125,5 +125,17 @@ test('the unsubscribe endpoint is reachable (no Cloud Run invoker regression)', 
     return;
   }
 
-  expect(status, `expected HTTP 400 (endpoint reached, no token supplied); got HTTP ${status}`).toBe(400);
+  if (status !== 400) {
+    // Keep this marker stable: synthetic-uptime.yml classifies outage advice
+    // from the probe's explicit diagnostics. Without it, a 404/429/5xx would
+    // fall through to the app-mount remediation even though /unsubscribe—not
+    // the rendered client—failed. The status still makes the root symptom
+    // visible without guessing whether it is Hosting, Cloud Run, or an app
+    // failure behind the endpoint.
+    throw new Error(
+      `emailUnsubscribe probe failed at ${UNSUBSCRIBE_URL}: expected HTTP 400 ` +
+        `(endpoint reached, no token supplied); got HTTP ${status}. Inspect the endpoint and its ` +
+        'Hosting rewrite before treating this as an app-mount failure.',
+    );
+  }
 });

@@ -101,16 +101,25 @@ jobs:
           # scheduled run can catch both an unsubscribe 403 and an app-mount
           # outage; prioritising the first match would wrongly promise that a
           # rollback cannot help while the application is also down.
+          unsubscribe_failure=false
           unsubscribe_403=false
           unsubscribe_rewrite=false
+          unsubscribe_other=false
           app_mount=false
           failure_count=0
           if grep -q 'emailUnsubscribe 403' "$log"; then
+            unsubscribe_failure=true
             unsubscribe_403=true
-            failure_count=$((failure_count + 1))
           fi
           if grep -q 'served the SPA shell' "$log"; then
+            unsubscribe_failure=true
             unsubscribe_rewrite=true
+          fi
+          if grep -q 'emailUnsubscribe probe failed' "$log"; then
+            unsubscribe_failure=true
+            unsubscribe_other=true
+          fi
+          if [[ "$unsubscribe_failure" == "true" ]]; then
             failure_count=$((failure_count + 1))
           fi
           if grep -qE 'app did not mount|Firebase init error|uncaught exception|sign-in gate never rendered' "$log"; then
@@ -127,6 +136,9 @@ jobs:
             if [[ "$unsubscribe_rewrite" == "true" ]]; then
               advice+=$'\n\n- **Unsubscribe rewrite:** confirm `/unsubscribe` is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
             fi
+            if [[ "$unsubscribe_other" == "true" ]]; then
+              advice+=$'\n\n- **Unsubscribe endpoint:** the probe reached an unexpected status. Inspect its diagnostic, Cloud Run service, and `/unsubscribe` Hosting rewrite; do not treat this as a healthy app merely because the sign-in gate renders.'
+            fi
             if [[ "$app_mount" == "true" ]]; then
               advice+=$'\n\n- **App mount:** open the production URL. If it is blank or spins forever, follow DEPLOYMENT.md § Rollback Procedure; if the sign-in gate renders, investigate the synthetic diagnostic instead.'
             fi
@@ -136,6 +148,9 @@ jobs:
           elif [[ "$unsubscribe_rewrite" == "true" ]]; then
             subject='/unsubscribe is serving the app shell, not the opt-out page'
             advice='**Do not roll back.** The `/unsubscribe` Hosting rewrite is missing from the live release, so every emailed unsubscribe link opens the app. Confirm the rewrite is present and ordered before the `**` catch-all in `firebase.json`, then deploy Hosting (`npm run deploy:gaycruisebingo:hosting`).'
+          elif [[ "$unsubscribe_other" == "true" ]]; then
+            subject='the unsubscribe endpoint is failing'
+            advice='**Do not treat this as an app-mount failure.** The `/unsubscribe` probe reached an unexpected status instead of the healthy HTTP 400. Inspect the quoted diagnostic, Cloud Run service, and `/unsubscribe` Hosting rewrite before deciding whether any rollback is appropriate.'
           else
             subject='the app is not mounting'
             advice="**Confirm before rolling back.** Open $SYNTHETIC_URL: if the sign-in gate renders, the PROBE failed and the release is healthy — do not roll back, fix the probe. If the page is blank or spins forever, it is a real outage: roll back per DEPLOYMENT.md § Rollback Procedure."

@@ -1167,6 +1167,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 16d (#768 Phase 4b P2): an unfamiliar selector can be a genuinely
+# unrelated function. Its conservative post-deploy probes must allow a
+# protected service to remain absent rather than turning the valid scoped
+# deploy into a failure; explicitly named endpoint scopes remain strict (19a).
+# ---------------------------------------------------------------------------
+REPO16D="$WORKDIR/case16d-unrelated-selector-first-deploy"
+init_fixture_repo "$REPO16D"
+OUT16D="$WORKDIR/case16d.out"
+ERR16D="$WORKDIR/case16d.err"
+: >"$WORKDIR/ofd-calls-16d.log"
+: >"$WORKDIR/gcloud-calls-16d.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-16d.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-16d.log" \
+GCLOUD_MISSING_SERVICE=submitbugreport \
+  bash -c "cd '$REPO16D' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:unrelatedFirstFunction" \
+  >"$OUT16D" 2>"$ERR16D"
+RC16D=$?
+set -e
+
+if [[ $RC16D -ne 0 ]]; then
+  fail "unrelated-selector-first-deploy: a valid unfamiliar scoped deploy returned $RC16D because protected submitbugreport is absent. stderr was:"
+  cat "$ERR16D" >&2
+elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-16d.log"; then
+  fail "unrelated-selector-first-deploy: the conservative precheck did not reach the scoped Firebase deploy."
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-16d.log"; then
+  fail "unrelated-selector-first-deploy: did not exercise the conservatively inferred absent service. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16d.log" >&2
+else
+  pass "unrelated-selector-first-deploy: an unfamiliar scoped selector tolerates an absent conservatively inferred service before and after publish (rc=$RC16D)."
+fi
+
+# ---------------------------------------------------------------------------
 # Case 17 (#768 r4 — Codex P2): stale overrides must not redirect the automatic
 # reconciliation.
 #

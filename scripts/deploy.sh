@@ -154,6 +154,14 @@ FUNCTIONS_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+# An endpoint selected by an exact `functions:<endpoint>` (or the whole
+# `functions` scope) MUST exist after a successful Functions deploy, so its
+# post-publish reconciliation stays strict. An unfamiliar `functions:<name>`
+# may instead be a codebase/group or a genuinely unrelated function; it selects
+# both endpoints defensively, but records that they were inferred rather than
+# named so a valid scoped first deploy is not failed by an absent service.
+BUG_REPORT_INVOKER_CONSERVATIVE=false
+EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 ONLY_VALUES=()
 EXCEPT_VALUES=()
 DEPLOY_PROJECT="${DEPLOY_TARGET_PROJECT:-}"
@@ -194,6 +202,8 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   FUNCTIONS_ATTEMPTED=false
   BUG_REPORT_INVOKER_SELECTED=false
   EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+  BUG_REPORT_INVOKER_CONSERVATIVE=false
+  EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
   for only_value in "${ONLY_VALUES[@]}"; do
     IFS=',' read -r -a only_selectors <<< "$only_value"
     for selector in "${only_selectors[@]}"; do
@@ -202,14 +212,18 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           FUNCTIONS_ATTEMPTED=true
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          BUG_REPORT_INVOKER_CONSERVATIVE=false
+          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
           ;;
         functions:submitBugReport)
           FUNCTIONS_ATTEMPTED=true
           BUG_REPORT_INVOKER_SELECTED=true
+          BUG_REPORT_INVOKER_CONSERVATIVE=false
           ;;
         functions:emailUnsubscribe)
           FUNCTIONS_ATTEMPTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
           ;;
         # A selector after `functions:` is not necessarily a single exported
         # function. Firebase also accepts codebase and function-group selectors
@@ -221,6 +235,12 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
         # created yet. Skipping one here risks a released endpoint remaining 403.
         functions:*)
           FUNCTIONS_ATTEMPTED=true
+          if [[ "$BUG_REPORT_INVOKER_SELECTED" != "true" ]]; then
+            BUG_REPORT_INVOKER_CONSERVATIVE=true
+          fi
+          if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" != "true" ]]; then
+            EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=true
+          fi
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           ;;
@@ -238,9 +258,17 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        BUG_REPORT_INVOKER_CONSERVATIVE=false
+        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
-      functions:submitBugReport) BUG_REPORT_INVOKER_SELECTED=false ;;
-      functions:emailUnsubscribe) EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false ;;
+      functions:submitBugReport)
+        BUG_REPORT_INVOKER_SELECTED=false
+        BUG_REPORT_INVOKER_CONSERVATIVE=false
+        ;;
+      functions:emailUnsubscribe)
+        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        ;;
     esac
   done
 done
@@ -272,6 +300,24 @@ if [[ -n "${DEPLOY_TARGET_PROJECT:-}" ]]; then
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
+
+# A post-deploy `--allow-missing` is normally wrong: an endpoint explicitly
+# selected for Functions release must exist once Firebase returns. The one
+# exception is an endpoint selected only because an unfamiliar
+# `functions:<selector>` might be a group/codebase containing it. That
+# conservative probe must not make a valid unrelated first deploy fail on a
+# service Firebase had no reason to create; credential and permission failures
+# remain fatal because set-cloud-run-invoker only tolerates its narrowly
+# matched missing-service diagnostics.
+run_postdeploy_invoker() {
+  local invoker_script="$1"
+  local selected_conservatively="$2"
+  if [[ "$selected_conservatively" == "true" ]]; then
+    run_invoker "$invoker_script" --allow-missing
+  else
+    run_invoker "$invoker_script"
+  fi
+}
 
 INVOKER_SCRIPTS=()
 if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
@@ -483,8 +529,12 @@ fi
 # deploy state. It narrows what counts as absent, not what counts as fine: a
 # missing credential, PERMISSION_DENIED, or any other describe failure still
 # aborts below exactly as before. Step 2.5's post-deploy reconciliation omits
-# this flag on purpose — by then the service should exist, so a 404 there
-# stays a real, fatal signal.
+# this flag on purpose for exactly selected endpoints — by then the service
+# should exist, so a 404 stays a real, fatal signal. A service selected only
+# conservatively from an unfamiliar codebase/group selector is the exception:
+# the post-deploy call also allows it to be absent, because that selector may
+# have been an unrelated function Firebase validly deployed without creating
+# either protected service.
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker credential check skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
@@ -678,9 +728,14 @@ EOF
   fi
   echo ">> Reconciling Cloud Run invoker config for selected Functions"
   RECONCILE_RAN=true
-  for invoker_script in "${INVOKER_SCRIPTS[@]}"; do
-    run_invoker "$invoker_script" || RECONCILE_STATUS=$?
-  done
+  if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_invoker "$SCRIPT_DIR/set-bug-report-invoker.sh" \
+      "$BUG_REPORT_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
+  fi
+  if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" \
+      "$EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
+  fi
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 
