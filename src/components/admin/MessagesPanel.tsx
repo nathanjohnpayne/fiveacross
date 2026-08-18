@@ -41,7 +41,10 @@ function ComposeNotice({ adminUid, adminName, days }: { adminUid: string; adminN
   // `midInteraction` asks about (src/swClientBridge.ts); it goes on only while
   // there IS a draft, because an admin merely sitting on this panel must not
   // pin the tab to a condemned build forever.
-  const hasDraft = title !== '' || body !== '';
+  // Trimmed, matching `canPost` below (post-review #752/#753): whitespace-only
+  // title/body can never satisfy `canPost`, so an untrimmed marker would pin
+  // the tab to a condemned build with no way for the admin to release it.
+  const hasDraft = title.trim() !== '' || body.trim() !== '';
 
   const submit = async () => {
     if (!canPost) return;

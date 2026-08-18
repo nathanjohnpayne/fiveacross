@@ -1460,6 +1460,22 @@ else
   echo "  FAIL: unsubscribe grace must be deployment-contextual, raw-IAM-protected, and bounded by commit-derived state" >&2
 fi
 
+# #774 (Codex P2 on PR #827): the rollout-epoch lookup must anchor on
+# first-parent history so a non-squash merge (allowed by this repo's GitHub
+# settings — allow_merge_commit / allow_rebase_merge are both on, with no
+# branch-protection squash-only enforcement) attributes the grace deadline to
+# the MERGE itself, not a buried feature-branch commit that can predate it by
+# more than the 72-hour window. A source-level assertion, like its siblings
+# above: the workflow's `run:` block owns the actual lookup, so this pins the
+# flag rather than re-implementing the lookup as a second source of truth.
+if grep -Fq 'git log --first-parent --diff-filter=A' "$synthetic_uptime_workflow"; then
+  pass=$((pass + 1))
+  echo "  PASS: the rollout-epoch lookup anchors on first-parent history (#774)"
+else
+  fail=$((fail + 1))
+  echo "  FAIL: the rollout-epoch lookup must use --first-parent so a non-squash merge attributes the grace deadline to the merge itself, not a buried feature-branch commit (#774)" >&2
+fi
+
 if grep -Fq 'gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \' "$synthetic_uptime_workflow" && \
    grep -Fq -- '--title "Synthetic uptime check failing: $subject"' "$synthetic_uptime_workflow"; then
   pass=$((pass + 1))

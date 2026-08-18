@@ -251,6 +251,19 @@ describe('MessagesPanel (specs/admin-messages.md)', () => {
       fireEvent.change(screen.getByLabelText('Edit notice body'), { target: { value: 'corrected' } });
       expect(document.querySelector(marker)).not.toBeNull();
     });
+
+    // Post-review #752/#753 on PR #720: `hasDraft` used raw non-emptiness while
+    // `canPost` required trimmed content, so whitespace-only text marked the
+    // form as unsaved work even though "Post to everyone" stayed disabled and
+    // could never clear it — pinning the tab to a condemned build forever.
+    it('does not mark the compose form for whitespace-only text, which Post can never clear', () => {
+      render(<MessagesPanel adminUid="admin-uid" days={days} />);
+      fireEvent.change(screen.getByLabelText('Notice title'), { target: { value: '   ' } });
+      expect(document.querySelector(marker)).toBeNull();
+      fireEvent.change(screen.getByLabelText('Notice body'), { target: { value: '  \n ' } });
+      expect(document.querySelector(marker)).toBeNull();
+      expect(screen.getByRole('button', { name: 'Post to everyone' })).toBeDisabled();
+    });
   });
 
   it('an edited Notice is marked "edited" in the history; an unedited one is not', () => {

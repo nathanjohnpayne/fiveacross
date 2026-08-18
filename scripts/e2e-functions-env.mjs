@@ -626,6 +626,13 @@ export const FUNCTIONS_EMULATOR_PORT = 5001;
 export function e2eParamValues(projectId) {
   return {
     EMAIL_FROM: 'Gay Cruise Bingo <e2e@example.invalid>',
+    // Left unset like EMAIL_REPLY_TO/ADMIN_NOTIFY_EMAIL above (#671): an empty
+    // per-Edition override is the documented "not verified yet" state, so the
+    // e2e run exercises the real EMAIL_FROM fallback path rather than a
+    // brand-specific address no test asserts on.
+    EMAIL_FROM_GCB: '',
+    EMAIL_FROM_VACAY: '',
+    EMAIL_FROM_FIVEACROSS: '',
     EMAIL_REPLY_TO: '',
     ADMIN_NOTIFY_EMAIL: '',
     APP_BASE_URL: 'http://127.0.0.1:4173',

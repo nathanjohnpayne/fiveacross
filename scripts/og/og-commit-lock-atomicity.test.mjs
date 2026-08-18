@@ -40,9 +40,9 @@ vi.mock('node:fs', async (importOriginal) => {
       linkSourceContentAtCallTime.push(actual.readFileSync(src, 'utf8'));
       return actual.linkSync(src, dest);
     }),
-    // Passthrough by default — the stale-takeover describe block below
-    // overrides this per-test to land a swap between stealIfStale's two
-    // statSync calls.
+    // Passthrough in every test in this file — spied only so a future test
+    // can assert on statSync call shape without needing to add the mock
+    // wiring separately.
     statSync: vi.fn(actual.statSync),
     writeSync: vi.fn(actual.writeSync),
   };
@@ -167,5 +167,39 @@ describe('a live holder remains exclusive even when its lock is old (#713 Phase 
     } finally {
       killSpy.mockRestore();
     }
+  });
+});
+
+// #824 (Codex P2 round 2 on PR #824): "blocks an ordinary acquirer... " in
+// og-commit-lock.test.mjs plants the takeover gate BEFORE calling
+// `withDestinationLocks`, so every attempt exits at `tryAcquireOne`'s FIRST
+// `existsSync(takeoverPath)` check and never reaches `linkSync` at all — it
+// would still pass even if the SECOND check (after publishing, inside the
+// try block) were deleted. This closes that gap: it lands the takeover gate
+// deterministically inside the one-syscall-pair window between the two
+// checks, by hooking the mocked `linkSync` this file already spies on to
+// plant the gate immediately after — but as part of the SAME synchronous
+// call stack as — the ordinary lock's own publish.
+describe('a takeover gate that appears strictly between the two checks still withdraws the lock (#824 Codex P2 round 2)', () => {
+  it('never leaves its own lock visible when the takeover gate is created between the first check and publication', () => {
+    const dest = join(dir, 'gcb.png');
+    const lockPath = `${dest}.commit-lock`;
+    const takeover = `${lockPath}.takeover`;
+
+    fs.linkSync.mockImplementationOnce((src, target) => {
+      linkSourceContentAtCallTime.push(actualFs.readFileSync(src, 'utf8'));
+      const result = actualFs.linkSync(src, target);
+      // This process's own pid keeps the gate "alive" for pidAlive's
+      // `process.kill(pid, 0)` probe, so the poll loop below can never
+      // recover it as abandoned — the only way through is the SECOND
+      // takeover check withdrawing the lock this call just published.
+      actualFs.writeFileSync(takeover, `${process.pid}\n`);
+      return result;
+    });
+
+    expect(() => withDestinationLocks([{ dest }], { timeoutMs: 300 })).toThrow(/timed out/);
+    // The lock this call published inside the race window must have been
+    // withdrawn — not left on disk looking like a healthy, live lock.
+    expect(actualFs.existsSync(lockPath)).toBe(false);
   });
 });
