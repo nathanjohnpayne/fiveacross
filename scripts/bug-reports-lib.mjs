@@ -158,12 +158,25 @@ function safeReport(report) {
   // make an unknown decision indistinguishable from an explicit negative (#670).
   // `null` is not available to mean "unknown" here: it already means "not
   // applicable", which is what a bug report exports.
-  for (const field of ['reporterInEvent', 'escalationEligible']) {
+  for (const field of ['reporterInEvent', 'escalationEligible', 'escalationLookupFailed']) {
     if (report[field] !== undefined && typeof report[field] !== 'boolean') {
       throw new Error(`Invalid ${field} for ${report.id}`);
     }
-    if (fields.kind === 'abuse' && report[field] === undefined) {
-      throw new Error(`Missing ${field} for ${report.id}`);
+  }
+  if (fields.kind === 'abuse') {
+    // Every abuse submission records whether the escalation lookup completed, so
+    // a missing verdict is a malformed record rather than an old one.
+    if (report.escalationLookupFailed === undefined) throw new Error(`Missing escalationLookupFailed for ${report.id}`);
+    if (report.escalationEligible === undefined) throw new Error(`Missing escalationEligible for ${report.id}`);
+    // `reporterInEvent` is present exactly when the lookup answered. Requiring
+    // it unconditionally would reject the unanswered case; allowing it in the
+    // unanswered case would mean an authorization decision was recorded when
+    // none was made (#670, Phase 4b P2).
+    if (!report.escalationLookupFailed && report.reporterInEvent === undefined) {
+      throw new Error(`Missing reporterInEvent for ${report.id}`);
+    }
+    if (report.escalationLookupFailed && report.reporterInEvent !== undefined) {
+      throw new Error(`Unexpected reporterInEvent for ${report.id}`);
     }
   }
   const metadata = {
@@ -180,7 +193,11 @@ function safeReport(report) {
     //   `reporterInEvent` — did the reporter belong to the Event they named?
     //   This is the trigger's gate input: NECESSARY for an alert, not
     //   sufficient. On its own it does not mean an admin heard anything.
-    reporterInEvent: fields.kind === 'abuse' ? report.reporterInEvent === true : null,
+    //   `null` here means one of two things depending on `kind`: not applicable
+    //   (a bug report), or NOT ANSWERED (the lookup failed) — which
+    //   `escalationLookupFailed` is what distinguishes.
+    reporterInEvent:
+      fields.kind === 'abuse' && !report.escalationLookupFailed ? report.reporterInEvent === true : null,
     //   `escalationEligible` — did the submission MEET THE CONDITIONS to be
     //   escalated? Membership AND a live Event, the same answer the reporter's
     //   receipt gave. Deliberately not a claim that an alert exists, let alone
@@ -189,6 +206,10 @@ function safeReport(report) {
     //   admin recipient. It is the closest thing the stored report can honestly
     //   assert about whether anyone was going to hear about it.
     escalationEligible: fields.kind === 'abuse' ? report.escalationEligible === true : null,
+    //   `escalationLookupFailed` — could the question even be asked? An
+    //   infrastructure failure must not read as a confirmed non-member: one is a
+    //   decision about the reporter, the other is the absence of one.
+    escalationLookupFailed: fields.kind === 'abuse' ? report.escalationLookupFailed === true : null,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,

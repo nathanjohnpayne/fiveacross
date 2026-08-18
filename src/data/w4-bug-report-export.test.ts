@@ -88,7 +88,7 @@ describe('local bug-report export', () => {
     const legacy = JSON.parse(await readFile(path.join(root, 'inbox/report_123/report.json'), 'utf8'));
     expect(legacy.kind).toBe('bug');
     await exportReports({
-      reports: [{ ...report('report_abuse'), kind: 'abuse', reporterInEvent: true, escalationEligible: true }],
+      reports: [{ ...report('report_abuse'), kind: 'abuse', reporterInEvent: true, escalationEligible: true, escalationLookupFailed: false }],
       downloadScreenshot: async () => PNG,
       root,
     });
@@ -119,9 +119,12 @@ describe('local bug-report export', () => {
     // first would have an operator assume an admin saw it (#670).
     const abuse = (id: string, over: Record<string, unknown>) => ({ ...report(id), kind: 'abuse', ...over });
     for (const doc of [
-      abuse('report_alerted', { reporterInEvent: true, escalationEligible: true }),
-      abuse('report_archived', { reporterInEvent: true, escalationEligible: false }),
-      abuse('report_stranger', { reporterInEvent: false, escalationEligible: false }),
+      abuse('report_alerted', { reporterInEvent: true, escalationEligible: true, escalationLookupFailed: false }),
+      abuse('report_archived', { reporterInEvent: true, escalationEligible: false, escalationLookupFailed: false }),
+      abuse('report_stranger', { reporterInEvent: false, escalationEligible: false, escalationLookupFailed: false }),
+      // The lookup never answered: no authorization decision was recorded, and
+      // that must not read as a confirmed non-member.
+      abuse('report_unknown', { escalationEligible: false, escalationLookupFailed: true }),
     ]) {
       await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
     }
@@ -133,9 +136,18 @@ describe('local bug-report export', () => {
     // The case that motivated this: a genuine member whose Event was not live.
     expect(await read('report_archived')).toMatchObject({ reporterInEvent: true, escalationEligible: false });
     expect(await read('report_stranger')).toMatchObject({ reporterInEvent: false, escalationEligible: false });
+    expect(await read('report_unknown')).toMatchObject({
+      reporterInEvent: null,
+      escalationEligible: false,
+      escalationLookupFailed: true,
+    });
     // `null`, not `false`, for a bug report: nothing was checked because there
     // was nothing to escalate.
-    expect(await read('report_123')).toMatchObject({ reporterInEvent: null, escalationEligible: null });
+    expect(await read('report_123')).toMatchObject({
+      reporterInEvent: null,
+      escalationEligible: null,
+      escalationLookupFailed: null,
+    });
   });
 
   it('fails closed on escalation metadata that is malformed OR incomplete', async () => {
@@ -145,10 +157,13 @@ describe('local bug-report export', () => {
     // decision indistinguishable from an explicit negative. `null` cannot stand
     // in for "unknown" here: it already means "not applicable" (a bug report).
     for (const [error, doc] of [
-      ['Invalid reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: 'yes', escalationEligible: false }],
-      ['Invalid escalationEligible', { ...report(), kind: 'abuse', reporterInEvent: true, escalationEligible: 'yes' }],
-      ['Missing reporterInEvent', { ...report(), kind: 'abuse', escalationEligible: false }],
-      ['Missing escalationEligible', { ...report(), kind: 'abuse', reporterInEvent: true }],
+      ['Invalid reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: 'yes', escalationEligible: false, escalationLookupFailed: false }],
+      ['Invalid escalationEligible', { ...report(), kind: 'abuse', reporterInEvent: true, escalationEligible: 'yes', escalationLookupFailed: false }],
+      ['Missing reporterInEvent', { ...report(), kind: 'abuse', escalationEligible: false, escalationLookupFailed: false }],
+      ['Missing escalationEligible', { ...report(), kind: 'abuse', reporterInEvent: true, escalationLookupFailed: false }],
+      ['Missing escalationLookupFailed', { ...report(), kind: 'abuse', reporterInEvent: true, escalationEligible: true }],
+      // A recorded decision alongside "we never got an answer" is incoherent.
+      ['Unexpected reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: false, escalationEligible: false, escalationLookupFailed: true }],
     ] as const) {
       const summary = await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
       expect(summary.failed[0].error).toContain(error);

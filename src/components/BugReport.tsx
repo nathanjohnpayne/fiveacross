@@ -296,11 +296,25 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     <h2 className="sheet-title" id="bug-report-title">Report received</h2>
                     <p>Thanks. Your report ID is <code>{submittedId}</code>.</p>
                     {submittedKind === 'abuse' && (
-                      <p className="bug-report-privacy">
-                        {escalationEligible
-                          ? 'We’re escalating this to the event’s admins too.'
-                          : 'We can’t escalate this to the event’s admins automatically. If someone is in danger, tell an event organizer directly.'}
-                      </p>
+                      <>
+                        <p className="bug-report-privacy">
+                          {escalationEligible
+                            ? 'Your report is marked for this event’s admins.'
+                            : 'Your report was filed, but it isn’t marked for this event’s admins.'}
+                        </p>
+                        {/* UNCONDITIONAL, and that is the point (Phase 4b P1).
+                            Even the positive branch only reflects checks made
+                            before the alert is queued — the trigger can still
+                            decline or fail, and the digest may have no
+                            resolvable recipient — so neither branch can promise
+                            an admin sees this. Somebody reporting harm must not
+                            be steered away from a faster route by a receipt
+                            that sounds like one is already underway. */}
+                        <p className="bug-report-privacy">
+                          We can’t confirm when an admin will see it. If someone may be in danger, tell an
+                          event organizer directly.
+                        </p>
+                      </>
                     )}
                     <div className="sheet-actions">
                       <button className="btn primary" type="button" onClick={close}>Done</button>

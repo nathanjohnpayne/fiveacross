@@ -173,17 +173,22 @@ describe('resolveAbuseEscalation (#670 — the abuse escalation gate)', () => {
     expect(ESCALATION_LOOKUP_ATTEMPTS).toBeGreaterThan(1);
   });
 
-  it('FAILS CLOSED on both halves when the lookup itself breaks', async () => {
+  it('answers UNKNOWN, not "no", when the lookup cannot be completed', async () => {
     // The wrong directions here are mailing an Event's admins on the say-so of
     // somebody with no relationship to it, and claiming a delivery that did not
     // happen — so an unreadable answer is neither membership nor activeness.
-    // Only after every attempt has failed. Failing closed is still the right
-    // direction — failing open would make a Firestore outage a window for
-    // routing text into another Event's digest — and the retry above is what
-    // makes this the rare case rather than the routine one.
+    // `null`, not `false`. Recording a backend failure as a confirmed non-member
+    // made an infrastructure problem indistinguishable from an authorization
+    // decision, and unrecoverable — nothing downstream could tell the question
+    // had never been answered (Phase 4b P2). The caller writes no
+    // `reporterInEvent` at all in this case, so the trigger still fails closed
+    // without anything false being recorded.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const db = lookup({ 'events/med-2026': { ...ACTIVE, admins: ['u1'] } }, ['events/med-2026']);
-    expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: false, eventActive: false });
+    expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: null, eventActive: null });
+    // A confirmed non-member is a DIFFERENT answer, and stays `false`.
+    const known = lookup({ 'events/med-2026': ACTIVE });
+    expect(await resolveAbuseEscalation(known, 'med-2026', 'u1')).toEqual({ member: false, eventActive: true });
     spy.mockRestore();
   });
 });

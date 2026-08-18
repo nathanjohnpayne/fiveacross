@@ -21,11 +21,16 @@ export const ESCALATION_LOOKUP_ATTEMPTS = 3;
  *  membership is stored for the trigger to gate on, while activeness is only a
  *  prediction the receipt uses — the trigger re-checks it at enqueue time. */
 export interface AbuseEscalation {
-  /** Does the reporter belong to the Event they named? Persisted as
-   *  `reporterInEvent`, which `abuseAlertsForWrite` requires to be `true`. */
-  member: boolean;
-  /** Is the Event one the digest sweep will actually visit? */
-  eventActive: boolean;
+  /** Does the reporter belong to the Event they named? `null` when the lookup
+   *  could not be completed — NOT `false`, because "we could not check" and "we
+   *  checked and they do not" are different facts and only one of them is an
+   *  authorization decision (Phase 4b P2). Persisted as `reporterInEvent` only
+   *  when it is a real answer; `abuseAlertsForWrite` requires `true`, so an
+   *  absent field still fails closed. */
+  member: boolean | null;
+  /** Is the Event one the digest sweep will actually visit? `null` when the
+   *  lookup could not be completed. */
+  eventActive: boolean | null;
 }
 
 /**
@@ -78,24 +83,26 @@ export async function resolveAbuseEscalation(
       lastError = error;
     }
   }
-  // Every attempt failed. This is the ONE place the design cannot be honest, and
-  // saying so is better than pretending otherwise (Phase 4b P2): a backend
-  // failure is recorded as `reporterInEvent: false`, which the trigger cannot
-  // distinguish from a confirmed non-member, so the escalation is suppressed for
-  // good even though the report itself is stored.
+  // Every attempt failed, so the honest answer is "unknown" — NOT "no".
   //
-  // Failing closed is still the right direction — failing open would let a
-  // Firestore outage become a window for routing text into another Event's
-  // digest — and the retries above are what make the case rare rather than
-  // routine. The remaining exposure is recorded in the export, where
-  // `reporterInEvent: false` alongside `escalationEligible: false` is what an
-  // operator sees, and in `specs/w4-bug-report-inbox.md`.
+  // Recording a backend failure as `reporterInEvent: false` made an
+  // infrastructure problem indistinguishable from a confirmed non-member, which
+  // is both wrong and unrecoverable: nothing downstream could tell that the
+  // question had never actually been answered (Phase 4b P2). Back-to-back
+  // retries help with a blip and do nothing during an outage.
+  //
+  // `null` propagates instead. The caller persists `escalationLookupFailed: true`
+  // and writes NO `reporterInEvent` at all, so no authorization decision is
+  // recorded, the trigger still fails closed (it requires a literal `true`), and
+  // the export can show an operator the difference. Failing closed remains the
+  // right direction — failing open would make an outage a window for routing
+  // text into another Event's digest.
   console.error(
-    `submitBugReport: escalation check failed after ${Math.max(1, attempts)} attempt(s); failing closed`,
+    `submitBugReport: escalation check failed after ${Math.max(1, attempts)} attempt(s); recording as unknown`,
     eventId,
     lastError,
   );
-  return { member: false, eventActive: false };
+  return { member: null, eventActive: null };
 }
 
 export async function handleSubmitBugReport(
@@ -142,6 +149,10 @@ export async function handleSubmitBugReport(
     report.kind === 'abuse'
       ? await resolveAbuseEscalation(db, report.eventId, uid)
       : { member: false, eventActive: false };
+  // `null` on either half means the question was never answered, which is a
+  // different thing from answering it "no".
+  const lookupFailed = escalation.member === null || escalation.eventActive === null;
+  const escalationEligible = escalation.member === true && escalation.eventActive === true;
 
   const reportRef = db.collection('bugReports').doc();
   const storagePath = report.screenshot
@@ -189,8 +200,13 @@ export async function handleSubmitBugReport(
       // alert exists, and the digest owns whether anyone was told.
       ...(report.kind === 'abuse'
         ? {
-            reporterInEvent: escalation.member,
-            escalationEligible: escalation.member && escalation.eventActive,
+            // `reporterInEvent` is written ONLY when it is a real answer. An
+            // unanswered lookup records no authorization decision at all, and
+            // says so, rather than leaving a `false` nothing can tell apart from
+            // a confirmed non-member.
+            ...(lookupFailed ? {} : { reporterInEvent: escalation.member }),
+            escalationLookupFailed: lookupFailed,
+            escalationEligible,
           }
         : {}),
       description: report.description,
@@ -227,5 +243,5 @@ export async function handleSubmitBugReport(
   //
   // It discloses nothing a caller could not already establish by observation,
   // and staying silent is worse for exactly the person this exists to protect.
-  return { reportId: reportRef.id, escalationEligible: escalation.member && escalation.eventActive };
+  return { reportId: reportRef.id, escalationEligible };
 }
