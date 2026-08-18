@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode } from 'react';
+import type { HTMLAttributes } from 'react';
 import type { ThemeId } from '../types';
 
 /**
@@ -33,7 +33,6 @@ export default function ThemeIsland({
   ...rest
 }: {
   theme: ThemeId;
-  children?: ReactNode;
 } & HTMLAttributes<HTMLDivElement>) {
   return (
     <div data-theme={theme} {...rest}>
