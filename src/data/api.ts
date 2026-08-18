@@ -107,6 +107,50 @@ export function resolveDisplayName(
   return saved ?? authFallback ?? 'Anonymous';
 }
 
+/**
+ * "Suggested by [player]" attribution (#559, Prompt detail — ProofSheet.tsx):
+ * a ONE-SHOT resolution of a Community Prompt submitter's uid into a display
+ * name, fetched only when a Prompt-detail sheet actually opens on a community
+ * Square — never a live subscription. Mirrors `resolveDisplayName`'s own
+ * saved-name-then-fallback rule, with no auth-state fallback to offer (this
+ * runs for ANOTHER player's uid, never the viewer's own), so a player row
+ * with no saved name — or missing/unreadable entirely — reads as 'Anonymous',
+ * the same unresolved-submission sentinel `markerDisplayName` uses elsewhere.
+ * Never throws: a failed read is presentational-only here, unlike `addItem`'s
+ * fail-closed read (losing an attribution costs nothing the way losing a
+ * Day-target would).
+ */
+export async function fetchDisplayName(uid: string): Promise<string> {
+  try {
+    const snap = await getDoc(rawPlayer(uid));
+    return resolveDisplayName(snap.exists() ? snap.data() : undefined, undefined);
+  } catch {
+    return 'Anonymous';
+  }
+}
+
+/**
+ * `community_prompt_dealt` (#559): fired once a freshly-dealt Board is
+ * OBSERVED to carry one or more Community Prompt Squares — the client-side
+ * "a suggestion made it onto someone's card" signal. Aggregate, not
+ * per-Square: one event per deal with a `count`, mirroring
+ * `most_loved_photo_frozen`'s aggregate-not-per-item shape rather than
+ * `echo_mark`'s per-transition one, because there is no durable-outbox/dedupe
+ * need here — every call site below fires exactly once, right after its own
+ * transaction commits a genuinely NEW set of cells (never from a retry that
+ * lost, never from re-reading an existing board). No Prompt text, no itemId —
+ * counts and the Day only. Same dynamic-import posture as `mark_rejected`
+ * above: keeps this Firestore-only module free of an eager analytics import,
+ * and never throws out of a deal's success path.
+ */
+function trackCommunityPromptDeal(cells: readonly Cell[], dayIndex: number | undefined): void {
+  const count = cells.filter((c) => c.communityPrompt === true).length;
+  if (count === 0) return;
+  void import('../analytics')
+    .then(({ track }) => track('community_prompt_dealt', { dayIndex, count }))
+    .catch(() => {});
+}
+
 /** Deterministic 32-bit seed from a uid so a player's board is stable. */
 export function seedFromUid(uid: string): number {
   let h = 2166136261;
@@ -520,7 +564,11 @@ export async function joinAndDeal(u: User): Promise<boolean> {
     // malformed item doc missing the field, or carrying a truthy non-boolean
     // like the string 'false', must read as tame rather than skew the
     // stratified deal.
-    .map((it) => ({ id: it.id, text: it.text, spicy: it.spicy === true }));
+    // Carry targetDayIndex + createdBy through so `dealBoard` can stamp the
+    // dealt Cell's `communityPrompt`/`suggestedBy` affordance (#559) — this
+    // is the single-Board (non-daily) deal path, reading the SAME already-
+    // fetched `it` this filter chain started from.
+    .map((it) => ({ id: it.id, text: it.text, spicy: it.spicy === true, targetDayIndex: it.targetDayIndex, createdBy: it.createdBy }));
 
   // The target spicy share for stratified composition (w1-seed-and-composition),
   // read defensively from the same already-fetched event doc as `threshold` above
@@ -541,7 +589,7 @@ export async function joinAndDeal(u: User): Promise<boolean> {
   // no `joinedAt` re-stamp, no duplicate `join_event`). The pool/profile reads
   // stay outside: a query cannot run in a transaction, and the deal is
   // deterministic from the uid, so a retry recomputes identical cells.
-  return await runTransaction(db, async (tx) => {
+  const dealtNew = await runTransaction(db, async (tx) => {
     const latestBoard = await tx.get(rawBoard(u.uid));
     if (latestBoard.exists()) return false;
     const now = Date.now();
@@ -564,6 +612,11 @@ export async function joinAndDeal(u: User): Promise<boolean> {
     );
     return true; // dealt a NEW board — an actual join
   });
+  // AFTER the transaction settles, never inside it — a transaction retries on
+  // contention, and firing here (rather than from the loser's abandoned
+  // attempts) fires exactly once per genuinely committed deal (#559).
+  if (dealtNew) trackCommunityPromptDeal(cells, 0);
+  return dealtNew;
 }
 
 /**
@@ -635,6 +688,10 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       // (#565; Codex P1 on PR #648) — and `dealBoard` normalizes again at
       // comparison time as defense in depth. Absent → 'main'.
       pool: normalizePool(data.pool),
+      // Community Prompt affordance + attribution (#559) — see the sibling
+      // deal path above for the same carry-through rationale.
+      targetDayIndex: data.targetDayIndex,
+      createdBy: data.createdBy,
     }));
 
   // No repeats across the cruise: exclude every Prompt already on ANY OTHER Day
@@ -841,6 +898,9 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       void pinDayFirstBingo(dayIndex, { uid: u.uid, displayName: echo.pinAs, photoURL: null }, echo.at);
     }
   }
+  // Independent of the echo branch above (#559) — a card dealing zero echoes
+  // can still carry Community Prompt Squares.
+  if (dealt) trackCommunityPromptDeal(cells, dayIndex);
   return dealt;
 }
 
@@ -983,6 +1043,11 @@ export async function reshuffleBoard(params: {
       // the same frozen snapshot for free (specs/easy-mix.md). RAW hydration, so
       // normalize the legacy persisted spelling here too (#565).
       pool: normalizePool(data.pool),
+      // Community Prompt affordance + attribution (#559) — same carry-through
+      // as the two deal paths above; a reshuffle re-deals from the SAME
+      // frozen snapshot, so a Community Prompt still reads as one afterward.
+      targetDayIndex: data.targetDayIndex,
+      createdBy: data.createdBy,
     }));
 
   // The peer cards whose Prompts the replacement must avoid. Their refs are built
@@ -1022,10 +1087,15 @@ export async function reshuffleBoard(params: {
     pinAs: string | null;
     at: number;
   } | null = null;
+  // Same per-attempt capture as `reshuffleEcho` above, for `community_prompt_dealt`
+  // (#559): the dealt Cells live inside the transaction closure, so the winning
+  // attempt's own draw has to escape it explicitly to be counted after commit.
+  let dealtCells: Cell[] | null = null;
   const spend = await runTransaction(db, async (tx) => {
     // Firestore can invoke this callback more than once. Do not let a discarded
     // attempt's echo transition escape if a later attempt does not commit.
     reshuffleEcho = null;
+    dealtCells = null;
     // Every read first (Firestore's transaction contract), and every one of them
     // re-runs on a retry — which is the point: a retry must re-decide from
     // committed state, never re-fire a verdict formed against a snapshot that has
@@ -1095,6 +1165,7 @@ export async function reshuffleBoard(params: {
       stratify,
       easyMixRatio: boardEasyMixRatio,
     });
+    dealtCells = cells;
 
     // Echo Marks (specs/echo-marks.md § Reshuffle): the replacement card
     // re-echoes from the SAME peer reads the exclusion set was built from —
@@ -1282,6 +1353,9 @@ export async function reshuffleBoard(params: {
       void pinDayFirstBingo(dayIndex, { uid, displayName: echo.pinAs, photoURL: null }, echo.at);
     }
   }
+  // Independent of the echo branch (#559) — a reshuffle deals a genuinely NEW
+  // card, so it gets its own `community_prompt_dealt` count even with no echo.
+  if (spend > 0 && dealtCells) trackCommunityPromptDeal(dealtCells, dayIndex);
   return spend;
 }
 
@@ -2626,6 +2700,15 @@ export function itemRateLimitRemainingMs(key: string, now: number = Date.now()):
   return remaining > 0 ? remaining : 0;
 }
 
+/** `addItem`'s result (#559): the new item's id, plus the target it was
+ *  ACTUALLY committed with — absent when the write resolved untargeted
+ *  (no schedule, or no Day left to name), exactly mirroring what
+ *  `ItemDoc.targetDayIndex` itself holds. */
+export interface AddItemResult {
+  id: string;
+  targetDayIndex?: number;
+}
+
 /**
  * Add a prompt to the community pool.
  *
@@ -2651,9 +2734,20 @@ export async function addItem(
   // one, NO target is written at all and the Prompt keeps the untargeted every-Day
   // behaviour that predates this feature — see `targetDayIndex` in ItemDoc.
   targetDayIndex?: number,
-): Promise<void> {
+  // Returns the new item's id and the target it was ACTUALLY committed with
+  // (or `undefined` for the blank-text no-op below) — never a caller-side
+  // recomputation. `ItemPool.tsx` uses the id to track its own submission for
+  // a later state check (#559, `trackSuggestion` — a rejected row is
+  // unreadable by its own submitter, see communityPrompts.ts's
+  // `submitterStatus` doc comment) and the target for its
+  // `prompt_suggestion_submitted` analytics payload: recomputing the default
+  // target client-side, off a schedule snapshot that can be stale or reload
+  // mid-await, could report a Day that disagrees with what this write
+  // actually persisted (Codex P2, PR #845) — this return is the single
+  // source of truth for both.
+): Promise<AddItemResult | undefined> {
   const t = text.trim();
-  if (!t) return;
+  if (!t) return undefined;
   // An OMITTED argument means "resolve the default"; an argument that is present
   // but malformed is a caller bug, and it must not be quietly dropped. Dropping
   // it would write an UNTARGETED row, which means every future main Day — the
@@ -2669,7 +2763,7 @@ export async function addItem(
     );
   }
   const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex());
-  await addDoc(rawItems(), {
+  const ref = await addDoc(rawItems(), {
     text: t.slice(0, 80),
     createdBy: uid,
     createdAt: Date.now(),
@@ -2692,6 +2786,7 @@ export async function addItem(
     // null would mint a third state the snapshot filter would have to know about.
     ...(isUsableTarget(target) ? { targetDayIndex: target } : {}),
   });
+  return { id: ref.id, ...(isUsableTarget(target) ? { targetDayIndex: target } : {}) };
 }
 
 /**

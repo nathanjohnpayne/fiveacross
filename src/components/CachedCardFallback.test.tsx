@@ -91,6 +91,32 @@ describe('CachedCardFallback', () => {
     expect(pending[0].textContent).toContain('Prompt 3');
   });
 
+  // #559, Codex P2, PR #845 round 6: the saved snapshot carries
+  // `Cell.communityPrompt` verbatim (it's part of the shape
+  // `saveCardSnapshot` persists), so the durable offline/flaky-Wi-Fi view
+  // must not be the one place the "new from the group" ring disappears.
+  it('carries the community affordance from the saved snapshot', () => {
+    const cells = Array.from({ length: 25 }, (_, i) =>
+      cell(i, i === 4 ? { communityPrompt: true, suggestedBy: 'u-suggester' } : {}),
+    );
+    const { container } = render(
+      <CachedCardFallback snapshot={snapshot({ cells })} onRetry={() => {}} retrying={false} />,
+    );
+    const community = container.querySelectorAll('.cell.community');
+    expect(community).toHaveLength(1);
+    expect(community[0].textContent).toContain('Prompt 4');
+  });
+
+  it('never marks the free centre as a community Square even if the snapshot somehow carries the flag there', () => {
+    const cells = Array.from({ length: 25 }, (_, i) =>
+      cell(i, i === 12 ? { communityPrompt: true } : {}),
+    );
+    const { container } = render(
+      <CachedCardFallback snapshot={snapshot({ cells })} onRetry={() => {}} retrying={false} />,
+    );
+    expect(container.querySelector('.cell.free.community')).toBeNull();
+  });
+
   it('renders a legacy single board (no Day header) when day is null', () => {
     const { container } = render(
       <CachedCardFallback snapshot={snapshot({ day: null })} onRetry={() => {}} retrying={false} />,

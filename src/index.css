@@ -524,6 +524,30 @@ a {
   opacity: 0.7;
   border-style: dashed;
 }
+/* "New from the group" (#559): a Community Prompt Square (Cell.communityPrompt,
+   stamped at deal time). A tile-level accent ring rather than a corner glyph —
+   every corner is already claimed (✓ top-right, echo/Doubt top-left, proof ＋
+   bottom-left, tally bottom-right) — so this composes with any of them instead
+   of contending for the same pixel. Ring, not fill: must stay legible under
+   every Theme's own gradient once marked. */
+.cell.community {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* A Community Prompt Square that is ALSO marked (Codex P2, PR #845 round 10):
+   `.cell.marked` (above) and `.cell.community` (immediately above this rule)
+   share the same (0,2,0) specificity, so without this combined selector the
+   LATER-declared rule — `.cell.community`, since it follows `.cell.marked` in
+   this file — would win box-shadow OUTRIGHT and silently drop `.cell.marked`'s
+   own gradient glow the instant a Community Prompt gets ticked, the exact
+   same composition failure `.cell.win.community` (reduced-motion block, below)
+   already exists to prevent for the winning-line state. `box-shadow` layers
+   comma-separated values, so this keeps both: the community inset ring, plus
+   marked's own outer glow. */
+.cell.marked.community {
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    0 0 14px var(--shadow);
+}
 /* An Echo Mark (specs/echo-marks.md): a Square auto-marked because the Player's
    confirmed Mark on the SAME Prompt carried over from another Day Card. The
    subtle ⟲ glyph (top-left — the ✓ owns top-right, proof ＋ bottom-left, tally
@@ -2332,6 +2356,33 @@ textarea.input {
   border-color: var(--danger, #ff6b7a);
   color: var(--danger, #ff6b7a);
 }
+/* A player's OWN not-selected Community Prompt (#559, ItemPool.tsx's
+   submitter-state pills) — de-emphasized rather than accent/danger-toned:
+   this is a routine outcome, not a moderation alert. */
+.pill-muted {
+  color: var(--dim);
+}
+/* The "put it on tomorrow's card" entry point (#559, TomorrowsCardInvite.tsx),
+   mounted on both the Card and the Feed. Scoped, minimal — a single quiet
+   row, not a new chrome pattern. */
+.prompt-invite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.prompt-invite-copy {
+  font-size: 12px;
+}
+.prompt-invite-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+}
 
 /* ---------- admin console chrome (specs/admin-console-ia.md) ----------
    Every admin surface — hub and details — shares one AdminSheet: a sticky
@@ -3948,8 +3999,23 @@ body:has(.sheet-backdrop) .guidelines-trigger {
    Mark that RISES between snapshots — a returning Player's standing marks
    never re-stamp) and cleared on animationend. Declared after the deal rule
    so a mid-deal Mark prefers the stamp. */
+/* `--cell-stamp-shadow` (Codex P2, PR #845 round 10): the 45% keyframe below
+   sets `box-shadow` directly, which — unlike two competing static rules —
+   REPLACES whatever shadow the element already had for the animation's
+   duration, community ring included, regardless of selector specificity or
+   source order. A custom property lets the SAME keyframe read a different
+   value per element: the plain default here, and `.cell.community.just-marked`
+   below overrides it to layer the inset ring back in, so a Community Prompt's
+   "new from the group" ring survives its own stamp animation instead of
+   flashing out for the ~200ms the punch-in glow is visible. */
 .cell.just-marked {
+  --cell-stamp-shadow: 0 0 26px var(--shadow);
   animation: cell-stamp 0.45s var(--ease-pop);
+}
+.cell.community.just-marked {
+  --cell-stamp-shadow:
+    inset 0 0 0 2px var(--accent),
+    0 0 26px var(--shadow);
 }
 @keyframes cell-stamp {
   0% {
@@ -3958,7 +4024,7 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   45% {
     transform: scale(1.12);
     filter: brightness(1.4) saturate(1.2);
-    box-shadow: 0 0 26px var(--shadow);
+    box-shadow: var(--cell-stamp-shadow);
   }
   100% {
     transform: scale(1);
@@ -4884,6 +4950,21 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   }
   .cell.win {
     box-shadow:
+      0 0 0 2px var(--accent),
+      0 0 14px var(--shadow);
+  }
+  /* A Community Prompt Square (#559) that is ALSO part of a winning line
+     (Codex P2, PR #845 round 6): `.cell.win`'s reduced-motion box-shadow
+     above has the SAME specificity as `.cell.community`'s (index.css, both
+     0,2,0) and comes later in the cascade, so on a normal render the win
+     ring would silently replace the community ring instead of composing
+     with it — the one state where the "new from the group" affordance is
+     specified to survive alongside every other Square state. `box-shadow`
+     takes multiple comma-separated layers, so this combined selector keeps
+     all three: the community inset ring, plus win's own outer ring + glow. */
+  .cell.win.community {
+    box-shadow:
+      inset 0 0 0 2px var(--accent),
       0 0 0 2px var(--accent),
       0 0 14px var(--shadow);
   }

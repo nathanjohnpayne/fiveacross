@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Camera, Mic, PenLine, Images, X } from 'lucide-react';
 import { attachProof, type AttachProofResult } from '../data/proofs';
+import { fetchDisplayName } from '../data/api';
 import { track } from '../analytics';
 import { safeMediaUrl } from './safeMediaUrl';
 import type { Cell, ClaimMode, ProofType } from '../types';
@@ -136,6 +137,26 @@ export default function ProofSheet(props: Props) {
   useEffect(() => {
     onCloseRef.current = onClose;
   });
+
+  // "Suggested by [player]" attribution (#559): a ONE-SHOT resolution of the
+  // Community Prompt submitter's display name, fetched only while THIS sheet
+  // is open on a community Square — never a live subscription (see
+  // `fetchDisplayName`'s own doc comment). Lives in Prompt detail, not on the
+  // card tile, per the acceptance list's "not crowding the card tile".
+  const [suggestedByName, setSuggestedByName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!cell.suggestedBy) {
+      setSuggestedByName(null);
+      return;
+    }
+    let cancelled = false;
+    fetchDisplayName(cell.suggestedBy).then((name) => {
+      if (!cancelled) setSuggestedByName(name);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cell.suggestedBy]);
 
   // Modal focus management, the same contract every other sheet carries
   // (ProfileEditor, AcceptableUse, More, FeedWhoListSheet, AdminSheet): move
@@ -368,6 +389,17 @@ export default function ProofSheet(props: Props) {
             <X aria-hidden="true" />
           </button>
         </div>
+        {/* "Suggested by [player]" (#559): Community Prompt attribution lives
+            HERE, in Prompt detail — never on the card tile, which stays
+            reserved for the "new from the group" affordance alone (acceptance
+            list: "not crowding the card tile"). Renders only once the
+            one-shot name resolution above settles, so a fresh sheet open
+            never flashes a placeholder name. */}
+        {cell.communityPrompt && suggestedByName && (
+          <p className="muted" style={{ fontSize: 12, margin: '0 0 8px' }}>
+            Suggested by {suggestedByName}
+          </p>
+        )}
         {typeof tallyCount === 'number' && heatOthers > 0 && (
           // The social heat line (ADR 0002): reuses the Prompt's already-subscribed
           // Tally count — no new read, no new doc — so a Player sees the pack has

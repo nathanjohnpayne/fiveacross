@@ -499,6 +499,23 @@ export interface Cell {
   // A Player can explicitly unmark an Echo on this card. Keep that choice on
   // the cell so open-time reconciliation does not add the same Echo back.
   echoOptOut?: boolean;
+  // This Square's Prompt is a Community Prompt (#559 on #557's targeting
+  // model): the picked ItemDoc carried a USABLE `targetDayIndex` at deal
+  // time. Denormalized onto the Cell — same idiom as the `echo*` fields
+  // above — so Board can paint the "new from the group" affordance on all 25
+  // Squares without re-enabling a live item-pool subscription once a Board
+  // is dealt (`useItems(!board)` stays disabled post-deal; see Board.tsx).
+  // Computed once, at deal time, by `dealBoard` (src/game/logic.ts); never
+  // recomputed later, so a Prompt that was later retained/re-approved does
+  // not retroactively relabel a card already dealt from it.
+  communityPrompt?: boolean;
+  // The Community Prompt's submitter uid (#559), denormalized alongside
+  // `communityPrompt` for the same reason. Prompt-detail attribution
+  // ("Suggested by [player]", ProofSheet.tsx) resolves this uid's display
+  // name with a single one-shot read when the sheet opens — never a live
+  // subscription. Absent on every non-community Square (organiser/seed
+  // content has no submitter to attribute).
+  suggestedBy?: string;
 }
 
 export interface BoardDoc {

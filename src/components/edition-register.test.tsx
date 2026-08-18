@@ -29,6 +29,10 @@ vi.mock('../firebase', () => ({
 vi.mock('../auth/AuthContext', () => ({
   useAuth: () => ({ user: { uid: 'u1' } }),
 }));
+// #559: ReviewQueue now imports `track`, reaching `../analytics` — mocked
+// directly so the real module's own `../firebase` (analyticsReady)
+// dependency never has to be satisfied here.
+vi.mock('../analytics', () => ({ track: vi.fn() }));
 
 afterEach(() => {
   cleanup();

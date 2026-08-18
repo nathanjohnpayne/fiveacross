@@ -1303,6 +1303,11 @@ describe('Locked-Day preview', () => {
     expect(document.querySelector('.daybar-name')?.textContent).toContain('Day 1 · Get Sporty');
     // get-sporty's ThemeMeta description (src/theme/themes.ts), verbatim.
     expect(screen.getByText(/locker-room fantasy/i)).toBeInTheDocument();
+    // "Put it on tomorrow's card" (#559, Codex P2 + CodeRabbit Major on PR
+    // #845): this Day is LOCKED but still targetable, and the entry point
+    // used to live only in the dealt-card return — invisible on exactly this
+    // very common state.
+    expect(screen.getByText(/put it on tomorrow.s card/i)).toBeInTheDocument();
     expect(screen.getByText('A per-day free space override')).toBeInTheDocument();
 
     // specs/d15-icons-lucide.md: the unlock badge shows a Lucide `Lock`
