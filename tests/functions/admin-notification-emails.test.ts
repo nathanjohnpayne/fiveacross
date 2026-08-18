@@ -1396,32 +1396,30 @@ describe('the frozen outbound request', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
   });
 
-  it('bounds the frozen request by the rows it covers, so it cannot be orphaned by their TTL', async () => {
+  it('gives the frozen request its own week-long expiry, clear of the idempotency window', async () => {
     // The frozen document holds the fully rendered email — every Prompt's words
-    // and every abuse description in the batch. Repeated delivery failures keep
-    // it alive indefinitely, and once the pending TTL reaps the claimed rows no
-    // sweep can find the batch to replay, release or delete it: an orphaned copy
-    // of the text with nothing pointing at it (Phase 4b P1).
+    // and every abuse description in the batch — and persists for as long as
+    // delivery keeps failing. Without an expiry it outlives its own rows once
+    // their TTL reaps them, with nothing left able to replay, release or delete
+    // it (Phase 4b P1).
+    //
+    // A FIXED week rather than a deadline inherited from the rows: inheriting
+    // would let a long-pending row hand the freeze a deadline minutes away, and
+    // a freeze reaped while its claimed row survives sends the next sweep down
+    // the missing-freeze rebuild path INSIDE Resend's 24h idempotency window.
     const failing = vi.fn(async () => false);
-    // A clock far enough along that the ROW's own deadline is the nearer of the
-    // two bounds, which is the case the orphaning depends on.
     const LATE = 40 * 24 * 60 * 60 * 1000;
-    const row = alert('a1', { createdAt: 1_000 });
-    const db = build([row]);
-    const result = await sendAdminDigestForEvent(db, 'med-2026', {
-      ...deps(failing),
-      now: () => LATE,
-    });
+    const db = build([alert('a1', { createdAt: 1_000 })]);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(failing), now: () => LATE });
     // The send failed, so the batch stays frozen — exactly the state that lasts.
     expect(result.reason).toBe('send-failed');
     const batch = db.rows('events/med-2026/adminAlertBatches')[0];
     expect(batch).toBeDefined();
+    // A Date, not epoch millis, or Firestore's TTL service ignores it entirely.
     expect(batch.expiresAt).toBeInstanceOf(Date);
-    // Never later than the earliest row's own deadline...
-    expect((batch.expiresAt as Date).getTime()).toBe(1_000 + PENDING_TTL_MS);
-    // ...and never more than a week out regardless, since a batch still failing
-    // after that long is not going to start succeeding.
-    expect((batch.expiresAt as Date).getTime()).toBeLessThanOrEqual(LATE + TOMBSTONE_TTL_MS);
+    expect((batch.expiresAt as Date).getTime()).toBe(LATE + TOMBSTONE_TTL_MS);
+    // Unconditionally past the 24h idempotency window, however old the row was.
+    expect(TOMBSTONE_TTL_MS).toBeGreaterThan(24 * 60 * 60 * 1000);
   });
 
   it('ABANDONS a frozen batch when the authorized recipients have changed', async () => {

@@ -613,8 +613,10 @@ const batchPath = (eventId: string, batchId: string) => `events/${eventId}/admin
 
 /** The frozen request's own retention bound. It holds the fully rendered email —
  *  the densest copy of user content in the system — so it is written with an
- *  `expiresAt` that can never outlast the alerts it was rendered from; see the
- *  freeze site in `sendAdminDigestForEvent` for why an unbounded one orphans. */
+ *  `expiresAt` a week out, which is unconditionally clear of Resend's 24-hour
+ *  idempotency window; see the freeze site in `sendAdminDigestForEvent` for why
+ *  an unbounded deadline orphans and an inherited one can duplicate a send. It
+ *  needs its own collection-group TTL policy (docs/app/phase-1-deploy.md). */
 
 /** Read back a frozen request, or `null` when there is none / it is unusable.
  *  A partial document is treated as absent: re-rendering is recoverable, while
@@ -1153,26 +1155,35 @@ export async function sendAdminDigestForEvent(
   // With `create` exactly one render wins; the loser discards its own bytes and
   // replays the winner's, so one batch id can only ever name one request.
   //
-  // IT CARRIES ITS OWN `expiresAt`, BOUNDED BY THE ROWS IT COVERS. This document
-  // holds the FULLY RENDERED email — every pending Prompt's words and every
-  // abuse description in the batch — so it is the single densest copy of user
-  // content in the system, and it must not be able to outlive the alerts it was
-  // built from. Without a bound it could: repeated delivery failures keep a
-  // frozen batch alive indefinitely, the pending TTL then reaps the claimed
-  // rows, and no later sweep can discover the batch to replay, release or delete
+  // IT CARRIES ITS OWN `expiresAt`. This document holds the FULLY RENDERED email
+  // — every pending Prompt's words and every abuse description in the batch — so
+  // it is the single densest copy of user content in the system, and until this
+  // existed it had no expiry at all: repeated delivery failures keep a frozen
+  // batch alive indefinitely, the pending TTL reaps the claimed rows underneath
+  // it, and no later sweep can discover the batch to replay, release or delete
   // it — an orphaned copy of the text with nothing left pointing at it
   // (Phase 4b P1).
   //
-  // The deadline is the EARLIEST row's own expiry, clamped to a week, so the
-  // batch always dies with (or before) its rows. Expiring early is safe and
-  // already handled: claimed rows with no frozen document take the documented
-  // rebuild path, and by then Resend's 24h idempotency window has long closed,
-  // so the rebuilt send cannot 409 against the key this batch used.
-  const createdStamps = page
-    .map((doc) => doc.data()?.createdAt)
-    .filter((value): value is number => typeof value === 'number' && value > 0);
-  const rowsExpireAt = (createdStamps.length > 0 ? Math.min(...createdStamps) : now) + PENDING_TTL_MS;
-  const batchExpiresAt = new Date(Math.min(rowsExpireAt, now + TOMBSTONE_TTL_MS));
+  // A FIXED WINDOW FROM THE FREEZE, not a deadline inherited from the rows, and
+  // the reason is a hazard the inherited version created (Phase 4b P1). A row
+  // that sat pending for most of its own lifetime and is finally processed near
+  // the end of it would hand the freeze a deadline minutes away — or already
+  // past. TTL could then remove the frozen bytes while the claimed row was still
+  // there, sending the next sweep down the missing-freeze rebuild path INSIDE
+  // Resend's 24-hour idempotency window: a 409 against the live key, or a
+  // duplicate once it closed. A week is unconditionally clear of that window.
+  //
+  // The trade, stated rather than hidden: the batch can now outlive its rows by
+  // up to a week if their TTL fires first. That is a BOUNDED, self-collecting
+  // window rather than the indefinite orphan the earlier version had — the
+  // document reaps itself on its own deadline whether or not anything ever finds
+  // it again. Bounded-and-safe beats unbounded-or-duplicating.
+  //
+  // This needs its OWN TTL policy. Firestore TTL is scoped to a collection
+  // group, so the `adminAlerts` policy does not reach `adminAlertBatches`;
+  // without the second policy this field is inert and the rendered email
+  // persists (docs/app/phase-1-deploy.md § 1a).
+  const batchExpiresAt = new Date(now + TOMBSTONE_TTL_MS);
   let outbound = payload;
   try {
     await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now, expiresAt: batchExpiresAt });

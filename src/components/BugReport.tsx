@@ -291,8 +291,8 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     {submittedKind === 'abuse' && (
                       <p className="bug-report-privacy">
                         {escalationEligible
-                          ? 'This will be raised with this event’s admins.'
-                          : 'This won’t be raised with the event’s admins automatically, but your report was filed and the team will see it.'}
+                          ? 'We’re escalating this to the event’s admins too.'
+                          : 'We can’t escalate this to the event’s admins automatically. If someone is in danger, tell an event organizer directly.'}
                       </p>
                     )}
                     <div className="sheet-actions">

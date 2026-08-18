@@ -142,19 +142,19 @@ describe('W4 bug-report inbox', () => {
     submitSpy.mockResolvedValue({ reportId: 'report-alerted', escalationEligible: true });
     renderFlow();
     await fileAbuse();
-    expect(await screen.findByText('This will be raised with this event’s admins.')).toBeInTheDocument();
+    expect(await screen.findByText('We’re escalating this to the event’s admins too.')).toBeInTheDocument();
 
     submitSpy.mockResolvedValue({ reportId: 'report-quiet', escalationEligible: false });
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await fileAbuse();
-    expect(await screen.findByText(/won’t be raised with the event’s admins automatically/)).toBeInTheDocument();
+    expect(await screen.findByText(/can’t escalate this to the event’s admins automatically/)).toBeInTheDocument();
 
     // An older deployed callable returns only `reportId`. That is "no claim
     // made", not a success — it must degrade to the honest half.
     submitSpy.mockResolvedValue({ reportId: 'report-legacy' });
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await fileAbuse();
-    expect(await screen.findByText(/won’t be raised with the event’s admins automatically/)).toBeInTheDocument();
+    expect(await screen.findByText(/can’t escalate this to the event’s admins automatically/)).toBeInTheDocument();
   });
 
   it('freezes the classification while a submit is in flight, so the receipt cannot describe a report nobody filed (#670)', async () => {
@@ -179,7 +179,7 @@ describe('W4 bug-report inbox', () => {
     // And even if it did, the receipt reports the kind that was SENT.
     fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }));
     resolveSubmit({ reportId: 'report-abuse', escalationEligible: true });
-    expect(await screen.findByText('This will be raised with this event’s admins.')).toBeInTheDocument();
+    expect(await screen.findByText('We’re escalating this to the event’s admins too.')).toBeInTheDocument();
     expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
   });
 
