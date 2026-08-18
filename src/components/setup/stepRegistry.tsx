@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { EventDraft, SetupStep } from '../../types';
 import PlaceholderStep from './PlaceholderStep';
+import OccasionStep from './OccasionStep';
 import StepSquares from './StepSquares';
 import { SETUP_STEP_ORDER, STEP_LABELS } from './wizardSteps';
 
@@ -30,7 +31,7 @@ export interface StepDefinition {
  *  their order (Codex, PR #840: two independently-maintained arrays can
  *  silently drift the moment either one is edited without the other). */
 const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>> = {
-  occasion: { heading: "What's the occasion?", render: () => <PlaceholderStep step="occasion" /> },
+  occasion: { heading: "What's the occasion?", render: (props) => <OccasionStep {...props} /> },
   basics: { heading: 'Name & dates', render: () => <PlaceholderStep step="basics" /> },
   squares: { heading: 'Squares', render: (props) => <StepSquares {...props} /> },
   look: { heading: 'Look', render: () => <PlaceholderStep step="look" /> },
@@ -45,13 +46,17 @@ const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>
  * `stepIndex`) and this registry's rendering order are structurally the same
  * sequence, not two lists a future edit could quietly desync.
  *
- * `squares` renders its real body (#791); `occasion`, `basics`, `look` and
- * `launch` are still `PlaceholderStep` pending #789, #790, #792 and #794. A
- * step ticket replaces its own entry's `render` (and may sharpen `heading`)
- * in `STEP_CONTENT` above — never adds, removes, or reorders steps, which
- * stays #788's shell contract (reorders belong in `SETUP_STEP_ORDER` itself,
- * and touch both the classifier in `wizardSteps.ts` and every step ticket at
- * once).
+ * Every `render` starts as `PlaceholderStep`; a step ticket replaces its own
+ * entry's `render` (and may sharpen `heading`) in `STEP_CONTENT` above —
+ * never adds, removes, or reorders steps, which stays #788's shell contract
+ * (reorders belong in `SETUP_STEP_ORDER` itself, and touch both the
+ * classifier in `wizardSteps.ts` and every step ticket at once). Occasion
+ * (#789, `OccasionStep`) and Squares (#791, `StepSquares`) have already made
+ * that swap; Basics, Look and Launch (#790, #792, #794) still render
+ * `PlaceholderStep` until their own tickets do the same. Keep this list
+ * current when you swap an entry (Codex P2, PR #855: it previously read
+ * "every render is PlaceholderStep today", which stopped being true the
+ * moment the line above it changed).
  */
 export const STEP_REGISTRY: readonly StepDefinition[] = SETUP_STEP_ORDER.map((id) => ({
   id,
