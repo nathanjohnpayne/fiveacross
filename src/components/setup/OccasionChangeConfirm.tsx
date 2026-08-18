@@ -14,11 +14,24 @@ import type { OccasionDef } from '../../types';
  * button, the overwriting one carries `.btn.danger`) and its focus
  * management: focus moves to the safe action on mount, Tab/Shift+Tab are
  * trapped between the two buttons, and focus returns to whatever opened the
- * dialog on unmount. Escape is deliberately NOT re-handled here, the same
- * choice `CancelConfirmDialog` makes and for the same reason: `WizardChrome`
- * already owns a single document-level Escape listener, wired to Cancel, not
- * to this step's own local state — duplicating a second Escape handler here
- * would race it on the same keypress rather than coordinate with it.
+ * dialog on unmount.
+ *
+ * ESCAPE OWNERSHIP (Codex P1, PR #855 Phase 4b round 1): `WizardChrome` owns
+ * its OWN document-level Escape → Cancel listener (bubble phase), registered
+ * for the whole time the wizard is mounted — well before this dialog ever
+ * opens. Without coordinating, the SAME keypress would both close this
+ * dialog AND open the (unrelated) discard-draft confirm on top of it — two
+ * stacked `aria-modal` dialogs with competing Tab traps. This mirrors
+ * `PreviewStrip`'s identical fix (Codex P2, PR #857): listening on the
+ * CAPTURE phase runs this handler before ANY bubble-phase document listener
+ * (capture always finishes before bubble begins, for every node in the
+ * path, including two listeners on the same `document`), and
+ * `stopPropagation` here keeps the event from ever reaching that later
+ * bubble-phase listener at all. `CancelConfirmDialog` deliberately does NOT
+ * do this — Escape opening the discard confirm from elsewhere in the wizard
+ * IS its intended behavior — but this dialog is a DIFFERENT, unrelated
+ * confirmation, so Escape here must mean "keep current", not "also ask about
+ * discarding the whole draft".
  */
 export default function OccasionChangeConfirm({
   from,
@@ -61,14 +74,22 @@ export default function OccasionChangeConfirm({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // See the ESCAPE OWNERSHIP note above: capture phase + stopPropagation
+        // is what keeps WizardChrome's own bubble-phase Escape listener from
+        // ALSO firing on this same keypress.
+        e.stopPropagation();
+        onKeepCurrent();
+        return;
+      }
       if (e.key !== 'Tab') return;
       e.preventDefault();
       const next = document.activeElement === switchRef.current ? keepRef.current : switchRef.current;
       next?.focus();
     };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, []);
+    document.addEventListener('keydown', onKeyDown, { capture: true });
+    return () => document.removeEventListener('keydown', onKeyDown, { capture: true });
+  }, [onKeepCurrent]);
 
   const title = from ? `Switch to ${to.emoji} ${to.label}?` : `Apply ${to.emoji} ${to.label}?`;
   const keepLabel = from ? `Keep ${from.label}` : 'Keep current answers';
@@ -87,14 +108,14 @@ export default function OccasionChangeConfirm({
         <p>
           {from ? (
             <>
-              This re-applies {to.label}&rsquo;s edition, claim mode, default Theme and Event settings over{' '}
-              {from.label}&rsquo;s — anything you&rsquo;ve since changed on a later step may be reset.
+              This re-applies {to.label}&rsquo;s edition, card format, claim mode, default Theme and Event settings
+              over {from.label}&rsquo;s — anything you&rsquo;ve since changed on a later step may be reset.
             </>
           ) : (
             <>
               This draft&rsquo;s saved occasion isn&rsquo;t available anymore. Applying {to.label} sets its edition,
-              claim mode, default Theme and Event settings — anything you&rsquo;ve already entered for those may be
-              reset.
+              card format, claim mode, default Theme and Event settings — anything you&rsquo;ve already entered for
+              those may be reset.
             </>
           )}
           {willClearSchedule &&

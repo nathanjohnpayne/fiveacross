@@ -406,6 +406,30 @@ describe('Cancel', () => {
     await user.keyboard('{Escape}');
     await screen.findByRole('alertdialog');
   });
+
+  it('Escape while OccasionStep\'s re-selection confirm is open closes ONLY that dialog, never stacking the unrelated discard confirm on top of it (Codex P1, PR #855 Phase 4b round 1)', async () => {
+    // WizardChrome owns its own document-level Escape -> Cancel listener,
+    // registered for the whole time the wizard is mounted. Without
+    // OccasionChangeConfirm's own capture-phase Escape handling, the SAME
+    // keypress that should just close the occasion-switch confirm would ALSO
+    // reach WizardChrome's listener and open the (unrelated) discard-draft
+    // confirm on top of it -- two stacked aria-modal dialogs at once.
+    const user = userEvent.setup();
+    await seedDraft({ occasion: 'weekend-away', edition: 'vacay' });
+    renderApp(setupStepPath('seeded-draft', 'occasion'));
+    await screen.findByTestId('wizard-step-occasion');
+
+    await user.click(screen.getByRole('button', { name: /^Wedding/ }));
+    await screen.findByRole('alertdialog', { name: /switch to.*wedding/i });
+
+    await user.keyboard('{Escape}');
+
+    // Closed -- and not replaced by a SECOND dialog.
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    // The draft is untouched (Escape behaved like "Keep Weekend away").
+    const stored = await store.load('seeded-draft');
+    expect(stored?.occasion).toBe('weekend-away');
+  });
 });
 
 describe('Save draft (local)', () => {

@@ -15,14 +15,20 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * unset — so in-app, `occasion === null` and "nothing customized yet" are
  * the same fact. But `parseEventDraft` validates each field independently,
  * not their joint plausibility: a resumed, imported, or hand-crafted draft
- * can be `occasion: null` while still carrying a customized card format,
- * claim mode, default Theme, settings or Days. Comparing against a FRESH
- * `createEventDraft()` — rather than hand-duplicating its defaults here —
- * is what keeps this check from drifting the moment that factory changes.
+ * can be `occasion: null` while still carrying a customized edition, card
+ * format, claim mode, default Theme, settings or Days. Comparing against a
+ * FRESH `createEventDraft()` — rather than hand-duplicating its defaults
+ * here — is what keeps this check from drifting the moment that factory
+ * changes. `edition` is included (Codex P2, PR #855 Phase 4b round 1): it's
+ * one of the fields `applyOccasionDefaults` overwrites, so a draft with
+ * `occasion: null`, a non-baseline `edition`, and every other field at
+ * baseline would otherwise slip past this check and have its stored edition
+ * silently replaced with no confirmation.
  */
 function unsetOccasionLooksFresh(draft: EventDraft): boolean {
   const baseline = createEventDraft();
   return (
+    draft.edition === baseline.edition &&
     draft.cardFormat === baseline.cardFormat &&
     draft.claimMode === baseline.claimMode &&
     draft.defaultTheme === baseline.defaultTheme &&

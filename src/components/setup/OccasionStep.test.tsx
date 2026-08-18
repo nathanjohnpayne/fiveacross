@@ -99,6 +99,60 @@ describe('OccasionStep', () => {
     expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'false');
   });
 
+  it('an UNSET occasion whose ONLY non-baseline field is edition still confirms first (Codex P2, PR #855 Phase 4b round 1)', async () => {
+    // A narrower version of the round-5 case: `applyOccasionDefaults` also
+    // overwrites `edition`, so a draft that is occasion: null with a
+    // non-baseline edition but every OTHER field still at baseline must not
+    // slip past `unsetOccasionLooksFresh` just because card format/claim
+    // mode/Theme/settings/Days happen to already match.
+    const user = userEvent.setup();
+    const draft: EventDraft = {
+      ...createEventDraft({ now: NOW }),
+      edition: 'vacay', // NOT the baseline 'fiveacross'
+    };
+    renderHarness(draft);
+
+    await user.click(row('Wedding'));
+
+    await screen.findByRole('alertdialog', { name: /apply.*wedding/i });
+    expect(row('Wedding')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('the confirm names EVERY field applyOccasionDefaults can overwrite, including card format', async () => {
+    const user = userEvent.setup();
+    const draft = applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('weekend-away')!);
+    renderHarness(draft);
+
+    await user.click(row('Wedding'));
+
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent(/card format/i);
+    expect(dialog).toHaveTextContent(/claim mode/i);
+    expect(dialog).toHaveTextContent(/default Theme/i);
+    expect(dialog).toHaveTextContent(/Event settings/i);
+  });
+
+  it('Escape closes the confirm (Keep current) rather than leaving it open for an unrelated Escape listener to also act on (Codex P1, PR #855 Phase 4b round 1)', async () => {
+    // This isolated render has no WizardChrome, so it can't prove the
+    // cross-component coordination directly (that's SetupWizard.test.tsx's
+    // "Escape while OccasionChangeConfirm is open" case) — but it does prove
+    // THIS dialog's own contract: Escape must resolve to "keep current",
+    // exactly like clicking the Keep button, not leave the dialog open for
+    // some other listener to react to the same keypress.
+    const user = userEvent.setup();
+    const draft = applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('weekend-away')!);
+    renderHarness(draft);
+
+    await user.click(row('Wedding'));
+    await screen.findByRole('alertdialog');
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'true');
+    expect(row('Wedding')).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('Custom commits with no starter pack and no schedule/day-Theme proposal beyond the platform floor', async () => {
     const user = userEvent.setup();
     const draft = createEventDraft({ now: NOW });
