@@ -626,6 +626,12 @@ a {
 .day-chip:active {
   transform: scale(0.94);
 }
+/* Inert while a modal scrim is up over the card (#736 — Board threads its
+   `overlayOpen` into the switcher as `inert`, which disables every chip). */
+.day-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .day-chip.selected {
   border-color: var(--ink);
   box-shadow: 0 0 0 1px var(--ink);
