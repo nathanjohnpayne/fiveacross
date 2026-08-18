@@ -81,6 +81,22 @@ export interface ResolveDeps {
 }
 
 /**
+ * Whether the router can perform a lookup at all.
+ *
+ * Exported because it is checked in TWO places for two different reasons, and
+ * collapsing them into one would lose a case: here, so a lookup is never
+ * attempted with no credentials, and in `router.ts` BEFORE the `/__/auth/*`
+ * exemption, so an unconfigured deployment fails closed uniformly instead of
+ * quietly proxying the one path that skips the lookup. A missing api key is not
+ * the transient dependency failure that exemption exists to survive — it is a
+ * total misconfiguration, and a router that half-serves under one is harder to
+ * diagnose than one that serves nothing.
+ */
+export function isLookupConfigured(config: Pick<ResolveConfig, 'projectId' | 'apiKey'>): boolean {
+  return config.apiKey.length > 0 && config.projectId.length > 0;
+}
+
+/**
  * ONLY positive resolutions are cached, and the asymmetry is deliberate.
  *
  * A cached negative would make a newly provisioned Event unreachable for the
@@ -98,7 +114,14 @@ export async function resolveHost(
   config: ResolveConfig,
   deps: ResolveDeps,
 ): Promise<Resolution> {
-  const cached = await deps.cache.read(host);
+  // The cache is an OPTIMISATION, so every access degrades to "no cache"
+  // rather than propagating. A rejecting Cache API would otherwise escape this
+  // function as a Worker runtime error — no rendered state, no diagnostic
+  // header, no fail-closed page — which is strictly worse than the extra
+  // Firestore read a miss costs. Same rule `specs/event-resolution.md` gives
+  // the client: "storage that throws on access degrades to 'no cache', never
+  // to a failed boot."
+  const cached = await swallow(() => deps.cache.read(host), null);
   const fresh =
     cached !== null &&
     cached.version === CACHE_VERSION &&
@@ -126,12 +149,37 @@ export async function resolveHost(
   if (record === null) {
     // Dropped, not expired: a mapping that is gone must stop serving from this
     // edge immediately rather than at the end of its TTL.
-    await deps.cache.drop(host);
+    await swallow(() => deps.cache.drop(host), undefined);
     return { kind: 'not-found', reason: 'unknown-host' };
   }
 
-  await deps.cache.write(host, { version: CACHE_VERSION, fetchedAt: deps.now(), record });
-  return decide(record, expectedSlug, false);
+  const decision = decide(record, expectedSlug, false);
+  if (decision.kind === 'serve') {
+    await swallow(
+      () => deps.cache.write(host, { version: CACHE_VERSION, fetchedAt: deps.now(), record }),
+      undefined,
+    );
+  } else {
+    // Only SERVABLE records are cached, and the else-arm is the other half of
+    // that rule rather than a tidy-up. Caching a record that exists but does
+    // not serve — inactive, malformed, slug-mismatched — would manufacture
+    // exactly the stuck negative this module refuses to create for an unknown
+    // host: provisioning that briefly exposes a partial document would pin the
+    // failure for a full TTL after the document was corrected. Dropping also
+    // closes the other direction: an Event that goes inactive must not leave a
+    // servable envelope behind for the stale-serve path to resurrect.
+    await swallow(() => deps.cache.drop(host), undefined);
+  }
+  return decision;
+}
+
+/** Run a cache operation, treating any failure as absence. */
+async function swallow<T>(operation: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await operation();
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -183,7 +231,7 @@ export async function fetchHostnameRecord(
   config: ResolveConfig,
   deps: ResolveDeps,
 ): Promise<HostnameRecord | null> {
-  if (config.apiKey.length === 0 || config.projectId.length === 0) {
+  if (!isLookupConfigured(config)) {
     throw new Error('event-router: FIREBASE_API_KEY / FIREBASE_PROJECT_ID are not configured');
   }
 

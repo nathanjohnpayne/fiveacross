@@ -8,6 +8,7 @@
 
 import type { HostRejection } from './host';
 import type { NotFoundReason } from './resolve';
+import type { SlugRejection } from '../../src/slug';
 
 export type FailClosedReason = HostRejection | NotFoundReason;
 
@@ -69,8 +70,16 @@ p { margin: 0; color: var(--muted); }
  * cutover needs to tell `reserved-label` from `lookup-unavailable` at a glance,
  * and a guest needs neither. Every value is drawn from the closed unions above,
  * so nothing caller-controlled reaches the header.
+ *
+ * `detail` refines `invalid-slug` into the specific rule the label broke, as
+ * `invalid-slug:too-short`. Qualified rather than replaced, so the class stays
+ * greppable as a prefix while the rule is still named.
  */
-export function notFoundResponse(reason: FailClosedReason, version: string): Response {
+export function notFoundResponse(
+  reason: FailClosedReason,
+  version: string,
+  detail?: SlugRejection,
+): Response {
   return new Response(BODY, {
     status: 404,
     headers: {
@@ -78,7 +87,7 @@ export function notFoundResponse(reason: FailClosedReason, version: string): Res
       'cache-control': 'no-store',
       'x-robots-tag': 'noindex, nofollow',
       'x-event-router': version,
-      'x-event-router-reason': reason,
+      'x-event-router-reason': detail === undefined ? reason : `${reason}:${detail}`,
     },
   });
 }

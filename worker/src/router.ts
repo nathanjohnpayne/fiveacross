@@ -28,7 +28,7 @@
 
 import { classifyHost, NAMESPACES } from './host';
 import { notFoundResponse } from './notFound';
-import { resolveHost, type HostnameCache, type ResolveDeps } from './resolve';
+import { isLookupConfigured, resolveHost, type HostnameCache, type ResolveDeps } from './resolve';
 
 export interface RouterConfig {
   /** The Firebase Hosting host to proxy to — the site's own `*.web.app`
@@ -67,7 +67,22 @@ export async function handleRequest(
   const classified = classifyHost(url.hostname, config.namespaces ?? NAMESPACES);
 
   if (classified.kind === 'rejected') {
-    return notFoundResponse(classified.reason, config.version);
+    // `detail` names WHICH Slug rule a malformed label broke. Carrying it into
+    // the reason header is what lets an operator tell `too-short` from
+    // `reserved-tag` from outside, without which every malformed address looks
+    // alike during a cutover. Both halves come from closed unions, so nothing
+    // caller-controlled reaches the header.
+    return notFoundResponse(classified.reason, config.version, classified.detail);
+  }
+
+  // An unconfigured router fails closed for EVERY request, and this check sits
+  // ahead of the auth exemption on purpose. A missing api key is not the
+  // transient dependency failure that exemption exists to survive; leaving
+  // `/__/auth/*` proxying under a misconfigured deployment would make the
+  // documented "fails closed on every address" posture quietly untrue for the
+  // one path hardest to notice.
+  if (!isLookupConfigured(config)) {
+    return notFoundResponse('lookup-unavailable', config.version);
   }
 
   // `/__/auth/*` passes through intact, and it skips the lookup ON PURPOSE.

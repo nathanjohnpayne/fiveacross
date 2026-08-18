@@ -35,7 +35,11 @@ function harness(options: { seed?: Record<string, CacheEnvelope>; origin?: Respo
   const fetchImpl = vi.fn(async (input: unknown, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(String(input), init);
     requests.push(request);
-    if (request.url.startsWith('https://firestore.googleapis.com')) {
+    // Compare the parsed ORIGIN, not a URL prefix: a `startsWith` test would
+    // also match `https://firestore.googleapis.com.example.test/…`, and a
+    // harness that mis-routes a request is a harness that proves the wrong
+    // thing (CodeQL js/incomplete-url-substring-sanitization).
+    if (new URL(request.url).origin === 'https://firestore.googleapis.com') {
       return new Response('{}', { status: 404 });
     }
     return options.origin ?? new Response('<!doctype html><title>app</title>', { status: 200 });
@@ -183,13 +187,20 @@ describe('failing closed', () => {
     ['https://unknown-event.fiveacross.app/', 'unknown-host'],
     ['https://bodega-bay.example.com/', 'out-of-namespace'],
     ['https://a.bodega-bay.fiveacross.app/', 'nested-label'],
-    ['https://ab.fiveacross.app/', 'invalid-slug'],
-    ['https://xn--80ak6aa92e.fiveacross.app/', 'invalid-slug'],
+    ['https://ab.fiveacross.app/', 'invalid-slug:too-short'],
+    ['https://xn--80ak6aa92e.fiveacross.app/', 'invalid-slug:reserved-tag'],
+    ['https://-bodega.fiveacross.app/', 'invalid-slug:edge-hyphen'],
   ] as const)('refuses %s with reason %s', async (url, reason) => {
     const { deps } = harness();
     const response = await handleRequest(get(url), CONFIG, deps);
     expect(response.status).toBe(404);
     expect(response.headers.get('x-event-router-reason')).toBe(reason);
+  });
+
+  it('names the broken Slug rule while keeping the class greppable as a prefix', async () => {
+    const { deps } = harness();
+    const response = await handleRequest(get('https://ab.fiveacross.app/'), CONFIG, deps);
+    expect(response.headers.get('x-event-router-reason')).toMatch(/^invalid-slug:/);
   });
 
   it('renders the not-found state rather than returning a bare status', async () => {
@@ -257,5 +268,35 @@ describe('/__/auth/* passthrough', () => {
       deps,
     );
     expect(response.status).toBe(404);
+  });
+
+  it('is NOT exempt from the unconfigured-router refusal', async () => {
+    // A missing api key is a total misconfiguration, not the transient
+    // dependency failure the exemption exists to survive — so "fails closed on
+    // every address" has to include the one path that skips the lookup.
+    const { deps, requests } = harness({ seed: servingSeed });
+    const response = await handleRequest(
+      get('https://bodega-bay.fiveacross.app/__/auth/handler'),
+      { ...CONFIG, apiKey: '' },
+      deps,
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
+    expect(requests).toHaveLength(0);
+  });
+});
+
+describe('an unconfigured router', () => {
+  it.each([
+    'https://bodega-bay.fiveacross.app/',
+    'https://bodega-bay.fiveacross.app/assets/app.js',
+    'https://fiveacross.app/',
+    'https://bodega-bay.fiveacross.app/__/auth/handler',
+  ])('fails closed on %s rather than serving', async (url) => {
+    const { deps, requests } = harness({ seed: servingSeed });
+    const response = await handleRequest(get(url), { ...CONFIG, projectId: '' }, deps);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-event-router-reason')).toBe('lookup-unavailable');
+    expect(requests).toHaveLength(0);
   });
 });

@@ -196,6 +196,59 @@ describe('resolveHost — the cache', () => {
     expect(cache.store.has(HOST)).toBe(false);
   });
 
+  it.each([
+    ['inactive', { eventId: 'e', status: 'disabled', slug: 'bodega-bay' }],
+    ['malformed', { status: 'active', slug: 'bodega-bay' }],
+    ['slug-mismatched', { eventId: 'e', status: 'active', slug: 'elsewhere' }],
+  ])('caches an EXISTING but unservable (%s) record no more than an absent one', async (_label, fields) => {
+    // The P1 this closes: a record that exists but does not serve was being
+    // written before the decision table ran, so a briefly-partial document
+    // pinned its own failure for a full TTL after being corrected.
+    const cache = memoryCache();
+    const result = await resolveHost(
+      HOST,
+      'bodega-bay',
+      CONFIG,
+      deps(respondWith(firestoreDoc(fields as Record<string, string>)), cache),
+    );
+    expect(result.kind).toBe('not-found');
+    expect(cache.store.has(HOST)).toBe(false);
+  });
+
+  it('drops a previously servable entry when the Event goes inactive', async () => {
+    // Otherwise the stale-serve path could resurrect an Event that has been
+    // disabled, the moment the next revalidation failed.
+    const cache = memoryCache({
+      [HOST]: {
+        version: CACHE_VERSION,
+        fetchedAt: 0,
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+      },
+    });
+    const disabled = firestoreDoc({ eventId: 'bodega-bay-2026', status: 'disabled', slug: 'bodega-bay' });
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(disabled), cache));
+    expect(result).toEqual({ kind: 'not-found', reason: 'inactive' });
+    expect(cache.store.has(HOST)).toBe(false);
+  });
+
+  it('treats a failing cache as a miss rather than as a Worker error', async () => {
+    // The cache is an optimisation; a rejecting Cache API must cost an extra
+    // Firestore read, never the rendered fail-closed state and its headers.
+    const exploding: HostnameCache = {
+      read: async () => {
+        throw new Error('cache unavailable');
+      },
+      write: async () => {
+        throw new Error('cache unavailable');
+      },
+      drop: async () => {
+        throw new Error('cache unavailable');
+      },
+    };
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), exploding));
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+  });
+
   it('caches no negatives, so a newly provisioned address serves on the next request', async () => {
     const cache = memoryCache();
     const fetchImpl = vi

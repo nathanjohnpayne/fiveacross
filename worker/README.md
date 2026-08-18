@@ -96,6 +96,8 @@ Comment the `routes` block out and redeploy, or delete the routes in the Cloudfl
 
 Every response carries `x-event-router`. Every fail-closed response also carries `x-event-router-reason`, drawn from a closed set:
 
-`out-of-namespace` · `nested-label` · `reserved-label` · `invalid-slug` · `unknown-host` · `inactive` · `malformed` · `slug-mismatch` · `slug-missing` · `lookup-unavailable`
+`out-of-namespace` · `nested-label` · `reserved-label` · `invalid-slug:<rule>` · `unknown-host` · `inactive` · `malformed` · `slug-mismatch` · `slug-missing` · `lookup-unavailable`
 
-`lookup-unavailable` is the only one that is about the router rather than about the address: it means the `hostnames/{host}` read could not be completed and no cached answer existed. Seeing it on **every** address points at configuration (a missing `FIREBASE_API_KEY` or `FIREBASE_PROJECT_ID`); seeing it intermittently points at Firestore.
+`invalid-slug` is qualified with the rule the first label broke — `invalid-slug:too-short`, `invalid-slug:edge-hyphen`, `invalid-slug:invalid-characters`, `invalid-slug:reserved-tag` — so the class stays greppable as a prefix while the specific failure is still named.
+
+`lookup-unavailable` is the only one that is about the router rather than about the address: it means the `hostnames/{host}` read could not be completed and no cached answer existed. Seeing it on **every** address, including `/__/auth/*`, points at configuration (a missing `FIREBASE_API_KEY` or `FIREBASE_PROJECT_ID`); seeing it intermittently points at Firestore.
