@@ -10,6 +10,7 @@ import {
   buildTimeEdition,
   applyEditionDocumentIdentity,
   wordmarkSegments,
+  alternateNamespaceApex,
 } from './editions';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
 
@@ -371,5 +372,23 @@ describe('editions × themes — one setActiveEdition call drives both (#580)', 
     expect(themed.activeEdition()).toBe('vacay');
     themed.setActiveEdition(DEFAULT_EDITION);
     expect(activeEdition()).toBe(DEFAULT_EDITION);
+  });
+});
+
+describe('alternateNamespaceApex — the setup wizard address step (#790)', () => {
+  it('is null for fiveacross — it IS the canonical Namespace, so it owns no distinct alternate', () => {
+    expect(alternateNamespaceApex('fiveacross')).toBeNull();
+  });
+
+  it('names vacaybingo.com for vacay', () => {
+    expect(alternateNamespaceApex('vacay')).toBe('vacaybingo.com');
+  });
+
+  it('names gaycruisebingo.com for gcb even though no occasion binds it today', () => {
+    expect(alternateNamespaceApex('gcb')).toBe('gaycruisebingo.com');
+  });
+
+  it('is null for an unrecognized Edition id', () => {
+    expect(alternateNamespaceApex('not-a-real-edition')).toBeNull();
   });
 });

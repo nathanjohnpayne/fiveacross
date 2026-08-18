@@ -8,6 +8,20 @@ import { createEventDraft, createLocalDraftStore, type EventDraftStore } from '.
 import SetupWizard, { verifiedSave } from './SetupWizard';
 import { setupStepPath } from './route';
 
+// The Basics step (#790) pulls in `../../data/hostnames` for its live
+// address check, and that module's top-level `import '../firebase'` calls
+// `getAuth(app)` at MODULE LOAD TIME — throwing `auth/invalid-api-key` in
+// this env-var-free test run. This file is deliberately "no Firebase" (see
+// specs/event-setup-wizard.md § Test coverage), so the seam is stubbed to
+// its one export the step actually calls, exactly like every OTHER
+// step-owned dependency this shell-level suite never exercises directly.
+// Resolves 'available': StepBasics's background re-check of an
+// already-committed candidate (this suite seeds `slugCandidate` directly)
+// downgrades it on anything else, and this suite runs in REAL time (no
+// faked debounce), so a less generous stub would risk a flaky downgrade
+// mid-test.
+vi.mock('../../data/hostnames', () => ({ checkSlugAvailability: vi.fn(() => Promise.resolve('available')) }));
+
 // Covers specs/event-setup-wizard.md § "Shell & navigation" — #788's route,
 // five-step navigation, per-step Continue gating, deep-link/resume landing,
 // and Cancel-with-confirm.
@@ -161,7 +175,7 @@ describe('Continue gating', () => {
 
     await user.click(screen.getByRole('button', { name: 'Continue' }));
 
-    await screen.findByTestId('wizard-step-placeholder-basics');
+    await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
     // No "Save draft (local)" tap happened — the step transition itself is
     // the field mutation, and it is durable on its own.
     const stored = await store.load('seeded-draft');
@@ -224,7 +238,7 @@ describe('deep link / resume landing', () => {
     const user = userEvent.setup();
     await seedDraft({ step: 'launch', occasion: 'weekend-away', edition: 'vacay' });
     renderApp(setupStepPath('seeded-draft', 'launch'));
-    await screen.findByTestId('wizard-step-placeholder-basics');
+    await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
 
     // If the correction only wrote storage and left the in-memory draft
     // still carrying `step: 'launch'`, this explicit save reads FROM that
@@ -251,7 +265,7 @@ describe('deep link / resume landing', () => {
       slugCandidate: 'point-reyes',
     });
     renderApp(setupStepPath('seeded-draft', 'basics'));
-    await screen.findByTestId('wizard-step-placeholder-basics');
+    await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
 
     await waitFor(async () => {
       const stored = await store.load('seeded-draft');
@@ -301,14 +315,14 @@ describe('back navigation to a completed step', () => {
 
     // Continue is how forward motion actually happens.
     await user.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByTestId('wizard-step-placeholder-basics');
+    await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
   });
 
   it('the header back-chevron steps back exactly one step, labelled with the previous step', async () => {
     const user = userEvent.setup();
     await seedDraft({ step: 'basics', occasion: 'weekend-away', edition: 'vacay' });
     renderApp(setupStepPath('seeded-draft', 'basics'));
-    await screen.findByTestId('wizard-step-placeholder-basics');
+    await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
 
     await user.click(screen.getByRole('button', { name: '‹ Occasion' }));
     await screen.findByTestId('wizard-step-occasion');
@@ -459,7 +473,7 @@ describe('Cancel', () => {
     const user = userEvent.setup();
     await seedDraft({ step: 'basics', occasion: 'weekend-away', edition: 'vacay' });
     renderApp(setupStepPath('seeded-draft', 'basics'));
-    await screen.findByTestId('wizard-step-placeholder-basics');
+    await screen.findByLabelText('Event name'); // StepBasics (#790) has real content now
 
     await user.keyboard('{Escape}');
     await screen.findByRole('alertdialog');

@@ -22,7 +22,7 @@ vi.mock('../firebase', () => ({ db: {}, applyResolvedEventId: mocks.applyResolve
 vi.mock('./cardCache', () => ({ setCardCacheEventId: mocks.setCardCacheEventId }));
 vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: mocks.applyResolvedCanonicalHost }));
 
-import { fetchHostnameDoc, bootstrapEventResolution } from './hostnames';
+import { fetchHostnameDoc, bootstrapEventResolution, checkSlugAvailability } from './hostnames';
 import { activeEdition, setActiveEdition, DEFAULT_EDITION } from '../editions';
 import { adultContentRequired, resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 
@@ -210,5 +210,46 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, edition: '' }));
     await bootstrapEventResolution('bodega-bay.vacaybingo.com');
     expect(activeEdition()).toBe(DEFAULT_EDITION);
+  });
+});
+
+describe('checkSlugAvailability — the setup wizard address step (#790)', () => {
+  it('reads "available" for a missing document', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap(null));
+    expect(await checkSlugAvailability('point-reyes.fiveacross.app')).toBe('available');
+  });
+
+  it('reads "taken" for a document that exists in ANY status', async () => {
+    for (const status of ['active', 'disabled', 'archived']) {
+      mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, status }));
+      expect(await checkSlugAvailability('bodega-bay.fiveacross.app')).toBe('taken');
+    }
+  });
+
+  it('reads "taken" for a malformed document rather than treating it as free', async () => {
+    // `fetchHostnameDoc` itself returns null for a malformed doc too, but that
+    // null is indistinguishable from "no document" — this predicate cannot
+    // and should not try to tell the two apart; a half-written record still
+    // occupies the address as far as an organizer trying to claim it is
+    // concerned.
+    mocks.getDocFromServer.mockResolvedValue(snap({ status: 'not-a-real-status' }));
+    expect(await checkSlugAvailability('h.fiveacross.app')).toBe('available');
+  });
+
+  it('reads "check-failed" rather than throwing when the network read fails', async () => {
+    // fetchHostnameDoc documents this as a THROW (offline, unreachable
+    // server) — the wizard step is the one place that must not propagate it,
+    // because an uncaught rejection would leave the step's own availability
+    // state stuck rather than reporting "unknown".
+    mocks.getDocFromServer.mockRejectedValue(new Error('offline'));
+    await expect(checkSlugAvailability('h.fiveacross.app')).resolves.toBe('check-failed');
+  });
+
+  it('lowercases the hostname before reading, matching fetchHostnameDoc', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap(null));
+    await checkSlugAvailability('Point-Reyes.FiveAcross.app');
+    expect(mocks.getDocFromServer.mock.calls[0][0]).toMatchObject({
+      path: 'hostnames/point-reyes.fiveacross.app',
+    });
   });
 });

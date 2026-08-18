@@ -202,6 +202,38 @@ export async function bootstrapEventResolution(
   return resolution;
 }
 
+/**
+ * Whether `hostname` (a full `<slug>.<namespace-apex>` address) is currently
+ * claimable, for the setup wizard's address step (#790).
+ *
+ * `'available'` and `'taken'` are read straight off `fetchHostnameDoc`'s own
+ * contract: a document that exists in ANY status — `active`, `disabled`,
+ * `archived` — means the label is spoken for, so this deliberately does not
+ * call `coerceHostnameDoc`'s narrower "servable" reading; a disabled or
+ * archived mapping is not a free address just because the app would not
+ * currently route to it. `'check-failed'` covers the network case
+ * `fetchHostnameDoc` itself documents as a THROW (offline, an unreachable
+ * server) — the wizard step is the one place that failure must read as
+ * "unknown" rather than propagate, because the launch gate treats unknown as
+ * NOT available (fail closed, per #785/#790's acceptance criteria) rather
+ * than silently defaulting to a claim that may not be real.
+ *
+ * Advisory only, matching the wizard's own contract: a draft never holds a
+ * claimed Slug, and this check races with every other organizer on earth
+ * right up until the provisioner's transactional claim at launch (#793) —
+ * a `true` answer here is a good sign, never a reservation.
+ */
+export type SlugAvailability = 'available' | 'taken' | 'check-failed';
+
+export async function checkSlugAvailability(hostname: string): Promise<SlugAvailability> {
+  try {
+    const doc = await fetchHostnameDoc(hostname);
+    return doc === null ? 'available' : 'taken';
+  } catch {
+    return 'check-failed';
+  }
+}
+
 /** localStorage, or null where it is unavailable (private mode, embedded
  *  webviews). Touching it can THROW rather than return null, so the probe is
  *  wrapped — an unavailable cache must cost a round-trip, not a boot. */

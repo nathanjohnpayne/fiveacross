@@ -324,6 +324,41 @@ export function buildTimeEdition(
   return envEdition || DEFAULT_EDITION;
 }
 
+/**
+ * The alternate Namespace apex an Edition owns beyond the canonical
+ * `fiveacross.app` Namespace every Event is reachable in (CONTEXT.md §
+ * Namespace: "Every Event is reachable in the Five Across namespace; an
+ * Edition may own a second one"). `null` means exactly that — no second
+ * one — which is the common case, not an omission: `fiveacross` IS the
+ * canonical Namespace, so a Five Across-Edition occasion (Wedding,
+ * Conference) has no distinct alternate to claim.
+ *
+ * This is the table `specs/event-setup-wizard.md` names as deliberately
+ * ABSENT from the occasion matrix ("the alternate is an Edition fact
+ * resolved at Steps 2 and 5, #790/#793") — the setup wizard's address step
+ * (#790) previews it, and the launch provisioner (#793) claims it
+ * atomically alongside the canonical hostname. Kept here, keyed by Edition
+ * rather than by occasion, so both consumers read the same one-row-per-
+ * Edition fact instead of re-deriving it from whichever occasion happened
+ * to bind that Edition.
+ *
+ * `gcb` is deliberately included even though no occasion in `OCCASIONS`
+ * binds to it today (`gaycruisebingo.com` is Gay Cruise Bingo's own
+ * apex) — the fact is true of the Edition regardless of whether the
+ * wizard can currently reach it, and leaving it out would silently need a
+ * second edit the day a `gcb` occasion is added.
+ */
+const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = {
+  vacay: 'vacaybingo.com',
+  gcb: 'gaycruisebingo.com',
+};
+
+/** `null` when `edition` owns no alternate Namespace — see
+ *  `ALTERNATE_NAMESPACE_APEX`. */
+export function alternateNamespaceApex(edition: string): string | null {
+  return ALTERNATE_NAMESPACE_APEX[edition] ?? null;
+}
+
 /** The brand fields that are plain strings — i.e. the ones a static HTML
  *  placeholder could carry. `EditionBrand` gained a nested `lexicon` in #608, so
  *  a bare `keyof EditionBrand` would let a token be pointed at an OBJECT and
