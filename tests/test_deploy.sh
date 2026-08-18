@@ -1869,6 +1869,67 @@ for combined_case in "22g:functions:someGroup,functions:mintAuthHandoff" "22h:fu
 done
 
 # ---------------------------------------------------------------------------
+# Case 22i (#548, Codex P2 round 5): the codebase-qualified scope stays strict.
+#
+# Firebase accepts BOTH `functions:<fn>` and `functions:<codebase>:<fn>` for a
+# scoped function deploy. Matching only the short form sent the qualified one
+# into the unfamiliar-selector arm, where both halves went lenient — so the
+# service the operator explicitly scoped could vanish unnoticed.
+# ---------------------------------------------------------------------------
+REPO22I="$WORKDIR/case22i-codebase-qualified"
+init_fixture_repo "$REPO22I"
+OUT22I="$WORKDIR/case22i.out"
+ERR22I="$WORKDIR/case22i.err"
+: >"$WORKDIR/ofd-calls-22i.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22i.log" \
+GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+  bash -c "cd '$REPO22I' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default:mintAuthHandoff" \
+  >"$OUT22I" 2>"$ERR22I"
+RC22I=$?
+set -e
+
+if [[ $RC22I -eq 0 ]]; then
+  fail "codebase-qualified: --only functions:default:mintAuthHandoff returned 0 though the scoped mintauthhandoff is missing — the qualified form bypassed strict-half tracking. stdout was:"
+  cat "$OUT22I" >&2
+else
+  pass "codebase-qualified: functions:<codebase>:<fn> keeps the scoped half strict (rc=$RC22I)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22j (#548, Codex P2 round 5): endpoint-qualified --except relaxes nothing.
+#
+# Firebase's --except subtracts exact TOP-LEVEL target names, so
+# `--except functions:mintAuthHandoff` subtracts nothing from `functions` and
+# the complete Functions target is still released — including the endpoint the
+# operator believed they excluded. Treating it as an exclusion would swallow a
+# NOT_FOUND on a service Firebase was actually asked to deploy.
+# ---------------------------------------------------------------------------
+REPO22J="$WORKDIR/case22j-except-not-a-filter"
+init_fixture_repo "$REPO22J"
+OUT22J="$WORKDIR/case22j.out"
+ERR22J="$WORKDIR/case22j.err"
+: >"$WORKDIR/ofd-calls-22j.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22j.log" \
+GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+  bash -c "cd '$REPO22J' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --except functions:mintAuthHandoff" \
+  >"$OUT22J" 2>"$ERR22J"
+RC22J=$?
+set -e
+
+if [[ $RC22J -eq 0 ]]; then
+  fail "except-not-a-filter: --except functions:mintAuthHandoff returned 0 though mintauthhandoff is missing and Firebase still released it. stdout was:"
+  cat "$OUT22J" >&2
+else
+  pass "except-not-a-filter: an endpoint-qualified --except keeps both halves strict (rc=$RC22J)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

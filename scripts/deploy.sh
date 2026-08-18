@@ -259,12 +259,19 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
         # reachable for that flow to work at all. Which HALVES were named is
         # tracked so the strictness can be decided after the whole scope is
         # parsed — see the reconciliation below the loop.
-        functions:mintAuthHandoff)
+        # BOTH spellings Firebase accepts for a scoped function deploy:
+        # `functions:<fn>` and the codebase-qualified `functions:<codebase>:<fn>`
+        # (`firebase deploy --help`). Matching only the short form sent the
+        # qualified one into the `functions:*` arm below, where it was treated
+        # as an unfamiliar group and both halves went lenient — so the service
+        # the operator explicitly scoped could go missing unnoticed (#548,
+        # Codex P2 round 5).
+        functions:mintAuthHandoff|functions:*:mintAuthHandoff)
           FUNCTIONS_ATTEMPTED=true
           AUTH_HANDOFF_INVOKER_SELECTED=true
           AUTH_HANDOFF_MINT_NAMED=true
           ;;
-        functions:exchangeAuthHandoff)
+        functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
           FUNCTIONS_ATTEMPTED=true
           AUTH_HANDOFF_INVOKER_SELECTED=true
           AUTH_HANDOFF_EXCHANGE_NAMED=true
@@ -361,16 +368,21 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
-      # Excluding ONE handoff endpoint does not deselect the pair: the other
-      # half is still released and still needs reconciling, and the shared
-      # wrapper is idempotent on the excluded one. Deselecting here to match
-      # the exclusion exactly would leave the released half 403ing. The
-      # RELEASED half stays strict — only the excluded one may be absent.
-      functions:mintAuthHandoff)
-        AUTH_HANDOFF_STRICT_HALF="exchange"
-        ;;
-      functions:exchangeAuthHandoff)
-        AUTH_HANDOFF_STRICT_HALF="mint"
+      # ENDPOINT-QUALIFIED `--except` IS NOT A FUNCTION FILTER, and this arm is
+      # a deliberate, documented NO-OP rather than a missing case (#548, Codex
+      # P2 round 5).
+      #
+      # Firebase implements `--except` by subtracting exact TOP-LEVEL target
+      # names (`firebase-tools/lib/filterTargets.js`); per-function filtering is
+      # documented for `--only` alone. So `--except functions:mintAuthHandoff`
+      # subtracts nothing from `functions` — the COMPLETE Functions target is
+      # still released, including the endpoint the operator believed they had
+      # excluded. An earlier version of this arm relaxed the excluded half to
+      # "may be absent", which would have swallowed a NOT_FOUND on a service
+      # Firebase was actually asked to deploy. Both halves stay strict.
+      functions:mintAuthHandoff|functions:*:mintAuthHandoff|\
+      functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
+        :
         ;;
       functions:default)
         # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
