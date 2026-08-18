@@ -1772,6 +1772,36 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
     expect(document.activeElement).toBe(opener);
     opener.remove();
   });
+
+  // Codex P2 on this PR — the #760 capture above must be scoped to its OWN
+  // paired click, never left sitting in a variable a LATER, unrelated close
+  // can read. A backdrop `mousedown` can be abandoned (pointer released
+  // outside the sheet, cancelled mid-gesture, used for a context click) with
+  // no `click` ever following it — and if that captured "focus was inside
+  // the sheet" value survived past its own gesture, a subsequent Escape after
+  // focus had genuinely moved elsewhere would wrongly steal it back, exactly
+  // the theft `close()`'s live read exists to prevent (mirrors "leaves focus
+  // alone when something else has taken it before the sheet closes" above,
+  // but via the #760 capture path instead of the plain live-read path).
+  it('does not let an abandoned backdrop mousedown steal focus on a later, unrelated Escape close (#760 follow-up)', async () => {
+    const opener = await openFallbackFrom('Share');
+    const backdropEl = fallbackSheet();
+
+    // A pointer-down on the backdrop that is never followed by its own
+    // click — the capture fires, but the gesture is abandoned.
+    fireEvent.mouseDown(backdropEl);
+
+    // Focus has genuinely moved elsewhere by the time the sheet closes.
+    const elsewhere = plantOpener('Somewhere else');
+    elsewhere.focus();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(elsewhere);
+    expect(document.activeElement).not.toBe(opener);
+    opener.remove();
+  });
 });
 
 // ---------------------------------------------------------------------------

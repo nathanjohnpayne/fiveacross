@@ -855,27 +855,19 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
    */
   let closed = false;
   /**
-   * Captured at backdrop `mousedown`, before the browser's own default action
-   * for that mousedown can run (issue #760).
-   *
-   * `close()` used to read `backdrop.contains(document.activeElement)` live,
-   * which is correct for Close/Escape/supersession but wrong for a real
-   * pointer dismissal of the backdrop: a mousedown on a plain, non-focusable
-   * `<div>` blurs whatever currently holds focus to `document.body` as part
-   * of the BROWSER'S OWN default action for that mousedown, and that default
-   * action runs strictly after any `mousedown` listeners attached without
-   * `preventDefault()`. By the time the paired `click` fires and calls
-   * `close()`, `document.activeElement` is already `document.body`, so the
-   * live `contains` check evaluates false and focus restoration is wrongly
-   * skipped — a real-browser sequence jsdom's `fireEvent.click` never models
-   * (jsdom does not blur on mousedown of a plain div), which is why the prior
-   * suite could not see it. Reading focus one tick earlier, at mousedown,
-   * sidesteps that blur entirely; `preventDefault()` below additionally stops
-   * the browser from shifting focus in the first place, so this capture is
-   * belt-and-braces rather than the only fix.
+   * `close`'s optional `heldOverride` param exists ONLY for the backdrop's own
+   * `mousedown`→`click` pair (issue #760) and must never leak into any other
+   * close path (Close button, Escape, supersession) — see the backdrop
+   * listeners below for the full sequencing argument and why a captured value
+   * has to be scoped to its own paired click rather than left sitting in a
+   * shared variable `close()` might read later (Codex P2 on this PR: an
+   * abandoned mousedown — pointer cancelled, released outside the sheet,
+   * captured for a context click — that is never followed by its own click
+   * must not go on to override a LATER, unrelated close such as Escape).
+   * `undefined` means "no override" — fall back to the live read, which is
+   * correct for every path except the one the override exists for.
    */
-  let heldAtPointerDown = false;
-  const close = (restoreFocus = true): void => {
+  const close = (restoreFocus = true, heldOverride?: boolean): void => {
     if (closed) return;
     closed = true;
     if (closeMountedFallbackSheet === close) closeMountedFallbackSheet = null;
@@ -883,11 +875,10 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
     if (previewUrl) revokeObjectUrl(previewUrl);
     // Only reclaim focus the sheet actually held at dismissal: if something
     // else has taken it in the meantime, yanking it back to the opener would
-    // be the theft this restoration exists to prevent. `heldAtPointerDown`
-    // covers the real-browser backdrop-blur case above; the live read still
-    // covers every other close path (Close button, Escape, supersession),
-    // none of which are preceded by a backdrop mousedown.
-    const held = heldAtPointerDown || backdrop.contains(document.activeElement);
+    // be the theft this restoration exists to prevent. `heldOverride` covers
+    // the real-browser backdrop-blur case (see below); every other close path
+    // has no override to give and falls through to the live read.
+    const held = heldOverride ?? backdrop.contains(document.activeElement);
     backdrop.remove();
     if (restoreFocus && held && opener?.isConnected) opener.focus();
   };
@@ -984,21 +975,43 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
 
   sheet.appendChild(actions);
   backdrop.appendChild(sheet);
-  // Captures `heldAtPointerDown` one tick before the browser's own
-  // mousedown-default-action blur can run (issue #760; see `close`'s own
-  // comment on `heldAtPointerDown` for the full sequencing argument), and
-  // additionally asks the browser not to shift focus off the sheet at all —
-  // the standard technique for a dismissible custom surface. Harmless
-  // elsewhere: Escape never dispatches a mousedown, and a press on one of the
-  // sheet's own buttons targets the button, not the backdrop, so this branch
-  // never runs for those.
+  /**
+   * Captured one tick before the browser's own mousedown-default-action blur
+   * can run (issue #760; see `close`'s own comment on `heldOverride` for the
+   * full sequencing argument), and consumed by the very next `click` on the
+   * backdrop — never by any other close path. `undefined` (not `false`) is
+   * the "nothing captured yet" state, so a synthetic `click` fired with no
+   * preceding `mousedown` (every test harness that dispatches events this way
+   * still needs to work) falls through to `close`'s own live read exactly as
+   * it did before this capture existed.
+   *
+   * Scoped to the PAIRED click, not left sitting around for a later,
+   * unrelated close (Codex P2 on this PR): an abandoned mousedown — the
+   * pointer released outside the sheet, cancelled, or used for a context
+   * click — is never followed by its own backdrop `click`, so the value it
+   * set is read by neither this listener nor `close()` and cannot leak into
+   * a later Escape/Close/supersession dismissal that happens to run
+   * afterward. The variable is reset to `undefined` on EVERY mousedown that
+   * targets the backdrop (fresh capture per gesture) and again the instant
+   * the paired click consumes it, so it never outlives the one interaction
+   * it describes.
+   */
+  let heldAtPointerDown: boolean | undefined;
+  // Additionally asks the browser not to shift focus off the sheet at all —
+  // the standard technique for a dismissible custom surface — belt-and-braces
+  // alongside the capture above. Harmless elsewhere: Escape never dispatches
+  // a mousedown, and a press on one of the sheet's own buttons targets the
+  // button, not the backdrop, so this branch never runs for those.
   backdrop.addEventListener('mousedown', (e) => {
     if (e.target !== backdrop) return;
     heldAtPointerDown = backdrop.contains(document.activeElement);
     e.preventDefault();
   });
   backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) close();
+    if (e.target !== backdrop) return;
+    const heldOverride = heldAtPointerDown;
+    heldAtPointerDown = undefined; // consumed — must not survive past this click
+    close(true, heldOverride);
   });
   document.body.appendChild(backdrop);
   // Returning `true` here becomes the caller's `'prompt'` — a claim that
