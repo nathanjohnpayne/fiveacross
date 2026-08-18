@@ -1,3 +1,4 @@
+import { isoDateInTz } from '../data/tzDate';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
 import type { EventDoc } from '../types';
@@ -58,21 +59,10 @@ function themeLine(themeId: string): string {
   return meta ? `${meta.emoji} ${meta.label}` : themeId;
 }
 
-/**
- * Today's calendar date as 'YYYY-MM-DD' in the given IANA timezone. en-CA is
- * the locale whose date format IS the ISO string, so the result compares
- * lexicographically against `DayDef.date`. An invalid timezone degrades to the
- * host zone rather than throwing — a hand-edited Event doc must never blank
- * the header.
- */
-export function isoDateInTz(now: number, timeZone: string): string {
-  const opts = { year: 'numeric', month: '2-digit', day: '2-digit' } as const;
-  try {
-    return new Intl.DateTimeFormat('en-CA', { ...opts, timeZone }).format(new Date(now));
-  } catch {
-    return new Intl.DateTimeFormat('en-CA', opts).format(new Date(now));
-  }
-}
+// Re-exported from its pure home in `data/tzDate.ts`, so the setup-wizard
+// launch gates can share the exact conversion this header uses without
+// importing a React module. Every existing importer keeps working unchanged.
+export { isoDateInTz };
 
 /**
  * Presentational (hook-free, so renderToStaticMarkup-testable without the
