@@ -82,7 +82,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   // What the SERVER did, not what the sheet hoped it would do. Only the server
   // knows whether an abuse report reached an admin, so the receipt reports the
   // outcome rather than the sheet promising one before submitting (#670).
-  const [escalated, setEscalated] = useState(false);
+  const [escalationEligible, setEscalationEligible] = useState(false);
   // The kind the SUBMITTED report actually carried. The live `kind` keeps
   // tracking the control, and the sheet stays mounted across a slow submit, so
   // reading `kind` on the receipt would describe whatever is selected NOW rather
@@ -156,7 +156,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       setError(null);
       setSubmittedId(null);
       setSubmittedKind('bug');
-      setEscalated(false);
+      setEscalationEligible(false);
       void capture();
     },
     [stage, capture],
@@ -250,7 +250,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       );
       setSubmittedId(result.reportId);
       setSubmittedKind(sentKind);
-      setEscalated(result.escalated === true);
+      setEscalationEligible(result.escalationEligible === true);
       setScreenshot(null);
     } catch (submitError) {
       setError(errorMessage(submitError));
@@ -290,9 +290,9 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     <p>Thanks. Your report ID is <code>{submittedId}</code>.</p>
                     {submittedKind === 'abuse' && (
                       <p className="bug-report-privacy">
-                        {escalated
-                          ? 'This report has been flagged for this event’s admins.'
-                          : 'We couldn’t flag this for the event’s admins, but your report was filed and the team will see it.'}
+                        {escalationEligible
+                          ? 'This will be raised with this event’s admins.'
+                          : 'This won’t be raised with the event’s admins automatically, but your report was filed and the team will see it.'}
                       </p>
                     )}
                     <div className="sheet-actions">
@@ -340,15 +340,16 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       </label>
                     </fieldset>
                     {kind === 'abuse' && (
-                      // "Flag for" rather than "alert": this promises the report
-                      // enters the path that reaches admins, which is a claim the
-                      // system can keep. Whether an admin is actually notified
-                      // depends on gates further down (a live Event, a resolvable
-                      // recipient), so somebody reporting harm is never told they
-                      // were reached when they were not. The receipt then states
-                      // what this submission actually did.
+                      // Future tense, and deliberately so. The submission is
+                      // only ever ELIGIBLE for escalation at this point: the
+                      // trigger that queues the alert runs asynchronously and
+                      // re-checks for itself, and the digest beyond it may find
+                      // no admin recipient. "Will be raised" is a statement of
+                      // intent the system can keep; "has been alerted" would
+                      // reassure somebody reporting harm about an outcome nobody
+                      // has determined yet (Phase 4b P1).
                       <p className="bug-report-privacy">
-                        We’ll flag this for the event’s admins as well as filing the report.
+                        We’ll raise this with the event’s admins as well as filing the report.
                       </p>
                     )}
                     <label className="bug-report-label" htmlFor="bug-report-description">What happened?</label>

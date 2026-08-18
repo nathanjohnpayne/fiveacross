@@ -272,6 +272,23 @@ export function alertsForWrite(
 export interface EnqueueDeps {
   /** Injectable clock, so a test can assert `createdAt` without freezing time. */
   now?: () => number;
+  /**
+   * Let a write failure ESCAPE instead of being logged and swallowed.
+   *
+   * Off by default, because the moderation producers ride a hot content-write
+   * path and ADR 0001 says a queue failure must never fail the write that
+   * triggered it — and their triggers are not retryable, so throwing would only
+   * trade a log line for a louder log line.
+   *
+   * `notifyAbuseBugReport` opts IN, because its situation is the opposite on
+   * both counts: it writes nothing but the queue row, so there is no other write
+   * to protect, and it is declared `retry: true`. Swallowing there converts a
+   * transient Firestore blip into a permanently lost report of harm, while
+   * throwing hands the platform something it can retry — safely, because the
+   * alert ids are deterministic, so a retry that lands after a successful write
+   * is an ALREADY_EXISTS no-op rather than a duplicate.
+   */
+  rethrowWriteErrors?: boolean;
 }
 
 /**
@@ -294,10 +311,11 @@ export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
 }
 
 /**
- * Append this write's alerts to the Event's queue. Best-effort and NEVER throws
- * (ADR 0001): a queue write failing must not fail the moderation write that
- * triggered it, exactly as the #101 notifier's mail failure never did. Returns
- * how many alerts it wrote.
+ * Append this write's alerts to the Event's queue. Best-effort by default and
+ * NEVER throws (ADR 0001): a queue write failing must not fail the moderation
+ * write that triggered it, exactly as the #101 notifier's mail failure never
+ * did. Returns how many alerts it wrote. A caller whose trigger is retryable can
+ * opt into propagation with `rethrowWriteErrors`.
  *
  * `create` rather than `set`, and a deterministic id rather than a random one,
  * so a redelivered trigger is a no-op. `set` would be wrong in the one case
@@ -308,6 +326,20 @@ export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
  * sweep finds work with `where('sentAt', '==', null)` and Firestore's equality
  * filter matches a stored null but not a missing field — an alert without the
  * field would sit in the collection forever, invisible to the drain.
+ *
+ * EVERY ROW CARRIES AN `expiresAt` FROM THE MOMENT IT IS WRITTEN, not only once
+ * it is tombstoned. A queue row holds a COPY of user content — a pending
+ * Prompt's words, a hidden Proof's text, an abuse reporter's description — and
+ * until this existed that copy had exactly one exit: being drained. A row whose
+ * Event is archived before the next sweep is never visited again
+ * (`runAdminAlertSweep` queries `status == 'active'`), so the copy outlived the
+ * source it described, the retention sweep that deletes that source, and any
+ * decision anyone made about it. `PENDING_TTL_MS` is generous enough that no
+ * ordinary backlog is ever reaped — orders of magnitude past the five-minute
+ * sweep, and comfortably inside the source-report retention window — so it only
+ * ever collects rows that were genuinely stranded. `finishBatch` REPLACES the
+ * document on drain, so a delivered row's shorter tombstone expiry supersedes
+ * this one rather than competing with it.
  */
 export async function enqueueAdminAlerts(
   db: AdminAlertFirestore,
@@ -318,20 +350,24 @@ export async function enqueueAdminAlerts(
 ): Promise<number> {
   if (drafts.length === 0) return 0;
   const createdAt = (deps.now ?? Date.now)();
+  // A Date, NOT epoch millis: Firestore's TTL service only considers a
+  // timestamp-typed field, so a number would leave the documented policy
+  // configured and reaping nothing (the same trap `finishBatch` documents).
+  const expiresAt = new Date(createdAt + PENDING_TTL_MS);
   let written = 0;
   for (const draft of drafts) {
     const id = alertDocId(transitionId, draft.kind);
     try {
       await db
         .doc(`events/${eventId}/adminAlerts/${id}`)
-        .create({ ...draft, createdAt, sentAt: null });
+        .create({ ...draft, createdAt, sentAt: null, expiresAt });
       written++;
     } catch (err) {
       // ALREADY_EXISTS is the redelivery path and is a SUCCESS: the alert this
-      // call would have written is already queued. Anything else is a real
-      // failure, logged and swallowed.
+      // call would have written is already queued.
       if (isAlreadyExists(err)) continue;
       console.error('enqueueAdminAlerts: write failed', eventId, draft.kind, draft.docId, err);
+      if (deps.rethrowWriteErrors) throw err;
     }
   }
   return written;
@@ -468,7 +504,13 @@ export function bugReportEventId(after: BugReportDoc | undefined): string | null
 
 /**
  * The whole abuse producer in one call — the shape `index.ts`'s
- * `notifyAbuseBugReport` trigger uses. Best-effort and NEVER throws (ADR 0001).
+ * `notifyAbuseBugReport` trigger uses.
+ *
+ * NOT best-effort, unlike `recordAdminAlerts`, and the difference is deliberate.
+ * That one guards a moderation write (ADR 0001: the queue must never fail the
+ * content write that triggered it). This trigger writes nothing else — enqueuing
+ * IS its whole job — so there is no other write to protect, and swallowing a
+ * transient failure just loses the alert forever.
  *
  * THE EVENT MUST EXIST AND BE ACTIVE, and that read is not defensive
  * boilerplate. The sweep (`runAdminAlertSweep`) finds work with
@@ -501,34 +543,43 @@ export async function recordBugReportAlerts(
   after: BugReportDoc | undefined,
   deps: EnqueueDeps = {},
 ): Promise<number> {
-  try {
-    const drafts = abuseAlertsForWrite(reportId, before, after);
-    if (drafts.length === 0) return 0;
-    const eventId = bugReportEventId(after);
-    if (!eventId) {
-      console.error('recordBugReportAlerts: abuse report carries no usable eventId', reportId);
-      return 0;
-    }
-    let event: Record<string, unknown> | undefined;
-    try {
-      event = (await db.doc(`events/${eventId}`).get()).data();
-    } catch (err) {
-      console.error('recordBugReportAlerts: event lookup failed', eventId, reportId, err);
-      return 0;
-    }
-    if (!event) {
-      console.error('recordBugReportAlerts: abuse report names an unresolvable event', eventId, reportId);
-      return 0;
-    }
-    if (event.status !== 'active') {
-      console.log('recordBugReportAlerts: abuse report names a non-active event; not queueing', eventId, reportId);
-      return 0;
-    }
-    return await enqueueAdminAlerts(db, eventId, drafts, transitionId, deps);
-  } catch (err) {
-    console.error('recordBugReportAlerts failed', reportId, err);
+  // EVERY EARLY RETURN BELOW IS A PERMANENT ANSWER, and every THROW is a
+  // transient one. That split is the whole contract with `notifyAbuseBugReport`,
+  // which is declared `retry: true` (Phase 4b P1).
+  //
+  // Returning 0 tells the platform "handled, do not retry", and it is correct
+  // for the cases below because retrying changes nothing about them: the write
+  // was not an abuse transition, the document names no usable Event, or it names
+  // one that does not exist or is not active. Those are properties of the data.
+  //
+  // A failed READ or a failed WRITE is the opposite: nothing about the report is
+  // wrong, Firestore was briefly unavailable, and the previous version of this
+  // function swallowed exactly that into a silent, permanent loss of a report of
+  // harm. Those now escape so the platform retries them, which is safe because
+  // the alert id is derived from the CloudEvent id — a retry that lands after a
+  // write already succeeded hits ALREADY_EXISTS and is a no-op, never a
+  // duplicate row.
+  const drafts = abuseAlertsForWrite(reportId, before, after);
+  if (drafts.length === 0) return 0;
+  const eventId = bugReportEventId(after);
+  if (!eventId) {
+    console.error('recordBugReportAlerts: abuse report carries no usable eventId', reportId);
     return 0;
   }
+  // Deliberately NOT wrapped: a read failure propagates to the retryable trigger.
+  const event = (await db.doc(`events/${eventId}`).get()).data();
+  if (!event) {
+    console.error('recordBugReportAlerts: abuse report names an unresolvable event', eventId, reportId);
+    return 0;
+  }
+  if (event.status !== 'active') {
+    console.log('recordBugReportAlerts: abuse report names a non-active event; not queueing', eventId, reportId);
+    return 0;
+  }
+  return await enqueueAdminAlerts(db, eventId, drafts, transitionId, {
+    ...deps,
+    rethrowWriteErrors: true,
+  });
 }
 
 // --- Consuming (the digest sweep) ------------------------------------------------
@@ -621,6 +672,27 @@ export const MAX_ATOMIC_WRITES = 450;
  * this module states a timestamp without importing `firebase-admin`.
  */
 export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long an UNDRAINED queue row may live before the same TTL policy reaps it.
+ *
+ * The tombstone TTL above protects the id, not the payload — by the time it
+ * applies, the content is already gone. This one protects the payload, and it
+ * exists because until now a queued row had exactly one exit: being drained. The
+ * sweep only visits `status == 'active'` Events, so a row whose Event is
+ * archived before the next sweep is never looked at again, and its COPY of user
+ * content — a pending Prompt's words, a hidden Proof's text, a reporter's abuse
+ * description — outlives the source it describes, the retention sweep that
+ * deletes that source, and every decision anyone made about it. Nothing else in
+ * the system would ever collect it.
+ *
+ * Thirty days is chosen to be uninteresting: the drain runs every five minutes,
+ * an undeliverable backlog is meant to clear as soon as a recipient exists, and
+ * the source reports themselves are retained ninety days. Anything still sitting
+ * here after a month is stranded rather than pending, and holding a copy of
+ * somebody's report indefinitely is the worse failure.
+ */
+export const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * How long an alert must sit still before it is eligible to be drained.

@@ -265,7 +265,8 @@ export const notifyItemModeration = onDocumentWritten(
  *
  * It fires on EVERY bug report, which is the cost of the collection being flat,
  * but a plain `bug` is rejected by a pure predicate before any read — so the
- * common case costs one no-op invocation and nothing else.
+ * common case costs one no-op invocation and nothing else. That predicate also
+ * runs before anything that can throw, so `retry: true` never re-runs a bug.
  *
  * Pins `ADMIN_SDK_SERVICE_ACCOUNT` for the same reason the two above do: it
  * reads `events/{eventId}` and writes the queue, neither of which the project's
@@ -274,7 +275,14 @@ export const notifyItemModeration = onDocumentWritten(
  * re-fire itself.
  */
 export const notifyAbuseBugReport = onDocumentWritten(
-  { document: 'bugReports/{reportId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  // `retry: true` (Phase 4b P1). `recordBugReportAlerts` acknowledges every
+  // PERMANENT answer by returning normally and lets only TRANSIENT Firestore
+  // failures escape, so retries are reserved for the case where retrying can
+  // actually help. They are safe because the queue's document ids derive from
+  // this event's own id: a retry landing after a write already succeeded hits
+  // ALREADY_EXISTS and is a no-op, never a duplicate row. Without it, one blip
+  // silently and permanently loses a report of harm.
+  { document: 'bugReports/{reportId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
   async (event) => {
     await recordBugReportAlerts(
       db as unknown as AdminAlertFirestore,

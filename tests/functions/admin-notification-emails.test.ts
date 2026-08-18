@@ -14,6 +14,7 @@ import {
   QUIET_PERIOD_MS,
   flattenLabel,
   sameRecipients,
+  PENDING_TTL_MS,
   TOMBSTONE_TTL_MS,
   abuseAlertsForWrite,
   alertDocId,
@@ -852,6 +853,8 @@ describe('sendAdminDigestForEvent', () => {
     // The row is REPLACED, not stamped: its copy of unapproved content is gone,
     // so nothing outlives the moderation decision it described...
     const rows = db.rows('events/med-2026/adminAlerts');
+    // The tombstone REPLACES the row, so the pending TTL written at enqueue is
+    // superseded by the shorter tombstone one rather than competing with it.
     expect(rows.map((r) => Object.keys(r).sort())).toEqual([
       ['expiresAt', 'id', 'sentAt'],
       ['expiresAt', 'id', 'sentAt'],
@@ -1917,6 +1920,25 @@ describe('recordBugReportAlerts', () => {
   const reportDb = (eventExists = true, status = 'active') =>
     fakeDb({}, eventExists ? { 'events/med-2026': { name: 'Trieste → Barcelona', status } } : {});
 
+  it('stamps every queued row with a TTL, so a stranded copy of a report cannot live forever', async () => {
+    // Until this existed a queue row had exactly ONE exit: being drained. The
+    // sweep only visits active Events, so a row whose Event is archived before
+    // the next sweep is never looked at again — and its copy of the reporter's
+    // description outlives the source report, the 90-day retention sweep that
+    // deletes it, and every decision anyone made about it (Phase 4b P1).
+    const db = reportDb();
+    await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, ABUSE_REPORT(), { now: () => NOW });
+    const row = db.rows('events/med-2026/adminAlerts')[0];
+    // A Date, NOT epoch millis: Firestore's TTL service only considers a
+    // timestamp-typed field, so a number would leave the policy reaping nothing.
+    expect(row.expiresAt).toBeInstanceOf(Date);
+    expect((row.expiresAt as Date).getTime()).toBe(NOW + PENDING_TTL_MS);
+    // Generous enough that no ordinary backlog is ever reaped, and shorter than
+    // the source-report retention window it must not outlive.
+    expect(PENDING_TTL_MS).toBeGreaterThan(TOMBSTONE_TTL_MS);
+    expect(PENDING_TTL_MS).toBeLessThan(90 * 24 * 60 * 60 * 1000);
+  });
+
   it('enqueues an abuse alert scoped to the report’s own Event', async () => {
     const db = reportDb();
     expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, ABUSE_REPORT())).toBe(1);
@@ -1981,11 +2003,53 @@ describe('recordBugReportAlerts', () => {
     spy.mockRestore();
   });
 
-  it('treats a FAILED Event lookup as unresolvable rather than assuming it exists', async () => {
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  it('PROPAGATES a failed Event lookup so the retryable trigger can try again', async () => {
+    // The permanent answers above all return normally, which tells the platform
+    // "handled, do not retry" — correct, because retrying changes nothing about
+    // them. A transient Firestore failure is the opposite: nothing about the
+    // report is wrong, and swallowing it silently and permanently loses a report
+    // of harm. `notifyAbuseBugReport` is declared `retry: true`, and the alert
+    // id derives from the CloudEvent id, so a retry is a no-op if the write
+    // already landed (Phase 4b P1).
     const db = fakeDb({}, { 'events/med-2026': { name: 'x', status: 'active' } }, ['events/med-2026']);
-    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
+    await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).rejects.toThrow(
+      /backend unavailable/,
+    );
     expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('PROPAGATES a failed queue write, unlike the moderation producers', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb();
+    const boom = new Error('write unavailable');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = (db as any).doc;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      const ref = original(path);
+      if (path.includes('/adminAlerts/')) return { ...ref, create: async () => { throw boom; } };
+      return ref;
+    };
+    await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).rejects.toThrow(boom);
+    spy.mockRestore();
+  });
+
+  it('does NOT propagate a queue write failure for the moderation producers', async () => {
+    // ADR 0001: their trigger guards a content write and is not retryable, so a
+    // queue failure stays swallowed. The opt-in is what separates the two.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = fakeDb({}, {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = (db as any).doc;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      const ref = original(path);
+      if (path.includes('/adminAlerts/')) return { ...ref, create: async () => { throw new Error('write unavailable'); } };
+      return ref;
+    };
+    await expect(
+      recordAdminAlerts(db, 'items', 'med-2026', 'i1', 'e1', undefined, ITEM({ status: 'pending' })),
+    ).resolves.toBe(0);
     spy.mockRestore();
   });
 });

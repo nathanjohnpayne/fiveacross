@@ -116,7 +116,7 @@ describe('W4 bug-report inbox', () => {
     // The consequence is stated only once the reporter has chosen it, and it is
     // stated as an ATTEMPT: whether an admin is actually reached depends on a
     // membership fact only the server holds.
-    const promise = /flag this for the event.s admins/i;
+    const promise = /raise this with the event.s admins/i;
     expect(screen.queryByText(promise)).not.toBeInTheDocument();
     fireEvent.click(abuse);
     expect(abuse).toBeChecked();
@@ -139,22 +139,22 @@ describe('W4 bug-report inbox', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
     };
 
-    submitSpy.mockResolvedValue({ reportId: 'report-alerted', escalated: true });
+    submitSpy.mockResolvedValue({ reportId: 'report-alerted', escalationEligible: true });
     renderFlow();
     await fileAbuse();
-    expect(await screen.findByText('This report has been flagged for this event’s admins.')).toBeInTheDocument();
+    expect(await screen.findByText('This will be raised with this event’s admins.')).toBeInTheDocument();
 
-    submitSpy.mockResolvedValue({ reportId: 'report-quiet', escalated: false });
+    submitSpy.mockResolvedValue({ reportId: 'report-quiet', escalationEligible: false });
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await fileAbuse();
-    expect(await screen.findByText(/couldn’t flag this for the event’s admins/)).toBeInTheDocument();
+    expect(await screen.findByText(/won’t be raised with the event’s admins automatically/)).toBeInTheDocument();
 
     // An older deployed callable returns only `reportId`. That is "no claim
     // made", not a success — it must degrade to the honest half.
     submitSpy.mockResolvedValue({ reportId: 'report-legacy' });
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await fileAbuse();
-    expect(await screen.findByText(/couldn’t flag this for the event’s admins/)).toBeInTheDocument();
+    expect(await screen.findByText(/won’t be raised with the event’s admins automatically/)).toBeInTheDocument();
   });
 
   it('freezes the classification while a submit is in flight, so the receipt cannot describe a report nobody filed (#670)', async () => {
@@ -163,7 +163,7 @@ describe('W4 bug-report inbox', () => {
     // sent — select abuse, press Send, switch to bug, and the abuse outcome
     // silently disappears.
     captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
-    let resolveSubmit!: (result: { reportId: string; escalated: boolean }) => void;
+    let resolveSubmit!: (result: { reportId: string; escalationEligible: boolean }) => void;
     submitSpy.mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
     renderFlow();
     fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
@@ -178,8 +178,8 @@ describe('W4 bug-report inbox', () => {
 
     // And even if it did, the receipt reports the kind that was SENT.
     fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }));
-    resolveSubmit({ reportId: 'report-abuse', escalated: true });
-    expect(await screen.findByText('This report has been flagged for this event’s admins.')).toBeInTheDocument();
+    resolveSubmit({ reportId: 'report-abuse', escalationEligible: true });
+    expect(await screen.findByText('This will be raised with this event’s admins.')).toBeInTheDocument();
     expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
   });
 

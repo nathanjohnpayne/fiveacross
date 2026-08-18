@@ -74,7 +74,7 @@ export async function resolveAbuseEscalation(
 export async function handleSubmitBugReport(
   request: CallableRequest<unknown>,
   requireAppCheck: boolean,
-): Promise<{ reportId: string; escalated: boolean }> {
+): Promise<{ reportId: string; escalationEligible: boolean }> {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in before reporting a bug.');
   if (requireAppCheck && !request.app) throw new HttpsError('failed-precondition', 'App Check is required.');
@@ -146,23 +146,24 @@ export async function handleSubmitBugReport(
       //   document that never went through the check above cannot escalate. It
       //   is a necessary condition for escalation, not a sufficient one.
       //
-      //   `escalatedAtIntake` is WHETHER THIS SUBMISSION WAS ELIGIBLE to reach
-      //   the admin alert queue — membership AND a live Event, the same
-      //   conjunction the callable returns to the reporter. Persisted because it
-      //   is a durable fact about the submission rather than a stale snapshot of
-      //   Event state: if somebody asks why a report never surfaced, this is the
-      //   record of what the submission itself decided.
+      //   `escalationEligible` is whether this submission MET THE CONDITIONS to
+      //   be escalated — membership AND a live Event, the same conjunction the
+      //   callable returns to the reporter. Persisted because it is a durable
+      //   fact about the submission rather than a stale snapshot of Event state:
+      //   if somebody asks why a report never surfaced, this is the record of
+      //   what the submission itself decided.
       //
-      // NEITHER IS A DELIVERY CLAIM, and the naming is deliberate (#670, Codex
-      // P2 round 7). Delivery is decided by a pipeline this callable does not
-      // own: the trigger re-reads Event status at enqueue time, and the digest
-      // can still resolve no admin recipient at all and leave the alert queued.
-      // "Escalated" is what is knowable here — the report entered the path that
-      // reaches admins — and nothing downstream can retroactively make it false.
+      // NEITHER IS A DELIVERY CLAIM, AND NEITHER SAYS AN ALERT WAS QUEUED. The
+      // naming went through `notified` and then `escalated` before landing here,
+      // and both were wrong for the same reason (Phase 4b P1): this runs BEFORE
+      // the asynchronous trigger, which re-reads Event status itself and may not
+      // have run at all yet. Eligibility is the only thing knowable at this
+      // point, so it is the only thing claimed — the trigger owns whether an
+      // alert exists, and the digest owns whether anyone was told.
       ...(report.kind === 'abuse'
         ? {
             reporterInEvent: escalation.member,
-            escalatedAtIntake: escalation.member && escalation.eventActive,
+            escalationEligible: escalation.member && escalation.eventActive,
           }
         : {}),
       description: report.description,
@@ -188,16 +189,16 @@ export async function handleSubmitBugReport(
   // report only entered the inbox. So the outcome is returned rather than
   // promised up front.
   //
-  // `escalated`, NOT `notified`, and that distinction is the whole point. This
-  // function knows exactly one thing: whether the report entered the path that
-  // reaches admins. It cannot know whether an admin was NOTIFIED — that needs
-  // the trigger's own re-check and the digest resolving a recipient, and an
-  // Event with no verified admin email and no `ADMIN_NOTIFY_EMAIL` override
-  // leaves the alert queued and unsent. Claiming delivery here would be the same
-  // over-promise a third time; claiming escalation is true when it is said and
-  // stays true.
+  // `escalationEligible`, NOT `escalated` and certainly not `notified`. This
+  // function returns BEFORE the trigger that queues the alert has run, so it
+  // cannot honestly report even that much: the trigger re-reads Event status for
+  // itself, and beyond it the digest may resolve no admin recipient at all. What
+  // this callable knows is that the submission met the conditions — nothing
+  // about what happened next. Wording it as eligibility is what keeps the sheet
+  // from reassuring somebody reporting harm about an outcome nobody has yet
+  // determined (Phase 4b P1).
   //
   // It discloses nothing a caller could not already establish by observation,
   // and staying silent is worse for exactly the person this exists to protect.
-  return { reportId: reportRef.id, escalated: escalation.member && escalation.eventActive };
+  return { reportId: reportRef.id, escalationEligible: escalation.member && escalation.eventActive };
 }

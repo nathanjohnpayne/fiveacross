@@ -158,7 +158,7 @@ function safeReport(report) {
   // make an unknown decision indistinguishable from an explicit negative (#670).
   // `null` is not available to mean "unknown" here: it already means "not
   // applicable", which is what a bug report exports.
-  for (const field of ['reporterInEvent', 'escalatedAtIntake']) {
+  for (const field of ['reporterInEvent', 'escalationEligible']) {
     if (report[field] !== undefined && typeof report[field] !== 'boolean') {
       throw new Error(`Invalid ${field} for ${report.id}`);
     }
@@ -181,13 +181,14 @@ function safeReport(report) {
     //   This is the trigger's gate input: NECESSARY for an alert, not
     //   sufficient. On its own it does not mean an admin heard anything.
     reporterInEvent: fields.kind === 'abuse' ? report.reporterInEvent === true : null,
-    //   `escalatedAtIntake` — did the submission enter the path that reaches
-    //   admins? Membership AND a live Event, which is the answer the reporter
-    //   was shown on their receipt. Deliberately not a DELIVERY claim: the
-    //   trigger re-reads Event status, and the digest can resolve no admin
-    //   recipient at all, so "an admin has seen this" is not something the
-    //   stored report can assert. This is the closest honest thing.
-    escalatedAtIntake: fields.kind === 'abuse' ? report.escalatedAtIntake === true : null,
+    //   `escalationEligible` — did the submission MEET THE CONDITIONS to be
+    //   escalated? Membership AND a live Event, the same answer the reporter's
+    //   receipt gave. Deliberately not a claim that an alert exists, let alone
+    //   that anyone read it: it is recorded before the trigger runs, that
+    //   trigger re-checks Event status, and the digest beyond it may resolve no
+    //   admin recipient. It is the closest thing the stored report can honestly
+    //   assert about whether anyone was going to hear about it.
+    escalationEligible: fields.kind === 'abuse' ? report.escalationEligible === true : null,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,
