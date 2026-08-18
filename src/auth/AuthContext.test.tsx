@@ -2,6 +2,7 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  AUTH_BOOTSTRAP_TIMEOUT_MS,
   AuthProvider,
   DEAL_TIMEOUT_MS,
   PENDING_REDIRECT_ATTESTATION_KEY,
@@ -1011,5 +1012,144 @@ describe('AuthContext stale-attempt + retry hardening', () => {
       await retry.promise;
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument(); // clears only on settle
+  });
+});
+
+describe('AuthContext late-authority generation guards (Codex P2 on #761 / #762)', () => {
+  // Captures the live context value on every render, the same pattern the
+  // sign-in tests above use for `signIn` — but for state (dealError,
+  // dealErrorReason, attest), not just callbacks.
+  function CaptureAuth({ onRender }: { onRender: (ctx: ReturnType<typeof useAuth>) => void }) {
+    const ctx = useAuth();
+    onRender(ctx);
+    return null;
+  }
+
+  it('does not let a late authoritative settle erase a NEWER deal failure that started after it began (#761)', async () => {
+    vi.useFakeTimers();
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    try {
+      // The server-only authority read hangs past AUTH_BOOTSTRAP_TIMEOUT_MS — the
+      // bootstrap times out (a 'connection'-worded failure), but the underlying
+      // read is still running in the background.
+      const authorityRead = deferred<number | null>();
+      mocks.readAdultAttestation.mockReturnValue(authorityRead.promise);
+
+      let ctx!: ReturnType<typeof useAuth>;
+      render(
+        <AuthProvider>
+          <CaptureAuth onRender={(c) => (ctx = c)} />
+        </AuthProvider>,
+      );
+
+      // NOT awaited: the auth callback RETURNS bootstrapUser's own promise
+      // (unlike `signInUser`'s usual quick-resolving read), and this test's
+      // authority read is deliberately hung until the timer below advances —
+      // awaiting it here would deadlock before any timer ever fires.
+      act(() => {
+        void emitAuth(FAKE_USER);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+      });
+      expect(ctx.dealError).toMatch(/connection/i);
+
+      // A same-session attest commits WHILE the original read is still pending:
+      // it grants authority and the `mayDeal` effect fires a FRESH deal, which
+      // fails with a different, more specific (pool-shortfall) error.
+      mocks.joinAndDeal.mockRejectedValueOnce(new Error('the active pool is below the 24 prompts a card needs'));
+      await act(async () => {
+        await ctx.attest();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+      expect(ctx.dealErrorReason).toBe('pool-shortfall');
+
+      // THE FIX UNDER TEST: the ORIGINAL slow authority read finally lands late
+      // — it must not erase the fresher pool-shortfall error with its own
+      // unconditional clear (Codex P2 on #761).
+      await act(async () => {
+        authorityRead.settle(1);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(ctx.dealErrorReason).toBe('pool-shortfall');
+      expect(ctx.dealError).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+      delete authMock.currentUser;
+    }
+  });
+
+  it('corrects a provisional connection-classed lift when the late authority read actually rejects PERMANENTLY (#762)', async () => {
+    vi.useFakeTimers();
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    try {
+      // A cache HIT is what the in-time 'connection' failure arm provisionally
+      // lifts `attested` from (#521) — the bet that the timeout is transient.
+      mocks.readAdultAttestationFromCache.mockResolvedValue(1);
+      const authorityRead = deferred<number | null>();
+      mocks.readAdultAttestation.mockReturnValue(authorityRead.promise);
+
+      let ctx!: ReturnType<typeof useAuth>;
+      render(
+        <AuthProvider>
+          <CaptureAuth onRender={(c) => (ctx = c)} />
+        </AuthProvider>,
+      );
+
+      // NOT awaited — see the #761 test above: bootstrapUser's own returned
+      // promise won't settle until the timer below advances.
+      act(() => {
+        void emitAuth(FAKE_USER);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+        // Let the fire-and-forget cache-lift promise settle.
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(ctx.dealErrorReason).toBe('connection');
+      // The provisional lift stood: cached-stamp proof rendered Event content
+      // even though authority was never established.
+      expect(ctx.canRenderEventContent).toBe(true);
+
+      // An OPTIMISTIC same-session attest (UI-only — the write never commits,
+      // `attestAdult` hangs forever) keeps `attested` true across the
+      // correction below. Without this, the fix's own `setAttested(false)`
+      // (correctly revoking the WRONG lift) flips `needsAttestation` true,
+      // which swaps AuthProvider's `children` for the SignIn re-prompt —
+      // unmounting the very component this test reads state through, before
+      // it can ever render with the corrected value. #761's generation guard
+      // already covers that revoke path; this test isolates #762's actual
+      // claim — that a late PERMANENT rejection corrects `dealErrorReason` at
+      // all, which a mounted-throughout consumer can observe directly.
+      mocks.attestAdult.mockReturnValue(new Promise<void>(() => {}));
+      act(() => {
+        void ctx.attest();
+      });
+
+      // THE FIX UNDER TEST: the underlying read that timed out now rejects LATE
+      // with a PERMANENT cause. That must correct `dealErrorReason` — the
+      // in-time timeout wrongly classified it 'connection' (Codex P2 on #762).
+      const permanentErr = Object.assign(new Error('Missing or insufficient permissions.'), {
+        code: 'permission-denied',
+      });
+      await act(async () => {
+        authorityRead.fail(permanentErr);
+        await authorityRead.promise.catch(() => {});
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(ctx.dealErrorReason).toBe('permanent');
+    } finally {
+      vi.useRealTimers();
+      delete authMock.currentUser;
+    }
   });
 });
