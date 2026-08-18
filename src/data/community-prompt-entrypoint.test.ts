@@ -218,16 +218,64 @@ describe('deriveMySubmissions (#559)', () => {
     expect(views).toEqual([{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'approved', dayIndex: undefined }]);
   });
 
-  it('carries lastKnownDayIndex through the same fallback, for a submission previously observed scheduled', () => {
-    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 3 }];
+  it('carries lastKnownDayIndex through the same fallback, for a submission previously observed scheduled — while its named Day is STILL targetable', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 2 }];
     const views = deriveMySubmissions(tracked, [], [], days, 0, true);
-    expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'scheduled', dayIndex: 3 });
+    expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'scheduled', dayIndex: 2 });
   });
 
   it('still reports "not_selected" for a submission that was NEVER observed active', () => {
     const tracked = [{ id: 'gone', text: 'Too spicy', submittedAt: 5 }];
     const views = deriveMySubmissions(tracked, [], [], days, 0, true);
     expect(views[0].status).toBe('not_selected');
+  });
+
+  // Codex P2, PR #845 round 8, finding (a): the FIRST-time version of round
+  // 7's race — a submission this device has NEVER before seen active (no
+  // lastKnownStatus cached yet) still needs one render's grace, or the SAME
+  // cross-listener overlap reads "not selected" for a submission that is
+  // actually about to resolve.
+  it('reports "pending" (not "not_selected") for an id in graceIds absent from both live queries, even with no lastKnownStatus cached', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true, new Set(['a1']));
+    expect(views).toEqual([{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'pending' }]);
+  });
+
+  it('graceIds does not override a submission that HAS already resolved active — the live document wins', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5 }];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    const views = deriveMySubmissions(tracked, [], activeMine, days, 0, true, new Set(['a1']));
+    expect(views[0].status).toBe('scheduled');
+  });
+
+  it('a genuine rejection is unaffected by an EMPTY graceIds (the default) — still "not_selected"', () => {
+    const tracked = [{ id: 'gone', text: 'Too spicy', submittedAt: 5 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views[0].status).toBe('not_selected');
+  });
+
+  // Codex P2, PR #845 round 8, finding (b): a cached 'scheduled' fallback is
+  // a promise about a SPECIFIC Day, true only while that Day is still
+  // targetable — a submission hard-hidden before its Day's cutoff must not
+  // replay "scheduled · Day N" forever once that Day stops being targetable.
+  it('downgrades a cached "scheduled" fallback to "approved" once its named Day is no longer targetable (stamped)', () => {
+    const stampedDays = [day(2, { unlockAt: 9999, snapshotItemIds: ['whatever'] })];
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 2 }];
+    const views = deriveMySubmissions(tracked, [], [], stampedDays, 0, true);
+    expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'approved', dayIndex: undefined });
+  });
+
+  it('downgrades a cached "scheduled" fallback to "approved" once its named Day\'s cutoff has passed', () => {
+    const pastCutoffDays = [day(2, { unlockAt: 100 })];
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 2 }];
+    const views = deriveMySubmissions(tracked, [], [], pastCutoffDays, 500, true);
+    expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'approved', dayIndex: undefined });
+  });
+
+  it('downgrades a cached "scheduled" fallback naming a Day no longer in the schedule at all', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 99 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'approved', dayIndex: undefined });
   });
 });
 

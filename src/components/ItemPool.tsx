@@ -117,6 +117,9 @@ export default function ItemPool() {
   useEffect(() => {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
   }, [uid]);
+  // The previous render's `myPending` ids (#559, Codex P2, PR #845 round 8) —
+  // see the `graceIds` computation below, just above where this is read.
+  const prevPendingIdsRef = useRef<ReadonlySet<string>>(new Set());
   // A ticking clock (#559, Codex P2 round 2, PR #845), shared with
   // Board.tsx/ProofFeed.tsx's identical need (Codex P2, PR #845 round 5 —
   // extracted into one hook after the same unclamped-timer overflow bug,
@@ -152,7 +155,37 @@ export default function ItemPool() {
   // start), which would have let a genuinely still-pending or still-active
   // submission read as `not_selected` while offline — see
   // `deriveMySubmissions`'s own doc comment for the flash this prevents.
-  const mySubmissions = deriveMySubmissions(tracked, myPending, activeMine, days, now, pendingServerReady && activeServerReady);
+  //
+  // One render's worth of grace for the FIRST-time approval race (#559,
+  // Codex P2, PR #845 round 8): `myPending`/`activeMine` are independent
+  // listeners, so the pending-removal snapshot can land one render before
+  // the active-addition snapshot — for a submission this device has NEVER
+  // before seen active (round 7's `lastKnownStatus` cache is still unset),
+  // that overlap would otherwise read `'not_selected'` for one render.
+  // `prevPendingIdsRef` remembers the PREVIOUS render's pending ids; an id
+  // that was there but is now in NEITHER set gets exactly one render of
+  // "still pending" (see `deriveMySubmissions`'s own doc comment for why one
+  // render is enough — the active listener's own arrival is what triggers
+  // the very next render, so a genuine rejection, which has no such arrival
+  // coming, simply ages out of `prevPendingIdsRef` on the render after next
+  // and correctly falls through to `'not_selected'`).
+  const currentPendingIds = new Set(myPending.map((it) => it.id));
+  const activeIds = new Set(activeMine.map((it) => it.id));
+  const graceIds = new Set(
+    [...prevPendingIdsRef.current].filter((id) => !currentPendingIds.has(id) && !activeIds.has(id)),
+  );
+  useEffect(() => {
+    prevPendingIdsRef.current = currentPendingIds;
+  });
+  const mySubmissions = deriveMySubmissions(
+    tracked,
+    myPending,
+    activeMine,
+    days,
+    now,
+    pendingServerReady && activeServerReady,
+    graceIds,
+  );
   // Every id `mySubmissions` already renders WITH a status pill (#559, Codex
   // P2) — excluded here so the plain pool list below never shows the SAME
   // Prompt a second time with no status at all.

@@ -190,6 +190,47 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
     }
   });
 
+  // #559, Codex P2, PR #845 round 8: `useMyPendingItems`/`useMyActiveItems`
+  // are independent listeners, so an admin's approval can land the
+  // pending-removal snapshot one render before the active-addition snapshot
+  // — for a submission this device has NEVER before seen active (round 7's
+  // `lastKnownStatus` cache still unset), that overlap used to read
+  // "not selected" for exactly that render. `graceIds` (ItemPool's own
+  // previous-render memory of `myPending`'s ids) covers it for one render,
+  // then correctly ages out into `not_selected` if nothing ever shows up
+  // active — pinning both halves against ItemPool's real render cycle, not
+  // just the pure `deriveMySubmissions` unit above.
+  it('shows a submission still as "pending" for one render after it vacates the pending query with no active arrival yet, then ages out to "not selected"', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage);
+    try {
+      localStorage.setItem(
+        'gcb.mySuggestions.ev-1.u1',
+        JSON.stringify([{ id: 'mine-1', text: 'About to be approved', submittedAt: 1 }]),
+      );
+      H.myPending = [item('mine-1', { text: 'About to be approved', status: 'pending' })];
+      const { rerender } = render(<ItemPool />);
+      expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+      // The pending listener's removal snapshot lands; the active listener's
+      // addition has NOT arrived yet — the grace render.
+      H.myPending = [];
+      rerender(<ItemPool />);
+      expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+      // Still nothing active on the NEXT render — grace has aged out, and a
+      // genuine rejection (no active arrival ever coming) correctly resolves.
+      rerender(<ItemPool />);
+      expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/not selected/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // #559, Codex P1, PR #845 round 4: an unclamped `setTimeout(..., nextUnlock
   // - Date.now())` overflows the 32-bit signed int delay browsers accept once
   // the next unlock is more than ~24.9 days out — which they clamp to ~0ms,

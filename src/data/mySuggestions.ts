@@ -24,7 +24,7 @@
  * on.
  */
 import type { ItemDoc } from '../types';
-import { submitterStatus, type SubmitterStatus, type TargetableDay } from './communityPrompts';
+import { isDayTargetable, submitterStatus, type SubmitterStatus, type TargetableDay } from './communityPrompts';
 
 export interface TrackedSuggestion {
   id: string;
@@ -143,6 +143,33 @@ export interface MySubmissionView {
  * the client at all, and "still approved" is the honest last-known fact.
  * Only a submission NEVER observed active falls all the way to
  * `'not_selected'`.
+ *
+ * Two more gaps in that fallback, both Codex P2, PR #845 round 8:
+ *
+ * (a) The FIRST-time version of the round-7 race (above) — an admin
+ * approving a submission this device has NEVER before seen active has no
+ * `lastKnownStatus` to fall back to at all, so the same one-render overlap
+ * (pending-removal landing before active-addition) still reads as
+ * `'not_selected'` for a submission that is about to resolve. `graceIds`
+ * (the caller's own one-render memory of "this id just vacated the pending
+ * query and has not yet shown up active" — see `ItemPool.tsx`) reports
+ * `'pending'` for exactly that window instead of guessing; a genuine
+ * rejection has no active snapshot ever arriving, so the caller's grace
+ * naturally expires on the next unrelated render and this still resolves to
+ * `'not_selected'` — it only smooths the transient overlap, never suppresses
+ * a real rejection indefinitely.
+ *
+ * (b) A cached `'scheduled'` fallback is a promise about a SPECIFIC Day,
+ * true only while that Day is still targetable — the same rule
+ * `submitterStatus` itself enforces for a live row. A submission observed
+ * scheduled and then hard-hidden BEFORE its Day's cutoff would otherwise
+ * replay that cached label forever, since a hidden row can never be
+ * re-observed to naturally correct it. Re-deriving the fallback against the
+ * CURRENT `days`/`now` (not just replaying the cached label verbatim) keeps
+ * the promise honest: once the named Day stops being targetable, the
+ * fallback downgrades to `'approved'` — still-approved is the honest
+ * last-known fact, exactly as a live `submitterStatus` read would report for
+ * any other Day-cutoff-passed row.
  */
 export function deriveMySubmissions(
   tracked: readonly TrackedSuggestion[],
@@ -151,6 +178,7 @@ export function deriveMySubmissions(
   days: readonly TargetableDay[],
   now: number,
   ready: boolean,
+  graceIds: ReadonlySet<string> = new Set(),
 ): MySubmissionView[] {
   const seen = new Set<string>();
   const views: MySubmissionView[] = [];
@@ -165,7 +193,19 @@ export function deriveMySubmissions(
     seen.add(t.id);
     const active = activeMine.find((it) => it.id === t.id);
     if (!active && !ready) continue;
-    const fallbackStatus: MySubmissionStatus = t.lastKnownStatus ?? 'not_selected';
+    if (!active && graceIds.has(t.id)) {
+      views.push({ id: t.id, text: t.text, submittedAt: t.submittedAt, status: 'pending' });
+      continue;
+    }
+    let fallbackStatus: MySubmissionStatus = t.lastKnownStatus ?? 'not_selected';
+    let fallbackDayIndex = t.lastKnownDayIndex;
+    if (!active && fallbackStatus === 'scheduled') {
+      const day = typeof fallbackDayIndex === 'number' ? days.find((d) => d.index === fallbackDayIndex) : undefined;
+      if (!day || !isDayTargetable(day, now)) {
+        fallbackStatus = 'approved';
+        fallbackDayIndex = undefined;
+      }
+    }
     views.push({
       id: t.id,
       // The authoritative text once approved (Codex P2, PR #845): an admin
@@ -180,7 +220,7 @@ export function deriveMySubmissions(
         ? typeof active.targetDayIndex === 'number'
           ? active.targetDayIndex
           : undefined
-        : t.lastKnownDayIndex,
+        : fallbackDayIndex,
     });
   }
 
