@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BugReportInputError, nextRateState, validateBugReportInput } from '../../functions/src/bugReportCore';
+import { reporterBelongsToEvent, type ReporterLookupFirestore } from '../../functions/src/bugReports';
 import contract from '../../functions/src/bugReportContract.cjs';
 
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -87,5 +88,55 @@ describe('bug-report server validation', () => {
     const atBoundary = nextRateState(third, 1_000 + 15 * 60 * 1000);
     expect(atBoundary.submissionMs).toEqual([2_000, 3_000, 901_000]);
     expect(() => nextRateState(atBoundary, 901_001)).toThrow(BugReportInputError);
+  });
+});
+
+describe('reporterBelongsToEvent (#670 — the abuse escalation gate)', () => {
+  // `eventId` rides in on the client payload, and once an abuse report mails the
+  // named Event's admins that field is a delivery address rather than a label.
+  // These are the only answers that may open it.
+  const lookup = (
+    docs: Record<string, Record<string, unknown> | undefined>,
+    throwOn: readonly string[] = [],
+  ): ReporterLookupFirestore => ({
+    doc: (path: string) => ({
+      get: async () => {
+        if (throwOn.includes(path)) throw new Error(`backend unavailable: ${path}`);
+        const data = docs[path];
+        return { exists: data !== undefined, data: () => data };
+      },
+    }),
+  });
+
+  it('accepts a player of the Event they named', async () => {
+    const db = lookup({ 'events/med-2026/players/u1': { displayName: 'Ada' } });
+    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(true);
+  });
+
+  it('accepts an Event ADMIN who never dealt a board', async () => {
+    // An organizer who sets the Event up without playing has no player document
+    // and is plainly authorized — the roster is the second chance, and only the
+    // second, because it costs a whole Event read the common case should not pay.
+    const db = lookup({ 'events/med-2026': { admins: ['u1', 'u2'] } });
+    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(true);
+  });
+
+  it('rejects a stranger naming somebody else’s Event', async () => {
+    const db = lookup({ 'events/med-2026': { admins: ['someone-else'] } });
+    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(false);
+    expect(await reporterBelongsToEvent(lookup({}), 'med-2026', 'u1')).toBe(false);
+    // A non-array or absent roster is not a membership claim.
+    expect(await reporterBelongsToEvent(lookup({ 'events/med-2026': { admins: 'u1' } }), 'med-2026', 'u1')).toBe(false);
+    expect(await reporterBelongsToEvent(lookup({ 'events/med-2026': {} }), 'med-2026', 'u1')).toBe(false);
+  });
+
+  it('FAILS CLOSED when the lookup itself breaks', async () => {
+    // The wrong direction here is mailing an Event's admins on the say-so of
+    // somebody with no relationship to it, so an unreadable answer is not
+    // membership.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = lookup({ 'events/med-2026': { admins: ['u1'] } }, ['events/med-2026/players/u1']);
+    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(false);
+    spy.mockRestore();
   });
 });

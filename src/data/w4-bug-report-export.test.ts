@@ -96,6 +96,22 @@ describe('local bug-report export', () => {
     expect(marked.kind).toBe('abuse');
   });
 
+  it('fails closed on a stored kind the contract does not recognize', async () => {
+    // Unlike intake, which normalizes an unknown value down so a client that
+    // cannot be forced to upgrade never loses a report. By the time a document
+    // is being EXPORTED it has already been through that normalizer, so a
+    // present-but-unrecognized value means a hand-repaired or half-migrated
+    // record — and exporting it as `bug` would silently discard triage
+    // information the operator is relying on.
+    const summary = await exportReports({
+      reports: [{ ...report(), kind: 'harassment' }],
+      downloadScreenshot: async () => PNG,
+      root,
+    });
+    expect(summary.failed[0].error).toContain('Invalid kind');
+    await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('archives with an immutable GitHub receipt and prevents duplicate import', async () => {
     await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
     const receipt = await archiveReport({

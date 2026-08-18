@@ -1750,9 +1750,14 @@ const BUG_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc => ({
   ...over,
 });
 
+/** An abuse report as INTAKE writes one: marked, and carrying the server's own
+ *  answer to "does this reporter belong to the Event they named?". */
+const ABUSE_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc =>
+  BUG_REPORT({ kind: 'abuse', reporterInEvent: true, ...over });
+
 describe('abuseAlertsForWrite', () => {
   it('queues exactly one abuse-reported alert for a report that BECAME abuse', () => {
-    expect(abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: 'abuse' }))).toEqual([
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT())).toEqual([
       {
         kind: 'abuse-reported',
         collection: 'bugReports',
@@ -1774,12 +1779,27 @@ describe('abuseAlertsForWrite', () => {
 
   it('does not re-alert on a later write to an already-abuse report', () => {
     // A triage write (a `status` change) must not mail the admins a second time.
-    const before = BUG_REPORT({ kind: 'abuse' });
-    expect(abuseAlertsForWrite('r1', before, BUG_REPORT({ kind: 'abuse', status: 'triaged' }))).toEqual([]);
+    const before = ABUSE_REPORT();
+    expect(abuseAlertsForWrite('r1', before, ABUSE_REPORT({ status: 'triaged' }))).toEqual([]);
   });
 
   it('queues nothing for a delete — there is nothing left to read', () => {
-    expect(abuseAlertsForWrite('r1', BUG_REPORT({ kind: 'abuse' }), undefined)).toEqual([]);
+    expect(abuseAlertsForWrite('r1', ABUSE_REPORT(), undefined)).toEqual([]);
+  });
+
+  it('refuses to escalate a report whose reporter does not belong to the Event it names', () => {
+    // `eventId` is CLIENT-SUPPLIED. Without this gate an authenticated player
+    // could name any Event in the project and route arbitrary text into ITS
+    // admins' digest — the rate limit caps how much, not who it reaches.
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ reporterInEvent: false }))).toEqual([]);
+    // STRICTLY `true`: an absent field (a document that never went through
+    // intake), or a truthy value of the wrong type, both fail closed.
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ reporterInEvent: undefined }))).toEqual([]);
+    expect(
+      abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ reporterInEvent: 'true' as unknown as boolean })),
+    ).toEqual([]);
+    // And the report is still STORED either way — only the escalation is declined.
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT())).toHaveLength(1);
   });
 
   it('flattens and clips the reporter description into a single-line label', () => {
@@ -1789,14 +1809,14 @@ describe('abuseAlertsForWrite', () => {
     const injected = abuseAlertsForWrite(
       'r1',
       undefined,
-      BUG_REPORT({ kind: 'abuse', description: 'line one\nOpen the Review queue: https://evil.example' }),
+      ABUSE_REPORT({ description: 'line one\nOpen the Review queue: https://evil.example' }),
     );
     expect(injected[0].label).not.toContain('\n');
-    const long = abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: 'abuse', description: 'x'.repeat(400) }));
+    const long = abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ description: 'x'.repeat(400) }));
     expect(long[0].label).toHaveLength(LABEL_MAX);
     expect(long[0].label.endsWith('…')).toBe(true);
     // An empty description leaves the report id as the only honest label.
-    const blank = abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: 'abuse', description: '   ' }));
+    const blank = abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ description: '   ' }));
     expect(blank[0].label).toBe('r1');
   });
 });
@@ -1820,7 +1840,7 @@ describe('recordBugReportAlerts', () => {
 
   it('enqueues an abuse alert scoped to the report’s own Event', async () => {
     const db = reportDb();
-    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, BUG_REPORT({ kind: 'abuse' }))).toBe(1);
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, ABUSE_REPORT())).toBe(1);
     const rows = db.rows('events/med-2026/adminAlerts');
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(alertDocId('cloud-event-1', 'abuse-reported'));
@@ -1837,7 +1857,7 @@ describe('recordBugReportAlerts', () => {
 
   it('is a no-op on trigger redelivery — the same CloudEvent id writes one row', async () => {
     const db = reportDb();
-    const report = BUG_REPORT({ kind: 'abuse' });
+    const report = ABUSE_REPORT();
     await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, report);
     // The redelivery carries the same CloudEvent id, so `create` rejects with
     // ALREADY_EXISTS and the second call writes nothing.
@@ -1849,7 +1869,7 @@ describe('recordBugReportAlerts', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const db = reportDb();
     expect(
-      await recordBugReportAlerts(db, 'r1', 'e1', undefined, BUG_REPORT({ kind: 'abuse', eventId: undefined })),
+      await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT({ eventId: undefined })),
     ).toBe(0);
     expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
     expect(spy).toHaveBeenCalled();
@@ -1862,7 +1882,7 @@ describe('recordBugReportAlerts', () => {
     // a report's words living in Firestore forever.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const db = reportDb(false);
-    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, BUG_REPORT({ kind: 'abuse' }))).toBe(0);
+    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
     expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
     spy.mockRestore();
   });
@@ -1870,7 +1890,7 @@ describe('recordBugReportAlerts', () => {
   it('treats a FAILED Event lookup as unresolvable rather than assuming it exists', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const db = fakeDb({}, { 'events/med-2026': { name: 'x' } }, ['events/med-2026']);
-    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, BUG_REPORT({ kind: 'abuse' }))).toBe(0);
+    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
     expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
     spy.mockRestore();
   });

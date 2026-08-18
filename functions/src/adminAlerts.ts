@@ -376,8 +376,13 @@ export interface BugReportDoc {
   /** The reporter's own words — the only human-readable label a report has. */
   description?: string;
   /** The Event the report was filed from. `bugReports` is TOP-LEVEL, so this
-   *  field is the ONLY link between a report and an Event's alert queue. */
+   *  field is the ONLY link between a report and an Event's alert queue — and it
+   *  is CLIENT-SUPPLIED, which is why `reporterInEvent` exists. */
   eventId?: string;
+  /** Server-resolved at intake (`reporterBelongsToEvent`): did this reporter
+   *  actually belong to the Event they named? Written only on abuse reports, so
+   *  its presence means "checked" rather than "defaulted". */
+  reporterInEvent?: boolean;
   status?: string;
 }
 
@@ -405,6 +410,15 @@ const EVENT_ID_SHAPE = /^[A-Za-z0-9_-]{1,100}$/;
  * make the digest useless for the reports that need eyes now.
  *
  * A DELETE (`after` undefined) earns nothing, matching `alertsForWrite`.
+ *
+ * AND THE REPORTER HAS TO BELONG TO THE EVENT. `eventId` is client-supplied, so
+ * without this an authenticated player could name any Event in the project and
+ * route arbitrary text into ITS admins' digest — the rate limit caps how much,
+ * not who it reaches. `reporterInEvent` is resolved at intake by
+ * `reporterBelongsToEvent` (the only point in the flow that still has the uid;
+ * by the time this runs the document carries an unresolvable `reporterHash`),
+ * and it is compared STRICTLY to `true`: an absent field, a `'true'` string, or
+ * a hand-written document that never went through intake all fail closed.
  */
 export function abuseAlertsForWrite(
   reportId: string,
@@ -413,6 +427,7 @@ export function abuseAlertsForWrite(
 ): AdminAlertDraft[] {
   if (!after) return [];
   if (after.kind !== 'abuse' || before?.kind === 'abuse') return [];
+  if (after.reporterInEvent !== true) return [];
   return [
     {
       kind: 'abuse-reported',

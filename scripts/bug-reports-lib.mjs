@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:f
 import path from 'node:path';
 import contract from '../functions/src/bugReportContract.cjs';
 
-const { validateClientReportFields, validatePngBytes } = contract;
+const { REPORT_KINDS, validateClientReportFields, validatePngBytes } = contract;
 
 const REPORT_ID = /^[A-Za-z0-9_-]{6,100}$/;
 const ISSUE_URL = /^https:\/\/github\.com\/nathanjohnpayne\/gaycruisebingo\/issues\/(\d+)$/;
@@ -139,6 +139,18 @@ function safeReport(report) {
   if (typeof report.submittedAt !== 'string' || !Number.isFinite(Date.parse(report.submittedAt))) throw new Error(`Invalid submittedAt for ${report.id}`);
   if (report.captureError != null && (typeof report.captureError !== 'string' || report.captureError.length > 200)) throw new Error(`Invalid capture error for ${report.id}`);
   if (report.status !== 'new') throw new Error(`Invalid status for ${report.id}`);
+  // FAIL CLOSED on a stored `kind` the contract does not recognize, unlike the
+  // intake path (#670 Codex P2). Normalizing an unknown value down to `bug` is
+  // right at INTAKE, where the alternative is losing a report from a client that
+  // cannot be forced to upgrade. Here the document has already been through that
+  // normalizer, so a present-but-unrecognized value means the stored report was
+  // hand-repaired, half-migrated, or written by a producer this checkout does not
+  // know — and silently exporting it as `bug` would discard triage information
+  // the operator is relying on. An ABSENT field is still the legacy default:
+  // every report stored before #670 has none.
+  if (report.kind !== undefined && !REPORT_KINDS.includes(report.kind)) {
+    throw new Error(`Invalid kind for ${report.id}`);
+  }
   const metadata = {
     id: report.id,
     schemaVersion: fields.schemaVersion,
