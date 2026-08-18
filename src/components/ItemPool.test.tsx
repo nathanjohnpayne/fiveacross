@@ -52,6 +52,7 @@ vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
 import ItemPool from './ItemPool';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
+import { track } from '../analytics';
 
 const item = (id: string, over: Partial<ItemDoc> = {}): ItemDoc =>
   ({
@@ -84,6 +85,24 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false);
+  });
+
+  // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
+  // prove a call site actually FIRES an event with sane params — this pins
+  // the real `add()` handler's `prompt_suggestion_submitted` emission, no
+  // Prompt text in the payload, `hasTargetDay` reflecting the write's own
+  // (mocked, here undefined-resolving) result rather than a guess.
+  it('fires prompt_suggestion_submitted with no Prompt text, alongside the existing add_item', async () => {
+    render(<ItemPool />);
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'A new prompt' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(track).toHaveBeenCalledWith('add_item'));
+    expect(track).toHaveBeenCalledWith('prompt_suggestion_submitted', { hasTargetDay: false });
+    for (const call of (track as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('A new prompt');
+    }
   });
 
   it('a half-typed suggestion holds back the automatic post-deploy reload', async () => {

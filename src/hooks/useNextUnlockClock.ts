@@ -33,6 +33,21 @@ import { useEffect, useState } from 'react';
  */
 export function useNextUnlockClock(days: readonly { unlockAt: number }[] | undefined): number {
   const [now, setNow] = useState(() => Date.now());
+  // Refresh to the CURRENT wall clock the moment the schedule itself changes
+  // (Codex P2, PR #845 round 6): `now` otherwise stays frozen at whatever it
+  // was during the gap between mount and the schedule actually arriving — a
+  // backgrounded tab, or the Event doc's first snapshot landing after a real
+  // unlock already elapsed — so a caller reading `now` right after a
+  // schedule change could judge a Day's lock/target state against a
+  // significantly stale clock until the NEXT scheduled timer happens to
+  // fire. Deliberately its OWN effect, depending ONLY on `days`, never
+  // `now`: folding this into the timer effect below (whose deps include
+  // `now`) would call `setNow` on every one of ITS OWN re-runs too, and
+  // `Date.now()` is essentially never bit-for-bit equal across two calls, so
+  // that would re-render forever.
+  useEffect(() => {
+    setNow(Date.now());
+  }, [days]);
   useEffect(() => {
     const schedule = days ?? [];
     const nextUnlock = schedule

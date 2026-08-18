@@ -4601,6 +4601,21 @@ body:has(.sheet-backdrop) .guidelines-trigger {
       0 0 0 2px var(--accent),
       0 0 14px var(--shadow);
   }
+  /* A Community Prompt Square (#559) that is ALSO part of a winning line
+     (Codex P2, PR #845 round 6): `.cell.win`'s reduced-motion box-shadow
+     above has the SAME specificity as `.cell.community`'s (index.css, both
+     0,2,0) and comes later in the cascade, so on a normal render the win
+     ring would silently replace the community ring instead of composing
+     with it — the one state where the "new from the group" affordance is
+     specified to survive alongside every other Square state. `box-shadow`
+     takes multiple comma-separated layers, so this combined selector keeps
+     all three: the community inset ring, plus win's own outer ring + glow. */
+  .cell.win.community {
+    box-shadow:
+      inset 0 0 0 2px var(--accent),
+      0 0 0 2px var(--accent),
+      0 0 14px var(--shadow);
+  }
   .confetti {
     display: none;
   }
