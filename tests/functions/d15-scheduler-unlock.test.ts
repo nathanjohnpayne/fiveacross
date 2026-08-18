@@ -508,7 +508,10 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
   it('the last-call Moment carries the standings line built from the ban-filtered roster', async () => {
     const db = makeDb({
       eventId: 'e',
-      event: { days: mainDays(), bannedUids: ['muted'] },
+      // #800: D10_UNLOCK is 06:00 UTC — the Event's own 'Europe/Rome' zone is
+      // what makes that 08:00, so the fixture must carry it for the freeze
+      // phrase to read "8 a.m." rather than a UTC-formatted "6 a.m.".
+      event: { days: mainDays(), bannedUids: ['muted'], timezone: 'Europe/Rome' },
       players: [
         { uid: 'jess', displayName: 'Jess', bingoCount: 3, squaresMarked: 40, firstBingoAt: 10 },
         { uid: 'rex', displayName: 'Rex', bingoCount: 1, squaresMarked: 44, firstBingoAt: 20 },
@@ -520,6 +523,7 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     // The banned leader never headlines; Jess leads Rex by 2 bingos.
     expect(lastCall.line).toBe('Jess leads by 2 bingos—standings freeze at 8 a.m.');
     expect(lastCall.lastCall).toMatchObject({
+      freezePhrase: 'standings freeze at 8 a.m',
       players: [
         { uid: 'jess', displayName: 'Jess', bingoCount: 3, squaresMarked: 40 },
         { uid: 'rex', displayName: 'Rex', bingoCount: 1, squaresMarked: 44 },
@@ -531,7 +535,7 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
   it('uses the player document id as the canonical finale roster uid when the field is missing', async () => {
     const db = makeDb({
       eventId: 'e',
-      event: { days: mainDays() },
+      event: { days: mainDays(), timezone: 'Europe/Rome' },
       players: [
         { id: 'jess', displayName: 'Jess', bingoCount: 3, squaresMarked: 40, firstBingoAt: 10 },
         { id: 'rex', displayName: 'Rex', bingoCount: 1, squaresMarked: 44, firstBingoAt: 20 },
@@ -551,7 +555,7 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
   it('uses the player document id as the canonical uid for ban filtering and stored payloads', async () => {
     const db = makeDb({
       eventId: 'e',
-      event: { days: mainDays(), bannedUids: ['muted'] },
+      event: { days: mainDays(), bannedUids: ['muted'], timezone: 'Europe/Rome' },
       players: [
         { id: 'jess', uid: 'jess', displayName: 'Jess', bingoCount: 3, squaresMarked: 40, firstBingoAt: 10 },
         { id: 'muted', uid: 'spoofed-safe-uid', displayName: 'Muted', bingoCount: 9, squaresMarked: 99, firstBingoAt: 1 },
@@ -566,6 +570,28 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
         { uid: 'muted', displayName: 'Muted' },
       ],
     });
+  });
+
+  it("#800: derives the freeze phrase from the Event's ACTUAL closing-Day unlock, not a hardcoded 8 a.m.", async () => {
+    // Bodega's exact shape (the issue's own example): a closing Day unlocking
+    // at 11:00 local, not 08:00. A schedule shaped like this used to post
+    // "standings freeze at 8 a.m." regardless — the wrong time entirely.
+    const bodegaFarewellUnlock = Date.UTC(2026, 6, 25, 18, 0); // 11:00 America/Los_Angeles (PDT, UTC-7)
+    const db = makeDb({
+      eventId: 'e',
+      event: {
+        days: [
+          { index: 8, pool: 'main', unlockAt: Date.UTC(2026, 6, 24, 6, 0) },
+          { index: 9, pool: 'farewell', unlockAt: bodegaFarewellUnlock },
+        ],
+        timezone: 'America/Los_Angeles',
+      },
+      players: [{ uid: 'jess', displayName: 'Jess', bingoCount: 1, squaresMarked: 5, firstBingoAt: 10 }],
+    });
+    await runFinaleBeats(db, 'e', { now: () => bodegaFarewellUnlock - 1 });
+    const lastCall = db.moments().find((m) => m.kind === 'last_call')!;
+    expect(lastCall.line).toBe('Jess has the board to themselves going into the final night—standings freeze at 11 a.m.');
+    expect(lastCall.lastCall).toMatchObject({ freezePhrase: 'standings freeze at 11 a.m' });
   });
 
   it('the podium Moment carries champion + cruise First-to-BINGO + the pinned daily honors', async () => {
