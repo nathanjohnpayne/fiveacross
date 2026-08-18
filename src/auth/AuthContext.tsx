@@ -189,6 +189,69 @@ function peekPendingRedirectAttestation(): boolean {
   }
 }
 
+/**
+ * A durable "redirect in flight" record, in the SAME store and under the SAME
+ * TTL discipline as `SIGNIN_ADULT_ACK_KEY` above, and for the same reason
+ * (#346): `localStorage` survives the storage-partitioning that can drop
+ * `PENDING_REDIRECT_ATTESTATION_KEY`'s `sessionStorage` marker across the
+ * Google round trip. `getRedirectResult` resolving non-null is normally proof
+ * enough that a redirect returned — but Safari can restore the session (via
+ * `onAuthStateChanged`) while the SAME round trip loses whatever helper state
+ * `getRedirectResult` itself depends on, and a null result then would wrongly
+ * read as "no redirect happened" rather than "a redirect happened and Safari
+ * lost the receipt." This record is the second, independent signal the
+ * redirect-return effect races against `getRedirectResult`: written at
+ * redirect START (`signIn`, alongside `markCollectedAcknowledgement`) and
+ * consumed at most once per mount, by whichever of the two signals fires
+ * first — see `completeRedirectReturn` below.
+ */
+export const REDIRECT_PENDING_KEY = 'gcb.signin.redirectPending';
+const REDIRECT_PENDING_TTL_MS = SIGNIN_ADULT_ACK_TTL_MS;
+
+function markRedirectPending(): void {
+  try {
+    localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+  } catch {
+    // Private mode / disabled storage: only the getRedirectResult signal remains.
+  }
+}
+
+function clearRedirectPending(): void {
+  try {
+    localStorage.removeItem(REDIRECT_PENDING_KEY);
+  } catch {
+    // no-op — nothing was durably recorded in the first place.
+  }
+}
+
+// Read WITHOUT consuming, TTL-checked — used by the `redirectReturnPending`
+// guard's mount-time initializer (#357) alongside the sessionStorage peek, so
+// that guard also survives on the surface that loses the marker.
+function peekRedirectPending(now: number = Date.now()): boolean {
+  try {
+    const raw = localStorage.getItem(REDIRECT_PENDING_KEY);
+    const at = Number(raw);
+    return Number.isFinite(at) && at > 0 && now - at <= REDIRECT_PENDING_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+// Consume (read + clear) exactly once. An expired or absent record reads as
+// NOT pending — same fail-toward-re-prompt direction as the ack record: an
+// abandoned redirect from days ago must not "complete" an unrelated later
+// sign-in via the onAuthStateChanged signal.
+function consumeRedirectPending(now: number = Date.now()): boolean {
+  try {
+    const raw = localStorage.getItem(REDIRECT_PENDING_KEY);
+    clearRedirectPending();
+    const at = Number(raw);
+    return Number.isFinite(at) && at > 0 && now - at <= REDIRECT_PENDING_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
 function trackSignInFailure(err: unknown): void {
   const rawCode = (err as { code?: unknown })?.code;
   const code = typeof rawCode === 'string' && /^auth\/[a-z0-9-]+$/.test(rawCode) ? rawCode : 'auth/unknown';
@@ -468,7 +531,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // regression, pinned by tests. STATE so the settle-timer effect re-arms when
   // the return settles; REF so the stable handoff callback can read it without
   // re-identifying (which would churn the onAuthStateChanged subscription).
-  const [redirectReturnPending, setRedirectReturnPending] = useState(peekPendingRedirectAttestation);
+  //
+  // Peeks BOTH the sessionStorage marker AND the durable localStorage record
+  // (#346 hardening): the marker can be lost across the exact round trip this
+  // guard exists to protect, so checking only it would let the guard itself
+  // drop on the surface it matters most for.
+  const [redirectReturnPending, setRedirectReturnPending] = useState(
+    () => peekPendingRedirectAttestation() || peekRedirectPending(),
+  );
   const redirectReturnPendingRef = useRef(redirectReturnPending);
   // Whether `attested === true` is AUTHORITATIVE (server-settled or a same-session
   // optimistic attest) vs merely PROVISIONAL (the offline cache lift). Distinct
@@ -1039,6 +1109,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         return undefined;
       }
+      // Signal (b), #346: the durable pending record proves a redirect was
+      // actually started, so a User publishing HERE — even with no
+      // getRedirectResult answer yet, or ever — is that redirect completing,
+      // not an ordinary cached-session restore. `consumeRedirectContextOnce`
+      // is idempotent and shared with the getRedirectResult effect (signal a),
+      // so this is a no-op read on every mount where no redirect was pending —
+      // which is every normal reload, including a normal signed-in restore.
+      if (consumeRedirectContextOnce().pending) completeRedirectReturn(u);
       // Gate on "Loading…" until the bootstrap PROVES 18+ (finding B): the
       // authoritative server read online, or a cached stamp / same-session attest
       // offline. Never render the Board before proof. Not an await (that was the
@@ -1053,6 +1131,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // an onAuthStateChanged callback's return value).
       return bootstrapUser(u, profileAttempt);
     });
+    // `completeRedirectReturn`/`consumeRedirectContextOnce` (referenced above)
+    // are deliberately NOT in this array, and are safe to omit: both are
+    // declared further down this same function body (after `persistAttestation`),
+    // so putting them here would evaluate a `const` before its own declaration
+    // line runs. That is safe ONLY because the reference above lives inside
+    // this callback, which React does not invoke until after the whole
+    // component function — including those later declarations — has finished
+    // executing for this render; by then both are assigned. Listing them here
+    // would additionally re-subscribe onAuthStateChanged on every identity
+    // change of either, which is exactly the subscription churn
+    // `redirectReturnPendingRef` (above) exists to avoid for the same
+    // callback — and unnecessary besides, since neither closes over anything
+    // but refs, other stable callbacks, and React's own always-stable setState
+    // functions.
   }, [bootstrapUser, clearDealError, handoffSignedOutWebApp]);
 
   // Mirror connectivity into React state AND complete the DEFERRED offline
@@ -1500,46 +1592,85 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (u) await persistAttestation(u);
   }, [persistAttestation]);
 
+  // Consumes the sessionStorage marker, the collected-acknowledgement record,
+  // and the durable redirect-pending record EXACTLY once per mount, regardless
+  // of which of the two completion signals below reaches it first. Idempotent:
+  // whichever signal loses the race gets the SAME already-read values back
+  // instead of re-reading (and re-clearing) storage the winner already cleared.
+  const redirectContextRef = useRef<{
+    appOwnedRedirect: boolean;
+    acknowledged: boolean;
+    pending: boolean;
+  } | null>(null);
+  const consumeRedirectContextOnce = useCallback(() => {
+    if (!redirectContextRef.current) {
+      redirectContextRef.current = {
+        appOwnedRedirect: consumePendingRedirectAttestation(),
+        acknowledged: consumeCollectedAcknowledgement(),
+        pending: consumeRedirectPending(),
+      };
+    }
+    return redirectContextRef.current;
+  }, []);
+
   // A top-level redirect reloads the app, so finish the Firebase transaction on
   // mount and complete the acknowledgement that gated the original sign-in tap.
   // The marker is same-origin session state and is consumed exactly once — but
   // completion does NOT require it (#346): Safari can drop sessionStorage
   // across the provider round-trip while Firebase still restores the session,
   // and gating on the marker skipped the redirect `login` event and the checked
-  // 18+ attestation exactly then. getRedirectResult is the bounded secondary
-  // completion signal: it settles once per mount, nothing render-critical
-  // awaits it, and it resolves non-null ONLY on an actual redirect return —
-  // never on an ordinary mount — so it cannot emit phantom `login` events. And
-  // signIn() is the only initiator of signInWithRedirect, and it records the
-  // actual checkbox value separately below. A non-null result proves the auth
-  // round trip happened, not that a checkbox was shown. The marker still scopes
-  // FAILURE reporting: a rejection becomes
-  // `login_failed` only when the marker proves an app-owned redirect was in
-  // flight — a marker-less rejection on an ordinary mount (e.g. partitioned
-  // helper storage) stays out of analytics.
+  // 18+ attestation exactly then.
+  //
+  // TWO independent completion signals now race for the SAME work (Phase 4b /
+  // decision-765): (a) getRedirectResult resolving non-null — the direct,
+  // in-time answer; (b) the durable `gcb.signin.redirectPending` record being
+  // live when onAuthStateChanged next publishes a signed-in User — the signal
+  // that survives the exact partitioning that can leave (a) resolving null on
+  // a return Firebase otherwise completed. `completeRedirectReturn` is the ONE
+  // latch both route through, so `login` fires exactly once and the
+  // attestation persists at most once no matter which signal wins, or whether
+  // both fire (the common case for an actual successful return). The pending
+  // record is written ONLY at redirect start (signIn), so signal (b) is a
+  // no-op on every ordinary mount — including a normal cached-session restore,
+  // which publishes a signed-in User via onAuthStateChanged just as often.
+  const redirectCompletionLatchRef = useRef(false);
+  const completeRedirectReturn = useCallback(
+    (u: User) => {
+      if (redirectCompletionLatchRef.current) return;
+      redirectCompletionLatchRef.current = true;
+      track('login', { method: 'google' });
+      // Persist ONLY an acknowledgement that was actually collected (Phase 4b
+      // round 4). The posture is read when the redirect STARTS, not when it
+      // returns: an Event that turns adult while the player is away at Google
+      // would otherwise have this branch stamp a durable, cross-Event
+      // `attestedAdultAt` for a checkbox that was never on screen — and walk
+      // them straight through the gate it had just raised. When the
+      // acknowledgement was not collected, doing nothing is exactly right:
+      // `needsAttestation` settles true against the newly raised posture and
+      // the existing re-prompt collects it properly.
+      const { acknowledged } = consumeRedirectContextOnce();
+      if (acknowledged) void persistAttestation(u);
+    },
+    [consumeRedirectContextOnce, persistAttestation],
+  );
+
+  // Signal (a). getRedirectResult settles once per mount, nothing
+  // render-critical awaits it, and it resolves non-null ONLY on an actual
+  // redirect return — never on an ordinary mount — so on its own it cannot
+  // emit phantom `login` events; routing it through the shared latch keeps
+  // that true even when signal (b) also fires. The marker still scopes FAILURE
+  // reporting: a rejection becomes `login_failed` only when the marker proves
+  // an app-owned redirect was in flight — a marker-less rejection on an
+  // ordinary mount (e.g. partitioned helper storage) stays out of analytics.
   useEffect(() => {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
-    const appOwnedRedirect = consumePendingRedirectAttestation();
-    // Read from its OWN store, and unconditionally — the marker above may have
-    // been lost (#346) while this record survives, which is the whole reason
-    // they are separate.
-    const acknowledged = consumeCollectedAcknowledgement();
+    const { appOwnedRedirect } = consumeRedirectContextOnce();
 
     void getRedirectResult(auth)
-      .then(async (result) => {
+      .then((result) => {
         if (!result) return;
-        track('login', { method: 'google' });
-        // Persist ONLY an acknowledgement that was actually collected (Phase 4b
-        // round 4). The posture is read when the redirect STARTS, not when it
-        // returns: an Event that turns adult while the player is away at Google
-        // would otherwise have this branch stamp a durable, cross-Event
-        // `attestedAdultAt` for a checkbox that was never on screen — and walk
-        // them straight through the gate it had just raised. When the
-        // acknowledgement was not collected, doing nothing is exactly right:
-        // `needsAttestation` settles true against the newly raised posture and
-        // the existing re-prompt collects it properly.
-        if (acknowledged) await persistAttestation(result.user);
+        completeRedirectReturn(result.user);
       })
       .catch((err: unknown) => {
         if (appOwnedRedirect) trackSignInFailure(err);
@@ -1553,7 +1684,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setRedirectReturnPending(false);
         }
       });
-  }, [persistAttestation]);
+  }, [completeRedirectReturn, consumeRedirectContextOnce]);
 
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
@@ -1590,14 +1721,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // exact redirect transaction.
         clearCollectedAcknowledgement();
         markPendingRedirectAttestation();
+        // The durable #346 signal (b) companion to the marker above — written
+        // alongside it, in the same store as the acknowledgement record, for
+        // the same reason: it must survive the partitioning that can drop the
+        // sessionStorage marker across this exact round trip.
+        markRedirectPending();
         // Recorded only when the box was actually shown and ticked; the return
         // path reads THIS, never the posture as it stands on return.
         if (acknowledged) markCollectedAcknowledgement();
         try {
           await signInWithRedirect(auth, googleProvider);
         } catch (err) {
+          // A failed START (signInWithRedirect rejects before navigating away)
+          // is a terminal outcome for this attempt — clear every record it
+          // wrote so it cannot be mistaken for an in-flight redirect by a
+          // later attempt on this same, still-live page.
           consumePendingRedirectAttestation();
           clearCollectedAcknowledgement();
+          clearRedirectPending();
           trackSignInFailure(err);
           throw err;
         }

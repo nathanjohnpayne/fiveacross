@@ -6,6 +6,7 @@ import {
   AuthProvider,
   DEAL_TIMEOUT_MS,
   PENDING_REDIRECT_ATTESTATION_KEY,
+  REDIRECT_PENDING_KEY,
   SIGNIN_ADULT_ACK_KEY,
   WEB_APP_AUTH_SETTLE_TIMEOUT_MS,
   useAuth,
@@ -663,6 +664,97 @@ describe('AuthContext deal-error hardening', () => {
       }),
     );
     expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
+  });
+
+  // The PR1 hardening (#765 decision): a durable localStorage pending record,
+  // the signal that survives the SAME partitioning that can drop
+  // PENDING_REDIRECT_ATTESTATION_KEY's sessionStorage marker AND leave
+  // getRedirectResult resolving null on a return Firebase otherwise completed.
+  describe('durable redirect-pending completion (signal b, #346 hardening)', () => {
+    it('completes on onAuthStateChanged alone when getRedirectResult resolves null but the pending record is live', async () => {
+      // No sessionStorage marker — lost, as in #346 — but the durable record
+      // and the collected ack both survive.
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve(); // let the getRedirectResult effect consume the records first
+      });
+      await signInUser(); // onAuthStateChanged publishes the returning User
+
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
+      expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
+      expect(mocks.track).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires login exactly once and attests exactly once when both signals arrive for the same return', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+      await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER));
+      // onAuthStateChanged also publishes the same User, as it does for a real
+      // completed redirect — the shared latch must make this a no-op.
+      await signInUser();
+
+      expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
+      expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' });
+      expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+    });
+
+    it('treats an EXPIRED pending record as absent: neither login nor attestation fire from signal (b)', async () => {
+      // An abandoned redirect from days ago must not "complete" an unrelated
+      // later sign-in the moment onAuthStateChanged happens to publish a User —
+      // which is what an ordinary cached-session restore does on every reload.
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
+    it('an ordinary cached-session restore with no pending record never fires login from onAuthStateChanged', async () => {
+      // No REDIRECT_PENDING_KEY at all — the everyday case of a returning
+      // Player whose session Firebase simply restores on load, no redirect
+      // involved. onAuthStateChanged publishing a User here must stay silent.
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
+    it('fires login with no attestation when the pending record is live but no acknowledgement was collected', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      // No SIGNIN_ADULT_ACK_KEY: the gate showed no checkbox when this redirect
+      // started (e.g. a tame-pool Event, #608).
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
   });
 
   it('hands a signed-out web.app boot to firebaseapp.com before rendering a second sign-in screen', async () => {
