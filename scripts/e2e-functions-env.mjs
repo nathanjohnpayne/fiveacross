@@ -102,6 +102,20 @@ function resolveFromReExports(upstream, name) {
 }
 
 /**
+ * The re-export map for a namespace import taken DIRECTLY from
+ * `firebase-functions/params` — `import * as params from
+ * 'firebase-functions/params'` or its CommonJS counterpart `const params =
+ * require('firebase-functions/params')`. Every export on the real module
+ * that matches `CONSTRUCTOR_RE` genuinely is a Firebase constructor, so this
+ * is a `WILDCARD_PARAMS`-only map: `resolveFromReExports` falls straight
+ * through to a `CONSTRUCTOR_RE` match for any property name, exactly the
+ * unconditional behavior this file always had for the direct-import case.
+ * Shared (not rebuilt per import) since it is the same for every direct
+ * namespace import in a file.
+ */
+const DIRECT_PARAMS_NAMESPACE = new Map([[WILDCARD_PARAMS, true]]);
+
+/**
  * Local name → constructor kind, for every params-module constructor a source
  * binds, however it binds it.
  *
@@ -118,7 +132,21 @@ function resolveFromReExports(upstream, name) {
  */
 function constructorBindings(sourceFile, filePath) {
   const bindings = new Map();
-  const namespaces = new Set();
+  // Local namespace name -> the re-export map to resolve a property access
+  // against (#832 follow-up, Codex + CodeRabbit on PR #834): a direct
+  // `firebase-functions/params` namespace import uses the shared
+  // `DIRECT_PARAMS_NAMESPACE` sentinel (trust any CONSTRUCTOR_RE-shaped
+  // property, since every one really is a constructor on that module); a
+  // LOCAL BARREL namespace import uses the barrel's own resolved upstream
+  // map instead, so a property this barrel does not actually re-export from
+  // the params module — including a local export that merely LOOKS
+  // constructor-shaped, like its own `defineString` helper — resolves to
+  // nothing rather than being accepted on name alone. Storing a `Set` here,
+  // as an earlier version of this fix did, could not make that distinction:
+  // it recorded only THAT a barrel re-exports something, not WHICH names,
+  // so `params.defineString(...)` through a barrel that only re-exports
+  // `defineSecret` was wrongly accepted too.
+  const namespaces = new Map();
 
   const takeNamed = (exported, local) => {
     const kind = CONSTRUCTOR_RE.exec(exported);
@@ -140,7 +168,7 @@ function constructorBindings(sourceFile, filePath) {
             takeNamed((element.propertyName ?? element.name).text, element.name.text);
           }
         } else if (named && ts.isNamespaceImport(named)) {
-          namespaces.add(named.name.text);
+          namespaces.set(named.name.text, DIRECT_PARAMS_NAMESPACE);
         }
       } else if (specifier.startsWith('.') && named && ts.isNamedImports(named) && !isTypeOnlyImport) {
         // Local re-export barrel (#738): `import { defineString } from
@@ -157,6 +185,38 @@ function constructorBindings(sourceFile, filePath) {
             if (kind) {
               bindings.set(element.name.text, kind);
             }
+          }
+        }
+      } else if (specifier.startsWith('.') && named && ts.isNamespaceImport(named) && !isTypeOnlyImport) {
+        // Local re-export barrel, NAMESPACE form (#832, filed as a
+        // post-review observation on PR #826): `import * as params from
+        // './barrel'`, where `./barrel` re-exports (named or wildcard) from
+        // `firebase-functions/params`. Skipping this case would silently
+        // miss a real `params.defineSecret(...)` call through the barrel —
+        // the false-negative direction this file treats as the dangerous
+        // one (a missed param hangs the emulator; a spurious one merely
+        // throws loudly asking for a value).
+        //
+        // Stores the barrel's OWN resolved `upstream` map, not a bare
+        // presence flag (Codex + CodeRabbit, independently, on PR #834's
+        // first version of this fix): a valid barrel can re-export
+        // `defineSecret` from the params module AND separately export its
+        // own unrelated local `defineString` helper — treating the whole
+        // namespace as trusted, the way a DIRECT `firebase-functions/params`
+        // import legitimately is, would misclassify `params.defineString(…)`
+        // as a real param declaration even though this barrel never
+        // re-exported that name. `constructorKindOf` resolves the specific
+        // property against this map via `resolveFromReExports`, the exact
+        // per-name provenance the named-import sibling branch above already
+        // gives a local barrel — a wildcard barrel (`export * from
+        // 'firebase-functions/params'`) still resolves everything, via that
+        // function's own `WILDCARD_PARAMS` fallback, since a wildcard
+        // genuinely does forward every constructor unchanged.
+        const resolved = resolveRelative(filePath, specifier);
+        if (resolved) {
+          const upstream = reExportedParamsBindings(resolved);
+          if (upstream.size > 0) {
+            namespaces.set(named.name.text, upstream);
           }
         }
       }
@@ -183,7 +243,7 @@ function constructorBindings(sourceFile, filePath) {
             }
           }
         } else if (ts.isIdentifier(declaration.name)) {
-          namespaces.add(declaration.name.text);
+          namespaces.set(declaration.name.text, DIRECT_PARAMS_NAMESPACE);
         }
         continue;
       }
@@ -419,9 +479,25 @@ function bindingNames(nameNode, into) {
   }
 }
 
-/** Whether a `VariableDeclarationList` is `var` (function-scoped/hoisted), not `let`/`const`. */
+/**
+ * Whether a `VariableDeclarationList` is `var` (function-scoped/hoisted), not
+ * block-scoped.
+ *
+ * Checked against `ts.NodeFlags.BlockScoped` — TypeScript's own union of
+ * every block-scoped declaration-list flag — rather than `Let | Const`
+ * directly (#829 [sic; filed as a post-review observation on PR #826]):
+ * `using`/`await using` (explicit resource management, TS 5.2+) are
+ * block-scoped exactly like `let`/`const` but carry their own flag bits, so
+ * `using defineString = …` inside a sibling block was previously collected
+ * as function-hoisted and could hide a real constructor call outside that
+ * block — the false-shadow failure mode `collectHoistedNames`'s own leading
+ * comment already warns is the dangerous direction (a real param silently
+ * dropped, not a spurious one added). No live case exists in this repo's
+ * Functions source today (no `using` declarations, checked at the time of
+ * this fix), but the flag check costs nothing extra to get right.
+ */
 function isHoistedDeclarationList(declarationList) {
-  return (declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0;
+  return (declarationList.flags & ts.NodeFlags.BlockScoped) === 0;
 }
 
 /**
@@ -763,7 +839,15 @@ function constructorKindOf(call, { bindings, namespaces }) {
     namespaces.has(call.expression.expression.text) &&
     !isShadowed(call, call.expression.expression.text)
   ) {
-    return CONSTRUCTOR_RE.exec(call.expression.name.text)?.[1] ?? null;
+    // Resolved against THIS namespace's own re-export map, not a blanket
+    // `CONSTRUCTOR_RE` match on the property name (#832 follow-up, Codex +
+    // CodeRabbit on PR #834): a direct `firebase-functions/params` import
+    // resolves via the `DIRECT_PARAMS_NAMESPACE` sentinel (trusts any
+    // constructor-shaped name, since every one really is one on that
+    // module); a local barrel resolves only the names it actually
+    // re-exports, so a barrel-local helper that merely LOOKS
+    // constructor-shaped is correctly left unresolved.
+    return resolveFromReExports(namespaces.get(call.expression.expression.text), call.expression.name.text) ?? null;
   }
   return null;
 }
