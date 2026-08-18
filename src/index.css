@@ -4575,6 +4575,66 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   justify-content: flex-end;
 }
 
+/* ---------- Step 1 · Occasion (#789, `#frame-setup-occasion`) ----------
+   `.wizard-occasion-row` is a full-width button, not the frame's `.menurow`
+   (that class exists only inside the wireframes' own scoped <style> — no
+   real app stylesheet defines it), reusing the same `.pill`/`.muted` tokens
+   every other step already does. */
+.wizard-occasion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wizard-occasion-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 10px 12px;
+  cursor: pointer;
+  touch-action: manipulation;
+  font: inherit;
+}
+.wizard-occasion-row:hover,
+.wizard-occasion-row:focus-visible {
+  border-color: var(--ink);
+}
+.wizard-occasion-row.is-selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 10px var(--shadow);
+}
+.wizard-occasion-icon {
+  font-size: 20px;
+  flex: none;
+}
+.wizard-occasion-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.wizard-occasion-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.wizard-occasion-blurb {
+  font-size: 12px;
+  color: var(--muted);
+}
+.wizard-occasion-pill {
+  flex: none;
+  white-space: nowrap;
+}
+.wizard-occasion-note {
+  font-size: 12px;
+}
+
 /* ---------- live preview strip (#795) ----------
    The strip's swatch and the expanded card both render inside a
    `ThemeIsland` (src/theme/ThemeIsland.tsx) — the same `[data-theme]`
