@@ -765,6 +765,14 @@ export interface MomentDoc {
 
 export interface LastCallMomentPayload {
   players: { uid: string; displayName: string; bingoCount: number; squaresMarked: number }[];
+  // The freeze-time phrase ("standings freeze at 8 a.m"), computed ONCE by the
+  // scheduler (functions/src/finaleContent.ts freezePhraseForUnlock) from the
+  // Event's actual closing-Day unlockAt in its own timezone, and persisted
+  // here so the client's ban-aware reconstruction (src/lastCallCopy.ts) reads
+  // the SAME string rather than an independently hardcoded literal (#800).
+  // Absent on a Moment posted before #800 — a legacy last-call Moment falls
+  // back to the historical literal.
+  freezePhrase?: string;
 }
 
 // The podium Moment's payload (#266) — the shape
