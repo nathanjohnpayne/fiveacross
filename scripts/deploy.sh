@@ -172,6 +172,14 @@ AUTH_HANDOFF_INVOKER_SELECTED=true
 BUG_REPORT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+# Which half of the pair must still EXIST after publish, when only one was
+# named. Empty means both must (the ordinary full-deploy case);
+# AUTH_HANDOFF_INVOKER_CONSERVATIVE=true means neither has to. Kept separate
+# from the conservative bit because "the partner may be absent" and "the
+# function I just deployed may be absent" are different claims, and collapsing
+# them lets a scoped deploy finish green without reconciling what it released
+# (#548, Codex P2 round 4).
+AUTH_HANDOFF_STRICT_HALF=""
 ONLY_VALUES=()
 EXCEPT_VALUES=()
 DEPLOY_PROJECT="${DEPLOY_TARGET_PROJECT:-}"
@@ -216,6 +224,7 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   BUG_REPORT_INVOKER_CONSERVATIVE=false
   EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
   AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+  AUTH_HANDOFF_STRICT_HALF=""
   # Which HALVES of the handoff pair this scope actually names. Parse-local:
   # only the strictness decision below reads them.
   AUTH_HANDOFF_MINT_NAMED=false
@@ -286,19 +295,22 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
       esac
     done
   done
-  # A scope that named only ONE half of the handoff pair reconciles the pair
-  # LENIENTLY (#548, Codex P2 round 3). Firebase's `--only functions:<name>` is
-  # a scoped deploy: `--only functions:mintAuthHandoff` does not create
-  # exchangeAuthHandoff, so on a first scoped deploy the partner service does
-  # not exist yet. Reconciling it strictly would fail the wrapper on a
-  # NOT_FOUND and exit deploy.sh nonzero even though Firebase succeeded — a
-  # false failure on a correct deploy. Naming BOTH halves, or the whole
-  # `functions` scope, releases both and stays strict, so a genuinely missing
-  # service after a full deploy still fails loud.
+  # A scope that named only ONE half of the pair keeps THAT half strict and
+  # tolerates only its partner being absent (#548, Codex P2 rounds 3 and 4).
+  # Firebase's `--only functions:<name>` is a scoped deploy:
+  # `--only functions:mintAuthHandoff` does not create exchangeAuthHandoff, so
+  # on a first scoped deploy the partner genuinely does not exist and demanding
+  # it would fail a correct deploy. The half that WAS deployed is a different
+  # matter — if it is missing afterwards, that is the 403 this mechanism exists
+  # to catch, so it must still fail loud. Naming both halves, or the whole
+  # `functions` scope, releases both and leaves both strict.
   if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" \
-     && "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" != "true" \
-     && ( "$AUTH_HANDOFF_MINT_NAMED" != "true" || "$AUTH_HANDOFF_EXCHANGE_NAMED" != "true" ) ]]; then
-    AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
+     && "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" != "true" ]]; then
+    if [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" && "$AUTH_HANDOFF_EXCHANGE_NAMED" != "true" ]]; then
+      AUTH_HANDOFF_STRICT_HALF="mint"
+    elif [[ "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" && "$AUTH_HANDOFF_MINT_NAMED" != "true" ]]; then
+      AUTH_HANDOFF_STRICT_HALF="exchange"
+    fi
   fi
 fi
 
@@ -334,9 +346,13 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
       # Excluding ONE handoff endpoint does not deselect the pair: the other
       # half is still released and still needs reconciling, and the shared
       # wrapper is idempotent on the excluded one. Deselecting here to match
-      # the exclusion exactly would leave the released half 403ing.
-      functions:mintAuthHandoff|functions:exchangeAuthHandoff)
-        AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
+      # the exclusion exactly would leave the released half 403ing. The
+      # RELEASED half stays strict — only the excluded one may be absent.
+      functions:mintAuthHandoff)
+        AUTH_HANDOFF_STRICT_HALF="exchange"
+        ;;
+      functions:exchangeAuthHandoff)
+        AUTH_HANDOFF_STRICT_HALF="mint"
         ;;
       functions:default)
         # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
@@ -413,6 +429,22 @@ run_postdeploy_invoker() {
     run_invoker "$invoker_script" --allow-missing
   else
     run_invoker "$invoker_script"
+  fi
+}
+
+# The handoff pair needs a third state the two-way flag above cannot express:
+# ONE named half strict, its partner allowed to be absent. See
+# AUTH_HANDOFF_STRICT_HALF.
+run_postdeploy_handoff_invoker() {
+  local script="$SCRIPT_DIR/set-auth-handoff-invoker.sh"
+  if [[ "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" == "true" ]]; then
+    run_invoker "$script" --allow-missing
+  elif [[ "$AUTH_HANDOFF_STRICT_HALF" == "mint" ]]; then
+    run_invoker "$script" --allow-missing-half exchange
+  elif [[ "$AUTH_HANDOFF_STRICT_HALF" == "exchange" ]]; then
+    run_invoker "$script" --allow-missing-half mint
+  else
+    run_invoker "$script"
   fi
 }
 
@@ -852,6 +884,34 @@ RECONCILE_STATUS=0
 RECONCILE_RAN=false
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (--skip-invoker)"
+  # A skipped reconciliation is normally harmless — the annotation is only reset
+  # by a Functions RELEASE. When this deploy could have released the auth
+  # handoff, it is not harmless, and it must not be silent (#548, Codex P1
+  # round 4). `scripts/deploy-target.mjs` auto-injects --skip-invoker for the
+  # fiveacross target, which is exactly the project the handoff lives in, so the
+  # routine `npm run deploy:fiveacross` path lands here every time.
+  if [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+    cat >&2 <<EOF
+
+⚠️  The auth-handoff callables were RELEASED but NOT reconciled (--skip-invoker).
+
+    Domain Restricted Sharing rejects the \`allUsers\` invoker binding Firebase
+    adds, so mintAuthHandoff and exchangeAuthHandoff are very likely returning
+    403 right now. Unlike the other reconciled endpoints, a 403 here is not one
+    broken feature — it is sign-in unavailable on every Event origin that uses
+    the handoff.
+
+    This is a KNOWN GAP, not a transient failure: enabling the reconciliation
+    for this target needs run.services.update on the target project for its
+    deploy credential (see skipInvokerReconcile in scripts/build-target.mjs).
+    Until that is provisioned, repair by hand after every Functions deploy:
+
+      AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
+
+    Harmless today only while the handoff has no caller — the client half
+    (#549) and the central origin (#547) are both still outstanding.
+EOF
+  fi
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
@@ -891,8 +951,7 @@ EOF
       "$EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
   fi
   if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
-    run_postdeploy_invoker "$SCRIPT_DIR/set-auth-handoff-invoker.sh" \
-      "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
+    run_postdeploy_handoff_invoker || RECONCILE_STATUS=$?
   fi
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF

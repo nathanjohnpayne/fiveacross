@@ -1763,6 +1763,75 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 22e (#548 Codex P2 round 4): the SELECTED half stays strict.
+#
+# The companion to 22c. Tolerating the absent partner must not decay into
+# tolerating any absent service: if the half the deploy actually RELEASED is
+# missing afterwards, that is precisely the 403 this mechanism exists to catch,
+# and it must fail loud. One shared leniency bit for both services would make
+# this case pass silently, which is what makes it worth pinning.
+# ---------------------------------------------------------------------------
+REPO22E="$WORKDIR/case22e-auth-handoff-selected-missing"
+init_fixture_repo "$REPO22E"
+OUT22E="$WORKDIR/case22e.out"
+ERR22E="$WORKDIR/case22e.err"
+: >"$WORKDIR/ofd-calls-22e.log"
+: >"$WORKDIR/gcloud-calls-22e.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22e.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22e.log" \
+GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+  bash -c "cd '$REPO22E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintAuthHandoff" \
+  >"$OUT22E" 2>"$ERR22E"
+RC22E=$?
+set -e
+
+if [[ $RC22E -eq 0 ]]; then
+  fail "auth-handoff-selected-missing: deploy.sh returned 0 though the SELECTED half is missing after publish — the partner leniency leaked onto the deployed service. stdout was:"
+  cat "$OUT22E" >&2
+else
+  pass "auth-handoff-selected-missing: a scoped deploy still fails when the half it released is missing afterwards (rc=$RC22E)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22f (#548 Codex P1 round 4): a skipped reconciliation that RELEASED the
+# handoff must say so.
+#
+# `scripts/deploy-target.mjs` auto-injects --skip-invoker for the fiveacross
+# target — the project the handoff lives in — so this is the routine path, not
+# an edge case. The skip cannot be silent: a 403 on these two callables is
+# sign-in unavailable on every Event origin.
+# ---------------------------------------------------------------------------
+REPO22F="$WORKDIR/case22f-auth-handoff-skip-warns"
+init_fixture_repo "$REPO22F"
+OUT22F="$WORKDIR/case22f.out"
+ERR22F="$WORKDIR/case22f.err"
+: >"$WORKDIR/ofd-calls-22f.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22f.log" \
+  bash -c "cd '$REPO22F' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-invoker -- fiveacross --only functions" \
+  >"$OUT22F" 2>"$ERR22F"
+RC22F=$?
+set -e
+
+if [[ $RC22F -ne 0 ]]; then
+  fail "auth-handoff-skip-warns: deploy.sh returned $RC22F. stderr was:"
+  cat "$ERR22F" >&2
+elif ! grep -q 'RELEASED but NOT reconciled' "$ERR22F"; then
+  fail "auth-handoff-skip-warns: --skip-invoker silently skipped a release that included the handoff. stderr was:"
+  cat "$ERR22F" >&2
+elif ! grep -q 'set-auth-handoff-invoker.sh' "$ERR22F"; then
+  fail "auth-handoff-skip-warns: the warning did not name the manual repair command. stderr was:"
+  cat "$ERR22F" >&2
+else
+  pass "auth-handoff-skip-warns: a skipped reconciliation that released the handoff warns loudly and names the repair (rc=$RC22F)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

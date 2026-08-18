@@ -44,7 +44,18 @@ set -euo pipefail
 #   scripts/set-auth-handoff-invoker.sh                 # apply to prod (default)
 #   scripts/set-auth-handoff-invoker.sh --dry-run       # print the actions, change nothing
 #   scripts/set-auth-handoff-invoker.sh --allow-missing # a NOT_FOUND describe is
-#                                                       # non-fatal (first deploy)
+#                                                       # non-fatal for BOTH halves
+#   scripts/set-auth-handoff-invoker.sh --allow-missing-half exchange
+#                                                       # non-fatal for ONE half only
+#
+# --allow-missing-half exists because "the pair is reconciled together" must not
+# become "a missing service is always tolerated" (#548, Codex P2 round 4). A
+# scoped `--only functions:mintAuthHandoff` deploy may legitimately leave
+# exchangeAuthHandoff uncreated, but the half it actually DEPLOYED must still be
+# there afterwards — tolerating both would let a scoped deploy finish green
+# without reconciling the function it just released, which is the 403 this whole
+# mechanism exists to prevent. deploy.sh therefore names the absent-tolerated
+# half rather than passing a single blanket --allow-missing.
 #
 # Environment / overrides:
 #   AUTH_HANDOFF_PROJECT          GCP project      (default: fiveacross)
@@ -70,13 +81,22 @@ REGION="${AUTH_HANDOFF_REGION:-us-central1}"
 MINT_SERVICE="${AUTH_HANDOFF_MINT_SERVICE:-mintauthhandoff}"
 EXCHANGE_SERVICE="${AUTH_HANDOFF_EXCHANGE_SERVICE:-exchangeauthhandoff}"
 DRY_RUN=false
-ALLOW_MISSING=false
+ALLOW_MISSING_MINT=false
+ALLOW_MISSING_EXCHANGE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
-    --allow-missing) ALLOW_MISSING=true; shift ;;
-    -h|--help) sed -n '3,66p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --allow-missing) ALLOW_MISSING_MINT=true; ALLOW_MISSING_EXCHANGE=true; shift ;;
+    --allow-missing-half)
+      case "${2:-}" in
+        mint)     ALLOW_MISSING_MINT=true ;;
+        exchange) ALLOW_MISSING_EXCHANGE=true ;;
+        *) echo "--allow-missing-half expects 'mint' or 'exchange', got: ${2:-<none>}" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    -h|--help) sed -n '3,76p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -88,9 +108,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the one already being reported — and since sign-in needs both, a report that
 # names only half the problem sends the operator back for a second round.
 STATUS=0
-for entry in "mint:$MINT_SERVICE" "exchange:$EXCHANGE_SERVICE"; do
+for entry in "mint:$MINT_SERVICE:$ALLOW_MISSING_MINT" "exchange:$EXCHANGE_SERVICE:$ALLOW_MISSING_EXCHANGE"; do
   half="${entry%%:*}"
-  service="${entry#*:}"
+  rest="${entry#*:}"
+  service="${rest%%:*}"
+  allow_missing="${rest#*:}"
   ARGS=(
     --service "$service" --region "$REGION" --project "$PROJECT"
     --label "Auth-handoff ($half)"
@@ -98,7 +120,7 @@ for entry in "mint:$MINT_SERVICE" "exchange:$EXCHANGE_SERVICE"; do
     --service-env-hint "AUTH_HANDOFF_$(echo "$half" | tr '[:lower:]' '[:upper:]')_SERVICE"
   )
   [[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
-  [[ "$ALLOW_MISSING" == "true" ]] && ARGS+=(--allow-missing)
+  [[ "$allow_missing" == "true" ]] && ARGS+=(--allow-missing)
   "$SCRIPT_DIR/set-cloud-run-invoker.sh" "${ARGS[@]}" || STATUS=$?
 done
 

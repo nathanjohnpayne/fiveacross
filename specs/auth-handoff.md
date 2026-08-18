@@ -176,6 +176,8 @@ These projects' org policy (Domain Restricted Sharing) **rejects** the `allUsers
 
 The handoff lives in the `fiveacross` project—`gaycruisebingo` is a single registered origin that signs in same-origin and never mints a handoff—but a `gaycruisebingo` deploy still publishes the functions, so `deploy.sh` pins the reconciliation project from the selected deploy target rather than trusting the wrapper's default.
 
+**Outstanding prerequisite: Five Across skips this reconciliation today.** `scripts/deploy-target.mjs` auto-injects `--skip-invoker` for the `fiveacross` target (`skipInvokerReconcile: true`, `scripts/build-target.mjs`), which is exactly the project the handoff lives in—so a routine `npm run deploy:fiveacross` releases both callables and leaves them 403. `deploy.sh` prints a loud warning naming the manual repair whenever it skips a release that included the handoff, so the gap is visible rather than silent, and it is harmless only while the handoff has no caller. **Before the flow carries real sign-ins, the `fiveacross` deploy service account needs `run.services.update` on `fiveacross` and `skipInvokerReconcile` must be flipped to `false`.** That is an IAM action a code change cannot make, and it belongs with #547 as a human prerequisite: without it, sign-in through the handoff is unavailable on every Event origin no matter what the client does.
+
 ## Not in scope
 
 - **Client code (#549).** No `src/**` change ships with this contract.
