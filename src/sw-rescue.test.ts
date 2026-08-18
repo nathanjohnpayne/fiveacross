@@ -5,6 +5,7 @@ import {
   FORCED_FLAG_URL,
   SHELL_META_CACHE,
   UNKNOWN_ACTIVE_STAMP,
+  UNREGISTERED_CLIENT_CONFIRM_ATTEMPTS,
   UNREGISTERED_CLIENT_CONFIRM_MS,
   confirmClientStamps,
   dueForFloorRecheck,
@@ -515,6 +516,48 @@ describe('confirming an absence before believing it (#516)', () => {
       await recordClientStamp(cs, 'tab-fresh', NEW_SHELL, live);
     });
     expect(decide(confirmed)).toBe(false);
+  });
+
+  // Post-review #756: one look assumes delivery to the ACTIVE worker and its
+  // Cache API write both land inside a single `UNREGISTERED_CLIENT_CONFIRM_MS`
+  // window, but nothing bounds either. A background-throttled tab can still be
+  // absent after the first confirmation read, so more than one look is taken
+  // before the absence is believed.
+  it('takes more than one look — a background-throttled client can miss the first', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-throttled'];
+    const sleep = vi.fn(async () => {});
+    // The late write lands only on the SECOND look, simulating a client whose
+    // postMessage-then-Cache-write took longer than one confirm window.
+    let reads = 0;
+    const confirmed = await confirmClientStamps(cs, live, {}, async () => {
+      reads += 1;
+      sleep();
+      if (reads === 2) await recordClientStamp(cs, 'tab-throttled', NEW_SHELL, live);
+    });
+    expect(confirmed).toEqual({ 'tab-throttled': NEW_SHELL });
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after UNREGISTERED_CLIENT_CONFIRM_ATTEMPTS looks, not forever', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-legacy'];
+    const sleep = vi.fn(async () => {});
+    const confirmed = await confirmClientStamps(cs, live, {}, sleep);
+    expect(hasUnregisteredClient(live, confirmed)).toBe(true);
+    expect(sleep).toHaveBeenCalledTimes(UNREGISTERED_CLIENT_CONFIRM_ATTEMPTS);
+  });
+
+  it('stops as soon as every live id has a record — the common case pays for one wait', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-old', 'tab-fresh'];
+    await recordClientStamp(cs, 'tab-old', OLD_SHELL, live);
+    const first = await readClientStamps(cs);
+    const sleep = vi.fn(async () => {
+      await recordClientStamp(cs, 'tab-fresh', NEW_SHELL, live);
+    });
+    await confirmClientStamps(cs, live, first, sleep);
+    expect(sleep).toHaveBeenCalledTimes(1);
   });
 });
 

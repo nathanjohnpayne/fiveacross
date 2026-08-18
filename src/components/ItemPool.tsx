@@ -137,8 +137,12 @@ export default function ItemPool() {
     <div>
       {/* `data-unsaved-work` while a suggestion is half-typed (Codex P2 round 5,
           PR #720): it lives only in `text`, so an automatic post-deploy reload
-          would eat it. See `midInteraction` in src/swClientBridge.ts. */}
-      <div className="addbar" data-unsaved-work={text !== '' || undefined}>
+          would eat it. See `midInteraction` in src/swClientBridge.ts.
+          Trimmed, matching the Add button's own `disabled` predicate below
+          (post-review #750/#755/#758): whitespace-only text is not something
+          Add can commit or clear, so marking it as unsaved work would pin the
+          tab to a condemned build with no way to release the marker. */}
+      <div className="addbar" data-unsaved-work={text.trim() !== '' || undefined}>
         <input
           className="input"
           maxLength={80}
