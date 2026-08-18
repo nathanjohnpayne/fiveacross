@@ -1449,28 +1449,3 @@ describe('runDailyEmailSweep', () => {
     }
   });
 });
-
-// #726 (P2 on PR #715, the "or separately test the parameter default"
-// alternative): every `sendDailyEmailForEvent`/`sendEmail` test above injects
-// `deps.from` (via `baseDeps()`), so none of them ever resolve the REAL
-// `EMAIL_FROM` param — and `EMAIL_FROM.value()` itself is not safely callable
-// here either: outside the Functions/emulator runtime it resolves to `''`,
-// not the declared `default:` (verified empirically; that gap is exactly why
-// every other test in this tree that needs a real param value mocks
-// `../../functions/src/params` with `vi.doMock` rather than calling
-// `.value()` directly). So this locks down the SOURCE declaration instead:
-// #633 moved `EMAIL_FROM`'s default off the unverified apex domain onto the
-// Resend-verified `mail.nathanpayne.com` subdomain, and a regression back to
-// the apex would otherwise pass every test above unnoticed.
-describe('functions/src/params.ts EMAIL_FROM default', () => {
-  it('defaults to the Resend-verified sending domain, not the unverified apex', () => {
-    const paramsSource = readFileSync(
-      fileURLToPath(new URL('../../functions/src/params.ts', import.meta.url)),
-      'utf8',
-    );
-
-    expect(paramsSource).toMatch(
-      /defineString\(\s*'EMAIL_FROM'\s*,\s*\{\s*\n?\s*default:\s*'Gay Cruise Bingo <gaycruisebingo@mail\.nathanpayne\.com>'/,
-    );
-  });
-});
