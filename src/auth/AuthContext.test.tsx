@@ -686,12 +686,14 @@ describe('AuthContext deal-error hardening', () => {
   // PENDING_REDIRECT_ATTESTATION_KEY's sessionStorage marker AND leave
   // getRedirectResult resolving null on a return Firebase otherwise completed.
   describe('durable redirect-pending completion (signal b, #346 hardening)', () => {
-    it('completes on onAuthStateChanged alone when getRedirectResult resolves null but the pending record is live (marker present: same-tab confirmed)', async () => {
-      // The sessionStorage marker IS present here — getRedirectResult itself
-      // failed to identify the return (unusual but possible without the
-      // #346 partitioning), while the SAME-tab confirmation the marker
-      // provides is intact. Same-tab confirmed → full completion, including
-      // the attestation.
+    // Phase 4b P1 round 2 on #836 (corrects this test's original premise): the
+    // session-storage marker being present does NOT make signal (b)
+    // trustworthy for attestation — it proves this tab once started a
+    // redirect, never that THIS specific published User is what that
+    // attempt produced. Signal (b) never persists an attestation, marker or
+    // no marker; only `getRedirectResult` itself (Firebase-verified,
+    // attempt-scoped) may.
+    it('fires login via signal (b) but never attests, even with the marker present', async () => {
       sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
       localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
       localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
@@ -704,22 +706,25 @@ describe('AuthContext deal-error hardening', () => {
       await signInUser(); // onAuthStateChanged publishes the returning User
 
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
-      expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
-      expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
       expect(mocks.track).toHaveBeenCalledTimes(1);
+      // Never Firebase-verified, so the durable records are left standing —
+      // not cleared — exactly as the marker-absent case, even though the
+      // marker was present this time.
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).not.toBeNull();
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).not.toBeNull();
     });
 
     // Phase 4b P1 on #836: the durable record is ORIGIN-WIDE localStorage, so
     // on its own it proves only that SOME same-origin tab started a
     // redirect — not that THIS onAuthStateChanged publication is that same
     // attempt returning (Firebase Auth persistence is shared across every
-    // open tab on the origin). Without the sessionStorage marker (tab-scoped)
-    // to CONFIRM same-tab, `login` still fires (low-stakes, matches the
+    // open tab on the origin). `login` still fires (low-stakes, matches the
     // existing marker-less-rejection precedent) but the attestation — the
     // honor-system self-statement — must NOT be persisted onto whichever
     // account happens to be currently signed in; that would let an unrelated
     // tab's sign-in inherit and fabricate this tab's collected checkbox.
-    it('does NOT persist the attestation via signal (b) when the marker is absent (same-tab unconfirmed)', async () => {
+    it('does NOT persist the attestation via signal (b) when the marker is absent (not Firebase-verified)', async () => {
       // No sessionStorage marker — lost, as in #346, OR this could be an
       // entirely different, unrelated same-origin tab; the two are
       // indistinguishable from here, so both are treated the same way.
