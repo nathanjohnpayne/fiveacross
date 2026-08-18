@@ -59,9 +59,13 @@ beforeEach(async () => {
       bannedUids: [],
       settings: { reportHideThreshold: 3 },
       timezone: 'Europe/Rome',
+      // An Event still IN PROGRESS: Day 0 has opened, Day 1 has not. That is
+      // the state an organiser configures in, and it matters for the ADR 0011
+      // freeze rules below — adding a freeze to an Event whose schedule has
+      // already run out crosses a boundary that has settled, and is denied.
       days: [
         { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
-        { index: 1, unlockAt: PAST(), theme: 'get-sporty' },
+        { index: 1, unlockAt: NOW() + 7200_000, theme: 'get-sporty' },
       ],
     });
   });
@@ -178,6 +182,59 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     });
     await assertFails(
       updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: deleteField() }),
+    );
+  });
+
+  // Phase 4b P2: adding an explicit freeze to a doc that had none, once the
+  // Event's own schedule has run out, crosses a boundary that has already
+  // settled — refreshed clients un-freeze while cached ones stay frozen.
+  it('DENIES adding a freeze once the schedule has already run out', async () => {
+    // The seeded fixture's Days are both in the PAST, so the derived boundary
+    // has elapsed and no explicit value exists yet.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `events/${EVENT}`),
+        {
+          name: 'Cruise',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          timezone: 'Europe/Rome',
+          days: [
+            { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
+            { index: 1, unlockAt: PAST(), theme: 'get-sporty' },
+          ],
+        },
+      );
+    });
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
+  });
+
+  it('still ALLOWS configuring a freeze while the Event is still running', async () => {
+    // The legitimate case this must not block: the schedule has not run out, so
+    // no boundary has settled and an organiser may still state one.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(
+        doc(ctx.firestore(), `events/${EVENT}`),
+        {
+          name: 'Cruise',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          timezone: 'Europe/Rome',
+          days: [
+            { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
+            { index: 1, unlockAt: NOW() + 7200_000, theme: 'get-sporty' },
+          ],
+        },
+      );
+    });
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
     );
   });
 

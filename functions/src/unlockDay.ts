@@ -953,7 +953,21 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
           readFinaleRoster(db, eventId),
           readDayHonors(db, eventId, days),
         ]);
-        extra = { podium: buildPodiumPayload(roster, days, honors) as unknown as Record<string, unknown> };
+        // The freeze cutoff is NOT optional here (Phase 4b P1). This beat is
+        // retried until the podium Moment actually lands, so a run that happens
+        // after the cutoff — a delayed sweep, or a retry following a transient
+        // write failure — reads LIVE ceremonial-Day buckets. Without the
+        // cutoff a post-freeze bingo could be selected and then PERMANENTLY
+        // posted as the Event-wide First to BINGO, which is the immutable
+        // record the client is asked to agree with.
+        extra = {
+          podium: buildPodiumPayload(
+            roster,
+            days,
+            honors,
+            times.standingsFreezeAt,
+          ) as unknown as Record<string, unknown>,
+        };
       } catch (err) {
         console.error('runFinaleBeats: podium content build failed', eventId, err);
       }

@@ -686,6 +686,43 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     expect(lastCall.lastCall).toMatchObject({ freezePhrase: 'standings freeze at 11 a.m' });
   });
 
+  // Phase 4b P1: the beat's own podium build must carry the freeze cutoff.
+  // `postPodium` is retried until the Moment lands, so a delayed sweep or a
+  // retry after a transient write failure reads LIVE ceremonial-Day buckets —
+  // and whatever it selects is then posted PERMANENTLY.
+  it('ADR 0011: the posted podium ignores a post-freeze bingo on a ceremonial Day', async () => {
+    const freeze = D10_UNLOCK;
+    const db = makeDb({
+      eventId: 'e',
+      event: {
+        days: [
+          { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+          // Ceremonial but NOT a Tutorial Day, so it stays eligible for the
+          // Event-wide honour — which is what makes the cutoff load-bearing.
+          { index: 9, pool: 'farewell', tutorial: false, scoring: 'ceremonial', unlockAt: freeze },
+        ],
+      },
+      players: [
+        {
+          uid: 'late',
+          displayName: 'Late',
+          bingoCount: 1,
+          squaresMarked: 10,
+          firstBingoAt: freeze + 5000,
+          dayStats: {
+            8: { bingoCount: 0, squaresMarked: 6, firstBingoAt: null },
+            9: { bingoCount: 1, squaresMarked: 4, firstBingoAt: freeze + 5000 },
+          },
+        },
+      ],
+    });
+    // The sweep runs LATE — after the freeze, with the post-freeze mark already
+    // recorded in the ceremonial Day's bucket.
+    await runFinaleBeats(db, 'e', { now: () => freeze + 60_000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')!;
+    expect((podium.podium as { firstBingo: unknown }).firstBingo).toBeNull();
+  });
+
   it('ADR 0011: quotes the CONFIGURED freeze, not a Day unlock, when the two differ', async () => {
     // The interaction between #800 (this phrase) and #551 (ADR 0011). #800
     // shipped deriving the phrase from the closing Day's `unlockAt`, which was

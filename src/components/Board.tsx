@@ -1744,7 +1744,14 @@ export default function Board() {
   if (!viewedIndexInitialized.current && hasDays) {
     viewedIndexInitialized.current = true;
     const initNow = Date.now();
-    setViewedIndex(finalePinIndex(days, event?.frozenAt, initNow) ?? defaultViewedIndex(days, initNow));
+    // The pin and the podium's mount gate MUST resolve the same boundary
+    // (Phase 4b P1): the mount reads `scheduledFreezeAt`, so a pin that
+    // re-derived its own would send a returning Player to a Day that renders no
+    // podium — the exact split `finaleDayIndex` was introduced to remove.
+    setViewedIndex(
+      finalePinIndex(days, event?.frozenAt, initNow, event?.standingsFreezeAt) ??
+        defaultViewedIndex(days, initNow),
+    );
   }
   const viewedDay = hasDays ? (days[viewedIndex] ?? days[0]) : undefined;
   // The viewed Day's deal state (#246), folding the schedule + clock + the

@@ -2248,6 +2248,70 @@ describe('decorative Square glyphs never swallow a claim tap', () => {
 // competitively until a stated check-out freeze has a boundary that coincides
 // with no Day unlock at all. Without a tick there, an open (or offline) Card tab
 // never re-evaluates `statsFrozen` when the freeze arrives.
+// Phase 4b P1: the default-view pin and the podium's mount gate must resolve
+// the SAME boundary. The mount reads the resolved freeze; a pin that re-derived
+// its own would send a returning Player to a Day that renders no podium — the
+// exact split `finaleDayIndex` exists to remove, reappearing because the pin's
+// freeze argument was left unpassed at the call site.
+describe('the default-view pin and the podium mount agree on the finale Day', () => {
+  const NOON = Date.parse('2026-07-18T12:00:00Z');
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOON);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('pins the Day the podium actually mounts on when a freeze is configured', () => {
+    // An EARLY ceremonial Day, later competitive Days, and an end-of-Event
+    // freeze. Deriving from the ceremonial Day would pin index 1; the freeze
+    // says the finale is index 2, and that is where the podium mounts.
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      frozenAt: NOON - 3600_000,
+      standingsFreezeAt: NOON - 60_000,
+      days: [
+        day({ index: 0, theme: 'get-sporty', unlockAt: NOON - 5 * 3600_000 }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: NOON - 4 * 3600_000, pool: 'closing', scoring: 'ceremonial' }),
+        day({ index: 2, theme: 'get-sporty', unlockAt: NOON - 2 * 3600_000 }),
+      ],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    render(<Board />);
+
+    // The pinned Day, read off the Day switcher. `finaleDayIndex` resolves the
+    // last Day open at the freeze — index 2 — and the podium's mount gate uses
+    // the same call, so pinning anywhere else means the two disagree.
+    const chips = [...document.querySelectorAll('.day-chip')];
+    const selected = chips.findIndex((c) => c.getAttribute('aria-selected') === 'true');
+    expect(selected).toBe(2);
+  });
+
+  it('still pins the ceremonial Day when the freeze is DERIVED from it', () => {
+    // The cruise shape, unchanged: the derived freeze IS that Day's unlock, so
+    // it is the last Day open at it.
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      frozenAt: NOON - 3600_000,
+      days: [
+        day({ index: 0, theme: 'get-sporty', unlockAt: NOON - 5 * 3600_000 }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: NOON - 4 * 3600_000, pool: 'closing' }),
+        day({ index: 2, theme: 'get-sporty', unlockAt: NOON - 2 * 3600_000 }),
+      ],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    render(<Board />);
+
+    const chips = [...document.querySelectorAll('.day-chip')];
+    expect(chips.findIndex((c) => c.getAttribute('aria-selected') === 'true')).toBe(1);
+  });
+});
+
 describe('the now-timer covers the configured Standings Freeze', () => {
   const NOON = Date.parse('2026-07-18T12:00:00Z');
   const LAST_UNLOCK = Date.parse('2026-07-18T15:00:00Z'); // the final Day opens

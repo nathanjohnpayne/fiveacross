@@ -809,7 +809,30 @@ service cloud.firestore {
             || request.resource.data.standingsFreezeAt > request.time.toMillis())
         && (resource == null
             || !('standingsFreezeAt' in resource.data)
-            || 'standingsFreezeAt' in request.resource.data);
+            || 'standingsFreezeAt' in request.resource.data)
+        // ADDING an explicit freeze to a doc that had none is the remaining way
+        // to cross a settled boundary (Phase 4b P2): the derived cutoff may
+        // ALREADY have elapsed, and an explicit value takes precedence in
+        // `standingsFreezeAtFor`, so refreshed clients un-freeze while cached
+        // ones stay frozen until `frozenAt` is stamped.
+        //
+        // Guarded here by the LAST Day's unlock, which is O(1). That catches the
+        // real legacy shape — both live Events put their ceremonial Day last, so
+        // the last unlock IS the derived boundary — and it is deliberately an
+        // over-approximation rather than the exact test: resolving the first
+        // ceremonial Day's unlock needs a ten-way unroll on a rule that already
+        // exceeds Firestore's 1000-expression cap at ten Days (#850). It does
+        // NOT catch a schedule whose ceremonial Day sits EARLY with competitive
+        // Days after it; that case rides #850's fix, and the PR body records the
+        // reasoning. An Event that has not finished can still be given a freeze,
+        // which is the legitimate configuration this must not block.
+        && (resource == null
+            || 'standingsFreezeAt' in resource.data
+            || !('standingsFreezeAt' in request.resource.data)
+            || !('days' in resource.data)
+            || resource.data.days.size() < 1
+            || request.time.toMillis()
+                 < resource.data.days[resource.data.days.size() - 1].unlockAt);
       allow delete: if isAdmin(eventId);
 
       // Community-editable prompt pool.

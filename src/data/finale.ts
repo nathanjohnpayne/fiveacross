@@ -9,7 +9,6 @@ import {
   comparePlayers,
   rankingExcludedDay,
   standingsFreezeAtFor,
-  cruiseFirstBingoUid,
   effectiveCruiseFirstBingoAt,
   perDayHonors,
   tutorialDayIndexSet,
