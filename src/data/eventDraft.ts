@@ -52,7 +52,8 @@ export const DRAFT_SCHEMA_VERSION = 1;
  * forever — and the version check in `parseEventDraft` would be reduced to a
  * guard against hand-edited blobs rather than the migration path it claims to
  * be. With one stable namespace, a version bump makes a stale draft read as a
- * miss AND leaves it reachable, so `list()` can reclaim its bytes.
+ * miss AND leaves it REACHABLE — which matters because nothing is reclaimed
+ * automatically (see `list`): `discard()` must still be able to reach it.
  */
 const KEY_PREFIX = 'gcb:event-draft:';
 
@@ -83,7 +84,8 @@ export interface EventDraftSummary {
  */
 export interface EventDraftStore {
   /** Every readable draft on this device, most recently updated first.
-   *  Unreadable blobs are skipped, never thrown. */
+   *  Unreadable blobs are skipped, never thrown — and never deleted: listing
+   *  is a read, and no read in this module destroys storage. */
   list(): Promise<EventDraftSummary[]>;
   /** One draft, or `null` on any miss: absent, unparseable, version-drifted,
    *  or carrying a claimed slug. */
@@ -388,47 +390,11 @@ export function createLocalDraftStore(
     }
   }
 
-  /**
-   * Whether a blob classified as unreadable must nevertheless be KEPT.
-   *
-   * Re-read at cleanup time, deliberately, because "unreadable" is neither one
-   * condition nor a stable one:
-   *
-   * - A blob whose `v` exceeds this build's is a draft the organizer can still
-   *   open — in the newer bundle they were using before a cached service
-   *   worker or a rolled-back deployment served them this one. Deleting it
-   *   would destroy live work to reclaim quota, so reclamation stops at the
-   *   version boundary and lets the newer build reclaim its own.
-   * - A blob that is READABLE NOW was written between the scan and this
-   *   cleanup: `localStorage` is shared across same-origin tabs, so another
-   *   tab can save a perfectly valid draft into a key this pass already
-   *   classified from its previous contents. Deleting on the stale verdict
-   *   would let merely rendering the resume list erase a concurrent save.
-   *
-   * Anything still unparseable with no honourable version is dead bytes.
-   */
-  function mustPreserve(key: string): boolean {
-    const ls = store(storage);
-    if (!ls) return false;
-    try {
-      const raw = ls.getItem(key);
-      // Already gone — nothing to preserve and nothing to reclaim.
-      if (!raw) return true;
-      const parsed: unknown = JSON.parse(raw);
-      if (parseEventDraft(parsed) !== null) return true;
-      return isRecord(parsed) && isFiniteNumber(parsed.v) && parsed.v > DRAFT_SCHEMA_VERSION;
-    } catch {
-      // A blob that will not even parse carries no version to respect.
-      return false;
-    }
-  }
-
   return {
     async list(): Promise<EventDraftSummary[]> {
       const ls = store(storage);
       if (!ls) return [];
       const summaries: EventDraftSummary[] = [];
-      const unreadable: string[] = [];
       try {
         // `length` and `key()` can THROW in a restricted Storage, not just
         // return nothing — so the enumeration is guarded as a whole. A store
@@ -438,10 +404,7 @@ export function createLocalDraftStore(
           const key = ls.key(i);
           if (!key || !key.startsWith(KEY_PREFIX)) continue;
           const draft = readAt(key);
-          if (!draft) {
-            unreadable.push(key);
-            continue;
-          }
+          if (!draft) continue;
           // The key suffix and the embedded id must agree, or the row is
           // unusable: `list()` would advertise the EMBEDDED id, `load()` would
           // then read a different key and miss, and `discard()` could never
@@ -463,24 +426,24 @@ export function createLocalDraftStore(
       } catch {
         return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
       }
-      // Reclaim drafts this build can no longer read — a RETIRED schema
-      // version, or a corrupted blob. They are invisible to the organizer
-      // either way, so leaving them would only consume the quota that makes
-      // the NEXT save fail silently.
+      // `list()` DELETES NOTHING. Reading the resume list is not a destructive
+      // operation.
       //
-      // Drafts written by a NEWER version are deliberately exempt: they are
-      // not dead bytes but live work belonging to a build the organizer may
-      // return to, and destroying them would make a rollback or a stale cached
-      // bundle permanently delete a draft (#787 review). So is anything that
-      // became readable since the scan — another tab's concurrent save.
-      for (const key of unreadable) {
-        if (mustPreserve(key)) continue;
-        try {
-          ls.removeItem(key);
-        } catch {
-          /* best-effort reclamation */
-        }
-      }
+      // Earlier revisions reclaimed blobs this build could not read, guarding
+      // the delete with a re-read that spared future schema versions and
+      // concurrent saves. That guard cannot be made correct: `mustPreserve`
+      // and `removeItem` are two separate localStorage operations, another
+      // same-origin tab can land a valid save in the window between them, and
+      // localStorage offers no compare-and-delete primitive to close it. The
+      // window can be narrowed forever and never shut.
+      //
+      // Given a race that cannot be eliminated, the asymmetry decides it:
+      // wrongly keeping a dead blob costs some quota, and `save` already
+      // tolerates a full store without losing the draft being edited. Wrongly
+      // deleting one destroys an organizer's work permanently and silently.
+      // So nothing is reclaimed here, and quota is left to `discard()` — the
+      // one path where deletion is what the organizer actually asked for
+      // (#787 Phase 4b review).
       return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
     },
 

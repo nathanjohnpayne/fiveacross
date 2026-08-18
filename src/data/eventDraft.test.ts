@@ -182,22 +182,23 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     expect(list[0]).toEqual({ draftId: 'newer', name: 'Newer', step: 'squares', updatedAt: NOW + 60_000 });
   });
 
-  it('reclaims drafts it can no longer read, and leaves foreign keys alone', async () => {
+  it('never deletes anything while listing, readable or not', async () => {
     const storage = fakeStorage();
     const store = createLocalDraftStore(storage, () => NOW);
     await store.save(draft({ draftId: 'live' }));
-    // A RETIRED version — below the current one, so no build will read it again.
     storage.setItem('gcb:event-draft:retired', JSON.stringify({ ...draft(), v: 0 }));
     storage.setItem('gcb:event-draft:junk', 'not json');
     storage.setItem('gcb:card-snapshot:med-2026:uid:day-1', 'unrelated');
 
-    await store.list();
+    expect((await store.list()).map((s) => s.draftId)).toEqual(['live']);
 
-    // Versioning the KEY would have orphaned these forever: invisible to
-    // list(), unreachable by discard(), and still consuming the quota that
-    // makes the next save fail silently.
-    expect(storage.raw.has('gcb:event-draft:retired')).toBe(false);
-    expect(storage.raw.has('gcb:event-draft:junk')).toBe(false);
+    // Listing is a READ. Reclamation was removed because mustPreserve() and
+    // removeItem() are separate localStorage operations and another tab can
+    // land a valid save between them, with no compare-and-delete primitive to
+    // close the window (#787 Phase 4b). Wrongly keeping dead bytes costs
+    // quota; wrongly deleting destroys an organizer's work.
+    expect(storage.raw.has('gcb:event-draft:retired')).toBe(true);
+    expect(storage.raw.has('gcb:event-draft:junk')).toBe(true);
     expect(storage.raw.has('gcb:event-draft:live')).toBe(true);
     expect(storage.raw.has('gcb:card-snapshot:med-2026:uid:day-1')).toBe(true);
   });
@@ -223,16 +224,16 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     );
   });
 
-  it('still reclaims a blob whose version is unreadable garbage', async () => {
+  it('leaves a garbage-version blob in place too, but hides it', async () => {
     const storage = fakeStorage();
     const store = createLocalDraftStore(storage, () => NOW);
-    // A non-numeric version carries no version to respect, so the
-    // future-version exemption must not become a way for any malformed blob to
-    // survive reclamation forever.
     storage.setItem('gcb:event-draft:bogus', JSON.stringify({ ...draft(), v: 'tomorrow' }));
 
-    await store.list();
-
+    expect(await store.list()).toEqual([]);
+    expect(storage.raw.has('gcb:event-draft:bogus')).toBe(true);
+    // discard() remains the way to reclaim it — deletion happens only where
+    // the organizer actually asked for it.
+    await store.discard('bogus');
     expect(storage.raw.has('gcb:event-draft:bogus')).toBe(false);
   });
 
@@ -384,11 +385,13 @@ describe('parseEventDraft — round-3 hardening (#787 review)', () => {
   });
 });
 
-describe('reclamation never races a concurrent save (#787 review)', () => {
-  it('keeps a blob that became readable between the scan and the cleanup', async () => {
+describe('listing never destroys a concurrent save (#787 review)', () => {
+  it('keeps a blob another tab wrote during the scan', async () => {
     // localStorage is shared across same-origin tabs: another tab can save a
     // valid draft into a key this pass already classified from its previous
-    // contents. Rendering the resume list must not erase that save.
+    // contents. Rendering the resume list must not erase that save. Now
+    // guaranteed structurally — list() deletes nothing at all — so this
+    // stands as a regression guard against reintroducing reclamation.
     const storage = fakeStorage();
     const key = 'gcb:event-draft:racy';
     storage.setItem(key, 'not json yet');
