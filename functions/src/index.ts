@@ -11,9 +11,11 @@ import sharp from 'sharp';
 import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import {
   recordAdminAlerts,
+  recordBugReportAlerts,
   runAdminAlertSweep,
   type AdminAlertFirestore,
   type AlertableDoc,
+  type BugReportDoc,
 } from './adminAlerts';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
@@ -249,6 +251,39 @@ export const notifyItemModeration = onDocumentWritten(
       event.data?.before.data(),
       event.data?.after.data(),
     ),
+);
+
+/**
+ * The third producer for the same queue: a bug report the reporter marked
+ * `abuse` (#670, specs/admin-notification-emails.md § Abuse reports).
+ *
+ * ITS DOCUMENT PATH IS TOP-LEVEL, unlike the two above, because `bugReports` is
+ * — the callable writes one document per report with an `eventId` FIELD rather
+ * than nesting it under an Event. So this trigger has no `{eventId}` wildcard to
+ * read: `recordBugReportAlerts` takes the Event off the document, checks it
+ * resolves, and refuses to enqueue otherwise rather than guessing one.
+ *
+ * It fires on EVERY bug report, which is the cost of the collection being flat,
+ * but a plain `bug` is rejected by a pure predicate before any read — so the
+ * common case costs one no-op invocation and nothing else.
+ *
+ * Pins `ADMIN_SDK_SERVICE_ACCOUNT` for the same reason the two above do: it
+ * reads `events/{eventId}` and writes the queue, neither of which the project's
+ * default Gen2 compute identity can reach (ADR 0008). It writes only under
+ * `events/{eventId}/adminAlerts`, never back into `bugReports`, so it cannot
+ * re-fire itself.
+ */
+export const notifyAbuseBugReport = onDocumentWritten(
+  { document: 'bugReports/{reportId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  async (event) => {
+    await recordBugReportAlerts(
+      db as unknown as AdminAlertFirestore,
+      event.params.reportId,
+      event.id,
+      event.data?.before.data() as BugReportDoc | undefined,
+      event.data?.after.data() as BugReportDoc | undefined,
+    );
+  },
 );
 
 /**

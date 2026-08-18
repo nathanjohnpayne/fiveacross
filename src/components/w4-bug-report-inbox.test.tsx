@@ -93,11 +93,49 @@ describe('W4 bug-report inbox', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'The card froze after I marked a square.',
+      // A reporter who never touches the kind control sends `bug` — the same
+      // thing an already-shipped client sends by sending nothing (#670).
+      kind: 'bug',
       screenshotDataUrl: null,
       captureError: 'Canvas unavailable',
       route: undefined,
     });
     expect(await screen.findByText('report-123')).toBeInTheDocument();
+  });
+
+  it('lets the reporter mark a report as abuse, defaulting to bug (#670)', async () => {
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy.mockResolvedValue({ reportId: 'report-abuse' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const bug = await screen.findByRole('radio', { name: 'Something is broken' });
+    const abuse = screen.getByRole('radio', { name: 'Abuse or harmful content' });
+    // Bug is pre-selected, so the default is visible rather than implied.
+    expect(bug).toBeChecked();
+    expect(abuse).not.toBeChecked();
+    // The consequence is stated only once the reporter has chosen it: an abuse
+    // report reaches an admin, a bug report waits in the inbox.
+    expect(screen.queryByText('An admin is notified about abuse reports.')).not.toBeInTheDocument();
+    fireEvent.click(abuse);
+    expect(abuse).toBeChecked();
+    expect(screen.getByText('An admin is notified about abuse reports.')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
+    expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
+  });
+
+  it('resets the kind to bug when a fresh report is opened', async () => {
+    // The draft survives a park/reopen inside one flow (#324), but a NEW report
+    // must not inherit the last one's abuse marking.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy.mockResolvedValue({ reportId: 'report-1' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Abuse or harmful content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    expect(await screen.findByRole('radio', { name: 'Something is broken' })).toBeChecked();
   });
 
   it('encodes an approved screenshot and keeps the sheet open on a retryable submit error', async () => {
@@ -191,10 +229,14 @@ describe('W4 bug-report inbox', () => {
     fireEvent.change(textarea, { target: { value: 'The board froze.' } });
     const send = screen.getByRole('button', { name: 'Send report' });
     expect(send).toBeEnabled();
+    // The wrap targets whatever is FIRST in the sheet, which since #670 is the
+    // kind control rather than the textarea — the reporter classifies the report
+    // before they describe it.
+    const first = screen.getByRole('radio', { name: 'Something is broken' });
     send.focus();
     fireEvent.keyDown(document, { key: 'Tab' });
-    expect(textarea).toHaveFocus();
-    textarea.focus();
+    expect(first).toHaveFocus();
+    first.focus();
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     expect(send).toHaveFocus();
   });
@@ -264,6 +306,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     expect(blobToDataUrlSpy).toHaveBeenCalledWith(moreBlob);
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'The selected screen would not capture.',
+      kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,more',
       captureError: null,
       route: '/more',
@@ -307,6 +350,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'A tile on my card is broken.',
+      kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,card',
       captureError: null,
       route: '/',
@@ -377,6 +421,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'Slow capture race.',
+      kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,card',
       captureError: null,
       route: '/',

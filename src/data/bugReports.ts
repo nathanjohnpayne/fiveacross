@@ -7,6 +7,18 @@ export const BUG_REPORT_SCHEMA_VERSION = 1 as const;
 export const BUG_REPORT_DESCRIPTION_MAX = 4000;
 export const BUG_REPORT_SCREENSHOT_MAX_BYTES = 5 * 1024 * 1024;
 
+/**
+ * What the reporter says this is. A deliberate RESTATEMENT of the server's
+ * `REPORT_KINDS` (`functions/src/bugReportContract.cjs`) rather than an import:
+ * `functions/` is a separately-rooted project whose modules pull `firebase-admin`
+ * and `resend`, so importing the contract here would drag the Functions tree into
+ * the browser bundle. `src/data/w4-bug-report-contract-parity.test.ts` is what
+ * keeps the two honest — it asserts this list and the server's are the same list,
+ * and that a payload this module builds validates on the server unchanged.
+ */
+export const BUG_REPORT_KINDS = ['bug', 'abuse'] as const;
+export type BugReportKind = (typeof BUG_REPORT_KINDS)[number];
+
 export interface BugReportViewport {
   width: number;
   height: number;
@@ -14,6 +26,7 @@ export interface BugReportViewport {
 
 export interface SubmitBugReportInput {
   schemaVersion: typeof BUG_REPORT_SCHEMA_VERSION;
+  kind: BugReportKind;
   description: string;
   screenshotDataUrl: string | null;
   captureError: string | null;
@@ -186,6 +199,10 @@ export function buildBugReportInput(args: {
   description: string;
   screenshotDataUrl: string | null;
   captureError: string | null;
+  /** What the reporter marked this as. Defaults to `'bug'` — the same default
+   * the server normalises an absent field to, so a caller that has no opinion
+   * produces the payload an already-shipped client would have sent (#670). */
+  kind?: BugReportKind;
   /** Pathname the attached screenshot was captured on. Pick mode (#324) can
    * capture a different screen than the one the sheet is submitted from, so
    * the caller passes the capture-time path; absent, the current one. */
@@ -193,6 +210,7 @@ export function buildBugReportInput(args: {
 }): SubmitBugReportInput {
   return {
     schemaVersion: BUG_REPORT_SCHEMA_VERSION,
+    kind: args.kind ?? 'bug',
     description: args.description.trim(),
     screenshotDataUrl: args.screenshotDataUrl,
     captureError: args.captureError,

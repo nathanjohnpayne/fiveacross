@@ -142,6 +142,9 @@ function safeReport(report) {
   const metadata = {
     id: report.id,
     schemaVersion: fields.schemaVersion,
+    // From the shared contract, so a report stored before #670 (no `kind` field)
+    // exports as `bug` rather than as a hole an importer has to interpret.
+    kind: fields.kind,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,

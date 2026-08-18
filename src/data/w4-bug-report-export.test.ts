@@ -80,6 +80,22 @@ describe('local bug-report export', () => {
     expect(metadata).not.toHaveProperty('futurePrivateField');
   });
 
+  it('carries the abuse marking into the exported metadata, defaulting a pre-#670 report to bug', async () => {
+    // The fixture has no `kind` — exactly the shape of every report stored
+    // before the field existed. It must export as `bug`, not as a hole the
+    // importer has to interpret.
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const legacy = JSON.parse(await readFile(path.join(root, 'inbox/report_123/report.json'), 'utf8'));
+    expect(legacy.kind).toBe('bug');
+    await exportReports({
+      reports: [{ ...report('report_abuse'), kind: 'abuse' }],
+      downloadScreenshot: async () => PNG,
+      root,
+    });
+    const marked = JSON.parse(await readFile(path.join(root, 'inbox/report_abuse/report.json'), 'utf8'));
+    expect(marked.kind).toBe('abuse');
+  });
+
   it('archives with an immutable GitHub receipt and prevents duplicate import', async () => {
     await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
     const receipt = await archiveReport({

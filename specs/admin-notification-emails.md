@@ -47,6 +47,24 @@ A delete (`after` undefined) earns nothing: there is nothing left to review.
 - **Given** `active → hidden` or a create straight into `flagged` **then** one `moderation` alert; **given** a same-status re-write **then** none. (Tests under "alertsForWrite".)
 - **Given** one write that both raises the count and hides the doc **then** both alerts are queued. (Test: "queues both alerts for a single hide-plus-report write".)
 
+### The fourth kind: `abuse-reported`
+
+A bug report the reporter marked `abuse` earns one `abuse-reported` alert ([#670](https://github.com/nathanjohnpayne/gaycruisebingo/issues/670)). The intake contract carries a `kind` field for exactly this—see `specs/w4-bug-report-inbox.md` § "Bug or abuse" for the field, its normalization, and the reporter control—and a plain `bug` earns nothing, which is the whole reason the field exists: bugs are answered from the inbox, and mailing an admin about each one would make the digest useless for the reports that need eyes now.
+
+It has its own producer, `abuseAlertsForWrite(reportId, before, after)`, rather than a fourth branch of `alertsForWrite`, because its document has none of the `status` / `reportCount` / `visionFlag` vocabulary the other three are read through. The predicate is still a TRANSITION, not a state—the report is CURRENTLY `abuse` and was not before. Every abuse report is a create today (the callable writes the document once and `firestore.rules` denies clients both directions), so the `before` half is not load-bearing yet; it is what keeps a future operator triage write from re-alerting, and it says what it means rather than relying on the collection's current immutability holding forever.
+
+**Two things follow from `bugReports` being a TOP-LEVEL collection**, and both are the interesting part of this leg.
+
+**The Event is read off the document, never guessed.** A report carries an `eventId` FIELD while the queue is `events/{eventId}/adminAlerts`, so `recordBugReportAlerts` reads it, checks its shape (the intake contract's own `^[A-Za-z0-9_-]{1,100}$`, restated because a stored document may predate that validator and a `/` would silently reparent the queue write), and confirms the Event RESOLVES before enqueuing. It refuses on anything else rather than filing the report against a default Event, which would put a stranger's abuse report in front of the wrong Event's admins. The existence read is not defensive boilerplate either: the sweep finds work by iterating the `events` collection, so a row written under an unresolvable id would never be visited, drained or tombstoned—an orphaned copy of a report's words living in Firestore forever, which is precisely the retention outcome the tombstone design exists to avoid. One read per ABUSE report, never per bug: the predicate runs first.
+
+**A failed Event lookup counts as unresolvable, not as assumed-present.** The asymmetry with the digest's fail-open re-read (below) is deliberate: there, failing open keeps an alert the admins should see; here, failing open would MINT one at a path that may not exist. The report itself is durably stored and pullable through `npm run bugs:pull` either way, so the lost thing is a digest row, not the report.
+
+- **Given** a report that became `abuse` **then** one `abuse-reported` alert; **given** a plain `bug`, a report with no `kind` at all, a later write to an already-`abuse` report, or a delete **then** none. (Tests under "abuseAlertsForWrite".)
+- **Given** a description with an embedded newline or over `LABEL_MAX` **then** the label is flattened and clipped like a Prompt's words; **given** a blank description **then** the report id is the label. (Test: "flattens and clips the reporter description into a single-line label".)
+- **Given** an `eventId` that is absent, non-string, over-length, or path-shaped **then** nothing is enqueued. (Tests under "bugReportEventId", "refuses to enqueue when the report names no usable Event, rather than guessing one".)
+- **Given** an Event that does not resolve, or a lookup that FAILS **then** nothing is enqueued. (Tests: "refuses to enqueue against an Event that does not resolve", "treats a FAILED Event lookup as unresolvable rather than assuming it exists".)
+- **Given** a redelivered trigger **then** the deterministic id keeps it to one row. (Test: "is a no-op on trigger redelivery — the same CloudEvent id writes one row".)
+
 ## Who is notified
 
 `resolveAdminEmails` is `notify.ts`'s, unchanged and reused: the Event's `admins` UID roster mapped through Firebase Auth to VERIFIED emails, de-duped, unioned with the comma-separated `ADMIN_NOTIFY_EMAIL` param.
@@ -62,16 +80,23 @@ A delete (`after` undefined) earns nothing: there is nothing left to review.
 
 ## The digest
 
-Six modules, in the wireframe's fixed order. An empty module is OMITTED rather than rendered empty—the daily email's standings module has a designed empty state because it ships every day either way; a digest with nothing to approve should simply not carry an approvals heading.
+Seven modules, in the wireframe's fixed order. An empty module is OMITTED rather than rendered empty—the daily email's standings module has a designed empty state because it ships every day either way; a digest with nothing to approve should simply not carry an approvals heading.
 
 1. **Preheader**—how much is waiting, for which Event.
 2. **Theme header**—the Day's palette over the two-token gradient band, with the admin brand line and the five-swatch palette strip. The Day supplies the palette so the digest looks like the Event it is about; the HEADLINE states the job ("Needs your eyes") rather than the Theme's name, because an admin opening this is being told there is work, not what today's Theme is. The Theme's own name rides the context line instead.
-3. **Awaiting approval**—one row per `pending` Prompt.
-4. **Reported & hidden**—one row per piece of CONTENT.
-5. **Primary CTA**—one bulletproof button, "Open the Review queue".
-6. **Footer**—brand line, why-you-got-this, and the batching note.
+3. **Abuse reports**—one row per report marked `abuse` ([#670](https://github.com/nathanjohnpayne/gaycruisebingo/issues/670)).
+4. **Awaiting approval**—one row per `pending` Prompt.
+5. **Reported & hidden**—one row per piece of CONTENT.
+6. **Primary CTA**—one bulletproof button, "Open the Review queue".
+7. **Footer**—brand line, why-you-got-this, and the batching note.
 
 **The review module is keyed by content, not by alert.** A report that trips the auto-hide produces two queued alerts—the `reportCount` rise, then the server's `status → hidden` write—and both are true. Rendering them as two rows would tell an admin that two things happened to two things. They collapse to one row per document. Approvals are not collapsed, because each `pending` Prompt is genuinely its own piece of work.
+
+**Abuse leads, and is not collapsed either.** The wireframe's module order is fixed for the six modules it designs; this one is NEW rather than moved, and it goes first because it is the only module with no automated backstop behind it. A reported Prompt has the auto-hide threshold, a flagged Proof has Cloud Vision, and both sit in a console queue an admin can open whenever they get to it; an abuse report has none of that—nothing acts on it until a person does—and it is the only module that can be describing harm to a PERSON rather than to content. Two abuse reports about one incident stay two rows, because a second person saying so is corroboration rather than a duplicate.
+
+**Its detail line is the report ID**, not a causal claim. `reviewDetail`'s vocabulary (`deriveReason`, the distance to the auto-hide bar) is built out of `status`, `reportCount` and `visionFlag`, and an abuse report has none of them—so the row says `abuse report · <id>`, which is the thing an admin can actually act on: it is what `npm run bugs:pull` and the inbox key on.
+
+**Its overflow line names the inbox, not the Review queue.** Every other module's "+N more" points at the surface the CTA opens; bug reports have no console surface at all, so pointing an admin at the Review queue would send them looking somewhere the rows are not. The CTA itself is unchanged and still opens the Review queue—an abuse digest therefore has no one-click destination for its own rows, which is a known gap rather than an oversight (see § Not in this change).
 
 ### Every row is rendered from live state
 
@@ -83,7 +108,10 @@ It also removes an ordering hazard rather than papering over it. The report writ
 
 **A failed re-read is not a resolution.** The stored facts are kept and the row renders from them, because for an admin notification the safe direction is to over-report: a dropped moderation alert is a piece of flagged content nobody is told about.
 
+**An abuse report is EXEMPT from all of it, stated rather than implied.** It is a record of a SUBMISSION, not a state a document is in: `bugReports/{id}` is top-level, so it is not re-read at all (the sender only re-reads `events/{eventId}/{collection}/{docId}` paths), and it carries none of the `status` / `reportCount` vocabulary the liveness rules read. Left to the general rule, every liveness answer for it would be "nothing there"—so every abuse row would be scored resolved and cleared the moment it was drained: queued, claimed, tombstoned, and never mailed. There is also nothing an admin can do that makes it stop being true. A report was filed, and it stays filed.
+
 - **Given** a Prompt approved inside the batching window **then** it is not mailed as pending, and its row is cleared. (Test: "does NOT mail a Prompt that was approved inside the batching window".)
+- **Given** an abuse alert **then** its row survives whatever the liveness rules would have said, and the drain never reads a document under the Event for it. (Tests: "survives the liveness rules that would otherwise drop it as resolved", "MAILS an abuse row without re-reading a document that does not live under the Event".)
 - **Given** every queued alert resolved **then** nothing is sent and the queue is still cleared. (Test: "sends nothing at all when every queued alert was resolved".)
 - **Given** a report alert whose content is now hidden **then** the row reads as the hide, whatever the alert ordering said. (Test: "takes the KIND from the live document".)
 - **Given** a re-read that FAILS **then** the row survives on its stored facts. (Tests: "FAILS OPEN on a read error", "keeps a row on a FAILED content re-read".)
@@ -93,6 +121,9 @@ It also removes an ordering hazard rather than papering over it. The report writ
 **The render cap is visible, never silent.** At most `ROWS_PER_SECTION` rows are drawn per module; the remainder is stated as "+N more in the Review queue" rather than dropped.
 
 - **Given** alerts of both kinds **then** the digest carries both modules in order, and the subject names both counts. (Test: "renders both modules and names both counts".)
+- **Given** an abuse alert and an approval **then** "Abuse reports" renders first and the subject names its count first. (Test: "renders abuse in its OWN module, ahead of the moderation ones, and names it in the subject".)
+- **Given** two abuse reports about one incident **then** two rows. (Test: "never collapses two abuse reports into one row — two people saying so IS the signal".)
+- **Given** more abuse rows than the cap **then** the overflow names the bug-report inbox. (Test: "points its overflow at the bug-report inbox, not at the Review queue the CTA opens".)
 - **Given** alerts of one kind **then** the other module is absent entirely. (Test: "omits a module with no rows".)
 - **Given** a report and the hide it caused **then** the review module shows ONE row, carrying the hide. (Test: "collapses a report and its auto-hide into one row".)
 - **Given** more rows than the cap **then** the overflow is stated. (Test: "states the overflow rather than truncating silently".)
@@ -162,6 +193,8 @@ The sweep is scoped to ACTIVE Events, mirroring `runDailyEmailSweep`. An archive
 
 The trigger pins `ADMIN_SDK_SERVICE_ACCOUNT` (it reads Events, the queue, the roster and `hostnames`, and stamps alerts) and binds `RESEND_API_KEY`—it is now the only admin-notification function that sends. Per [#318](https://github.com/nathanjohnpayne/gaycruisebingo/issues/318): verify the Cloud Scheduler job exists after the deploy (`gcloud scheduler jobs list`)—the deployer service account has historically lacked `cloudscheduler.admin`, which deploys an `onSchedule` function jobless and silently.
 
+The three PRODUCERS are `notifyItemModeration` and `notifyProofModeration` (`onDocumentWritten` on `events/{eventId}/{items,proofs}/{id}`) and `notifyAbuseBugReport` (`onDocumentWritten` on `bugReports/{reportId}`, [#670](https://github.com/nathanjohnpayne/gaycruisebingo/issues/670)). All three pin `ADMIN_SDK_SERVICE_ACCOUNT` and none binds `RESEND_API_KEY`—they only append to the queue. The third has no `{eventId}` wildcard to read, because its collection is flat; it fires on every bug report and rejects a plain `bug` with a pure predicate before it spends a read, so the common case costs one no-op invocation. It writes only under `events/{eventId}/adminAlerts`, never back into `bugReports`, so it cannot re-fire itself.
+
 ### The delivery identity is claimed, not derived
 
 **The idempotency key is PERSISTED before the send.** `claimDrain` stamps every row it is about to drain with a `batchId`, and the email is keyed `admin-digest/{eventId}/{batchId}`. So the delivery identity is immutable from the moment the email goes out, and a retry after a failed clean-up recognises its own previous delivery.
@@ -228,8 +261,12 @@ Applied in memory rather than as a query filter, because a `createdAt <=` range 
 
 - **Given** any client—owner, participant or Event admin—**then** every read and write of `adminAlerts` is denied. (Tests in `tests/rules/admin-notification-emails.test.ts`.)
 
+**The abuse signal is server-owned at its source too.** `bugReports/{reportId}` is already `allow read, write: if false`—the callable is the only write path—so the `kind` field that decides whether an admin is mailed cannot be forged. That denial is load-bearing in both directions now: a client able to write `kind` could mint admin alerts at will, and a client able to rewrite it could bury a real abuse report by downgrading it to a bug.
+
+- **Given** any client **then** creating a `bugReports` document carrying `kind: 'abuse'`, and updating an existing report's `kind`, are both denied. (Test: "keeps bug reports and rate-limit state server-only", `tests/rules/w0-firestore-rules.test.ts`.)
+
 ## Not in this change
 
-- **Bug reports of type abuse.** [#638](https://github.com/nathanjohnpayne/gaycruisebingo/issues/638) lists them under the abuse signal, but the intake contract has no type at all: `validateClientReportFields` (`functions/src/bugReportContract.cjs`) accepts a free-text description and nothing that distinguishes a bug from an abuse report. Adding one is a client change—a control on `src/components/BugReport.tsx`, a widened shared contract, and a persisted field—with no design behind it in any wireframe, and it would pull this PR into `src/components`, which several in-flight lanes own. The producer seam is ready for it: a `bugReports/{id}` trigger calling `enqueueAdminAlerts` with a fourth kind is the whole integration. Tracked as a follow-up.
+- **A deep link for an abuse row.** The digest's CTA opens the Review queue, and bug reports are not in it—they are pulled with `npm run bugs:pull` (`specs/w4-bug-report-inbox.md`). So an abuse row names its report ID and the module's overflow line names the inbox, but nothing in the email is one click from the report itself. Giving it one means an admin-console surface for bug reports, which does not exist.
 - **An in-app admin notification-preferences surface.** Recipients are the roster plus the env override; there is no per-admin mute. An Event with no resolvable recipients already sends nothing.
 - **Per-row deep links.** The digest carries one CTA to the Review queue, which lists every queued item; linking each row individually would need a per-content route the console does not have.

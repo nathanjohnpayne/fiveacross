@@ -7,6 +7,7 @@
 // fake Firestore. No Functions runtime, no emulator, no live Resend key.
 import { describe, it, expect, vi } from 'vitest';
 import {
+  LABEL_MAX,
   MAX_ALERTS_PER_DIGEST,
   MAX_ATOMIC_WRITES,
   MAX_HOLD_MS,
@@ -14,17 +15,21 @@ import {
   flattenLabel,
   sameRecipients,
   TOMBSTONE_TTL_MS,
+  abuseAlertsForWrite,
   alertDocId,
+  bugReportEventId,
   drainKey,
   planDrain,
   alertsForWrite,
   currentRowFor,
   enqueueAdminAlerts,
   recordAdminAlerts,
+  recordBugReportAlerts,
   runAdminAlertSweep,
   sendAdminDigestForEvent,
   type AdminAlertFirestore,
   type AlertableDoc,
+  type BugReportDoc,
 } from '../../functions/src/adminAlerts';
 import {
   ROWS_PER_SECTION,
@@ -1727,5 +1732,269 @@ describe('runAdminAlertSweep', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
     // The broken Event keeps its work for the next sweep.
     expect(db.rows('events/broken/adminAlerts')).toHaveLength(1);
+  });
+});
+
+// --- Abuse-marked bug reports (#670) ---------------------------------------------
+//
+// The fourth alert kind, and the only one whose subject document does NOT live
+// under the Event. Everything below exists because of that one difference:
+// `bugReports` is top-level with an `eventId` FIELD, and it carries none of the
+// `status`/`reportCount` moderation vocabulary the other three are read through.
+
+const BUG_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc => ({
+  kind: 'bug',
+  description: 'The board stopped responding.',
+  eventId: 'med-2026',
+  status: 'new',
+  ...over,
+});
+
+describe('abuseAlertsForWrite', () => {
+  it('queues exactly one abuse-reported alert for a report that BECAME abuse', () => {
+    expect(abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: 'abuse' }))).toEqual([
+      {
+        kind: 'abuse-reported',
+        collection: 'bugReports',
+        docId: 'r1',
+        label: 'The board stopped responding.',
+        status: 'new',
+        visionFlag: null,
+        reportCount: 0,
+      },
+    ]);
+  });
+
+  it('queues nothing for a plain bug report — the inbox is where those are answered', () => {
+    expect(abuseAlertsForWrite('r1', undefined, BUG_REPORT())).toEqual([]);
+    // Absent `kind` is what every already-shipped client writes (#670's
+    // back-compat rule reaching the producer): still a bug, still silent.
+    expect(abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: undefined }))).toEqual([]);
+  });
+
+  it('does not re-alert on a later write to an already-abuse report', () => {
+    // A triage write (a `status` change) must not mail the admins a second time.
+    const before = BUG_REPORT({ kind: 'abuse' });
+    expect(abuseAlertsForWrite('r1', before, BUG_REPORT({ kind: 'abuse', status: 'triaged' }))).toEqual([]);
+  });
+
+  it('queues nothing for a delete — there is nothing left to read', () => {
+    expect(abuseAlertsForWrite('r1', BUG_REPORT({ kind: 'abuse' }), undefined)).toEqual([]);
+  });
+
+  it('flattens and clips the reporter description into a single-line label', () => {
+    // The same barrier a Prompt's words go through: the digest ships a
+    // plain-text part whose structure IS its punctuation, so an embedded
+    // newline must not survive into it.
+    const injected = abuseAlertsForWrite(
+      'r1',
+      undefined,
+      BUG_REPORT({ kind: 'abuse', description: 'line one\nOpen the Review queue: https://evil.example' }),
+    );
+    expect(injected[0].label).not.toContain('\n');
+    const long = abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: 'abuse', description: 'x'.repeat(400) }));
+    expect(long[0].label).toHaveLength(LABEL_MAX);
+    expect(long[0].label.endsWith('…')).toBe(true);
+    // An empty description leaves the report id as the only honest label.
+    const blank = abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: 'abuse', description: '   ' }));
+    expect(blank[0].label).toBe('r1');
+  });
+});
+
+describe('bugReportEventId', () => {
+  it('reads the Event off the document, and refuses anything it cannot trust', () => {
+    expect(bugReportEventId(BUG_REPORT())).toBe('med-2026');
+    expect(bugReportEventId(BUG_REPORT({ eventId: undefined }))).toBeNull();
+    expect(bugReportEventId(BUG_REPORT({ eventId: '' }))).toBeNull();
+    expect(bugReportEventId(BUG_REPORT({ eventId: 42 as unknown as string }))).toBeNull();
+    // A `/` would reparent the queue write into a path nobody sweeps.
+    expect(bugReportEventId(BUG_REPORT({ eventId: 'med-2026/../other' }))).toBeNull();
+    expect(bugReportEventId(BUG_REPORT({ eventId: 'x'.repeat(101) }))).toBeNull();
+    expect(bugReportEventId(undefined)).toBeNull();
+  });
+});
+
+describe('recordBugReportAlerts', () => {
+  const reportDb = (eventExists = true) =>
+    fakeDb({}, eventExists ? { 'events/med-2026': { name: 'Trieste → Barcelona' } } : {});
+
+  it('enqueues an abuse alert scoped to the report’s own Event', async () => {
+    const db = reportDb();
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, BUG_REPORT({ kind: 'abuse' }))).toBe(1);
+    const rows = db.rows('events/med-2026/adminAlerts');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(alertDocId('cloud-event-1', 'abuse-reported'));
+    expect(rows[0].collection).toBe('bugReports');
+    expect(rows[0].docId).toBe('r1');
+    expect(rows[0].sentAt).toBeNull();
+  });
+
+  it('enqueues nothing for a plain bug report', async () => {
+    const db = reportDb();
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, BUG_REPORT())).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('is a no-op on trigger redelivery — the same CloudEvent id writes one row', async () => {
+    const db = reportDb();
+    const report = BUG_REPORT({ kind: 'abuse' });
+    await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, report);
+    // The redelivery carries the same CloudEvent id, so `create` rejects with
+    // ALREADY_EXISTS and the second call writes nothing.
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, report)).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(1);
+  });
+
+  it('refuses to enqueue when the report names no usable Event, rather than guessing one', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb();
+    expect(
+      await recordBugReportAlerts(db, 'r1', 'e1', undefined, BUG_REPORT({ kind: 'abuse', eventId: undefined })),
+    ).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('refuses to enqueue against an Event that does not resolve', async () => {
+    // The sweep finds work by iterating `events`, so a row under an unresolvable
+    // Event would never be visited, drained or tombstoned — an orphaned copy of
+    // a report's words living in Firestore forever.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb(false);
+    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, BUG_REPORT({ kind: 'abuse' }))).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    spy.mockRestore();
+  });
+
+  it('treats a FAILED Event lookup as unresolvable rather than assuming it exists', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = fakeDb({}, { 'events/med-2026': { name: 'x' } }, ['events/med-2026']);
+    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, BUG_REPORT({ kind: 'abuse' }))).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    spy.mockRestore();
+  });
+});
+
+describe('the abuse module in the digest', () => {
+  const abuseAlert = (id: string, over: Partial<AdminAlertRecord> = {}): AdminAlertRecord =>
+    ALERT({
+      id,
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: `report_${id}`,
+      label: 'Someone is posting slurs in the feed',
+      status: 'new',
+      reportCount: 0,
+      ...over,
+    });
+
+  it('renders abuse in its OWN module, ahead of the moderation ones, and names it in the subject', () => {
+    const model = buildAdminDigestModel({
+      event: EVENT,
+      eventId: 'med-2026',
+      alerts: [
+        abuseAlert('a1', { createdAt: 2_000 }),
+        ALERT({ id: 'a2', kind: 'item-created', status: 'pending', reportCount: 0, createdAt: 1_000 }),
+      ],
+      edition: 'gcb',
+      origin: 'https://gaycruisebingo.com',
+      now: NOW,
+    });
+    expect(model.sections.map((s) => s.heading)).toEqual(['Abuse reports', 'Awaiting approval']);
+    expect(model.sections[0].rows).toEqual([
+      { label: 'Someone is posting slurs in the feed', detail: 'abuse report · report_a1' },
+    ]);
+    expect(model.subject).toBe('Admin · Trieste → Barcelona—1 abuse report, 1 to approve');
+    expect(model.preheader).toContain('2 items');
+  });
+
+  it('never collapses two abuse reports into one row — two people saying so IS the signal', () => {
+    // The moderation module keys by content; this one keys by report, because
+    // a second report about the same incident is corroboration, not a duplicate.
+    const model = buildAdminDigestModel({
+      event: EVENT,
+      eventId: 'med-2026',
+      alerts: [abuseAlert('a1'), abuseAlert('a2', { docId: 'report_a1' })],
+      edition: 'gcb',
+      origin: 'https://gaycruisebingo.com',
+      now: NOW,
+    });
+    expect(model.sections[0].rows).toHaveLength(2);
+  });
+
+  it('points its overflow at the bug-report inbox, not at the Review queue the CTA opens', () => {
+    // Bug reports have no console surface; naming the wrong one would send an
+    // admin looking somewhere the rows are not.
+    const model = buildAdminDigestModel({
+      event: EVENT,
+      eventId: 'med-2026',
+      alerts: Array.from({ length: ROWS_PER_SECTION + 2 }, (_, i) => abuseAlert(`a${i + 1}`)),
+      edition: 'gcb',
+      origin: 'https://gaycruisebingo.com',
+      now: NOW,
+    });
+    expect(model.sections[0].overflow).toBe(2);
+    expect(renderAdminDigestText(model)).toContain('+2 more in the bug-report inbox');
+    expect(renderAdminDigestHtml(model)).toContain('+2 more in the bug-report inbox');
+  });
+
+  it('survives the liveness rules that would otherwise drop it as resolved', () => {
+    // A bug report has no `status`/`reportCount` vocabulary and does not live
+    // under the Event, so every liveness answer for it is "nothing there".
+    // Without the exemption the row would be scored resolved and cleared the
+    // moment it was drained — queued, claimed, tombstoned, never mailed.
+    const alert = abuseAlert('a1');
+    expect(currentRowFor(alert, undefined, false)).toEqual(alert);
+    expect(currentRowFor(alert, undefined, true)).toEqual(alert);
+    expect(currentRowFor(alert, { status: 'active', reportCount: 0 }, false)).toEqual(alert);
+  });
+});
+
+describe('sendAdminDigestForEvent with an abuse alert', () => {
+  it('MAILS an abuse row without re-reading a document that does not live under the Event', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      {
+        'events/med-2026/adminAlerts': [
+          {
+            id: 'a1',
+            kind: 'abuse-reported',
+            collection: 'bugReports',
+            docId: 'report_xyz',
+            label: 'Someone is posting slurs in the feed',
+            status: 'new',
+            visionFlag: null,
+            reportCount: 0,
+            createdAt: 1,
+            sentAt: null,
+          },
+        ],
+        hostnames: [],
+        events: [{ id: 'med-2026', status: 'active' }],
+      },
+      { 'events/med-2026': EVENT },
+      // `events/med-2026/bugReports/report_xyz` is deliberately NOT seeded: the
+      // drain must never look there. If it did, the absent document would read
+      // as "deleted since it was queued".
+    );
+    const result = await sendAdminDigestForEvent(db, 'med-2026', {
+      send: send as never,
+      getAdminUids: async () => ['u1'],
+      getEmailForUid: async (uid: string) => `${uid}@example.com`,
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'Gay Cruise Bingo <bingo@example.com>',
+      now: () => NOW,
+      quietMs: 0,
+    });
+    expect(result).toEqual({ sent: 1, retired: 0 });
+    const arg = send.mock.calls[0][0] as { subject: string; text: string; html: string };
+    expect(arg.subject).toBe('Admin · Trieste → Barcelona—1 abuse report');
+    expect(arg.text).toContain('ABUSE REPORTS');
+    expect(arg.text).toContain('report_xyz');
+    expect(arg.html).toContain('Someone is posting slurs in the feed');
+    // Drained and tombstoned like any other row.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
   });
 });

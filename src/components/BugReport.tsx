@@ -6,6 +6,7 @@ import {
   buildBugReportInput,
   captureAppSurface,
   submitBugReport,
+  type BugReportKind,
 } from '../data/bugReports';
 
 // `lucide-react`'s `Bug` (daily-cards-spec § "Iconography — Lucide"), formerly
@@ -62,6 +63,11 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const [stage, setStage] = useState<FlowStage>('closed');
   const [description, setDescription] = useState('');
+  // What the reporter says this is. `'bug'` by default, which is both the
+  // common case and the value the server normalises an absent field to — so the
+  // control changes what an abuse report does, never what a bug report does
+  // (#670).
+  const [kind, setKind] = useState<BugReportKind>('bug');
   const [screenshot, setScreenshot] = useState<Blob | null>(null);
   // The route the attached screenshot was taken on. Submission reports this
   // rather than the submit-time pathname, so a capture picked up on Card and
@@ -124,6 +130,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       }
       setStage('sheet');
       setDescription('');
+      setKind('bug');
       setError(null);
       setSubmittedId(null);
       void capture();
@@ -193,6 +200,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       const result = await submitBugReport(
         buildBugReportInput({
           description,
+          kind,
           screenshotDataUrl,
           captureError,
           route: screenshot ? (captureRoute ?? undefined) : undefined,
@@ -246,6 +254,38 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     <p className="bug-report-privacy">
                       We’ll send your description, this app view, route, app version, browser, and screen size. Review the image before sending; no email or auth token is included.
                     </p>
+                    {/* The abuse marking (#670). A radio pair rather than a
+                        checkbox because the two are alternatives, not a flag on
+                        a bug — and radios state the default visibly, which a
+                        checkbox does not. `bug` is pre-selected, so a reporter
+                        who ignores this control sends exactly the payload every
+                        already-shipped client sends. */}
+                    <fieldset className="bug-report-kind">
+                      <legend className="bug-report-label">What kind of report is this?</legend>
+                      <label className="bug-report-kind-option">
+                        <input
+                          type="radio"
+                          name="bug-report-kind"
+                          value="bug"
+                          checked={kind === 'bug'}
+                          onChange={() => setKind('bug')}
+                        />
+                        <span>Something is broken</span>
+                      </label>
+                      <label className="bug-report-kind-option">
+                        <input
+                          type="radio"
+                          name="bug-report-kind"
+                          value="abuse"
+                          checked={kind === 'abuse'}
+                          onChange={() => setKind('abuse')}
+                        />
+                        <span>Abuse or harmful content</span>
+                      </label>
+                    </fieldset>
+                    {kind === 'abuse' && (
+                      <p className="bug-report-privacy">An admin is notified about abuse reports.</p>
+                    )}
                     <label className="bug-report-label" htmlFor="bug-report-description">What happened?</label>
                     <textarea
                       id="bug-report-description"

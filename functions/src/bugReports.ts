@@ -49,6 +49,11 @@ export async function handleSubmitBugReport(
   try {
     await reportRef.create({
       schemaVersion: report.schemaVersion,
+      // Server-normalised, never the raw client value: `bugReports` is denied to
+      // clients in both directions, so this document is the ONLY place the
+      // reporter's abuse marking exists — and it is what the `notifyAbuseBugReport`
+      // trigger reads to decide whether an admin hears about it (#670).
+      kind: report.kind,
       description: report.description,
       screenshotPath: storagePath,
       captureError: report.captureError,

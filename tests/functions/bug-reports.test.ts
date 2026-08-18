@@ -6,6 +6,7 @@ const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCA
 
 const valid = () => ({
   schemaVersion: 1,
+  kind: 'bug',
   description: 'The board stopped responding.',
   screenshotDataUrl: png,
   captureError: null,
@@ -43,6 +44,38 @@ describe('bug-report server validation', () => {
       complete.subarray(complete.length - 12),
     ]);
     expect(() => contract.validatePngBytes(noImageData)).toThrow('incomplete');
+  });
+
+  it('carries the reporter’s abuse marking through to the persisted report (#670)', () => {
+    expect(validateBugReportInput({ ...valid(), kind: 'abuse' }).kind).toBe('abuse');
+    expect(validateBugReportInput(valid()).kind).toBe('bug');
+  });
+
+  it('accepts an ABSENT kind as a plain bug, so already-shipped clients keep working', () => {
+    // THE BACK-COMPAT GUARANTEE, stated as a test rather than as a comment. Every
+    // client in the wild sends no `kind` at all, and an installed PWA holding a
+    // stale precached bundle can be weeks behind a deploy — rejecting the field's
+    // absence would break bug reporting for exactly those players.
+    const legacy = valid() as Record<string, unknown>;
+    delete legacy.kind;
+    const report = validateBugReportInput(legacy);
+    expect(report.kind).toBe('bug');
+    // Nothing else about the legacy payload changes shape.
+    expect(report.description).toBe('The board stopped responding.');
+    expect(report.route).toBe('/leaderboard?view=all');
+  });
+
+  it('normalises an UNKNOWN kind down to a bug rather than rejecting the report', () => {
+    // The value comes from a client the server cannot force to upgrade, so a
+    // future third kind must not start failing submissions against a server that
+    // has not shipped yet. Degrading keeps the report; rejecting loses it. The
+    // direction is safe because `abuse` is the only value that DOES anything —
+    // normalisation can decline an escalation, never invent one.
+    for (const kind of ['ABUSE', 'abuse ', 'harassment', '', 42, null, {}, ['abuse']]) {
+      expect(validateBugReportInput({ ...valid(), kind }).kind).toBe('bug');
+    }
+    expect(contract.normalizeReportKind(undefined)).toBe('bug');
+    expect(contract.REPORT_KINDS).toEqual(['bug', 'abuse']);
   });
 
   it('allows only three reports in every rolling 15-minute window, including across the boundary', () => {

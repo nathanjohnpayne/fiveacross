@@ -107,10 +107,31 @@ export type AdminAlertKind =
   /** Somebody reported this content — `reportCount` rose on this write. */
   | 'content-reported'
   /** The server moved this content into a moderation state (flagged/hidden). */
-  | 'moderation';
+  | 'moderation'
+  /** A reporter filed a bug report and marked it `abuse` (#670). Unlike the
+   *  three above this is not a state a document is IN — it is a submission that
+   *  happened — which is why it needs its own liveness rule and its own digest
+   *  module rather than joining "Reported & hidden". */
+  | 'abuse-reported';
 
-/** The two collections an alert can be about. */
-export type AlertedCollection = 'items' | 'proofs';
+/** The collections that live UNDER an Event, at `events/{eventId}/{collection}`.
+ *  Everything the moderation producers touch, and the only paths the digest can
+ *  re-read a row's live state from. */
+export type EventScopedCollection = 'items' | 'proofs';
+
+/** Every collection an alert can be about. `bugReports` is the odd one: a
+ *  TOP-LEVEL collection carrying an `eventId` FIELD, so an alert about it is
+ *  scoped to an Event without living inside one. */
+export type AlertedCollection = EventScopedCollection | 'bugReports';
+
+const EVENT_SCOPED: readonly AlertedCollection[] = ['items', 'proofs'];
+
+/** Whether this collection can be re-read at `events/{eventId}/{collection}/{id}`.
+ *  The digest asks before it spends a read — and before it lets `currentRowFor`
+ *  interpret an absent document as "deleted since it was queued". */
+export function isEventScoped(collection: AlertedCollection): collection is EventScopedCollection {
+  return EVENT_SCOPED.includes(collection);
+}
 
 /** The subset of a Prompt/Proof doc the producers read. Everything is optional
  *  because this reads RAW Firestore snapshots with no converter. */
@@ -166,10 +187,16 @@ export function flattenLabel(value: string): string {
   return value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function labelFor(collection: AlertedCollection, docId: string, doc: AlertableDoc): string {
-  const trimmed = flattenLabel((collection === 'items' ? doc.text : doc.itemText) ?? '');
-  if (!trimmed) return docId;
+/** Flatten, clip, and fall back — the one place a row's human subject line is
+ *  derived, whatever kind of document it came from. */
+function clipLabel(text: string | undefined, fallback: string): string {
+  const trimmed = flattenLabel(text ?? '');
+  if (!trimmed) return fallback;
   return trimmed.length > LABEL_MAX ? `${trimmed.slice(0, LABEL_MAX - 1)}…` : trimmed;
+}
+
+function labelFor(collection: EventScopedCollection, docId: string, doc: AlertableDoc): string {
+  return clipLabel(collection === 'items' ? doc.text : doc.itemText, docId);
 }
 
 const MODERATION_STATES = ['flagged', 'hidden'];
@@ -200,7 +227,7 @@ const MODERATION_STATES = ['flagged', 'hidden'];
  * A DELETE (`after` undefined) earns nothing: there is nothing left to review.
  */
 export function alertsForWrite(
-  collection: AlertedCollection,
+  collection: EventScopedCollection,
   docId: string,
   before: AlertableDoc | undefined,
   after: AlertableDoc | undefined,
@@ -316,7 +343,7 @@ function isAlreadyExists(err: unknown): boolean {
  *  which makes a redelivered trigger idempotent rather than duplicative. */
 export async function recordAdminAlerts(
   db: AdminAlertFirestore,
-  collection: AlertedCollection,
+  collection: EventScopedCollection,
   eventId: string,
   docId: string,
   transitionId: string,
@@ -334,6 +361,137 @@ export async function recordAdminAlerts(
     );
   } catch (err) {
     console.error('recordAdminAlerts failed', eventId, collection, docId, err);
+    return 0;
+  }
+}
+
+// --- Producing: abuse-marked bug reports (#670) ----------------------------------
+
+/** The subset of a `bugReports/{reportId}` document the abuse producer reads.
+ *  Everything is optional because this reads a RAW Firestore snapshot with no
+ *  converter — and because a report written before #670 has no `kind` at all. */
+export interface BugReportDoc {
+  /** `'abuse'` or `'bug'`, normalised at intake by `bugReportContract.cjs`. */
+  kind?: string;
+  /** The reporter's own words — the only human-readable label a report has. */
+  description?: string;
+  /** The Event the report was filed from. `bugReports` is TOP-LEVEL, so this
+   *  field is the ONLY link between a report and an Event's alert queue. */
+  eventId?: string;
+  status?: string;
+}
+
+/** The intake contract's own `eventId` shape (`bugReportContract.cjs`), restated
+ *  here because this reads STORED documents rather than a live payload: a report
+ *  written by hand, by a migration, or by an older contract has not been through
+ *  that validator, and an id with a `/` in it would silently reparent the queue
+ *  write. */
+const EVENT_ID_SHAPE = /^[A-Za-z0-9_-]{1,100}$/;
+
+/**
+ * Pure: the alerts one `bugReports/{reportId}` write earns.
+ *
+ * ONE SIGNAL, and it is a TRANSITION rather than a state: the report is
+ * CURRENTLY marked `abuse` and was not before. In practice every abuse report is
+ * a create — the callable writes the document once and `firestore.rules` denies
+ * clients both directions — so the `before` half is not load-bearing today. It
+ * is still the right predicate: it is what keeps a future operator triage write
+ * (a `status` change on an already-abuse report) from re-alerting, and it makes
+ * the function say what it means rather than relying on a collection's current
+ * immutability to be true forever.
+ *
+ * A plain `bug` earns nothing, which is the entire point of the field — the
+ * inbox is where bugs are answered, and mailing an admin about each one would
+ * make the digest useless for the reports that need eyes now.
+ *
+ * A DELETE (`after` undefined) earns nothing, matching `alertsForWrite`.
+ */
+export function abuseAlertsForWrite(
+  reportId: string,
+  before: BugReportDoc | undefined,
+  after: BugReportDoc | undefined,
+): AdminAlertDraft[] {
+  if (!after) return [];
+  if (after.kind !== 'abuse' || before?.kind === 'abuse') return [];
+  return [
+    {
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: reportId,
+      // The reporter's description, through the same `flattenLabel` barrier a
+      // Prompt's words go through: it is user-submitted text bound for a
+      // plain-text email part whose structure IS its punctuation.
+      label: clipLabel(after.description, reportId),
+      status: typeof after.status === 'string' && after.status ? after.status : 'new',
+      visionFlag: null,
+      reportCount: 0,
+    },
+  ];
+}
+
+/**
+ * The Event an abuse report belongs to, or `null` when there is none to trust.
+ *
+ * `bugReports` is a TOP-LEVEL collection with an `eventId` field, while the
+ * queue is `events/{eventId}/adminAlerts` — so the Event is READ OFF THE
+ * DOCUMENT and never guessed. A report with no usable `eventId` is not filed
+ * against some default Event, because "some default Event" would put a
+ * stranger's abuse report in front of the wrong Event's admins.
+ */
+export function bugReportEventId(after: BugReportDoc | undefined): string | null {
+  const eventId = typeof after?.eventId === 'string' ? after.eventId.trim() : '';
+  return EVENT_ID_SHAPE.test(eventId) ? eventId : null;
+}
+
+/**
+ * The whole abuse producer in one call — the shape `index.ts`'s
+ * `notifyAbuseBugReport` trigger uses. Best-effort and NEVER throws (ADR 0001).
+ *
+ * THE EVENT MUST EXIST, and that read is not defensive boilerplate. The sweep
+ * (`runAdminAlertSweep`) finds work by iterating the `events` collection, so a
+ * queue row written under an `eventId` that resolves to no Event would never be
+ * visited, never drained and never tombstoned — an orphaned copy of a report's
+ * text sitting in Firestore forever, which is precisely the retention outcome
+ * the tombstone design exists to avoid. One read per ABUSE report (never per
+ * bug: the predicate above runs first) is a cheap price for that.
+ *
+ * A read that FAILS is treated as unresolvable rather than assumed-present. The
+ * asymmetry with `currentRowFor`'s fail-open is deliberate: there, failing open
+ * keeps an alert the admins should see; here, failing open would MINT one at a
+ * path that may not exist. The report itself is already durably stored and
+ * pullable through `npm run bugs:pull` either way, so the lost thing is a digest
+ * row, not the report.
+ */
+export async function recordBugReportAlerts(
+  db: AdminAlertFirestore,
+  reportId: string,
+  transitionId: string,
+  before: BugReportDoc | undefined,
+  after: BugReportDoc | undefined,
+  deps: EnqueueDeps = {},
+): Promise<number> {
+  try {
+    const drafts = abuseAlertsForWrite(reportId, before, after);
+    if (drafts.length === 0) return 0;
+    const eventId = bugReportEventId(after);
+    if (!eventId) {
+      console.error('recordBugReportAlerts: abuse report carries no usable eventId', reportId);
+      return 0;
+    }
+    let event: Record<string, unknown> | undefined;
+    try {
+      event = (await db.doc(`events/${eventId}`).get()).data();
+    } catch (err) {
+      console.error('recordBugReportAlerts: event lookup failed', eventId, reportId, err);
+      return 0;
+    }
+    if (!event) {
+      console.error('recordBugReportAlerts: abuse report names an unresolvable event', eventId, reportId);
+      return 0;
+    }
+    return await enqueueAdminAlerts(db, eventId, drafts, transitionId, deps);
+  } catch (err) {
+    console.error('recordBugReportAlerts failed', reportId, err);
     return 0;
   }
 }
@@ -533,8 +691,10 @@ function toRecord(snap: AlertSnapshot): AdminAlertRecord | null {
   if (!data) return null;
   const kind = data.kind;
   const collection = data.collection;
-  if (kind !== 'item-created' && kind !== 'content-reported' && kind !== 'moderation') return null;
-  if (collection !== 'items' && collection !== 'proofs') return null;
+  if (kind !== 'item-created' && kind !== 'content-reported' && kind !== 'moderation' && kind !== 'abuse-reported') {
+    return null;
+  }
+  if (collection !== 'items' && collection !== 'proofs' && collection !== 'bugReports') return null;
   const docId = typeof data.docId === 'string' ? data.docId : '';
   if (!docId) return null;
   return {
@@ -581,6 +741,15 @@ export function currentRowFor(
   live: AlertableDoc | undefined,
   readFailed: boolean,
 ): AdminAlertRecord | null {
+  // AN ABUSE REPORT IS EXEMPT, and it needs to be stated rather than fall out of
+  // the rules below. It is a RECORD OF A SUBMISSION, not a state a document is
+  // in: `bugReports/{id}` is a top-level document with no `status`/`reportCount`
+  // moderation vocabulary for the liveness rules to read, so applying them would
+  // score every abuse row as "resolved" and drop it the moment it was drained —
+  // the alert would exist, be claimed, be tombstoned, and never be mailed (#670).
+  // There is also nothing an admin can do that would make it stop being true: a
+  // report was filed, and that stays filed.
+  if (alert.kind === 'abuse-reported') return alert;
   if (readFailed) return alert; // fail-open: keep the stored facts rather than lose the alert
   if (!live) return null; // deleted since it was queued — nothing left to review
   const status = typeof live.status === 'string' ? live.status : 'unknown';
@@ -733,8 +902,14 @@ export async function sendAdminDigestForEvent(
 
   // Re-read each piece of content ONCE, however many alerts point at it, then
   // render every row from what the document says now.
+  // EVENT-SCOPED ROWS ONLY. A `bugReports` alert names a top-level document that
+  // does not exist at `events/{eventId}/bugReports/{id}`, so re-reading it would
+  // spend a read to learn nothing and hand `currentRowFor` an absent document —
+  // which for every other kind means "deleted since it was queued".
   const live = new Map<string, { doc: AlertableDoc | undefined; failed: boolean }>();
-  for (const key of new Set(alerts.map((a) => `${a.collection}/${a.docId}`))) {
+  for (const key of new Set(
+    alerts.filter((a) => isEventScoped(a.collection)).map((a) => `${a.collection}/${a.docId}`),
+  )) {
     try {
       live.set(key, { doc: (await db.doc(`events/${eventId}/${key}`).get()).data() as AlertableDoc | undefined, failed: false });
     } catch (err) {
@@ -745,7 +920,11 @@ export async function sendAdminDigestForEvent(
   const current: AdminAlertRecord[] = [];
   const resolved: string[] = [];
   for (const alert of alerts) {
-    const state = live.get(`${alert.collection}/${alert.docId}`) ?? { doc: undefined, failed: true };
+    // `failed: false` for a row that was never re-read on purpose, so the
+    // fail-open branch stays reserved for a re-read that genuinely broke.
+    const state = isEventScoped(alert.collection)
+      ? live.get(`${alert.collection}/${alert.docId}`) ?? { doc: undefined, failed: true }
+      : { doc: undefined, failed: false };
     const row = currentRowFor(alert, state.doc, state.failed);
     if (row) current.push(row);
     else resolved.push(alert.id);
