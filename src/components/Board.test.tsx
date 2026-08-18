@@ -1232,6 +1232,17 @@ describe('Durable cached-card fallback', () => {
 
 describe('Day switcher retint', () => {
   it('selecting a Day chip sets data-theme on the board container only, never on <html> (the app-wide Theme is unchanged)', () => {
+    // #736: the switcher is now inert while the first-open coach overlay is
+    // up (this repo's jsdom leaves `localStorage` unset, which reads as
+    // "never dismissed" — see "board inert while an overlay is up"). Dismiss
+    // it first so the chip click under test lands on a live switcher, same
+    // as every other test in this file that opens a claim/tally/reshuffle
+    // sheet over a dealt card.
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.test-event.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+
     const now = Date.now();
     H.event = {
       claimMode: 'honor',
@@ -2011,6 +2022,142 @@ describe('board inert while an overlay is up', () => {
 
     expect(document.querySelector('.coach-overlay')).not.toBeNull();
     expect(boardArea()).toHaveAttribute('inert');
+  });
+});
+
+// --- The Day switcher stays inert behind an open overlay too (#736) --------
+//
+// PR #732 marked `.board-area` inert while an overlay is up, but
+// `daySwitcher` renders OUTSIDE `.board-area` — above CoachOverlay/
+// LaunchIntro in Board's returned fragment, and from several early-return
+// branches (deal-error, locked-Day preview, cached-card fallback) that have
+// no overlay concept at all — so a keyboard user could Tab off a dialog's
+// CTA and switch Days behind the scrim. Board now threads its `overlayOpen`
+// derivation into `daySwitcher` as an `inert` prop (DaySwitcher.tsx applies
+// it to the wrapper AND `disabled`s every chip, because jsdom implements no
+// `inert` behaviour — same caveat as "board inert while an overlay is up"
+// above — but DOES enforce `:disabled`). These assert the chips' actual
+// focusable/clickable state, not just the attribute.
+describe('Day switcher chips inert behind an open overlay (#736)', () => {
+  // Same helper as "board inert while an overlay is up" above: starts each
+  // test from a card with NO overlay already up, so it opens exactly the one
+  // under test.
+  function dismissOneTimeOverlays(): void {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.test-event.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+  }
+
+  const dayChips = () =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.day-switcher .day-chip'));
+
+  it('keeps the Day chips focusable and clickable with no overlay up', () => {
+    dismissOneTimeOverlays();
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS }),
+        day({ index: 1, theme: 'glamiators', unlockAt: now + DAY_MS }),
+      ],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    const chips = dayChips();
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) expect(chip).not.toBeDisabled();
+    expect(document.querySelector('.day-switcher')).not.toHaveAttribute('inert');
+
+    // Tapping the locked Day 1 chip navigates — this is the mainline
+    // behaviour a scrim must suspend, not remove.
+    fireEvent.click(chips[1]);
+    expect(document.querySelector('.locked-grid')).not.toBeNull();
+  });
+
+  it('makes the Day chips inert while the claim sheet is open — not focusable, not clickable', () => {
+    dismissOneTimeOverlays();
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS }),
+        day({ index: 1, theme: 'glamiators', unlockAt: now + DAY_MS }),
+      ],
+    } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+    fireEvent.click(
+      document.querySelectorAll<HTMLButtonElement>('.grid .cell > button.cell-claim')[0],
+    );
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    expect(document.querySelector('.day-switcher')).toHaveAttribute('inert');
+    const chips = dayChips();
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) {
+      expect(chip).toBeDisabled();
+      // A disabled control cannot take focus at all (the HTML focus steps
+      // exclude it) — this is real jsdom behaviour, unlike `inert`.
+      chip.focus();
+      expect(chip).not.toHaveFocus();
+    }
+
+    // A click on the locked Day 1 chip must not switch Days behind the
+    // sheet — the exact regression #736 exists to close. ProofSheet also
+    // captures its target cell (`proofTarget`), so a Day switching underneath
+    // it while open is the staleness class `proofSourceLive` guards against.
+    fireEvent.click(chips[1]);
+    expect(document.querySelector('.locked-grid')).toBeNull();
+    expect(screen.getByText(/Proof for/)).toBeInTheDocument();
+
+    // Closing the sheet releases the switcher again.
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    expect(document.querySelector('.day-switcher')).not.toHaveAttribute('inert');
+    expect(dayChips()[0]).not.toBeDisabled();
+  });
+
+  it('defaults the switcher to tappable from an early-return branch with no overlay concept (cached-card fallback)', () => {
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const now = Date.now();
+    const cells = dealt('saved');
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({
+          index: 0,
+          theme: 'welcome-aboard',
+          unlockAt: now - DAY_MS,
+          tutorial: true,
+          pool: 'easy',
+          snapshotItemIds: cells.filter((c) => !c.free).map((c) => c.itemId!),
+        }),
+        day({ index: 1, theme: 'glamiators', unlockAt: now + DAY_MS }),
+      ],
+    } as unknown as EventDoc;
+    saveCardSnapshot({ uid: 'u1', dayIndex: 0, cells, bingoCount: 1, day: null });
+
+    render(<Board />);
+    // Confirms this render really is the cached-card fallback branch under
+    // test — the one with no overlay concept at all.
+    expect(screen.getByText(/Showing your saved card/)).toBeInTheDocument();
+
+    const chips = dayChips();
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) expect(chip).not.toBeDisabled();
+    expect(document.querySelector('.day-switcher')).not.toHaveAttribute('inert');
+
+    // No overlay is ever reachable from this branch, so the switcher must
+    // default to live: tapping the locked Day 1 chip switches away from the
+    // cached fallback exactly like it would from the mainline card.
+    fireEvent.click(chips[1]);
+    expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
+    expect(document.querySelector('.locked-grid')).not.toBeNull();
   });
 });
 

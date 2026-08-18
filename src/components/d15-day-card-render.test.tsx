@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen, fireEvent } from '@testing-library/react';
 import type { BoardDoc, Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 
@@ -116,6 +116,35 @@ const momentsMocks = momentsModule as unknown as {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// This repo's jsdom project leaves `window.localStorage` unset, which
+// CoachOverlay's own try/catch reads as "never dismissed" — so its first-open
+// scrim would otherwise mount over every dealt board rendered below and (#736)
+// make the Day switcher inert, breaking the chip clicks these tests exercise.
+// None of these tests are about the coach overlay itself, so start every one
+// from a card with it (and the reshuffle intro) already dismissed — same
+// posture as Board.test.tsx's `dismissOneTimeOverlays`.
+class MemoryStorage implements Storage {
+  private m = new Map<string, string>();
+  get length() {
+    return this.m.size;
+  }
+  clear() {
+    this.m.clear();
+  }
+  getItem(k: string) {
+    return this.m.has(k) ? this.m.get(k)! : null;
+  }
+  key(i: number) {
+    return [...this.m.keys()][i] ?? null;
+  }
+  removeItem(k: string) {
+    this.m.delete(k);
+  }
+  setItem(k: string, v: string) {
+    this.m.set(k, String(v));
+  }
+}
+
 function day(over: Partial<DayDef> & Pick<DayDef, 'index' | 'unlockAt' | 'theme'>): DayDef {
   return {
     date: `2026-07-${String(15 + over.index).padStart(2, '0')}`,
@@ -152,6 +181,14 @@ beforeEach(() => {
   H.event = null;
   H.setMark.mockResolvedValue({ cells: [], bingo: false, blackout: false, bingoTransition: false, blackoutTransition: false });
   H.dealDayCard.mockResolvedValue(true);
+  const store = new MemoryStorage();
+  store.setItem('gcb.coachOverlay.test-event.dismissedAt', '1');
+  store.setItem('gcb.seen.reshuffleIntro', '1');
+  vi.stubGlobal('localStorage', store);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('Board daily-cards wiring (#246)', () => {

@@ -1796,8 +1796,68 @@ export default function Board() {
   // re-checks server-side too, for the races this cannot see.
   if (reshuffleOpen && !reshuffleEligible) setReshuffleOpen(false);
 
+  /**
+   * Is a modal scrim currently up over the card?
+   *
+   * Load-bearing since the Squares became real controls (Codex P1, round 1):
+   * every overlay below is a sibling of `.board-area`, and none of them traps
+   * focus or marks the card inert, so a keyboard user could Tab straight past
+   * the dialog's CTA into the grid behind it — unmarking a hidden Square, or
+   * opening a SECOND sheet from behind an `aria-modal` dialog. 25 new tab stops
+   * turned a latent gap (only the free centre and the badges on marked Squares
+   * were reachable) into the default experience.
+   *
+   * CoachOverlay and LaunchIntro both self-gate on a stored flag, so their
+   * mount conditions do not say whether a scrim is actually up. Each mirrors
+   * the child's OWN two-part test, because either half alone strands the card
+   * inert with no visible scrim — and `inert` blocks pointer events too, so
+   * that state is not a focus nit, it is a dead card until remount:
+   *
+   *  - Stored flag alone (Codex P2, round 2): another tab writes the key, the
+   *    child re-reads storage every render and stops drawing, but a boolean
+   *    mirrored in this tab only moves on this tab's own `onDismiss`.
+   *  - This tab's dismissal alone (Codex P2, round 3): `markSeen`/
+   *    `markDismissed` swallow write failures by design (private mode, storage
+   *    disabled), so the child hides itself on local state while the stored
+   *    flag stays unset forever.
+   *
+   * Dismissed by EITHER route means no scrim, which is exactly the child's own
+   * `seenThisMount || hasSeen()`. The `*Seen` values are this tab's half; they
+   * also force the re-render that a bare storage write does not trigger.
+   *
+   * Hoisted above `daySwitcher` (#736): every overlay this derivation counts
+   * is a sibling of `.board-area`, but `daySwitcher` itself renders OUTSIDE
+   * `.board-area` — above CoachOverlay/LaunchIntro in the fragment below, and
+   * from several early-return branches (deal-error, locked-Day preview,
+   * cached-card fallback) that have no overlay concept at all. Computing
+   * `overlayOpen` here, before any of those returns, lets `daySwitcher` carry
+   * it as a prop into EVERY branch. In ordinary operation those early-return
+   * branches see it evaluate `false` (none of them mounts a Square, so none
+   * of their code paths sets `proofTarget`/`tallyTarget`/`reshuffleOpen`/
+   * `celebrate`, and `coachOverlayUp`/`launchIntroUp` both require
+   * `cells.length > 0`) — so for the common case this is purely additive
+   * there. The one place it can legitimately read `true` in an early-return
+   * branch is the exact bug this fix closes: a sheet left open from a
+   * previous render whose Day the Player then switched away from behind the
+   * scrim. Keeping `daySwitcher` inert there too is correct, not incidental —
+   * ProofSheet captures a target cell, so the Day changing underneath while
+   * it's open is exactly the staleness class `proofSourceLive` (below) guards
+   * against, and once this prop lands the switch that produced that state can
+   * no longer happen going forward.
+   */
+  const coachOverlayUp = cells.length > 0 && !coachSeen && !isCoachOverlayDismissed();
+  const launchIntroUp =
+    hasDays && cells.length > 0 && coachSeen && !launchIntroSeen && !isLaunchIntroDismissed();
+  const overlayOpen =
+    coachOverlayUp ||
+    launchIntroUp ||
+    proofTarget != null ||
+    tallyTarget != null ||
+    reshuffleOpen ||
+    celebrate != null;
+
   const daySwitcher = hasDays ? (
-    <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} />
+    <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} inert={overlayOpen} />
   ) : null;
   // The tutorial (embark/farewell) Day indexes, threaded to the Mark/proof write
   // paths so the persisted cruise-wide `firstBingoAt` excludes them (spec §
@@ -2289,46 +2349,10 @@ export default function Board() {
     if (revalidateAfterAwait(uid).isCurrentAccount) drainMoments(res.cells, actedDay);
   };
 
-  /**
-   * Is a modal scrim currently up over the card?
-   *
-   * Load-bearing since the Squares became real controls (Codex P1, round 1):
-   * every overlay below is a sibling of `.board-area`, and none of them traps
-   * focus or marks the card inert, so a keyboard user could Tab straight past
-   * the dialog's CTA into the grid behind it — unmarking a hidden Square, or
-   * opening a SECOND sheet from behind an `aria-modal` dialog. 25 new tab stops
-   * turned a latent gap (only the free centre and the badges on marked Squares
-   * were reachable) into the default experience.
-   *
-   * CoachOverlay and LaunchIntro both self-gate on a stored flag, so their
-   * mount conditions do not say whether a scrim is actually up. Each mirrors
-   * the child's OWN two-part test, because either half alone strands the card
-   * inert with no visible scrim — and `inert` blocks pointer events too, so
-   * that state is not a focus nit, it is a dead card until remount:
-   *
-   *  - Stored flag alone (Codex P2, round 2): another tab writes the key, the
-   *    child re-reads storage every render and stops drawing, but a boolean
-   *    mirrored in this tab only moves on this tab's own `onDismiss`.
-   *  - This tab's dismissal alone (Codex P2, round 3): `markSeen`/
-   *    `markDismissed` swallow write failures by design (private mode, storage
-   *    disabled), so the child hides itself on local state while the stored
-   *    flag stays unset forever.
-   *
-   * Dismissed by EITHER route means no scrim, which is exactly the child's own
-   * `seenThisMount || hasSeen()`. The `*Seen` values are this tab's half; they
-   * also force the re-render that a bare storage write does not trigger.
-   */
-  const coachOverlayUp = cells.length > 0 && !coachSeen && !isCoachOverlayDismissed();
-  const launchIntroUp =
-    hasDays && cells.length > 0 && coachSeen && !launchIntroSeen && !isLaunchIntroDismissed();
-  const overlayOpen =
-    coachOverlayUp ||
-    launchIntroUp ||
-    proofTarget != null ||
-    tallyTarget != null ||
-    reshuffleOpen ||
-    celebrate != null;
-
+  // `overlayOpen` (and its `coachOverlayUp`/`launchIntroUp` inputs) is
+  // computed above `daySwitcher`, near the top of the component — see the
+  // comment there (#736) for why it needs to be visible to the early
+  // returns.
   const toggle = (c: Cell) => {
     // The shared attribution guard (PR #110 finding 2, widened in round 2):
     // NO action may start from a render still showing another account's board —
