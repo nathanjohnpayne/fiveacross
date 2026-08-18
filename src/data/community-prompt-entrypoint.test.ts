@@ -277,22 +277,57 @@ describe('deriveMySubmissions (#559)', () => {
     const views = deriveMySubmissions(tracked, [], [], days, 0, true);
     expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'approved', dayIndex: undefined });
   });
+
+  // Codex P2, PR #845 round 10: the fallback text preference, once a
+  // submission has been hard-hidden after an admin edited its wording — the
+  // whole point `lastKnownText` exists, mirroring the SAME correction
+  // `lastKnownStatus`/`lastKnownDayIndex` already made for status/target.
+  it('falls back to lastKnownText (the last observed admin-edited wording), not the locally-tracked ORIGINAL text', () => {
+    const tracked = [
+      {
+        id: 'a1',
+        text: 'my original wording',
+        submittedAt: 5,
+        lastKnownStatus: 'approved' as const,
+        lastKnownText: 'admin-edited wording',
+      },
+    ];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views[0].text).toBe('admin-edited wording');
+  });
+
+  it('falls back to the locally-tracked ORIGINAL text when no lastKnownText was ever recorded (never observed active)', () => {
+    const tracked = [{ id: 'a1', text: 'my original wording', submittedAt: 5 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views[0].text).toBe('my original wording');
+  });
 });
 
-describe('refreshLastKnownStatuses (#559, Codex P2, PR #845 round 7)', () => {
-  it('stamps lastKnownStatus/lastKnownDayIndex the first time a tracked entry is observed active', () => {
+describe('refreshLastKnownStatuses (#559, Codex P2, PR #845 rounds 7 + 10)', () => {
+  it('stamps lastKnownStatus/lastKnownDayIndex/lastKnownText the first time a tracked entry is observed active', () => {
     const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5 }];
-    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2, text: 'Wore Crocs to dinner' })];
     const refreshed = refreshLastKnownStatuses(tracked, activeMine, [day(2, { unlockAt: 9999 })], 0);
     expect(refreshed).not.toBe(tracked);
-    expect(refreshed[0]).toMatchObject({ lastKnownStatus: 'scheduled', lastKnownDayIndex: 2 });
+    expect(refreshed[0]).toMatchObject({
+      lastKnownStatus: 'scheduled',
+      lastKnownDayIndex: 2,
+      lastKnownText: 'Wore Crocs to dinner',
+    });
   });
 
   it('returns the SAME array reference when nothing actually changed (no-op, no needless persistence)', () => {
     const tracked = [
-      { id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 2 },
+      {
+        id: 'a1',
+        text: 'Wore Crocs',
+        submittedAt: 5,
+        lastKnownStatus: 'scheduled' as const,
+        lastKnownDayIndex: 2,
+        lastKnownText: 'Wore Crocs to dinner',
+      },
     ];
-    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2, text: 'Wore Crocs to dinner' })];
     const refreshed = refreshLastKnownStatuses(tracked, activeMine, [day(2, { unlockAt: 9999 })], 0);
     expect(refreshed).toBe(tracked);
   });
@@ -314,5 +349,26 @@ describe('refreshLastKnownStatuses (#559, Codex P2, PR #845 round 7)', () => {
     // The Day has since stamped — no longer targetable, so submitterStatus now reads 'approved'.
     const refreshed = refreshLastKnownStatuses(tracked, activeMine, [day(2, { unlockAt: 9999, snapshotItemIds: ['a1'] })], 0);
     expect(refreshed[0]).toMatchObject({ lastKnownStatus: 'approved', lastKnownDayIndex: 2 });
+  });
+
+  // Codex P2, PR #845 round 10: an admin may edit a submission's wording
+  // AFTER approval — the observed active document's text is what re-stamps
+  // here, not the locally-tracked original, so a since-hard-hidden
+  // submission's fallback text (deriveMySubmissions) can stay authoritative
+  // too instead of reverting to the pre-edit wording.
+  it('re-stamps lastKnownText when the active document text changes (an admin edit)', () => {
+    const tracked = [
+      {
+        id: 'a1',
+        text: 'original wording',
+        submittedAt: 5,
+        lastKnownStatus: 'approved' as const,
+        lastKnownText: 'original wording',
+      },
+    ];
+    const activeMine = [item({ id: 'a1', status: 'active', text: 'admin-edited wording' })];
+    const refreshed = refreshLastKnownStatuses(tracked, activeMine, [], 0);
+    expect(refreshed).not.toBe(tracked);
+    expect(refreshed[0].lastKnownText).toBe('admin-edited wording');
   });
 });

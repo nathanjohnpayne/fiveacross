@@ -533,6 +533,21 @@ a {
 .cell.community {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
+/* A Community Prompt Square that is ALSO marked (Codex P2, PR #845 round 10):
+   `.cell.marked` (above) and `.cell.community` (immediately above this rule)
+   share the same (0,2,0) specificity, so without this combined selector the
+   LATER-declared rule — `.cell.community`, since it follows `.cell.marked` in
+   this file — would win box-shadow OUTRIGHT and silently drop `.cell.marked`'s
+   own gradient glow the instant a Community Prompt gets ticked, the exact
+   same composition failure `.cell.win.community` (reduced-motion block, below)
+   already exists to prevent for the winning-line state. `box-shadow` layers
+   comma-separated values, so this keeps both: the community inset ring, plus
+   marked's own outer glow. */
+.cell.marked.community {
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    0 0 14px var(--shadow);
+}
 /* An Echo Mark (specs/echo-marks.md): a Square auto-marked because the Player's
    confirmed Mark on the SAME Prompt carried over from another Day Card. The
    subtle ⟲ glyph (top-left — the ✓ owns top-right, proof ＋ bottom-left, tally
@@ -3951,8 +3966,23 @@ body:has(.sheet-backdrop) .guidelines-trigger {
    Mark that RISES between snapshots — a returning Player's standing marks
    never re-stamp) and cleared on animationend. Declared after the deal rule
    so a mid-deal Mark prefers the stamp. */
+/* `--cell-stamp-shadow` (Codex P2, PR #845 round 10): the 45% keyframe below
+   sets `box-shadow` directly, which — unlike two competing static rules —
+   REPLACES whatever shadow the element already had for the animation's
+   duration, community ring included, regardless of selector specificity or
+   source order. A custom property lets the SAME keyframe read a different
+   value per element: the plain default here, and `.cell.community.just-marked`
+   below overrides it to layer the inset ring back in, so a Community Prompt's
+   "new from the group" ring survives its own stamp animation instead of
+   flashing out for the ~200ms the punch-in glow is visible. */
 .cell.just-marked {
+  --cell-stamp-shadow: 0 0 26px var(--shadow);
   animation: cell-stamp 0.45s var(--ease-pop);
+}
+.cell.community.just-marked {
+  --cell-stamp-shadow:
+    inset 0 0 0 2px var(--accent),
+    0 0 26px var(--shadow);
 }
 @keyframes cell-stamp {
   0% {
@@ -3961,7 +3991,7 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   45% {
     transform: scale(1.12);
     filter: brightness(1.4) saturate(1.2);
-    box-shadow: 0 0 26px var(--shadow);
+    box-shadow: var(--cell-stamp-shadow);
   }
   100% {
     transform: scale(1);

@@ -44,6 +44,16 @@ export interface TrackedSuggestion {
   // "not selected" for either reason.
   lastKnownStatus?: SubmitterStatus;
   lastKnownDayIndex?: number;
+  // The active document's authoritative text, the last time this device
+  // actually observed it (#559, Codex P2, PR #845 round 10). An admin may
+  // edit a submission's wording — `deriveMySubmissions` already prefers that
+  // authoritative text over `text` (the locally-tracked ORIGINAL wording)
+  // whenever the live document is available. Without this field, the SAME
+  // fallback that keeps `lastKnownStatus`/`lastKnownDayIndex` alive once a
+  // submission is hard-hidden would silently revert its displayed text back
+  // to the pre-edit original the moment the live document stops being
+  // readable — correct status, wrong words.
+  lastKnownText?: string;
 }
 
 /** Cap on locally-tracked submissions per Player per Event — plenty for the
@@ -210,10 +220,14 @@ export function deriveMySubmissions(
       id: t.id,
       // The authoritative text once approved (Codex P2, PR #845): an admin
       // may edit a submission's wording before or after approval, and the
-      // active document carries whatever text will actually be dealt — the
-      // locally tracked original is a fallback ONLY for the unreadable
-      // (not-selected) case, where no authoritative copy is available at all.
-      text: active ? active.text : t.text,
+      // active document carries whatever text will actually be dealt.
+      // Falling back, in order: the last text this device actually OBSERVED
+      // live (`lastKnownText`, Codex P2, PR #845 round 10 — covers a
+      // since-hard-hidden or transiently-absent submission whose wording was
+      // edited before it stopped being readable), then the locally tracked
+      // ORIGINAL wording — the only thing available for a submission never
+      // observed active at all (the genuine not-selected / graced case).
+      text: active ? active.text : (t.lastKnownText ?? t.text),
       submittedAt: t.submittedAt,
       status: active ? submitterStatus(active, days, now) : fallbackStatus,
       dayIndex: active
@@ -228,14 +242,14 @@ export function deriveMySubmissions(
 }
 
 /**
- * Refresh each tracked entry's `lastKnownStatus`/`lastKnownDayIndex` from the
- * CURRENT `activeMine` query, for the caller to persist (`trackSuggestion`)
- * whenever an entry actually changes. Deliberately does nothing for an entry
- * NOT currently found in `activeMine` — a transiently-absent or
- * genuinely-hidden entry keeps whatever it last recorded, which is the whole
- * point (see `deriveMySubmissions`'s doc comment). Returns the SAME array
- * reference when nothing changed, so a caller can cheaply skip persisting
- * with a straight `!==` check.
+ * Refresh each tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/
+ * `lastKnownText` from the CURRENT `activeMine` query, for the caller to
+ * persist (`trackSuggestion`) whenever an entry actually changes.
+ * Deliberately does nothing for an entry NOT currently found in `activeMine`
+ * — a transiently-absent or genuinely-hidden entry keeps whatever it last
+ * recorded, which is the whole point (see `deriveMySubmissions`'s doc
+ * comment). Returns the SAME array reference when nothing changed, so a
+ * caller can cheaply skip persisting with a straight `!==` check.
  */
 export function refreshLastKnownStatuses(
   tracked: readonly TrackedSuggestion[],
@@ -249,9 +263,11 @@ export function refreshLastKnownStatuses(
     if (!active) return t;
     const status = submitterStatus(active, days, now);
     const dayIndex = typeof active.targetDayIndex === 'number' ? active.targetDayIndex : undefined;
-    if (t.lastKnownStatus === status && t.lastKnownDayIndex === dayIndex) return t;
+    if (t.lastKnownStatus === status && t.lastKnownDayIndex === dayIndex && t.lastKnownText === active.text) {
+      return t;
+    }
     changed = true;
-    return { ...t, lastKnownStatus: status, lastKnownDayIndex: dayIndex };
+    return { ...t, lastKnownStatus: status, lastKnownDayIndex: dayIndex, lastKnownText: active.text };
   });
   return changed ? next : tracked;
 }
