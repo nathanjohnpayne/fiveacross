@@ -200,12 +200,15 @@ describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review
     expect(screen.getByText(/alice-uid/)).toBeInTheDocument();
   });
 
-  it('Approve invokes approveItem(id, adminUid)', () => {
-    H.pendingItems = [pendingItem('p1', { text: 'Approve me' })];
+  // #557: the queue passes the ROW, not the id — approval routes the Prompt to
+  // the Day it was submitted for, which lives on the row as `targetDayIndex`.
+  it('Approve invokes approveItem(row, adminUid) carrying the row', () => {
+    const row = pendingItem('p1', { text: 'Approve me' });
+    H.pendingItems = [row];
     renderAdmin('/more/admin/queue');
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    expect(H.approveItem).toHaveBeenCalledWith('p1', 'admin-uid');
+    expect(H.approveItem).toHaveBeenCalledWith(row, 'admin-uid');
   });
 
   it('Reject invokes rejectItem(id, adminUid)', () => {

@@ -23,7 +23,8 @@ import { db, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
 import { adultContentRequired } from '../adultContent';
-import { itemsCol } from './paths';
+import { itemsCol, eventRef } from './paths';
+import { defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import { FREE_TEXT } from './seed';
 import { normalizePool } from '../game/pool';
 import {
@@ -2624,9 +2625,37 @@ export function itemRateLimitRemainingMs(key: string, now: number = Date.now()):
  * `spicy` defaults to `false`: a user-added Prompt is tame unless the ItemPool
  * 🔞 toggle was checked when they submitted it.
  */
-export async function addItem(uid: string, text: string, spicy = false): Promise<void> {
+export async function addItem(
+  uid: string,
+  text: string,
+  spicy = false,
+  // The Day this suggestion is meant for (#557, specs/community-prompt-targeting.md).
+  // OMITTED is the normal player path and means "put it on tomorrow's card": the
+  // schedule is read here and the earliest still-targetable Day is recorded, so a
+  // suggestion carries its intended Day from the moment it is written rather than
+  // being aimed later at approval time. An explicit value is the override seam for
+  // a Day picker (#559). When the Event has no schedule, or no Day can still take
+  // one, NO target is written at all and the Prompt keeps the untargeted every-Day
+  // behaviour that predates this feature — see `targetDayIndex` in ItemDoc.
+  targetDayIndex?: number,
+): Promise<void> {
   const t = text.trim();
   if (!t) return;
+  // An OMITTED argument means "resolve the default"; an argument that is present
+  // but malformed is a caller bug, and it must not be quietly dropped. Dropping
+  // it would write an UNTARGETED row, which means every future main Day — the
+  // precise failure this feature exists to prevent, arriving through the one
+  // path that is supposed to set the target (Phase 4b P1, PR #812). `NaN`, `-1`
+  // and `1.5` are all valid TypeScript `number`s, so the type does not catch
+  // this; fail closed and loudly instead. `firestore.rules` would reject the
+  // value anyway — throwing here turns a silent mis-placement into an obvious
+  // programming error at the call site.
+  if (targetDayIndex !== undefined && !isUsableTarget(targetDayIndex)) {
+    throw new Error(
+      `addItem: targetDayIndex must be a non-negative integer, received ${String(targetDayIndex)}`,
+    );
+  }
+  const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex());
   await addDoc(rawItems(), {
     text: t.slice(0, 80),
     createdBy: uid,
@@ -2644,7 +2673,39 @@ export async function addItem(uid: string, text: string, spicy = false): Promise
     // Honor the now-required ItemDoc.pool: a player prompt-submission lands in
     // the main game pool. Embark/farewell pools are seeded directly (#207).
     pool: 'main',
+    // Written only when a Day can actually take it. The field is ABSENT rather
+    // than null when there is no target, because absent is the untargeted
+    // contract every pre-#557 Prompt already satisfies — writing an explicit
+    // null would mint a third state the snapshot filter would have to know about.
+    ...(isUsableTarget(target) ? { targetDayIndex: target } : {}),
   });
+}
+
+/**
+ * The Day a fresh suggestion defaults to — the earliest Day that can still take
+ * one (#557). Reads the Event's schedule at submission time.
+ *
+ * A read failure PROPAGATES rather than resolving to `null`. This used to be
+ * swallowed as best-effort, on the reasoning that losing the targeting mattered
+ * less than refusing a suggestion — which was wrong, because an untargeted row
+ * does not lose anything: it means EVERY future main Day (`targetsDay` admits an
+ * absent target everywhere, and approval deliberately preserves that absence).
+ * So a transient offline blip would have put one suggestion on every card of the
+ * cruise — the precise failure this feature exists to prevent — and it is the
+ * same mistake as silently dropping an explicit malformed argument, which
+ * `addItem` already refuses (Phase 4b P1, PR #812). Failing closed costs the
+ * player a retry with their text still in the box; failing open costs the
+ * organiser every Day.
+ *
+ * `null` remains the answer when the read SUCCEEDS and there is simply no Day to
+ * aim at — a schedule-less legacy Event, or no Day that can still take one.
+ * Those are known states rather than unknown ones, and untargeted is the honest
+ * record of them.
+ */
+async function resolveDefaultTargetDayIndex(): Promise<number | null> {
+  const snap = await getDoc(eventRef());
+  const days = snap.exists() ? snap.data().days : undefined;
+  return Array.isArray(days) ? defaultTargetDayIndex(days, Date.now()) : null;
 }
 
 /**
