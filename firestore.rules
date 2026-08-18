@@ -403,7 +403,16 @@ service cloud.firestore {
         && ('unlockAt' in newDay) == ('unlockAt' in oldDay)
         && (!('unlockAt' in newDay) || newDay.unlockAt == oldDay.unlockAt)
         && ('tonight' in newDay) == ('tonight' in oldDay)
-        && (!('tonight' in newDay) || newDay.tonight == oldDay.tonight);
+        && (!('tonight' in newDay) || newDay.tonight == oldDay.tonight)
+        // `scoring` (ADR 0011) joins the lock: flipping an already-played Day
+        // between competitive and ceremonial re-interprets the podium
+        // immediately, while every Player's denormalized root totals keep the
+        // OLD policy until that Player happens to fold another Mark — mixed
+        // standings across one roster, with no way to tell which rows are which
+        // (Codex P2, PR #841). A still-future Day stays fully editable, exactly
+        // like its theme and schedule.
+        && ('scoring' in newDay) == ('scoring' in oldDay)
+        && (!('scoring' in newDay) || newDay.scoring == oldDay.scoring);
     }
     // `tonight` is legacy-tolerant but strict once present. Fixtures and docs
     // seeded before the field existed may still omit it; a write to a Day that
@@ -683,11 +692,20 @@ service cloud.firestore {
       // instant would sail past every `typeof === 'number'` guard on the read
       // side as "not configured" and silently fall back to the schedule
       // derivation, which is the confusing failure rather than the loud one.
+      // It must also be POSITIVE, for the same reason one layer down: both
+      // `standingsFreezeAtFor` and `finaleTimes` deliberately ignore a
+      // non-positive or non-finite instant (0 is the schedule's "always
+      // unlocked" sentinel elsewhere in this contract), so accepting one here
+      // would hand an admin a SUCCESSFUL write for a freeze that every reader
+      // silently discards — falling back to a ceremonial Day, or skipping the
+      // finale entirely, with nothing anywhere saying so (Codex P2, PR #841).
+      // `> 0` also rejects NaN, which compares false against every bound.
       // Optional: absent means "derive from the first ceremonial Day", which is
       // both live Events.
       allow create, update: if isAdmin(eventId)
         && (!('standingsFreezeAt' in request.resource.data)
-            || request.resource.data.standingsFreezeAt is number)
+            || (request.resource.data.standingsFreezeAt is number
+                && request.resource.data.standingsFreezeAt > 0))
         && (!('settings' in request.resource.data)
             || request.resource.data.settings.reportHideThreshold is number)
         && (!('settings' in request.resource.data)

@@ -8,6 +8,7 @@ import { isCeremonialDay } from '../game/scoring';
 import {
   ceremonialDayIndexSet,
   comparePlayers,
+  rankingExcludedDay,
   cruiseFirstBingoUid,
   effectiveCruiseFirstBingoAt,
   perDayHonors,
@@ -67,7 +68,15 @@ function podiumStandingRow(
   ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
 ): Rankable & { uid: string; displayName: string } {
-  const firstBingoAt = effectiveCruiseFirstBingoAt(player, isTutorialDay);
+  // RANKING first-bingo: Tutorial OR ceremonial (ADR 0011). `comparePlayers`
+  // breaks ties on this timestamp, so leaving ceremonial Days in would let a
+  // ceremonial Mark decide the podium while its bingos and squares are being
+  // excluded two lines below. The First to BINGO HONOUR keeps its own
+  // tutorial-only value — different question, different exclusion.
+  const firstBingoAt = effectiveCruiseFirstBingoAt(
+    player,
+    rankingExcludedDay(isTutorialDay, (i) => ceremonial.has(i)),
+  );
   const dayStats = player.dayStats;
   if (!dayStats || ceremonial.size === 0) {
     return {

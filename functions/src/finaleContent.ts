@@ -164,7 +164,15 @@ function podiumStandingRow(
   ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
 ): FinalePlayer {
-  const firstBingoAt = effectiveFirstBingoAt(player, isTutorialDay);
+  // RANKING first-bingo: Tutorial OR ceremonial (ADR 0011), mirroring
+  // `rankingExcludedDay` in `src/game/logic.ts`. `compareFinalePlayers` breaks
+  // ties on this timestamp, so a ceremonial Mark must not decide the podium
+  // while its bingos and squares are excluded. The First to BINGO HONOUR below
+  // keeps its own tutorial-only value.
+  const firstBingoAt = effectiveFirstBingoAt(
+    player,
+    (i: number) => isTutorialDay(i) || ceremonial.has(i),
+  );
   const dayStats = player.dayStats;
   if (!dayStats || ceremonial.size === 0) {
     return { ...player, firstBingoAt };

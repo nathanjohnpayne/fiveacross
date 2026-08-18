@@ -97,6 +97,15 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     await assertFails(updateDoc(doc(unauthDb(), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
   });
 
+  it('DENIES even an admin writing a non-POSITIVE standingsFreezeAt', async () => {
+    // Both readers ignore a non-positive instant (0 is the schedule's
+    // "always unlocked" sentinel), so accepting one would be a successful
+    // write that every consumer silently discards.
+    for (const bad of [0, -1]) {
+      await assertFails(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: bad }));
+    }
+  });
+
   it('DENIES even an admin writing a non-number standingsFreezeAt', async () => {
     // A string instant reads as "not configured" on every `typeof === 'number'`
     // guard, so it would silently fall back to the schedule derivation instead

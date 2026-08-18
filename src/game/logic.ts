@@ -964,8 +964,35 @@ export function aggregatePlayerStats(
 ): DayStat {
   return {
     ...sumDayStats(dayStats, isCeremonialDay),
-    firstBingoAt: eventFirstBingoAt(dayStats, isTutorialDay),
+    firstBingoAt: eventFirstBingoAt(dayStats, rankingExcludedDay(isTutorialDay, isCeremonialDay)),
   };
+}
+
+/**
+ * The exclusion a STANDINGS-RANKING derivation applies: Tutorial Days OR
+ * ceremonial Days. Deliberately wider than the Event-wide First to BINGO
+ * honour, which excludes Tutorial Days ALONE — the two answer different
+ * questions and must not be collapsed.
+ *
+ * `comparePlayers`' final tie-break is the earliest first-bingo, so a
+ * first-bingo value that still counts ceremonial Days lets a ceremonial Mark
+ * decide the standings — which is precisely what a `ceremonial` policy promises
+ * it can never do. The sums already exclude those Days; the timestamp has to
+ * agree, or the row is internally inconsistent.
+ *
+ * Unreachable on both live Events, where every ceremonial Day is also
+ * `tutorial: true` so the two predicates coincide. ADR 0011 is what makes it
+ * reachable, by allowing a ceremonial Day with `tutorial: false`.
+ * `playerRowRootLag` already derives its bucket evidence this way, so before
+ * this the fold that WRITES the root and the predicate that AUDITS it disagreed
+ * — a row on such a schedule would read as permanently lagging and re-heal
+ * forever (Codex P1, PR #841).
+ */
+export function rankingExcludedDay(
+  isTutorialDay: (dayIndex: number) => boolean,
+  isCeremonialDay?: (dayIndex: number) => boolean,
+): (dayIndex: number) => boolean {
+  return (i: number) => isTutorialDay(i) || (isCeremonialDay?.(i) ?? false);
 }
 
 /**
@@ -1064,7 +1091,12 @@ export function foldDayStat(params: {
     blackout: boolean;
     firstBingoAt?: number | null;
   } = { dayStats: { [dayIndex]: dayBucket }, bingoCount, squaresMarked, blackout };
-  if (!preserve) out.firstBingoAt = eventFirstBingoAt(merged, isTutorialDay);
+  // Ceremonial-excluded as well as tutorial-excluded (ADR 0011): this root is
+  // `comparePlayers`' tie-break input, and the sums a few lines up already drop
+  // ceremonial Days. See `rankingExcludedDay`.
+  if (!preserve) {
+    out.firstBingoAt = eventFirstBingoAt(merged, rankingExcludedDay(isTutorialDay, params.isCeremonialDay));
+  }
   return out;
 }
 

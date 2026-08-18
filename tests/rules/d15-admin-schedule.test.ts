@@ -194,4 +194,37 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     days[1] = { ...days[1], unlockAt: FUTURE() + 3600_000 };
     await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days }));
   });
+
+  // ADR 0011 (#551): `scoring` joins the same lock. Flipping an already-played
+  // Day's Scoring Policy re-interprets the podium at once, while every Player's
+  // denormalized root totals keep the OLD policy until that Player folds
+  // another Mark — one roster, two rules, no way to tell the rows apart.
+  it('an Admin CANNOT change days[i].scoring for a Day whose unlockAt has already passed', async () => {
+    const days = seededDays();
+    days[0] = { ...days[0], scoring: 'ceremonial' };
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
+
+  it('an Admin CANNOT ADD or DROP scoring on an already-unlocked Day', async () => {
+    const added = seededDays();
+    added[0] = { ...added[0], scoring: 'competitive' }; // seeded Days carry none
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: added }));
+
+    const withPolicy = seededDays().map((d, i) => (i === 0 ? { ...d, scoring: 'competitive' } : d));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: withPolicy });
+    });
+    const dropped = withPolicy.map((d, i) => {
+      if (i !== 0) return d;
+      const { scoring, ...rest } = d as Record<string, unknown>;
+      return rest;
+    });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: dropped }));
+  });
+
+  it('an Admin CAN set days[i].scoring on a still-future Day', async () => {
+    const days = seededDays();
+    days[1] = { ...days[1], scoring: 'ceremonial' };
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
 });

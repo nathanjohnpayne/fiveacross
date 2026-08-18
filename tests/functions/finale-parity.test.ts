@@ -294,6 +294,68 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
     );
   });
 
+  // Codex P1, round 2: the standings tie-break. `comparePlayers` breaks a
+  // bingos+squares tie on the earliest first-bingo, so a first-bingo value that
+  // still counts ceremonial Days lets a ceremonial Mark decide the podium —
+  // while that same Day's bingos and squares are being excluded. Unreachable on
+  // both live Events (their ceremonial Day is also `tutorial: true`); ADR 0011
+  // is what makes it reachable, via a ceremonial Day with `tutorial: false`.
+  it('never lets a ceremonial Day s bingo win the standings tie-break', () => {
+    // A ceremonial Day that is NOT a Tutorial Day — the newly expressible shape.
+    const days: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'> & { scoring?: string }> = [
+      { index: 0, pool: 'main', tutorial: false },
+      { index: 1, pool: 'main', tutorial: false, scoring: 'ceremonial' },
+    ];
+    // Dead heat on Day 0 — same bingos, same squares. The ONLY thing that can
+    // separate them is the first-bingo tie-break.
+    const players: PlayerDoc[] = [
+      {
+        uid: 'early-on-ceremonial',
+        displayName: 'Cera',
+        photoURL: null,
+        joinedAt: 0,
+        bingoCount: 2,
+        squaresMarked: 20,
+        firstBingoAt: 10,
+        reshufflesUsed: 0,
+        dayStats: {
+          0: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 500 },
+          // Earliest bingo of anyone — but it happened on a ceremonial Day, so
+          // it must not count toward the ranking.
+          1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 10 },
+        },
+      },
+      {
+        uid: 'early-on-competitive',
+        displayName: 'Comp',
+        photoURL: null,
+        joinedAt: 0,
+        bingoCount: 2,
+        squaresMarked: 20,
+        firstBingoAt: 100,
+        reshufflesUsed: 0,
+        dayStats: {
+          0: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 100 },
+          1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 900 },
+        },
+      },
+    ];
+
+    const client = buildPodium(players, days as DayDef[]);
+    const fns = buildPodiumPayload(asFinalePlayers(players), asFinaleDays(days));
+
+    // Competitive-Day evidence wins: Comp's t=100 is the earliest that COUNTS.
+    expect(client.champion?.uid).toBe('early-on-competitive');
+    expect(fns.champion).toEqual(client.champion);
+
+    // The HONOUR is a different question with a different exclusion — it drops
+    // Tutorial Days only, so a ceremonial non-Tutorial Day IS still eligible
+    // for First to BINGO. Cera's t=10 takes it, and that is correct: the two
+    // must not be collapsed into one predicate.
+    expect(client.firstBingo).toEqual({ uid: 'early-on-ceremonial', displayName: 'Cera', at: 10 });
+    expect(fns.firstBingo).toEqual(client.firstBingo);
+  });
+
   it('agrees on an empty roster and on a schedule-less Event', () => {
     expect(buildPodiumPayload([], asFinaleDays(CRUISE_SHAPE)).champion).toEqual(
       buildPodium([], CRUISE_SHAPE as DayDef[]).champion,

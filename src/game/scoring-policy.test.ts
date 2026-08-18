@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { scoringForDay, isCeremonialDay } from './scoring';
-import { ceremonialDayIndexSet, standingsFreezeAtFor, standingsFrozen } from './logic';
+import {
+  aggregatePlayerStats,
+  ceremonialDayIndexSet,
+  playerRowRootLag,
+  rankingExcludedDay,
+  standingsFreezeAtFor,
+  standingsFrozen,
+} from './logic';
 import { migrateDayFields } from '../data/converters';
 import { normalizePool } from './pool';
 import { DAYS as GCB_DAYS } from '../data/seed';
@@ -288,5 +295,47 @@ describe('Bodega Bay stores both fields, and they agree with the derivation', ()
     for (const at of [stated - 1, stated, stated + 1]) {
       expect(standingsFrozen(withField, at)).toBe(standingsFrozen(withoutField, at));
     }
+  });
+});
+
+// --- The ranking tie-break (Codex P1, round 2) -----------------------------------
+describe('rankingExcludedDay — the standings tie-break drops ceremonial Days too', () => {
+  const isTutorial = (i: number) => i === 0;
+  const isCeremonial = (i: number) => i === 2;
+
+  it('unions the two exclusions', () => {
+    const pred = rankingExcludedDay(isTutorial, isCeremonial);
+    expect([0, 1, 2, 3].map(pred)).toEqual([true, false, true, false]);
+  });
+
+  it('degrades to tutorial-only when no ceremonial predicate is supplied', () => {
+    const pred = rankingExcludedDay(isTutorial);
+    expect([0, 1, 2, 3].map(pred)).toEqual([true, false, false, false]);
+  });
+
+  it('keeps a ceremonial Day out of the aggregated root firstBingoAt', () => {
+    // The root is `comparePlayers`' tie-break input, so a ceremonial Mark must
+    // not decide the standings while its bingos and squares are excluded.
+    const dayStats = {
+      1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 500 },
+      2: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 10 }, // ceremonial, earliest
+    };
+    const agg = aggregatePlayerStats(dayStats, isTutorial, isCeremonial);
+    expect(agg.firstBingoAt).toBe(500);
+    // …and its bingos/squares were already excluded from the sums.
+    expect(agg).toMatchObject({ bingoCount: 1, squaresMarked: 10 });
+  });
+
+  it('matches what playerRowRootLag already assumes the root contains', () => {
+    // The fold that WRITES the root and the predicate that AUDITS it derive the
+    // bucket evidence the same way, so a row on a ceremonial+non-tutorial
+    // schedule does not read as permanently lagging and re-heal forever.
+    const dayStats = {
+      1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 500 },
+      2: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 10 },
+    };
+    const agg = aggregatePlayerStats(dayStats, isTutorial, isCeremonial);
+    const row = { dayStats, ...agg };
+    expect(playerRowRootLag(row, isCeremonial, isTutorial)).toBe(false);
   });
 });
