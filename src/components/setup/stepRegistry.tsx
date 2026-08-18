@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { EventDraft, SetupStep } from '../../types';
 import PlaceholderStep from './PlaceholderStep';
 import OccasionStep from './OccasionStep';
+import StepSquares from './StepSquares';
 import { SETUP_STEP_ORDER, STEP_LABELS } from './wizardSteps';
 
 /** Props every step's `render` receives. The step tickets (#789–#792, #794)
@@ -32,7 +33,7 @@ export interface StepDefinition {
 const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>> = {
   occasion: { heading: "What's the occasion?", render: (props) => <OccasionStep {...props} /> },
   basics: { heading: 'Name & dates', render: () => <PlaceholderStep step="basics" /> },
-  squares: { heading: 'Squares', render: () => <PlaceholderStep step="squares" /> },
+  squares: { heading: 'Squares', render: (props) => <StepSquares {...props} /> },
   look: { heading: 'Look', render: () => <PlaceholderStep step="look" /> },
   launch: { heading: 'Ready when you are', render: () => <PlaceholderStep step="launch" /> },
 };
@@ -47,12 +48,13 @@ const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>
  *
  * Every `render` starts as `PlaceholderStep`; a step ticket replaces its own
  * entry's `render` (and may sharpen `heading`) in `STEP_CONTENT` above —
- * never adds, removes, or reorders steps, which stays this ticket's shell
- * contract (reorders belong in `SETUP_STEP_ORDER` itself, and touch both the
+ * never adds, removes, or reorders steps, which stays #788's shell contract
+ * (reorders belong in `SETUP_STEP_ORDER` itself, and touch both the
  * classifier in `wizardSteps.ts` and every step ticket at once). Occasion
- * (#789) has already made that swap (`OccasionStep`); Basics/Squares/Look/
- * Launch (#790–792, #794) still render `PlaceholderStep` until their own
- * tickets do the same (Codex P2, PR #855: this comment previously read
+ * (#789, `OccasionStep`) and Squares (#791, `StepSquares`) have already made
+ * that swap; Basics, Look and Launch (#790, #792, #794) still render
+ * `PlaceholderStep` until their own tickets do the same. Keep this list
+ * current when you swap an entry (Codex P2, PR #855: it previously read
  * "every render is PlaceholderStep today", which stopped being true the
  * moment the line above it changed).
  */

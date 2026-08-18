@@ -191,7 +191,9 @@ describe('deep link / resume landing', () => {
     });
     renderApp(setupStepPath('seeded-draft', 'squares'));
 
-    await screen.findByTestId('wizard-step-placeholder-squares');
+    // Squares is a real step body now (#791) rather than a placeholder; these
+    // assertions only ever meant "the wizard landed on Squares".
+    await screen.findByTestId('setup-step-squares');
   });
 
   it('a miss (unknown draftId) starts a fresh draft rather than dead-ending', async () => {
@@ -272,7 +274,9 @@ describe('back navigation to a completed step', () => {
       slugCandidate: 'point-reyes',
     });
     renderApp(setupStepPath('seeded-draft', 'squares'));
-    await screen.findByTestId('wizard-step-placeholder-squares');
+    // Squares is a real step body now (#791) rather than a placeholder; these
+    // assertions only ever meant "the wizard landed on Squares".
+    await screen.findByTestId('setup-step-squares');
 
     // Occasion is done — jump back to it via its indicator pill.
     await user.click(screen.getByRole('button', { name: /Occasion/ }));
@@ -332,7 +336,9 @@ describe('step indicator inertness (Codex P2, PR #840, round 2)', () => {
       defaultTheme: 'the-birds',
     });
     renderApp(setupStepPath('seeded-draft', 'squares'));
-    await screen.findByTestId('wizard-step-placeholder-squares');
+    // Squares is a real step body now (#791) rather than a placeholder; these
+    // assertions only ever meant "the wizard landed on Squares".
+    await screen.findByTestId('setup-step-squares');
 
     expect(screen.queryByRole('button', { name: /Look/ })).not.toBeInTheDocument();
     expect(screen.getByText('Look')).toBeInTheDocument();

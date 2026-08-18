@@ -212,10 +212,26 @@ const POOL_LABEL: Record<PoolId, string> = {
   closing: 'closing',
 };
 
-/** Prompt entries that actually EXIST — `Array.prototype.filter` skips holes,
- *  so this is the count a sparse array really holds rather than its `length`. */
-function countPrompts(prompts: readonly unknown[]): number {
-  return prompts.filter(() => true).length;
+/**
+ * Prompt entries that actually EXIST — neither a hole nor an explicit
+ * `null`/`undefined` — so this is what a pool really holds rather than its
+ * `length`.
+ *
+ * `filter` alone drops holes but KEEPS an explicit `null`, and the two are the
+ * same missing Prompt to every other reader: `promptTextIssues` reports both
+ * as a gap, and Step 3 renders both as a removable "missing" row. Counting an
+ * explicit `null` therefore let a 24-slot pool holding 23 usable Prompts read
+ * `24 · ✓` beside a visible gap — the "looks satisfied, is not" reporting
+ * #785 catalogues, arriving through the one path meant to prevent it (Codex
+ * P2, PR #856, round 2). An explicit `null` only reaches memory through an
+ * untyped path — `parseEventDraft` refuses a stored one — which is exactly the
+ * case this gate exists to catch.
+ *
+ * EXPORTED (#791) so Step 3's live per-pool counter renders the same number
+ * this gate judges. One function, one answer.
+ */
+export function countPrompts(prompts: readonly unknown[]): number {
+  return prompts.filter((prompt) => prompt !== null && prompt !== undefined).length;
 }
 
 /**

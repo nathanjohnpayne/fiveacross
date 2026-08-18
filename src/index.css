@@ -4575,6 +4575,172 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   justify-content: flex-end;
 }
 
+/* ---------- Step 3 · Squares (#791, specs/event-setup-wizard.md § Squares)
+   The frames' `.secthead` / `.promptrow` / `.addbar` shapes, rendered with
+   this app's own tokens. Rhymes with Admin → Prompt pool (.row/.grow/.list)
+   rather than forking it: that surface edits ItemDocs, this one edits a
+   device-local draft, so they share the look and none of the plumbing. */
+.squares-step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.squares-subhead {
+  font-weight: 700;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.squares-seg {
+  margin-bottom: 0;
+}
+.squares-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.squares-note code {
+  font-size: 11px;
+}
+.squares-empty {
+  padding: 10px 0;
+}
+/* Wrapping, for the same reason the rows above wrap: the add bar carries a
+   text field, a pool select, a spicy toggle and an Add button, which do not
+   fit one phone line (Codex P2, round 2). The text field keeps a floor width
+   so it stays usable once it wraps onto its own line. */
+.squares-pack,
+.squares-confirm,
+.squares-addbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.squares-addbar > .grow,
+.squares-pack > .grow {
+  min-width: 12ch;
+  flex: 1 1 12ch;
+}
+.squares-pack .name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.squares-pack .sub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.squares-confirm,
+.squares-confirm-text {
+  font-size: 12px;
+}
+.squares-confirm {
+  border-color: var(--primary);
+  flex-wrap: wrap;
+}
+
+/* Per-pool counts. Three states, never two — an unassigned pool is not
+   "passing", the minimum simply does not apply to it. */
+.squares-counts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.squares-count {
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+.squares-count.is-ok {
+  border-color: var(--primary);
+}
+.squares-count.is-short {
+  border-color: var(--danger, #ff6b7a);
+}
+.squares-count.is-idle {
+  color: var(--dim);
+}
+
+.squares-prompts,
+.squares-days {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+/* Wraps rather than overflowing: a Prompt row carries a pool chip, the text,
+   a spicy toggle and two icon buttons, and a Day row two selects and a
+   remove — more than a narrow phone fits on one line (Codex P2). `min-width`
+   lets the flexible middle actually shrink instead of forcing the row wider
+   than its container, which is what makes wrapping take effect at all. */
+.squares-prompt-row,
+.squares-day-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.squares-prompt-row > .grow,
+.squares-day-head > .grow {
+  min-width: 8ch;
+  flex: 1 1 8ch;
+  /* Prompt text is organizer-authored and can run 80 unbroken characters —
+     a URL, a hashtag, a long compound. Without this the flex item refuses to
+     shrink below its longest word and pushes the row's controls off a narrow
+     screen (Codex P2, round 4). `anywhere` rather than `break-word` so the
+     break also counts toward the item's intrinsic minimum width. */
+  overflow-wrap: anywhere;
+}
+.squares-day-row {
+  padding: 0;
+}
+.squares-prompt-row.is-gap,
+.squares-day-row.is-gap {
+  color: var(--danger, #ff6b7a);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+}
+.squares-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: var(--muted);
+  flex: none;
+}
+.squares-spicy,
+.squares-spicy-off {
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: none;
+  white-space: nowrap;
+}
+.squares-btnrow {
+  display: flex;
+}
+.squares-issues {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 8px 12px;
+  border: 1.5px solid var(--danger, #ff6b7a);
+  border-radius: 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 /* ---------- Step 1 · Occasion (#789, `#frame-setup-occasion`) ----------
    `.wizard-occasion-row` is a full-width button, not the frame's `.menurow`
    (that class exists only inside the wireframes' own scoped <style> — no
