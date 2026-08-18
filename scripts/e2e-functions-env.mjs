@@ -50,7 +50,7 @@ import ts from 'typescript';
 // disagreeing in the accepting direction is a hang. firebase-tools is a
 // devDependency and `npx firebase` runs moments later in the same script, so
 // this adds no dependency the runner did not already have.
-import { parse, parseStrict } from 'firebase-tools/lib/functions/env.js';
+import { KeyValidationError, parse, parseStrict } from 'firebase-tools/lib/functions/env.js';
 
 /**
  * A firebase-functions/params constructor, by its EXPORTED name.
@@ -69,6 +69,39 @@ const CONSTRUCTOR_RE = /^define([A-Z][A-Za-z]*)$/;
 const PARAMS_MODULE = 'firebase-functions/params';
 
 /**
+ * Sentinel key `reExportedParamsBindings` sets on its result Map when a
+ * barrel does `export * from 'firebase-functions/params'` (#738, Codex P2
+ * round 3 on PR #826): a wildcard re-export forwards EVERY named export
+ * from the params module, unchanged, and there is no static list of that
+ * package's exports to pre-populate here (unlike a named re-export, which
+ * names the constructors it forwards up front). A `Symbol` key can never
+ * collide with a real (string) local export name, so its presence is a safe
+ * "resolve anything constructor-shaped on request" flag alongside whatever
+ * concrete bindings the Map already holds. It propagates automatically
+ * through a CHAIN of `export * from './barrel'` re-exports too, since that
+ * forwarding path already copies every entry — Symbol keys included — from
+ * `upstream` into `result`.
+ */
+const WILDCARD_PARAMS = Symbol('wildcard-params-reexport');
+
+/**
+ * The constructor kind `name` resolves to through a re-export map — a
+ * direct hit if the barrel named it explicitly, otherwise (only if the
+ * barrel wildcard-re-exported the params module) whatever `CONSTRUCTOR_RE`
+ * says about `name` itself.
+ */
+function resolveFromReExports(upstream, name) {
+  const direct = upstream.get(name);
+  if (direct) {
+    return direct;
+  }
+  if (upstream.has(WILDCARD_PARAMS)) {
+    return CONSTRUCTOR_RE.exec(name)?.[1];
+  }
+  return undefined;
+}
+
+/**
  * Local name → constructor kind, for every params-module constructor a source
  * binds, however it binds it.
  *
@@ -77,8 +110,13 @@ const PARAMS_MODULE = 'firebase-functions/params';
  * `stringParam`, where three earlier attempts could only reject the import and
  * hope nobody needed it (Codex P2 x3 on PR #730). A namespace import resolves
  * through the property access instead, and is handled at the call site.
+ *
+ * `filePath` is the scanned file's own path, used only to resolve a LOCAL
+ * re-export barrel (see `reExportedParamsBindings`) — a synthetic label from
+ * a unit test that names no real file simply fails to resolve and this
+ * degrades to exactly the prior behavior (#738).
  */
-function constructorBindings(sourceFile) {
+function constructorBindings(sourceFile, filePath) {
   const bindings = new Map();
   const namespaces = new Set();
 
@@ -91,22 +129,41 @@ function constructorBindings(sourceFile) {
 
   for (const statement of sourceFile.statements) {
     // ESM: import { defineString [as alias] } / import * as params
-    if (
-      ts.isImportDeclaration(statement) &&
-      ts.isStringLiteral(statement.moduleSpecifier) &&
-      statement.moduleSpecifier.text === PARAMS_MODULE
-    ) {
+    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+      const specifier = statement.moduleSpecifier.text;
       const named = statement.importClause?.namedBindings;
-      if (named && ts.isNamedImports(named)) {
-        for (const element of named.elements) {
-          takeNamed((element.propertyName ?? element.name).text, element.name.text);
+      const isTypeOnlyImport = statement.importClause?.isTypeOnly ?? false;
+      if (specifier === PARAMS_MODULE && !isTypeOnlyImport) {
+        if (named && ts.isNamedImports(named)) {
+          for (const element of named.elements) {
+            if (element.isTypeOnly) continue;
+            takeNamed((element.propertyName ?? element.name).text, element.name.text);
+          }
+        } else if (named && ts.isNamespaceImport(named)) {
+          namespaces.add(named.name.text);
         }
-      } else if (named && ts.isNamespaceImport(named)) {
-        namespaces.add(named.name.text);
+      } else if (specifier.startsWith('.') && named && ts.isNamedImports(named) && !isTypeOnlyImport) {
+        // Local re-export barrel (#738): `import { defineString } from
+        // './barrel'`, where `./barrel` itself does `export { defineString }
+        // from 'firebase-functions/params'` — directly, or through a chain of
+        // further local barrels. Provenance still traces back to the params
+        // module; it is just one (or more) hop away.
+        const resolved = resolveRelative(filePath, specifier);
+        if (resolved) {
+          const upstream = reExportedParamsBindings(resolved);
+          for (const element of named.elements) {
+            if (element.isTypeOnly) continue;
+            const kind = resolveFromReExports(upstream, (element.propertyName ?? element.name).text);
+            if (kind) {
+              bindings.set(element.name.text, kind);
+            }
+          }
+        }
       }
       continue;
     }
-    // CommonJS: const { defineString } = require('…') / const params = require('…').
+    // CommonJS: const { defineString } = require('…') / const params = require('…')
+    // / const defineString = require('…').defineString.
     // A `.cjs` module in this tree binds its constructors this way, and only this
     // way (Codex P2 on PR #730 — the fixture that motivated scanning `.cjs` was
     // itself written in ESM, so it never exercised the real syntax).
@@ -114,61 +171,543 @@ function constructorBindings(sourceFile) {
       continue;
     }
     for (const declaration of statement.declarationList.declarations) {
-      if (!declaration.initializer || !isParamsRequire(declaration.initializer)) {
+      if (!declaration.initializer) {
         continue;
       }
-      if (ts.isObjectBindingPattern(declaration.name)) {
-        for (const element of declaration.name.elements) {
-          const exported = element.propertyName ?? element.name;
-          if (ts.isIdentifier(exported) && ts.isIdentifier(element.name)) {
-            takeNamed(exported.text, element.name.text);
+      if (isParamsRequire(declaration.initializer, sourceFile)) {
+        if (ts.isObjectBindingPattern(declaration.name)) {
+          for (const element of declaration.name.elements) {
+            const exported = element.propertyName ?? element.name;
+            if (ts.isIdentifier(exported) && ts.isIdentifier(element.name)) {
+              takeNamed(exported.text, element.name.text);
+            }
           }
+        } else if (ts.isIdentifier(declaration.name)) {
+          namespaces.add(declaration.name.text);
         }
-      } else if (ts.isIdentifier(declaration.name)) {
-        namespaces.add(declaration.name.text);
+        continue;
+      }
+      // const defineString = require('firebase-functions/params').defineString;
+      // (#738) — a direct property-access binding, distinct from the
+      // destructured form above: the require call is the PROPERTY ACCESS's
+      // expression, not the declaration's own initializer.
+      if (
+        ts.isIdentifier(declaration.name) &&
+        ts.isPropertyAccessExpression(declaration.initializer) &&
+        isParamsRequire(declaration.initializer.expression, sourceFile)
+      ) {
+        takeNamed(declaration.initializer.name.text, declaration.name.text);
       }
     }
   }
   return { bindings, namespaces };
 }
 
-/** `require('firebase-functions/params')` — the CommonJS half of the same import. */
-function isParamsRequire(expression) {
+/**
+ * Local name → constructor kind, for names `sourceFile` imports — either
+ * DIRECTLY from the params module, or through a relative barrel of its own
+ * — used to resolve a bare `export { X }` (no `from` clause) re-exporting an
+ * import in the SAME file: the "import, then separately export" barrel
+ * idiom (Codex P2 rounds 4/5 on PR #826).
+ *
+ * The relative-import case reuses `reExportedParamsBindings` with the SAME
+ * `visited` set the caller is already threading through — NOT a fresh one,
+ * and NOT the full `constructorBindings` (which would start its own,
+ * unlinked resolution chain for a relative barrel it encounters, defeating
+ * this function's own cycle guard — the exact risk this function's earlier,
+ * narrower version was written to avoid). Sharing `visited` keeps this
+ * participating in the same on-the-stack cycle tracking as the rest of the
+ * traversal, so a cycle reached through THIS path is caught exactly like
+ * any other, rather than reopening the round-2 unbounded-recursion bug.
+ */
+function localImportBindings(sourceFile, filePath, visited) {
+  const bindings = new Map();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      statement.importClause?.isTypeOnly ||
+      !ts.isStringLiteral(statement.moduleSpecifier)
+    ) {
+      continue;
+    }
+    const specifier = statement.moduleSpecifier.text;
+    const named = statement.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) {
+      continue;
+    }
+    if (specifier === PARAMS_MODULE) {
+      for (const element of named.elements) {
+        if (element.isTypeOnly) continue;
+        const kind = CONSTRUCTOR_RE.exec((element.propertyName ?? element.name).text);
+        if (kind) {
+          bindings.set(element.name.text, kind[1]);
+        }
+      }
+    } else if (specifier.startsWith('.')) {
+      const resolved = resolveRelative(filePath, specifier);
+      if (!resolved) {
+        continue;
+      }
+      const upstream = reExportedParamsBindings(resolved, visited);
+      for (const element of named.elements) {
+        if (element.isTypeOnly) continue;
+        const kind = resolveFromReExports(upstream, (element.propertyName ?? element.name).text);
+        if (kind) {
+          bindings.set(element.name.text, kind);
+        }
+      }
+    }
+  }
+  return bindings;
+}
+
+/**
+ * Local export name → constructor kind, for names `filePath` re-exports
+ * (directly, or through a chain of further local re-export barrels) from the
+ * params module (#738).
+ *
+ * Read straight off disk rather than reusing `functionsSources`' reachable-
+ * tree scan: a barrel a consumer imports from need not itself be REACHED by
+ * the entrypoint walk (an unrelated import inside it could easily fail to
+ * resolve), and re-deriving it here costs one extra small-file read, not a
+ * second full-tree walk.
+ *
+ * `visited` tracks files on the CURRENT traversal path — an on-the-stack DFS
+ * visited set, not a "seen anywhere, ever" set — so a genuine re-export
+ * cycle (`./a` re-exporting from `./b`, which re-exports back from `./a`)
+ * still returns empty rather than looping forever, while two SEPARATE,
+ * non-cyclic statements that converge on the same upstream module (a barrel
+ * re-exporting `defineString` from one statement and `defineSecret` from
+ * another, both `from './shared'`) are each free to resolve it in full.
+ * `finally` is what makes this correct: a file removes ONLY ITSELF, exactly
+ * once, when its OWN call is about to return — not a caller deleting a
+ * child's entry after each individual statement, which (Codex P2 round 2 on
+ * PR #826) could delete an ancestor that a DIFFERENT sibling statement,
+ * still active higher up the same call stack, still depends on being
+ * marked — letting a later sibling edge re-enter that ancestor and recurse
+ * until the call stack overflows. A namespace re-export barrel (`import *
+ * as params from './barrel'`) is NOT resolved here — only named re-exports —
+ * a narrower, still-useful scope for the common idiom.
+ *
+ * Also resolves the "import, then separately export" barrel idiom —
+ * `import { defineString } from 'firebase-functions/params'; export {
+ * defineString };` — via `directParamsImportBindings`, a deliberately
+ * NARROW, non-recursive lookup of names THIS file imports straight from the
+ * params module (Codex P2 round 4 on PR #826). It does not follow a
+ * relative import the same way: that would mean calling the full
+ * `constructorBindings` (which itself calls back into
+ * `reExportedParamsBindings` for a relative barrel import) from inside this
+ * function, on a SEPARATE, unlinked `visited` set — reopening the exact
+ * unbounded-recursion class of bug fixed above, for a cycle this function's
+ * own cycle guard would no longer be positioned to catch.
+ */
+function reExportedParamsBindings(filePath, visited = new Set()) {
+  const result = new Map();
+  if (!filePath || visited.has(filePath) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    return result;
+  }
+  visited.add(filePath);
+  try {
+    const text = readFileSync(filePath, 'utf8');
+    const sourceFile = ts.createSourceFile(filePath, text, ts.ScriptTarget.Latest, true);
+    const localImports = localImportBindings(sourceFile, filePath, visited);
+    for (const statement of sourceFile.statements) {
+      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) {
+        continue;
+      }
+      if (!statement.moduleSpecifier) {
+        // `export { defineString }` — no `from` clause: re-exporting a name
+        // THIS file imported separately, resolved against `localImports`.
+        const bareClause = statement.exportClause;
+        if (bareClause && ts.isNamedExports(bareClause)) {
+          for (const element of bareClause.elements) {
+            if (element.isTypeOnly) continue;
+            const kind = localImports.get((element.propertyName ?? element.name).text);
+            if (kind) {
+              result.set(element.name.text, kind);
+            }
+          }
+        }
+        continue;
+      }
+      if (!ts.isStringLiteral(statement.moduleSpecifier)) {
+        continue;
+      }
+      const specifier = statement.moduleSpecifier.text;
+      const clause = statement.exportClause;
+      if (specifier === PARAMS_MODULE) {
+        if (clause && ts.isNamedExports(clause)) {
+          for (const element of clause.elements) {
+            if (element.isTypeOnly) continue;
+            const kind = CONSTRUCTOR_RE.exec((element.propertyName ?? element.name).text);
+            if (kind) {
+              result.set(element.name.text, kind[1]);
+            }
+          }
+        } else if (!clause) {
+          // `export * from 'firebase-functions/params'` — see WILDCARD_PARAMS.
+          result.set(WILDCARD_PARAMS, true);
+        }
+        continue;
+      }
+      if (!specifier.startsWith('.')) {
+        continue;
+      }
+      const resolved = resolveRelative(filePath, specifier);
+      if (!resolved) {
+        continue;
+      }
+      const upstream = reExportedParamsBindings(resolved, visited);
+      if (clause && ts.isNamedExports(clause)) {
+        for (const element of clause.elements) {
+          if (element.isTypeOnly) continue;
+          const kind = resolveFromReExports(upstream, (element.propertyName ?? element.name).text);
+          if (kind) {
+            result.set(element.name.text, kind);
+          }
+        }
+      } else if (!clause) {
+        // `export * from './barrel'` — forward every re-exported params
+        // binding as-is; there is no local alias to rename it through.
+        for (const [name, kind] of upstream) {
+          result.set(name, kind);
+        }
+      }
+    }
+    return result;
+  } finally {
+    visited.delete(filePath);
+  }
+}
+
+/**
+ * `require('firebase-functions/params')` — the CommonJS half of the same
+ * import. Checked against `isRequireShadowed` too (#738, Codex P2 round 5 on
+ * PR #826): `const require = localLoader; const defineString =
+ * require('firebase-functions/params').defineString` calls the local
+ * helper, not Node's loader, and checking only the call's spelling accepted
+ * it as a real params binding regardless.
+ */
+function isParamsRequire(expression, sourceFile) {
   return (
     ts.isCallExpression(expression) &&
     ts.isIdentifier(expression.expression) &&
     expression.expression.text === 'require' &&
     expression.arguments.length === 1 &&
     ts.isStringLiteral(expression.arguments[0]) &&
-    expression.arguments[0].text === PARAMS_MODULE
+    expression.arguments[0].text === PARAMS_MODULE &&
+    !isRequireShadowed(expression, sourceFile)
   );
 }
 
-/** Names a scope introduces itself, which therefore shadow anything outer. */
-function scopeDeclares(scope, name) {
-  const parameters = ts.isFunctionLike(scope) ? (scope.parameters ?? []) : [];
-  if (parameters.some((parameter) => ts.isIdentifier(parameter.name) && parameter.name.text === name)) {
-    return true;
+/**
+ * Every identifier a binding target introduces — a plain name, or (#741) a
+ * destructured object/array pattern, recursively (`{ defineString }`,
+ * `[a, { b: defineString }]`, defaults and rest elements included).
+ */
+function bindingNames(nameNode, into) {
+  if (ts.isIdentifier(nameNode)) {
+    into.add(nameNode.text);
+    return;
   }
-  const body = ts.isBlock(scope) ? scope : scope.body;
-  if (!body || !ts.isBlock(body)) {
-    return false;
+  if (ts.isObjectBindingPattern(nameNode) || ts.isArrayBindingPattern(nameNode)) {
+    for (const element of nameNode.elements) {
+      if (ts.isBindingElement(element)) {
+        bindingNames(element.name, into);
+      }
+    }
   }
-  return body.statements.some((statement) => {
-    if (ts.isFunctionDeclaration(statement)) {
-      return statement.name?.text === name;
-    }
-    if (!ts.isVariableStatement(statement)) {
-      return false;
-    }
-    return statement.declarationList.declarations.some(
-      (declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name,
-    );
-  });
+}
+
+/** Whether a `VariableDeclarationList` is `var` (function-scoped/hoisted), not `let`/`const`. */
+function isHoistedDeclarationList(declarationList) {
+  return (declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0;
 }
 
 /**
- * Whether an inner scope rebinds `name` between this call and the file top.
+ * Whether `sourceFile` is strict — a module (`ts.isExternalModule`), OR a
+ * script that opts in with its own leading `'use strict'` directive (Codex
+ * P2 round 4 on PR #826): a `.cjs` file has no import/export syntax, so
+ * `ts.isExternalModule` is false for it regardless, but a literal `'use
+ * strict';` as its first statement (the ECMAScript "directive prologue" —
+ * only leading string-literal expression statements count, and only the
+ * exact text matters) disables Annex B hoisting there too.
+ *
+ * Deliberately does NOT account for `alwaysStrict` (implied by
+ * `functions/tsconfig.json`'s `strict: true`), which can make tsc EMIT a
+ * `'use strict'` prologue into compiled output that has neither ESM syntax
+ * nor a source-level directive (Codex P2 round 5 on PR #826). This scanner
+ * reads SOURCE, not compiled output, and whether `alwaysStrict` actually
+ * applies to a given file depends on build-pipeline specifics this file has
+ * no visibility into — does tsc even process this specific file's emit, or
+ * is it copied through verbatim, as `.cjs` sources typically are? Modeling
+ * the compiler flag unconditionally would not so much fix this as trade one
+ * approximation for a different, equally uncertain one. Not a live gap
+ * today: the one real `.cjs` file this scanner currently reads
+ * (`functions/src/bugReportContract.cjs`) already carries its own literal
+ * `'use strict';` as its first line, so the directive check above already
+ * classifies it correctly without needing to reason about `alwaysStrict` at
+ * all. Tracked as a known limitation for a FUTURE `.cjs` file that relies on
+ * the compiler flag alone, rather than guessed at now.
+ */
+function isStrictSourceFile(sourceFile) {
+  if (ts.isExternalModule(sourceFile)) {
+    return true;
+  }
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExpressionStatement(statement) || !ts.isStringLiteral(statement.expression)) {
+      break;
+    }
+    if (statement.expression.text === 'use strict') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Every `var`/function-declaration name bound ANYWHERE within `node` — at any
+ * nesting depth through blocks, `if`/`for`/`while`/`try`/`catch`, etc. — but
+ * never crossing into a nested function's own body (#741).
+ *
+ * `var` and function declarations are hoisted to the nearest enclosing
+ * function (or the top level), not their lexical block, so a call OUTSIDE
+ * the block that declares one is still shadowed by it — the earlier
+ * ancestor-only walk could never see a sibling block's `var` (Codex P2 on PR
+ * #730 caught the ancestor-only miss for the simple case; this closes the
+ * nested-statement variant of the same gap).
+ */
+function collectHoistedNames(node, names) {
+  // Annex B block-function hoisting is SLOPPY-MODE-ONLY behavior — it does
+  // not apply in a module, which is always strict, regardless of the
+  // `strict` compiler option (Codex P2 round 3 on PR #826, against an
+  // earlier version of this fix that treated it as unconditionally safe
+  // "can only ADD a shadow, never miss a real param" — backwards for a
+  // strict file specifically, where a block-nested function declaration is
+  // genuinely block-scoped: collecting it as though it hoists creates a
+  // FALSE shadow over a call that, in the real module, still reaches the
+  // outer import — dropping the exact real param this file exists to catch,
+  // not adding a spurious one). `isStrictSourceFile` covers a `.cjs` SCRIPT
+  // that opts into strict mode with its own `'use strict'` directive too
+  // (Codex P2 round 4 on PR #826) — `ts.isExternalModule` alone only catches
+  // the module case.
+  if (ts.isFunctionDeclaration(node) && node.name && !isStrictSourceFile(node.getSourceFile())) {
+    // Recorded BEFORE the function-like early return below, not after it —
+    // `ts.isFunctionLike` also matches `FunctionDeclaration`, so putting
+    // this in the `else if` chain after that check made it unreachable dead
+    // code: a function declared two or more levels deep (inside an
+    // `if`/`for` nested in the body, not directly in the function's own
+    // top-level block — the shallow case is caught separately by
+    // `scopeDeclares`'s own per-block scan) never had its name collected at
+    // all (Codex P2 round 2 on PR #826).
+    names.add(node.name.text);
+  }
+  if (ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node)) {
+    // Stop descending: this node's own body is a new var/function-hoisting
+    // scope boundary. A class STATIC BLOCK is one too (Codex P2 round 2 on
+    // PR #826) — `var` inside `static { … }` is scoped to the block itself,
+    // not hoisted out to whatever function contains the class, and was
+    // previously walked into as though it were ordinary body code.
+    return;
+  }
+  if (ts.isVariableStatement(node) && isHoistedDeclarationList(node.declarationList)) {
+    for (const declaration of node.declarationList.declarations) {
+      bindingNames(declaration.name, names);
+    }
+  } else if (
+    ts.isForStatement(node) &&
+    node.initializer &&
+    ts.isVariableDeclarationList(node.initializer) &&
+    isHoistedDeclarationList(node.initializer)
+  ) {
+    for (const declaration of node.initializer.declarations) {
+      bindingNames(declaration.name, names);
+    }
+  } else if (
+    (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
+    ts.isVariableDeclarationList(node.initializer) &&
+    isHoistedDeclarationList(node.initializer)
+  ) {
+    bindingNames(node.initializer.declarations[0].name, names);
+  }
+  ts.forEachChild(node, (child) => collectHoistedNames(child, names));
+}
+
+/**
+ * Whether `name` is `var`/function-declaration hoisted to `sourceFile`'s own
+ * top level, from ANY nesting depth of `if`/`for`/`while`/etc — the file-top
+ * counterpart of what `collectHoistedNames` already does for a function
+ * body. `collectHoistedNames` accepts a `SourceFile` directly: it is not
+ * function-like, so the walk simply recurses through every top-level
+ * statement (stopping only at a nested function's own boundary, same as
+ * always). Used only by the `require`-identifier shadow check (#740) — see
+ * its call site for why that check needs file-top coverage a param
+ * constructor name does not (Codex P2 round 4 on PR #826).
+ */
+function fileTopHoistsName(sourceFile, name) {
+  const names = new Set();
+  collectHoistedNames(sourceFile, names);
+  return names.has(name);
+}
+
+/**
+ * Whether `require` is a locally shadowed identifier at `node`'s call site —
+ * combining every way this file checks it: an enclosing scope
+ * (`isShadowed`), a direct file-top declaration (`scopeDeclares` against the
+ * `SourceFile`), or one hoisted to the file top from any nesting depth
+ * (`fileTopHoistsName`). Shared by BOTH places this file needs it:
+ * `relativeDependencies`' dynamic `require(...)` dependency check, and
+ * `isParamsRequire`'s CommonJS constructor-binding check — a first version
+ * of the latter checked only the call's spelling, so `const require =
+ * localLoader; const defineString = require('firebase-functions/params')`
+ * was accepted as a real params binding even though it calls the local
+ * helper, not Node's loader (Codex P2 round 5 on PR #826).
+ */
+function isRequireShadowed(node, sourceFile) {
+  return isShadowed(node, 'require') || scopeDeclares(sourceFile, 'require') || fileTopHoistsName(sourceFile, 'require');
+}
+
+/**
+ * Names a scope introduces itself, which therefore shadow anything outer
+ * (#741). Three binding sources, matched to real JS/TS scoping:
+ *
+ *   - A function-like scope: its (possibly destructured) parameters, its own
+ *     name when it is a NAMED function expression (binds only within
+ *     itself), and — UNLESS `child` is one of its own parameters — every
+ *     `var`/function-declaration hoisted anywhere within its body,
+ *     regardless of nesting depth.
+ *   - A `catch` clause: its (possibly destructured) binding, block-scoped to
+ *     the clause.
+ *   - A block (or the source file): `let`/`const`/`class`/function
+ *     declarations bound DIRECTLY in its own statement list — lexically
+ *     block-scoped, so NOT recursed into nested blocks; a nested block is
+ *     itself a later ancestor in `isShadowed`'s walk and gets its own check.
+ *
+ * `child` is the node `isShadowed` ascended FROM to reach `scope` — the
+ * direct child of `scope` on the path back down to the original call. It
+ * exists for exactly one distinction: a call inside a PARAMETER's own
+ * default-value initializer (`function f(x = defineString('P')) {…}`) runs
+ * in a separate parameter scope that cannot see the function BODY's
+ * `var`/function-declaration bindings — only a call actually inside the body
+ * can be hoisting-shadowed by one (Codex P2 round 2 on PR #826).
+ */
+function scopeDeclares(scope, name, child) {
+  const names = new Set();
+  if (ts.isFunctionLike(scope)) {
+    for (const parameter of scope.parameters) {
+      bindingNames(parameter.name, names);
+    }
+    // A named FUNCTION EXPRESSION's own name is a real local binding inside
+    // its own body (`const f = function g() { g(); }` calls itself via `g`).
+    // `ts.isFunctionLike` also matches methods, accessors, and arrow
+    // functions — a class or object-literal method named `defineString`
+    // does NOT bind that name as a bare identifier inside its own body (you
+    // would need `this.defineString(…)`), so treating its `.name` the same
+    // way falsely marked an unrelated, unshadowed call as shadowed and
+    // silently dropped a real param (Codex P2 on PR #826).
+    if (ts.isFunctionExpression(scope) && scope.name && ts.isIdentifier(scope.name)) {
+      names.add(scope.name.text);
+    }
+    if (names.has(name)) {
+      return true;
+    }
+    const cameFromParameter = scope.parameters.some((parameter) => parameter === child);
+    if (scope.body && !cameFromParameter) {
+      collectHoistedNames(scope.body, names);
+    }
+    return names.has(name);
+  }
+  if (ts.isCatchClause(scope)) {
+    if (scope.variableDeclaration) {
+      bindingNames(scope.variableDeclaration.name, names);
+    }
+    return names.has(name);
+  }
+  if (
+    (ts.isForStatement(scope) || ts.isForOfStatement(scope) || ts.isForInStatement(scope)) &&
+    scope.initializer &&
+    ts.isVariableDeclarationList(scope.initializer)
+  ) {
+    // A FOR-loop's own initializer (`for (let x = …; …)` / `for (const x of
+    // …)`) is its own lexical scope, distinct from the loop body's Block —
+    // `isShadowed`'s ancestor walk reaches the `ForStatement`/`ForOfStatement`/
+    // `ForInStatement` node itself as an ancestor of a call inside the body,
+    // and none of the branches above or the plain Block scan below ever
+    // looked at its `initializer` (Codex P2 round 5 on PR #826).
+    for (const declaration of scope.initializer.declarations) {
+      bindingNames(declaration.name, names);
+    }
+    return names.has(name);
+  }
+  if (ts.isCaseBlock(scope)) {
+    // A `switch` statement's clauses share ONE lexical scope for
+    // `let`/`const`/`class`/function declarations across EVERY case —
+    // spec-mandated (it is why redeclaring the same name under two case
+    // labels without braces is an error) — so every clause's statements are
+    // scanned together, not per-clause (Codex P2 round 5 on PR #826).
+    for (const clause of scope.clauses) {
+      for (const statement of clause.statements) {
+        if (ts.isFunctionDeclaration(statement) && statement.name) {
+          names.add(statement.name.text);
+        } else if (ts.isClassDeclaration(statement) && statement.name) {
+          names.add(statement.name.text);
+        } else if (ts.isVariableStatement(statement)) {
+          for (const declaration of statement.declarationList.declarations) {
+            bindingNames(declaration.name, names);
+          }
+        }
+      }
+    }
+    return names.has(name);
+  }
+  const statements = ts.isBlock(scope) || ts.isSourceFile(scope) ? scope.statements : null;
+  if (!statements) {
+    return false;
+  }
+  for (const statement of statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name) {
+      names.add(statement.name.text);
+    } else if (ts.isClassDeclaration(statement) && statement.name) {
+      names.add(statement.name.text);
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        bindingNames(declaration.name, names);
+      }
+    } else if (ts.isImportDeclaration(statement) && statement.importClause) {
+      // An import binding is only legal at the file top, but this branch
+      // also runs for an ordinary block — harmless there, since a block can
+      // never contain one. `import require from './loader'` (default),
+      // `import { x as require } from './loader'` (named, possibly
+      // aliased), and `import * as require from './loader'` (namespace) are
+      // all real local bindings a reachable module can legally name
+      // `require`, shadowing Node's global the same way a `const require =
+      // …` does — and the require-shadow check (#740) reuses this same
+      // lexical scan for the file top specifically because `require` is not
+      // necessarily imported, so import forms have to count too (Codex P2
+      // round 3 on PR #826).
+      const clause = statement.importClause;
+      if (clause.name) {
+        names.add(clause.name.text);
+      }
+      if (clause.namedBindings) {
+        if (ts.isNamespaceImport(clause.namedBindings)) {
+          names.add(clause.namedBindings.name.text);
+        } else if (ts.isNamedImports(clause.namedBindings)) {
+          for (const element of clause.namedBindings.elements) {
+            names.add(element.name.text);
+          }
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(statement) && statement.name) {
+      names.add(statement.name.text);
+    }
+  }
+  return names.has(name);
+}
+
+/**
+ * Whether an inner scope rebinds `name` between this call and the file top —
+ * EXCLUSIVE of the file top itself.
  *
  * A file-wide name lookup reads `function f(defineString) { defineString('LOCAL') }`
  * as declaring a param, and the generator then aborts every run demanding a value
@@ -176,12 +715,28 @@ function scopeDeclares(scope, name) {
  * settles it; the alternative — `ts.createProgram` and a real type checker — buys
  * exact symbol resolution at the cost of module resolution and a compile, on a
  * path that runs before every e2e suite.
+ *
+ * Deliberately does NOT check the file top: a param constructor is always
+ * IMPORTED, so a top-level redeclaration of its name is a TypeScript
+ * duplicate-identifier error and could never legitimately shadow it here —
+ * BUT the CommonJS binding form this file also supports
+ * (`const { defineString } = require('firebase-functions/params')`, #738) is
+ * itself an ordinary top-level `VariableStatement`. Checking the file top
+ * would make `scopeDeclares` rediscover THAT SAME statement as though it
+ * were an unrelated shadow of the very binding it defines — a self-
+ * referential false positive that broke every CJS-bound param (caught by
+ * this file's own pre-existing CJS tests when a round-2 attempt at the
+ * `require`-shadow fix below tried reusing this function directly, Codex P2
+ * round 2 on PR #826). The `require`-identifier check needs file-top
+ * coverage for a different, legitimate reason — see its call site.
  */
 function isShadowed(call, name) {
+  let child = call;
   for (let scope = call.parent; scope && !ts.isSourceFile(scope); scope = scope.parent) {
-    if (scopeDeclares(scope, name)) {
+    if (scopeDeclares(scope, name, child)) {
       return true;
     }
+    child = scope;
   }
   return false;
 }
@@ -317,7 +872,7 @@ function scanSource(source, label) {
   // one of those by construction, and it costs a devDependency the repo already
   // installs for `npm run typecheck`.
   const sourceFile = ts.createSourceFile(label, source, ts.ScriptTarget.Latest, true);
-  const bindings = constructorBindings(sourceFile);
+  const bindings = constructorBindings(sourceFile, label);
   const visit = (node) => {
     if (ts.isCallExpression(node)) {
       const kind = constructorKindOf(node, bindings);
@@ -414,24 +969,138 @@ function resolveRelative(fromFile, specifier) {
   return candidates.find((path) => existsSync(path) && statSync(path).isFile()) ?? null;
 }
 
-/** Every relative specifier a module imports or requires. */
-function relativeDependencies(sourceFile) {
+/**
+ * Whether an `import` declaration is erased entirely at compile time — no
+ * runtime reference to the module survives, so it declares no dependency
+ * (#739). `import type { X } from './x'` (whole-declaration) and `import {
+ * type X } from './x'` (every named binding individually type-only) both
+ * qualify; a default import, a namespace import, or ANY non-type-only named
+ * binding makes it a real runtime import (`import { type X, y } from './x'`
+ * still loads the module for `y`). A side-effect-only `import './x'` has no
+ * clause at all and is always a runtime import.
+ */
+function isFullyTypeOnlyImport(clause) {
+  if (!clause) {
+    return false;
+  }
+  if (clause.isTypeOnly) {
+    return true;
+  }
+  if (clause.name) {
+    return false;
+  }
+  const named = clause.namedBindings;
+  if (!named || ts.isNamespaceImport(named)) {
+    return false;
+  }
+  return named.elements.length > 0 && named.elements.every((element) => element.isTypeOnly);
+}
+
+/** The `export …` counterpart of `isFullyTypeOnlyImport` (#739). */
+function isFullyTypeOnlyExport(node) {
+  if (node.isTypeOnly) {
+    return true;
+  }
+  const clause = node.exportClause;
+  if (!clause || ts.isNamespaceExport(clause)) {
+    // `export * from './x'` or `export * as ns from './x'` — always runtime.
+    return false;
+  }
+  return clause.elements.length > 0 && clause.elements.every((element) => element.isTypeOnly);
+}
+
+/** A specifier this scanner can read statically: a plain string, or a template literal with no `${}` substitutions. */
+function literalSpecifierOf(expression) {
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text;
+  }
+  return null;
+}
+
+/**
+ * Every relative specifier a module imports or requires.
+ *
+ * `label` names the file in the thrown error for a specifier this scanner
+ * cannot resolve statically (#740) — never propagated otherwise.
+ */
+function relativeDependencies(sourceFile, label) {
   const specifiers = [];
   const visit = (node) => {
     if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      ts.isImportDeclaration(node) &&
       node.moduleSpecifier &&
-      ts.isStringLiteral(node.moduleSpecifier)
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      !isFullyTypeOnlyImport(node.importClause)
     ) {
       specifiers.push(node.moduleSpecifier.text);
     } else if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      !isFullyTypeOnlyExport(node)
+    ) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (
+      // `import x = require('./x')` (#740) — TypeScript's pre-ESM syntax for
+      // a runtime require, not expressible as an ImportDeclaration at all.
+      ts.isImportEqualsDeclaration(node) &&
+      !node.isTypeOnly &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      ts.isStringLiteral(node.moduleReference.expression)
+    ) {
+      specifiers.push(node.moduleReference.expression.text);
+    } else if (
       ts.isCallExpression(node) &&
       (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === 'require')) &&
-      node.arguments.length > 0 &&
-      ts.isStringLiteral(node.arguments[0])
+        // `require` is an ordinary identifier, not a keyword — a reachable
+        // module that declares its OWN local `require` (a param, a test
+        // helper, anything) shadows Node's loader, and a call through it is
+        // not a module specifier at all (Codex P2 round 1 on PR #826).
+        // Treating it as one used to just miss a dependency silently; now
+        // that a non-literal argument fails closed below, the same false
+        // positive would abort validation over unrelated application code.
+        //
+        // Checked at EVERY level including the file top via
+        // `isRequireShadowed` — an enclosing scope, a direct top-level
+        // declaration (including one nested inside a plain block), or one
+        // hoisted to the file top from ANY depth of nested `if`/`for`/
+        // `while` (`var` hoists to the module/script top exactly like it
+        // hoists to a function; Codex P2 rounds 1/2/4 on PR #826). `require`
+        // needs all of this, unlike the `isShadowed`-only check
+        // `constructorKindOf` uses for a param constructor name: `require`
+        // is not necessarily imported, so a plain top-level `const require =
+        // …;` is legal TS and genuinely shadows Node's global for the whole
+        // module — where a param constructor's name always IS imported,
+        // making a top-level redeclaration of ITS name a TypeScript
+        // duplicate-identifier error, safe to not check for. `isShadowed`
+        // itself stays file-top-EXCLUSIVE because reusing it, file-top
+        // included, for the constructor-name check broke every CJS-bound
+        // param — see `isShadowed`'s own comment.
+        (ts.isIdentifier(node.expression) &&
+          node.expression.text === 'require' &&
+          !isRequireShadowed(node, sourceFile)))
     ) {
-      specifiers.push(node.arguments[0].text);
+      const [first] = node.arguments;
+      if (first) {
+        const literal = literalSpecifierOf(first);
+        if (literal !== null) {
+          specifiers.push(literal);
+        } else {
+          // A non-literal specifier (#740) — `require(pathVar)`, a template
+          // literal with a substitution — cannot be resolved statically.
+          // Skipping it silently would miss a module that declares a
+          // Firebase param exactly like the unresolvable-param-name case
+          // below does, so this fails the same way: loud, not silent.
+          throw new Error(
+            `${label} calls ${node.expression.getText(sourceFile)}(…) with a specifier this ` +
+              'generator cannot resolve statically. Use a plain string literal (or a ' +
+              'no-substitution template literal) module specifier, or teach ' +
+              'scripts/e2e-functions-env.mjs to resolve the expression — silently skipping it ' +
+              'could miss a module that declares a Firebase param, letting the emulator prompt ' +
+              'for it later.',
+          );
+        }
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -466,7 +1135,7 @@ export function functionsSources(entrypoint) {
     const text = readFileSync(file, 'utf8');
     sources.push({ label: file, text });
     const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-    for (const specifier of relativeDependencies(sourceFile)) {
+    for (const specifier of relativeDependencies(sourceFile, file)) {
       const resolved = resolveRelative(file, specifier);
       if (resolved) {
         walk(resolved);
@@ -541,7 +1210,7 @@ export function unassignedNames(assigned, names) {
 export function parseDotenv(body, label) {
   try {
     return parseStrict(body);
-  } catch {
+  } catch (error) {
     // NEVER propagate the parser's own message. It quotes each rejected line
     // verbatim, and a malformed line in `.secret.local` is by definition a line
     // holding a credential — `RESEND_API_KEY sk_live_…` with the `=` fumbled
@@ -549,7 +1218,7 @@ export function parseDotenv(body, label) {
     // captured test log (Codex P2 on PR #730). Line numbers locate the problem
     // without disclosing it.
     throw new Error(
-      `${label} is not a dotenv file the emulator can read — ${describeBadLines(body)}. It ` +
+      `${label} is not a dotenv file the emulator can read — ${describeBadLines(body, error)}. It ` +
         'parses strictly, so a single malformed line discards the whole file: for ' +
         '.secret.local that silently sends the run to the real Secret Manager. The ' +
         'offending content is withheld here because this file holds credentials.',
@@ -557,8 +1226,46 @@ export function parseDotenv(body, label) {
   }
 }
 
-/** Where the rejected lines are, never what they say. */
-function describeBadLines(body) {
+/**
+ * Where the rejected lines are, never what they say.
+ *
+ * `parseStrict` fails two different ways (#742), and only one of them shows
+ * up in `parse(body).errors`: a SYNTAX error (a line `parse` itself cannot
+ * read) does, but a KEY validation error — reserved, not
+ * `[A-Z_][A-Z0-9_]*`, or a reserved prefix — does not: `parse` accepts the
+ * line just fine and only `validateKey` rejects the resulting key. Grepping
+ * `parse(body).errors` for that second case found nothing and reported "0
+ * malformed lines" — true of the (empty) syntax-error set, but not of why
+ * the file was actually rejected.
+ *
+ * `KeyValidationError.message` (and `.key`) is NEVER surfaced in the
+ * returned string, even though a key name is not itself normally a
+ * credential: `LINE_RE` captures whatever text sits before `=` as the key,
+ * with no check that it LOOKS like a key, so a reversed assignment in
+ * `.secret.local` — `sk_live_do_not_leak_me=RESEND_API_KEY`, the `=`
+ * fumbled the other way — puts the credential in the key position, and
+ * `validateKey` rejects it (lowercase) with a message that repeats it
+ * verbatim (Codex P1 on PR #826, on an earlier version of this function
+ * that DID surface `.message`). A generic category, not the parser's
+ * classification, is all this reports, matching the syntax-error path's
+ * existing withholding below. `.key` is still used internally, only to
+ * LOCATE the line via `lineAssignsKey` — never printed.
+ */
+function describeBadLines(body, error) {
+  const keyErrors = (error?.children ?? []).filter((child) => child instanceof KeyValidationError);
+  if (keyErrors.length > 0) {
+    const numbers = body
+      .split('\n')
+      .map((line, index) => (keyErrors.some((keyError) => lineAssignsKey(line, keyError.key)) ? index + 1 : 0))
+      .filter(Boolean);
+    const count = keyErrors.length;
+    const plural = count === 1 ? 'key' : 'keys';
+    const location = numbers.length > 0 ? ` (line ${numbers.join(', ')})` : '';
+    return (
+      `${count} invalid ${plural}${location} — reserved for internal use, not ` +
+      'ALL_CAPS_WITH_UNDERSCORES, or starting with a reserved prefix'
+    );
+  }
   const rejected = new Set(parse(body).errors.map((line) => line.trim()));
   const numbers = body
     .split('\n')
@@ -569,6 +1276,12 @@ function describeBadLines(body) {
   return numbers.length > 0
     ? `${count} malformed ${plural} (line ${numbers.join(', ')})`
     : `${count} malformed ${plural}`;
+}
+
+/** Whether `line` is a dotenv assignment for `key` — the key name only, never the value. */
+function lineAssignsKey(line, key) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*(?:export\\s+)?${escapedKey}\\s*=`).test(line);
 }
 
 /**
