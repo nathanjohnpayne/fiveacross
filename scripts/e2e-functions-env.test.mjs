@@ -495,6 +495,80 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(paramDefaultNotShadowed).params).toEqual(['REAL_PARAM', 'PARAM_IN_DEFAULT']);
   });
 
+  // Codex P2 round 5 on PR #826: a `let`/`const` FOR-loop initializer is its
+  // own lexical scope, distinct from the loop body's Block, and was never
+  // checked.
+  it('ignores a call shadowed by a for-loop initializer', () => {
+    const forLoopInitializerShadow = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(items) {',
+      "  for (let defineString = (name) => name; items.length; items.pop()) {",
+      "    defineString('LOCAL_NOT_A_PARAM');",
+      '  }',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(forLoopInitializerShadow).params).toEqual(['REAL_PARAM']);
+  });
+
+  // The `for…of`/`for…in` counterpart — the bound name lives directly on the
+  // statement, not wrapped in a `VariableDeclarationList.declarations` array
+  // of more than one, but is still the same lexical-scope shape.
+  it('ignores a call shadowed by a for-of loop binding', () => {
+    const forOfShadow = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(items) {',
+      '  for (const defineString of items) {',
+      "    defineString('LOCAL_NOT_A_PARAM');",
+      '  }',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(forOfShadow).params).toEqual(['REAL_PARAM']);
+  });
+
+  // Codex P2 round 5 on PR #826: every clause of a `switch` shares ONE
+  // lexical scope — the same reason redeclaring a name across two case
+  // labels without braces is an error — so a binding introduced under one
+  // case label shadows a call under a DIFFERENT case label too.
+  it('ignores a call shadowed by a binding declared under a different switch case', () => {
+    const switchCaseShadow = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(mode) {',
+      '  switch (mode) {',
+      "    case 'a':",
+      '      let defineString = (name) => name;',
+      '      break;',
+      "    case 'b':",
+      "      defineString('LOCAL_NOT_A_PARAM');",
+      '      break;',
+      '  }',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(switchCaseShadow).params).toEqual(['REAL_PARAM']);
+  });
+
+  // Codex P2 round 5 on PR #826: `isParamsRequire` (the CJS destructured and
+  // property-access binding checks) looked only at the call's spelling, so a
+  // locally shadowed `require` was still accepted as Node's loader.
+  it('does not treat a require call through a locally shadowed require as a params binding', () => {
+    const shadowedRequireBinding = [
+      'function localLoader(name) { return { defineString: () => "not-a-param" }; }',
+      'function helper() {',
+      '  const require = localLoader;',
+      "  const defineString = require('firebase-functions/params').defineString;",
+      "  return defineString('NOT_A_FIREBASE_PARAM');",
+      '}',
+      'exports.A = helper;',
+    ].join('\n');
+
+    expect(() => declaredParamNames(shadowedRequireBinding)).toThrow(/CONSTRUCTOR_RE/);
+  });
+
   // Codex P2 on PR #730, and the exact counterpart of the earlier finding that a
   // params.ts-only scan misses too much: presence on disk is not reachability,
   // and Firebase discovery runs the entrypoint's import graph.
@@ -678,6 +752,29 @@ describe('functions source-tree reachability and barrel resolution', () => {
 
     const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
     expect(declared.params).toEqual(['IMPORT_THEN_EXPORT_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 round 5 on PR #826: the round-4 fix for "import, then export"
+  // only resolved an import DIRECTLY from the params module — a chained
+  // form, where the barrel imports from a RELATIVE re-export of its own
+  // before bare-exporting it, fell through unhandled.
+  it('resolves a constructor reached through an import-then-export barrel chained via a relative import', () => {
+    const dir = makeTree({
+      'inner.ts': "export { defineString } from 'firebase-functions/params';\n",
+      'middle.ts': [
+        "import { defineString } from './inner';",
+        'export { defineString };',
+      ].join('\n'),
+      'index.ts': [
+        "import { defineString } from './middle';",
+        "defineString('CHAINED_IMPORT_THEN_EXPORT_PARAM');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['CHAINED_IMPORT_THEN_EXPORT_PARAM']);
 
     rmSync(dir, { recursive: true, force: true });
   });
