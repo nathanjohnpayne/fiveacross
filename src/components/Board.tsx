@@ -1825,25 +1825,27 @@ export default function Board() {
    * `seenThisMount || hasSeen()`. The `*Seen` values are this tab's half; they
    * also force the re-render that a bare storage write does not trigger.
    *
-   * Hoisted above `daySwitcher` (#736): every overlay this derivation counts
-   * is a sibling of `.board-area`, but `daySwitcher` itself renders OUTSIDE
-   * `.board-area` — above CoachOverlay/LaunchIntro in the fragment below, and
-   * from several early-return branches (deal-error, locked-Day preview,
-   * cached-card fallback) that have no overlay concept at all. Computing
-   * `overlayOpen` here, before any of those returns, lets `daySwitcher` carry
-   * it as a prop into EVERY branch. In ordinary operation those early-return
-   * branches see it evaluate `false` (none of them mounts a Square, so none
-   * of their code paths sets `proofTarget`/`tallyTarget`/`reshuffleOpen`/
-   * `celebrate`, and `coachOverlayUp`/`launchIntroUp` both require
-   * `cells.length > 0`) — so for the common case this is purely additive
-   * there. The one place it can legitimately read `true` in an early-return
-   * branch is the exact bug this fix closes: a sheet left open from a
-   * previous render whose Day the Player then switched away from behind the
-   * scrim. Keeping `daySwitcher` inert there too is correct, not incidental —
-   * ProofSheet captures a target cell, so the Day changing underneath while
-   * it's open is exactly the staleness class `proofSourceLive` (below) guards
-   * against, and once this prop lands the switch that produced that state can
-   * no longer happen going forward.
+   * Hoisted above `daySwitcher` (#736) so it is IN SCOPE for every
+   * early-return branch below — but every overlay it counts (CoachOverlay,
+   * LaunchIntro, ProofSheet, TallySheet, the reshuffle confirm, the win
+   * celebration) is JSX that appears ONLY in this component's final,
+   * post-every-early-return `return` — see `{daySwitcher}` right before
+   * `<CoachOverlay .../>` below. None of those overlays is EVER mounted from
+   * a `return` above this point, so `overlayOpen` being state-true while an
+   * early return fires does not mean a dialog is actually on screen there:
+   * External Phase 4b review on PR #820 caught the trap this created — the
+   * FIRST version of this fix threaded `overlayOpen` into every branch's
+   * `daySwitcher`, so a Player who lands on `defaultViewedIndex` (locked
+   * pre-Event Day 0, or a cached/legacy board still carrying `cells`) with
+   * `coachOverlayUp`/`launchIntroUp` state true would hit the locked-Day
+   * preview with every chip disabled and NO CoachOverlay/LaunchIntro on
+   * screen to dismiss — a permanent dead end, not a scrim. `daySwitcher`
+   * itself therefore stays UNCONDITIONALLY tappable (no `inert` prop —
+   * DaySwitcher's own default), which is correct for the deal-error,
+   * locked-Day, cached-fallback and "Dealing…" branches: none of them can
+   * ever have a real overlay visible, by construction. Only the mainline
+   * render below — the one place a dialog can actually be mounted — passes
+   * `overlayOpen` in, on its OWN `<DaySwitcher>` element.
    */
   const coachOverlayUp = cells.length > 0 && !coachSeen && !isCoachOverlayDismissed();
   const launchIntroUp =
@@ -1857,7 +1859,7 @@ export default function Board() {
     celebrate != null;
 
   const daySwitcher = hasDays ? (
-    <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} inert={overlayOpen} />
+    <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} />
   ) : null;
   // The tutorial (embark/farewell) Day indexes, threaded to the Mark/proof write
   // paths so the persisted cruise-wide `firstBingoAt` excludes them (spec §
@@ -2378,8 +2380,17 @@ export default function Board() {
     <>
       {/* No itinerary line here (#300) — per the wireframe the header carries
           brand + today's port/theme and the day bar carries day name/port/
-          description, so the Card chrome opens straight with the Day strip. */}
-      {daySwitcher}
+          description, so the Card chrome opens straight with the Day strip.
+          This is the ONE render path where a modal scrim can actually be on
+          screen (CoachOverlay/LaunchIntro/ProofSheet/TallySheet/reshuffle/
+          celebration all mount only below, never from an early return), so
+          it is the only `daySwitcher` usage that passes `overlayOpen` in —
+          see the #736 comment above `overlayOpen`'s derivation. */}
+      {hasDays ? (
+        <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} inert={overlayOpen} />
+      ) : (
+        daySwitcher
+      )}
       {/* First-open coach overlay (specs/d15-coach-overlay.md, #214): mounted
           whenever Board has cells — whichever Board is the Player's first
           dealt card, not hardcoded to the embark Day. Self-gates on a

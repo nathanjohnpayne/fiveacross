@@ -2159,6 +2159,56 @@ describe('Day switcher chips inert behind an open overlay (#736)', () => {
     expect(screen.queryByText(/Showing your saved card/)).not.toBeInTheDocument();
     expect(document.querySelector('.locked-grid')).not.toBeNull();
   });
+
+  it('never strands the switcher inert from a no-overlay early return, even with coachOverlayUp-shaped state true (round-2 fix, Phase 4b finding on PR #820)', () => {
+    // The trap the FIRST version of this fix introduced: `overlayOpen` is
+    // state-derived (`coachOverlayUp` only needs `cells.length > 0` and an
+    // undismissed coach overlay — it says nothing about which BRANCH is
+    // rendering, or whether CoachOverlay is actually mounted). A retained
+    // FOREIGN board (Codex #438 — an account switch, or a stale Firestore
+    // cache, that still holds a PREVIOUS user's board) makes `cells` non-empty
+    // (`cells = board?.cells ?? []` does not check attribution) while
+    // `cellsAttributable` is false, landing this render on the "Dealing your
+    // card…" early return, not the mainline card — so if the coach overlay is
+    // still undismissed, `coachOverlayUp` reads true there with NO
+    // CoachOverlay mounted to dismiss it (that JSX exists only in the
+    // mainline return). Threading `overlayOpen` into this branch's switcher
+    // (the round-1 shape) would disable every chip with nothing on screen to
+    // dismiss: a permanent dead end. The fix: `daySwitcher` never carries
+    // `inert` in any early-return branch; only the mainline render's own
+    // instance does. No `dismissOneTimeOverlays()` here — the coach overlay
+    // is deliberately left UNDISMISSED so `coachOverlayUp` reads true.
+    const now = Date.now();
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({ index: 0, theme: 'glamiators', unlockAt: now - DAY_MS }),
+        day({ index: 1, theme: 'glamiators', unlockAt: now + DAY_MS }), // locked
+      ],
+    } as unknown as EventDoc;
+    // A board that belongs to someone ELSE: cellsAttributable is false, but
+    // `cells` still reads this foreign board's (non-empty) cells.
+    H.board = { uid: 'someone-else', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+
+    render(<Board />);
+
+    // Confirms this really is the "Dealing your card…" early-return branch
+    // under test, not the mainline card.
+    expect(screen.getByText(/Dealing your card/)).toBeInTheDocument();
+    // CoachOverlay never mounts here — no dialog exists to dismiss.
+    expect(document.querySelector('.coach-overlay')).toBeNull();
+
+    const chips = dayChips();
+    expect(chips).toHaveLength(2);
+    for (const chip of chips) expect(chip).not.toBeDisabled();
+    expect(document.querySelector('.day-switcher')).not.toHaveAttribute('inert');
+
+    // The Player is never stuck: tapping the locked Day 1 chip still
+    // switches the viewed Day, to the locked-Day preview.
+    fireEvent.click(chips[1]);
+    expect(document.querySelector('.locked-grid')).not.toBeNull();
+  });
 });
 
 // The Square's decorative glyphs are CSS-only, so their hit-testing behaviour
