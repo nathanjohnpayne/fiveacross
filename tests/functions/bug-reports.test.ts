@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BugReportInputError, nextRateState, validateBugReportInput } from '../../functions/src/bugReportCore';
-import { resolveAbuseEscalation, type ReporterLookupFirestore } from '../../functions/src/bugReports';
+import {
+  ESCALATION_LOOKUP_ATTEMPTS,
+  resolveAbuseEscalation,
+  type ReporterLookupFirestore,
+} from '../../functions/src/bugReports';
 import contract from '../../functions/src/bugReportContract.cjs';
 
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -146,10 +150,37 @@ describe('resolveAbuseEscalation (#670 — the abuse escalation gate)', () => {
     }
   });
 
+  it('does not believe the FIRST failure — a transient blip must not look like non-membership', async () => {
+    // A backend failure is recorded as `reporterInEvent: false`, which the
+    // trigger cannot tell from a confirmed non-member, so it suppresses the
+    // escalation for good. Retrying is the cheapest defence against a blip
+    // costing somebody their abuse escalation (Phase 4b P2).
+    let calls = 0;
+    const flaky: ReporterLookupFirestore = {
+      doc: (path: string) => ({
+        get: async () => {
+          if (path === 'events/med-2026') {
+            calls += 1;
+            if (calls < ESCALATION_LOOKUP_ATTEMPTS) throw new Error('backend unavailable');
+            return { exists: true, data: () => ACTIVE };
+          }
+          return { exists: true, data: () => ({ displayName: 'Ada' }) };
+        },
+      }),
+    };
+    expect(await resolveAbuseEscalation(flaky, 'med-2026', 'u1')).toEqual({ member: true, eventActive: true });
+    expect(calls).toBe(ESCALATION_LOOKUP_ATTEMPTS);
+    expect(ESCALATION_LOOKUP_ATTEMPTS).toBeGreaterThan(1);
+  });
+
   it('FAILS CLOSED on both halves when the lookup itself breaks', async () => {
     // The wrong directions here are mailing an Event's admins on the say-so of
     // somebody with no relationship to it, and claiming a delivery that did not
     // happen — so an unreadable answer is neither membership nor activeness.
+    // Only after every attempt has failed. Failing closed is still the right
+    // direction — failing open would make a Firestore outage a window for
+    // routing text into another Event's digest — and the retry above is what
+    // makes this the rare case rather than the routine one.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const db = lookup({ 'events/med-2026': { ...ACTIVE, admins: ['u1'] } }, ['events/med-2026']);
     expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: false, eventActive: false });

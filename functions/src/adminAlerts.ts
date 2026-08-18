@@ -367,10 +367,48 @@ export async function enqueueAdminAlerts(
       // call would have written is already queued.
       if (isAlreadyExists(err)) continue;
       console.error('enqueueAdminAlerts: write failed', eventId, draft.kind, draft.docId, err);
-      if (deps.rethrowWriteErrors) throw err;
+      // Only a failure a retry could actually fix escapes. A permanent one is
+      // logged and acknowledged, because redelivering it forever helps nobody.
+      if (deps.rethrowWriteErrors && isRetryableFirestoreError(err)) throw err;
     }
   }
   return written;
+}
+
+/**
+ * Is this failure worth retrying, or will it fail identically forever?
+ *
+ * A retryable trigger that rethrows EVERYTHING turns a permanent misconfiguration
+ * — a service account without Firestore access, an invalid argument — into an
+ * Eventarc redelivery loop that can never succeed, burning quota and burying the
+ * real error in noise (Phase 4b P2). These are the gRPC statuses that mean "the
+ * request itself is wrong", so retrying is pointless:
+ *
+ *   3 INVALID_ARGUMENT · 5 NOT_FOUND · 6 ALREADY_EXISTS · 7 PERMISSION_DENIED ·
+ *   9 FAILED_PRECONDITION · 11 OUT_OF_RANGE · 12 UNIMPLEMENTED · 16 UNAUTHENTICATED
+ *
+ * Everything else — UNAVAILABLE, DEADLINE_EXCEEDED, ABORTED, INTERNAL, and any
+ * code this does not recognise — is treated as retryable. The default leans that
+ * way deliberately: retrying something permanent wastes invocations, while
+ * acknowledging something transient silently loses a report of harm.
+ */
+const PERMANENT_STATUS_CODES = new Set([3, 5, 6, 7, 9, 11, 12, 16]);
+const PERMANENT_STATUS_NAMES = new Set([
+  'invalid-argument',
+  'not-found',
+  'already-exists',
+  'permission-denied',
+  'failed-precondition',
+  'out-of-range',
+  'unimplemented',
+  'unauthenticated',
+]);
+
+export function isRetryableFirestoreError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'number') return !PERMANENT_STATUS_CODES.has(code);
+  if (typeof code === 'string') return !PERMANENT_STATUS_NAMES.has(code.toLowerCase());
+  return true;
 }
 
 /** Firestore surfaces ALREADY_EXISTS as gRPC status 6; the emulator and some
@@ -566,8 +604,17 @@ export async function recordBugReportAlerts(
     console.error('recordBugReportAlerts: abuse report carries no usable eventId', reportId);
     return 0;
   }
-  // Deliberately NOT wrapped: a read failure propagates to the retryable trigger.
-  const event = (await db.doc(`events/${eventId}`).get()).data();
+  // A read failure PROPAGATES when a retry could fix it, and is acknowledged
+  // when it could not — a permission error on this path will fail identically on
+  // every redelivery, so looping on it only buries the real cause.
+  let event: Record<string, unknown> | undefined;
+  try {
+    event = (await db.doc(`events/${eventId}`).get()).data();
+  } catch (err) {
+    if (isRetryableFirestoreError(err)) throw err;
+    console.error('recordBugReportAlerts: permanent event-read failure; not retrying', eventId, reportId, err);
+    return 0;
+  }
   if (!event) {
     console.error('recordBugReportAlerts: abuse report names an unresolvable event', eventId, reportId);
     return 0;
@@ -613,10 +660,10 @@ const batchPath = (eventId: string, batchId: string) => `events/${eventId}/admin
 
 /** The frozen request's own retention bound. It holds the fully rendered email —
  *  the densest copy of user content in the system — so it is written with an
- *  `expiresAt` a week out, which is unconditionally clear of Resend's 24-hour
- *  idempotency window; see the freeze site in `sendAdminDigestForEvent` for why
- *  an unbounded deadline orphans and an inherited one can duplicate a send. It
- *  needs its own collection-group TTL policy (docs/app/phase-1-deploy.md). */
+ *  `expiresAt` of `PENDING_TTL_MS` from the freeze, which is never earlier than
+ *  any row it claims; see the freeze site in `sendAdminDigestForEvent` for why
+ *  an unbounded deadline orphans and a shorter one can duplicate a delivered
+ *  digest. Needs its own collection-group TTL policy (docs/app/phase-1-deploy.md). */
 
 /** Read back a frozen request, or `null` when there is none / it is unusable.
  *  A partial document is treated as absent: re-rendering is recoverable, while
@@ -1164,26 +1211,30 @@ export async function sendAdminDigestForEvent(
   // it — an orphaned copy of the text with nothing left pointing at it
   // (Phase 4b P1).
   //
-  // A FIXED WINDOW FROM THE FREEZE, not a deadline inherited from the rows, and
-  // the reason is a hazard the inherited version created (Phase 4b P1). A row
-  // that sat pending for most of its own lifetime and is finally processed near
-  // the end of it would hand the freeze a deadline minutes away — or already
-  // past. TTL could then remove the frozen bytes while the claimed row was still
-  // there, sending the next sweep down the missing-freeze rebuild path INSIDE
-  // Resend's 24-hour idempotency window: a 409 against the live key, or a
-  // duplicate once it closed. A week is unconditionally clear of that window.
+  // THE FREEZE MUST OUTLIVE EVERY ROW IT CLAIMS, and `PENDING_TTL_MS` from NOW is
+  // what guarantees it: the rows were created at or before this moment and carry
+  // the same span, so this deadline is never earlier than any of theirs.
   //
-  // The trade, stated rather than hidden: the batch can now outlive its rows by
-  // up to a week if their TTL fires first. That is a BOUNDED, self-collecting
-  // window rather than the indefinite orphan the earlier version had — the
-  // document reaps itself on its own deadline whether or not anything ever finds
-  // it again. Bounded-and-safe beats unbounded-or-duplicating.
+  // Both directions here are hazards, and two earlier attempts each fell into
+  // one of them (Phase 4b P1, twice). If the freeze expires EARLY relative to
+  // its claimed rows, the next sweep finds claimed rows with no frozen document
+  // and takes the missing-freeze rebuild path — re-rendering and re-sending
+  // under a key that may still be live (a 409 that strands the batch) or one
+  // whose 24-hour Resend window has closed (a second copy of a digest that was
+  // already delivered, if the original send landed but its response or clean-up
+  // was lost). Inheriting the earliest row's deadline caused the first; a fixed
+  // week caused the second, because rows live thirty days.
+  //
+  // Outliving the rows is the safe direction, and it is bounded: the document
+  // reaps itself on its own deadline whether or not anything ever finds it
+  // again, and nothing in this queue's retention story now exceeds
+  // `PENDING_TTL_MS`.
   //
   // This needs its OWN TTL policy. Firestore TTL is scoped to a collection
   // group, so the `adminAlerts` policy does not reach `adminAlertBatches`;
   // without the second policy this field is inert and the rendered email
   // persists (docs/app/phase-1-deploy.md § 1a).
-  const batchExpiresAt = new Date(now + TOMBSTONE_TTL_MS);
+  const batchExpiresAt = new Date(now + PENDING_TTL_MS);
   let outbound = payload;
   try {
     await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now, expiresAt: batchExpiresAt });

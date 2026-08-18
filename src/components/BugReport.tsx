@@ -195,9 +195,16 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (stage !== 'sheet' || event.key !== 'Tab') return;
+      // `:disabled`, not `[disabled]`. The kind radios are disabled by their
+      // parent `<fieldset disabled>` and carry no attribute of their own, so the
+      // attribute selector kept them in the list while the browser refused to
+      // focus them — and mid-submit, when Send is disabled too, the trap's idea
+      // of the boundary stopped matching anything the user could reach and Tab
+      // walked out of the modal (Phase 4b P2). The pseudo-class is what accounts
+      // for inherited disability.
       const candidates = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+          'button:not(:disabled), textarea:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
         ) ?? [],
       );
       // A RADIO GROUP IS ONE SEQUENTIAL TAB STOP, not one per radio. Browsers

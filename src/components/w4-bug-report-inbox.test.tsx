@@ -183,6 +183,45 @@ describe('W4 bug-report inbox', () => {
     expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
   });
 
+  it('keeps the focus trap on controls the browser will actually focus, mid-submit included', async () => {
+    // The radios are disabled by their parent `<fieldset disabled>` and carry no
+    // attribute of their own, so an attribute-based query kept them in the trap's
+    // list while the browser refused to focus them. Mid-submit, with Send
+    // disabled too, the boundary stopped matching anything reachable and Tab
+    // walked out of the modal (Phase 4b P2).
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    let resolveSubmit!: (result: { reportId: string; escalationEligible: boolean }) => void;
+    submitSpy.mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const textarea = await screen.findByLabelText('What happened?');
+    fireEvent.change(textarea, { target: { value: 'Something broke.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Something is broken' })).toBeDisabled());
+
+    const dialog = screen.getByRole('dialog', { name: 'Report a bug' });
+    const landed = () => document.activeElement as HTMLElement;
+    const stillTrapped = () => {
+      expect(dialog.contains(landed())).toBe(true);
+      expect(landed()).not.toBeDisabled();
+    };
+
+    // Backwards from the FIRST reachable control must wrap onto the last
+    // reachable one — not onto a disabled radio the browser would skip, and
+    // never out of the dialog.
+    textarea.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    stillTrapped();
+    expect(landed()).not.toBe(textarea);
+    // ...and forwards from there wraps back to the textarea, which is now the
+    // first control the browser will actually focus.
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(textarea).toHaveFocus();
+    stillTrapped();
+    resolveSubmit({ reportId: 'report-1', escalationEligible: false });
+    await screen.findByText('report-1');
+  });
+
   it('gives each report-kind label a real 44px tap target', () => {
     // A 13px line plus a few px of padding measures ~24px, which is the sort of
     // thing a comment can claim and the box model quietly refuse. Phone-first

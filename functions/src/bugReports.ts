@@ -10,6 +10,12 @@ export interface ReporterLookupFirestore {
   doc(path: string): { get(): Promise<{ exists?: boolean; data(): Record<string, unknown> | undefined }> };
 }
 
+/** How many times the escalation lookup is tried before giving up. A transient
+ *  Firestore blip is recorded as a confirmed non-member and permanently
+ *  suppresses the alert, so the cheapest defence is simply not to believe the
+ *  first failure (Phase 4b P2). */
+export const ESCALATION_LOOKUP_ATTEMPTS = 3;
+
 /** Both halves of the question "will this abuse report actually reach an admin?".
  *  They are separate fields because they are persisted and reported differently:
  *  membership is stored for the trigger to gate on, while activeness is only a
@@ -57,18 +63,39 @@ export async function resolveAbuseEscalation(
   db: ReporterLookupFirestore,
   eventId: string,
   uid: string,
+  attempts = ESCALATION_LOOKUP_ATTEMPTS,
 ): Promise<AbuseEscalation> {
-  try {
-    const event = (await db.doc(`events/${eventId}`).get()).data();
-    const eventActive = event?.status === 'active';
-    const admins = event?.admins;
-    if (Array.isArray(admins) && admins.includes(uid)) return { member: true, eventActive };
-    const player = await db.doc(`events/${eventId}/players/${uid}`).get();
-    return { member: player.exists ?? player.data() !== undefined, eventActive };
-  } catch (error) {
-    console.error('submitBugReport: escalation check failed', eventId, error);
-    return { member: false, eventActive: false };
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+    try {
+      const event = (await db.doc(`events/${eventId}`).get()).data();
+      const eventActive = event?.status === 'active';
+      const admins = event?.admins;
+      if (Array.isArray(admins) && admins.includes(uid)) return { member: true, eventActive };
+      const player = await db.doc(`events/${eventId}/players/${uid}`).get();
+      return { member: player.exists ?? player.data() !== undefined, eventActive };
+    } catch (error) {
+      lastError = error;
+    }
   }
+  // Every attempt failed. This is the ONE place the design cannot be honest, and
+  // saying so is better than pretending otherwise (Phase 4b P2): a backend
+  // failure is recorded as `reporterInEvent: false`, which the trigger cannot
+  // distinguish from a confirmed non-member, so the escalation is suppressed for
+  // good even though the report itself is stored.
+  //
+  // Failing closed is still the right direction — failing open would let a
+  // Firestore outage become a window for routing text into another Event's
+  // digest — and the retries above are what make the case rare rather than
+  // routine. The remaining exposure is recorded in the export, where
+  // `reporterInEvent: false` alongside `escalationEligible: false` is what an
+  // operator sees, and in `specs/w4-bug-report-inbox.md`.
+  console.error(
+    `submitBugReport: escalation check failed after ${Math.max(1, attempts)} attempt(s); failing closed`,
+    eventId,
+    lastError,
+  );
+  return { member: false, eventActive: false };
 }
 
 export async function handleSubmitBugReport(

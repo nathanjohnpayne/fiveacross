@@ -20,6 +20,7 @@ import {
   alertDocId,
   bugReportEventId,
   drainKey,
+  isRetryableFirestoreError,
   planDrain,
   alertsForWrite,
   currentRowFor,
@@ -1396,20 +1397,23 @@ describe('the frozen outbound request', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
   });
 
-  it('gives the frozen request its own week-long expiry, clear of the idempotency window', async () => {
+  it('gives the frozen request an expiry that outlives every row it claims', async () => {
     // The frozen document holds the fully rendered email — every Prompt's words
     // and every abuse description in the batch — and persists for as long as
     // delivery keeps failing. Without an expiry it outlives its own rows once
     // their TTL reaps them, with nothing left able to replay, release or delete
     // it (Phase 4b P1).
     //
-    // A FIXED week rather than a deadline inherited from the rows: inheriting
-    // would let a long-pending row hand the freeze a deadline minutes away, and
-    // a freeze reaped while its claimed row survives sends the next sweep down
-    // the missing-freeze rebuild path INSIDE Resend's 24h idempotency window.
+    // It must OUTLIVE every row it claims. A freeze reaped while its claimed rows
+    // survive sends the next sweep down the missing-freeze rebuild path, which
+    // re-renders and re-sends — either 409ing against a still-live Resend key or,
+    // past the 24h window, delivering a second copy of a digest that already
+    // went out. Two earlier attempts (an inherited deadline, then a fixed week)
+    // each fell into one side of that.
     const failing = vi.fn(async () => false);
     const LATE = 40 * 24 * 60 * 60 * 1000;
-    const db = build([alert('a1', { createdAt: 1_000 })]);
+    const oldest = 1_000;
+    const db = build([alert('a1', { createdAt: oldest })]);
     const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(failing), now: () => LATE });
     // The send failed, so the batch stays frozen — exactly the state that lasts.
     expect(result.reason).toBe('send-failed');
@@ -1417,9 +1421,11 @@ describe('the frozen outbound request', () => {
     expect(batch).toBeDefined();
     // A Date, not epoch millis, or Firestore's TTL service ignores it entirely.
     expect(batch.expiresAt).toBeInstanceOf(Date);
-    expect((batch.expiresAt as Date).getTime()).toBe(LATE + TOMBSTONE_TTL_MS);
-    // Unconditionally past the 24h idempotency window, however old the row was.
-    expect(TOMBSTONE_TTL_MS).toBeGreaterThan(24 * 60 * 60 * 1000);
+    expect((batch.expiresAt as Date).getTime()).toBe(LATE + PENDING_TTL_MS);
+    // Never earlier than the oldest claimed row's own deadline...
+    expect((batch.expiresAt as Date).getTime()).toBeGreaterThanOrEqual(oldest + PENDING_TTL_MS);
+    // ...and still comfortably past the 24h idempotency window.
+    expect(PENDING_TTL_MS).toBeGreaterThan(24 * 60 * 60 * 1000);
   });
 
   it('ABANDONS a frozen batch when the authorized recipients have changed', async () => {
@@ -2044,6 +2050,24 @@ describe('recordBugReportAlerts', () => {
     expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
   });
 
+  it('ACKNOWLEDGES a permanent failure instead of looping the retryable trigger on it', async () => {
+    // A retryable trigger that rethrows everything turns a misconfigured service
+    // account into an Eventarc redelivery loop that can never succeed, burning
+    // quota and burying the real error (Phase 4b P2).
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb();
+    const denied = Object.assign(new Error('permission denied'), { code: 7 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = (db as any).doc;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      if (path === 'events/med-2026') return { get: async () => { throw denied; } };
+      return original(path);
+    };
+    await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).resolves.toBe(0);
+    spy.mockRestore();
+  });
+
   it('PROPAGATES a failed queue write, unlike the moderation producers', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const db = reportDb();
@@ -2077,6 +2101,27 @@ describe('recordBugReportAlerts', () => {
       recordAdminAlerts(db, 'items', 'med-2026', 'i1', 'e1', undefined, ITEM({ status: 'pending' })),
     ).resolves.toBe(0);
     spy.mockRestore();
+  });
+});
+
+describe('isRetryableFirestoreError', () => {
+  it('treats request-is-wrong statuses as permanent and everything else as retryable', () => {
+    // Permanent: retrying cannot change the outcome.
+    for (const code of [3, 5, 6, 7, 9, 11, 12, 16]) {
+      expect(isRetryableFirestoreError({ code })).toBe(false);
+    }
+    for (const code of ['permission-denied', 'INVALID-ARGUMENT', 'not-found']) {
+      expect(isRetryableFirestoreError({ code })).toBe(false);
+    }
+    // Retryable: the request was fine, the backend was not.
+    for (const code of [1, 2, 4, 8, 10, 13, 14, 'unavailable', 'deadline-exceeded']) {
+      expect(isRetryableFirestoreError({ code })).toBe(true);
+    }
+    // Unknown or absent leans RETRYABLE on purpose: retrying something permanent
+    // wastes invocations, acknowledging something transient loses a report.
+    expect(isRetryableFirestoreError(new Error('no code at all'))).toBe(true);
+    expect(isRetryableFirestoreError(undefined)).toBe(true);
+    expect(isRetryableFirestoreError({ code: 999 })).toBe(true);
   });
 });
 
