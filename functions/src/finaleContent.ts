@@ -195,6 +195,109 @@ export interface LastCallOptions {
 // period produced (#266).
 export const DEFAULT_FREEZE_PHRASE = 'standings freeze at 8 a.m';
 
+/** The app's legacy-doc / malformed-value timezone default. Mirrors
+ *  `DEFAULT_TIMEZONE` in `src/data/converters.ts`. */
+export const DEFAULT_TIMEZONE = 'Europe/Rome';
+
+/**
+ * Resolve a persisted `timezone` to a usable IANA zone — a *real named* zone
+ * ('Area/Location'), never an offset id ('+02:00'), a GMT/UTC/Etc alias, or a
+ * bare abbreviation ('EST'), even though some runtimes' `Intl.DateTimeFormat`
+ * will accept those. Mirrors `normalizeTimezone` in `src/data/converters.ts`
+ * — restated here because the app and functions packages are deliberately
+ * decoupled (ADR 0011); `tests/functions/timezone-normalize-parity.test.ts`
+ * pins the two together.
+ *
+ * `runFinaleBeats` (`functions/src/unlockDay.ts`) reads the raw Firestore
+ * Event doc directly, bypassing `eventConverter` — so WITHOUT this mirror, a
+ * legacy Event doc missing `timezone` would format the freeze phrase in a
+ * different zone than the client resolves through `eventConverter` (#800
+ * Codex P2): exactly the two-rendering-paths-disagree bug this ticket exists
+ * to fix, just moved one layer down. Falls back to `DEFAULT_TIMEZONE`
+ * ('Europe/Rome') for anything invalid, matching `eventConverter`'s legacy
+ * default.
+ */
+export function normalizeTimezone(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_TIMEZONE;
+  const tz = raw.trim();
+  if (/^[+-]\d/.test(tz) || /GMT|UTC|Etc\//i.test(tz) || !tz.includes('/')) {
+    return DEFAULT_TIMEZONE;
+  }
+  try {
+    const canonical = new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone;
+    return canonical.includes('/') && !/GMT|UTC|Etc\//i.test(canonical) ? canonical : DEFAULT_TIMEZONE;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
+/**
+ * "8 a.m.", "11:30 p.m." — bare hour, minutes only off the hour, no trailing
+ * period on the meridiem (the caller's own sentence supplies the final full
+ * stop — see the `DEFAULT_FREEZE_PHRASE` note above, same reason). Mirrors the
+ * clock-formatting rule in `src/unlockCopy.ts`'s `spokenHour`, restated here
+ * because the app and functions packages are deliberately decoupled (ADR 0011).
+ */
+function spokenHour(unlockAt: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone,
+  }).formatToParts(new Date(unlockAt));
+  const part = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+  const minute = part('minute');
+  const hour = part('hour');
+  const meridiem = part('dayPeriod').toUpperCase().startsWith('P') ? 'p.m' : 'a.m';
+  return `${hour}${minute === '00' ? '' : `:${minute}`} ${meridiem}`;
+}
+
+/**
+ * "standings freeze at 8 a.m" — the Event's ACTUAL Standings Freeze, formatted
+ * in the Event's timezone (#800). Both rendering paths that quote the freeze
+ * time used to hardcode this as the literal "8 a.m." regardless of the
+ * schedule; this is the one place that now derives it, so an Event that freezes
+ * at, say, 11:00 announces "11 a.m.", not a copy-pasted 8. `runFinaleBeats`
+ * (`functions/src/unlockDay.ts`) computes this once and writes it into the
+ * `last_call` Moment's payload; `src/lastCallCopy.ts`'s client reconstruction
+ * reads that same persisted string rather than reformatting the instant
+ * itself, so the two rendering paths cannot drift apart.
+ *
+ * WHICH INSTANT (#800 landed before ADR 0011, #551, and the answer changed).
+ * The argument is the RESOLVED Standings Freeze — `times.standingsFreezeAt`,
+ * which is the configured `EventDoc.standingsFreezeAt` when the doc carries a
+ * usable one and the first ceremonial Day's `unlockAt` otherwise. It was
+ * originally the closing Day's unlock, and for both live Events those are the
+ * same instant to the millisecond (Bodega pins `standingsFreezeAt ==
+ * days[3].unlockAt`), so no shipped copy changes. It matters for the shape ADR
+ * 0011 exists for: an Event whose final morning plays competitively until an
+ * 11:00 check-out has NO closing-Day unlock that equals its freeze, and the
+ * copy must quote the freeze the standings actually observe — otherwise this
+ * function would confidently announce the wrong deadline, which is exactly the
+ * bug #800 closed, one layer up. The parameter is named for the concept rather
+ * than the Day for that reason; the exported name is kept as-is so #800's own
+ * tests and call sites are untouched.
+ *
+ * `timeZone` is passed through `normalizeTimezone` first (#800 Codex P2): a
+ * missing/malformed value resolves to `DEFAULT_TIMEZONE` ('Europe/Rome'), the
+ * SAME legacy default `eventConverter` applies client-side, not UTC — a raw
+ * Firestore Event doc read here (bypassing the converter) must still land on
+ * the zone the client would resolve to. Falls back to `DEFAULT_FREEZE_PHRASE`
+ * when the instant is missing/non-finite or formatting still throws, so a
+ * malformed schedule degrades to the historical literal rather than crashing
+ * the finale beat.
+ */
+export function freezePhraseForUnlock(freezeAt: number | undefined, timeZone: string | undefined): string {
+  if (typeof freezeAt !== 'number' || !Number.isFinite(freezeAt)) {
+    return DEFAULT_FREEZE_PHRASE;
+  }
+  try {
+    return `standings freeze at ${spokenHour(freezeAt, normalizeTimezone(timeZone))}`;
+  } catch {
+    return DEFAULT_FREEZE_PHRASE;
+  }
+}
+
 /**
  * The going-into-the-final-night last-call line posted at 20:00 on Day 9. Names
  * the current leader and their margin over the runner-up — by bingos when they

@@ -54,6 +54,13 @@ export interface EventLike {
   standingsFreezeAt?: number;
   frozenAt?: number | null;
   admins?: string[];
+  /** IANA zone the Day schedule is authored in (#800: the last-call freeze
+   *  phrase is formatted in this zone). Optional here because this reads the
+   *  raw Firestore doc directly rather than through `eventConverter` —
+   *  `freezePhraseForUnlock` runs it through `normalizeTimezone`, which
+   *  resolves a missing/malformed value to the SAME legacy default
+   *  ('Europe/Rome') `eventConverter` applies client-side. */
+  timezone?: string;
   /** ADR 0004 Phase 0 community auto-hide threshold (mirrors the live deal pool). */
   settings?: { reportHideThreshold?: number; easyMixRatio?: number };
   /** ADR 0004 Phase 0 event-scoped ban roster (#108; mirrors the live deal pool). */
@@ -69,6 +76,7 @@ import {
   lastCallStandingsCopy,
   buildPodiumPayload,
   buildMostLovedPhotoAward,
+  freezePhraseForUnlock,
   type FinalePlayer,
   type FinaleDay,
   type FinaleDayStat,
@@ -871,9 +879,21 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       let extra: Record<string, unknown> | undefined;
       try {
         const roster = await readFinaleRoster(db, eventId);
+        // #800: the Event's actual Standings Freeze, formatted in its own
+        // timezone — computed ONCE here and persisted on the Moment so the
+        // client's ban-aware reconstruction (`src/lastCallCopy.ts`) reads the
+        // same string instead of an independently hardcoded literal.
+        //
+        // ADR 0011 (#551) is what makes `times.standingsFreezeAt` the right
+        // argument rather than a closing Day's `unlockAt`: the copy must quote
+        // the instant the standings actually freeze. Identical for both live
+        // Events; different, and load-bearing, for an Event that plays
+        // competitively until a configured check-out freeze.
+        const freezePhrase = freezePhraseForUnlock(times.standingsFreezeAt, event.timezone);
         extra = {
-          line: lastCallStandingsCopy(visibleFinaleRoster(roster, event.bannedUids ?? [])),
+          line: lastCallStandingsCopy(visibleFinaleRoster(roster, event.bannedUids ?? []), { freezePhrase }),
           lastCall: {
+            freezePhrase,
             players: roster.map((p) => ({
               uid: p.uid,
               displayName: p.displayName,
