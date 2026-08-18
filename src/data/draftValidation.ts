@@ -126,7 +126,21 @@ export function isSupportedTimezone(timezone: string): boolean {
   // it, so `isoDateInTz` silently falls back to the DEVICE zone, which near a
   // date boundary can make a Day's unlock appear to match its date even though
   // the read-side normalization puts it on another day (#787 review).
-  return timezone.length > 0 && normalizeTimezone(timezone) === timezone;
+  if (timezone.length === 0) return false;
+  if (normalizeTimezone(timezone) !== timezone) return false;
+  // Surviving `normalizeTimezone` proves only that the CONVERTER preserves the
+  // string — it is a shape rule (region prefix, not UTC/Etc/an offset), not a
+  // registry lookup. A region-shaped but nonexistent zone like
+  // `America/Not_A_Zone` passes it, and then every consumer falls back to the
+  // device zone, which can make the Day-date check agree by accident and
+  // persist an Event whose whole schedule is interpreted in the wrong zone. So
+  // the runtime must also RECOGNISE it (#787 Phase 4b review).
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

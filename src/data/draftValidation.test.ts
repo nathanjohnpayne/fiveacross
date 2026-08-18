@@ -1020,3 +1020,33 @@ describe('a sparse day schedule reports, never crashes (#787 Phase 4b)', () => {
     expect(() => firstUnlockIssues(draft, NOW)).not.toThrow();
   });
 });
+
+describe('the timezone must be a zone the RUNTIME knows (#787 Phase 4b)', () => {
+  it('rejects a region-shaped zone that does not exist', () => {
+    // normalizeTimezone is a SHAPE rule (region prefix, not UTC/Etc/offset).
+    // It happily preserves a fictional zone, after which every consumer falls
+    // back to the device zone and the Day-date check can agree by accident.
+    expect(isSupportedTimezone('America/Not_A_Zone')).toBe(false);
+    expect(isSupportedTimezone('Europe/Atlantis')).toBe(false);
+  });
+
+  it('still accepts real IANA zones', () => {
+    for (const zone of ['America/Los_Angeles', 'Europe/Rome', 'Australia/Sydney']) {
+      expect(isSupportedTimezone(zone)).toBe(true);
+    }
+  });
+
+  it('reports the fictional zone as the unsupported-timezone issue', () => {
+    const issues = eventCompletenessIssues(launchableDraft({ timezone: 'America/Not_A_Zone' }));
+    expect(issues.map((i) => i.code)).toContain('event-unsupported-timezone');
+  });
+
+  it('does not run the Day-date comparison on an unusable zone', () => {
+    // The mismatch check is gated on isSupportedTimezone, so a fictional zone
+    // yields ONE issue about the zone rather than a spurious per-Day one.
+    const codes = dayCompletenessIssues(
+      launchableDraft({ timezone: 'America/Not_A_Zone' }),
+    ).map((i) => i.code);
+    expect(codes).not.toContain('day-unlock-date-mismatch');
+  });
+});
