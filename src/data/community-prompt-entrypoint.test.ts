@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { submitterStatus, type TargetableDay } from './communityPrompts';
-import { loadTrackedSuggestions, trackSuggestion, deriveMySubmissions } from './mySuggestions';
+import { loadTrackedSuggestions, trackSuggestion, deriveMySubmissions, refreshLastKnownStatuses } from './mySuggestions';
 import type { ItemDoc } from '../types';
 
 // jsdom here leaves `window.localStorage` unset (src/data/cardCache.test.ts's
@@ -205,5 +205,66 @@ describe('deriveMySubmissions (#559)', () => {
     const pendingMine = [item({ id: 'earlier', status: 'pending', text: 'a', createdAt: 100 })];
     const views = deriveMySubmissions(tracked, pendingMine, [], days, 0, true);
     expect(views.map((v) => v.id)).toEqual(['earlier', 'later']);
+  });
+
+  // Codex P2, PR #845 round 7: absence from both live queries, even once
+  // `ready`, is NOT automatically "not selected" — a submission previously
+  // OBSERVED active (lastKnownStatus set) falls back to that last-known
+  // state instead, covering both the cross-listener approval race and a
+  // later hard-hide, neither of which is a genuine rejection.
+  it('falls back to lastKnownStatus, not "not_selected", for a submission absent from both live queries but previously observed active', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'approved' as const, lastKnownDayIndex: undefined }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views).toEqual([{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'approved', dayIndex: undefined }]);
+  });
+
+  it('carries lastKnownDayIndex through the same fallback, for a submission previously observed scheduled', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 3 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views[0]).toEqual({ id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'scheduled', dayIndex: 3 });
+  });
+
+  it('still reports "not_selected" for a submission that was NEVER observed active', () => {
+    const tracked = [{ id: 'gone', text: 'Too spicy', submittedAt: 5 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
+    expect(views[0].status).toBe('not_selected');
+  });
+});
+
+describe('refreshLastKnownStatuses (#559, Codex P2, PR #845 round 7)', () => {
+  it('stamps lastKnownStatus/lastKnownDayIndex the first time a tracked entry is observed active', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5 }];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    const refreshed = refreshLastKnownStatuses(tracked, activeMine, [day(2, { unlockAt: 9999 })], 0);
+    expect(refreshed).not.toBe(tracked);
+    expect(refreshed[0]).toMatchObject({ lastKnownStatus: 'scheduled', lastKnownDayIndex: 2 });
+  });
+
+  it('returns the SAME array reference when nothing actually changed (no-op, no needless persistence)', () => {
+    const tracked = [
+      { id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 2 },
+    ];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    const refreshed = refreshLastKnownStatuses(tracked, activeMine, [day(2, { unlockAt: 9999 })], 0);
+    expect(refreshed).toBe(tracked);
+  });
+
+  it('leaves an entry untouched when it is NOT currently found in activeMine — a transient gap or a hard-hide keeps its last recorded state', () => {
+    const tracked = [
+      { id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'approved' as const, lastKnownDayIndex: undefined },
+    ];
+    const refreshed = refreshLastKnownStatuses(tracked, [], [], 0);
+    expect(refreshed).toBe(tracked);
+    expect(refreshed[0].lastKnownStatus).toBe('approved');
+  });
+
+  it('updates an entry whose observed status moved on (e.g. scheduled -> approved once its Day dealt) — dayIndex still reflects the stored target either way', () => {
+    const tracked = [
+      { id: 'a1', text: 'Wore Crocs', submittedAt: 5, lastKnownStatus: 'scheduled' as const, lastKnownDayIndex: 2 },
+    ];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    // The Day has since stamped — no longer targetable, so submitterStatus now reads 'approved'.
+    const refreshed = refreshLastKnownStatuses(tracked, activeMine, [day(2, { unlockAt: 9999, snapshotItemIds: ['a1'] })], 0);
+    expect(refreshed[0]).toMatchObject({ lastKnownStatus: 'approved', lastKnownDayIndex: 2 });
   });
 });

@@ -7,6 +7,7 @@ import {
   loadTrackedSuggestions,
   trackSuggestion,
   deriveMySubmissions,
+  refreshLastKnownStatuses,
   type MySubmissionStatus,
   type TrackedSuggestion,
 } from '../data/mySuggestions';
@@ -124,6 +125,26 @@ export default function ItemPool() {
   // reporting `'scheduled'` off a stale `Date.now()` until some UNRELATED
   // render happens to fire.
   const now = useNextUnlockClock(event?.days);
+  // Persist each tracked entry's last-observed-active status (#559, Codex P2,
+  // PR #845 round 7): once a submission is actually SEEN in `activeMine`,
+  // remember its status/target so a LATER render where it's transiently
+  // absent (an admin approving mid-session — the pending and active
+  // listeners update independently) or permanently absent (an admin
+  // hard-hiding it after approval, which is unreadable to the submitter same
+  // as a rejection) keeps reporting that last-known state instead of
+  // flashing/settling into a false "not selected" — see
+  // `deriveMySubmissions`'s own doc comment. `refreshLastKnownStatuses`
+  // returns the SAME array reference when nothing changed, so this only
+  // writes when a tracked entry's observed status genuinely moved.
+  useEffect(() => {
+    const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
+    if (refreshed === tracked || !uid) return;
+    for (let i = 0; i < refreshed.length; i++) {
+      if (refreshed[i] !== tracked[i]) trackSuggestion(EVENT_ID, uid, refreshed[i]);
+    }
+    setTracked([...refreshed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days ?? []` (a fresh [] literal each render); this effect's own `setTracked` is what re-evaluates it on every genuine change to `tracked`/`activeMine`/`now`, matching the established pattern elsewhere in this file.
+  }, [tracked, activeMine, now, uid]);
   // `ready` (#559, Codex P2 rounds 1 + 2): BOTH live queries must have
   // delivered a SERVER-CONFIRMED snapshot — not merely cleared `loading` —
   // before an absent tracked id can honestly mean "not selected". `loading`

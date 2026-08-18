@@ -30,6 +30,20 @@ export interface TrackedSuggestion {
   id: string;
   text: string;
   submittedAt: number;
+  // The last status/target THIS device actually observed the submission
+  // hold — 'pending' is never stored here, only a genuinely resolved
+  // ('scheduled' | 'approved') state (#559, Codex P2, PR #845 round 7). See
+  // `deriveMySubmissions`'s doc comment for why this exists: without it, two
+  // DIFFERENT gaps both misreport as `'not_selected'` — a submission
+  // transiently missing from both live queries between the pending listener
+  // dropping it and the active listener picking it up (an admin approving
+  // while the panel is open), and a submission an admin later hard-hides
+  // AFTER approval (`hideItem`, which is unreadable to the submitter same as
+  // a rejection, but is not one). Once observed active, the submission keeps
+  // reporting its last-known state instead of flashing/settling into
+  // "not selected" for either reason.
+  lastKnownStatus?: SubmitterStatus;
+  lastKnownDayIndex?: number;
 }
 
 /** Cap on locally-tracked submissions per Player per Event — plenty for the
@@ -112,6 +126,23 @@ export interface MySubmissionView {
  * id resolved by neither query is OMITTED from the result entirely — never
  * defaulted to a guessed state — and reappears correctly once both queries
  * have delivered their first snapshot.
+ *
+ * Once `ready`, absence from BOTH queries still isn't automatically
+ * `'not_selected'` (Codex P2, PR #845 round 7): two DIFFERENT gaps can put a
+ * genuinely-approved submission there too. (1) `pendingMine`/`activeMine`
+ * are independent listeners — if an admin approves while this panel is
+ * open, the pending-removal snapshot can land before the active-addition
+ * one, leaving the id in NEITHER query for one transient render. (2) an
+ * admin can hard-hide an ALREADY-approved Prompt (`hideItem`) later, which
+ * leaves the `status == 'active'` query permanently — hidden is unreadable
+ * to the submitter same as rejected, but is a different fact. Falling back
+ * to `t.lastKnownStatus` (set by `refreshLastKnownStatuses` below, once this
+ * device has actually SEEN the submission active) turns both gaps into
+ * "still shows its last known state" instead of a false demotion — case (1)
+ * self-heals on the next snapshot; case (2) has no way to distinguish from
+ * the client at all, and "still approved" is the honest last-known fact.
+ * Only a submission NEVER observed active falls all the way to
+ * `'not_selected'`.
  */
 export function deriveMySubmissions(
   tracked: readonly TrackedSuggestion[],
@@ -134,6 +165,7 @@ export function deriveMySubmissions(
     seen.add(t.id);
     const active = activeMine.find((it) => it.id === t.id);
     if (!active && !ready) continue;
+    const fallbackStatus: MySubmissionStatus = t.lastKnownStatus ?? 'not_selected';
     views.push({
       id: t.id,
       // The authoritative text once approved (Codex P2, PR #845): an admin
@@ -143,10 +175,43 @@ export function deriveMySubmissions(
       // (not-selected) case, where no authoritative copy is available at all.
       text: active ? active.text : t.text,
       submittedAt: t.submittedAt,
-      status: active ? submitterStatus(active, days, now) : 'not_selected',
-      dayIndex: active && typeof active.targetDayIndex === 'number' ? active.targetDayIndex : undefined,
+      status: active ? submitterStatus(active, days, now) : fallbackStatus,
+      dayIndex: active
+        ? typeof active.targetDayIndex === 'number'
+          ? active.targetDayIndex
+          : undefined
+        : t.lastKnownDayIndex,
     });
   }
 
   return views.sort((a, b) => a.submittedAt - b.submittedAt);
+}
+
+/**
+ * Refresh each tracked entry's `lastKnownStatus`/`lastKnownDayIndex` from the
+ * CURRENT `activeMine` query, for the caller to persist (`trackSuggestion`)
+ * whenever an entry actually changes. Deliberately does nothing for an entry
+ * NOT currently found in `activeMine` — a transiently-absent or
+ * genuinely-hidden entry keeps whatever it last recorded, which is the whole
+ * point (see `deriveMySubmissions`'s doc comment). Returns the SAME array
+ * reference when nothing changed, so a caller can cheaply skip persisting
+ * with a straight `!==` check.
+ */
+export function refreshLastKnownStatuses(
+  tracked: readonly TrackedSuggestion[],
+  activeMine: readonly ItemDoc[],
+  days: readonly TargetableDay[],
+  now: number,
+): readonly TrackedSuggestion[] {
+  let changed = false;
+  const next = tracked.map((t) => {
+    const active = activeMine.find((it) => it.id === t.id);
+    if (!active) return t;
+    const status = submitterStatus(active, days, now);
+    const dayIndex = typeof active.targetDayIndex === 'number' ? active.targetDayIndex : undefined;
+    if (t.lastKnownStatus === status && t.lastKnownDayIndex === dayIndex) return t;
+    changed = true;
+    return { ...t, lastKnownStatus: status, lastKnownDayIndex: dayIndex };
+  });
+  return changed ? next : tracked;
 }
