@@ -79,9 +79,24 @@ export type ApprovableItem = Pick<ItemDoc, 'id'> & Partial<Pick<ItemDoc, 'target
  * Firestore retries and the routing is recomputed against the schedule that
  * actually won. Without that, an approval could commit "scheduled for Day 4"
  * microseconds after Day 4 froze, and the Prompt would silently be retained
- * while the organiser was told it was placed. The transaction closes that window
+ * while the organiser was told it was placed. The transaction narrows that window
  * rather than mutating anything on the Day side — the already-frozen Day is left
  * strictly alone either way, which is the invariant that matters most here.
+ *
+ * What the two transactions do and do not guarantee, precisely, because the
+ * boundary is easy to overstate in both directions (Phase 4b, PR #812). The
+ * snapshot side is NOT the loose half: `stampDaySnapshot` reads its active-item
+ * query THROUGH its own transaction, in the same read set as the `tx.update`
+ * that stamps the Day, so the frozen ids and the committed pool always describe
+ * one Firestore state. What neither transaction can promise is the phantom edge
+ * — a row flipping pending→active is not a change to a document the scheduler's
+ * `status == 'active'` query matched when it ran — so the residual risk is that
+ * an approval landing in that instant is reported as placed on a Day whose
+ * snapshot does not list it. That is a MISREPORT of which Day, and it is the
+ * worst case: the Day itself is safe by construction, because the stamp is
+ * written once, re-confirmed as absent inside the scheduler's transaction, and
+ * never overwritten. Making even the misreport impossible means approving on the
+ * server clock, which is #813, not a stronger client-side transaction.
  *
  * Bulk shares ONE transaction and one `approvedAt` instant (the pre-existing
  * `bulkApproveItems` contract: one click is one approval event). That also keeps
