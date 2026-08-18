@@ -755,6 +755,51 @@ describe('AuthContext deal-error hardening', () => {
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
       expect(mocks.attestAdult).not.toHaveBeenCalled();
     });
+
+    // Codex P2 on #836: the durable record must NOT be cleared merely
+    // because a mount read it — only a terminal outcome (a completed
+    // redirect, or a genuine getRedirectResult rejection) may clear it. A
+    // mount that reads a live record but reaches neither (e.g. it reloads
+    // before onAuthStateChanged ever publishes a user) must leave the record
+    // standing for the next mount to pick up — that reload-survival is the
+    // entire reason the record exists.
+    it('leaves a live pending record standing when a mount reads it but neither completion signal fires', async () => {
+      const at = String(Date.now());
+      localStorage.setItem(REDIRECT_PENDING_KEY, at);
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // No signInUser() — onAuthStateChanged never publishes a user in this
+      // mount, simulating a reload/crash before Firebase's own restore lands.
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(at);
+    });
+
+    it('clears the pending record once the redirect actually completes (signal a)', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
+    });
+
+    it('clears the pending record on a genuine getRedirectResult rejection for a mount that knows it was pending', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockRejectedValueOnce(
+        Object.assign(new Error('missing initial state'), { code: 'auth/missing-initial-state' }),
+      );
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
+    });
   });
 
   it('hands a signed-out web.app boot to firebaseapp.com before rendering a second sign-in screen', async () => {

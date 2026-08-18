@@ -202,8 +202,14 @@ function peekPendingRedirectAttestation(): boolean {
  * lost the receipt." This record is the second, independent signal the
  * redirect-return effect races against `getRedirectResult`: written at
  * redirect START (`signIn`, alongside `markCollectedAcknowledgement`) and
- * consumed at most once per mount, by whichever of the two signals fires
- * first — see `completeRedirectReturn` below.
+ * cleared only on a TERMINAL outcome for the transaction it tracks — either
+ * completion signal succeeding, or a genuine getRedirectResult rejection
+ * (see `completeRedirectReturn` and the redirect-result effect below) —
+ * never merely because a mount READ it. A mount that reads it live but never
+ * reaches a terminal outcome (e.g. it reloads before onAuthStateChanged
+ * publishes the restored user) must leave it standing for the NEXT mount to
+ * pick up; that durability across a reload is the entire reason this record
+ * exists, so consuming it eagerly on read would defeat it (Codex P2 on #836).
  */
 export const REDIRECT_PENDING_KEY = 'gcb.signin.redirectPending';
 const REDIRECT_PENDING_TTL_MS = SIGNIN_ADULT_ACK_TTL_MS;
@@ -224,27 +230,14 @@ function clearRedirectPending(): void {
   }
 }
 
-// Read WITHOUT consuming, TTL-checked — used by the `redirectReturnPending`
+// Read WITHOUT consuming, TTL-checked. Used both by the `redirectReturnPending`
 // guard's mount-time initializer (#357) alongside the sessionStorage peek, so
-// that guard also survives on the surface that loses the marker.
+// that guard also survives on the surface that loses the marker; and by
+// `consumeRedirectContextOnce` below, which deliberately never clears this
+// specific record on read (Codex P2 on #836) — see its own comment for why.
 function peekRedirectPending(now: number = Date.now()): boolean {
   try {
     const raw = localStorage.getItem(REDIRECT_PENDING_KEY);
-    const at = Number(raw);
-    return Number.isFinite(at) && at > 0 && now - at <= REDIRECT_PENDING_TTL_MS;
-  } catch {
-    return false;
-  }
-}
-
-// Consume (read + clear) exactly once. An expired or absent record reads as
-// NOT pending — same fail-toward-re-prompt direction as the ack record: an
-// abandoned redirect from days ago must not "complete" an unrelated later
-// sign-in via the onAuthStateChanged signal.
-function consumeRedirectPending(now: number = Date.now()): boolean {
-  try {
-    const raw = localStorage.getItem(REDIRECT_PENDING_KEY);
-    clearRedirectPending();
     const at = Number(raw);
     return Number.isFinite(at) && at > 0 && now - at <= REDIRECT_PENDING_TTL_MS;
   } catch {
@@ -1592,11 +1585,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (u) await persistAttestation(u);
   }, [persistAttestation]);
 
-  // Consumes the sessionStorage marker, the collected-acknowledgement record,
-  // and the durable redirect-pending record EXACTLY once per mount, regardless
-  // of which of the two completion signals below reaches it first. Idempotent:
+  // Reads the sessionStorage marker, the collected-acknowledgement record, and
+  // the durable redirect-pending record EXACTLY once per mount, regardless of
+  // which of the two completion signals below reaches it first. Idempotent:
   // whichever signal loses the race gets the SAME already-read values back
-  // instead of re-reading (and re-clearing) storage the winner already cleared.
+  // instead of re-reading storage the winner already touched.
+  //
+  // The pending record is PEEKED here, not consumed (Codex P2 on #836): this
+  // effect runs, and calls this, before EITHER completion signal is
+  // guaranteed to fire in this mount — if getRedirectResult resolves null and
+  // the page reloads, crashes, or is replaced before onAuthStateChanged
+  // publishes the restored user, clearing the record here would erase the
+  // one thing a LATER mount could still use to complete the same redirect via
+  // signal (b). It is cleared only on an actual terminal outcome:
+  // `completeRedirectReturn` below (either signal completed), or a genuine
+  // getRedirectResult rejection for a mount that already knows it was
+  // pending (see the `.catch()` below). Left alone otherwise, it simply
+  // expires on its own TTL.
   const redirectContextRef = useRef<{
     appOwnedRedirect: boolean;
     acknowledged: boolean;
@@ -1607,7 +1612,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       redirectContextRef.current = {
         appOwnedRedirect: consumePendingRedirectAttestation(),
         acknowledged: consumeCollectedAcknowledgement(),
-        pending: consumeRedirectPending(),
+        pending: peekRedirectPending(),
       };
     }
     return redirectContextRef.current;
@@ -1638,6 +1643,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     (u: User) => {
       if (redirectCompletionLatchRef.current) return;
       redirectCompletionLatchRef.current = true;
+      // The redirect this record was tracking has now definitively completed
+      // — safe to clear (Codex P2 on #836). A no-op if it was already absent
+      // or expired.
+      clearRedirectPending();
       track('login', { method: 'google' });
       // Persist ONLY an acknowledgement that was actually collected (Phase 4b
       // round 4). The posture is read when the redirect STARTS, not when it
@@ -1665,7 +1674,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
-    const { appOwnedRedirect } = consumeRedirectContextOnce();
+    const { appOwnedRedirect, pending } = consumeRedirectContextOnce();
 
     void getRedirectResult(auth)
       .then((result) => {
@@ -1674,6 +1683,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch((err: unknown) => {
         if (appOwnedRedirect) trackSignInFailure(err);
+        // A genuine getRedirectResult rejection is a terminal outcome for the
+        // transaction the durable record was tracking (Codex P2 on #836) —
+        // gated on `pending`, not `appOwnedRedirect`, since it is the durable
+        // record's own liveness that decides whether THIS rejection is its
+        // terminal event (the marker can already be lost while the durable
+        // record still stands). Clearing here only affects a LATER mount;
+        // signal (b) can still complete THIS mount from the cached value
+        // above if onAuthStateChanged has not fired yet.
+        if (pending) clearRedirectPending();
       })
       .finally(() => {
         // The app-owned redirect return has settled — release the signed-out
