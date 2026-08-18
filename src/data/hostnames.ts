@@ -13,6 +13,25 @@ import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } fro
 // module is the only part that touches the network.
 
 const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
+
+/**
+ * The document key for a hostname — lowercased, and with a trailing root dot
+ * removed.
+ *
+ * The dot matters because the edge Event router removes it too
+ * (`worker/src/host.ts`, specs/event-router.md). `bodega-bay.fiveacross.app.`
+ * and `bodega-bay.fiveacross.app` are the same DNS name, so the Worker admits
+ * the dotted form and proxies the app shell — but the browser keeps the dot in
+ * `window.location.hostname`. Lowercasing alone would then send the client
+ * looking for a `hostnames/bodega-bay.fiveacross.app.` document that does not
+ * exist, and the guest would get EventNotFound on a host the edge had just
+ * declared servable. Two seams resolving one address must not disagree about
+ * what its key is (#839, Codex).
+ */
+export function hostnameKey(hostname: string): string {
+  const lowered = hostname.trim().toLowerCase();
+  return lowered.endsWith('.') ? lowered.slice(0, -1) : lowered;
+}
 // The Event chosen before React mounts. The live hostname watcher is an update
 // channel, not an Event switch, so its preview must keep agreeing with this
 // bootstrap result. `null` keeps the watcher test seam usable on its own; the
@@ -49,7 +68,7 @@ let bootstrappedEventId: string | null = null;
  * which the resolver renders as not-found rather than as a failed read.
  */
 export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
-  const snap = await getDocFromServer(doc(db, 'hostnames', hostname.toLowerCase()));
+  const snap = await getDocFromServer(doc(db, 'hostnames', hostnameKey(hostname)));
   if (!snap.exists()) return null;
   return coerceHostnameDoc(snap.data() as Partial<HostnameDoc>, hostname);
 }
@@ -258,7 +277,7 @@ export function watchAdultContent(
   resolvedEventId: string | null = bootstrappedEventId,
 ): () => void {
   const unsubscribe = onSnapshot(
-    doc(db, 'hostnames', hostname.toLowerCase()),
+    doc(db, 'hostnames', hostnameKey(hostname)),
     (snap) => {
       // Server-backed snapshots prove; cached ones may only ever RAISE.
       const proven = snap.metadata.fromCache === false;

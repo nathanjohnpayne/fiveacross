@@ -66,6 +66,20 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
     });
   });
 
+  it('strips a trailing root dot, so the client agrees with the edge router about the key', async () => {
+    // `bodega-bay.fiveacross.app.` and `bodega-bay.fiveacross.app` are the same
+    // DNS name. The edge Event router normalises the dot away and serves the
+    // app shell (worker/src/host.ts, #839), but the browser keeps the dot in
+    // `window.location.hostname` — so lowercasing alone sent the client looking
+    // for a document that does not exist, and the guest got EventNotFound on a
+    // host the edge had just declared servable.
+    mocks.getDocFromServer.mockResolvedValue(snap(DOC));
+    await fetchHostnameDoc('Bodega-Bay.VacayBingo.com.');
+    expect(mocks.getDocFromServer.mock.calls[0][0]).toMatchObject({
+      path: 'hostnames/bodega-bay.vacaybingo.com',
+    });
+  });
+
   it('reads a missing doc, a missing eventId and an unknown status all as null', async () => {
     for (const data of [null, { ...DOC, eventId: '' }, { ...DOC, status: 'weird' }, { ...DOC, status: undefined }]) {
       mocks.getDocFromServer.mockResolvedValue(snap(data));

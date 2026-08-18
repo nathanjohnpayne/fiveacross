@@ -62,7 +62,15 @@ function cloudflareCache(cache: Cache, ctx: ExecutionContext): HostnameCache {
       ctx.waitUntil(cache.put(keyFor(host), stored));
     },
     async drop(host) {
-      ctx.waitUntil(cache.delete(keyFor(host)));
+      // AWAITED, unlike `write`, and the asymmetry is load-bearing.
+      // `resolveHost` awaits `drop` specifically so a mapping revalidated away
+      // cannot be resurrected: a concurrent request whose own revalidation
+      // fails would otherwise still read the old active envelope and serve a
+      // disabled Event. Handing the deletion to `waitUntil` and resolving
+      // immediately would make that await mean nothing. A write only benefits
+      // the NEXT request, so it may lag; a deletion is a correctness barrier
+      // for requests already in flight.
+      await cache.delete(keyFor(host));
     },
   };
 }

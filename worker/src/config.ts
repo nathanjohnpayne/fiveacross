@@ -35,12 +35,24 @@ export const DEFAULT_LOOKUP_TIMEOUT_MS = 2_000;
 export const DEFAULT_CACHE_TTL_MS = 300_000;
 export const DEFAULT_ROUTER_VERSION = 'v1';
 
-/** A malformed or absent numeric binding falls back rather than propagating
- *  `NaN`, which would make every timeout comparison silently false. */
+/**
+ * A malformed or absent numeric binding falls back rather than propagating
+ * `NaN`, which would make every timeout comparison silently false.
+ *
+ * The WHOLE trimmed string must be digits — `Number.parseInt` alone is not
+ * enough, because it accepts a valid prefix and discards the rest. That turns
+ * `750.5` into `750` and `2000ms` into `2000`, which merely look like the
+ * operator got away with it, and turns `1e3` into **1** — a one-millisecond
+ * lookup timeout that fails closed on every uncached host while the binding
+ * reads as if it said one second. Silently honouring a prefix of a value
+ * nobody wrote is worse than ignoring the value.
+ */
 function positiveInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  const trimmed = raw.trim();
+  if (!/^[0-9]+$/.test(trimmed)) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 /**

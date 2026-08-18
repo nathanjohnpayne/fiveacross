@@ -154,7 +154,14 @@ export async function resolveHost(
   // data rather than a value this module wrote.
   const raw = await swallow<unknown>(() => deps.cache.read(host), null);
   const cached = isCacheEnvelope(raw) ? raw : null;
-  const fresh = cached !== null && deps.now() - cached.fetchedAt < config.cacheTtlMs;
+  // Age must be non-negative as well as under the TTL. An envelope stamped in
+  // the FUTURE — by a clock-skewed writer, or left by another deployment on
+  // the shared cache this module treats as untrusted — yields a negative age,
+  // which would satisfy a bare `< ttl` test and pin an obsolete mapping for
+  // the cache's full retention window without ever revalidating. A stamp we
+  // cannot have written is evidence of nothing, so it revalidates.
+  const age = cached === null ? -1 : deps.now() - cached.fetchedAt;
+  const fresh = cached !== null && age >= 0 && age < config.cacheTtlMs;
 
   if (fresh && cached !== null) {
     return decide(cached.record, expectedSlug, false);

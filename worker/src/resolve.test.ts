@@ -152,6 +152,24 @@ describe('resolveHost — the cache', () => {
     expect(cache.store.get(HOST)?.fetchedAt).toBe(1_000_000);
   });
 
+  it('revalidates an envelope stamped in the FUTURE rather than treating it as eternally fresh', async () => {
+    // A negative age satisfies a bare `< ttl` test, so a clock-skewed writer —
+    // or another deployment on this shared cache — could pin an obsolete
+    // mapping for the whole retention window without ever revalidating.
+    const cache = memoryCache({
+      [HOST]: {
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000 + 60_000,
+        record: { eventId: 'obsolete-event', status: 'active', slug: 'bodega-bay' },
+      },
+    });
+    const fetchImpl = respondWith(ACTIVE);
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
+    expect(fetchImpl).toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(cache.store.get(HOST)?.fetchedAt).toBe(1_000_000);
+  });
+
   it('reads a version-drifted envelope as a miss rather than coercing it', async () => {
     const cache = memoryCache({
       [HOST]: {

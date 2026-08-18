@@ -46,6 +46,23 @@ describe('routerConfigFromEnv', () => {
     },
   );
 
+  it.each(['1e3', '750.5', '2000ms', '2_000', '0x10', ' 12 34 '])(
+    'refuses the PREFIX of a malformed binding (%s) rather than silently honouring it',
+    (raw) => {
+      // `Number.parseInt` accepts a valid prefix and discards the rest. `750.5`
+      // becoming 750 merely looks like getting away with it; `1e3` becoming 1
+      // is a ONE-MILLISECOND lookup timeout that fails closed on every uncached
+      // host while the binding reads as if it said one second.
+      expect(routerConfigFromEnv({ ...FULL, LOOKUP_TIMEOUT_MS: raw }).lookupTimeoutMs).toBe(
+        DEFAULT_LOOKUP_TIMEOUT_MS,
+      );
+    },
+  );
+
+  it('accepts a plain integer with incidental surrounding whitespace', () => {
+    expect(routerConfigFromEnv({ ...FULL, LOOKUP_TIMEOUT_MS: ' 1500 ' }).lookupTimeoutMs).toBe(1500);
+  });
+
   it('turns an UNBOUND string binding into an empty string, never undefined', () => {
     // The P1 this closes. `wrangler.toml` deliberately does not commit
     // FIREBASE_API_KEY, so "deployed but not yet configured" is a state the
