@@ -1,5 +1,7 @@
 import { cellsFromData, cellsToMap } from '../game/cells';
 import { normalizePool } from '../game/pool';
+import { scoringForDay } from '../game/scoring';
+import { standingsFreezeAtFor } from '../game/logic';
 import type {
   FirestoreDataConverter,
   QueryDocumentSnapshot,
@@ -85,6 +87,14 @@ export function migrateDayFields(raw: unknown): DayDef {
     placeEmoji:
       typeof portEmoji === 'string' ? portEmoji : typeof day.placeEmoji === 'string' ? day.placeEmoji : '',
     pool: migratePool(day.pool),
+    // The Scoring Policy (ADR 0011) resolves on read the same way the pool
+    // does. Docs written before the field existed — every Day of both live
+    // Events — carry no key, and `scoringForDay` derives them from the closing
+    // pool, which is precisely the comparison the scoring paths used to make.
+    // Filling it here is a convenience for consumers reading a converted doc;
+    // it is NOT the contract, because raw-hydrated paths bypass this converter
+    // entirely — those resolve through `scoringForDay` at comparison time.
+    scoring: scoringForDay(day),
   } as DayDef;
 }
 
@@ -151,6 +161,7 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
   toFirestore: (data) => data as DocumentData,
   fromFirestore: (snap: QueryDocumentSnapshot) => {
     const data = snap.data() as EventDoc;
+    const days = Array.isArray(data.days) ? data.days.map(migrateDayFields) : [];
     return {
       ...data,
       claimMode: migrateClaimMode(data.claimMode),
@@ -169,8 +180,22 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
       // reads through the #566 field migration (`migrateDayFields`) so a doc
       // persisting the pre-rename `port`/`portEmoji` resolves to the current
       // `place`/`placeEmoji` contract.
-      days: Array.isArray(data.days) ? data.days.map(migrateDayFields) : [],
+      days,
       timezone: normalizeTimezone(data.timezone),
+      // The CONFIGURED Standings Freeze (ADR 0011). Absent on every doc written
+      // before the field existed, so resolve it here the same way the runtime
+      // helper does — a stored instant wins, else the first ceremonial Day's
+      // `unlockAt`, which is the moment the old pool-scanning derivation froze
+      // at. Both live Events therefore freeze at exactly the instant they
+      // always did while reading a stated field. `standingsFreezeAtFor` is
+      // still the contract every consumer holds (raw-hydrated event re-reads
+      // never pass through here); resolving on the converted doc just means a
+      // surface reading `event.standingsFreezeAt` directly is never wrong. The
+      // already-migrated `days` go in, so the derivation sees the same
+      // normalized pools every other consumer does.
+      standingsFreezeAt:
+        standingsFreezeAtFor({ standingsFreezeAt: data.standingsFreezeAt, days, frozenAt: data.frozenAt }) ??
+        undefined,
       // The Event date window reads through the #566 rename too: `startsOn`/
       // `endsOn`, with the legacy `sailStart`/`sailEnd` as read fallbacks.
       ...migrateEventWindow(data as unknown as Record<string, unknown>),

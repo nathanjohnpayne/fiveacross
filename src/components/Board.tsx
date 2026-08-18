@@ -34,7 +34,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -59,7 +59,7 @@ import DaySwitcher, { defaultViewedIndex } from './DaySwitcher';
 import TutorialBanner, { TutorialTag } from './TutorialBanner';
 import { formatUnlockAt, unlockCaption } from '../unlockCopy';
 import FarewellPodium from './FarewellPodium';
-import { farewellPinIndex } from '../data/finale';
+import { finalePinIndex, finaleDayIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
 import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
@@ -849,7 +849,21 @@ export default function Board() {
   // independently discovered in all three hand-copies of this pattern); see
   // `useNextUnlockClock`'s own doc comment for the clamp and the `event?.days`
   // (not the `days` local below, a fresh `[]` literal while unmigrated) choice.
-  const now = useNextUnlockClock(event?.days);
+  //
+  // The Event's CONFIGURED Standings Freeze is a boundary in its own right (ADR
+  // 0011, Codex P1 on PR #841). It used to be redundant — the freeze WAS a Day's
+  // `unlockAt`, so the unlock timers already covered it — but an Event that
+  // plays competitively until a stated check-out freeze has a boundary that
+  // coincides with no Day unlock at all. Without it, an open (or offline) Card
+  // tab never re-evaluates `statsFrozen` when the freeze arrives, and a
+  // post-freeze tap keeps writing root totals until some unrelated render
+  // happens to land. `standingsFreezeAt` resolves to a ceremonial Day's unlock
+  // when nothing is configured, so on both live Events this adds a boundary the
+  // list already had and nothing changes. Folded into the shared hook as its
+  // `extraBoundary` (PR #841/#845 merge) rather than a second hand-rolled
+  // timer, so this Board-only boundary gets the same 32-bit clamp for free.
+  const scheduledFreezeAt = standingsFreezeAtFor(event);
+  const now = useNextUnlockClock(event?.days, scheduledFreezeAt);
   // Lazy per-Day dealing (#246, daily-cards-spec § "Unlock mechanics"): on opening
   // an UNLOCKED Day whose snapshot is stamped (`dayDealState === 'ready'`) that has
   // no Day Card for this Player yet, deal it from that Day's frozen snapshot
@@ -1731,11 +1745,18 @@ export default function Board() {
   // never override a Player's own later chip tap (adjust-during-render, mirroring
   // `edgeStateUid` above). Once the cruise has ended (`frozenAt` set + farewell
   // Day unlocked) the farewell Day — podium included — is pinned as the default
-  // view (#217, `farewellPinIndex`); before the freeze it falls back to today's Day.
+  // view (#217, `finalePinIndex`); before the freeze it falls back to today's Day.
   if (!viewedIndexInitialized.current && hasDays) {
     viewedIndexInitialized.current = true;
     const initNow = Date.now();
-    setViewedIndex(farewellPinIndex(days, event?.frozenAt, initNow) ?? defaultViewedIndex(days, initNow));
+    // The pin and the podium's mount gate MUST resolve the same boundary
+    // (Phase 4b P1): the mount reads `scheduledFreezeAt`, so a pin that
+    // re-derived its own would send a returning Player to a Day that renders no
+    // podium — the exact split `finaleDayIndex` was introduced to remove.
+    setViewedIndex(
+      finalePinIndex(days, event?.frozenAt, initNow, event?.standingsFreezeAt) ??
+        defaultViewedIndex(days, initNow),
+    );
   }
   const viewedDay = hasDays ? (days[viewedIndex] ?? days[0]) : undefined;
   // The viewed Day's deal state (#246), folding the schedule + clock + the
@@ -2463,16 +2484,24 @@ export default function Board() {
           />
         )}
         {/* The farewell podium (#217, daily-cards-spec § "Farewell view"):
-            shown on the farewell Day once the standings freeze (`frozenAt`
+            shown on the FINALE Day once the standings freeze (`frozenAt`
             set), ABOVE the goodbye banner below — this ticket owns the
             podium and its stacking order; the goodbye copy is
-            TutorialBanner's. `buildPodium` freezes out the farewell Day's
-            own marks, so a post-freeze goodbye tap never moves the podium.
+            TutorialBanner's. `buildPodium` freezes out every ceremonial
+            Day's own marks, so a post-freeze goodbye tap never moves the
+            podium.
+
+            The mount gate reads `finaleDayIndex` — the SAME resolver the
+            default-view pin uses (ADR 0011) — rather than re-inferring the
+            Day from `viewedDay.pool === 'closing'`. Those two disagreed for
+            any Event whose ceremonial Day is on another pool, or which has
+            none at all: the pin sent a returning Player to a Day that then
+            rendered no podium and no share action (Codex P1, PR #841).
             The roster is ban-filtered first (Leaderboard.tsx parity): the
             podium is a public leaderboard-like surface, so a banned Player
             must never surface as champion, First to BINGO, or a daily
             honor (Codex #244). */}
-        {viewedDay?.pool === 'closing' && event?.frozenAt != null && (
+        {hasDays && viewedIndex === finaleDayIndex(days, scheduledFreezeAt) && event?.frozenAt != null && (
           <FarewellPodium
             players={players.filter((p) => !isBanned(p.uid, event?.bannedUids ?? []))}
             days={days}

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   isDueForSnapshot,
   daysDueForSnapshot,
@@ -329,12 +329,12 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
   it('anchors last-call to Day 9 08:00 + 12h = 20:00 and freeze to the farewell unlock', () => {
     const t = finaleTimes(mainDays())!;
     expect(t.lastCallAt).toBe(D9_UNLOCK + LAST_CALL_LEAD_MS);
-    expect(t.farewellUnlockAt).toBe(D10_UNLOCK);
+    expect(t.standingsFreezeAt).toBe(D10_UNLOCK);
     expect(t.lastCallDayIndex).toBe(8);
     expect(t.podiumDayIndex).toBe(9);
   });
 
-  it('returns null when there is no farewell Day (a non-Phase-1.5 event)', () => {
+  it('returns null when the Event has neither a ceremonial Day nor a configured freeze', () => {
     expect(finaleTimes([{ index: 0, pool: 'main', unlockAt: 1 }])).toBeNull();
   });
 
@@ -343,31 +343,31 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
     const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
     expect(finaleActions(t, t.lastCallAt, base).postLastCall).toBe(true);
     expect(finaleActions(t, t.lastCallAt - 1, base).postLastCall).toBe(false); // before 20:00
-    expect(finaleActions(t, t.farewellUnlockAt, base).postLastCall).toBe(false); // freeze supersedes
+    expect(finaleActions(t, t.standingsFreezeAt, base).postLastCall).toBe(false); // freeze supersedes
     expect(finaleActions(t, t.lastCallAt, { ...base, lastCallPosted: true }).postLastCall).toBe(false); // dedup
   });
 
   it('freezes at/after the farewell unlock only while not yet frozen', () => {
     const t = finaleTimes(mainDays())!;
     const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
-    expect(finaleActions(t, t.farewellUnlockAt, base).freeze).toBe(true);
-    expect(finaleActions(t, t.farewellUnlockAt - 1, base).freeze).toBe(false);
-    expect(finaleActions(t, t.farewellUnlockAt, { ...base, frozenAt: 123 }).freeze).toBe(false);
+    expect(finaleActions(t, t.standingsFreezeAt, base).freeze).toBe(true);
+    expect(finaleActions(t, t.standingsFreezeAt - 1, base).freeze).toBe(false);
+    expect(finaleActions(t, t.standingsFreezeAt, { ...base, frozenAt: 123 }).freeze).toBe(false);
   });
 
   it('posts the podium at/after the farewell unlock only while not already posted', () => {
     const t = finaleTimes(mainDays())!;
     const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
-    expect(finaleActions(t, t.farewellUnlockAt, base).postPodium).toBe(true);
-    expect(finaleActions(t, t.farewellUnlockAt - 1, base).postPodium).toBe(false);
-    expect(finaleActions(t, t.farewellUnlockAt, { ...base, podiumPosted: true }).postPodium).toBe(false);
+    expect(finaleActions(t, t.standingsFreezeAt, base).postPodium).toBe(true);
+    expect(finaleActions(t, t.standingsFreezeAt - 1, base).postPodium).toBe(false);
+    expect(finaleActions(t, t.standingsFreezeAt, { ...base, podiumPosted: true }).postPodium).toBe(false);
   });
 
   it('keeps the podium retry open after a run that froze but failed to post it (#228)', () => {
     const t = finaleTimes(mainDays())!;
     // An earlier run flipped frozenAt but its podium write failed transiently.
-    const d = finaleActions(t, t.farewellUnlockAt + 60_000, {
-      frozenAt: t.farewellUnlockAt,
+    const d = finaleActions(t, t.standingsFreezeAt + 60_000, {
+      frozenAt: t.standingsFreezeAt,
       lastCallPosted: true,
       podiumPosted: false,
       mostLovedComputed: false,
@@ -379,7 +379,7 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
   // #784 — Bodega's tail put the closing Day on the SAME calendar date as the
   // Day before it, which the plain forward `dayNine.unlockAt + 12h` offset
   // never anticipated: 06:00 + 12h = 18:00, well past the 11:00 freeze, so the
-  // posting gate `[lastCallAt, farewellUnlockAt)` was empty and the beat could
+  // posting gate `[lastCallAt, standingsFreezeAt)` was empty and the beat could
   // never fire. Pin the exact seeded shape from
   // scripts/seed-data/bodega-bay-2026.mjs (index 2 'main' 06:00, index 3
   // 'farewell'/closing 11:00, both 2026-08-09) and assert the window is
@@ -401,7 +401,7 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
 
     expect(t.lastCallAt).toBe(farewellUnlock - LAST_CALL_LEAD_MS);
     expect(t.lastCallAt).toBe(Date.parse('2026-08-08T23:00:00-07:00'));
-    expect(t.lastCallAt).toBeLessThan(t.farewellUnlockAt);
+    expect(t.lastCallAt).toBeLessThan(t.standingsFreezeAt);
 
     // The posting gate itself must now admit at least one instant.
     const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
@@ -415,7 +415,111 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
   it('keeps the forward 08:00+12h derivation when Day 9 and the farewell Day fall on different dates', () => {
     const t = finaleTimes(mainDays())!;
     expect(t.lastCallAt).toBe(D9_UNLOCK + LAST_CALL_LEAD_MS);
-    expect(t.lastCallAt).toBeLessThan(t.farewellUnlockAt);
+    expect(t.lastCallAt).toBeLessThan(t.standingsFreezeAt);
+  });
+
+  // --- ADR 0011: the freeze is an Event setting, the policy is stated ---------
+
+  it('leaves the live schedule s clock exactly where it was when nothing is configured', () => {
+    // The regression pin: `mainDays()` is the ten-Day cruise shape with legacy
+    // pool spellings and no `scoring`/`standingsFreezeAt` anywhere. Passing an
+    // undefined configured freeze must reproduce the pre-ADR answer verbatim.
+    expect(finaleTimes(mainDays(), undefined)).toEqual(finaleTimes(mainDays()));
+    expect(finaleTimes(mainDays(), undefined)!.standingsFreezeAt).toBe(D10_UNLOCK);
+  });
+
+  it('prefers a CONFIGURED standingsFreezeAt over the ceremonial Day s unlock', () => {
+    const configured = D10_UNLOCK + 3 * 60 * 60 * 1000; // 11:00, a check-out freeze
+    const t = finaleTimes(mainDays(), configured)!;
+    expect(t.standingsFreezeAt).toBe(configured);
+    // The podium still files under the ceremonial Day — the freeze moved, the
+    // schedule did not.
+    expect(t.podiumDayIndex).toBe(9);
+    // The forward last-call candidate (Day 9 08:00 + 12h) still precedes the
+    // later freeze, so it is still preferred.
+    expect(t.lastCallAt).toBe(D9_UNLOCK + LAST_CALL_LEAD_MS);
+  });
+
+  it('gives an ALL-COMPETITIVE schedule a finale once it states its own freeze', () => {
+    // ADR 0011's motivating shape: the final morning deals the closing pool but
+    // is real competitive play until check-out. Before this, the only way to get
+    // a finale was to make that morning ceremonial — which froze the standings
+    // at the card's own unlock and made the morning's marks inert.
+    const checkout = D10_UNLOCK + 3 * 60 * 60 * 1000;
+    const days: DayLike[] = [
+      { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+      { index: 9, pool: 'farewell', scoring: 'competitive', unlockAt: D10_UNLOCK },
+    ];
+    // Without a configured freeze there is no ceremonial Day, so no finale.
+    expect(finaleTimes(days)).toBeNull();
+
+    const t = finaleTimes(days, checkout)!;
+    expect(t.standingsFreezeAt).toBe(checkout);
+    // No ceremonial Day, so the podium files under the LAST Day of the schedule.
+    expect(t.podiumDayIndex).toBe(9);
+    expect(t.lastCallDayIndex).toBe(8);
+    expect(t.lastCallAt).toBeLessThan(t.standingsFreezeAt);
+  });
+
+  it('honours a STATED ceremonial policy on a Day the pool would not have flagged', () => {
+    const days: DayLike[] = [
+      { index: 0, pool: 'main', unlockAt: D9_UNLOCK },
+      { index: 1, pool: 'main', scoring: 'ceremonial', unlockAt: D10_UNLOCK },
+    ];
+    const t = finaleTimes(days)!;
+    expect(t.standingsFreezeAt).toBe(D10_UNLOCK);
+    expect(t.podiumDayIndex).toBe(1);
+  });
+
+  it('ignores a non-positive or non-finite configured freeze rather than honouring it', () => {
+    // 0 is the schedule's "always unlocked" sentinel elsewhere in this file, so
+    // reading it as an instant would freeze every Event at the epoch. Mirrors
+    // `standingsFreezeAtFor` in src/game/logic.ts.
+    for (const bad of [0, -1, Number.NaN]) {
+      expect(finaleTimes(mainDays(), bad)!.standingsFreezeAt).toBe(D10_UNLOCK);
+    }
+  });
+
+  it('treats a ceremonial Day carrying the unlockAt-0 sentinel as scheduling NO freeze', () => {
+    // "Live from event open", not an instant. Deriving a freeze at the epoch
+    // would put every Mark in the Event's history at-or-after the boundary.
+    expect(finaleTimes([{ index: 0, pool: 'farewell', unlockAt: 0 }])).toBeNull();
+    // …and a later ceremonial Day carrying a real instant is still found.
+    const t = finaleTimes([
+      { index: 0, pool: 'farewell', unlockAt: 0 },
+      { index: 1, pool: 'farewell', unlockAt: D10_UNLOCK },
+    ])!;
+    expect(t.standingsFreezeAt).toBe(D10_UNLOCK);
+  });
+
+  it('returns null for a configured freeze on an Event with no schedule at all', () => {
+    // There is no Day to file the Moments under, and a Moment at Day -1 renders
+    // nowhere — the same "no finale" answer, not a podium posted into the void.
+    expect(finaleTimes([], D10_UNLOCK)).toBeNull();
+  });
+
+  it('never files the last-call Moment under Day -1 on a single-Day schedule', () => {
+    const t = finaleTimes([{ index: 0, pool: 'farewell', unlockAt: D10_UNLOCK }])!;
+    expect(t.podiumDayIndex).toBe(0);
+    expect(t.lastCallDayIndex).toBe(0); // clamped: Day -1 is not a Day
+  });
+
+  it('logs loudly when a configured freeze empties the last-call window (#784 guard)', () => {
+    // An organiser can now configure a freeze EARLIER than the preceding Day's
+    // unlock, which the schedule alone could not produce. The window guard has
+    // to catch that too, or the beat silently never fires.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const t = finaleTimes(mainDays(), D9_UNLOCK - LAST_CALL_LEAD_MS)!;
+      expect(t.lastCallAt).toBe(t.standingsFreezeAt - LAST_CALL_LEAD_MS);
+      // The backward branch keeps the window non-empty even here, so the guard
+      // should NOT fire — assert the healthy case explicitly rather than
+      // assuming it.
+      expect(t.lastCallAt).toBeLessThan(t.standingsFreezeAt);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -592,6 +696,77 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
     const lastCall = db.moments().find((m) => m.kind === 'last_call')!;
     expect(lastCall.line).toBe('Jess has the board to themselves going into the final night—standings freeze at 11 a.m.');
     expect(lastCall.lastCall).toMatchObject({ freezePhrase: 'standings freeze at 11 a.m' });
+  });
+
+  // Phase 4b P1: the beat's own podium build must carry the freeze cutoff.
+  // `postPodium` is retried until the Moment lands, so a delayed sweep or a
+  // retry after a transient write failure reads LIVE ceremonial-Day buckets —
+  // and whatever it selects is then posted PERMANENTLY.
+  it('ADR 0011: the posted podium ignores a post-freeze bingo on a ceremonial Day', async () => {
+    const freeze = D10_UNLOCK;
+    const db = makeDb({
+      eventId: 'e',
+      event: {
+        days: [
+          { index: 8, pool: 'main', unlockAt: D9_UNLOCK },
+          // Ceremonial but NOT a Tutorial Day, so it stays eligible for the
+          // Event-wide honour — which is what makes the cutoff load-bearing.
+          { index: 9, pool: 'farewell', tutorial: false, scoring: 'ceremonial', unlockAt: freeze },
+        ],
+      },
+      players: [
+        {
+          uid: 'late',
+          displayName: 'Late',
+          bingoCount: 1,
+          squaresMarked: 10,
+          firstBingoAt: freeze + 5000,
+          dayStats: {
+            8: { bingoCount: 0, squaresMarked: 6, firstBingoAt: null },
+            9: { bingoCount: 1, squaresMarked: 4, firstBingoAt: freeze + 5000 },
+          },
+        },
+      ],
+    });
+    // The sweep runs LATE — after the freeze, with the post-freeze mark already
+    // recorded in the ceremonial Day's bucket.
+    await runFinaleBeats(db, 'e', { now: () => freeze + 60_000 });
+    const podium = db.moments().find((m) => m.kind === 'podium')!;
+    expect((podium.podium as { firstBingo: unknown }).firstBingo).toBeNull();
+  });
+
+  it('ADR 0011: quotes the CONFIGURED freeze, not a Day unlock, when the two differ', async () => {
+    // The interaction between #800 (this phrase) and #551 (ADR 0011). #800
+    // shipped deriving the phrase from the closing Day's `unlockAt`, which was
+    // the freeze by construction at the time. It no longer is: an Event whose
+    // final morning plays competitively until an 11:00 check-out states its own
+    // `standingsFreezeAt`, and NO Day's unlock equals it. Quoting a Day here
+    // would announce a deadline three hours before the real one — reintroducing
+    // #800's bug one layer up, which is why `runFinaleBeats` feeds this
+    // `times.standingsFreezeAt` rather than any Day's unlock.
+    const finalMorningUnlock = Date.UTC(2026, 6, 25, 15, 0); // 08:00 America/Los_Angeles
+    const checkoutFreeze = Date.UTC(2026, 6, 25, 18, 0); // 11:00 — the STATED freeze
+    const db = makeDb({
+      eventId: 'e',
+      event: {
+        days: [
+          { index: 0, pool: 'main', unlockAt: Date.UTC(2026, 6, 24, 15, 0) },
+          // Deals the closing pool, but STATES that it counts — so it is not
+          // ceremonial, and its unlock is not the freeze.
+          { index: 1, pool: 'farewell', scoring: 'competitive', unlockAt: finalMorningUnlock },
+        ],
+        standingsFreezeAt: checkoutFreeze,
+        timezone: 'America/Los_Angeles',
+      },
+      players: [{ uid: 'jess', displayName: 'Jess', bingoCount: 1, squaresMarked: 5, firstBingoAt: 10 }],
+    });
+    await runFinaleBeats(db, 'e', { now: () => checkoutFreeze - 1 });
+    const lastCall = db.moments().find((m) => m.kind === 'last_call')!;
+    // 11 a.m — the configured freeze. The final Day's own 08:00 unlock, which
+    // the pre-ADR derivation would have quoted, is explicitly NOT the answer.
+    expect(lastCall.lastCall).toMatchObject({ freezePhrase: 'standings freeze at 11 a.m' });
+    expect(lastCall.line).toContain('standings freeze at 11 a.m.');
+    expect(lastCall.line).not.toContain('8 a.m');
   });
 
   it('the podium Moment carries champion + cruise First-to-BINGO + the pinned daily honors', async () => {

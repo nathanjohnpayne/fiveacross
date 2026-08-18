@@ -1,6 +1,7 @@
 // Pure, framework-free game logic. No Firebase, no React — fully unit-testable.
 import type { Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 import { normalizePool } from './pool';
+import { isCeremonialDay } from './scoring';
 
 export const GRID = 5;
 export const CENTER = 12;
@@ -675,7 +676,12 @@ export function foldEchoStats(params: {
   // clobber the server's earlier value). With no base (deal/reconcile paths)
   // the prior view came from a real read, so the root always writes.
   if (!base || 'firstBingoAt' in base) {
-    out.firstBingoAt = eventFirstBingoAt(merged, isTutorialDay);
+    // Ceremonial-excluded as well as tutorial-excluded, exactly like
+    // `foldDayStat` and `aggregatePlayerStats` (ADR 0011). The counts a few
+    // lines up already drop ceremonial Days; a root that kept a ceremonial
+    // timestamp would give this row competitive bingos with a ceremonial
+    // tie-break, mis-ranking the live Leaderboard (Codex P2, PR #841).
+    out.firstBingoAt = eventFirstBingoAt(merged, rankingExcludedDay(isTutorialDay, params.isCeremonialDay));
   }
   return out;
 }
@@ -811,37 +817,93 @@ export function tutorialDayIndexSet(days: readonly DayDef[] | undefined): Set<nu
   return s;
 }
 
-/** The CEREMONIAL Day indexes — the farewell pool only (#265, spec § "Scoring"):
- *  "the farewell card is ceremonial—it unlocks at the freeze, so its marks never
- *  move the standings." Distinct from `tutorialDayIndexSet` because the embark
- *  card COUNTS (pre-freeze real play, just easy); only farewell is standings-
- *  inert. Its daily honor still stands — the exclusion applies to the summed
- *  root totals, never the per-Day bucket. */
+/** The CEREMONIAL Day indexes — the Days whose Scoring Policy is `ceremonial`
+ *  (ADR 0011; #265, spec § "Scoring"): "its marks never move the standings."
+ *  Distinct from `tutorialDayIndexSet` because the two flags answer different
+ *  questions — an easy-pool opener COUNTS (pre-freeze real play, just easy)
+ *  while still being excluded from the Event-wide First to BINGO honour, and a
+ *  competitive final morning is neither. A ceremonial Day's daily honor still
+ *  stands: the exclusion applies to the summed root totals and the podium,
+ *  never to the per-Day bucket.
+ *
+ *  Resolved through `scoringForDay`, so a Day carrying no `scoring` key — every
+ *  Day of both live Events — still resolves by the closing-pool derivation this
+ *  function used to hard-code, and nothing about either Event changes. */
 export function ceremonialDayIndexSet(days: readonly DayDef[] | undefined): Set<number> {
   const s = new Set<number>();
-  for (const d of days ?? []) if (normalizePool(d.pool) === 'closing') s.add(d.index);
+  for (const d of days ?? []) if (isCeremonialDay(d)) s.add(d.index);
   return s;
+}
+
+/** The Event's inputs to the freeze question. `standingsFreezeAt` is spelled
+ *  out rather than `Pick`ed so a caller assembling a partial Event by hand
+ *  (`{ frozenAt, days }` — the admin and API transaction paths re-read raw
+ *  event data) reads as an Event that has no CONFIGURED freeze and falls back
+ *  to the schedule derivation, which is the correct answer for both live
+ *  Events. */
+export type FreezeSchedule = Pick<EventDoc, 'frozenAt' | 'days'> & {
+  standingsFreezeAt?: number;
+};
+
+/**
+ * The Event's Standings Freeze instant (ADR 0011): the CONFIGURED
+ * `standingsFreezeAt` when the doc carries a usable one, else the first
+ * ceremonial Day's `unlockAt` — the instant the old `pool === 'closing'`
+ * derivation used, so both live Events resolve to exactly the moment they
+ * always did. `null` when the Event has neither: a legacy Event with no
+ * schedule, or an all-competitive schedule that has not been given a freeze,
+ * has no scheduled freeze at all and never freezes on its own.
+ *
+ * The FIRST ceremonial Day, matching every other finale consumer
+ * (`finaleTimes`, the podium builders) — the wizard's `extra-closing-day`
+ * validation exists precisely because that "first match" is load-bearing.
+ *
+ * A non-finite or non-positive stored value is ignored rather than honoured: 0
+ * is the schedule's "always unlocked" sentinel elsewhere in this contract, and
+ * reading it as a freeze instant would freeze every Event at the epoch.
+ */
+export function standingsFreezeAtFor(
+  event: FreezeSchedule | null | undefined,
+): number | null {
+  if (!event) return null;
+  const configured = event.standingsFreezeAt;
+  if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  for (const d of event.days ?? []) {
+    // The SAME non-positive guard the configured value gets. `unlockAt: 0` is
+    // the schedule's "live from event open" sentinel, not an instant — the
+    // snapshot path already treats a non-positive cutoff as NO cutoff (#289),
+    // and reading it here as a freeze would freeze the Event at the epoch:
+    // every Mark in its history lands at-or-after the boundary, so the podium
+    // and the Leaderboard's First to BINGO would both go permanently blank.
+    // A ceremonial Day carrying the sentinel therefore schedules no freeze
+    // rather than an immediate one.
+    if (isCeremonialDay(d) && Number.isFinite(d.unlockAt) && d.unlockAt > 0) return d.unlockAt;
+  }
+  return null;
 }
 
 /**
  * Whether the standings are FROZEN (#265; Codex P2 on #278): the scheduler's
- * `frozenAt` stamp when present, OR — the stale-cache belt — the farewell
- * Day's scheduled `unlockAt` having passed. The freeze moment IS the farewell
- * unlock (daily-cards-spec § "Scoring": the two-beat finish), and the schedule
- * is cached with the event doc, so a client whose persistent cache predates
- * the scheduler's stamp (or is offline at sea) still fails CLOSED at 08:00 on
- * Day 10 by its own clock. Legacy events (no schedule) never freeze.
+ * `frozenAt` stamp when present, OR — the stale-cache belt — the Event's
+ * scheduled Standings Freeze having passed. The schedule is cached with the
+ * event doc, so a client whose persistent cache predates the scheduler's stamp
+ * (or is offline at sea) still fails CLOSED at the freeze by its own clock.
+ * Events with no scheduled freeze (see `standingsFreezeAtFor`) never freeze.
+ *
+ * Reads the freeze through `standingsFreezeAtFor` rather than scanning pools
+ * (ADR 0011): a competitive final Day now counts right up to the configured
+ * freeze instead of being frozen out by the pool its card happens to deal.
  */
 export function standingsFrozen(
-  event: Pick<EventDoc, 'frozenAt' | 'days'> | null | undefined,
+  event: FreezeSchedule | null | undefined,
   now: number = Date.now(),
 ): boolean {
   if (!event) return false;
   if (event.frozenAt != null) return true;
-  for (const d of event.days ?? []) {
-    if (normalizePool(d.pool) === 'closing' && now >= d.unlockAt) return true;
-  }
-  return false;
+  const freezeAt = standingsFreezeAtFor(event);
+  return freezeAt != null && now >= freezeAt;
 }
 
 /** Sum `bingoCount` + `squaresMarked` across EVERY Day Card, tutorial Days
@@ -905,7 +967,7 @@ export function playerRowRootLag(
   const rootBingos = row.bingoCount ?? 0;
   const bucketFirst = eventFirstBingoAt(
     row.dayStats,
-    (i: number) => (isTutorialDay?.(i) ?? false) || (isCeremonialDay?.(i) ?? false),
+    rankingExcludedDay(isTutorialDay ?? (() => false), isCeremonialDay),
   );
   const rootFirst = row.firstBingoAt ?? null;
   const countsDominate =
@@ -951,8 +1013,35 @@ export function aggregatePlayerStats(
 ): DayStat {
   return {
     ...sumDayStats(dayStats, isCeremonialDay),
-    firstBingoAt: eventFirstBingoAt(dayStats, isTutorialDay),
+    firstBingoAt: eventFirstBingoAt(dayStats, rankingExcludedDay(isTutorialDay, isCeremonialDay)),
   };
+}
+
+/**
+ * The exclusion a STANDINGS-RANKING derivation applies: Tutorial Days OR
+ * ceremonial Days. Deliberately wider than the Event-wide First to BINGO
+ * honour, which excludes Tutorial Days ALONE — the two answer different
+ * questions and must not be collapsed.
+ *
+ * `comparePlayers`' final tie-break is the earliest first-bingo, so a
+ * first-bingo value that still counts ceremonial Days lets a ceremonial Mark
+ * decide the standings — which is precisely what a `ceremonial` policy promises
+ * it can never do. The sums already exclude those Days; the timestamp has to
+ * agree, or the row is internally inconsistent.
+ *
+ * Unreachable on both live Events, where every ceremonial Day is also
+ * `tutorial: true` so the two predicates coincide. ADR 0011 is what makes it
+ * reachable, by allowing a ceremonial Day with `tutorial: false`.
+ * `playerRowRootLag` already derives its bucket evidence this way, so before
+ * this the fold that WRITES the root and the predicate that AUDITS it disagreed
+ * — a row on such a schedule would read as permanently lagging and re-heal
+ * forever (Codex P1, PR #841).
+ */
+export function rankingExcludedDay(
+  isTutorialDay: (dayIndex: number) => boolean,
+  isCeremonialDay?: (dayIndex: number) => boolean,
+): (dayIndex: number) => boolean {
+  return (i: number) => isTutorialDay(i) || (isCeremonialDay?.(i) ?? false);
 }
 
 /**
@@ -979,14 +1068,50 @@ export function effectiveCruiseFirstBingoAt(
 export function cruiseFirstBingoUid(
   players: readonly PlayerDoc[],
   isTutorialDay: (dayIndex: number) => boolean,
+  freezeAt?: number | null,
 ): string | undefined {
-  let best: { uid: string; at: number } | undefined;
+  return eventFirstBingoWinner(players, isTutorialDay, freezeAt)?.uid;
+}
+
+/**
+ * The Event-wide First to BINGO honour: the earliest eligible bingo across the
+ * roster, as ONE selector every surface shares (Phase 4b P1). The Leaderboard's
+ * pin, the frozen podium and its Share Card all render this honour, and they
+ * were each deriving it — so the podium could gain a freeze cutoff while the
+ * public Leaderboard kept naming a post-freeze winner, printing two different
+ * answers to the same question on two screens.
+ *
+ * Two exclusions, and they are NOT the same set:
+ *
+ *   - Tutorial Days, always. An onboarding or send-off card is framed as
+ *     non-competition, so its bingo never takes the headline honour.
+ *   - Anything at or after `freezeAt`, when a cutoff is supplied. The standings
+ *     are "as of the freeze", and a ceremonial Day deliberately keeps recording
+ *     Marks afterwards so its own daily honour still renders — without the
+ *     cutoff those late Marks can mint an honour the scheduler's immutable
+ *     podium Moment does not carry.
+ *
+ * The cutoff is INCLUSIVE (`>= freezeAt`), matching `standingsFrozen`'s
+ * `now >= freezeAt` and the half-open `[lastCallAt, freezeAt)` last-call window:
+ * the freeze instant itself is already frozen, so a Mark stamped on that exact
+ * millisecond is not eligible (Phase 4b P2). Absent/`null` means no cutoff,
+ * which is every pre-freeze render.
+ *
+ * Ties go to the first Player in roster order, unchanged.
+ */
+export function eventFirstBingoWinner(
+  players: readonly PlayerDoc[],
+  isTutorialDay: (dayIndex: number) => boolean,
+  freezeAt?: number | null,
+): { uid: string; displayName: string; at: number } | undefined {
+  let best: { uid: string; displayName: string; at: number } | undefined;
   for (const p of players) {
     const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
     if (at == null) continue;
-    if (!best || at < best.at) best = { uid: p.uid, at };
+    if (freezeAt != null && at >= freezeAt) continue;
+    if (!best || at < best.at) best = { uid: p.uid, displayName: p.displayName, at };
   }
-  return best?.uid;
+  return best;
 }
 
 /** A Player-write bucket: the day/root stats, with `firstBingoAt` OPTIONAL so a
@@ -1051,7 +1176,12 @@ export function foldDayStat(params: {
     blackout: boolean;
     firstBingoAt?: number | null;
   } = { dayStats: { [dayIndex]: dayBucket }, bingoCount, squaresMarked, blackout };
-  if (!preserve) out.firstBingoAt = eventFirstBingoAt(merged, isTutorialDay);
+  // Ceremonial-excluded as well as tutorial-excluded (ADR 0011): this root is
+  // `comparePlayers`' tie-break input, and the sums a few lines up already drop
+  // ceremonial Days. See `rankingExcludedDay`.
+  if (!preserve) {
+    out.firstBingoAt = eventFirstBingoAt(merged, rankingExcludedDay(isTutorialDay, params.isCeremonialDay));
+  }
   return out;
 }
 
