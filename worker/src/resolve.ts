@@ -92,7 +92,9 @@ export function isCacheEnvelope(value: unknown): value is CacheEnvelope {
 export interface HostnameCache {
   read(host: string): Promise<CacheEnvelope | null>;
   write(host: string, envelope: CacheEnvelope): Promise<void>;
-  drop(host: string): Promise<void>;
+  /** A revalidated refusal supplies the lookup start time as a fence, so an
+   *  older in-flight positive response cannot repopulate the entry after it. */
+  drop(host: string, fenceAt?: number): Promise<void>;
 }
 
 export interface ResolveConfig {
@@ -164,10 +166,23 @@ export async function resolveHost(
   const fresh = cached !== null && age >= 0 && age < config.cacheTtlMs;
 
   if (fresh && cached !== null) {
-    return decide(cached.record, expectedSlug, false);
+    // Envelope shape alone only makes the value safe to inspect. It does NOT
+    // make it a positive cache entry: a current-version envelope could have
+    // been left by an older deployment while its record was inactive,
+    // malformed, or for another Slug. Returning that decision would turn the
+    // shared cache into a negative cache and strand a corrected Firestore
+    // record until the TTL elapsed. Fresh cache may serve, never refuse.
+    const decision = decide(cached.record, expectedSlug, false);
+    if (decision.kind === 'serve') return decision;
+    await swallow(() => deps.cache.drop(host), undefined);
   }
 
   let record: HostnameRecord | null;
+  // A response observes the document state at or after this instant. Keeping
+  // that start time on both a positive write and a revalidated drop gives the
+  // Cache adapter a total order for overlapping requests: an older lookup that
+  // returns late cannot resurrect a mapping a newer lookup already refused.
+  const lookupStartedAt = deps.now();
   try {
     record = await fetchHostnameRecord(host, config, deps);
   } catch {
@@ -185,14 +200,14 @@ export async function resolveHost(
   if (record === null) {
     // Dropped, not expired: a mapping that is gone must stop serving from this
     // edge immediately rather than at the end of its TTL.
-    await swallow(() => deps.cache.drop(host), undefined);
+    await swallow(() => deps.cache.drop(host, lookupStartedAt), undefined);
     return { kind: 'not-found', reason: 'unknown-host' };
   }
 
   const decision = decide(record, expectedSlug, false);
   if (decision.kind === 'serve') {
     await swallow(
-      () => deps.cache.write(host, { version: CACHE_VERSION, fetchedAt: deps.now(), record }),
+      () => deps.cache.write(host, { version: CACHE_VERSION, fetchedAt: lookupStartedAt, record }),
       undefined,
     );
   } else {
@@ -204,7 +219,7 @@ export async function resolveHost(
     // failure for a full TTL after the document was corrected. Dropping also
     // closes the other direction: an Event that goes inactive must not leave a
     // servable envelope behind for the stale-serve path to resurrect.
-    await swallow(() => deps.cache.drop(host), undefined);
+    await swallow(() => deps.cache.drop(host, lookupStartedAt), undefined);
   }
   return decision;
 }

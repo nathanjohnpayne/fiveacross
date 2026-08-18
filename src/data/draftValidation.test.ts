@@ -437,6 +437,22 @@ describe('eventCompletenessIssues', () => {
     ).toEqual(['occasion']);
   });
 
+  it.each([
+    ['reserved infrastructure', 'admin', 'reserved-label'],
+    ['reserved IDNA form', 'ab--cd', 'reserved-tag'],
+    ['uppercase wire spelling', 'Point-Reyes', 'invalid-characters'],
+  ])('uses the shared router Slug contract for %s', (_label, slugCandidate, rejection) => {
+    const issues = eventCompletenessIssues(launchableDraft({ slugCandidate }));
+    expect(issues).toEqual([
+      expect.objectContaining({
+        code: 'event-invalid-slug',
+        field: 'slugCandidate',
+        message: expect.stringContaining(rejection),
+      }),
+    ]);
+    expect(isDraftLaunchable(launchableDraft({ slugCandidate }), NOW)).toBe(false);
+  });
+
   it('rejects a zone the read-side contract would silently rewrite', () => {
     // `normalizeTimezone` substitutes Europe/Rome for UTC, Etc/*, bare offsets
     // and anything without a region prefix — so accepting them here would

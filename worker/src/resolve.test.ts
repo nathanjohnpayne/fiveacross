@@ -90,8 +90,25 @@ describe('resolveHost — fail closed', () => {
     });
     const fetchImpl = respondWith(ACTIVE);
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
-    expect(result).toEqual({ kind: 'not-found', reason: 'inactive' });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['inactive', { eventId: 'e', status: 'disabled', slug: 'bodega-bay' }],
+    ['malformed', { eventId: '', status: 'active', slug: 'bodega-bay' }],
+    ['slug-mismatched', { eventId: 'e', status: 'active', slug: 'elsewhere' }],
+  ])('bypasses a fresh but non-serving cached %s record', async (_label, record) => {
+    const cache = memoryCache({
+      [HOST]: { version: CACHE_VERSION, fetchedAt: 1_000_000, record },
+    });
+    const fetchImpl = respondWith(ACTIVE);
+
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+    expect(cache.store.get(HOST)?.record.eventId).toBe('bodega-bay-2026');
   });
 
   it('fails closed when the lookup is unavailable and nothing is cached', async () => {

@@ -21,6 +21,7 @@ import { track } from '../analytics';
 import { adultContentRequired } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
+import { hostnameKey } from '../hostnameKey';
 import { consumePostUpdateDealGrace } from '../postUpdateDeal';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
@@ -1578,7 +1579,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         handoffSignedOutWebApp();
         return;
       }
-      const sameOriginHandler = auth.config?.authDomain === window.location.hostname;
+      const sameOriginHandler =
+        auth.config?.authDomain !== undefined &&
+        hostnameKey(auth.config.authDomain) === hostnameKey(window.location.hostname);
       if (sameOriginHandler && shouldRedirectSignIn(window.navigator, isStandaloneApp())) {
         // One top-level redirect keeps the browser on a single origin so the
         // helper's sessionStorage survives the Google round-trip — the flow the

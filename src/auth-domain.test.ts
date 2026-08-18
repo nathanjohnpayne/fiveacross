@@ -59,6 +59,13 @@ describe('resolveAuthDomain', () => {
     },
   );
 
+  it('normalizes a DNS root dot before making an exact-host auth decision', () => {
+    expect(resolveAuthDomain('bodega-bay.vacaybingo.com', 'Bodega-Bay.FiveAcross.App.')).toBe(
+      'bodega-bay.fiveacross.app',
+    );
+    expect(isSignInReachableOnHost('bodega-bay.vacaybingo.com', 'Bodega-Bay.FiveAcross.App.')).toBe(true);
+  });
+
   it.each([
     'gaycruisebingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
     'gaycruisebingo-git-some-other-branch-nathanjohnpaynes-projects.vercel.app',
