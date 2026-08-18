@@ -245,9 +245,12 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number, label = 'Auth boots
 // (permission-denied, schema, unknown-coded), the bet was wrong and nothing ever
 // revoked the lift or corrected `dealErrorReason` — contradicting the invariant
 // (enforced at every OTHER call site) that a permanent failure never stands behind
-// a lifted render gate. `onLateError` gives bootstrapUser's caller a chokepoint to
-// correct that; it defaults to a no-op so `retryBootstrap` — which never
-// provisionally lifts anything on a read failure — is unaffected.
+// a lifted render gate. `onLateError` gives BOTH callers a chokepoint to correct
+// that: bootstrapUser wires one for its own in-time lift, and retryBootstrap wires
+// one too (Codex P2 round 2 on #762) — retryBootstrap never lifts on its OWN
+// failure, but it also never resets `attested` at its start, so a lift standing
+// from an earlier bootstrapUser attempt can still be up when a retry's read later
+// rejects late. Defaults to a no-op only for callers with no lift to ever correct.
 function startAuthorityRead(
   u: User,
   onLate: (serverAttested: boolean) => void,
@@ -783,6 +786,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (authorityApplied) return;
           if (dealAttemptRef.current !== dealAttemptAtBootstrap) return;
           if (dealErrorReasonFor(err) !== 'permanent') return;
+          // LATCH TERMINAL (Codex P2 round 2 on #762): the in-time failure arm's
+          // own cache-lift promise (below) is fire-and-forget and only checks
+          // `authorityApplied` before re-lifting `attested` from a cached stamp.
+          // Without setting it here, a cache read that resolves AFTER this
+          // correction would silently undo it — re-lifting `attested` (and
+          // therefore `canRenderEventContent`) right back to true behind a
+          // confirmed-permanent failure. This correction IS authority settling
+          // (permanently, to "no"), so it latches the same way a definite
+          // success/failure does.
+          authorityApplied = true;
           failDeal(err);
           setAttested(attestedUidsRef.current.has(u.uid));
         },
@@ -1300,9 +1313,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // discarded null left the stale lift up and the durable card painted for a
       // User the server says has no stamp. Now it downgrades, same as everywhere
       // else.
-      const read = await startAuthorityRead(u, (late) => {
-        if (profileAttemptRef.current === attempt) settleRetry(late);
-      });
+      const read = await startAuthorityRead(
+        u,
+        (late) => {
+          if (profileAttemptRef.current === attempt) settleRetry(late);
+        },
+        (err) => {
+          // A late PERMANENT rejection during a retry (Codex P2 round 2 on
+          // #762). retryBootstrap does not reset `attested` at its own start,
+          // so a 'connection'-classified provisional lift (#521) carried over
+          // from an EARLIER bootstrapUser attempt — or one this retry's own
+          // in-time timeout below just made — can still be standing when this
+          // fires. Route it through the same correction bootstrapUser's
+          // onLateError applies: skip if this attempt is superseded, already
+          // terminal (latch it here too, for the same reason — nothing later
+          // may re-lift `attested` for this attempt), or a newer deal attempt
+          // now owns the error (Codex P2 on #761, the same generation guard
+          // `settleRetry`'s own clear uses above).
+          if (profileAttemptRef.current !== attempt) return;
+          if (authorityApplied) return;
+          if (dealAttemptRef.current !== dealAttemptAtRetry) return;
+          if (dealErrorReasonFor(err) !== 'permanent') return;
+          authorityApplied = true;
+          failDeal(err);
+          setAttested(attestedUidsRef.current.has(u.uid));
+          setDealing(false);
+        },
+      );
       if (profileAttemptRef.current !== attempt) return;
       settleRetry(read);
     } catch (err) {
