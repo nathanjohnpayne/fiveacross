@@ -266,6 +266,26 @@ describe('sparse pools', () => {
     expect(poolCounts(d).main).toBe(2);
   });
 
+  it('excludes an EXPLICIT null the same way it excludes a hole', () => {
+    // `filter` drops holes but keeps an explicit null, and the two are the
+    // same missing Prompt to `promptTextIssues` and to the repair UI. Counting
+    // one let a 24-slot pool holding 23 usable Prompts read as passing (Codex
+    // P2, PR #856, round 2).
+    const withNull = [
+      { text: 'a', spicy: false },
+      null,
+      { text: 'c', spicy: false },
+    ] as unknown as { text: string; spicy: boolean }[];
+    const d = draftWith({
+      cardFormat: 'daily_cards',
+      days: [day(0, { pool: 'main' })],
+      prompts: { main: withNull, easy: [], closing: [] },
+    });
+    expect(poolCounts(d).main).toBe(2);
+    expect(assignedPoolIssues(d)[0]?.message).toContain('has 2 Prompts');
+    expect(promptTextIssues(d).map((i) => i.code)).toEqual(['prompt-text-out-of-bounds']);
+  });
+
   it('addresses the entry at the STORED position, holes included', () => {
     const d = draftWith({ prompts: { main: holedMain(), easy: [], closing: [] } });
     // 'c' is at stored position 2, not at dense position 1.

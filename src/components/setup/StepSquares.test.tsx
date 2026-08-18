@@ -295,6 +295,60 @@ describe('prompt CRUD', () => {
     );
   });
 
+  it('closes an open editor even when the Prompt sliding in reads identically', async () => {
+    // Text is not an identity: duplicates are explicitly allowed, so a
+    // text-based reset would miss a swap between two same-reading Prompts and
+    // Save would rename the wrong one (Codex P2, round 2).
+    const { current } = renderStep(
+      draftWith({
+        days: [day(0, { pool: 'closing' })],
+        prompts: {
+          main: [
+            { text: 'same', spicy: false },
+            { text: 'same', spicy: false },
+            { text: 'same', spicy: false },
+          ],
+          easy: [],
+          closing: [],
+        },
+      }),
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Edit Prompt 2 in the main pool' }));
+    const input = screen.getByRole('textbox', { name: 'Edit Prompt 2 in the main pool' });
+    await userEvent.clear(input);
+    await userEvent.type(input, 'renamed');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Delete Prompt 1 in the main pool' }));
+    expect(screen.queryByRole('textbox', { name: /^Edit Prompt/ })).toBeNull();
+    expect(current().prompts.main).toEqual([
+      { text: 'same', spicy: false },
+      { text: 'same', spicy: false },
+    ]);
+  });
+
+  it('keeps an open editor when an unrelated row changes', async () => {
+    // The flip side: the transforms preserve the object of every entry they do
+    // not touch, so a row nobody edited must not lose a half-typed draft.
+    renderStep(
+      draftWith({
+        days: [day(0, { pool: 'closing' })],
+        prompts: { main: mainPrompts(2), easy: [], closing: [] },
+      }),
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Edit Prompt 1 in the main pool' }));
+    const input = screen.getByRole('textbox', { name: 'Edit Prompt 1 in the main pool' });
+    await userEvent.clear(input);
+    await userEvent.type(input, 'still being typed');
+
+    // Toggle spicy on the OTHER row — a different entry entirely.
+    await userEvent.click(
+      screen.getByRole('checkbox', { name: 'Spicy — Prompt 2 in the main pool' }),
+    );
+    expect(screen.getByRole('textbox', { name: 'Edit Prompt 1 in the main pool' })).toHaveValue(
+      'still being typed',
+    );
+  });
+
   it('flags repeated wording without blocking on it', async () => {
     const { current } = renderStep(
       draftWith({
@@ -411,6 +465,19 @@ describe('Days & pools', () => {
     expect(current().days).toHaveLength(3);
     expect(current().days[1]).toMatchObject({ pool: 'closing', tutorial: true });
     expect(current().days[2]).toMatchObject({ index: 2, pool: 'main', tutorial: false });
+  });
+
+  it('renders a sparse Day slot as a removable gap row', async () => {
+    // `map` SKIPS holes rather than passing undefined, so the gap branch was
+    // unreachable and a sparse schedule showed no gap at all — the gate
+    // reported it while the only surface that could repair it stayed silent
+    // (Codex P2, round 2).
+    const holed = [day(0), , day(1, { pool: 'closing' })] as unknown as DraftDayDef[];
+    const { current } = renderStep(draftWith({ days: holed }));
+    expect(screen.getByText('Day 2 is missing')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Remove the gap at Day 2' }));
+    expect(screen.queryByText('Day 2 is missing')).toBeNull();
+    expect(current().days.map((d) => d.index)).toEqual([0, 1]);
   });
 
   it('removes a Day and renumbers the rest', async () => {

@@ -4572,15 +4572,25 @@ body:has(.sheet-backdrop) .guidelines-trigger {
 .squares-empty {
   padding: 10px 0;
 }
+/* Wrapping, for the same reason the rows above wrap: the add bar carries a
+   text field, a pool select, a spicy toggle and an Add button, which do not
+   fit one phone line (Codex P2, round 2). The text field keeps a floor width
+   so it stays usable once it wraps onto its own line. */
 .squares-pack,
 .squares-confirm,
 .squares-addbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 10px 12px;
+}
+.squares-addbar > .grow,
+.squares-pack > .grow {
+  min-width: 12ch;
+  flex: 1 1 12ch;
 }
 .squares-pack .name {
   font-weight: 600;

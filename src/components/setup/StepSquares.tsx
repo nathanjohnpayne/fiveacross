@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import type { DayDef } from '../../types';
+import type { DayDef, EventDraft } from '../../types';
 import type { PoolId } from '../../game/pool';
 import { MIN_POOL } from '../../game/logic';
 import { normalizePool } from '../../game/pool';
@@ -351,6 +351,7 @@ function PromptList({ draft, updateDraft }: Pick<StepRenderProps, 'draft' | 'upd
           key={key}
           pool={pool}
           position={position}
+          identity={entry}
           text={typeof prompt.text === 'string' ? prompt.text : ''}
           spicy={prompt.spicy === true}
           onText={(text) => updateDraft((d) => setPromptText(d, pool, position, text))}
@@ -375,6 +376,7 @@ function PromptList({ draft, updateDraft }: Pick<StepRenderProps, 'draft' | 'upd
 function PromptRow({
   pool,
   position,
+  identity,
   text,
   spicy,
   onText,
@@ -383,6 +385,8 @@ function PromptRow({
 }: {
   pool: PoolId;
   position: number;
+  /** The Prompt object this row is currently showing — see below. */
+  identity: unknown;
   text: string;
   spicy: boolean;
   onText: (text: string) => void;
@@ -391,19 +395,25 @@ function PromptRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(text);
-  // Rows are keyed by POSITION, because Prompt text is not unique — duplicates
-  // are explicitly allowed. So a delete, a compaction or a pack swap can slide
-  // a DIFFERENT Prompt into a position whose row is mid-edit, and React keeps
-  // that row's state. Without this the editor would stay open over the new
-  // Prompt holding the old one's draft, and Save would overwrite it.
+  // Rows are keyed by POSITION, so a delete, a compaction or a pack swap can
+  // slide a DIFFERENT Prompt into a position whose row is mid-edit while React
+  // keeps that row's state — leaving the editor open over the new Prompt,
+  // holding the old one's draft, with Save ready to overwrite it.
+  //
+  // Compared by OBJECT IDENTITY rather than by text, because text is not an
+  // identity here: duplicates are explicitly allowed, so two Prompts can read
+  // the same and a text comparison would miss the swap between them entirely
+  // (Codex P2, round 2). The transforms preserve the object of every entry
+  // they do not touch, so an unchanged row keeps editing and only a row whose
+  // underlying entry actually changed resets.
   //
   // Compared DURING RENDER (React's documented "adjusting state when a prop
   // changes" pattern), the same way `WizardChrome` resets `showIssues` on a
   // step change rather than in an effect: an effect-based reset fires after
   // the commit, so the stale draft would reach the DOM first.
-  const [seenText, setSeenText] = useState(text);
-  if (text !== seenText) {
-    setSeenText(text);
+  const [seenIdentity, setSeenIdentity] = useState<unknown>(identity);
+  if (identity !== seenIdentity) {
+    setSeenIdentity(identity);
     setValue(text);
     setEditing(false);
   }
@@ -565,6 +575,49 @@ function AddPromptBar({
 
 /* ----------------------------------------------------------- days and pools */
 
+/** The Day rows, walked BY INDEX so a hole reaches the gap branch. */
+function dayRows(
+  draft: EventDraft,
+  issues: DraftIssue[],
+  updateDraft: StepRenderProps['updateDraft'],
+): ReactNode[] {
+  const out: ReactNode[] = [];
+  for (let position = 0; position < draft.days.length; position++) {
+    const day = draft.days[position];
+    if (day === null || day === undefined) {
+      out.push(
+        <li className="squares-day-row is-gap" key={`gap-${position}`}>
+          <span className="grow">Day {position + 1} is missing</span>
+          <button
+            type="button"
+            className="iconbtn"
+            aria-label={`Remove the gap at Day ${position + 1}`}
+            onClick={() => updateDraft((d) => removeDay(d, position))}
+          >
+            ✕
+          </button>
+        </li>,
+      );
+      continue;
+    }
+    const dayIndex = day.index;
+    out.push(
+      <DayRow
+        key={`day-${position}`}
+        position={position}
+        date={day.date}
+        pool={day.pool}
+        tutorial={day.tutorial}
+        issues={issues.filter((i) => i.dayIndex === dayIndex)}
+        onPool={(pool) => updateDraft((d) => setDayPool(d, position, pool))}
+        onTutorial={(tutorial) => updateDraft((d) => setDayTutorial(d, position, tutorial))}
+        onRemove={() => updateDraft((d) => removeDay(d, position))}
+      />,
+    );
+  }
+  return out;
+}
+
 function DaysAndPools({
   draft,
   updateDraft,
@@ -575,36 +628,12 @@ function DaysAndPools({
     <>
       <div className="squares-subhead">Days &amp; pools</div>
       <ul className="squares-days list" aria-label="Days">
-        {draft.days.map((day, position) => {
-          if (day === null || day === undefined) {
-            return (
-              <li className="squares-day-row is-gap" key={`gap-${position}`}>
-                <span className="grow">Day {position + 1} is missing</span>
-                <button
-                  type="button"
-                  className="iconbtn"
-                  aria-label={`Remove the gap at Day ${position + 1}`}
-                  onClick={() => updateDraft((d) => removeDay(d, position))}
-                >
-                  ✕
-                </button>
-              </li>
-            );
-          }
-          return (
-            <DayRow
-              key={`day-${position}`}
-              position={position}
-              date={day.date}
-              pool={day.pool}
-              tutorial={day.tutorial}
-              issues={issues.filter((i) => i.dayIndex === day.index)}
-              onPool={(pool) => updateDraft((d) => setDayPool(d, position, pool))}
-              onTutorial={(tutorial) => updateDraft((d) => setDayTutorial(d, position, tutorial))}
-              onRemove={() => updateDraft((d) => removeDay(d, position))}
-            />
-          );
-        })}
+        {/* An INDEX walk, exactly as the Prompt list does. `map` SKIPS holes
+            rather than passing `undefined`, so the gap branch below was
+            unreachable through it and a sparse schedule rendered no gap row
+            at all — the shared gate reported the gap while the only surface
+            that could repair it stayed silent (Codex P2, round 2). */}
+        {dayRows(draft, issues, updateDraft)}
       </ul>
       <div className="squares-btnrow">
         <button
