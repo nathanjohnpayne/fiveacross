@@ -110,7 +110,10 @@ export interface EventDraftStore {
   load(draftId: string): Promise<EventDraft | null>;
   /** Persist, stamping `updatedAt`. Returns the stored draft. */
   save(draft: EventDraft): Promise<EventDraft>;
-  /** Remove one draft. Discarding something that is already gone succeeds. */
+  /** Remove one draft. Discarding something that is already gone succeeds.
+   *  Unlike `load`, an empty `draftId` is NOT a guaranteed no-op here: it is
+   *  a valid identifier `unreadable()` can report (the degenerate
+   *  exact-prefix key), and this method must be able to reach it. */
   discard(draftId: string): Promise<void>;
 }
 
@@ -540,7 +543,16 @@ export function createLocalDraftStore(
 
     async discard(draftId: string): Promise<void> {
       const ls = store(storage);
-      if (!ls || !draftId) return;
+      // NOT `!draftId`: an empty string is a legitimate `discard()` argument,
+      // not a guaranteed miss the way it is for `load()`. `unreadable()` can
+      // report `''` as a hidden entry's suffix — the degenerate exact-prefix
+      // key `gcb:event-draft:` — reachable only via a hand-edited blob or a
+      // foreign writer, since this module's own `save()` never persists an
+      // empty `draftId` (`parseEventDraft` refuses one). Guarding on falsiness
+      // here would make that one advertised id permanently un-discardable,
+      // silently defeating the very cleanup path it was named for (Codex P2,
+      // #814 round 2 review).
+      if (!ls) return;
       try {
         ls.removeItem(KEY_PREFIX + draftId);
       } catch {

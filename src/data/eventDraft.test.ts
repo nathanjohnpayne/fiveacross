@@ -288,6 +288,23 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     expect(storage.raw.has('gcb:event-draft:wrong-key')).toBe(false);
   });
 
+  it('the degenerate exact-prefix key is both reported and actually discardable (Codex P2, #814 round 2)', async () => {
+    // A key of exactly `gcb:event-draft:` — no suffix at all. Reachable only
+    // via a hand-edited blob or a foreign writer; this module's own save()
+    // never persists an empty draftId. unreadable() reports it as `''`, and
+    // discard('') must not be a silent no-op or the advertised id would be
+    // permanently un-discardable — defeating the whole point of naming it.
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    storage.setItem('gcb:event-draft:', 'not json');
+
+    const hidden = await store.unreadable();
+    expect(hidden).toEqual(['']);
+
+    await store.discard(hidden[0]);
+    expect(storage.raw.has('gcb:event-draft:')).toBe(false);
+  });
+
   it('unreadable() reports nothing when every draft is readable and correctly keyed', async () => {
     const store = createLocalDraftStore(fakeStorage(), () => NOW);
     await store.save(draft({ draftId: 'a' }));
