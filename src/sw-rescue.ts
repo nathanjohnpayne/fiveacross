@@ -395,12 +395,17 @@ export function hasUnregisteredClient(liveIds: readonly string[] | null | undefi
  * Looks again at the registry, up to `attempts` times, before an absence is
  * treated as evidence.
  *
- * Only ever adds entries, so it can only ever talk the rescue OUT of condemning
- * a window — the safe direction, and the reason it needs no coordination with
- * whatever wrote them. Callers invoke it lazily, once they know the absence is
- * about to matter, so a decision that was going to decline anyway pays nothing.
- * Stops as soon as every live id has a record, so the common case — one late
- * arrival lands on the first look — still pays for exactly one wait.
+ * Only ever ADDS entries, never overwrites one already confirmed — across
+ * attempts, not merely against the initial snapshot (CodeRabbit on #819): each
+ * `readClientStamps` re-read is the WHOLE registry, so blindly spreading it
+ * over the running result on every attempt would let a later read's answer for
+ * an id already confirmed on an earlier attempt silently replace it. Once this
+ * function has believed a stamp for an id, nothing here revisits that belief —
+ * the safe direction, and the reason it needs no coordination with whatever
+ * wrote them. Callers invoke it lazily, once they know the absence is about to
+ * matter, so a decision that was going to decline anyway pays nothing. Stops
+ * as soon as every live id has a record, so the common case — one late arrival
+ * lands on the first look — still pays for exactly one wait.
  */
 export async function confirmClientStamps(
   cacheStorage: CacheStorage,
@@ -413,7 +418,12 @@ export async function confirmClientStamps(
   let merged = stamps;
   for (let attempt = 0; attempt < attempts && hasUnregisteredClient(liveIds, merged); attempt++) {
     await sleep(delayMs);
-    merged = { ...merged, ...(await readClientStamps(cacheStorage)) };
+    const fresh = await readClientStamps(cacheStorage);
+    const additions: ClientStamps = {};
+    for (const [id, stamp] of Object.entries(fresh)) {
+      if (merged[id] === undefined) additions[id] = stamp;
+    }
+    merged = { ...merged, ...additions };
   }
   return merged;
 }

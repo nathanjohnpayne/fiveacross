@@ -559,6 +559,32 @@ describe('confirming an absence before believing it (#516)', () => {
     await confirmClientStamps(cs, live, first, sleep);
     expect(sleep).toHaveBeenCalledTimes(1);
   });
+
+  // CodeRabbit on #819 (post-review #756's fix): each retry re-reads the WHOLE
+  // registry, so a naive `{ ...merged, ...fresh }` spread on every attempt
+  // would let a LATER read's answer for an id already confirmed on an EARLIER
+  // attempt silently replace it — reintroducing the overwrite the "only ever
+  // adds entries" contract exists to rule out, just spread across retries
+  // instead of against the original snapshot.
+  it('never lets a later re-read overwrite a client id already confirmed on an earlier attempt', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-confirmed', 'tab-late'];
+    await recordClientStamp(cs, 'tab-confirmed', OLD_SHELL, live);
+    const first = await readClientStamps(cs);
+    let attempt = 0;
+    const confirmed = await confirmClientStamps(cs, live, first, async () => {
+      attempt += 1;
+      if (attempt === 1) {
+        // A same-id write races in between attempts — the kind of drift the
+        // registry does not promise cannot happen — but the already-confirmed
+        // value must not be replaced by it.
+        await recordClientStamp(cs, 'tab-confirmed', NEW_SHELL, live);
+      } else {
+        await recordClientStamp(cs, 'tab-late', NEW_SHELL, live);
+      }
+    });
+    expect(confirmed).toEqual({ 'tab-confirmed': OLD_SHELL, 'tab-late': NEW_SHELL });
+  });
 });
 
 describe('the client build registry, as the decision reads it (#516)', () => {
