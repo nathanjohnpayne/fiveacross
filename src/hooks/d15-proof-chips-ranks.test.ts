@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
-// specs/d15-proof-chips-ranks.md, hooks layer (#218). Harness mirrors
-// src/hooks/w2-doubts.test.tsx — the REAL hook with Firestore's onSnapshot
-// stubbed, event doc + proofs query hand-delivered separately.
+// specs/d15-proof-chips-ranks.md, hooks layer (#218, union semantics #604).
+// Harness mirrors src/hooks/w2-doubts.test.tsx — the REAL hook with
+// Firestore's onSnapshot stubbed, event doc + proofs query hand-delivered
+// separately.
 
 const H = vi.hoisted(() => ({ onSnapshot: vi.fn() }));
 
@@ -23,7 +24,7 @@ vi.mock('firebase/firestore', () => {
   };
 });
 
-import { useLatestProofByUid } from './useData';
+import { useProofKindsByUid } from './useData';
 import type { ProofDoc } from '../types';
 
 beforeEach(() => {
@@ -58,36 +59,51 @@ const proof = (id: string, uid: string, createdAt: number, over: Partial<ProofDo
     text: 'x', createdAt, reportCount: 0, status: 'active', visionFlag: null, ...over,
   }) as ProofDoc;
 
-describe('useLatestProofByUid (#218)', () => {
-  it('keeps exactly the most recent Proof per uid across different Days', () => {
+describe('useProofKindsByUid (#604)', () => {
+  it('unions every proof kind a Player has used across different Days, not just their most recent', () => {
     const cap = capture();
-    const { result } = renderHook(() => useLatestProofByUid());
+    const { result } = renderHook(() => useProofKindsByUid());
     cap.fireDoc(eventSnap(undefined));
     cap.fireQuery(colSnap([
-      proof('p1', 'bob', 1_000, { type: 'photo' }),
-      proof('p2', 'bob', 3_000, { type: 'audio' }), // later — should win
-      proof('p3', 'ana', 2_000, { type: 'text' }),
+      // Nathan mixed a live photo, a library photo, and written proof —
+      // the reported #604 case — none of these is the "latest" alone.
+      proof('p1', 'nathan', 1_000, { type: 'photo', source: 'camera' }),
+      proof('p2', 'nathan', 2_000, { type: 'photo', source: 'library' }),
+      proof('p3', 'nathan', 3_000, { type: 'text' }),
+      proof('p4', 'ana', 2_000, { type: 'audio' }),
     ]));
 
-    expect(result.current.latestByUid.bob.id).toBe('p2');
-    expect(result.current.latestByUid.ana.id).toBe('p3');
-    expect(Object.keys(result.current.latestByUid).sort()).toEqual(['ana', 'bob']);
+    expect(result.current.kindsByUid.nathan).toEqual({ photo: true, library: true, audio: false, text: true });
+    expect(result.current.kindsByUid.ana).toEqual({ photo: false, library: false, audio: true, text: false });
+    expect(Object.keys(result.current.kindsByUid).sort()).toEqual(['ana', 'nathan']);
+  });
+
+  it('a single-kind Player unions down to exactly that one flag', () => {
+    const cap = capture();
+    const { result } = renderHook(() => useProofKindsByUid());
+    cap.fireDoc(eventSnap(undefined));
+    cap.fireQuery(colSnap([proof('p1', 'bob', 1_000, { type: 'text' }), proof('p2', 'bob', 2_000, { type: 'text' })]));
+
+    expect(result.current.kindsByUid.bob).toEqual({ photo: false, library: false, audio: false, text: true });
   });
 
   it('applies the community auto-hide (report threshold) and the Admin ban (#108)', () => {
-    // Threshold: an at/over-threshold Proof never wins "latest".
+    // Threshold: an at/over-threshold Proof never contributes a kind.
     let cap = capture();
-    let hook = renderHook(() => useLatestProofByUid());
+    let hook = renderHook(() => useProofKindsByUid());
     cap.fireDoc(eventSnap(4));
-    cap.fireQuery(colSnap([proof('p1', 'bob', 1_000, { reportCount: 2 }), proof('p2', 'bob', 3_000, { reportCount: 4 })]));
-    expect(hook.result.current.latestByUid.bob.id).toBe('p1');
+    cap.fireQuery(colSnap([
+      proof('p1', 'bob', 1_000, { type: 'text', reportCount: 2 }),
+      proof('p2', 'bob', 3_000, { type: 'photo', reportCount: 4 }),
+    ]));
+    expect(hook.result.current.kindsByUid.bob).toEqual({ photo: false, library: false, audio: false, text: true });
 
-    // Ban: a banned Player's Proof is dropped entirely.
+    // Ban: a banned Player's Proofs are dropped entirely.
     cap = capture();
-    hook = renderHook(() => useLatestProofByUid());
+    hook = renderHook(() => useProofKindsByUid());
     cap.fireDoc(eventSnap(undefined, ['bob']));
     cap.fireQuery(colSnap([proof('p1', 'bob', 1_000), proof('p2', 'ana', 2_000)]));
-    expect(hook.result.current.latestByUid.bob).toBeUndefined();
-    expect(hook.result.current.latestByUid.ana.id).toBe('p2');
+    expect(hook.result.current.kindsByUid.bob).toBeUndefined();
+    expect(hook.result.current.kindsByUid.ana).toEqual({ photo: false, library: false, audio: false, text: true });
   });
 });

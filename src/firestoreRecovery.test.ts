@@ -99,6 +99,15 @@ describe('isFirestorePoisonAssertion (detection is the thing that authorizes a r
     // Ordering matters: the id has to follow the assertion header, not precede it.
     ['the id BEFORE the assertion header', '(ID: b815) FIRESTORE (12.17.0) INTERNAL ASSERTION FAILED: x (ID: 9999)'],
     ['an assertion with no product tag', 'INTERNAL ASSERTION FAILED: Unexpected state (ID: b815)'],
+    // The id has to be the one belonging to the FIRST (outer) header — not any
+    // `(ID: b815)` marker that shows up later in the string. A different outer
+    // assertion whose nested CONTEXT happens to mention b815 is not the
+    // tombstone: the tombstone's own reload budget must not be spent on it.
+    [
+      'a different outer assertion whose nested context happens to mention b815',
+      'FIRESTORE (12.17.0) INTERNAL ASSERTION FAILED: Unexpected state (ID: 3c6b) ' +
+        'CONTEXT: {"rl":"FIRESTORE (12.17.0) INTERNAL ASSERTION FAILED: Unexpected state (ID: b815) CONTEXT: {}"}',
+    ],
   ])('does NOT recognise %s', (_label, message) => {
     expect(isFirestorePoisonAssertion(message)).toBe(false);
     expect(isFirestorePoisonAssertion(new Error(message))).toBe(false);
@@ -112,6 +121,20 @@ describe('isFirestorePoisonAssertion (detection is the thing that authorizes a r
     ['an object with a non-string message', { message: { toString: () => BODEGA_TOMBSTONE } }],
   ])('does NOT recognise %s', (_label, value) => {
     expect(isFirestorePoisonAssertion(value)).toBe(false);
+  });
+
+  it('does NOT throw, and does NOT recognise, a value whose `message` getter throws', () => {
+    // A thrown Proxy or an object with a throwing `message` getter must
+    // degrade to "not the tombstone" — this runs on every global error and
+    // unhandled rejection, so it must never itself become a second throw.
+    const poisonedGetter: { message?: string } = {};
+    Object.defineProperty(poisonedGetter, 'message', {
+      get() {
+        throw new Error('reading .message itself threw');
+      },
+    });
+    expect(() => isFirestorePoisonAssertion(poisonedGetter)).not.toThrow();
+    expect(isFirestorePoisonAssertion(poisonedGetter)).toBe(false);
   });
 });
 
@@ -156,6 +179,21 @@ describe('installFirestorePoisonRecovery', () => {
     const { target, reload } = harness();
     target.dispatchEvent(errorEvent({ error }));
     target.dispatchEvent(rejectionEvent(error));
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('degrades to no recovery, and does not itself throw, on a `message` getter that throws', () => {
+    // The fail-safe contract this watchdog exists under: a hostile or merely
+    // buggy thrown value must never turn global error dispatch into a SECOND
+    // unhandled exception.
+    const poisonedGetter: { message?: string } = {};
+    Object.defineProperty(poisonedGetter, 'message', {
+      get() {
+        throw new Error('reading .message itself threw');
+      },
+    });
+    const { target, reload } = harness();
+    expect(() => target.dispatchEvent(errorEvent({ error: poisonedGetter }))).not.toThrow();
     expect(reload).not.toHaveBeenCalled();
   });
 

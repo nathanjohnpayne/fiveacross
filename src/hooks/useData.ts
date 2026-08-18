@@ -1123,34 +1123,45 @@ export function useProofsForItemText(itemText: string | null | undefined) {
   return { proofs, loading, hasServerData };
 }
 
+/** The distinct proof "kinds" a Leaderboard row's chip strip can show — one
+ *  flag per chip, independent of `ProofDoc.type`/`source` naming so
+ *  `proofChips` (Leaderboard.tsx) never has to re-inspect a raw Proof. */
+export interface ProofKindFlags {
+  photo: boolean;
+  library: boolean;
+  audio: boolean;
+  text: boolean;
+}
+
 /**
- * Each Player's single most-recent active Proof (#218, daily-cards-spec §
- * "Asking for proof — Doubts"): the Leaderboard's per-row media chip reads
- * this — one Proof per uid (max `createdAt`), never a history. Presentational
- * only — Leaderboard.tsx applies it strictly AFTER `sortPlayers`, so it
- * never feeds ranking/filter logic.
+ * Every proof "kind" each Player has actually used, across their active
+ * Proofs (#604, daily-cards-spec § "Asking for proof — Doubts"): the
+ * Leaderboard's per-row media chips are the UNION of kinds a Player has used
+ * during the Event, not just their most recent Proof's kind (#218's original
+ * "latest only" reading undercounted a Player who mixed live photos, library
+ * photos, and written proof down to a single chip — reported in #604).
+ * Presentational only — Leaderboard.tsx applies it strictly AFTER
+ * `sortPlayers`, so it never feeds ranking/filter logic.
  *
  * Derived from `useProofFeed(max)` — the SAME newest-first, capped, filtered
- * list the public Feed's proof stream renders — rather than an unbounded scan
- * (Codex P2, PR #243): a chip's `onClick` navigates to `/feed`, and `ProofFeed`
- * caps its merged entries at the same `max` via `useFeed`. Sourcing the latest-
- * by-uid reduction from that pre-capped list means a chip is only ever offered
- * for a Proof that is actually a CANDIDATE for the page the chip navigates
- * to — closing the common case where a Player's newest Proof had aged out of
- * the window entirely (an all-Players scan has no cap, so it could otherwise
- * surface a chip for a Proof dozens of pages of activity in the past). This
- * also folds in the same two PUBLIC-facing filters (community auto-hide +
- * Admin ban, #108) `useProofFeed` already applies, and shares its `'proofs'`
- * subscription cache key — one listener, not two.
+ * list the public Feed's proof stream renders — rather than a new/unbounded
+ * query (Codex P2, PR #243, carried forward by #604): a chip's `onClick`
+ * navigates to `/feed`, and `ProofFeed` caps its merged entries at the same
+ * `max` via `useFeed`, so the union is only ever built from Proofs that are
+ * actually CANDIDATES for the page the chip navigates to. This also folds in
+ * the same two PUBLIC-facing filters (community auto-hide + Admin ban, #108)
+ * `useProofFeed` already applies, and shares its `'proofs'` subscription
+ * cache key — one listener, not two.
  */
-export function useLatestProofByUid(max = 60) {
+export function useProofKindsByUid(max = 60) {
   const { proofs, loading } = useProofFeed(max);
-  const latestByUid: Record<string, ProofDoc> = {};
+  const kindsByUid: Record<string, ProofKindFlags> = {};
   for (const p of proofs) {
-    const existing = latestByUid[p.uid];
-    if (!existing || p.createdAt > existing.createdAt) {
-      latestByUid[p.uid] = p;
-    }
+    const flags = kindsByUid[p.uid] ?? (kindsByUid[p.uid] = { photo: false, library: false, audio: false, text: false });
+    if (p.type === 'photo') flags.photo = true;
+    if (p.type === 'photo' && p.source === 'library') flags.library = true;
+    if (p.type === 'audio') flags.audio = true;
+    if (p.type === 'text') flags.text = true;
   }
-  return { latestByUid, loading };
+  return { kindsByUid, loading };
 }
