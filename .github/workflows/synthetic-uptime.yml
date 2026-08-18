@@ -81,7 +81,24 @@ jobs:
       - name: Bound scheduled unsubscribe-rewrite grace
         run: |
           set -euo pipefail
-          rollout_epoch="$(git log --diff-filter=A --format=%ct --reverse -- tests/synthetic/unsubscribe-invoker.spec.ts | head -n 1)"
+          # --first-parent anchors the deadline to when the file reached THIS
+          # branch's mainline, not to a buried feature-branch commit's original
+          # date (Codex P2 on #774). This repo's operating convention is a
+          # squash merge, whose fresh commit is already dated at merge time —
+          # but `allow_merge_commit`/`allow_rebase_merge` are both enabled on
+          # the repo (no branch-protection squash-only enforcement), so a
+          # non-squash merge is not hypothetical. Without --first-parent, `git
+          # log --diff-filter=A` would (for such a merge) walk into the second
+          # parent and attribute the add to the ORIGINAL feature-branch commit,
+          # which can predate the merge by longer than the review took —
+          # already-expired grace on the very first scheduled run after merge,
+          # exactly the false-incident risk this bound exists to prevent. With
+          # --first-parent, a merge commit is diffed against its own first
+          # parent, so the add is attributed to the merge itself regardless of
+          # how old the commits it merged in are. For today's actual squash-only
+          # history this is a no-op (every commit already has exactly one
+          # parent) — pure defense-in-depth against a future non-squash merge.
+          rollout_epoch="$(git log --first-parent --diff-filter=A --format=%ct --reverse -- tests/synthetic/unsubscribe-invoker.spec.ts | head -n 1)"
           if [[ -z "$rollout_epoch" ]]; then
             echo "Could not find the commit that added tests/synthetic/unsubscribe-invoker.spec.ts." >&2
             exit 1
