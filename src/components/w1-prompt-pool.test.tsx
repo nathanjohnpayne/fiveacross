@@ -43,6 +43,10 @@ vi.mock('../hooks/useData', () => ({
   // for every assertion in THIS file, which only exercises the pre-existing
   // active-pool + throttle behavior.
   useMyPendingItems: () => ({ items: [], loading: false }),
+  // #559: ItemPool now reads the Day schedule for its submitter-state pills.
+  // No schedule here — a no-op for this file's pre-existing add/throttle
+  // assertions, which don't exercise the new states.
+  useEventDoc: () => ({ data: undefined }),
 }));
 
 import ItemPool from './ItemPool';

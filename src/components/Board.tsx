@@ -4,6 +4,8 @@ import { getDoc } from 'firebase/firestore';
 import { useAuth } from '../auth/AuthContext';
 import { useBoard, useDayBoard, useDayMeta, useMyPlayer, useEventDoc, useItems, useTally, useLeaderboard, useDoubts, useMyProofs, useProofsForItemText, useDayMetasStatus, isBanned } from '../hooks/useData';
 import { setMark, dealDayCard, reconcileEchoes, resolveDisplayName, RESHUFFLE_ALLOWANCE } from '../data/api';
+import { requestOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
+import TomorrowsCardInvite from './TomorrowsCardInvite';
 import { saveCardSnapshot, loadCardSnapshot } from '../data/cardCache';
 import { dayBoardRef } from '../data/paths';
 import { raiseDoubt, openDoubts, doubtStatusFor } from '../data/doubts';
@@ -572,11 +574,19 @@ function firstCompletedLineAt(cells: Cell[]): number | null {
  * pressed value cannot carry.
  */
 function squareLabel(c: Cell): string {
+  // "New from the group" affordance (#559): a screen-reader parity note for
+  // the visual `.cell.community` accent ring (Board's tile className below)
+  // — carried through every marked-state branch rather than a single early
+  // return, so a community Square's label stays complete no matter which
+  // state it's in.
+  const community = !c.free && c.communityPrompt ? '—new from the group' : '';
   if (c.free) return `${c.text}—free space, already marked`;
-  if (!c.marked) return `${c.text}—not marked`;
+  if (!c.marked) return `${c.text}${community}—not marked`;
   // The app's own vocabulary for this state (ProofSheet: "Goes pending until an
   // admin confirms.").
-  return c.status === 'pending' ? `${c.text}—marked, pending admin confirmation` : `${c.text}—marked`;
+  return c.status === 'pending'
+    ? `${c.text}${community}—marked, pending admin confirmation`
+    : `${c.text}${community}—marked`;
 }
 
 /**
@@ -2470,6 +2480,15 @@ export default function Board() {
           />
         )}
         {viewedDay && <TutorialBanner day={viewedDay} event={event} />}
+        {/* "Put it on tomorrow's card" entry point (#559) — hidden once no
+            later eligible Day remains (TomorrowsCardInvite's own check).
+            `days`/`now` are the SAME schedule + clock every lock check on
+            this page already reads. Deliberately does NOT call
+            `useNavigate` itself — Board is kept react-router-free (many of
+            its unit tests mount it standalone, with no <Router> wrapper);
+            `SuggestPanelBridge.tsx` (mounted from App.tsx, always inside the
+            Router) does the actual navigation once this intent lands. */}
+        <TomorrowsCardInvite days={days} now={now} onOpen={requestOpenSuggestPanel} />
         {/* Keyed + gated like the grid below (Codex P3 on #421 round 3): the
             header letters cascade once per board identity — replaying for a
             genuinely new card (Day switch, reshuffle) and mounting landed on
@@ -2507,7 +2526,15 @@ export default function Board() {
               (c.status === 'pending' ? ' pending' : '') +
               (wins.has(c.index) ? ' win' : '') +
               (stamped.has(c.index) ? ' just-marked' : '') +
-              (c.free && freePulse > 0 ? (freePulse % 2 ? ' free-pulse-a' : ' free-pulse-b') : '')
+              (c.free && freePulse > 0 ? (freePulse % 2 ? ' free-pulse-a' : ' free-pulse-b') : '') +
+              // "New from the group" (#559): a Community Prompt Square, flagged
+              // at deal time (Cell.communityPrompt). A TILE-level modifier
+              // rather than a corner glyph — every corner (✓ top-right, echo
+              // ⟲/Doubt top-left, proof ＋ bottom-left, tally bottom-right) is
+              // already spoken for, and a Square can carry several of those at
+              // once; the accent ring below composes with all of them instead
+              // of contending for the same pixel.
+              (!c.free && c.communityPrompt ? ' community' : '')
             }
             // The motion pass's per-Square inputs (specs/motion-polish.md):
             // the deal cascade's column/row delay, and — on a winning line —

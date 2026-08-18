@@ -32,6 +32,9 @@ vi.mock('../data/api', () => ({
 vi.mock('../hooks/useData', () => ({
   useItems: () => ({ items: [], loading: false }),
   useMyPendingItems: () => ({ items: [] }),
+  // #559: ItemPool now reads the Day schedule for its submitter-state pills.
+  // No schedule here — a no-op for this file's adult-content-gate assertions.
+  useEventDoc: () => ({ data: undefined }),
 }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({

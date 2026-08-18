@@ -26,6 +26,10 @@ vi.mock('../hooks/useData', () => ({
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useItems: () => ({ items: H.items, loading: false }),
   useMyPendingItems: () => ({ items: H.myPending, loading: false }),
+  // #559: ItemPool now reads the Day schedule for its submitter-state pills.
+  // No schedule here — this file's existing assertions predate #559 and
+  // don't exercise scheduled/approved/not-selected states (own suite below).
+  useEventDoc: () => ({ data: undefined }),
 }));
 vi.mock('../data/api', () => ({
   addItem: (...a: unknown[]) => H.addItem(...a),

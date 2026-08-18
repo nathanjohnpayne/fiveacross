@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router';
 import { Play, Pause, Heart } from 'lucide-react';
 import { useFeed, useEventDoc, useMyDayBoards, useAllDoubts, useAllHearts, useMyPlayer } from '../hooks/useData';
 import { requestOpenSquare } from '../hooks/useOpenSquare';
+import { requestOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
+import TomorrowsCardInvite from './TomorrowsCardInvite';
 import { useAuth } from '../auth/AuthContext';
 import { reportProof, deleteProof } from '../data/proofs';
 import { resolveDisplayName } from '../data/api';
@@ -1144,6 +1146,16 @@ export default function ProofFeed() {
 
   return (
     <div className="list">
+      {/* "Put it on tomorrow's card" entry point (#559) — the SAME component
+          Board.tsx mounts on the Card, hidden once no later eligible Day
+          remains. `event?.days`/`Date.now()` mirror Board's own inputs; the
+          Feed has no equivalent of Board's ticking `now` state, so this reads
+          the clock fresh on each render, which is fine for a visibility gate
+          that only needs to flip once a Day boundary passes, not live-tick.
+          `onOpen` only signals the intent — `SuggestPanelBridge.tsx`
+          (App.tsx) does the actual navigation, the SAME split Board.tsx
+          uses, so this isn't a special case. */}
+      <TomorrowsCardInvite days={event?.days ?? []} now={Date.now()} onOpen={requestOpenSuggestPanel} />
       {/* The Hearts cue (#534/#561, specs/feed-hearts.md): a quiet standing
           invitation while Hearts still count toward the Most-Loved Photo
           freeze — no streaks, no badges, no notification pressure, and it

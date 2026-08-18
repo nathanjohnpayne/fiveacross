@@ -59,6 +59,29 @@ export interface DealItem {
    * EASY half of the mix (specs/easy-mix.md); everything else is the main half.
    */
   pool?: string;
+  // The Day this Prompt is routed to (#557/#559, specs/community-prompt-targeting.md
+  // § "Entry point, submitter states, and attribution"). A USABLE value marks the
+  // picked Prompt a Community Prompt so `dealBoard` can stamp the receiving Cell's
+  // `communityPrompt` affordance — see `isUsableDealTarget` below. Absent/malformed
+  // reads as organiser/seed content, matching `isUsableTarget`'s own rule.
+  targetDayIndex?: number;
+  // The submitter uid, carried through ONLY so `dealBoard` can denormalize
+  // `Cell.suggestedBy` for Prompt-detail attribution (#559). Optional: several
+  // hydration paths (reshuffle, snapshot-id lookups) may omit it; an absent value
+  // just means no attribution is stamped on the dealt Cell.
+  createdBy?: string;
+}
+
+/**
+ * Is `targetDayIndex` usable, i.e. does this DealItem describe a Community
+ * Prompt? A LOCAL MIRROR of `isUsableTarget` (src/data/communityPrompts.ts),
+ * not a shared import — `src/game/**` is the app's pure, Firestore-free
+ * layer and every existing import edge runs `data/** → game/**`, never the
+ * reverse (mirrors `functions/src/unlockDay.ts`'s own local-mirror rationale
+ * for the identical reason: staying dependency-light for its own layer).
+ */
+function isUsableDealTarget(targetDayIndex: unknown): targetDayIndex is number {
+  return typeof targetDayIndex === 'number' && Number.isInteger(targetDayIndex) && targetDayIndex >= 0;
 }
 
 function interleavePicks(spicyPicks: DealItem[], tamePicks: DealItem[]): DealItem[] {
@@ -315,6 +338,12 @@ export function dealBoard(
         free: false,
         marked: false,
         markedAt: null,
+        // Community Prompt affordance + attribution (#559), stamped ONCE at
+        // deal time from the picked ItemDoc — see the `communityPrompt`/
+        // `suggestedBy` doc comments on `Cell` (domainTypes.d.ts) for why
+        // this is denormalized here instead of resolved live post-deal.
+        ...(item && isUsableDealTarget(item.targetDayIndex) ? { communityPrompt: true } : {}),
+        ...(item?.createdBy ? { suggestedBy: item.createdBy } : {}),
       });
     }
   }

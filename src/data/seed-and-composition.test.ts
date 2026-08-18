@@ -151,6 +151,52 @@ describe('dealBoard — clamps a malformed spicyRatio instead of corrupting the 
   });
 });
 
+describe('dealBoard — Community Prompt affordance + attribution stamping (#559)', () => {
+  // A synthetic pool with 24 usable non-free draws, exactly two of which
+  // carry a Community Prompt's usual shape: a usable `targetDayIndex` plus a
+  // `createdBy` uid. `unstratifiedPicks` guards a >MIN_POOL, spicy-agnostic
+  // pool here (stratify: false), so every non-community item is deliberately
+  // tame and untargeted — nothing to accidentally collide with the two.
+  const pool: DealItem[] = [
+    { id: 'community-1', text: 'Suggested by a player', spicy: false, targetDayIndex: 2, createdBy: 'u-suggester' },
+    { id: 'community-2', text: 'Also suggested', spicy: false, targetDayIndex: 0, createdBy: 'u-other' },
+    ...Array.from({ length: 22 }, (_, i) => ({ id: `organiser-${i}`, text: `Organiser prompt ${i}`, spicy: false })),
+  ];
+
+  it('stamps communityPrompt + suggestedBy ONLY on cells drawn from a usable-target item', () => {
+    const cells = nonFreeCells(dealBoard(pool, FREE_TEXT, 1, 0, { stratify: false }));
+    const community = cells.filter((c) => c.itemId === 'community-1' || c.itemId === 'community-2');
+    expect(community).toHaveLength(2);
+    for (const c of community) {
+      expect(c.communityPrompt).toBe(true);
+    }
+    expect(cells.find((c) => c.itemId === 'community-1')?.suggestedBy).toBe('u-suggester');
+    expect(cells.find((c) => c.itemId === 'community-2')?.suggestedBy).toBe('u-other');
+
+    const organiser = cells.filter((c) => c.itemId?.startsWith('organiser-'));
+    expect(organiser.length).toBeGreaterThan(0);
+    for (const c of organiser) {
+      expect(c.communityPrompt).toBeUndefined();
+      expect(c.suggestedBy).toBeUndefined();
+    }
+  });
+
+  it('never stamps the free centre — it has no drawn item to attribute', () => {
+    const cells = dealBoard(pool, FREE_TEXT, 1, 0, { stratify: false });
+    const free = cells.find((c) => c.free);
+    expect(free?.communityPrompt).toBeUndefined();
+    expect(free?.suggestedBy).toBeUndefined();
+  });
+
+  it('leaves an untargeted item unstamped even when it carries no createdBy at all (synthetic/legacy items)', () => {
+    const cells = nonFreeCells(dealBoard(fullPool, FREE_TEXT, 1));
+    for (const c of cells) {
+      expect(c.communityPrompt).toBeUndefined();
+      expect(c.suggestedBy).toBeUndefined();
+    }
+  });
+});
+
 describe('scripts/seed-data/med-2026.mjs — replace semantics (no Firestore/emulator; plain import assertions)', () => {
   it('exports the same 80-entry { text, spicy } pool as src/data/seed.ts SEED_ITEMS', () => {
     expect(SCRIPT_ITEMS.length).toBe(80);

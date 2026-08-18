@@ -524,6 +524,15 @@ a {
   opacity: 0.7;
   border-style: dashed;
 }
+/* "New from the group" (#559): a Community Prompt Square (Cell.communityPrompt,
+   stamped at deal time). A tile-level accent ring rather than a corner glyph —
+   every corner is already claimed (✓ top-right, echo/Doubt top-left, proof ＋
+   bottom-left, tally bottom-right) — so this composes with any of them instead
+   of contending for the same pixel. Ring, not fill: must stay legible under
+   every Theme's own gradient once marked. */
+.cell.community {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 /* An Echo Mark (specs/echo-marks.md): a Square auto-marked because the Player's
    confirmed Mark on the SAME Prompt carried over from another Day Card. The
    subtle ⟲ glyph (top-left — the ✓ owns top-right, proof ＋ bottom-left, tally
@@ -2331,6 +2340,33 @@ textarea.input {
 .pill-error {
   border-color: var(--danger, #ff6b7a);
   color: var(--danger, #ff6b7a);
+}
+/* A player's OWN not-selected Community Prompt (#559, ItemPool.tsx's
+   submitter-state pills) — de-emphasized rather than accent/danger-toned:
+   this is a routine outcome, not a moderation alert. */
+.pill-muted {
+  color: var(--dim);
+}
+/* The "put it on tomorrow's card" entry point (#559, TomorrowsCardInvite.tsx),
+   mounted on both the Card and the Feed. Scoped, minimal — a single quiet
+   row, not a new chrome pattern. */
+.prompt-invite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.prompt-invite-copy {
+  font-size: 12px;
+}
+.prompt-invite-btn {
+  font-size: 12px;
+  padding: 6px 12px;
 }
 
 /* ---------- admin console chrome (specs/admin-console-ia.md) ----------

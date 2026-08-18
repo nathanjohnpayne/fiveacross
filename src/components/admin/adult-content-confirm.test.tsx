@@ -27,6 +27,12 @@ vi.mock('../../firebase', () => ({
   googleProvider: {},
   analytics: null,
 }));
+// #559: ReviewQueue now imports `track` (for `prompt_suggestion_approved`),
+// so the module graph reaches `../../analytics` — mock it directly rather
+// than letting the real module's own `../../firebase` (analyticsReady)
+// dependency leak into this suite's mock, the same posture
+// ItemPool.test.tsx already takes.
+vi.mock('../../analytics', () => ({ track: vi.fn() }));
 vi.mock('../../data/admin', () => ({
   approveItem: (...a: unknown[]) => approveItem(...(a as [])),
   bulkApproveItems: (...a: unknown[]) => bulkApproveItems(...(a as [])),

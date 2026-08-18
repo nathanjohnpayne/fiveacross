@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { useItems, useMyPendingItems } from '../hooks/useData';
+import { useItems, useMyPendingItems, useEventDoc } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
+import { defaultTargetDayIndex } from '../data/communityPrompts';
+import {
+  loadTrackedSuggestions,
+  trackSuggestion,
+  deriveMySubmissions,
+  type MySubmissionStatus,
+  type TrackedSuggestion,
+} from '../data/mySuggestions';
 import { track } from '../analytics';
 import LoadingState from './LoadingState';
 import { editionBrand } from '../editions';
@@ -59,6 +67,16 @@ function markExplicitTagSeen(eventId: string): void {
   }
 }
 
+// Submitter-state pill copy (#559 acceptance: "the submitter sees pending /
+// approved / scheduled / not selected"). `scheduled` names the Day so the
+// promise reads concretely ("Day 3") rather than as a bare status word.
+const SUBMISSION_STATUS_LABEL: Record<MySubmissionStatus, string> = {
+  pending: 'pending review',
+  scheduled: 'scheduled',
+  approved: 'approved',
+  not_selected: 'not selected',
+};
+
 export default function ItemPool() {
   const { user } = useAuth();
   const { items, loading } = useItems();
@@ -69,8 +87,30 @@ export default function ItemPool() {
   const adult = useAdultContent();
   // The submitter's own pending submissions (#210): `useItems` reads only
   // `status == 'active'`, so a fresh `pending` add would otherwise vanish from
-  // this list the instant it lands. Merged in below, tagged "pending review".
+  // this list the instant it lands. `deriveMySubmissions` below unions this
+  // LIVE, cross-device query with the local tracker for the follow-up states.
   const { items: myPending } = useMyPendingItems(user?.uid);
+  // The Day schedule, for `submitterStatus`'s "is the promised Day still
+  // open" check (#559) — the SAME `useEventDoc` subscription every other
+  // schedule-reading surface (Board, More) already holds; no new read.
+  const { data: event } = useEventDoc();
+  const days = event?.days ?? [];
+  // This device's own submission history (#559) — see src/data/mySuggestions.ts
+  // for why a rejected row can't just be READ back. Reloaded whenever the
+  // signed-in uid changes (account switch on a shared device). Keyed on the
+  // PRIMITIVE `user?.uid`, not the `user` object itself: `useAuth()` is not
+  // guaranteed to return a referentially-stable object on every render (a
+  // caller-supplied stand-in — e.g. an `useAuth: () => ({ user: {...}, ... })`
+  // test double with no memoization — can hand back a fresh object every
+  // call), and depending on the whole object here would re-run this effect,
+  // and re-`setTracked`, on EVERY render, forever.
+  const uid = user?.uid;
+  const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
+  useEffect(() => {
+    setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
+  }, [uid]);
+  const activeMine = user ? items.filter((it) => it.createdBy === user.uid) : [];
+  const mySubmissions = deriveMySubmissions(tracked, myPending, activeMine, days, Date.now());
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
   // The first-time explainer (#610). State, not a render-time storage read:
@@ -109,8 +149,24 @@ export default function ItemPool() {
       return;
     }
     try {
-      await addItem(user.uid, text, adult && spicy);
+      const id = await addItem(user.uid, text, adult && spicy);
       track('add_item');
+      // `prompt_suggestion_submitted` (#559): NO Prompt text in the payload —
+      // just whether a Day could be named. `defaultTargetDayIndex` re-derives
+      // the SAME "earliest still-open Day" `addItem` itself resolves
+      // (specs/community-prompt-targeting.md), off the schedule this panel
+      // already holds — an approximation for analytics only; the write's own
+      // fresh read is what's authoritative for the actual placement.
+      const approxTarget = defaultTargetDayIndex(days, Date.now());
+      track('prompt_suggestion_submitted', {
+        hasTargetDay: approxTarget != null,
+        ...(approxTarget != null ? { dayIndex: approxTarget } : {}),
+      });
+      if (id) {
+        const submitted = { id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
+        trackSuggestion(EVENT_ID, user.uid, submitted);
+        setTracked((prev) => [...prev.filter((s) => s.id !== id), submitted]);
+      }
       setText('');
       setSpicy(false);
     } catch (e) {
@@ -211,16 +267,21 @@ export default function ItemPool() {
               </button>
             </div>
           ))}
-          {/* Own pending submissions (#210): visible ONLY to their submitter,
-              never to other Players (mirrors the read rule's carve-out) — no
-              Report control, since reporting your own not-yet-live Prompt is
-              meaningless. */}
-          {myPending.map((it) => (
-            <div key={it.id} className="row">
+          {/* Own submissions (#210, extended #559): visible ONLY to their
+              submitter, never to other Players (mirrors the read rule's
+              carve-out) — no Report control, since reporting your own Prompt
+              is meaningless. `mySubmissions` carries every state the
+              acceptance list names: pending / scheduled / approved / not
+              selected (src/data/mySuggestions.ts). */}
+          {mySubmissions.map((s) => (
+            <div key={s.id} className="row">
               <div className="grow">
                 <div className="name" style={{ fontWeight: 500 }}>
-                  {it.text}
-                  <span className="pill">pending review</span>
+                  {s.text}
+                  <span className={'pill' + (s.status === 'not_selected' ? ' pill-muted' : '')}>
+                    {SUBMISSION_STATUS_LABEL[s.status]}
+                    {s.status === 'scheduled' && typeof s.dayIndex === 'number' ? ` · Day ${s.dayIndex + 1}` : ''}
+                  </span>
                 </div>
               </div>
             </div>
