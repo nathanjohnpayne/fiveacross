@@ -29,7 +29,7 @@ vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: null, loading: false }),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useLeaderboard: () => ({ players: [], loading: false }),
-  useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
+  useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),
   useProofFeed: (
     max: number | null,
     moderation?: { threshold: number | undefined; bannedUids: readonly string[] },
