@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BugReportInputError, nextRateState, validateBugReportInput } from '../../functions/src/bugReportCore';
-import { reporterBelongsToEvent, type ReporterLookupFirestore } from '../../functions/src/bugReports';
+import { resolveAbuseEscalation, type ReporterLookupFirestore } from '../../functions/src/bugReports';
 import contract from '../../functions/src/bugReportContract.cjs';
 
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -91,7 +91,7 @@ describe('bug-report server validation', () => {
   });
 });
 
-describe('reporterBelongsToEvent (#670 — the abuse escalation gate)', () => {
+describe('resolveAbuseEscalation (#670 — the abuse escalation gate)', () => {
   // `eventId` rides in on the client payload, and once an abuse report mails the
   // named Event's admins that field is a delivery address rather than a label.
   // These are the only answers that may open it.
@@ -108,35 +108,51 @@ describe('reporterBelongsToEvent (#670 — the abuse escalation gate)', () => {
     }),
   });
 
+  const ACTIVE = { status: 'active' };
+
   it('accepts a player of the Event they named', async () => {
-    const db = lookup({ 'events/med-2026/players/u1': { displayName: 'Ada' } });
-    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(true);
+    const db = lookup({ 'events/med-2026': ACTIVE, 'events/med-2026/players/u1': { displayName: 'Ada' } });
+    expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: true, eventActive: true });
   });
 
   it('accepts an Event ADMIN who never dealt a board', async () => {
     // An organizer who sets the Event up without playing has no player document
-    // and is plainly authorized — the roster is the second chance, and only the
-    // second, because it costs a whole Event read the common case should not pay.
-    const db = lookup({ 'events/med-2026': { admins: ['u1', 'u2'] } });
-    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(true);
+    // and is plainly authorized, so the roster answers first — and saves the
+    // second read when it does.
+    const db = lookup({ 'events/med-2026': { ...ACTIVE, admins: ['u1', 'u2'] } });
+    expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: true, eventActive: true });
   });
 
   it('rejects a stranger naming somebody else’s Event', async () => {
-    const db = lookup({ 'events/med-2026': { admins: ['someone-else'] } });
-    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(false);
-    expect(await reporterBelongsToEvent(lookup({}), 'med-2026', 'u1')).toBe(false);
-    // A non-array or absent roster is not a membership claim.
-    expect(await reporterBelongsToEvent(lookup({ 'events/med-2026': { admins: 'u1' } }), 'med-2026', 'u1')).toBe(false);
-    expect(await reporterBelongsToEvent(lookup({ 'events/med-2026': {} }), 'med-2026', 'u1')).toBe(false);
+    const strangers = [
+      { 'events/med-2026': { ...ACTIVE, admins: ['someone-else'] } },
+      {},
+      // A non-array or absent roster is not a membership claim.
+      { 'events/med-2026': { ...ACTIVE, admins: 'u1' } },
+      { 'events/med-2026': ACTIVE },
+    ];
+    for (const docs of strangers) {
+      expect((await resolveAbuseEscalation(lookup(docs), 'med-2026', 'u1')).member).toBe(false);
+    }
   });
 
-  it('FAILS CLOSED when the lookup itself breaks', async () => {
-    // The wrong direction here is mailing an Event's admins on the say-so of
-    // somebody with no relationship to it, so an unreadable answer is not
-    // membership.
+  it('reports a NON-ACTIVE Event as unescalatable even for a genuine member', async () => {
+    // `recordBugReportAlerts` refuses to enqueue against a non-active Event, so
+    // membership alone would have the sheet telling a member an admin was
+    // alerted when nobody was — the exact failure the receipt exists to prevent.
+    for (const event of [{ status: 'archived' }, { status: 'draft' }, { name: 'no status at all' }]) {
+      const db = lookup({ 'events/med-2026': event, 'events/med-2026/players/u1': { displayName: 'Ada' } });
+      expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: true, eventActive: false });
+    }
+  });
+
+  it('FAILS CLOSED on both halves when the lookup itself breaks', async () => {
+    // The wrong directions here are mailing an Event's admins on the say-so of
+    // somebody with no relationship to it, and claiming a delivery that did not
+    // happen — so an unreadable answer is neither membership nor activeness.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const db = lookup({ 'events/med-2026': { admins: ['u1'] } }, ['events/med-2026/players/u1']);
-    expect(await reporterBelongsToEvent(db, 'med-2026', 'u1')).toBe(false);
+    const db = lookup({ 'events/med-2026': { ...ACTIVE, admins: ['u1'] } }, ['events/med-2026']);
+    expect(await resolveAbuseEscalation(db, 'med-2026', 'u1')).toEqual({ member: false, eventActive: false });
     spy.mockRestore();
   });
 });

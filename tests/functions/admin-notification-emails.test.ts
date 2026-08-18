@@ -2023,9 +2023,14 @@ describe('the abuse module in the digest', () => {
     expect(model.preheader).toContain('2 items');
   });
 
-  it('never collapses two abuse reports into one row — two people saying so IS the signal', () => {
-    // The moderation module keys by content; this one keys by report, because
-    // a second report about the same incident is corroboration, not a duplicate.
+  it('renders one row per REPORT, never collapsing two abuse reports into one', () => {
+    // The moderation module keys by content because two reports about one Proof
+    // are one piece of work. A bug report has no subject document to collapse
+    // toward, only its own text — so each row stands for one report, and the
+    // report ID in its detail line is how an admin tells two rows apart. The
+    // rows deliberately do NOT claim two distinct reporters: intake has no
+    // submission idempotency yet, so one reporter retrying after a lost response
+    // can produce two reports.
     const model = buildAdminDigestModel({
       event: EVENT,
       eventId: 'med-2026',

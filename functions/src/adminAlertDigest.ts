@@ -240,12 +240,18 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
 
   const ordered = [...alerts].sort((a, b) => a.createdAt - b.createdAt);
 
-  // ③ Abuse reports — one row per report, never collapsed and never merged into
-  // the moderation module (#670). Two reports about the same incident are two
-  // people saying so, which is itself the signal; and an abuse report carries no
-  // `status`, no `reportCount` and no Vision flag, so `reviewDetail`'s causal
-  // vocabulary has nothing to say about it. The report ID is the detail an admin
-  // acts on: it is what `npm run bugs:pull` and the inbox key on.
+  // ③ Abuse reports — one row per REPORT, never collapsed and never merged into
+  // the moderation module (#670).
+  //
+  // The moderation module keys by content because two reports about one Proof
+  // are one piece of work. There is no equivalent key here: a bug report has no
+  // subject document to collapse toward, only its own text. So each row stands
+  // for one report and says so — the detail line carries the report ID, which is
+  // what `npm run bugs:pull` and the inbox key on, and is how an admin tells two
+  // rows apart. Deliberately NOT read as "two people": intake has no submission
+  // idempotency yet, so a retried submission after a lost response can produce a
+  // second report from one reporter (tracked as a follow-up). Two rows mean two
+  // reports, which is a claim the digest can actually support.
   const abuse: DigestRow[] = ordered
     .filter((a) => a.kind === 'abuse-reported')
     .map((a) => ({ label: a.label, detail: `abuse report · ${a.docId}` }));

@@ -83,6 +83,11 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   // knows whether an abuse report reached an admin, so the receipt reports the
   // outcome rather than the sheet promising one before submitting (#670).
   const [notified, setNotified] = useState(false);
+  // The kind the SUBMITTED report actually carried. The live `kind` keeps
+  // tracking the control, and the sheet stays mounted across a slow submit, so
+  // reading `kind` on the receipt would describe whatever is selected NOW rather
+  // than what was sent (#670, Codex P2 round 5).
+  const [submittedKind, setSubmittedKind] = useState<BugReportKind>('bug');
   const previewUrl = useMemo(() => (screenshot ? URL.createObjectURL(screenshot) : null), [screenshot]);
 
   useEffect(() => () => {
@@ -150,6 +155,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       setKind('bug');
       setError(null);
       setSubmittedId(null);
+      setSubmittedKind('bug');
       setNotified(false);
       void capture();
     },
@@ -226,6 +232,9 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
 
   const submit = async () => {
     if (!description.trim()) return;
+    // Read ONCE, at click time. Everything below is async, and this closure must
+    // send and report the same classification even if the control moves under it.
+    const sentKind = kind;
     setBusy(true);
     setError(null);
     try {
@@ -233,13 +242,14 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       const result = await submitBugReport(
         buildBugReportInput({
           description,
-          kind,
+          kind: sentKind,
           screenshotDataUrl,
           captureError,
           route: screenshot ? (captureRoute ?? undefined) : undefined,
         }),
       );
       setSubmittedId(result.reportId);
+      setSubmittedKind(sentKind);
       setNotified(result.notified === true);
       setScreenshot(null);
     } catch (submitError) {
@@ -278,7 +288,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                   <>
                     <h2 className="sheet-title" id="bug-report-title">Report received</h2>
                     <p>Thanks. Your report ID is <code>{submittedId}</code>.</p>
-                    {kind === 'abuse' && (
+                    {submittedKind === 'abuse' && (
                       <p className="bug-report-privacy">
                         {notified
                           ? 'This event’s admins have been alerted.'
@@ -301,7 +311,10 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                         checkbox does not. `bug` is pre-selected, so a reporter
                         who ignores this control sends exactly the payload every
                         already-shipped client sends. */}
-                    <fieldset className="bug-report-kind">
+                    {/* Frozen while a submit is in flight, alongside Cancel: a
+                        classification that can move after Send is a receipt that
+                        can describe a report nobody filed. */}
+                    <fieldset className="bug-report-kind" disabled={busy}>
                       <legend className="bug-report-label">What kind of report is this?</legend>
                       <label className="bug-report-kind-option">
                         <input

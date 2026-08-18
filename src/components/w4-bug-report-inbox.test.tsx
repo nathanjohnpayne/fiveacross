@@ -157,6 +157,32 @@ describe('W4 bug-report inbox', () => {
     expect(await screen.findByText(/couldn’t alert this event’s admins/)).toBeInTheDocument();
   });
 
+  it('freezes the classification while a submit is in flight, so the receipt cannot describe a report nobody filed (#670)', async () => {
+    // The sheet stays mounted across a slow submit. Reading the LIVE `kind` on
+    // the receipt would describe whatever is selected now rather than what was
+    // sent — select abuse, press Send, switch to bug, and the abuse outcome
+    // silently disappears.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    let resolveSubmit!: (result: { reportId: string; notified: boolean }) => void;
+    submitSpy.mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const abuse = await screen.findByRole('radio', { name: 'Abuse or harmful content' });
+    fireEvent.click(abuse);
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+
+    // Frozen at source: the control cannot move mid-flight in the first place.
+    await waitFor(() => expect(abuse).toBeDisabled());
+    expect(screen.getByRole('radio', { name: 'Something is broken' })).toBeDisabled();
+
+    // And even if it did, the receipt reports the kind that was SENT.
+    fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }));
+    resolveSubmit({ reportId: 'report-abuse', notified: true });
+    expect(await screen.findByText('This event’s admins have been alerted.')).toBeInTheDocument();
+    expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
+  });
+
   it('gives each report-kind label a real 44px tap target', () => {
     // A 13px line plus a few px of padding measures ~24px, which is the sort of
     // thing a comment can claim and the box model quietly refuse. Phone-first
