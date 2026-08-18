@@ -40,7 +40,8 @@ One table rather than scattered prose, because the whole point of folding #766 a
 | Origin installable at all | yes | **no**—whole origin | **no**—whole origin, flagship included (D4) |
 | Offline cold boot | yes (ADR 0006) | no | no |
 | Camera / proof capture | yes | **no**—read-only | yes, with the origin-shared grant accepted explicitly (D2) |
-| Event lifecycle admitted | `active` only | `active` (migration window) and `archived` | `active` and `archived` |
+| Event lifecycle admitted | `active` only | `active` (migration window) and `archived`—**and only with `apexPath` set on the target** (D8) | `active` and `archived`, namespace-wide (no per-Event opt-in) |
+| Durable caching | yes | **must be disabled** (D4) | permitted, namespacing required (D4) |
 | Share URL composed as | this origin, no prefix | this origin **plus** `/<slug>` | this origin **plus** `/<slug>` |
 | Analytics host dimension | the Event's canonical host | the Event's canonical host | the Event's canonical host |
 | Sign-in reachable | yes | **only once the apex is registered**—`vacaybingo.com` is not yet (D7) | yes—all three mirrors are already first-party (D7) |
@@ -142,7 +143,8 @@ That residue is **accepted, not refused**, and bounded the same way the camera e
 
 - **Namespacing is required where the app already does it.** Every durable key a path Event writes—`localStorage` entries, the card cache, the resolution cache (D3)—is keyed by the resolved Event, never by the serving host. This is the partitioning ADR 0009 calls buildable, and this repo already keys durable snapshots that way, so it is applied rather than invented.
 - **What remains genuinely shared is the browser's to arbitrate:** the single quota and its cross-Event eviction, and the all-or-nothing site-data clear. Those do not become per-Event on a shared origin no matter how the app is written, which is exactly why regime (a) still exists and why a live Event's home is still its own subdomain.
-- **The implementation ticket must decide, and state, whether a path surface opts out of durable caching entirely**—no Firestore persistence, no card cache—trading offline behaviour it was never promised (regimes (b) and (c) have no offline cold boot) for a smaller shared footprint. This spec's position is that opting out is the better default on an archive, which reads once and keeps nothing.
+- **An apex archive MUST opt out of durable caching entirely—this is a requirement, not an implementation choice.** No Firestore persistence, no card cache, no durable snapshots. The reason it cannot be left optional: both ADR 0009's scope note and `x-multi-event-schema.md`'s supersession note justify the apex-archive regime on the premise that a read-only archive *has no durable or offline cache for origin isolation to protect*. If an implementation were free to leave persistence on, it would invalidate the premise the whole regime was approved on while still passing every other criterion here. An archive reads once and keeps nothing, so it gives up nothing it was promised—regimes (b) and (c) have no offline cold boot by construction.
+- **A mirror path may keep durable caching**, because its premise is different and stated differently: regime (c) accepts the storage coupling explicitly (above) rather than claiming it is absent, and a break-glass surface that re-fetches everything on a degraded network is a worse backup. What it owes is the namespacing requirement, not abstention.
 
 This is ADR 0009's own named mitigation—"the nested-install breakage … is avoidable by never making the origin root installable"—promoted from a note to a requirement and extended from the root to every path under it. #626 reached the identical conclusion independently from the collision direction: path-scoped installs on a shared origin collide, so the only safe number of installable surfaces per origin is one, and on a doorway origin it is zero.
 
@@ -153,6 +155,14 @@ This is ADR 0009's own named mitigation—"the nested-install breakage … is av
 The invariant is therefore simpler and stricter than the one it replaces: **an origin that does path addressing is not installable, anywhere on it.** Doorway origins, mirror origins, flagship root included.
 
 **This costs less than it appears, because #625 asked for reachability and not installability.** A mirror exists so that a Player whose canonical host is blocked still *reaches* the game; it says nothing about installing from there, and a Player who wants an installed app installs it from the Event's own subdomain, where regime (a) gives them real origin isolation. So the mirror keeps serving its flagship at `/` exactly as today—#625's actual requirement is untouched—and simply stops offering to install. This is also what ADR 0009 already says to do in as many words: never make the shared origin installable. The earlier draft carved an exception into that sentence; this one stops carving.
+
+**Making the origin non-installable only stops FUTURE installs, so legacy installed clients need their own answer.** A device that already installed the flagship holds a stored manifest whose `scope` is `/`, and nothing the server does removes it: not dropping the manifest link, not suppressing prompts, not retiring the worker and its precache. **A web app cannot uninstall itself**—that is a browser and OS action a Player performs. So on exactly those devices, a `/<slug>` URL can still open inside the flagship's app window, which is the identity inheritance this section exists to prevent.
+
+The requirement is therefore a **runtime refusal rather than a claim of prevention**, and it is stated as its own obligation because the non-installability rule above does not imply it:
+
+- **A path-addressed route must refuse to mount inside an installed app window.** When a path-addressed surface resolves and the display mode is standalone (or any installed-app display mode rather than a browser tab), the app does **not** mount the Event. It renders an explicit screen saying this address must be opened in a browser, with the reason and a one-tap way to do it. Refusing is correct rather than unhelpful: mounting would give the Player an Event wearing another Event's identity, offline shell and permissions, which is worse than a clear redirection.
+- **Full remediation requires the Player to uninstall, and the spec says so rather than implying we can do it.** The refusal screen is what bounds the damage in the meantime; it is not a fix for the stored scope.
+- **The refusal is keyed on display mode plus path addressing**, not on "is this a mirror," so it also covers a doorway origin whose Event was previously installed at `/`—the repoint case D1 describes, which has the identical stored-scope problem.
 
 **Existing installed mirror clients must be retired too, not just repointed roots.** The same forced-advancement requirement D1 states for a root being repointed to a doorway applies verbatim to **a mirror gaining path addressing**, and for the same mechanism: a client carrying the current root-scoped worker keeps its navigation fallback and env-pinned flagship shell indefinitely under `registerType: 'prompt'`, so opening a new `/<slug>` on that client can mount the **flagship** instead of the requested Event. Enabling mirror paths is therefore gated on the same forced worker advancement and precache retirement, verified rather than assumed, before those routes go live. Treat "a root-scoped worker already exists on this origin" as the trigger for the requirement, rather than enumerating the two situations that currently produce one.
 
@@ -200,10 +210,23 @@ That is a precondition, not a defect in the design, and it is stated as one: **a
 | `archived` | **no**—not-found | **yes**—regimes (b) and (c) |
 | `disabled` | no | no |
 
+**The status matrix alone is not sufficient, because `pathNamespace` is host-wide.** Taken by itself, "an `active` target serves when reached by path" plus a namespace-wide `pathNamespace` on `fiveacross.app` would make **every active Event in that namespace permanently reachable at an apex path**, for its whole active life rather than during a migration. That is not the migration-only exception this decision intends, and it would hand every live Event a shared-origin alias competing with its own installable subdomain—reintroducing exactly what ADR 0009 rejects. Host-wide capability has to be paired with **per-Event eligibility**.
+
+So the apex-path regime carries a second condition, on the **target** document rather than the serving host: a field—`apexPath`—that the Event's own routing document must carry before it is reachable at an apex path at all. Absent is the fail-closed default, so no Event acquires an apex path merely because its namespace gained one.
+
+| | `apexPath` absent | `apexPath` present |
+|---|---|---|
+| `active` target reached at apex path | **not-found** | serves—this is the migration window |
+| `archived` target reached at apex path | **not-found** | serves—this is the archive |
+
+**This condition is deliberately scoped to regime (b) and does not apply to mirrors.** The two regimes are asking for different things. An apex path competes with the Event's own subdomain on a shared origin, so it must be opted into per Event and, during a migration, deliberately and temporarily. A **mirror** path is the break-glass backup #626 exists to provide: the mirror origin is already non-installable throughout (D4), it offers no competing installable surface, and the whole point is that *any* Event in the mirrored namespace is reachable when the canonical host is blocked. Requiring per-Event opt-in there would mean discovering, mid-outage, that the one Event you needed had never been enrolled. So regime (c) stays namespace-wide and regime (b) is opt-in.
+
+#134 sets `apexPath` as part of the same archival transaction below. A migration sets it explicitly, and is expected to clear it when the migration ends if the Event is not being archived.
+
 Read off the three answers #799 asks for:
 
-- **Does path-addressability require `status: 'archived'`? No.** An `active` Event is reachable at a path today, which is what makes the migration window work and what makes regime (c) possible at all—mirrors serve live Events by path as their entire purpose.
-- **Does the subdomain keep serving after archival? No, and the same write ends it—at the origin.** Flipping one document from `active` to `archived` retires the subdomain and promotes the path in a single atomic change, with no window where both serve and none where neither does. It needs no new field and no rules change: `specs/event-resolution.md` already refuses to serve a non-`active` status at its own host.
+- **Does path-addressability require `status: 'archived'`? No—but on an apex it requires `apexPath`.** An `active` Event is reachable at an apex path during a migration, which is what the migration window is, and on a **mirror** it is reachable with no per-Event condition at all, which is regime (c)'s entire purpose. What an `active` Event never gets is an apex path it did not opt into.
+- **Does the subdomain keep serving after archival? No, and the same transaction ends it—at the origin.** Moving a routing document from `active` to `archived` retires the subdomain and promotes the path together, with no window where both serve and none where neither does. It needs **no rules change** (`specs/event-resolution.md` already refuses to serve a non-`active` status at its own host) though it does need the two new fields this spec introduces, `pathNamespace` and `apexPath`.
 
 **The cache does not carry that flip promptly, and the interlock must not pretend it does.** An earlier draft of this decision claimed the cache-drop makes an installed client stop on its next boot. That is wrong, and the correction matters because #134 would otherwise ship believing archival takes effect immediately:
 
@@ -218,7 +241,11 @@ So the archive contract carries an explicit obligation rather than an inherited 
 What is **not** acceptable is relying on TTL expiry. Until one of the two lands, the honest statement is that archival is prompt at the origin and lagging on cached clients—and this spec says so rather than letting #134 discover it.
 - **Does path-addressing replace the subdomain? Yes—on archival, and only then.** Before it, the two coexist with different capabilities (D2).
 
-**#134 owns two obligations this creates.** First, the flip must write both documents in one transaction when an Event has more than one routing document—Bodega has three—or the Event is archived on one host and live on another. Second, the Event's *own* `status: 'archived'` is what the app reads after mount to draw a read-only surface; the routing status decides addressing, the Event status decides behaviour, and #134 sets both. They are deliberately two fields because they answer to two different audiences at two different times, and collapsing them would put an authenticated read on the pre-paint path.
+**#134's flip is ONE transaction over every document involved—routing and Event alike.** An earlier draft asked only that the routing documents flip atomically with each other and left `EventDoc.status` as a separate obligation. That ordering is exploitable: if routing flips first, path resolution begins serving the Event as an archive while a still-`active` `EventDoc` renders **writable** gameplay behaviour—an "archive" a Player can still mark, claim and post into. The reverse order is merely useless rather than harmful, but neither is acceptable when one batch avoids both.
+
+So the transaction includes, atomically: **every** routing document for that Event (Bodega has three), each moving `active → archived`; the `apexPath` field on whichever routing document is to become the archive address; and `EventDoc.status → 'archived'`. Nothing observes a half-archived Event.
+
+The two status fields stay deliberately separate even though they now move together, because they answer different questions for different audiences at different times: the **routing** status decides addressing and is read world-readably before first paint, while the **Event** status decides behaviour and is read after mount behind `signedIn()`. Collapsing them would put an authenticated read on the pre-paint path, which is the thing ADR 0009 exists to avoid. Moving together is a property of the write; being separate is a property of the read.
 
 ### D9 — What the root's create affordance does today
 
@@ -254,7 +281,8 @@ This spec introduces a `hostnames/{host}` document with **no `eventId`**, a **th
 **`specs/hostnames-lookup.md` must gain:**
 
 - The **root marker** as a documented variant: `eventId` becomes optional, and its absence is what makes the document a doorway rather than a malformed Event mapping. Today's coercion (`coerceHostnameDoc`) must read a missing `eventId` as a root marker, never as null-and-drop.
-- **`pathNamespace`** as an optional field, with the fail-closed default (absent ⇒ no path addressing) and the validity rule (it may only name an apex that issues Event subdomains).
+- **`pathNamespace`** as an optional field on a **serving** host, with the fail-closed default (absent ⇒ no path addressing) and the validity rule (it may only name an apex that issues Event subdomains).
+- **`apexPath`** as an optional field on a **target** Event's routing document, fail-closed absent, gating apex-path eligibility per Event (D8). It is deliberately a different field on a different document from `pathNamespace`: one says "this host can address by path," the other says "this Event may be addressed that way on an apex," and conflating them is what would alias every live Event onto the shared origin.
 - A note that neither addition changes the rules contract: still `allow get: if true; allow list: if false`, still no client writes. Nothing here is rules-gated, so the disclosure posture is unchanged.
 
 **`specs/event-resolution.md` must gain:**
@@ -325,7 +353,9 @@ The last point is the one most likely to be missed, because today's contract sta
 - **Given** a doorway root, **which resolves with an empty basename exactly like a live Event subdomain**, **when** the install guard evaluates it, **then** it is still suppressed—so **given** any implementation, **then** the guard keys on the resolved regime and never on the presence of a basename.
 - **Given** a device that installed the Event previously served at a root being repointed to a doorway, **when** the repoint lands, **then** the old root-scoped service worker is forcibly advanced and its precache cleaned up **before** the doorway is treated as live—omitting the manifest neither unregisters it nor stops it answering `/`, and `registerType: 'prompt'` means a replacement worker may sit in `waiting` indefinitely.
 - **Given** a path-addressed surface, **when** it writes any durable state, **then** every key it controls is keyed by the resolved Event rather than the serving host; **and given** the quota, cross-Event eviction and site-data clear, **then** those remain shared and are accepted as such, not claimed to be refused by non-installability.
-- **Given** an archive path, **when** the implementation ticket decides its caching posture, **then** it states explicitly whether durable caching is disabled there—this spec's position being that it should be, since an archive reads once and keeps nothing.
+- **Given** an apex archive path, **when** it renders, **then** durable caching is **disabled**—no Firestore persistence, no card cache—because ADR 0009 and `x-multi-event-schema.md` both justify this regime on the premise that an archive keeps nothing durable; leaving it optional would let an implementation invalidate that premise while passing every other criterion.
+- **Given** a mirror path, **when** it renders, **then** durable caching is permitted and every key it writes is namespaced per Event.
+- **Given** a device with the Event previously installed at that origin's root, **when** a path-addressed route is opened **in an installed-app display mode**, **then** the app refuses to mount the Event and renders an explicit open-in-a-browser screen—because a stored manifest scope cannot be revoked from the server and a web app cannot uninstall itself; making the origin non-installable prevents only future installs.
 
 **D5 — share composition**
 
@@ -350,13 +380,15 @@ The last point is the one most likely to be missed, because today's contract sta
 
 **D8 — archive interlock**
 
-- **Given** a routing document with `status: 'active'`, **when** it is reached at its own host **or** by path on its namespace root, **then** it serves in both cases.
+- **Given** a routing document with `status: 'active'`, **when** it is reached at its own host, **then** it serves; **when** it is reached by path on a **mirror**, **then** it serves; **when** it is reached at an **apex** path, **then** it serves only if that document carries `apexPath`, and renders not-found otherwise.
+- **Given** a namespace apex that has gained `pathNamespace`, **when** an active Event in that namespace has **no** `apexPath`, **then** it is **not** reachable at an apex path—host-wide capability never confers per-Event eligibility, so enabling the apex does not alias every live Event onto the shared origin.
+- **Given** a mirror, **when** any Event in the mirrored namespace is reached by path, **then** it serves without per-Event opt-in—so an outage cannot reveal that the one Event needed was never enrolled.
 - **Given** a routing document flipped to `status: 'archived'`, **when** it is reached at its own host by a client with no fresh cache, **then** it renders not-found; **when** it is reached by path, **then** it serves.
 - **Given** a client holding a **fresh** (`active`, within TTL) cached entry, **when** the document is flipped to `archived`, **then** that client does **not** learn of the flip from the cache alone—so **given** #134's implementation, **then** it must drive a bounded, observable transition rather than relying on TTL expiry.
 - **Given** the boot-revalidation option is chosen, **when** its scope is defined, **then** it applies to **the Event's own host** (the retired subdomain) and not to "path-capable hosts"—the subdomain that must stop serving carries no `pathNamespace`, so the path-capable scoping would revalidate only origins that were never the problem; the alternative is the watcher-driven transition applied universally.
 - **Given** an open session, **when** the live watcher observes the archival, **then** the session does not continue running the retired Event indefinitely.
 - **Given** `status: 'disabled'`, **when** it is reached either way, **then** it serves in neither.
-- **Given** an Event with more than one routing document, **when** #134 archives it, **then** every one of those documents flips in a single transaction—no Event is archived on one host and live on another.
+- **Given** an Event with more than one routing document, **when** #134 archives it, **then** every routing document, the `apexPath` field, **and** `EventDoc.status` change in **one** transaction—no observer ever sees routing archived while the Event document is still `active`, which would serve an "archive" that still accepts marks, claims and posts.
 - **Given** an archived Event, **when** the app has mounted, **then** the read-only surface is driven by `EventDoc.status`, while addressing was driven by the routing document's `status`—two fields, two audiences, two times.
 
 **D9 — the root's create affordance today**
@@ -377,7 +409,9 @@ Tests land with the implementation tickets this spec blocks, each against the cr
 - **The root doorway** (D1, D9) — component tests per host class, including that a mirror never renders a create affordance and that the not-yet-open state does no network read.
 - **Non-installability** (D4) — a worker-source guard extending `src/sw-auth-handler-denylist.test.ts`'s existing pattern, plus component tests that no manifest link and no install affordance render on a path-addressed surface.
 - **Share composition** (D5) — extends the existing per-surface share-`url` pins in `src/components/w2-share-cards.test.tsx` and `src/canonicalHost.test.ts` to assert the prefix survives.
-- **The archive interlock** (D8) — rules and resolver tests over the status matrix, a transactional-flip test on #134's writer, and — the case the first draft of this spec got wrong — a test that a **fresh** cached `active` entry does not silently outlive the flip, pinning whichever bounded transition #134 chooses.
+- **The archive interlock** (D8) — rules and resolver tests over the status matrix **and the `apexPath` eligibility matrix** (an active Event in a path-enabled namespace without `apexPath` must be not-found at an apex path, while remaining reachable on a mirror), a single-transaction test covering every routing document plus `EventDoc.status` together, and — the case the first draft of this spec got wrong — a test that a **fresh** cached `active` entry does not silently outlive the flip.
+- **The installed-app refusal** (D4) — a test that a path-addressed route in a standalone display mode refuses to mount and renders the open-in-a-browser screen, since this is the only defence available against a stored manifest scope that cannot be revoked from the server.
+- **The mandatory archive cache opt-out** (D4) — a test that an apex archive runs with Firestore persistence and the card cache disabled, guarding the premise ADR 0009 and `x-multi-event-schema.md` both rest on.
 - **The resolution contract's three hazards** (D3) — a cache-key test proving two slugs on one origin cannot consume each other's mapping, a subscription test proving `watchAdultContent()` follows the resolved routing document rather than `window.location.hostname`, and a timing test proving both reads share one `timeoutMs` rather than two.
 - **The env short-circuit precondition** (D1) — a guard that a target baking `VITE_EVENT_ID` cannot also be declared a doorway or path-addressing host, so the rebuild precondition fails loudly in config rather than silently at runtime.
 
