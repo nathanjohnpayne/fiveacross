@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useItems, useMyPendingItems, useMyActiveItems, useEventDoc } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
+import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
 import {
   loadTrackedSuggestions,
   trackSuggestion,
@@ -115,30 +116,14 @@ export default function ItemPool() {
   useEffect(() => {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
   }, [uid]);
-  // A ticking clock (#559, Codex P2 round 2, PR #845), mirroring Board.tsx's
-  // and ProofFeed.tsx's own `now`: without it, a panel left open across the
-  // submission's target Day's `unlockAt` keeps reporting `'scheduled'` off a
-  // stale `Date.now()` until some UNRELATED render happens to fire. A timer
-  // bumps it exactly when the earliest still-open Day's `unlockAt` passes.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const nextUnlock = days
-      .map((d) => d.unlockAt)
-      .filter((t) => t > Date.now())
-      .sort((a, b) => a - b)[0];
-    if (nextUnlock == null) return;
-    // Clamped to the 32-bit signed int `setTimeout` max (Codex P1, PR #845,
-    // round 4): an Event whose next unlock is more than ~24.9 days out would
-    // otherwise overflow the delay, which browsers clamp to ~0ms — firing
-    // near-instantly, re-computing the SAME far-off `nextUnlock`, and
-    // re-arming an equally-near-instant timer forever. Same clamp
-    // `admin/SchedulePanel.tsx` already applies to its own unlock timer: a
-    // clamped early fire just re-runs this effect and re-arms, safely, until
-    // the real unlock is within range.
-    const timer = setTimeout(() => setNow(Date.now()), Math.min(nextUnlock - Date.now(), 2_147_483_647));
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days` (a fresh [] literal each render on a schedule-less Event); the effect's own reschedule (`now` in the deps) is what re-evaluates it, matching Board.tsx's identical pattern.
-  }, [event?.days, now]);
+  // A ticking clock (#559, Codex P2 round 2, PR #845), shared with
+  // Board.tsx/ProofFeed.tsx's identical need (Codex P2, PR #845 round 5 —
+  // extracted into one hook after the same unclamped-timer overflow bug,
+  // round 4 P1, turned up in all three hand-copies): without it, a panel
+  // left open across the submission's target Day's `unlockAt` keeps
+  // reporting `'scheduled'` off a stale `Date.now()` until some UNRELATED
+  // render happens to fire.
+  const now = useNextUnlockClock(event?.days);
   // `ready` (#559, Codex P2 rounds 1 + 2): BOTH live queries must have
   // delivered a SERVER-CONFIRMED snapshot — not merely cleared `loading` —
   // before an absent tracked id can honestly mean "not selected". `loading`

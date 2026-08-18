@@ -5,6 +5,7 @@ import { useAuth } from '../auth/AuthContext';
 import { useBoard, useDayBoard, useDayMeta, useMyPlayer, useEventDoc, useItems, useTally, useLeaderboard, useDoubts, useMyProofs, useProofsForItemText, useDayMetasStatus, isBanned } from '../hooks/useData';
 import { setMark, dealDayCard, reconcileEchoes, resolveDisplayName, RESHUFFLE_ALLOWANCE } from '../data/api';
 import { requestOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
+import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
 import TomorrowsCardInvite from './TomorrowsCardInvite';
 import { saveCardSnapshot, loadCardSnapshot } from '../data/cardCache';
 import { dayBoardRef } from '../data/paths';
@@ -842,32 +843,13 @@ export default function Board() {
   // player who leaves the Card tab open across an `unlockAt` rollover (e.g.
   // the 8:00 ship-time unlock) would stay stuck on `LockedDayPreview` until
   // a reload or unrelated interaction (Codex P2, PR #230). `now` stands in
-  // for `Date.now()` everywhere a lock check reads the clock, and this timer
-  // bumps it exactly when the EARLIEST still-locked Day's `unlockAt` in the
-  // whole schedule passes — not just the viewed Day, so switching to an
-  // already-elapsed chip never needs its own reschedule. Depends on
-  // `event?.days` (not the `days` local below, which is a fresh `[]`
-  // literal on every render while unmigrated) so it doesn't re-schedule on
-  // every unrelated render.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const schedule = event?.days ?? [];
-    const nextUnlock = schedule
-      .map((d) => d.unlockAt)
-      .filter((t) => t > Date.now())
-      .sort((a, b) => a - b)[0];
-    if (nextUnlock == null) return;
-    // Clamped to the 32-bit signed int `setTimeout` max (Codex P1, PR #845
-    // round 4, incidentally surfaced by the SAME unclamped pattern this
-    // pre-existing timer used — the two new #559 timers below copied it
-    // verbatim): an Event whose next unlock is more than ~24.9 days out
-    // would otherwise overflow the delay, which browsers clamp to ~0ms,
-    // re-computing the SAME far-off `nextUnlock` and re-arming an equally
-    // near-instant timer forever. Same clamp `admin/SchedulePanel.tsx`
-    // already applies to its own unlock timer.
-    const timer = setTimeout(() => setNow(Date.now()), Math.min(nextUnlock - Date.now(), 2_147_483_647));
-    return () => clearTimeout(timer);
-  }, [event?.days, now]);
+  // for `Date.now()` everywhere a lock check reads the clock. Shared with
+  // ProofFeed.tsx/ItemPool.tsx's identical need (Codex P2, PR #845 round 5 —
+  // extracted after the same unclamped-timer overflow bug, round 4 P1, was
+  // independently discovered in all three hand-copies of this pattern); see
+  // `useNextUnlockClock`'s own doc comment for the clamp and the `event?.days`
+  // (not the `days` local below, a fresh `[]` literal while unmigrated) choice.
+  const now = useNextUnlockClock(event?.days);
   // Lazy per-Day dealing (#246, daily-cards-spec § "Unlock mechanics"): on opening
   // an UNLOCKED Day whose snapshot is stamped (`dayDealState === 'ready'`) that has
   // no Day Card for this Player yet, deal it from that Day's frozen snapshot
