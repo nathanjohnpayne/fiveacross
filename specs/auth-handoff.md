@@ -176,6 +176,16 @@ These projects' org policy (Domain Restricted Sharing) **rejects** the `allUsers
 
 The handoff lives in the `fiveacross` project—`gaycruisebingo` is a single registered origin that signs in same-origin and never mints a handoff—but a `gaycruisebingo` deploy still publishes the functions, so `deploy.sh` pins the reconciliation project from the selected deploy target rather than trusting the wrapper's default.
 
+### Abuse control: App Check
+
+`exchangeAuthHandoff` is unauthenticated by design, so once the invoker workaround makes it publicly reachable an anonymous caller can submit unlimited well-formed 43-character codes. None of them will ever redeem—the code space is 2^256—but each one still costs a Firestore transaction, so a sustained flood can consume instances and database capacity and delay real sign-ins. **The risk is resource exhaustion, not compromise**, and the two are worth keeping apart: nothing here weakens the single-use, expiry, origin or transaction guarantees.
+
+`AUTH_HANDOFF_APP_CHECK` is the control, and it is checked **before any Firestore read**, so an unattested flood cannot be converted into read volume. A Firestore-backed throttle was rejected as the wrong shape: it answers a database-load problem by adding a database write per request.
+
+It defaults to **off**, exactly like `BUG_REPORT_APP_CHECK`, because enforcing attestation before the client attests would lock out the flow it protects. **Turning it on once #549 initialises App Check on the client is a launch prerequisite.**
+
+> **Adding this param has a deploy consequence.** `resolveParams` partitions on a param's NAME being present in the merged `functions/.env*` files; a `defineBoolean` default only supplies the interactive prompt's answer, which `--non-interactive` cannot give (#767). `AUTH_HANDOFF_APP_CHECK` is registered in `functions/.env.example`, but **the real `functions/.env.<projectId>` files are not in the repo and must gain the key too**, or the next Functions deploy hard-fails mid-flight during parameter resolution. `npm run verify:functions-env:<project>` checks this before publishing.
+
 **Outstanding prerequisite: Five Across skips this reconciliation today.** `scripts/deploy-target.mjs` auto-injects `--skip-invoker` for the `fiveacross` target (`skipInvokerReconcile: true`, `scripts/build-target.mjs`), which is exactly the project the handoff lives in—so a routine `npm run deploy:fiveacross` releases both callables and leaves them 403. `deploy.sh` prints a loud warning naming the manual repair whenever it skips a release that included the handoff, so the gap is visible rather than silent, and it is harmless only while the handoff has no caller. **Before the flow carries real sign-ins, the `fiveacross` deploy service account needs `run.services.update` on `fiveacross` and `skipInvokerReconcile` must be flipped to `false`.** That is an IAM action a code change cannot make, and it belongs with #547 as a human prerequisite: without it, sign-in through the handoff is unavailable on every Event origin no matter what the client does.
 
 ## Not in scope

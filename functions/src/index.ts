@@ -9,7 +9,7 @@ import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
-import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import {
   recordAdminAlerts,
   runAdminAlertSweep,
@@ -131,18 +131,23 @@ export const mintAuthHandoff = onCall(
         targetOrigin: payload.targetOrigin,
         transactionId: payload.transactionId,
         returnPath: payload.returnPath,
+        appCheckPresent: request.app != null,
       },
       {
         db: db as unknown as HandoffFirestore,
         now: () => Date.now(),
         timestamp: (ms) => Timestamp.fromMillis(ms),
         policy: { allowLocalDev: handoffAllowsLocalDev() },
+        requireAppCheck: AUTH_HANDOFF_APP_CHECK.value(),
       },
     );
 
     if (!result.ok) {
       if (result.reason === 'unauthenticated') {
         throw new HttpsError('unauthenticated', 'Sign in before starting a handoff.');
+      }
+      if (result.reason === 'app-check-required') {
+        throw new HttpsError('failed-precondition', 'App Check is required.');
       }
       // The reason stays in the log, never in the response.
       console.warn('mintAuthHandoff rejected', { reason: result.reason });
@@ -183,11 +188,13 @@ export const exchangeAuthHandoff = onCall(
         transactionVerifier: payload.transactionVerifier,
         origin: payload.origin,
         headerOrigin: typeof headerOrigin === 'string' ? headerOrigin : null,
+        appCheckPresent: request.app != null,
       },
       {
         db: db as unknown as HandoffFirestore,
         now: () => Date.now(),
         timestamp: (ms) => Timestamp.fromMillis(ms),
+        requireAppCheck: AUTH_HANDOFF_APP_CHECK.value(),
         createCustomToken: (uid) => getAuth().createCustomToken(uid),
         // Fails closed: `getUser` rejects for a deleted account, and a lookup
         // that errors must not be read as "the account is fine".

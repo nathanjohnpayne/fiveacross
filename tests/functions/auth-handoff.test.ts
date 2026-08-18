@@ -397,6 +397,17 @@ describe('mintHandoff', () => {
     expect(fake.docs.has(handoffPath(CODE))).toBe(false);
   });
 
+  it('refuses an unattested minter before any Firestore read when App Check is enforced', async () => {
+    const fake = makeDb(activeHost());
+    const result = await mintHandoff(
+      { uid: UID, targetOrigin: ORIGIN, transactionId: transactionIdFor(VERIFIER) },
+      mintDeps(fake, { requireAppCheck: true }),
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'app-check-required' });
+    expect(fake.reads.count).toBe(0);
+  });
+
   it('defaults an absent return path to the root', () => {
     expect(validateReturnPath(undefined, ORIGIN)).toBe('/');
     expect(validateReturnPath(null, ORIGIN)).toBe('/');
@@ -570,7 +581,80 @@ describe('exchangeHandoff', () => {
     ).toEqual({ ok: false, reason: 'replayed' });
   });
 
-  it('rejects the loser of two concurrent exchanges of the same code', async () => {
+  it('treats a timestamp-shaped expiry with a non-callable toMillis as expired', async () => {
+    // `'toMillis' in value` proves the KEY exists, not that it is callable. A
+    // stored map `{ toMillis: 1 }` satisfied it and then threw TypeError out of
+    // exchangeHandoff, so the callable answered INTERNAL instead of the uniform
+    // rejection — a crash AND a break in the "every rejection looks identical"
+    // promise.
+    const seeded = seedHandoff();
+    const fake = makeDb({
+      [handoffPath(CODE)]: { ...seeded[handoffPath(CODE)], expiresAt: { toMillis: 1 } },
+    });
+
+    expect(
+      await exchangeHandoff(
+        { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN },
+        exchangeDeps(fake),
+      ),
+    ).toEqual({ ok: false, reason: 'expired' });
+  });
+
+  it('treats an expiry whose toMillis throws as expired', async () => {
+    const seeded = seedHandoff();
+    const fake = makeDb({
+      [handoffPath(CODE)]: {
+        ...seeded[handoffPath(CODE)],
+        expiresAt: {
+          toMillis: () => {
+            throw new Error('boom');
+          },
+        },
+      },
+    });
+
+    expect(
+      await exchangeHandoff(
+        { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN },
+        exchangeDeps(fake),
+      ),
+    ).toEqual({ ok: false, reason: 'expired' });
+  });
+
+  it('refuses an unattested caller before any Firestore read when App Check is enforced', async () => {
+    const fake = makeDb(seedHandoff());
+    const result = await exchangeHandoff(
+      { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN },
+      exchangeDeps(fake, { requireAppCheck: true }),
+    );
+
+    // Rejected for free: an unattested flood cannot be turned into read volume,
+    // which is the whole point of putting this check first.
+    expect(result).toEqual({ ok: false, reason: 'app-check-required' });
+    expect(fake.reads.count).toBe(0);
+  });
+
+  it('redeems normally for an attested caller under enforcement', async () => {
+    const fake = makeDb(seedHandoff());
+    expect(
+      await exchangeHandoff(
+        { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN, appCheckPresent: true },
+        exchangeDeps(fake, { requireAppCheck: true }),
+      ),
+    ).toMatchObject({ ok: true, uid: UID });
+  });
+
+  it('ignores attestation entirely when enforcement is off', async () => {
+    const fake = makeDb(seedHandoff());
+    expect(
+      await exchangeHandoff(
+        { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN },
+        exchangeDeps(fake),
+      ),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('rejects the loser of two concurrent exchanges of the same code', async () =>{
     const fake = makeDb(seedHandoff());
 
     // Hold both transactions until each has read, so they genuinely race rather

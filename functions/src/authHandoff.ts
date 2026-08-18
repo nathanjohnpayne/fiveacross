@@ -162,6 +162,7 @@ export interface HandoffFirestore {
  */
 export type HandoffMintReason =
   | 'unauthenticated'
+  | 'app-check-required'
   | 'invalid-target-origin'
   | 'origin-not-allowed'
   | 'invalid-transaction-id'
@@ -178,6 +179,8 @@ export type HandoffExchangeReason =
   | 'expired'
   | 'transaction-mismatch'
   | 'account-unusable'
+  /** App Check enforcement is on and the caller presented no valid token. */
+  | 'app-check-required'
   /** The stored document is not the shape this module writes — fail closed
    *  rather than guess which half of it to trust. */
   | 'malformed-record';
@@ -360,11 +363,29 @@ function constantTimeEquals(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+/**
+ * Read a stored deadline as ms, or `null` if it is not readable as one.
+ *
+ * `'toMillis' in value` proves the KEY exists, not that it is callable — a
+ * stored map `{ toMillis: 1 }` satisfies it and then throws `TypeError` on the
+ * call. That exception would escape `exchangeHandoff` entirely, so the callable
+ * would answer `INTERNAL` instead of the uniform rejection every other
+ * malformed record gets, turning a data-shape defect into both a crash and a
+ * break in the "every rejection looks identical" promise. Hence the explicit
+ * callable check and the catch: EVERY unreadable expiry has to fail closed as
+ * expired, not just the ones that fail politely.
+ */
 function readMillis(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'object' && value !== null && 'toMillis' in value) {
-    const ms = (value as HandoffTimestamp).toMillis();
-    if (typeof ms === 'number' && Number.isFinite(ms)) return ms;
+    const toMillis = (value as { toMillis: unknown }).toMillis;
+    if (typeof toMillis !== 'function') return null;
+    try {
+      const ms = (toMillis as () => unknown).call(value);
+      if (typeof ms === 'number' && Number.isFinite(ms)) return ms;
+    } catch {
+      return null;
+    }
   }
   return null;
 }
@@ -411,6 +432,8 @@ export interface MintInput {
   targetOrigin: unknown;
   transactionId: unknown;
   returnPath?: unknown;
+  /** Whether the transport verified an App Check token on this request. */
+  appCheckPresent?: boolean;
 }
 
 export interface MintDeps {
@@ -420,6 +443,7 @@ export interface MintDeps {
   policy: OriginPolicy;
   /** Injectable entropy so a test can pin a code. Defaults to 32 random bytes. */
   mintCode?: () => string;
+  requireAppCheck?: boolean;
 }
 
 /**
@@ -433,6 +457,9 @@ export interface MintDeps {
 export async function mintHandoff(input: MintInput, deps: MintDeps): Promise<HandoffMintResult> {
   const uid = input.uid;
   if (typeof uid !== 'string' || uid.length === 0) return { ok: false, reason: 'unauthenticated' };
+  if (deps.requireAppCheck && input.appCheckPresent !== true) {
+    return { ok: false, reason: 'app-check-required' };
+  }
 
   const target = await validateTargetOrigin(deps.db, input.targetOrigin, deps.policy);
   if (!target.ok) return { ok: false, reason: target.reason };
@@ -479,6 +506,8 @@ export interface ExchangeInput {
   origin: unknown;
   /** The transport's `Origin` header when it exposed one; `null` otherwise. */
   headerOrigin?: string | null;
+  /** Whether the transport verified an App Check token on this request. */
+  appCheckPresent?: boolean;
 }
 
 export interface ExchangeDeps {
@@ -489,6 +518,24 @@ export interface ExchangeDeps {
   /** Whether the account may still sign in — false for deleted or disabled.
    *  Must fail closed on error. */
   isAccountUsable?: (uid: string) => Promise<boolean>;
+  /**
+   * Reject callers without a verified App Check token.
+   *
+   * THE abuse control for this endpoint, and the reason it needs one is
+   * resource exhaustion rather than compromise: the code space is 2^256, so
+   * guessing is infeasible, but every well-FORMED guess still costs a Firestore
+   * transaction. An unauthenticated flood of syntactically valid codes can
+   * therefore consume instances and database capacity and delay real sign-ins,
+   * without ever being close to redeeming anything. App Check is what
+   * distinguishes "our app" from "anyone with the URL"; a Firestore-backed
+   * throttle would answer a database-load problem by adding a database write
+   * per request.
+   *
+   * Off by default, like `BUG_REPORT_APP_CHECK`, because enforcing it before
+   * the client attests would lock out the very flow it protects. Turning it on
+   * is a launch prerequisite (specs/auth-handoff.md § Deployment).
+   */
+  requireAppCheck?: boolean;
 }
 
 /**
@@ -504,8 +551,14 @@ export async function exchangeHandoff(
   input: ExchangeInput,
   deps: ExchangeDeps,
 ): Promise<HandoffExchangeResult> {
-  // Shape checks first, before any Firestore read: a malformed code is rejected
-  // for free, so noise at this endpoint cannot be turned into read volume.
+  // Attestation first, then shape — both before any Firestore read, so neither
+  // an unattested caller nor a malformed code can be turned into read volume.
+  if (deps.requireAppCheck && input.appCheckPresent !== true) {
+    return { ok: false, reason: 'app-check-required' };
+  }
+
+  // A malformed code is rejected for free, so noise at this endpoint cannot be
+  // turned into read volume.
   const code = typeof input.code === 'string' ? input.code : '';
   if (!HANDOFF_TOKEN_PATTERN.test(code)) return { ok: false, reason: 'invalid-code' };
 
