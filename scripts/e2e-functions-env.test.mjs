@@ -781,6 +781,36 @@ describe('functions source-tree reachability and barrel resolution', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // Codex + CodeRabbit, independently, on the first version of the test
+  // above (PR #834): a valid barrel can re-export ONE params constructor and
+  // separately export its OWN unrelated, constructor-shaped local helper —
+  // `defineSecret` from the params module alongside a local `defineString`
+  // that has nothing to do with Firebase. Treating the whole namespace as
+  // trusted (accepting ANY `defineX`-shaped property, the way a direct
+  // `firebase-functions/params` namespace import legitimately can) would
+  // misclassify `params.defineString(...)` as a real param declaration. The
+  // namespace has to resolve each property against what the barrel actually
+  // re-exports, not against the property's name alone.
+  it('does not treat an unrelated same-shaped local export as a namespace params constructor', () => {
+    const dir = makeTree({
+      'barrel.ts': [
+        "export { defineSecret } from 'firebase-functions/params';",
+        "export function defineString() { return 'not a Firebase param'; }",
+      ].join('\n'),
+      'index.ts': [
+        "import * as params from './barrel';",
+        "params.defineSecret('BARRELED_ONLY_SECRET');",
+        "params.defineString('NOT_A_REAL_PARAM');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.secrets).toEqual(['BARRELED_ONLY_SECRET']);
+    expect(declared.params).toEqual([]);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   // Codex P2 round 4 on PR #826: the "import, then separately export" form
   // — `import { defineString } from 'firebase-functions/params'; export {
   // defineString };` — has no `moduleSpecifier` on its export declaration at
