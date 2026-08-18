@@ -541,3 +541,41 @@ describe('save never replaces a good draft with an unreadable one (#787 Phase 4b
     await expect(store.save(bad)).resolves.toMatchObject({ v: DRAFT_SCHEMA_VERSION });
   });
 });
+
+describe('newDraftId calls randomUUID through its receiver (#787 Phase 4b)', () => {
+  it('works when crypto.randomUUID enforces its Crypto this-binding', () => {
+    // The real Web IDL method throws "Illegal invocation" in browsers (and a
+    // receiver TypeError in Node) when extracted and called bare. The unit
+    // environment's crypto shim does NOT enforce that, so this stub restores
+    // the production contract — without it, no test could catch the bug.
+    const realCrypto = globalThis.crypto;
+    const strict = {
+      randomUUID(this: unknown) {
+        if (this !== strict) {
+          throw new TypeError("Illegal invocation: 'this' must be a Crypto object");
+        }
+        return `uuid-${Math.random().toString(36).slice(2, 10)}`;
+      },
+    };
+    Object.defineProperty(globalThis, 'crypto', { value: strict, configurable: true });
+    try {
+      expect(() => createEventDraft({ now: NOW })).not.toThrow();
+      expect(createEventDraft({ now: NOW }).draftId).toMatch(/^uuid-/);
+      expect(createEventDraft().draftId).not.toBe(createEventDraft().draftId);
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { value: realCrypto, configurable: true });
+    }
+  });
+
+  it('still falls back when the environment has no randomUUID at all', () => {
+    const realCrypto = globalThis.crypto;
+    Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true });
+    try {
+      const id = createEventDraft({ now: NOW }).draftId;
+      expect(id).toMatch(/^draft-/);
+      expect(id.length).toBeGreaterThan('draft-'.length);
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { value: realCrypto, configurable: true });
+    }
+  });
+});

@@ -304,7 +304,14 @@ const BARE_SETTINGS: EventDraftSettings = {
 function newDraftId(): string {
   const c: unknown = globalThis.crypto;
   if (isRecord(c) && typeof c.randomUUID === 'function') {
-    return (c.randomUUID as () => string)();
+    // Called THROUGH the receiver, never extracted. `randomUUID` is a Web IDL
+    // method that requires its `Crypto` `this`: pulling it off the object and
+    // invoking it bare throws "Illegal invocation" in browsers and a receiver
+    // `TypeError` in Node, which would break every draft created without an
+    // injected id. The unit environment's `crypto` shim does NOT enforce the
+    // receiver, so no test could catch this — it is guarded by construction
+    // here instead (#787 Phase 4b review).
+    return (c as { randomUUID: () => string }).randomUUID();
   }
   return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
