@@ -80,6 +80,97 @@ describe('local bug-report export', () => {
     expect(metadata).not.toHaveProperty('futurePrivateField');
   });
 
+  it('carries the abuse marking into the exported metadata, defaulting a pre-#670 report to bug', async () => {
+    // The fixture has no `kind` — exactly the shape of every report stored
+    // before the field existed. It must export as `bug`, not as a hole the
+    // importer has to interpret.
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const legacy = JSON.parse(await readFile(path.join(root, 'inbox/report_123/report.json'), 'utf8'));
+    expect(legacy.kind).toBe('bug');
+    await exportReports({
+      reports: [{ ...report('report_abuse'), kind: 'abuse', reporterInEvent: true, escalationEligible: true, escalationLookupFailed: false }],
+      downloadScreenshot: async () => PNG,
+      root,
+    });
+    const marked = JSON.parse(await readFile(path.join(root, 'inbox/report_abuse/report.json'), 'utf8'));
+    expect(marked.kind).toBe('abuse');
+  });
+
+  it('fails closed on a stored kind the contract does not recognize', async () => {
+    // Unlike intake, which normalizes an unknown value down so a client that
+    // cannot be forced to upgrade never loses a report. By the time a document
+    // is being EXPORTED it has already been through that normalizer, so a
+    // present-but-unrecognized value means a hand-repaired or half-migrated
+    // record — and exporting it as `bug` would silently discard triage
+    // information the operator is relying on.
+    const summary = await exportReports({
+      reports: [{ ...report(), kind: 'harassment' }],
+      downloadScreenshot: async () => PNG,
+      root,
+    });
+    expect(summary.failed[0].error).toContain('Invalid kind');
+    await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('records BOTH escalation conditions, so a suppressed report is not read as delivered', async () => {
+    // Membership alone is necessary, not sufficient: the trigger also refuses a
+    // non-active Event, so an Event member reporting against an archived Event
+    // has `reporterInEvent: true` and still reached nobody. Exporting only the
+    // first would have an operator assume an admin saw it (#670).
+    const abuse = (id: string, over: Record<string, unknown>) => ({ ...report(id), kind: 'abuse', ...over });
+    for (const doc of [
+      abuse('report_alerted', { reporterInEvent: true, escalationEligible: true, escalationLookupFailed: false }),
+      abuse('report_archived', { reporterInEvent: true, escalationEligible: false, escalationLookupFailed: false }),
+      abuse('report_stranger', { reporterInEvent: false, escalationEligible: false, escalationLookupFailed: false }),
+      // The lookup never answered: no authorization decision was recorded, and
+      // that must not read as a confirmed non-member.
+      abuse('report_unknown', { escalationEligible: false, escalationLookupFailed: true }),
+    ]) {
+      await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
+    }
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const read = async (id: string) =>
+      JSON.parse(await readFile(path.join(root, `inbox/${id}/report.json`), 'utf8'));
+
+    expect(await read('report_alerted')).toMatchObject({ reporterInEvent: true, escalationEligible: true });
+    // The case that motivated this: a genuine member whose Event was not live.
+    expect(await read('report_archived')).toMatchObject({ reporterInEvent: true, escalationEligible: false });
+    expect(await read('report_stranger')).toMatchObject({ reporterInEvent: false, escalationEligible: false });
+    expect(await read('report_unknown')).toMatchObject({
+      reporterInEvent: null,
+      escalationEligible: false,
+      escalationLookupFailed: true,
+    });
+    // `null`, not `false`, for a bug report: nothing was checked because there
+    // was nothing to escalate.
+    expect(await read('report_123')).toMatchObject({
+      reporterInEvent: null,
+      escalationEligible: null,
+      escalationLookupFailed: null,
+    });
+  });
+
+  it('fails closed on escalation metadata that is malformed OR incomplete', async () => {
+    // Absent is malformed too, on an abuse report. Intake writes both booleans
+    // on every abuse submission, so a missing one means a half-migrated or
+    // hand-repaired record — and exporting it as `false` would make an unknown
+    // decision indistinguishable from an explicit negative. `null` cannot stand
+    // in for "unknown" here: it already means "not applicable" (a bug report).
+    for (const [error, doc] of [
+      ['Invalid reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: 'yes', escalationEligible: false, escalationLookupFailed: false }],
+      ['Invalid escalationEligible', { ...report(), kind: 'abuse', reporterInEvent: true, escalationEligible: 'yes', escalationLookupFailed: false }],
+      ['Missing reporterInEvent', { ...report(), kind: 'abuse', escalationEligible: false, escalationLookupFailed: false }],
+      ['Missing escalationEligible', { ...report(), kind: 'abuse', reporterInEvent: true, escalationLookupFailed: false }],
+      ['Missing escalationLookupFailed', { ...report(), kind: 'abuse', reporterInEvent: true, escalationEligible: true }],
+      // A recorded decision alongside "we never got an answer" is incoherent.
+      ['Unexpected reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: false, escalationEligible: false, escalationLookupFailed: true }],
+    ] as const) {
+      const summary = await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
+      expect(summary.failed[0].error).toContain(error);
+      await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+  });
+
   it('archives with an immutable GitHub receipt and prevents duplicate import', async () => {
     await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
     const receipt = await archiveReport({

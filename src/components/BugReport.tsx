@@ -6,6 +6,7 @@ import {
   buildBugReportInput,
   captureAppSurface,
   submitBugReport,
+  type BugReportKind,
 } from '../data/bugReports';
 
 // `lucide-react`'s `Bug` (daily-cards-spec § "Iconography — Lucide"), formerly
@@ -58,10 +59,16 @@ const BugReportFlowContext = createContext<BugReportFlow | null>(null);
 export function BugReportProvider({ children }: { children: ReactNode }) {
   const dialogRef = useRef<HTMLElement>(null);
   const pickRef = useRef<HTMLDivElement>(null);
+  const kindRef = useRef<HTMLInputElement>(null);
   const captureAttemptRef = useRef(0);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const [stage, setStage] = useState<FlowStage>('closed');
   const [description, setDescription] = useState('');
+  // What the reporter says this is. `'bug'` by default, which is both the
+  // common case and the value the server normalises an absent field to — so the
+  // control changes what an abuse report does, never what a bug report does
+  // (#670).
+  const [kind, setKind] = useState<BugReportKind>('bug');
   const [screenshot, setScreenshot] = useState<Blob | null>(null);
   // The route the attached screenshot was taken on. Submission reports this
   // rather than the submit-time pathname, so a capture picked up on Card and
@@ -72,17 +79,38 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
+  // What the SERVER did, not what the sheet hoped it would do. Only the server
+  // knows whether an abuse report reached an admin, so the receipt reports the
+  // outcome rather than the sheet promising one before submitting (#670).
+  const [escalationEligible, setEscalationEligible] = useState(false);
+  // The kind the SUBMITTED report actually carried. The live `kind` keeps
+  // tracking the control, and the sheet stays mounted across a slow submit, so
+  // reading `kind` on the receipt would describe whatever is selected NOW rather
+  // than what was sent (#670, Codex P2 round 5).
+  const [submittedKind, setSubmittedKind] = useState<BugReportKind>('bug');
   const previewUrl = useMemo(() => (screenshot ? URL.createObjectURL(screenshot) : null), [screenshot]);
 
   useEffect(() => () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
   useEffect(() => {
-    // The sheet's focus lands via the textarea's autoFocus on (re)mount; the
-    // pick bar has no field, so move focus onto it explicitly for
+    // The pick bar has no field, so move focus onto it explicitly for
     // screen-reader users when the sheet parks.
     if (stage === 'pick') pickRef.current?.focus();
   }, [stage]);
+  useEffect(() => {
+    // THE SHEET OPENS ON THE KIND CHOICE, not on the textarea it used to
+    // autofocus (#670). Forward navigation from the textarea never reaches a
+    // control that sits ABOVE it, so a keyboard or screen-reader user could
+    // describe harmful content and submit it under the default `bug`
+    // classification without ever meeting the control that escalates it.
+    //
+    // It costs every reporter one Tab to start typing, which is a real cost paid
+    // by the common case; it is worth it because the failure it removes is a
+    // report of harm being silently misclassified, and because a classification
+    // question is a reasonable thing to be asked first.
+    if (stage === 'sheet' && !submittedId) kindRef.current?.focus();
+  }, [stage, submittedId]);
 
   const capture = useCallback(async () => {
     const attempt = ++captureAttemptRef.current;
@@ -124,8 +152,11 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       }
       setStage('sheet');
       setDescription('');
+      setKind('bug');
       setError(null);
       setSubmittedId(null);
+      setSubmittedKind('bug');
+      setEscalationEligible(false);
       void capture();
     },
     [stage, capture],
@@ -164,11 +195,33 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (stage !== 'sheet' || event.key !== 'Tab') return;
-      const focusable = Array.from(
+      // `:disabled`, not `[disabled]`. The kind radios are disabled by their
+      // parent `<fieldset disabled>` and carry no attribute of their own, so the
+      // attribute selector kept them in the list while the browser refused to
+      // focus them — and mid-submit, when Send is disabled too, the trap's idea
+      // of the boundary stopped matching anything the user could reach and Tab
+      // walked out of the modal (Phase 4b P2). The pseudo-class is what accounts
+      // for inherited disability.
+      const candidates = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+          'button:not(:disabled), textarea:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
         ) ?? [],
       );
+      // A RADIO GROUP IS ONE SEQUENTIAL TAB STOP, not one per radio. Browsers
+      // visit only the checked member (or the first, when none is checked), so a
+      // raw query makes `first` a radio the user can never actually land on once
+      // a LATER member is selected — and the backward-wrap test below, which
+      // compares against `first` by identity, then never fires and focus walks
+      // straight out of the modal. Reachable in this sheet the moment a reporter
+      // picks "Abuse or harmful content" and presses Shift+Tab (#670, Codex P2).
+      const radios = candidates.filter(
+        (element): element is HTMLInputElement => element instanceof HTMLInputElement && element.type === 'radio',
+      );
+      const focusable = candidates.filter((element) => {
+        if (!(element instanceof HTMLInputElement) || element.type !== 'radio' || !element.name) return true;
+        const group = radios.filter((radio) => radio.name === element.name);
+        return element === (group.find((radio) => radio.checked) ?? group[0]);
+      });
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -186,6 +239,9 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
 
   const submit = async () => {
     if (!description.trim()) return;
+    // Read ONCE, at click time. Everything below is async, and this closure must
+    // send and report the same classification even if the control moves under it.
+    const sentKind = kind;
     setBusy(true);
     setError(null);
     try {
@@ -193,12 +249,15 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       const result = await submitBugReport(
         buildBugReportInput({
           description,
+          kind: sentKind,
           screenshotDataUrl,
           captureError,
           route: screenshot ? (captureRoute ?? undefined) : undefined,
         }),
       );
       setSubmittedId(result.reportId);
+      setSubmittedKind(sentKind);
+      setEscalationEligible(result.escalationEligible === true);
       setScreenshot(null);
     } catch (submitError) {
       setError(errorMessage(submitError));
@@ -236,6 +295,27 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                   <>
                     <h2 className="sheet-title" id="bug-report-title">Report received</h2>
                     <p>Thanks. Your report ID is <code>{submittedId}</code>.</p>
+                    {submittedKind === 'abuse' && (
+                      <>
+                        <p className="bug-report-privacy">
+                          {escalationEligible
+                            ? 'Your report is marked for this event’s admins.'
+                            : 'Your report was filed, but it isn’t marked for this event’s admins.'}
+                        </p>
+                        {/* UNCONDITIONAL, and that is the point (Phase 4b P1).
+                            Even the positive branch only reflects checks made
+                            before the alert is queued — the trigger can still
+                            decline or fail, and the digest may have no
+                            resolvable recipient — so neither branch can promise
+                            an admin sees this. Somebody reporting harm must not
+                            be steered away from a faster route by a receipt
+                            that sounds like one is already underway. */}
+                        <p className="bug-report-privacy">
+                          We can’t confirm when an admin will see it. If someone may be in danger, tell an
+                          event organizer directly.
+                        </p>
+                      </>
+                    )}
                     <div className="sheet-actions">
                       <button className="btn primary" type="button" onClick={close}>Done</button>
                     </div>
@@ -246,13 +326,61 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     <p className="bug-report-privacy">
                       We’ll send your description, this app view, route, app version, browser, and screen size. Review the image before sending; no email or auth token is included.
                     </p>
+                    {/* The abuse marking (#670). A radio pair rather than a
+                        checkbox because the two are alternatives, not a flag on
+                        a bug — and radios state the default visibly, which a
+                        checkbox does not. `bug` is pre-selected, so a reporter
+                        who ignores this control sends exactly the payload every
+                        already-shipped client sends. */}
+                    {/* Frozen while a submit is in flight, alongside Cancel: a
+                        classification that can move after Send is a receipt that
+                        can describe a report nobody filed. */}
+                    <fieldset className="bug-report-kind" disabled={busy}>
+                      <legend className="bug-report-label">What kind of report is this?</legend>
+                      <label className="bug-report-kind-option">
+                        <input
+                          ref={kind === 'bug' ? kindRef : undefined}
+                          type="radio"
+                          name="bug-report-kind"
+                          value="bug"
+                          checked={kind === 'bug'}
+                          onChange={() => setKind('bug')}
+                        />
+                        <span>Something is broken</span>
+                      </label>
+                      <label className="bug-report-kind-option">
+                        <input
+                          ref={kind === 'abuse' ? kindRef : undefined}
+                          type="radio"
+                          name="bug-report-kind"
+                          value="abuse"
+                          checked={kind === 'abuse'}
+                          onChange={() => setKind('abuse')}
+                        />
+                        <span>Abuse or harmful content</span>
+                      </label>
+                    </fieldset>
+                    {kind === 'abuse' && (
+                      // "We'll TRY", because at this point nothing has been
+                      // checked at all: eligibility is decided server-side after
+                      // Send, and the server may deliberately decline — a
+                      // stranger naming somebody else's Event, or a member
+                      // reporting against an archived one. Promising the outcome
+                      // here would be false for exactly those cases (Phase 4b
+                      // P2). The second clause is the part that is always true,
+                      // and it is the reassurance that actually matters: the
+                      // report is filed either way. The receipt then states
+                      // which of the two happened.
+                      <p className="bug-report-privacy">
+                        We’ll try to raise this with the event’s admins; either way your report is filed.
+                      </p>
+                    )}
                     <label className="bug-report-label" htmlFor="bug-report-description">What happened?</label>
                     <textarea
                       id="bug-report-description"
                       className="input bug-report-description"
                       rows={5}
                       maxLength={BUG_REPORT_DESCRIPTION_MAX}
-                      autoFocus
                       placeholder="What were you trying to do, and what happened instead?"
                       value={description}
                       onChange={(event) => setDescription(event.target.value)}
