@@ -1694,6 +1694,75 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 22c (#548 Codex P2 round 3): a scoped FIRST deploy of one handoff half
+# must not fail on the partner that does not exist yet.
+#
+# `--only functions:mintAuthHandoff` is a scoped deploy — it does not create
+# exchangeAuthHandoff — so on a first scoped deploy the partner service is
+# genuinely absent. Reconciling the pair strictly would fail on that NOT_FOUND
+# and exit deploy.sh nonzero even though Firebase succeeded: a false failure on
+# a correct deploy. Naming one half therefore reconciles the pair leniently.
+# ---------------------------------------------------------------------------
+REPO22C="$WORKDIR/case22c-auth-handoff-partner-absent"
+init_fixture_repo "$REPO22C"
+OUT22C="$WORKDIR/case22c.out"
+ERR22C="$WORKDIR/case22c.err"
+: >"$WORKDIR/ofd-calls-22c.log"
+: >"$WORKDIR/gcloud-calls-22c.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22c.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22c.log" \
+GCLOUD_MISSING_SERVICE="exchangeauthhandoff" \
+  bash -c "cd '$REPO22C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintAuthHandoff" \
+  >"$OUT22C" 2>"$ERR22C"
+RC22C=$?
+set -e
+
+if [[ $RC22C -ne 0 ]]; then
+  fail "auth-handoff-partner-absent: a scoped first deploy returned $RC22C because the unselected partner does not exist yet. stderr was:"
+  cat "$ERR22C" >&2
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-22c.log"; then
+  fail "auth-handoff-partner-absent: the SELECTED half was never reconciled. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22c.log" >&2
+else
+  pass "auth-handoff-partner-absent: a scoped first deploy tolerates the absent partner and still reconciles the selected half (rc=$RC22C)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22d (#548 Codex P2 round 3): a FULL Functions deploy stays strict.
+#
+# The leniency above is scoped to a partial selection. A whole-`functions`
+# deploy releases both halves, so a service still missing afterwards is a real
+# failure and must not be swallowed — otherwise the lenient path would quietly
+# become the only path and a 403ing callable would ship green.
+# ---------------------------------------------------------------------------
+REPO22D="$WORKDIR/case22d-auth-handoff-strict"
+init_fixture_repo "$REPO22D"
+OUT22D="$WORKDIR/case22d.out"
+ERR22D="$WORKDIR/case22d.err"
+: >"$WORKDIR/ofd-calls-22d.log"
+: >"$WORKDIR/gcloud-calls-22d.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22d.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22d.log" \
+GCLOUD_MISSING_SERVICE="exchangeauthhandoff" \
+  bash -c "cd '$REPO22D' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$OUT22D" 2>"$ERR22D"
+RC22D=$?
+set -e
+
+if [[ $RC22D -eq 0 ]]; then
+  fail "auth-handoff-strict: a full Functions deploy returned 0 though exchangeauthhandoff is still missing afterwards — the lenient path leaked into the strict one. stdout was:"
+  cat "$OUT22D" >&2
+else
+  pass "auth-handoff-strict: a full Functions deploy still fails loud when a handoff service is missing after publish (rc=$RC22D)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

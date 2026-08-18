@@ -216,6 +216,10 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   BUG_REPORT_INVOKER_CONSERVATIVE=false
   EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
   AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+  # Which HALVES of the handoff pair this scope actually names. Parse-local:
+  # only the strictness decision below reads them.
+  AUTH_HANDOFF_MINT_NAMED=false
+  AUTH_HANDOFF_EXCHANGE_NAMED=false
   for only_value in "${ONLY_VALUES[@]}"; do
     IFS=',' read -r -a only_selectors <<< "$only_value"
     for selector in "${only_selectors[@]}"; do
@@ -225,6 +229,8 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_MINT_NAMED=true
+          AUTH_HANDOFF_EXCHANGE_NAMED=true
           BUG_REPORT_INVOKER_CONSERVATIVE=false
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
           AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
@@ -239,14 +245,20 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
           ;;
-        # Either handoff endpoint selects BOTH services, and not
-        # conservatively: naming one half of the sign-in flow releases a
-        # function whose partner must stay reachable for that flow to work at
-        # all, so this is an exact selection of the pair, not an inference.
-        functions:mintAuthHandoff|functions:exchangeAuthHandoff)
+        # Either handoff endpoint selects BOTH services: naming one half of
+        # the sign-in flow releases a function whose partner must stay
+        # reachable for that flow to work at all. Which HALVES were named is
+        # tracked so the strictness can be decided after the whole scope is
+        # parsed — see the reconciliation below the loop.
+        functions:mintAuthHandoff)
           FUNCTIONS_ATTEMPTED=true
           AUTH_HANDOFF_INVOKER_SELECTED=true
-          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+          AUTH_HANDOFF_MINT_NAMED=true
+          ;;
+        functions:exchangeAuthHandoff)
+          FUNCTIONS_ATTEMPTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_EXCHANGE_NAMED=true
           ;;
         # A selector after `functions:` is not necessarily a single exported
         # function. Firebase also accepts codebase and function-group selectors
@@ -274,6 +286,20 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
       esac
     done
   done
+  # A scope that named only ONE half of the handoff pair reconciles the pair
+  # LENIENTLY (#548, Codex P2 round 3). Firebase's `--only functions:<name>` is
+  # a scoped deploy: `--only functions:mintAuthHandoff` does not create
+  # exchangeAuthHandoff, so on a first scoped deploy the partner service does
+  # not exist yet. Reconciling it strictly would fail the wrapper on a
+  # NOT_FOUND and exit deploy.sh nonzero even though Firebase succeeded — a
+  # false failure on a correct deploy. Naming BOTH halves, or the whole
+  # `functions` scope, releases both and stays strict, so a genuinely missing
+  # service after a full deploy still fails loud.
+  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" \
+     && "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" != "true" \
+     && ( "$AUTH_HANDOFF_MINT_NAMED" != "true" || "$AUTH_HANDOFF_EXCHANGE_NAMED" != "true" ) ]]; then
+    AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
+  fi
 fi
 
 # `--except` removes whole Functions releases or one known invoker service.
@@ -365,6 +391,12 @@ if [[ -n "${DEPLOY_TARGET_PROJECT:-}" ]]; then
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
+
+# The project a MANUAL repair must name, for the failure guidance below. Same
+# value deploy.sh pins automatically; printed because a human re-running a bare
+# wrapper would otherwise inherit that wrapper's own default project, which is
+# only ever one of this repo's two primaries (#548, Codex P2 round 3).
+INVOKER_REPAIR_PROJECT="${DEPLOY_TARGET_PROJECT:-${DEPLOY_PROJECT:-<project-id>}}"
 
 # A post-deploy `--allow-missing` is normally wrong: an endpoint explicitly
 # selected for Functions release must exist once Firebase returns. The one
@@ -880,11 +912,15 @@ EOF
     • The org policy also blocks the annotation (it should not — that is a
       service setting, not an IAM binding — but read the gcloud error above).
 
-  Re-run by hand once fixed; all are idempotent, so a re-run is safe:
+  Re-run by hand once fixed; all are idempotent, so a re-run is safe. The
+  project is pinned explicitly because each wrapper's own default is only ONE
+  of this repo's two Firebase primaries — a bare re-run can therefore repair
+  the OTHER project and report success while the services that are actually
+  403ing stay broken:
 
-    scripts/set-bug-report-invoker.sh
-    scripts/set-email-unsubscribe-invoker.sh
-    scripts/set-auth-handoff-invoker.sh
+    BUG_REPORT_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-bug-report-invoker.sh
+    EMAIL_UNSUBSCRIBE_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-email-unsubscribe-invoker.sh
+    AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
 EOF
   fi
 fi
