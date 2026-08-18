@@ -1701,7 +1701,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
-    const { appOwnedRedirect, pending } = consumeRedirectContextOnce();
+    const { appOwnedRedirect } = consumeRedirectContextOnce();
 
     void getRedirectResult(auth)
       .then((result) => {
@@ -1719,20 +1719,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // keeps the two outcomes mutually exclusive in EITHER firing order —
         // whichever lands first wins, and the other becomes a no-op, so a
         // single attempt can never report both `login_failed` and `login`.
-        if (appOwnedRedirect && !redirectCompletionLatchRef.current) {
-          redirectCompletionLatchRef.current = true;
-          trackSignInFailure(err);
-        }
-        // A terminal outcome for the transaction the durable records were
-        // tracking (Codex P2 on #836) — gated on `pending`, not
-        // `appOwnedRedirect`, since it is the durable record's own liveness
-        // that decides whether THIS rejection is its terminal event (the
-        // marker can already be lost while the durable record still
-        // stands). Clearing here only affects a LATER mount; signal (b) can
-        // still complete THIS mount from the cached value above if
-        // onAuthStateChanged has not fired yet — clearing storage does not
-        // touch the in-memory `redirectContextRef` those signals share.
-        if (pending) {
+        //
+        // Gated on `appOwnedRedirect`, NOT `pending` (Codex P2 on the merged
+        // HEAD — the round after the round-2 fix this comment used to
+        // describe): the marker proves THIS rejection belongs to THIS app's
+        // own redirect attempt, so it is safe to treat as definitively dead
+        // and clear both durable records below. When the marker is lost but
+        // the durable record still stands, this rejection is NOT proof of
+        // failure — it is exactly the "Firebase's own helper threw, but the
+        // session it restored is still landing" case signal (b) exists to
+        // rescue (#346) — so clearing here would be premature. If THIS mount
+        // then reloads/crashes before onAuthStateChanged ever fires (signal
+        // (b) never gets its chance), a cleared record would leave the NEXT
+        // mount with nothing to recover from — the exact regression the
+        // round-1 fix closed for the "mount merely read it" case, reopened
+        // here for the "mount saw an inconclusive rejection" case. Left
+        // standing, it simply expires on its own TTL if truly abandoned.
+        if (appOwnedRedirect) {
+          if (!redirectCompletionLatchRef.current) {
+            redirectCompletionLatchRef.current = true;
+            trackSignInFailure(err);
+          }
           clearRedirectPending();
           clearCollectedAcknowledgement();
         }

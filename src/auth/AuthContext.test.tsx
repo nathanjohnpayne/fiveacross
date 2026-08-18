@@ -787,8 +787,35 @@ describe('AuthContext deal-error hardening', () => {
       expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
     });
 
-    it('clears the pending record on a genuine getRedirectResult rejection for a mount that knows it was pending', async () => {
+    it('clears the durable records on a CONFIRMED (marker-present) getRedirectResult rejection', async () => {
+      // The marker present is what makes this rejection DEFINITIVE — the
+      // app knows for certain this getRedirectResult() belongs to its own
+      // attempt, so clearing is safe (nothing left to recover).
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
       localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockRejectedValueOnce(
+        Object.assign(new Error('network down'), { code: 'auth/network-request-failed' }),
+      );
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBeNull();
+    });
+
+    // Codex P2 on the merged HEAD (#836): a marker-less rejection is
+    // INCONCLUSIVE, not confirmed — it must not clear the durable records,
+    // or a mount that reloads/crashes before signal (b) gets its chance
+    // would leave the NEXT mount with nothing to recover the redirect from.
+    it('leaves the durable records standing on an INCONCLUSIVE (marker-less) getRedirectResult rejection', async () => {
+      const pendingAt = String(Date.now());
+      const ackAt = String(Date.now());
+      localStorage.setItem(REDIRECT_PENDING_KEY, pendingAt);
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackAt);
       mocks.getRedirectResult.mockRejectedValueOnce(
         Object.assign(new Error('missing initial state'), { code: 'auth/missing-initial-state' }),
       );
@@ -798,7 +825,8 @@ describe('AuthContext deal-error hardening', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(pendingAt);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackAt);
     });
 
     // Codex P2 round 2 on #836: the failure path and signal (b) must not both
