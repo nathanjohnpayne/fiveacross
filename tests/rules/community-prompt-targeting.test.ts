@@ -155,6 +155,18 @@ describe('create — targetDayIndex shape', () => {
       ),
     );
   });
+
+  it('DENIES a submitter arriving with a forged retainedAt', async () => {
+    // `retainedAt` is an APPROVAL-time fact. Unlike a forged `approvedAt` — which
+    // the approval write overwrites, making it harmless — a forged `retainedAt`
+    // would survive a normal approval and leave a Prompt that is active and
+    // DEALT while its durable state claims it was retained (Phase 4b P1, PR
+    // #812). The client half of the same guarantee is `approveItems` clearing
+    // the field on every placement.
+    await assertFails(
+      setDoc(doc(db(ALICE), at('items/p11')), pendingPayload(ALICE, { retainedAt: NOW() })),
+    );
+  });
 });
 
 describe('update — only an admin re-targets or approves', () => {

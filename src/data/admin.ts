@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -100,11 +100,21 @@ export async function approveItems(
     const placements: ApprovalPlacement[] = [];
     for (const it of items) {
       const base = { status: 'active' as const, approvedBy: adminUid, approvedAt };
+      // A placement CLEARS any `retainedAt` already on the row, rather than
+      // merely not writing one. Two ways a stale marker gets there: a submitter
+      // can put one on the create (the rules now refuse that, but rows created
+      // before this bar exist), and a genuinely-retained Prompt can be re-aimed
+      // by an organiser and approved again. Since `tx.update` is a merge, a
+      // marker left behind would describe an active Prompt that is being DEALT
+      // as one that was retained and dealt nowhere — the mirror of the P2 above,
+      // and just as misleading (Phase 4b P1, PR #812). `retained: true` is the
+      // only state that stamps it, so `retained: false` must unstamp it.
+      const placed = { ...base, retainedAt: deleteField() };
       if (it.targetDayIndex === undefined) {
         // Genuinely untargeted: approve exactly as before this feature. No
         // target is invented — inferring one would quietly narrow an organiser
         // Prompt that is meant for every Day.
-        tx.update(item(it.id), base);
+        tx.update(item(it.id), placed);
         placements.push({ itemId: it.id, dayIndex: null, retained: false });
         continue;
       }
@@ -129,7 +139,7 @@ export async function approveItems(
         placements.push({ itemId: it.id, dayIndex: null, retained: true });
         continue;
       }
-      tx.update(item(it.id), { ...base, targetDayIndex: routed });
+      tx.update(item(it.id), { ...placed, targetDayIndex: routed });
       placements.push({ itemId: it.id, dayIndex: routed, retained: false });
     }
     return placements;

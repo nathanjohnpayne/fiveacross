@@ -54,9 +54,17 @@ service cloud.firestore {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['targetDayIndex'])
         || validTargetDayIndex();
     }
+    // `retainedAt` is an APPROVAL-time fact, so a submitter may not arrive with
+    // one. Unlike a forged `approvedAt` — which the approval write overwrites,
+    // making it harmless — a forged `retainedAt` survives a normal approval,
+    // leaving a Prompt that is active and DEALT while its durable state claims it
+    // was retained and dealt nowhere (Phase 4b P1, PR #812). `approveItems` also
+    // clears the field whenever it places a Prompt, so the two ends agree: only a
+    // retention stamps it, and anything else unstamps it.
     function nonAdminPendingMainItemCreate() {
       return request.resource.data.status == 'pending'
-        && request.resource.data.pool == 'main';
+        && request.resource.data.pool == 'main'
+        && !('retainedAt' in request.resource.data);
     }
     function adminActiveItemCreate(eventId) {
       return isAdmin(eventId)

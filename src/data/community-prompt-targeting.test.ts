@@ -354,11 +354,15 @@ describe('approveItems — routing an approval into one Day', () => {
     const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
     expect(placements).toEqual([{ itemId: 'legacy', dayIndex: null, retained: false }]);
     const { data } = written()[0];
-    expect(data).toEqual({
+    expect(data).toMatchObject({
       status: 'active',
       approvedBy: 'admin-uid',
       approvedAt: expect.any(Number),
     });
+    // No Day is invented, and no retention is claimed. `retainedAt` appears only
+    // as the CLEAR (see below), never as a stamp.
+    expect(data).not.toHaveProperty('targetDayIndex');
+    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
   });
 
   it('reports a malformed target as RETAINED — dealt nowhere, so described as nowhere', async () => {
@@ -390,6 +394,33 @@ describe('approveItems — routing an approval into one Day', () => {
     );
     expect(placements).toEqual([{ itemId: 'nulled', dayIndex: null, retained: true }]);
     expect(written()[0].data).toHaveProperty('retainedAt');
+  });
+
+  it('CLEARS a stale retainedAt when it places the Prompt', async () => {
+    // A marker left behind would describe an active, DEALT Prompt as one that
+    // was retained and dealt nowhere (Phase 4b P1, PR #812). Reachable two ways:
+    // a row created before the rules barred a submitter-supplied `retainedAt`,
+    // and a genuinely-retained Prompt an organiser re-aims and approves again.
+    // `tx.update` is a merge, so not-writing the field is not the same as
+    // clearing it — a placement has to unstamp it explicitly.
+    await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
+    const { data } = written()[0];
+    expect(data).toHaveProperty('retainedAt');
+    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
+  });
+
+  it('CLEARS it on an UNTARGETED approval too — every placement, not just routed ones', async () => {
+    await approveItems([{ id: 'legacy' }], 'admin-uid');
+    const { data } = written()[0];
+    expect(data).toHaveProperty('retainedAt');
+    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
+  });
+
+  it('STAMPS retainedAt as a real instant when it retains — the two paths differ', async () => {
+    // The control for the two above: retention is the one outcome that writes a
+    // number, so "cleared" and "stamped" can never be confused for each other.
+    await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
+    expect(typeof (written()[0].data as { retainedAt: unknown }).retainedAt).toBe('number');
   });
 
   it('never writes to a Day — an approval touches only the Prompt', async () => {
