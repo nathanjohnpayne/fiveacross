@@ -31,7 +31,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -840,16 +840,25 @@ export default function Board() {
   // literal on every render while unmigrated) so it doesn't re-schedule on
   // every unrelated render.
   const [now, setNow] = useState(() => Date.now());
+  // The Event's CONFIGURED Standings Freeze is a boundary in its own right (ADR
+  // 0011, Codex P1 on PR #841). It used to be redundant — the freeze WAS a Day's
+  // `unlockAt`, so the unlock timers already covered it — but an Event that
+  // plays competitively until a stated check-out freeze has a boundary that
+  // coincides with no Day unlock at all. Without it, an open (or offline) Card
+  // tab never re-evaluates `statsFrozen` when the freeze arrives, and a
+  // post-freeze tap keeps writing root totals until some unrelated render
+  // happens to land. `standingsFreezeAt` resolves to a ceremonial Day's unlock
+  // when nothing is configured, so on both live Events this adds a boundary the
+  // list already had and nothing changes.
+  const scheduledFreezeAt = standingsFreezeAtFor(event);
   useEffect(() => {
-    const schedule = event?.days ?? [];
-    const nextUnlock = schedule
-      .map((d) => d.unlockAt)
-      .filter((t) => t > Date.now())
-      .sort((a, b) => a - b)[0];
-    if (nextUnlock == null) return;
-    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
+    const boundaries = [...(event?.days ?? []).map((d) => d.unlockAt)];
+    if (scheduledFreezeAt != null) boundaries.push(scheduledFreezeAt);
+    const nextBoundary = boundaries.filter((t) => t > Date.now()).sort((a, b) => a - b)[0];
+    if (nextBoundary == null) return;
+    const timer = setTimeout(() => setNow(Date.now()), nextBoundary - Date.now());
     return () => clearTimeout(timer);
-  }, [event?.days, now]);
+  }, [event?.days, scheduledFreezeAt, now]);
   // Lazy per-Day dealing (#246, daily-cards-spec § "Unlock mechanics"): on opening
   // an UNLOCKED Day whose snapshot is stamped (`dayDealState === 'ready'`) that has
   // no Day Card for this Player yet, deal it from that Day's frozen snapshot

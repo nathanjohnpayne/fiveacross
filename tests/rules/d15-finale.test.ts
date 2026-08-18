@@ -106,6 +106,15 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     }
   });
 
+  it('DENIES a positive-INFINITE standingsFreezeAt', async () => {
+    // Infinity is a Firestore number and passes `> 0`, but both readers discard
+    // it via Number.isFinite — so without the upper bound it is another
+    // successful write that silently does nothing.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: Number.POSITIVE_INFINITY }),
+    );
+  });
+
   it('DENIES even an admin writing a non-number standingsFreezeAt', async () => {
     // A string instant reads as "not configured" on every `typeof === 'number'`
     // guard, so it would silently fall back to the schedule derivation instead

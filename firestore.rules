@@ -699,13 +699,19 @@ service cloud.firestore {
       // would hand an admin a SUCCESSFUL write for a freeze that every reader
       // silently discards — falling back to a ceremonial Day, or skipping the
       // finale entirely, with nothing anywhere saying so (Codex P2, PR #841).
-      // `> 0` also rejects NaN, which compares false against every bound.
+      // `> 0` also rejects NaN, which compares false against every bound. The
+      // UPPER bound is what rejects positive `Infinity`, which is a Firestore
+      // number and passes `> 0` while both readers discard it via
+      // `Number.isFinite` (Codex P2, PR #841). Rules have no `isFinite`, so the
+      // bound stands in for it: 4102444800000 is 2100-01-01T00:00:00Z, far
+      // beyond any real Event and finite by construction.
       // Optional: absent means "derive from the first ceremonial Day", which is
       // both live Events.
       allow create, update: if isAdmin(eventId)
         && (!('standingsFreezeAt' in request.resource.data)
             || (request.resource.data.standingsFreezeAt is number
-                && request.resource.data.standingsFreezeAt > 0))
+                && request.resource.data.standingsFreezeAt > 0
+                && request.resource.data.standingsFreezeAt < 4102444800000))
         && (!('settings' in request.resource.data)
             || request.resource.data.settings.reportHideThreshold is number)
         && (!('settings' in request.resource.data)

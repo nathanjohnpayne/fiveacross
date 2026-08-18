@@ -640,7 +640,12 @@ export function foldEchoStats(params: {
   // clobber the server's earlier value). With no base (deal/reconcile paths)
   // the prior view came from a real read, so the root always writes.
   if (!base || 'firstBingoAt' in base) {
-    out.firstBingoAt = eventFirstBingoAt(merged, isTutorialDay);
+    // Ceremonial-excluded as well as tutorial-excluded, exactly like
+    // `foldDayStat` and `aggregatePlayerStats` (ADR 0011). The counts a few
+    // lines up already drop ceremonial Days; a root that kept a ceremonial
+    // timestamp would give this row competitive bingos with a ceremonial
+    // tie-break, mis-ranking the live Leaderboard (Codex P2, PR #841).
+    out.firstBingoAt = eventFirstBingoAt(merged, rankingExcludedDay(isTutorialDay, params.isCeremonialDay));
   }
   return out;
 }
@@ -918,7 +923,7 @@ export function playerRowRootLag(
   const rootBingos = row.bingoCount ?? 0;
   const bucketFirst = eventFirstBingoAt(
     row.dayStats,
-    (i: number) => (isTutorialDay?.(i) ?? false) || (isCeremonialDay?.(i) ?? false),
+    rankingExcludedDay(isTutorialDay ?? (() => false), isCeremonialDay),
   );
   const rootFirst = row.firstBingoAt ?? null;
   const countsDominate =

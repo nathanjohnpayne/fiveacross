@@ -3,6 +3,7 @@ import { scoringForDay, isCeremonialDay } from './scoring';
 import {
   aggregatePlayerStats,
   ceremonialDayIndexSet,
+  foldEchoStats,
   playerRowRootLag,
   rankingExcludedDay,
   standingsFreezeAtFor,
@@ -337,5 +338,27 @@ describe('rankingExcludedDay — the standings tie-break drops ceremonial Days t
     const agg = aggregatePlayerStats(dayStats, isTutorial, isCeremonial);
     const row = { dayStats, ...agg };
     expect(playerRowRootLag(row, isCeremonial, isTutorial)).toBe(false);
+  });
+});
+
+// --- Codex round 3: the echo fold uses the same ranking exclusion ----------------
+describe('foldEchoStats — the echo path ranks the same way the mark path does', () => {
+  it('keeps a ceremonial Day out of the root firstBingoAt it writes', () => {
+    // An Echo landing a bingo on a ceremonial (non-Tutorial) Day must not give
+    // the row a ceremonial tie-break while that Day's counts are excluded.
+    const out = foldEchoStats({
+      priorDayStats: { 1: { bingoCount: 1, squaresMarked: 10, firstBingoAt: 500 } },
+      // `bingoAt` is the echo's cells-derived completion time — the stamp
+      // `foldEchoStats` records for this Day's previously unstamped bingo.
+      echoes: [{ dayIndex: 2, bingoCount: 1, squaresMarked: 10, blackout: false, bingoAt: 10 }],
+      now: 10,
+      isTutorialDay: (i: number) => i === 0,
+      isCeremonialDay: (i: number) => i === 2,
+    });
+    expect(out.firstBingoAt).toBe(500);
+    // The ceremonial Day's counts are excluded from the roots too…
+    expect(out).toMatchObject({ bingoCount: 1, squaresMarked: 10 });
+    // …while its own per-Day bucket is still recorded (its daily honour stands).
+    expect(out.dayStats[2]).toMatchObject({ bingoCount: 1, squaresMarked: 10 });
   });
 });
