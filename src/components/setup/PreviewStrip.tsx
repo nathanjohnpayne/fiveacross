@@ -32,16 +32,34 @@ export default function PreviewStrip({ draft }: { draft: EventDraft }) {
   const days = previewDays(draft);
   const defaultDay = previewDayForTheme(draft) ?? days[0] ?? null;
   const [selectedIndex, setSelectedIndex] = useState<number | null>(defaultDay?.index ?? null);
+  // Whether `selectedIndex` is an organizer's own Day-tab pick, as opposed to
+  // the auto-computed `defaultDay`. Only an EXPLICIT pick is allowed to
+  // outlive a draft edit (Codex P2, PR #857): without this, the default
+  // Day chosen before any Theme was assigned would stay pinned forever —
+  // Look assigning a Theme to a LATER Day would move `defaultDay` (and the
+  // collapsed strip's own swatch) but leave the expanded sheet showing the
+  // old, no-longer-"current" Day, silently disagreeing with the strip that
+  // opened it.
+  const explicitPick = useRef(false);
 
-  // Re-anchor the selection when the schedule itself changes shape (a Day
-  // removed, or the first Day ever added) — but never fight the organizer's
-  // own pick while it still names a real Day, so switching the Day tab in
-  // the expanded sheet survives an unrelated draft edit elsewhere.
+  // Re-anchor to the (possibly new) default whenever the organizer has not
+  // explicitly chosen a tab, OR their earlier explicit pick no longer names a
+  // real Day (removed from the schedule) — never fight a still-valid
+  // explicit pick, so switching Day tabs in the expanded sheet survives an
+  // unrelated draft edit elsewhere.
   useEffect(() => {
-    if (selectedIndex != null && days.some((d) => d.index === selectedIndex)) return;
-    setSelectedIndex(defaultDay?.index ?? null);
+    const stillValid = selectedIndex != null && days.some((d) => d.index === selectedIndex);
+    if (explicitPick.current && stillValid) return;
+    if (!stillValid) explicitPick.current = false;
+    const nextIndex = defaultDay?.index ?? null;
+    if (nextIndex !== selectedIndex) setSelectedIndex(nextIndex);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days.map((d) => d.index).join(','), defaultDay?.index]);
+
+  const selectDay = (index: number) => {
+    explicitPick.current = true;
+    setSelectedIndex(index);
+  };
 
   const selectedDay =
     draft.cardFormat === 'daily_cards' ? (days.find((d) => d.index === selectedIndex) ?? null) : null;
@@ -69,12 +87,27 @@ export default function PreviewStrip({ draft }: { draft: EventDraft }) {
           draft={draft}
           days={days}
           selectedDay={selectedDay}
-          onSelectDay={setSelectedIndex}
+          onSelectDay={selectDay}
           onClose={() => setOpen(false)}
         />
       )}
     </>
   );
+}
+
+/**
+ * A Day tab's own label — `previewDayLabel` (the weekday), disambiguated
+ * with the 1-based Day ordinal whenever another Day in `allDays` shares the
+ * same weekday (Codex P2, PR #857): the spec explicitly permits, and
+ * Bodega's schedule actually has, two Days on one calendar date (a
+ * competitive main Day and a closing wrap-up), which would otherwise render
+ * as two indistinguishable "Sunday" tabs — unusable to sight and, via
+ * duplicate accessible names, to assistive tech.
+ */
+function dayTabLabel(day: DraftDayDef, allDays: readonly DraftDayDef[]): string {
+  const label = previewDayLabel(day);
+  const collides = allDays.some((d) => d.index !== day.index && previewDayLabel(d) === label);
+  return collides ? `${label} — Day ${day.index + 1}` : label;
 }
 
 function PreviewSheet({
@@ -103,6 +136,17 @@ function PreviewSheet({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // `WizardChrome` owns its OWN document-level Escape → Cancel
+        // listener, registered (bubble phase) for the whole time the wizard
+        // is mounted — well before this sheet ever opens. Without
+        // coordinating, the SAME keypress would both close this preview AND
+        // open the discard-draft confirm (Codex P2, PR #857). Listening on
+        // the CAPTURE phase runs this handler before ANY bubble-phase
+        // document listener (capture always finishes before bubble begins,
+        // for every node in the path, including two listeners on the same
+        // `document`), and `stopPropagation` here keeps the event from ever
+        // reaching that later bubble-phase listener at all.
+        e.stopPropagation();
         onClose();
         return;
       }
@@ -121,12 +165,13 @@ function PreviewSheet({
         first.focus();
       }
     };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    document.addEventListener('keydown', onKeyDown, { capture: true });
+    return () => document.removeEventListener('keydown', onKeyDown, { capture: true });
   }, [onClose]);
 
   const theme = selectedDay?.theme ?? previewTheme(draft);
   const deal = dealPreviewCard(draft, selectedDay);
+  const title = draft.name.trim() || 'Live preview';
 
   return (
     <div className="sheet-backdrop" onClick={onClose}>
@@ -135,11 +180,11 @@ function PreviewSheet({
         className="sheet wizard-preview-sheet"
         role="dialog"
         aria-modal="true"
-        aria-label="Live preview"
+        aria-label={title}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sheet-header">
-          <div className="sheet-title">Live preview</div>
+          <div className="sheet-title">{title}</div>
           <button
             type="button"
             ref={closeRef}
@@ -159,7 +204,7 @@ function PreviewSheet({
                 className={'seg-btn' + (selectedDay?.index === d.index ? ' on' : '')}
                 onClick={() => onSelectDay(d.index)}
               >
-                {previewDayLabel(d)}
+                {dayTabLabel(d, days)}
               </button>
             ))}
           </div>

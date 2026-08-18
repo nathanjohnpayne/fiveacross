@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import WizardChrome from './WizardChrome';
 import { STEP_REGISTRY } from './stepRegistry';
 import { createEventDraft } from '../../data/eventDraft';
-import type { SetupStep } from '../../types';
+import type { EventDraft, SetupStep } from '../../types';
 
 // Covers specs/event-setup-wizard.md § "Live preview strip" (#795) mount
 // gating: the strip appears "from Step 2 on" — Basics, Squares, Look — and
@@ -11,18 +12,20 @@ import type { SetupStep } from '../../types';
 // full review checklist takes its place). PreviewStrip's own behavior
 // (caption, expanded sheet, theme island) is covered by PreviewStrip.test.tsx
 // and src/data/draftPreview.test.ts; this file only pins WHERE WizardChrome
-// mounts it.
+// mounts it — plus the Escape-ownership handoff between the two, below.
 
-function renderChrome(currentStep: SetupStep) {
-  const draft = createEventDraft({ now: 0 });
+function renderChrome(
+  currentStep: SetupStep,
+  { onRequestCancel = vi.fn(), draft }: { onRequestCancel?: () => void; draft?: EventDraft } = {},
+) {
   render(
     <WizardChrome
       registry={STEP_REGISTRY}
       currentStep={currentStep}
-      draft={draft}
+      draft={draft ?? createEventDraft({ now: 0 })}
       now={0}
       onStepSelect={vi.fn()}
-      onRequestCancel={vi.fn()}
+      onRequestCancel={onRequestCancel}
       onAdvance={vi.fn()}
       onSaveNow={vi.fn()}
     >
@@ -68,5 +71,36 @@ describe('WizardChrome — live preview strip mount gating', () => {
     expect(bodyIndex).toBeGreaterThanOrEqual(0);
     expect(prevbarIndex).toBeGreaterThan(bodyIndex);
     expect(actionsIndex).toBeGreaterThan(prevbarIndex);
+  });
+});
+
+describe('WizardChrome + PreviewStrip — Escape ownership (Codex P2, PR #857)', () => {
+  it('Escape closes an open preview sheet WITHOUT also requesting draft cancellation', async () => {
+    const user = userEvent.setup();
+    const onRequestCancel = vi.fn();
+    const draft = {
+      ...createEventDraft({ now: 0 }),
+      prompts: {
+        main: Array.from({ length: 24 }, (_, i) => ({ text: `main prompt ${i}`, spicy: false })),
+        easy: [],
+        closing: [],
+      },
+    };
+    renderChrome('basics', { onRequestCancel, draft });
+
+    await user.click(screen.getByRole('button', { name: /Open/ }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(onRequestCancel).not.toHaveBeenCalled();
+  });
+
+  it('Escape still requests cancellation via the chrome listener when no preview is open', async () => {
+    const user = userEvent.setup();
+    const onRequestCancel = vi.fn();
+    renderChrome('basics', { onRequestCancel });
+    await user.keyboard('{Escape}');
+    expect(onRequestCancel).toHaveBeenCalledTimes(1);
   });
 });

@@ -4579,6 +4579,14 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   cursor: pointer;
   touch-action: manipulation;
 }
+.wizard-preview-sheet {
+  /* Unlike the other content-heavy sheets, a full 5x5 board can make this
+     bottom-aligned fixed sheet taller than a short viewport (a phone in
+     landscape) — bound it and let the sheet's own content scroll rather
+     than push the close control off-screen (Codex P2, PR #857). */
+  max-height: 88dvh;
+  overflow-y: auto;
+}
 .wizard-preview-days {
   margin-bottom: 8px;
   overflow-x: auto;

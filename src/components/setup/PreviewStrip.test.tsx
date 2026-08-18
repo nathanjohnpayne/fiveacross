@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PreviewStrip from './PreviewStrip';
@@ -164,5 +167,93 @@ describe('PreviewStrip — expanded (Open ›)', () => {
     render(<PreviewStrip draft={draft} />);
     await user.click(screen.getByRole('button', { name: /Open/ }));
     expect(screen.queryByText(/🌊|🌅|🌫️/)).not.toBeInTheDocument();
+  });
+
+  it('gives same-weekday Day tabs distinct, unambiguous labels', async () => {
+    const user = userEvent.setup();
+    // Bodega's own shape: two Days on the SAME calendar date — a
+    // competitive main Day and a closing wrap-up.
+    const draft = draftWith({
+      cardFormat: 'daily_cards',
+      prompts: { main: mainPrompts(24), easy: [], closing: Array.from({ length: 24 }, (_, i) => ({ text: `closing prompt ${i}` })) },
+      days: [
+        day({ index: 0, date: '2026-08-09', pool: 'main', theme: 'the-birds', place: 'Competitive Sunday' }),
+        day({ index: 1, date: '2026-08-09', pool: 'closing', theme: 'afterglow', place: 'Wrap-up Sunday' }),
+      ],
+    });
+    render(<PreviewStrip draft={draft} />);
+    await user.click(screen.getByRole('button', { name: /Open/ }));
+    const dialog = screen.getByRole('dialog');
+    const tabs = within(dialog)
+      .getAllByRole('button')
+      .filter((b) => /Sunday/.test(b.textContent ?? ''));
+    expect(tabs).toHaveLength(2);
+    const names = tabs.map((t) => t.textContent);
+    expect(new Set(names).size).toBe(2); // distinct — no duplicate accessible names
+    expect(names).toEqual(['Sunday — Day 1', 'Sunday — Day 2']);
+  });
+
+  it("re-anchors the expanded sheet's default Day to a LATER Day once IT becomes themed, as long as the organizer has not picked a tab", async () => {
+    const user = userEvent.setup();
+    const untimed = draftWith({
+      cardFormat: 'daily_cards',
+      prompts: { main: mainPrompts(24), easy: [], closing: [] },
+      days: [
+        day({ index: 0, theme: null, place: 'Friday spot' }),
+        day({ index: 1, theme: null, place: 'Sunday spot' }),
+      ],
+    });
+    const { rerender } = render(<PreviewStrip draft={untimed} />);
+    await user.click(screen.getByRole('button', { name: /Open/ }));
+    // No themed Day yet — defaultDay falls back to the first Day.
+    expect(screen.getByText(/Friday spot/)).toBeInTheDocument();
+
+    const laterThemed = draftWith({
+      cardFormat: 'daily_cards',
+      prompts: { main: mainPrompts(24), easy: [], closing: [] },
+      days: [
+        day({ index: 0, theme: null, place: 'Friday spot' }),
+        day({ index: 1, theme: 'marquee', place: 'Sunday spot' }),
+      ],
+    });
+    rerender(<PreviewStrip draft={laterThemed} />);
+    // The sheet is still open (same PreviewStrip instance) and must follow
+    // the NEW default Day — the regression Codex flagged (PR #857): without
+    // it, the sheet would stay pinned to Day 0 forever.
+    expect(screen.getByText(/Sunday spot/)).toBeInTheDocument();
+    expect(screen.queryByText(/Friday spot/)).not.toBeInTheDocument();
+  });
+
+  it("shows the draft's own name as the sheet title, and falls back to a generic one while it is blank", async () => {
+    const user = userEvent.setup();
+    const bare = draftWith({ prompts: { main: mainPrompts(24), easy: [], closing: [] } });
+    const { rerender } = render(<PreviewStrip draft={bare} />);
+    await user.click(screen.getByRole('button', { name: /Open/ }));
+    expect(screen.getByRole('dialog', { name: 'Live preview' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close preview' }));
+
+    const named = draftWith({ name: 'Weekend in Point Reyes', prompts: { main: mainPrompts(24), easy: [], closing: [] } });
+    rerender(<PreviewStrip draft={named} />);
+    await user.click(screen.getByRole('button', { name: /Open/ }));
+    expect(screen.getByRole('dialog', { name: 'Weekend in Point Reyes' })).toBeInTheDocument();
+    expect(screen.getByText('Weekend in Point Reyes')).toBeInTheDocument();
+  });
+});
+
+describe('wizard-preview-sheet CSS — bounded to the viewport (Codex P2, PR #857)', () => {
+  // Structural pin, same "parse the source of truth" convention
+  // src/theme/theme-on-color-contrast.test.tsx uses: jsdom in this project
+  // does not execute the real CSS cascade, so this greps src/index.css
+  // itself rather than asserting a computed style vitest cannot produce.
+  const cssDir = dirname(fileURLToPath(import.meta.url));
+  const indexCss = readFileSync(join(cssDir, '..', '..', 'index.css'), 'utf-8');
+  const rule = indexCss.match(/\.wizard-preview-sheet\s*\{([^}]*)\}/)?.[1] ?? '';
+
+  it('bounds its own height rather than assuming it always fits the viewport', () => {
+    expect(rule).toMatch(/max-height:/);
+  });
+
+  it('scrolls its own content instead of overflowing the viewport', () => {
+    expect(rule).toMatch(/overflow-y:\s*auto/);
   });
 });
