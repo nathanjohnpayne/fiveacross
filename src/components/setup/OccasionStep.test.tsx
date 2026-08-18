@@ -76,6 +76,29 @@ describe('OccasionStep', () => {
     void expected; // shape asserted via the rendered pill/selection above
   });
 
+  it('an UNSET occasion that is NOT actually fresh (hand-crafted/imported) confirms first, rather than committing over it (Codex P2, PR #855 round 5)', async () => {
+    // parseEventDraft validates each field independently, so a resumed or
+    // imported draft can be occasion: null while still carrying a
+    // customized card format, claim mode, default Theme, settings or Days —
+    // none of which the app's OWN wizard flow can ever produce (Continue is
+    // gated on Step 1 until occasion is set), but the parser doesn't rule
+    // out. Treating null as "always fresh" would silently overwrite that
+    // data the same way a stale occasion id's direct commit once did.
+    const user = userEvent.setup();
+    const draft: EventDraft = {
+      ...createEventDraft({ now: NOW }),
+      claimMode: 'proof_required', // NOT the baseline 'honor'
+    };
+    renderHarness(draft);
+
+    await user.click(row('Weekend away'));
+
+    const dialog = await screen.findByRole('alertdialog', { name: /apply.*weekend away/i });
+    expect(within(dialog).getByRole('button', { name: /keep current answers/i })).toBeInTheDocument();
+    // Not committed yet.
+    expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('Custom commits with no starter pack and no schedule/day-Theme proposal beyond the platform floor', async () => {
     const user = userEvent.setup();
     const draft = createEventDraft({ now: NOW });

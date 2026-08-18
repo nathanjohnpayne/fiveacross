@@ -1,9 +1,42 @@
 import { useState } from 'react';
 import type { StepRenderProps } from './stepRegistry';
-import type { OccasionDef } from '../../types';
+import type { EventDraft, OccasionDef } from '../../types';
 import { OCCASIONS, applyOccasionDefaults, occasionById } from '../../data/occasions';
+import { createEventDraft } from '../../data/eventDraft';
 import { editionBrand } from '../../editions';
 import OccasionChangeConfirm from './OccasionChangeConfirm';
+
+/**
+ * Whether an UNSET occasion (`draft.occasion === null`) is safe to treat as
+ * "nothing to protect" (Codex P2, PR #855 round 5). `createEventDraft`
+ * always sets `occasion: null` alongside every OTHER field at its baseline,
+ * and the wizard's own Continue gate (`isStepComplete('occasion', …)`) keeps
+ * an organizer from ever reaching Steps 2–5 while `occasion` is still
+ * unset — so in-app, `occasion === null` and "nothing customized yet" are
+ * the same fact. But `parseEventDraft` validates each field independently,
+ * not their joint plausibility: a resumed, imported, or hand-crafted draft
+ * can be `occasion: null` while still carrying a customized card format,
+ * claim mode, default Theme, settings or Days. Comparing against a FRESH
+ * `createEventDraft()` — rather than hand-duplicating its defaults here —
+ * is what keeps this check from drifting the moment that factory changes.
+ */
+function unsetOccasionLooksFresh(draft: EventDraft): boolean {
+  const baseline = createEventDraft();
+  return (
+    draft.cardFormat === baseline.cardFormat &&
+    draft.claimMode === baseline.claimMode &&
+    draft.defaultTheme === baseline.defaultTheme &&
+    draft.days.length === baseline.days.length &&
+    draft.settings.reportHideThreshold === baseline.settings.reportHideThreshold &&
+    draft.settings.spicyRatio === baseline.settings.spicyRatio &&
+    draft.settings.easyMixRatio === baseline.settings.easyMixRatio &&
+    draft.settings.forceAdult === baseline.settings.forceAdult &&
+    draft.settings.photoProofSource === baseline.settings.photoProofSource &&
+    draft.settings.stripPhotoExif === baseline.settings.stripPhotoExif &&
+    draft.settings.visionGate === baseline.settings.visionGate &&
+    draft.settings.dailyEmailEnabled === baseline.settings.dailyEmailEnabled
+  );
+}
 
 /**
  * Step 1 · Occasion (#789, specs/event-setup-wizard.md § "Step 1 ·
@@ -37,8 +70,16 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * `applyOccasionDefaults` here would silently discard exactly the same
  * later-step hand-edits the confirm dialog exists to protect.
  *
- * TWO EDGE CASES about a draft this step did not itself produce — resumed,
+ * THREE EDGE CASES about a draft this step did not itself produce — resumed,
  * imported, or hand-crafted, never a normal in-flow edit:
+ * - `draft.occasion === null` does NOT always mean "genuinely fresh" (Codex
+ *   P2, PR #855 round 5): `parseEventDraft` validates each field
+ *   independently, so a resumed/imported/hand-crafted draft can be
+ *   `occasion: null` while still carrying a customized card format, claim
+ *   mode, default Theme, settings or Days — none of which a normal in-app
+ *   flow can produce (Continue is gated on Step 1 until occasion is set),
+ *   but the parser doesn't rule out. `unsetOccasionLooksFresh` (above)
+ *   decides which case this is; only a TRUE baseline commits directly.
  * - `draft.occasion` may hold an id `OCCASIONS` no longer recognizes (a
  *   stale/removed matrix entry), so `current` (`occasionById(draft.occasion)`)
  *   is `null`. An unrecognized id is NOT proof there's nothing to protect
@@ -47,7 +88,9 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  *   entered data that `applyOccasionDefaults` would overwrite, or for a
  *   one-card `to`, clear outright. So this still routes through
  *   `OccasionChangeConfirm`, which accepts `from: OccasionDef | null` and
- *   adapts its copy when there's no valid occasion left to name.
+ *   adapts its copy when there's no valid occasion left to name — the SAME
+ *   dialog and the same `from: null` copy the null-but-not-fresh case above
+ *   uses, since neither has a real "current" occasion to name.
  * - `draft.occasion` may resolve, but disagree with `draft.edition`
  *   (specs/event-setup-wizard.md § Validation's `event-occasion-edition-mismatch`,
  *   which routes the organizer back to THIS step to fix it). A same-occasion
@@ -68,7 +111,7 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   }
 
   function handleSelect(occasion: OccasionDef) {
-    if (draft.occasion === null) {
+    if (draft.occasion === null && unsetOccasionLooksFresh(draft)) {
       // A genuinely fresh draft — nothing anywhere is at risk of being
       // overwritten, so there is nothing to confirm.
       commit(occasion);
