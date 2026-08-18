@@ -311,15 +311,19 @@ describe('addItem — a submission records the Day it is meant for', () => {
     expect(payload()).not.toHaveProperty('targetDayIndex');
   });
 
-  it('still submits when the schedule read FAILS — targeting is best-effort', async () => {
-    // Losing the targeting on one suggestion is a far smaller harm than
-    // refusing to accept it.
+  it('REFUSES to submit when the schedule read fails — an unknown Day is not every Day', async () => {
+    // This was once swallowed as best-effort, on the reasoning that losing the
+    // targeting mattered less than refusing a suggestion. That was wrong: an
+    // untargeted row does not lose anything, it means EVERY future main Day, so
+    // a transient offline blip would have put one suggestion on every card of
+    // the cruise (Phase 4b P1, PR #812). Failing closed costs the player a retry
+    // with their text still in the box — `ItemPool` only clears the field after
+    // a successful write.
     eventDataMock.mockImplementation(() => {
       throw new Error('offline');
     });
-    await addItem('u1', 'Read failed', false);
-    expect(addDocMock).toHaveBeenCalledTimes(1);
-    expect(payload()).not.toHaveProperty('targetDayIndex');
+    await expect(addItem('u1', 'Read failed', false)).rejects.toThrow('offline');
+    expect(addDocMock).not.toHaveBeenCalled();
   });
 });
 

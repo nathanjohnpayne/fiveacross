@@ -2683,19 +2683,29 @@ export async function addItem(
 
 /**
  * The Day a fresh suggestion defaults to — the earliest Day that can still take
- * one (#557). Reads the Event's schedule at submission time. Best-effort by
- * design: a read failure or a schedule-less Event yields `null`, and the caller
- * writes an untargeted Prompt rather than failing the submission. Losing the
- * targeting on one suggestion is a far smaller harm than refusing to accept it.
+ * one (#557). Reads the Event's schedule at submission time.
+ *
+ * A read failure PROPAGATES rather than resolving to `null`. This used to be
+ * swallowed as best-effort, on the reasoning that losing the targeting mattered
+ * less than refusing a suggestion — which was wrong, because an untargeted row
+ * does not lose anything: it means EVERY future main Day (`targetsDay` admits an
+ * absent target everywhere, and approval deliberately preserves that absence).
+ * So a transient offline blip would have put one suggestion on every card of the
+ * cruise — the precise failure this feature exists to prevent — and it is the
+ * same mistake as silently dropping an explicit malformed argument, which
+ * `addItem` already refuses (Phase 4b P1, PR #812). Failing closed costs the
+ * player a retry with their text still in the box; failing open costs the
+ * organiser every Day.
+ *
+ * `null` remains the answer when the read SUCCEEDS and there is simply no Day to
+ * aim at — a schedule-less legacy Event, or no Day that can still take one.
+ * Those are known states rather than unknown ones, and untargeted is the honest
+ * record of them.
  */
 async function resolveDefaultTargetDayIndex(): Promise<number | null> {
-  try {
-    const snap = await getDoc(eventRef());
-    const days = snap.exists() ? snap.data().days : undefined;
-    return Array.isArray(days) ? defaultTargetDayIndex(days, Date.now()) : null;
-  } catch {
-    return null;
-  }
+  const snap = await getDoc(eventRef());
+  const days = snap.exists() ? snap.data().days : undefined;
+  return Array.isArray(days) ? defaultTargetDayIndex(days, Date.now()) : null;
 }
 
 /**
