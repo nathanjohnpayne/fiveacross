@@ -233,6 +233,29 @@ describe('deep link / resume landing', () => {
     const stored = await store.load('seeded-draft');
     expect(stored?.step).toBe('basics');
   });
+
+  it('syncs draft.step to a history-driven navigation, not only a goToStep click (Codex P2, PR #840, round 4)', async () => {
+    // Saved mid-Squares, but the organizer used the browser's Back button (or
+    // pasted a same-draft link) straight to Basics — a legitimate, already-
+    // reached step reached WITHOUT going through `goToStep`'s own persist.
+    await seedDraft({
+      step: 'squares',
+      occasion: 'weekend-away',
+      edition: 'vacay',
+      name: 'Weekend in Point Reyes',
+      startsOn: '2026-08-07',
+      endsOn: '2026-08-09',
+      timezone: 'America/Los_Angeles',
+      slugCandidate: 'point-reyes',
+    });
+    renderApp(setupStepPath('seeded-draft', 'basics'));
+    await screen.findByTestId('wizard-step-placeholder-basics');
+
+    await waitFor(async () => {
+      const stored = await store.load('seeded-draft');
+      expect(stored?.step).toBe('basics');
+    });
+  });
 });
 
 describe('back navigation to a completed step', () => {

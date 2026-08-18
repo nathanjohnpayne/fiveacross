@@ -229,25 +229,26 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
     [store],
   );
 
-  // Persists the render-time landing correction below — otherwise a draft
-  // saved on, say, Launch, that later becomes unreachable (its first unlock
-  // elapses while the wizard sits open) keeps `draft.step: 'launch'` forever:
-  // every future Resume reopens at the stale step and redirects again without
-  // ever recording that it did (Codex P2, PR #840, round 2). Goes through
-  // `persist` — not a bare `store.save` — so the IN-MEMORY `draft.step` is
-  // corrected too; writing storage alone left the next `updateDraft`/Save
-  // call reading the stale in-memory value and overwriting the correction
-  // right back (Codex P2, PR #840, round 3). `clockTick` is a dependency for
-  // the same round-3 reason: a redirect can be triggered purely by the clock
-  // advancing past an unlock with NEITHER `draft` NOR `step` changing, and
-  // without it in the array this effect would never re-run to catch that
-  // case. Setting `draft.step` to `landing` here also means this effect
-  // naturally stops firing once it converges (the guard below goes false).
+  // Keeps `draft.step` synchronized to whichever step is ACTUALLY being
+  // rendered — the render-time redirect's target when `step` requests one
+  // further ahead than the draft supports, or `step` itself otherwise. The
+  // second half is what covers browser Back/Forward and a pasted same-draft
+  // URL (Codex P2, PR #840, round 4): those change the `step` prop directly,
+  // bypassing `goToStep`'s own persist, so without this general sync a
+  // legitimate move to an earlier, already-valid step would leave storage —
+  // and the in-memory draft — pointing at the step the organizer just
+  // navigated away from. Originally written only for the forward-redirect
+  // half (round 2, then fixed to go through `persist` and depend on
+  // `clockTick` in round 3, for a draft saved on a step that later becomes
+  // unreachable — its first unlock elapses while the wizard sits open).
+  // Setting `draft.step` to `target` here also means this effect naturally
+  // stops firing once it converges (the guard below goes false).
   useEffect(() => {
     if (!draft) return;
     const landing = firstIncompleteStep(draft, Date.now());
-    if (stepIndex(step) > stepIndex(landing) && draft.step !== landing) {
-      persist({ ...draft, step: landing });
+    const target = stepIndex(step) > stepIndex(landing) ? landing : step;
+    if (draft.step !== target) {
+      persist({ ...draft, step: target });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, step, clockTick, persist]);
