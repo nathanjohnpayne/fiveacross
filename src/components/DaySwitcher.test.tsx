@@ -147,4 +147,38 @@ describe('<DaySwitcher />', () => {
       expect(chips[i]).not.toHaveAccessibleName(/goodbye/i);
     }
   });
+
+  // #736: Board threads its `overlayOpen` derivation in as `inert` so a
+  // keyboard user can't Tab off a dialog's CTA and switch Days behind the
+  // scrim. Defaults to `false` (every call site above omits the prop and
+  // stays fully tappable), and when `true` disables every chip — jsdom
+  // implements no `inert` behaviour, so `disabled` is what actually makes
+  // the chips unfocusable/unclickable here, the same caveat Board.test.tsx
+  // notes for `.board-area`.
+  describe('inert (#736)', () => {
+    it('leaves every chip enabled by default', () => {
+      const days = makeDays(3);
+      render(<DaySwitcher days={days} viewedIndex={0} onSelect={vi.fn()} now={0} />);
+      expect(document.querySelector('.day-switcher')).not.toHaveAttribute('inert');
+      for (const chip of screen.getAllByRole('tab')) expect(chip).not.toBeDisabled();
+    });
+
+    it('disables every chip, including locked ones, when inert', () => {
+      const days = makeDays(3);
+      const onSelect = vi.fn();
+      render(<DaySwitcher days={days} viewedIndex={0} onSelect={onSelect} now={0} inert />);
+      expect(document.querySelector('.day-switcher')).toHaveAttribute('inert');
+
+      const chips = screen.getAllByRole('tab');
+      expect(chips).toHaveLength(3);
+      for (const chip of chips) {
+        expect(chip).toBeDisabled();
+        chip.focus();
+        expect(chip).not.toHaveFocus();
+      }
+
+      fireEvent.click(chips[2]);
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+  });
 });

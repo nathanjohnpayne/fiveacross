@@ -76,6 +76,20 @@ export interface DaySwitcherProps {
   onSelect: (index: number) => void;
   /** Injectable for tests; defaults to the real clock. */
   now?: number;
+  /**
+   * Whether a modal scrim is up over the card right now (Board's
+   * `overlayOpen`, #736). Board renders `daySwitcher` OUTSIDE `.board-area` —
+   * above CoachOverlay/LaunchIntro, and from several early-return branches
+   * with no overlay concept at all — so `overlayOpen` marking `.board-area`
+   * `inert` never reached these chips: a keyboard user could Tab off a
+   * dialog's CTA and switch Days behind the scrim. Threading it in here
+   * instead of widening the `.board-area` boundary keeps every no-overlay
+   * early-return branch (which never passes this prop true) unaffected.
+   * Defaults to `false` so every other call site — including the early
+   * returns above and the existing tests — stays exactly as tappable as
+   * before.
+   */
+  inert?: boolean;
 }
 
 /**
@@ -84,11 +98,28 @@ export interface DaySwitcherProps {
  * Every chip — locked included — just reports the tap via `onSelect`; this
  * component issues no writes and holds no board data, so a locked tap is
  * structurally a no-op beyond changing which Day is viewed.
+ *
+ * `inert` on the wrapper is the same platform primitive Board's `.board-area`
+ * uses (drops the group from the tab order and the accessibility tree in one
+ * attribute), but jsdom implements no `inert` behaviour — see Board.test.tsx
+ * "board inert while an overlay is up" — and neither does
+ * `@testing-library/user-event`'s focusable-element selector, which checks
+ * `:disabled` but not `[inert]`. Each `<button>` is additionally given
+ * `disabled` when `inert` is true so the "not focusable/clickable" guarantee
+ * holds under jsdom too, not only in real browsers: disabled buttons drop out
+ * of the tab order and (unlike a bare `inert` ancestor in jsdom) don't fire a
+ * click.
  */
-export default function DaySwitcher({ days, viewedIndex, onSelect, now = Date.now() }: DaySwitcherProps) {
+export default function DaySwitcher({
+  days,
+  viewedIndex,
+  onSelect,
+  now = Date.now(),
+  inert = false,
+}: DaySwitcherProps) {
   const states = dayStates(days, now);
   return (
-    <div className="day-switcher" role="tablist" aria-label={dayTabsLabel()}>
+    <div className="day-switcher" role="tablist" aria-label={dayTabsLabel()} inert={inert}>
       {days.map((d, i) => {
         const state = states[i];
         const selected = i === viewedIndex;
@@ -100,6 +131,7 @@ export default function DaySwitcher({ days, viewedIndex, onSelect, now = Date.no
             aria-selected={selected}
             aria-label={`${weekday(d.date)} · ${d.place}${d.tutorial ? ` · ${tutorialTagLabel(d.pool)}` : ''}${state === 'locked' ? ' · locked' : ''}`}
             className={`day-chip day-chip-${state}${selected ? ' selected' : ''}`}
+            disabled={inert}
             onClick={() => onSelect(i)}
           >
             {/* The state glyph PREFIXES the single-line pill (#293 — the
