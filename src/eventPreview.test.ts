@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import {
   activeEventPreview,
   applyResolvedEventPreview,
@@ -192,6 +192,53 @@ describe('previewDayEmoji — the stamp postage, or nothing', () => {
     ['a non-emoji single character', '★'],
   ])('accepts genuine single-glyph postage: %s', (_label, emoji) => {
     expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBe(emoji);
+  });
+
+  // #779/#780: every case above runs under Vitest's Node environment, where
+  // `Intl.Segmenter` is natively available — so none of them ever exercise
+  // `isSingleGlyph`'s no-Segmenter fallback. That's how the fallback's old
+  // `<= 8 code points` bug (accepting '🐦🐦🐦' or eight ordinary characters as
+  // "one glyph") shipped untested. Delete `Intl.Segmenter` for just this
+  // block to force every call through the fallback, and restore it
+  // afterward — the rest of the suite depends on the real one.
+  describe('the isSingleGlyph fallback when Intl.Segmenter is unavailable', () => {
+    // Same `as unknown as {...}` cast `isSingleGlyph` itself uses to reach
+    // `Intl.Segmenter` as an optional property, so `delete` type-checks.
+    type IntlWithOptionalSegmenter = { Segmenter?: unknown };
+    const intlWithOptionalSegmenter = Intl as unknown as IntlWithOptionalSegmenter;
+    let originalSegmenter: unknown;
+
+    beforeEach(() => {
+      originalSegmenter = intlWithOptionalSegmenter.Segmenter;
+      delete intlWithOptionalSegmenter.Segmenter;
+    });
+
+    afterEach(() => {
+      intlWithOptionalSegmenter.Segmenter = originalSegmenter;
+    });
+
+    it('still accepts a genuine single code point', () => {
+      expect(previewDayEmoji(dayWith('🐦'), localNoon(2026, 8, 6))).toBe('🐦');
+    });
+
+    it('rejects three separate emoji — the literal #779/#780 regression case', () => {
+      expect(previewDayEmoji(dayWith('🐦🐦🐦'), localNoon(2026, 8, 6))).toBeNull();
+    });
+
+    it('rejects eight arbitrary ordinary characters', () => {
+      expect(previewDayEmoji(dayWith('abcdefgh'), localNoon(2026, 8, 6))).toBeNull();
+    });
+
+    it.each([
+      ['a flag (two code points, one glyph)', '🇮🇹'],
+      ['a skin-toned emoji', '👋🏽'],
+      ['a ZWJ family sequence', '👨‍👩‍👧‍👦'],
+    ])(
+      'conservatively degrades genuine multi-codepoint postage to null without Segmenter: %s',
+      (_label, emoji) => {
+        expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBeNull();
+      },
+    );
   });
 
   it('leaves the Day LINE alone — inline text wraps, so it costs nothing there', () => {

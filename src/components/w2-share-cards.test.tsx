@@ -72,7 +72,7 @@ vi.mock('../hooks/useData', () => ({
   useProofFeed: () => ({ proofs: H.proofs, loading: H.proofsLoading }),
   // #218: no Proofs fixtured in this suite — an empty map keeps every row
   // chip-less, which is orthogonal to the Share Card assertions here.
-  useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
+  useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),
   // Mirrors src/data/moderation.ts isBanned (#108); the fixtures carry no bannedUids,
   // so it filters nothing and the share-card standings are unchanged. The ban filter
   // is pinned in src/components/w2-ban-console.test.tsx.

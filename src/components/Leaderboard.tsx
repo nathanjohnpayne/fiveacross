@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { useEventDoc, useDayMetasStatus, useLeaderboard, useLatestProofByUid, isBanned } from '../hooks/useData';
+import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
+import type { ProofKindFlags } from '../hooks/useData';
 import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/logic';
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
@@ -9,7 +10,7 @@ import { renderLeaderboardShareCard, shareCardBlob, shareCardAppName, type Leade
 import { editionBrand, editionLexicon } from '../editions';
 import Avatar from './Avatar';
 import { EmojiText } from './EmojiText';
-import type { EventDoc, PlayerDoc, ProofDoc } from '../types';
+import type { EventDoc, PlayerDoc } from '../types';
 import LoadingState from './LoadingState';
 
 function when(ts: number | null): string {
@@ -47,16 +48,19 @@ function matchesFilter(p: PlayerDoc, filter: LeaderboardFilter): boolean {
   }
 }
 
-// The Leaderboard row's latest-proof media chip set (#218): 📷/🎙️/✍️ per
-// `ProofDoc.type`, plus 🖼️ layered on for a library-sourced photo (the #211
-// Feed badge). Stays emoji per #220's rule. `[]` when `proof` is `undefined`.
-function proofChips(proof: ProofDoc | undefined): string[] {
-  if (!proof) return [];
+// The Leaderboard row's proof-kind chip set (#604): the UNION of proof kinds
+// that Player has used across their active Proofs — 📷/🖼️/🎙️/✍️ per
+// `ProofKindFlags` (`useProofKindsByUid`) — not just their latest Proof's
+// kind (#218's original behavior). Stable order regardless of which order
+// the Player used them in: 📷 🖼️ 🎙️ ✍️. Stays emoji per #220's rule. `[]`
+// when `flags` is `undefined` (no active Proof at all).
+function proofChips(flags: ProofKindFlags | undefined): string[] {
+  if (!flags) return [];
   const chips: string[] = [];
-  if (proof.type === 'photo') chips.push('📷');
-  if (proof.type === 'audio') chips.push('🎙️');
-  if (proof.type === 'text') chips.push('✍️');
-  if (proof.type === 'photo' && proof.source === 'library') chips.push('🖼️');
+  if (flags.photo) chips.push('📷');
+  if (flags.library) chips.push('🖼️');
+  if (flags.audio) chips.push('🎙️');
+  if (flags.text) chips.push('✍️');
   return chips;
 }
 
@@ -133,7 +137,7 @@ export default function Leaderboard() {
   // never below the loading/empty early returns, where a later non-empty
   // render would change the hook order and crash (Codex P1 on #280).
   const { metas: dayMetas, loaded: dayMetasLoaded } = useDayMetasStatus(event?.days?.length ?? 0);
-  const { latestByUid } = useLatestProofByUid();
+  const { kindsByUid } = useProofKindsByUid();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<LeaderboardFilter>('all');
   // The most recent warmed-up card render, keyed by the inputs it was built
@@ -353,9 +357,9 @@ export default function Leaderboard() {
         <div className="list">
           {visible.map((p, i) => {
             const isFirst = p.uid === firstBingoUid;
-            // Presentational-only (#218): decorates an already-ranked row,
-            // never feeds rank/filter — see `proofChips` above.
-            const chips = proofChips(latestByUid[p.uid]);
+            // Presentational-only (#218, union semantics #604): decorates an
+            // already-ranked row, never feeds rank/filter — see `proofChips` above.
+            const chips = proofChips(kindsByUid[p.uid]);
             return (
               <div key={p.uid} className={'row' + (isFirst ? ' leader' : '')}>
                 <div className="rank">{i + 1}</div>
@@ -371,7 +375,7 @@ export default function Leaderboard() {
                   <button
                     type="button"
                     className="lb-proof-chips"
-                    aria-label={`${p.displayName}'s latest proof—view in Feed`}
+                    aria-label={`${p.displayName}'s proof types—view in Feed`}
                     onClick={() => navigate('/feed')}
                   >
                     {/* One <span> per chip so `.lb-proof-chips`'s flex gap spaces
@@ -391,8 +395,8 @@ export default function Leaderboard() {
       {/* The wireframes' explanatory footnote (#264), re-voiced as player copy (#298). */}
       <p className="muted lb-footnote">
         Every Day Card counts here—except the farewell, which is pure ceremony. ⭐ marks the
-        {editionLexicon().occasionWide} First to BINGO—main days only. Tap a proof chip for the receipts in
-        the Feed.
+        {editionLexicon().occasionWide} First to BINGO—main days only. Proof chips show every kind of
+        proof a player has used. Tap a proof chip for the receipts in the Feed.
       </p>
       <div className="lb-actions">
         <button
