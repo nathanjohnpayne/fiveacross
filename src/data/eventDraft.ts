@@ -103,7 +103,11 @@ function isFiniteNumber(v: unknown): v is number {
 }
 
 function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((entry) => typeof entry === 'string');
+  // Dense FIRST: `every` skips holes, so `new Array(2)` would otherwise pass
+  // as a pair of strings. `save` then serializes the holes as `[null, null]`
+  // and the next `load` rejects the draft — saving an incomplete schedule
+  // would destroy it (#787 review).
+  return isDenseArray(v) && v.every((entry) => typeof entry === 'string');
 }
 
 function isSetupStep(v: unknown): v is SetupStep {
@@ -260,7 +264,9 @@ export function parseEventDraft(value: unknown): EventDraft | null {
     typeof value.hostedBy !== 'string' ||
     !(value.defaultTheme === null || typeof value.defaultTheme === 'string') ||
     !isPromptPools(value.prompts) ||
-    !Array.isArray(value.days) ||
+    // Dense, for the same reason every other array here is: a hole survives
+    // `every`, then serializes to `null` and makes the draft unreadable.
+    !isDenseArray(value.days) ||
     !value.days.every(isDraftDay) ||
     !isDraftSettings(value.settings)
   ) {
@@ -434,6 +440,17 @@ export function createLocalDraftStore(
           const draft = readAt(key);
           if (!draft) {
             unreadable.push(key);
+            continue;
+          }
+          // The key suffix and the embedded id must agree, or the row is
+          // unusable: `list()` would advertise the EMBEDDED id, `load()` would
+          // then read a different key and miss, and `discard()` could never
+          // reach the original key — a permanently stuck row in the resume
+          // list. A copied blob or a prior bad writer produces exactly this
+          // (#787 review). Such a blob is SKIPPED but deliberately not
+          // reclaimed: it parses, so it is somebody's real draft, and this
+          // module never deletes valid work to tidy a listing.
+          if (key !== KEY_PREFIX + draft.draftId) {
             continue;
           }
           summaries.push({

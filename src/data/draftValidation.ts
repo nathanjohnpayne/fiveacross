@@ -359,7 +359,17 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
   // using another Day's unlock and snapshot. Requiring `days[position].index
   // === position` collapses contiguity, uniqueness and stored order into the
   // one property every consumer actually relies on (#787 review).
-  draft.days.forEach((day, position) => {
+  // An INDEX walk, not `forEach`: `forEach` skips holes, so a sparse schedule
+  // would slip past the position check entirely.
+  for (let position = 0; position < draft.days.length; position++) {
+    const day: DraftDayDef | undefined = draft.days[position];
+    if (day === null || day === undefined) {
+      issues.push({
+        code: 'day-index-out-of-order',
+        message: `The schedule has a gap at position ${position + 1}; Days must be contiguous from 0.`,
+      });
+      continue;
+    }
     if (day.index !== position) {
       issues.push({
         code: 'day-index-out-of-order',
@@ -466,7 +476,7 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
         message: `Day ${day.index + 1} needs exactly two non-blank Tonight entries; it has ${day.tonight.length}.`,
       });
     }
-  });
+  }
   return issues;
 }
 
@@ -575,6 +585,12 @@ export function promptPoolIssues(draft: EventDraft): DraftIssue[] {
   const issues: DraftIssue[] = [];
   for (const pool of ['easy', 'closing'] as const) {
     for (const prompt of draft.prompts[pool]) {
+      // A hole yields `undefined` here, and the property access below would
+      // THROW before `promptTextIssues` could report the gap — crashing the
+      // launch checklist. Reachable in memory via `new Array(n)`, with no
+      // deserialization involved. The missing entry is reported there, so
+      // this predicate only steps over it (#787 review).
+      if (prompt === null || prompt === undefined) continue;
       // The VALUE, not the key: `JSON.stringify` drops an explicitly-undefined
       // property, so a presence check would call a draft unlaunchable in
       // memory and launchable after one save/load. `spicy: undefined` is
@@ -693,6 +709,24 @@ export function settingsIssues(draft: EventDraft): DraftIssue[] {
  * total-based reporting #785 warns about.
  */
 export function validateEventDraft(draft: EventDraft, now: number): DraftIssue[] {
+  const firstUnlock = firstUnlockIssues(draft, now);
+  // ONE organizer mistake is ONE checklist row. `firstUnlockIssues` speaks
+  // specifically about Day 1's unlock — missing, the open sentinel, or already
+  // past — and each of those also trips the generic per-Day unlock checks.
+  // Editing the unlock clears both, so rendering them as two independent
+  // repairs would misrepresent the work (#787 review). The specific message
+  // wins; the generic one for that same Day is suppressed.
+  const firstUnlockDays = new Set(
+    firstUnlock.map((issue) => issue.dayIndex).filter((index) => index !== undefined),
+  );
+  const dayIssues = dayCompletenessIssues(draft).filter(
+    (issue) =>
+      !(
+        (issue.code === 'day-missing-unlock' || issue.code === 'day-unlock-date-mismatch') &&
+        issue.dayIndex !== undefined &&
+        firstUnlockDays.has(issue.dayIndex)
+      ),
+  );
   return [
     ...eventCompletenessIssues(draft),
     ...settingsIssues(draft),
@@ -701,8 +735,8 @@ export function validateEventDraft(draft: EventDraft, now: number): DraftIssue[]
     ...promptTextIssues(draft),
     ...dayCountIssues(draft),
     ...finaleClosingPoolIssues(draft),
-    ...firstUnlockIssues(draft, now),
-    ...dayCompletenessIssues(draft),
+    ...firstUnlock,
+    ...dayIssues,
   ];
 }
 

@@ -860,3 +860,55 @@ describe('a blank Free Space override is not "no override" (#787 review)', () =>
     }
   });
 });
+
+describe('sparse arrays never crash the launch gate (#787 review)', () => {
+  it('steps over a hole in a curated pool instead of throwing on .spicy', () => {
+    // for...of yields undefined for a hole, so the property access used to
+    // throw before promptTextIssues could report the gap.
+    const holed: { text: string }[] = [];
+    holed.length = 2;
+    holed[0] = { text: 'easy 0' };
+    const draft = launchableDraft({
+      prompts: { main: mainPrompts(32), easy: holed, closing: curatedPrompts(26, 'closing') },
+    });
+    expect(() => promptPoolIssues(draft)).not.toThrow();
+    expect(() => validateEventDraft(draft, NOW)).not.toThrow();
+    // The gap is still REPORTED, just by the predicate that owns it.
+    expect(promptTextIssues(draft).some((i) => i.message.includes('missing'))).toBe(true);
+  });
+
+  it('reports a gap in the day schedule rather than skipping it', () => {
+    const days: DraftDayDef[] = [];
+    days.length = 2;
+    days[0] = day(0, { pool: 'closing' });
+    const draft = launchableDraft({ days });
+    expect(() => dayCompletenessIssues(draft)).not.toThrow();
+    expect(dayCompletenessIssues(draft).map((i) => i.code)).toContain('day-index-out-of-order');
+  });
+});
+
+describe('one unlock mistake is one checklist row (#787 review)', () => {
+  it('does not also emit the generic unlock issue for Day 1', () => {
+    const draft = launchableDraft({
+      days: [day(0, { pool: 'closing', unlockAt: null })],
+    });
+    const codes = validateEventDraft(draft, NOW).map((i) => i.code);
+    expect(codes).toContain('first-unlock-missing');
+    expect(codes).not.toContain('day-missing-unlock');
+  });
+
+  it('still reports the generic issue for a LATER Day', () => {
+    const draft = launchableDraft({
+      days: [day(0), day(1, { pool: 'closing', unlockAt: null })],
+    });
+    const codes = validateEventDraft(draft, NOW).map((i) => i.code);
+    expect(codes).toContain('day-missing-unlock');
+  });
+
+  it('suppresses the date-mismatch row behind the open-sentinel row', () => {
+    const draft = launchableDraft({ days: [day(0, { pool: 'closing', unlockAt: 0 })] });
+    const codes = validateEventDraft(draft, NOW).map((i) => i.code);
+    expect(codes).toContain('first-unlock-sentinel');
+    expect(codes).not.toContain('day-unlock-date-mismatch');
+  });
+});

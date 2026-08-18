@@ -449,3 +449,44 @@ describe('parseEventDraft — a blank Free Space override is refused (#787 revie
     expect(parseEventDraft(withFreeText('   '))).toBeNull();
   });
 });
+
+describe('sparse and mislabelled blobs (#787 review)', () => {
+  it('rejects a sparse Tonight array, which would serialize to nulls', () => {
+    const tonight: string[] = [];
+    tonight.length = 2;
+    const blob = {
+      ...draft(),
+      days: [
+        {
+          index: 0,
+          date: '2026-08-07',
+          unlockAt: Date.parse('2026-08-07T13:00:00Z'),
+          place: 'p',
+          placeEmoji: '🌊',
+          theme: 'the-birds',
+          pool: 'main',
+          tutorial: false,
+          tonight,
+        },
+      ],
+    };
+    // `every` skips the holes, so only a density check catches this.
+    expect(tonight.every((t) => typeof t === 'string')).toBe(true);
+    expect(parseEventDraft(blob)).toBeNull();
+  });
+
+  it('skips a draft whose key and embedded id disagree, without deleting it', async () => {
+    // list() would advertise the embedded id, load() would miss on it, and
+    // discard() could never reach the real key — a permanently stuck row.
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    storage.setItem(
+      'gcb:event-draft:wrong-key',
+      JSON.stringify({ ...draft(), draftId: 'embedded-id' }),
+    );
+
+    expect(await store.list()).toEqual([]);
+    // Valid work is never destroyed to tidy a listing.
+    expect(storage.raw.has('gcb:event-draft:wrong-key')).toBe(true);
+  });
+});
