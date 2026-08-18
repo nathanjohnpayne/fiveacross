@@ -400,19 +400,20 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(staticBlockVar).params).toEqual(['REAL_PARAM', 'LOCAL_PARAM_NOT_SHADOWED']);
   });
 
-  // Codex P2 round 2 on PR #826: `ts.isFunctionLike` also matches
-  // `FunctionDeclaration`, so a first version of this fix's early return
-  // made the branch that records a function declaration's OWN name
-  // unreachable dead code — silently dropping the Annex B hoisting for any
-  // function declared two or more levels deep (inside an `if`/`for` nested
-  // in the body, not directly in the function's own top-level block, which
-  // `scopeDeclares`'s per-block scan already catches on its own).
-  it('still hoists a function declaration nested two levels deep in the body', () => {
-    const nestedFunctionDeclaration = [
+  // Codex P2 round 3 on PR #826, against the test above's ORIGINAL version:
+  // Annex B block-function hoisting is sloppy-mode-only, and every source in
+  // this file is written as ESM (`import`/`export`), which makes it a
+  // MODULE — always strict, regardless of the `strict` compiler option.
+  // Collecting the nested declaration's name here created a FALSE shadow: in
+  // a real module, the earlier call still reaches the outer import, and
+  // `.ts` sources under `functions/src/**` — what this scanner actually
+  // reads — are ESM throughout, so this was not a hypothetical.
+  it('does not let a block-nested function declaration hoist in a module', () => {
+    const nestedFunctionDeclarationInModule = [
       IMPORT,
       "export const REAL = defineString('REAL_PARAM');",
       'export function helper(flag) {',
-      "  const early = defineString('LOCAL_NOT_A_PARAM');",
+      "  const early = defineString('MODULE_PARAM_STILL_REAL');",
       '  if (flag) {',
       '    function defineString() { return null; }',
       '  }',
@@ -420,7 +421,37 @@ describe('e2e functions dotenv generation', () => {
       '}',
     ].join('\n');
 
-    expect(declaredParamNames(nestedFunctionDeclaration).params).toEqual(['REAL_PARAM']);
+    expect(declaredParamNames(nestedFunctionDeclarationInModule).params).toEqual([
+      'REAL_PARAM',
+      'MODULE_PARAM_STILL_REAL',
+    ]);
+  });
+
+  // The counterpart proving Annex B hoisting still applies where it
+  // genuinely can: a real CommonJS SCRIPT with no `import`/`export` syntax
+  // anywhere (`ts.isExternalModule` false). Also the regression guard for
+  // the bug this whole fix chases: `ts.isFunctionLike` also matches
+  // `FunctionDeclaration`, so an early version of the round-2 fix's early
+  // return made the branch that records a function declaration's OWN name
+  // unreachable dead code, dropping the hoisting for one declared two or
+  // more levels deep (inside an `if`/`for` nested in the body, not directly
+  // in the function's own top-level block, which `scopeDeclares`'s
+  // per-block scan already catches on its own).
+  it('still hoists a function declaration nested two levels deep in a genuine CommonJS script', () => {
+    const nestedFunctionDeclarationInScript = [
+      "const { defineString } = require('firebase-functions/params');",
+      'function helper(flag) {',
+      "  const early = defineString('CJS_LOCAL_NOT_A_PARAM');",
+      '  if (flag) {',
+      '    function defineString() { return null; }',
+      '  }',
+      '  return early;',
+      '}',
+      "exports.A = defineString('CJS_REAL_PARAM');",
+      'exports.B = helper;',
+    ].join('\n');
+
+    expect(declaredParamNames(nestedFunctionDeclarationInScript).params).toEqual(['CJS_REAL_PARAM']);
   });
 
   // Codex P2 round 2 on PR #826: a call inside a PARAMETER's own default-
@@ -565,6 +596,45 @@ describe('functions source-tree reachability and barrel resolution', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // Codex P2 round 3 on PR #826: `export * from 'firebase-functions/params'`
+  // has no `exportClause` at all (unlike a named re-export), so it reached
+  // the direct-module branch and recorded nothing — there is no static list
+  // of the params module's own exports to pre-populate. A wildcard
+  // re-export forwards EVERY constructor unchanged, so a consumer naming one
+  // through it has to resolve against CONSTRUCTOR_RE directly instead.
+  it('resolves a constructor reached through a wildcard (export *) barrel', () => {
+    const dir = makeTree({
+      'barrel.ts': "export * from 'firebase-functions/params';\n",
+      'index.ts': [
+        "import { defineString } from './barrel';",
+        "defineString('WILDCARD_BARREL_PARAM');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['WILDCARD_BARREL_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The wildcard marker has to propagate through a CHAIN of `export *`
+  // barrels too, not just a direct one hop from the params module.
+  it('resolves a constructor reached through a chain of wildcard barrels', () => {
+    const dir = makeTree({
+      'inner-barrel.ts': "export * from 'firebase-functions/params';\n",
+      'outer-barrel.ts': "export * from './inner-barrel';\n",
+      'index.ts': [
+        "import { defineSecret } from './outer-barrel';",
+        "defineSecret('WILDCARD_CHAIN_SECRET');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.secrets).toEqual(['WILDCARD_CHAIN_SECRET']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   // Codex P2 on PR #826: two SIBLING barrels that both re-export from the
   // SAME shared upstream module are two separate, non-cyclic paths, not a
   // cycle — the first version of the cycle guard shared one `visited` set
@@ -623,6 +693,24 @@ describe('functions source-tree reachability and barrel resolution', () => {
   it('does not fail closed on a non-literal call through a require shadowed at the file top', () => {
     const dir = makeTree({
       'index.ts': ['const require = (name) => name;', 'require(computeSomethingUnrelated());'].join('\n'),
+    });
+
+    expect(() => functionsSources(join(dir, 'index.ts'))).not.toThrow();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 round 3 on PR #826: the file-top shadow check only looked at
+  // function/class/variable declarations — an IMPORTED `require` (default,
+  // named-possibly-aliased, or namespace) is just as real a local binding,
+  // and was missed.
+  it('does not fail closed on a non-literal call through a require shadowed by an import', () => {
+    const dir = makeTree({
+      'loader.ts': 'export default function loader(name) { return name; }\n',
+      'index.ts': [
+        "import require from './loader';",
+        'require(computeSomethingUnrelated());',
+      ].join('\n'),
     });
 
     expect(() => functionsSources(join(dir, 'index.ts'))).not.toThrow();

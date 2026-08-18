@@ -69,6 +69,39 @@ const CONSTRUCTOR_RE = /^define([A-Z][A-Za-z]*)$/;
 const PARAMS_MODULE = 'firebase-functions/params';
 
 /**
+ * Sentinel key `reExportedParamsBindings` sets on its result Map when a
+ * barrel does `export * from 'firebase-functions/params'` (#738, Codex P2
+ * round 3 on PR #826): a wildcard re-export forwards EVERY named export
+ * from the params module, unchanged, and there is no static list of that
+ * package's exports to pre-populate here (unlike a named re-export, which
+ * names the constructors it forwards up front). A `Symbol` key can never
+ * collide with a real (string) local export name, so its presence is a safe
+ * "resolve anything constructor-shaped on request" flag alongside whatever
+ * concrete bindings the Map already holds. It propagates automatically
+ * through a CHAIN of `export * from './barrel'` re-exports too, since that
+ * forwarding path already copies every entry — Symbol keys included — from
+ * `upstream` into `result`.
+ */
+const WILDCARD_PARAMS = Symbol('wildcard-params-reexport');
+
+/**
+ * The constructor kind `name` resolves to through a re-export map — a
+ * direct hit if the barrel named it explicitly, otherwise (only if the
+ * barrel wildcard-re-exported the params module) whatever `CONSTRUCTOR_RE`
+ * says about `name` itself.
+ */
+function resolveFromReExports(upstream, name) {
+  const direct = upstream.get(name);
+  if (direct) {
+    return direct;
+  }
+  if (upstream.has(WILDCARD_PARAMS)) {
+    return CONSTRUCTOR_RE.exec(name)?.[1];
+  }
+  return undefined;
+}
+
+/**
  * Local name → constructor kind, for every params-module constructor a source
  * binds, however it binds it.
  *
@@ -120,7 +153,7 @@ function constructorBindings(sourceFile, filePath) {
           const upstream = reExportedParamsBindings(resolved);
           for (const element of named.elements) {
             if (element.isTypeOnly) continue;
-            const kind = upstream.get((element.propertyName ?? element.name).text);
+            const kind = resolveFromReExports(upstream, (element.propertyName ?? element.name).text);
             if (kind) {
               bindings.set(element.name.text, kind);
             }
@@ -227,6 +260,9 @@ function reExportedParamsBindings(filePath, visited = new Set()) {
               result.set(element.name.text, kind[1]);
             }
           }
+        } else if (!clause) {
+          // `export * from 'firebase-functions/params'` — see WILDCARD_PARAMS.
+          result.set(WILDCARD_PARAMS, true);
         }
         continue;
       }
@@ -241,7 +277,7 @@ function reExportedParamsBindings(filePath, visited = new Set()) {
       if (clause && ts.isNamedExports(clause)) {
         for (const element of clause.elements) {
           if (element.isTypeOnly) continue;
-          const kind = upstream.get((element.propertyName ?? element.name).text);
+          const kind = resolveFromReExports(upstream, (element.propertyName ?? element.name).text);
           if (kind) {
             result.set(element.name.text, kind);
           }
@@ -309,12 +345,21 @@ function isHoistedDeclarationList(declarationList) {
  * nested-statement variant of the same gap).
  */
 function collectHoistedNames(node, names) {
-  if (ts.isFunctionDeclaration(node) && node.name) {
-    // Annex B pragmatic choice: a block-nested function declaration's
-    // hoisting behavior is implementation-defined in sloppy mode, but
-    // treating it as function-scoped (like `var`) is the conservative
-    // direction — it can only ADD a shadow, never miss a real param.
-    //
+  // Annex B block-function hoisting is SLOPPY-MODE-ONLY behavior — it does
+  // not apply in a module, which is always strict, regardless of the
+  // `strict` compiler option (Codex P2 round 3 on PR #826, against an
+  // earlier version of this fix that treated it as unconditionally safe
+  // "can only ADD a shadow, never miss a real param" — backwards for a
+  // strict file specifically, where a block-nested function declaration is
+  // genuinely block-scoped: collecting it as though it hoists creates a
+  // FALSE shadow over a call that, in the real module, still reaches the
+  // outer import — dropping the exact real param this file exists to catch,
+  // not adding a spurious one). Every `.ts` source in this tree is written
+  // as ESM (`import`/`export`), making it a module by construction;
+  // `ts.isExternalModule` is the general, syntax-driven test (any top-level
+  // import or export makes a file a module) rather than assuming the
+  // extension.
+  if (ts.isFunctionDeclaration(node) && node.name && !ts.isExternalModule(node.getSourceFile())) {
     // Recorded BEFORE the function-like early return below, not after it —
     // `ts.isFunctionLike` also matches `FunctionDeclaration`, so putting
     // this in the `else if` chain after that check made it unreachable dead
@@ -425,6 +470,33 @@ function scopeDeclares(scope, name, child) {
       for (const declaration of statement.declarationList.declarations) {
         bindingNames(declaration.name, names);
       }
+    } else if (ts.isImportDeclaration(statement) && statement.importClause) {
+      // An import binding is only legal at the file top, but this branch
+      // also runs for an ordinary block — harmless there, since a block can
+      // never contain one. `import require from './loader'` (default),
+      // `import { x as require } from './loader'` (named, possibly
+      // aliased), and `import * as require from './loader'` (namespace) are
+      // all real local bindings a reachable module can legally name
+      // `require`, shadowing Node's global the same way a `const require =
+      // …` does — and the require-shadow check (#740) reuses this same
+      // lexical scan for the file top specifically because `require` is not
+      // necessarily imported, so import forms have to count too (Codex P2
+      // round 3 on PR #826).
+      const clause = statement.importClause;
+      if (clause.name) {
+        names.add(clause.name.text);
+      }
+      if (clause.namedBindings) {
+        if (ts.isNamespaceImport(clause.namedBindings)) {
+          names.add(clause.namedBindings.name.text);
+        } else if (ts.isNamedImports(clause.namedBindings)) {
+          for (const element of clause.namedBindings.elements) {
+            names.add(element.name.text);
+          }
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(statement) && statement.name) {
+      names.add(statement.name.text);
     }
   }
   return names.has(name);
