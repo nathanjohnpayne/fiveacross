@@ -46,8 +46,10 @@ export interface EventLike {
   admins?: string[];
   /** IANA zone the Day schedule is authored in (#800: the last-call freeze
    *  phrase is formatted in this zone). Optional here because this reads the
-   *  raw Firestore doc directly rather than through `eventConverter`'s legacy
-   *  default — `freezePhraseForUnlock` falls back to UTC when absent. */
+   *  raw Firestore doc directly rather than through `eventConverter` —
+   *  `freezePhraseForUnlock` runs it through `normalizeTimezone`, which
+   *  resolves a missing/malformed value to the SAME legacy default
+   *  ('Europe/Rome') `eventConverter` applies client-side. */
   timezone?: string;
   /** ADR 0004 Phase 0 community auto-hide threshold (mirrors the live deal pool). */
   settings?: { reportHideThreshold?: number; easyMixRatio?: number };

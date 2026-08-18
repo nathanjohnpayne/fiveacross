@@ -174,6 +174,42 @@ export interface LastCallOptions {
 // period produced (#266).
 export const DEFAULT_FREEZE_PHRASE = 'standings freeze at 8 a.m';
 
+/** The app's legacy-doc / malformed-value timezone default. Mirrors
+ *  `DEFAULT_TIMEZONE` in `src/data/converters.ts`. */
+export const DEFAULT_TIMEZONE = 'Europe/Rome';
+
+/**
+ * Resolve a persisted `timezone` to a usable IANA zone — a *real named* zone
+ * ('Area/Location'), never an offset id ('+02:00'), a GMT/UTC/Etc alias, or a
+ * bare abbreviation ('EST'), even though some runtimes' `Intl.DateTimeFormat`
+ * will accept those. Mirrors `normalizeTimezone` in `src/data/converters.ts`
+ * — restated here because the app and functions packages are deliberately
+ * decoupled (ADR 0011); `tests/functions/timezone-normalize-parity.test.ts`
+ * pins the two together.
+ *
+ * `runFinaleBeats` (`functions/src/unlockDay.ts`) reads the raw Firestore
+ * Event doc directly, bypassing `eventConverter` — so WITHOUT this mirror, a
+ * legacy Event doc missing `timezone` would format the freeze phrase in a
+ * different zone than the client resolves through `eventConverter` (#800
+ * Codex P2): exactly the two-rendering-paths-disagree bug this ticket exists
+ * to fix, just moved one layer down. Falls back to `DEFAULT_TIMEZONE`
+ * ('Europe/Rome') for anything invalid, matching `eventConverter`'s legacy
+ * default.
+ */
+export function normalizeTimezone(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_TIMEZONE;
+  const tz = raw.trim();
+  if (/^[+-]\d/.test(tz) || /GMT|UTC|Etc\//i.test(tz) || !tz.includes('/')) {
+    return DEFAULT_TIMEZONE;
+  }
+  try {
+    const canonical = new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone;
+    return canonical.includes('/') && !/GMT|UTC|Etc\//i.test(canonical) ? canonical : DEFAULT_TIMEZONE;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
 /**
  * "8 a.m.", "11:30 p.m." — bare hour, minutes only off the hour, no trailing
  * period on the meridiem (the caller's own sentence supplies the final full
@@ -207,22 +243,23 @@ function spokenHour(unlockAt: number, timeZone: string): string {
  * reads that same persisted string rather than reformatting the instant
  * itself, so the two rendering paths cannot drift apart.
  *
- * Falls back to `DEFAULT_FREEZE_PHRASE` when `farewellUnlockAt` is
- * missing/non-finite or formatting throws, so a malformed schedule degrades to
- * the historical literal rather than crashing the finale beat.
+ * `timeZone` is passed through `normalizeTimezone` first (#800 Codex P2): a
+ * missing/malformed value resolves to `DEFAULT_TIMEZONE` ('Europe/Rome'), the
+ * SAME legacy default `eventConverter` applies client-side, not UTC — a raw
+ * Firestore Event doc read here (bypassing the converter) must still land on
+ * the zone the client would resolve to. Falls back to `DEFAULT_FREEZE_PHRASE`
+ * when `farewellUnlockAt` is missing/non-finite or formatting still throws,
+ * so a malformed schedule degrades to the historical literal rather than
+ * crashing the finale beat.
  */
 export function freezePhraseForUnlock(farewellUnlockAt: number | undefined, timeZone: string | undefined): string {
   if (typeof farewellUnlockAt !== 'number' || !Number.isFinite(farewellUnlockAt)) {
     return DEFAULT_FREEZE_PHRASE;
   }
   try {
-    return `standings freeze at ${spokenHour(farewellUnlockAt, timeZone || 'UTC')}`;
+    return `standings freeze at ${spokenHour(farewellUnlockAt, normalizeTimezone(timeZone))}`;
   } catch {
-    try {
-      return `standings freeze at ${spokenHour(farewellUnlockAt, 'UTC')}`;
-    } catch {
-      return DEFAULT_FREEZE_PHRASE;
-    }
+    return DEFAULT_FREEZE_PHRASE;
   }
 }
 

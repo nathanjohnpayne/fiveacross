@@ -3,7 +3,9 @@ import {
   lastCallStandingsCopy,
   buildPodiumPayload,
   freezePhraseForUnlock,
+  normalizeTimezone,
   DEFAULT_FREEZE_PHRASE,
+  DEFAULT_TIMEZONE,
   type FinaleDay,
   type FinaleDayHonorDoc,
   type FinalePlayer,
@@ -100,9 +102,13 @@ describe('freezePhraseForUnlock (#800)', () => {
     expect(freezePhraseForUnlock(unlockAt, 'America/Los_Angeles')).toBe('standings freeze at 1 p.m');
   });
 
-  it('defaults to UTC when no timezone is given', () => {
+  it("#800 Codex P2: defaults to 'Europe/Rome' (eventConverter's own legacy default) when no timezone is given, not UTC", () => {
+    // 11:00 UTC is 13:00 (1 p.m.) in Europe/Rome (UTC+2, July DST). A raw
+    // Firestore Event doc missing `timezone` must land on the SAME zone the
+    // client resolves through `eventConverter`, or the two rendering paths
+    // disagree again — exactly the bug class #800 exists to close.
     const unlockAt = Date.UTC(2026, 6, 25, 11, 0);
-    expect(freezePhraseForUnlock(unlockAt, undefined)).toBe('standings freeze at 11 a.m');
+    expect(freezePhraseForUnlock(unlockAt, undefined)).toBe('standings freeze at 1 p.m');
   });
 
   it('falls back to the historical default phrase when the unlock is missing or invalid', () => {
@@ -110,14 +116,51 @@ describe('freezePhraseForUnlock (#800)', () => {
     expect(freezePhraseForUnlock(Number.NaN, 'America/Los_Angeles')).toBe(DEFAULT_FREEZE_PHRASE);
   });
 
-  it('degrades to UTC formatting on an unusable timezone, rather than crashing the beat', () => {
+  it("degrades to 'Europe/Rome' formatting on an unusable timezone, rather than crashing the beat", () => {
     const unlockAt = Date.UTC(2026, 6, 25, 11, 0);
-    expect(freezePhraseForUnlock(unlockAt, 'Not/A_Zone')).toBe('standings freeze at 11 a.m');
+    expect(freezePhraseForUnlock(unlockAt, 'Not/A_Zone')).toBe('standings freeze at 1 p.m');
   });
 
   it('produces the exact string DEFAULT_FREEZE_PHRASE bakes when the unlock genuinely IS 08:00', () => {
+    // Atlantic/Reykjavik: a REAL IANA zone at a fixed UTC+0 offset year-round
+    // (no DST) — 'UTC' itself is rejected by normalizeTimezone (#800 Codex P2:
+    // it must resolve to a real 'Area/Location' zone, matching the client
+    // contract), so this is the honest way to pin an 08:00 UTC unlock.
     const unlockAt = Date.UTC(2026, 6, 25, 8, 0);
-    expect(freezePhraseForUnlock(unlockAt, 'UTC')).toBe(DEFAULT_FREEZE_PHRASE);
+    expect(freezePhraseForUnlock(unlockAt, 'Atlantic/Reykjavik')).toBe(DEFAULT_FREEZE_PHRASE);
+  });
+});
+
+describe('normalizeTimezone (#800 Codex P2)', () => {
+  it('passes through a real, canonical IANA zone', () => {
+    expect(normalizeTimezone('America/Los_Angeles')).toBe('America/Los_Angeles');
+  });
+
+  it('falls back to DEFAULT_TIMEZONE for a missing/blank/non-string value', () => {
+    expect(normalizeTimezone(undefined)).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone(null)).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone('')).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone('   ')).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone(42)).toBe(DEFAULT_TIMEZONE);
+  });
+
+  it('rejects an offset-style id', () => {
+    expect(normalizeTimezone('+02:00')).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone('Etc/GMT+5')).toBe(DEFAULT_TIMEZONE);
+  });
+
+  it('rejects a GMT/UTC alias and a separator-less abbreviation', () => {
+    expect(normalizeTimezone('UTC')).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone('GMT')).toBe(DEFAULT_TIMEZONE);
+    expect(normalizeTimezone('EST')).toBe(DEFAULT_TIMEZONE);
+  });
+
+  it('rejects an unresolvable zone id', () => {
+    expect(normalizeTimezone('Mars/Olympus')).toBe(DEFAULT_TIMEZONE);
+  });
+
+  it('DEFAULT_TIMEZONE is Europe/Rome, matching eventConverter', () => {
+    expect(DEFAULT_TIMEZONE).toBe('Europe/Rome');
   });
 });
 
