@@ -73,13 +73,14 @@ let emitAuth: (u: unknown) => unknown = () => {};
 let sawDealError = false;
 
 function Harness() {
-  const { dealError, dealing, canRenderEventContent } = useAuth();
+  const { dealError, dealErrorReason, dealing, canRenderEventContent } = useAuth();
   if (dealError) sawDealError = true;
   return (
     <div>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       <span data-testid="authority">{canRenderEventContent ? 'may-render' : 'withheld'}</span>
+      <span data-testid="deal-error-reason">{dealErrorReason ?? 'none'}</span>
     </div>
   );
 }
@@ -453,6 +454,54 @@ describe('the #519 grace repeat and the #521 cache lift (ordering)', () => {
     // `authorityApplied` instead of a dedicated flag, would have done here).
     expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  // Codex P2 round 4 on #762, found reviewing the fix for the SUCCESS case
+  // above: the repeat need not SUCCEED to reach the in-time failure arm — it
+  // can simply TIME OUT, same as the first read did. A mere timeout is
+  // non-conclusive (never an answer), so it must not be allowed to downgrade
+  // an ALREADY-CONFIRMED permanent classification back to 'connection',
+  // which would mask the real failure behind transient-error handling
+  // (retryable copy, eligible for the #521 cache lift, etc.) that does not
+  // apply to a confirmed permission-denied.
+  it('does not let the repeat’s own TIMEOUT downgrade an already-confirmed PERMANENT error back to connection', async () => {
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    // The first read times out; the grace claims and starts the repeat.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // The ORPHANED first read rejects PERMANENTLY while the repeat is still
+    // pending: the correction confirms the permanent classification.
+    const permanentErr = Object.assign(new Error('Missing or insufficient permissions.'), {
+      code: 'permission-denied',
+    });
+    await act(async () => {
+      first.fail(permanentErr);
+      await first.promise.catch(() => {});
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('deal-error-reason')).toHaveTextContent('permanent');
+
+    // THE FIX UNDER TEST: the repeat now times out too — a non-conclusive
+    // failure, not an answer. It must not reach the in-time failure arm and
+    // republish the WEAKER 'connection' classification over the confirmed
+    // permanent one.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(screen.getByTestId('deal-error-reason')).toHaveTextContent('permanent');
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    repeat.settle(null); // drain the orphan so no unhandled promise leaks
   });
 
   // The SIBLING of the case above, and the one the merge left open (Phase 4b P1 on

@@ -743,6 +743,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // error and failed bootstrap state even though a definitive, later answer
     // arrived. This flag only ever gates the cache lift.
     let provisionalLiftRetired = false;
+    // A THIRD, independent latch (Codex P2 round 4 on #762): confirming a
+    // PERMANENT failure must outrank any WEAKER failure that resolves after
+    // it, without outranking a genuine SUCCESS. `authorityApplied` can't do
+    // this alone — it stays false on purpose so a #519 grace repeat's real
+    // answer can still settle (round 3) — but that same openness lets the
+    // repeat's OWN mere TIMEOUT (not an answer, a non-conclusive failure)
+    // reach the in-time failure arm below and downgrade `dealErrorReason`
+    // from the confirmed 'permanent' back to 'connection', masking the real
+    // failure behind transient-error handling. This flag is checked ONLY in
+    // that failure arm — never in `settleAuthoritative`, so a later
+    // authoritative success is still free to clear everything, exactly as
+    // round 3 established.
+    let permanentFailureConfirmed = false;
     const settleAuthoritative = (serverAttested: boolean) => {
       if (authorityApplied) return;
       authorityApplied = true;
@@ -809,6 +822,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // back to true behind a confirmed-permanent failure once its own read
           // resolves.
           provisionalLiftRetired = true;
+          // Also latch the PERMANENT confirmation itself (Codex P2 round 4 on
+          // #762): if a #519 grace repeat is what's in flight, its own read
+          // can still time out (a non-conclusive failure, not an answer) and
+          // reach the in-time failure arm below — which must not be allowed
+          // to downgrade this confirmed 'permanent' classification back to
+          // 'connection'. See `permanentFailureConfirmed`'s declaration.
+          permanentFailureConfirmed = true;
           failDeal(err);
           // TRI-STATE, NOT A DEFINITE `false` (Codex P2 round 3 on #762,
           // specs/w1-attestation.md § Failure state): a REJECTED read is not
@@ -912,11 +932,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAttested(true);
         const failure = bootstrapFailure.err;
         void hasCachedBoard(u.uid).then((boarded) => {
-          if (!authorityApplied && profileAttemptRef.current === attempt && !boarded) {
+          // Also guarded on `permanentFailureConfirmed` (Codex P2 round 4 on
+          // #762): `failure` is whatever `bootstrapFailure` holds NOW, which
+          // — after a #519 grace repeat — can be the repeat's OWN mere
+          // timeout, weaker evidence than an already-confirmed permanent
+          // rejection. A weaker failure must never downgrade a confirmed one.
+          if (!authorityApplied && !permanentFailureConfirmed && profileAttemptRef.current === attempt && !boarded) {
             failDeal(failure);
           }
         });
-      } else {
+      } else if (!permanentFailureConfirmed) {
+        // Skipped entirely when a PERMANENT failure was already confirmed for
+        // this attempt (Codex P2 round 4 on #762): `bootstrapFailure` here can
+        // be a #519 grace repeat's own mere TIMEOUT — a non-conclusive
+        // failure, not an answer — and publishing it would downgrade the
+        // confirmed 'permanent' classification back to 'connection', masking
+        // the real failure behind transient-error handling. The correction
+        // already published the right error and retired the cache lift
+        // (`provisionalLiftRetired`); nothing else in this branch is safe to
+        // run over it. A genuine authoritative SUCCESS is unaffected — it
+        // lands in the `else` below, not here.
         failDeal(bootstrapFailure.err);
         // …and, for a CONNECTION-class failure ONLY, fall back to the SAME
         // cache-first proof the OFFLINE branch uses (#521). `navigator.onLine`
