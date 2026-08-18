@@ -673,7 +673,21 @@ service cloud.firestore {
       // a truthy string cannot smuggle the posture on (the function's own read is
       // a strict `=== true` besides). Optional: the field's absence means "derive
       // from the pool alone", which is the majority case and every Event today.
+      //
+      // `standingsFreezeAt` (ADR 0011) is the CONFIGURED Standings Freeze — the
+      // moment competitive scoring stops. Writable only through this
+      // already-admin-gated event doc, exactly like the `frozenAt` stamp beside
+      // it, so no new write path is opened and no Player can move their own
+      // Event's freeze. When the write NAMES the field it must be a NUMBER, the
+      // same shape check `reportHideThreshold` and `forceAdult` carry: a string
+      // instant would sail past every `typeof === 'number'` guard on the read
+      // side as "not configured" and silently fall back to the schedule
+      // derivation, which is the confusing failure rather than the loud one.
+      // Optional: absent means "derive from the first ceremonial Day", which is
+      // both live Events.
       allow create, update: if isAdmin(eventId)
+        && (!('standingsFreezeAt' in request.resource.data)
+            || request.resource.data.standingsFreezeAt is number)
         && (!('settings' in request.resource.data)
             || request.resource.data.settings.reportHideThreshold is number)
         && (!('settings' in request.resource.data)

@@ -18,7 +18,7 @@
  * tutorial-exclusion rule ever changes, change it here too.
  */
 
-import { normalizePool } from './poolVocab';
+import { isCeremonialDay } from './scoringVocab';
 // Declaration-only shared contract (the daily-engagement-email precedent): the
 // separately-rooted Functions compiler can consume `src/domainTypes.d.ts`
 // without emitting an app file, so both the client mirror
@@ -37,7 +37,7 @@ export interface FinaleDayStat {
 /** The subset of a `PlayerDoc` the finale content reads. `bingoCount` /
  *  `squaresMarked` / `firstBingoAt` are the cruise-wide root AGGREGATES
  *  (`src/game/logic.ts` `aggregatePlayerStats`); `dayStats` is the per-Day
- *  breakdown the podium re-aggregates to exclude the ceremonial farewell Day. */
+ *  breakdown the podium re-aggregates to exclude the ceremonial Days. */
 export interface FinalePlayer {
   uid: string;
   displayName: string;
@@ -48,12 +48,17 @@ export interface FinalePlayer {
 }
 
 /** The subset of a `DayDef` the finale content reads. A Day is Tutorial only
- *  when its `tutorial` flag is set; pool identity and Tutorial framing are
- *  independent. */
+ *  when its `tutorial` flag is set, and ceremonial only per its stated Scoring
+ *  Policy; pool identity, Tutorial framing and Scoring Policy are three
+ *  independent facts (ADR 0011). */
 export interface FinaleDay {
   index: number;
   tutorial?: boolean;
   pool?: string; // 'main' | 'embark' | 'farewell'
+  /** `'competitive' | 'ceremonial'`, absent on every doc written before ADR
+   *  0011. Typed loosely because this side reads RAW Firestore maps; resolve it
+   *  through `scoringForDay` (scoringVocab.ts), never by direct comparison. */
+  scoring?: string;
 }
 
 /** One Day's pinned First to BINGO honor doc (`DayMetaDoc.firstBingo`), read from
@@ -106,12 +111,23 @@ export function tutorialDayIndexes(days: readonly FinaleDay[] | undefined): Set<
   return s;
 }
 
-/** The farewell Day's `index`, or `-1` when the schedule has none (a non-Phase-1.5
- *  event). The farewell Day unlocks AT the freeze, so its marks are all post-freeze
- *  and must never move the frozen standings — the podium excludes this Day. */
-export function farewellDayIndex(days: readonly FinaleDay[] | undefined): number {
-  const f = (days ?? []).find((d) => normalizePool(d.pool) === 'closing');
-  return f ? f.index : -1;
+/** The CEREMONIAL Day indexes — the Days whose Scoring Policy is `ceremonial`
+ *  (ADR 0011). Their marks never move the standings, so the podium excludes
+ *  them; on the cruise shape that Day unlocks AT the freeze, so its marks are
+ *  all post-freeze anyway.
+ *
+ *  MUST stay identical to `ceremonialDayIndexSet` in `src/game/logic.ts`, and
+ *  `tests/functions/finale-parity.test.ts` pins the two against one fixture
+ *  schedule. This replaced a `farewellDayIndex` that resolved the FIRST
+ *  closing-pool Day and excluded that one index: a set keyed on stated scoring
+ *  keeps a competitive final morning in the standings, and stops a second
+ *  ceremonial Day from silently counting. */
+export function ceremonialDayIndexes(days: readonly FinaleDay[] | undefined): Set<number> {
+  const s = new Set<number>();
+  for (const d of days ?? []) {
+    if (isCeremonialDay(d)) s.add(d.index);
+  }
+  return s;
 }
 
 /** A Player's EFFECTIVE Event-wide First to BINGO: the earliest `firstBingoAt`
@@ -135,23 +151,28 @@ function effectiveFirstBingoAt(
   return player.firstBingoAt;
 }
 
-/** A Player's standings row for the podium, re-aggregated to EXCLUDE the farewell
- *  Day (the ceremonial-freeze rule). When the Player has no `dayStats` breakdown
- *  (a legacy roster) the root totals stand — there is nothing to exclude. */
+/** A Player's standings row for the podium, re-aggregated to EXCLUDE every
+ *  CEREMONIAL Day (ADR 0011). When the Player has no `dayStats` breakdown (a
+ *  legacy roster), or the schedule has no ceremonial Day at all, the root totals
+ *  stand — there is nothing to exclude, and re-summing the buckets anyway would
+ *  rewrite a legacy/hybrid row whose roots and buckets disagree.
+ *
+ *  Byte-identical to `podiumStandingRow` in `src/data/finale.ts`, including that
+ *  empty-set passthrough — the parity test compares the two builders' output. */
 function podiumStandingRow(
   player: FinalePlayer,
-  farewellIndex: number,
+  ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
 ): FinalePlayer {
   const firstBingoAt = effectiveFirstBingoAt(player, isTutorialDay);
   const dayStats = player.dayStats;
-  if (!dayStats || farewellIndex < 0) {
+  if (!dayStats || ceremonial.size === 0) {
     return { ...player, firstBingoAt };
   }
   let bingoCount = 0;
   let squaresMarked = 0;
   for (const [key, stat] of Object.entries(dayStats)) {
-    if (Number(key) === farewellIndex) continue;
+    if (ceremonial.has(Number(key))) continue;
     bingoCount += stat.bingoCount;
     squaresMarked += stat.squaresMarked;
   }
@@ -235,7 +256,7 @@ export interface PodiumHonor {
   at: number;
 }
 export interface PodiumPayload {
-  /** Top of the frozen standings (farewell Day excluded); `null` on an empty board. */
+  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty board. */
   champion: PodiumChampion | null;
   /** Event-wide First to BINGO across non-Tutorial Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
@@ -246,7 +267,7 @@ export interface PodiumPayload {
 /**
  * Build the podium payload posted at the 08:00 Day 10 freeze:
  *
- *   - champion: the top of the standings re-aggregated to EXCLUDE the farewell Day
+ *   - champion: the top of the standings re-aggregated to EXCLUDE every ceremonial Day
  *     (its marks are all post-freeze and ceremonial), `null` when nobody has played;
  *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
  *     identity alone never decides the headline honor;
@@ -260,10 +281,10 @@ export function buildPodiumPayload(
 ): PodiumPayload {
   const tutorial = tutorialDayIndexes(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
-  const farewellIndex = farewellDayIndex(days);
+  const ceremonial = ceremonialDayIndexes(days);
 
   const standings = players
-    .map((p) => podiumStandingRow(p, farewellIndex, isTutorialDay))
+    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay))
     .sort(compareFinalePlayers);
   const top = standings[0];
   const champion: PodiumChampion | null =

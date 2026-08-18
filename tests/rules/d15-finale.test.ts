@@ -80,3 +80,29 @@ describe('d15-finale — frozenAt is admin/Function-writable only', () => {
     await assertFails(updateDoc(doc(unauthDb(), `events/${EVENT}`), { frozenAt: NOW() }));
   });
 });
+
+// ADR 0011: `standingsFreezeAt` is the CONFIGURED freeze — the schedule, where
+// `frozenAt` is the stamp. It rides the same admin gate, and carries the shape
+// check the read side depends on.
+describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () => {
+  it('ALLOWS an admin to set a numeric standingsFreezeAt', async () => {
+    await assertSucceeds(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+  });
+
+  it('DENIES a non-admin Player setting standingsFreezeAt', async () => {
+    await assertFails(updateDoc(doc(db(MALLORY), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+  });
+
+  it('DENIES an unauthenticated write of standingsFreezeAt', async () => {
+    await assertFails(updateDoc(doc(unauthDb(), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+  });
+
+  it('DENIES even an admin writing a non-number standingsFreezeAt', async () => {
+    // A string instant reads as "not configured" on every `typeof === 'number'`
+    // guard, so it would silently fall back to the schedule derivation instead
+    // of failing where the organiser could see it.
+    for (const bad of [String(NOW()), null, true, { at: NOW() }]) {
+      await assertFails(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: bad }));
+    }
+  });
+});

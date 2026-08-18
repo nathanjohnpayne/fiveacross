@@ -34,6 +34,11 @@
 export interface DayLike {
   index: number;
   pool: string; // canonical 'main' | 'easy' | 'closing'; legacy docs persist 'embark' | 'farewell' (normalizePool)
+  /** The Day's Scoring Policy (ADR 0011), absent on every doc written before
+   *  the field existed. Loosely typed because this package reads RAW Firestore
+   *  maps; resolve through `scoringForDay`/`isCeremonialDay` (scoringVocab.ts),
+   *  never by direct comparison. */
+  scoring?: string;
   unlockAt: number; // ms epoch
   snapshotItemIds?: string[];
   snapshotEasyMixRatio?: number;
@@ -42,6 +47,11 @@ export interface DayLike {
 /** The subset of an `EventDoc` the scheduler reads. */
 export interface EventLike {
   days?: DayLike[];
+  /** The CONFIGURED Standings Freeze (ADR 0011) — the moment scoring stops.
+   *  Distinct from `frozenAt`, the stamp recording that it happened. Absent on
+   *  every doc written before the field existed, in which case `finaleTimes`
+   *  falls back to the first ceremonial Day's own `unlockAt`. */
+  standingsFreezeAt?: number;
   frozenAt?: number | null;
   admins?: string[];
   /** ADR 0004 Phase 0 community auto-hide threshold (mirrors the live deal pool). */
@@ -67,6 +77,7 @@ import {
   type MostLovedHeartLike,
 } from './finaleContent';
 import { normalizePool } from './poolVocab';
+import { isCeremonialDay } from './scoringVocab';
 // Declaration-only shared contract (the daily-engagement-email precedent) —
 // the persisted award shape both compiler roots agree on.
 
@@ -285,70 +296,107 @@ export const LAST_CALL_LEAD_MS = 12 * 60 * 60 * 1000;
 
 export interface FinaleTimes {
   lastCallAt: number;
-  farewellUnlockAt: number;
+  /** The Event's Standings Freeze instant (ADR 0011) — when scoring stops, the
+   *  podium is computed and the Most-Loved Photo is frozen. Renamed from
+   *  `standingsFreezeAt`: it is no longer definitionally a Day's unlock. */
+  standingsFreezeAt: number;
   lastCallDayIndex: number;
   podiumDayIndex: number;
 }
 
 /**
- * Resolve the finale clock boundaries from the Day schedule. The farewell Day
- * (pool `'farewell'`, Day 10) anchors the freeze/podium at its own `unlockAt`
- * (08:00 disembark morning, the standard rule). The last-call beat PREFERS Day
- * 9's 08:00 `unlockAt` + 12h = 20:00 Day 9 (a same-day forward offset, so no
- * midnight/DST cross) — but that offset is only meaningful when the closing
- * Day sits on its OWN calendar date. When Day 9 is absent, OR the forward
- * candidate would land at-or-after `farewellUnlockAt` (#784 — a schedule shape
- * that puts the closing Day on the SAME date as the preceding Day, as Bodega's
- * tail does, makes 08:00+12h fall past the very freeze it's supposed to
- * precede), this derives backwards instead: `farewellUnlockAt - 12h` (the
- * 08:00→08:00 gap less the last night). Returns `null` when there is no
- * farewell Day (a non-Phase-1.5 event), so callers skip the finale entirely.
+ * Resolve the finale clock boundaries for an Event. The freeze/podium anchor is
+ * the Event's Standings Freeze (ADR 0011): the CONFIGURED
+ * `EventDoc.standingsFreezeAt` when the doc carries a usable one, else the first
+ * CEREMONIAL Day's own `unlockAt` — which on both live Events is the closing
+ * Day's 08:00 disembark morning, exactly the instant this function used to read
+ * off `pool === 'closing'`. Nothing about either live Event's finale clock
+ * moves; what changes is that a weekend Event whose final morning is real
+ * competitive play can now state its own freeze (check-out, say) instead of
+ * being forced to make that morning ceremonial to get a finale at all.
  *
- * GUARD (#784): whichever branch runs, `lastCallAt` is asserted to precede
- * `farewellUnlockAt` before returning. `LAST_CALL_LEAD_MS` is a positive
- * constant, so the backward branch is always safe on its own — the guard
- * exists because the issue's postmortem was exactly this: the forward branch
- * silently produced an empty `[lastCallAt, farewellUnlockAt)` window with no
- * throw, no log, and no visible symptom until someone read the numbers by
- * hand. If a future schedule shape ever re-empties the window, this logs
- * loudly instead of failing silently again.
+ * Returns `null` when the Event has NEITHER a configured freeze nor a ceremonial
+ * Day (a non-Phase-1.5 event), so callers skip the finale entirely. The finale
+ * is still not an automatic consequence of the schedule ending — it is now a
+ * stated freeze OR a stated Scoring Policy, rather than a pool assignment.
+ *
+ * The last-call beat PREFERS the preceding Day's 08:00 `unlockAt` + 12h = 20:00
+ * (a same-day forward offset, so no midnight/DST cross) — but that offset is
+ * only meaningful when the closing Day sits on its OWN calendar date. When that
+ * Day is absent, OR the forward candidate would land at-or-after the freeze
+ * (#784 — a schedule shape that puts the closing Day on the SAME date as the
+ * preceding Day, as Bodega's tail does, makes 08:00+12h fall past the very
+ * freeze it's supposed to precede), this derives backwards instead:
+ * `standingsFreezeAt - 12h` (the 08:00→08:00 gap less the last night).
+ *
+ * GUARD (#784): whichever branch runs, `lastCallAt` is asserted to precede the
+ * freeze before returning. `LAST_CALL_LEAD_MS` is a positive constant, so the
+ * backward branch is always safe on its own — the guard exists because the
+ * issue's postmortem was exactly this: the forward branch silently produced an
+ * empty `[lastCallAt, standingsFreezeAt)` window with no throw, no log, and no
+ * visible symptom until someone read the numbers by hand. If a future schedule
+ * shape ever re-empties the window, this logs loudly instead of failing
+ * silently again. A CONFIGURED freeze widens the ways that can happen — an
+ * organiser can set one earlier than the preceding Day's unlock — so the guard
+ * matters more now, not less.
  *
  * NO DST CAVEAT (#552). This used to warn that the 12h wall gap assumed the
  * event window did not cross a `Europe/Rome` DST switch, and that the 20:00 cron
- * landed inside `[lastCallAt, farewellUnlockAt)` under standard time. Both
- * halves are retired. Every boundary here is derived from the Day schedule's own
- * `unlockAt` values — absolute instants — so there is no local-time shift to
- * reason about; and the scheduler is a single fixed-offset UTC trigger that
- * sweeps often enough to land inside any beat's window rather than a wall-clock
- * cron aimed at one. Do not reintroduce a timezone assumption here: the whole
- * point of #552 is that this file's arithmetic is timezone-free.
+ * landed inside `[lastCallAt, standingsFreezeAt)` under standard time. Both
+ * halves are retired. Every boundary here is an absolute instant — a Day's own
+ * `unlockAt` or the stored freeze — so there is no local-time shift to reason
+ * about; and the scheduler is a single fixed-offset UTC trigger that sweeps
+ * often enough to land inside any beat's window rather than a wall-clock cron
+ * aimed at one. Do not reintroduce a timezone assumption here: the whole point
+ * of #552 is that this file's arithmetic is timezone-free.
  */
-export function finaleTimes(days: DayLike[]): FinaleTimes | null {
-  const farewell = days.find((d) => normalizePool(d.pool) === 'closing');
-  if (!farewell) return null;
-  const dayNine = days.find((d) => d.index === farewell.index - 1);
-  const forwardLastCallAt = dayNine ? dayNine.unlockAt + LAST_CALL_LEAD_MS : null;
-  const lastCallAt =
-    forwardLastCallAt !== null && forwardLastCallAt < farewell.unlockAt
-      ? forwardLastCallAt
-      : farewell.unlockAt - LAST_CALL_LEAD_MS;
+export function finaleTimes(days: DayLike[], standingsFreezeAt?: number): FinaleTimes | null {
+  const ceremonial = days.find((d) => isCeremonialDay(d));
+  // A non-finite or non-positive stored value is ignored rather than honoured:
+  // 0 is the schedule's "always unlocked" sentinel elsewhere in this file, and
+  // reading it as a freeze instant would freeze every Event at the epoch.
+  // Mirrors `standingsFreezeAtFor` in `src/game/logic.ts`.
+  const configured =
+    typeof standingsFreezeAt === 'number' && Number.isFinite(standingsFreezeAt) && standingsFreezeAt > 0
+      ? standingsFreezeAt
+      : null;
+  const freezeAt = configured ?? ceremonial?.unlockAt ?? null;
+  if (freezeAt == null) return null;
 
-  // #784: the last-call posting gate is `[lastCallAt, farewellUnlockAt)` — an
+  // The Day the podium Moment is filed under: the ceremonial Day when the
+  // schedule has one (the cruise shape's goodbye card), else the LAST Day — an
+  // all-competitive Event with a configured freeze still has a finale, and it
+  // belongs on the Day the Event ends on. Matches `finalePinIndex`
+  // (src/data/finale.ts), which pins the view to the same Day.
+  const lastDayIndex = days.reduce((max, d) => (d.index > max ? d.index : max), -1);
+  // A configured freeze on an Event with no schedule at all has no Day to file
+  // the Moments under, and a Moment at Day -1 renders nowhere. Treat it the
+  // same as no finale rather than posting into the void.
+  if (!ceremonial && lastDayIndex < 0) return null;
+  const podiumDayIndex = ceremonial ? ceremonial.index : lastDayIndex;
+  // Clamped at 0: a single-Day Event would otherwise file the last-call Moment
+  // under Day -1, which is not a Day any surface can render. Both beats landing
+  // on the one Day is the honest answer for a one-Day schedule.
+  const lastCallDayIndex = Math.max(0, podiumDayIndex - 1);
+
+  const priorDay = days.find((d) => d.index === podiumDayIndex - 1);
+  const forwardLastCallAt = priorDay ? priorDay.unlockAt + LAST_CALL_LEAD_MS : null;
+  const lastCallAt =
+    forwardLastCallAt !== null && forwardLastCallAt < freezeAt
+      ? forwardLastCallAt
+      : freezeAt - LAST_CALL_LEAD_MS;
+
+  // #784: the last-call posting gate is `[lastCallAt, standingsFreezeAt)` — an
   // empty or inverted window means the beat can never fire, and nothing else
   // in the finale path would notice. Log loudly rather than let it slide by.
-  if (!(lastCallAt < farewell.unlockAt)) {
+  if (!(lastCallAt < freezeAt)) {
     console.error(
-      `[finaleTimes] last-call window is empty or inverted for farewell Day index ${farewell.index}: ` +
-        `lastCallAt=${lastCallAt} >= farewellUnlockAt=${farewell.unlockAt}. The last-call beat will never post.`,
+      `[finaleTimes] last-call window is empty or inverted for podium Day index ${podiumDayIndex}: ` +
+        `lastCallAt=${lastCallAt} >= standingsFreezeAt=${freezeAt}. The last-call beat will never post.`,
     );
   }
 
-  return {
-    lastCallAt,
-    farewellUnlockAt: farewell.unlockAt,
-    lastCallDayIndex: farewell.index - 1,
-    podiumDayIndex: farewell.index,
-  };
+  return { lastCallAt, standingsFreezeAt: freezeAt, lastCallDayIndex, podiumDayIndex };
 }
 
 export interface FinaleDecision {
@@ -363,7 +411,7 @@ export interface FinaleDecision {
  * `last_call` / `podium` Moments already exist, whether the Most-Loved award is
  * already persisted), decide which beats fire:
  *
- *   - `postLastCall`: `now` is in `[lastCallAt, farewellUnlockAt)` and no last-call
+ *   - `postLastCall`: `now` is in `[lastCallAt, standingsFreezeAt)` and no last-call
  *     Moment exists yet. The upper bound means once the freeze time arrives the
  *     podium supersedes it; the already-posted guard makes a same-window retry a no-op.
  *   - `freeze`: `now` has reached the farewell unlock and the event is not yet frozen
@@ -390,9 +438,9 @@ export function finaleActions(
     mostLovedComputed: boolean;
   },
 ): FinaleDecision {
-  const atFreeze = now >= times.farewellUnlockAt;
+  const atFreeze = now >= times.standingsFreezeAt;
   return {
-    postLastCall: now >= times.lastCallAt && now < times.farewellUnlockAt && !state.lastCallPosted,
+    postLastCall: now >= times.lastCallAt && now < times.standingsFreezeAt && !state.lastCallPosted,
     freeze: atFreeze && state.frozenAt == null,
     postPodium: atFreeze && !state.podiumPosted,
     computeMostLoved: atFreeze && state.frozenAt == null && !state.mostLovedComputed,
@@ -752,7 +800,7 @@ function createTimeCeilingMillis(
  * is written and the next tick retries the whole snapshot together. The podium
  * remains its own best-effort beat.
  *
- * `cutoff` is the SCHEDULED freeze instant (`times.farewellUnlockAt`), never the
+ * `cutoff` is the SCHEDULED freeze instant (`times.standingsFreezeAt`), never the
  * run clock: post-cutoff Hearts remain excluded even if this transaction starts
  * late. The atomic transaction also collapses concurrent scheduler/manual runs
  * onto the first successful freeze.
@@ -800,7 +848,7 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
   const now = (deps.now ?? Date.now)();
   const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
   if (!event) return;
-  const times = finaleTimes(Array.isArray(event.days) ? event.days : []);
+  const times = finaleTimes(Array.isArray(event.days) ? event.days : [], event.standingsFreezeAt);
   if (!times) return;
 
   const [lastCallPosted, podiumPosted] = await Promise.all([
@@ -849,12 +897,12 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
   if (freeze) {
     try {
       if (computeMostLoved) {
-        await freezeStandingsAndPersistMostLovedAward(db, eventId, times.farewellUnlockAt, now);
+        await freezeStandingsAndPersistMostLovedAward(db, eventId, times.standingsFreezeAt, now);
       } else {
         // Defensive compatibility for an Event that already has a persisted
         // award but lacks the historical freeze stamp. The normal new-event path
         // always takes the atomic branch above.
-        await freezeStandings(db, eventId, times.farewellUnlockAt);
+        await freezeStandings(db, eventId, times.standingsFreezeAt);
       }
     } catch (err) {
       console.error('runFinaleBeats: freeze failed', eventId, err);

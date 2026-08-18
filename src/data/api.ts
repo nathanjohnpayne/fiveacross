@@ -756,7 +756,11 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
       // post-freeze manual Mark).
       const tutorialSet = tutorialDayIndexSet(latestDays);
       const ceremonialSet = ceremonialDayIndexSet(latestDays);
-      const frozen = standingsFrozen({ frozenAt: latestEventData?.frozenAt, days: latestDays });
+      const frozen = standingsFrozen({
+        frozenAt: latestEventData?.frozenAt,
+        standingsFreezeAt: latestEventData?.standingsFreezeAt,
+        days: latestDays,
+      });
       const playerData = playerSnap.exists() ? (playerSnap.data() as Partial<PlayerDoc>) : undefined;
       const statsAllowed = !frozen || ceremonialSet.has(dayIndex);
       // The Day-honor pin identity (Codex P2 on #447): the saved player-row
@@ -1115,8 +1119,12 @@ export async function reshuffleBoard(params: {
       }
     }
     const rawEchoRes = applyEchoes(cells, achieved, now);
-    const statsAllowed = !standingsFrozen({ frozenAt: eventData?.frozenAt, days }) ||
-      ceremonialDayIndexSet(days).has(dayIndex);
+    const statsAllowed =
+      !standingsFrozen({
+        frozenAt: eventData?.frozenAt,
+        standingsFreezeAt: eventData?.standingsFreezeAt,
+        days,
+      }) || ceremonialDayIndexSet(days).has(dayIndex);
     const savedName = typeof player?.displayName === 'string' ? player.displayName : undefined;
     // Net-new echo count (#721, Codex round 1 finding 4): `echoRes` is derived
     // against the freshly-dealt REPLACEMENT card, so `echoedItemIds` is every
@@ -1244,7 +1252,12 @@ export async function reshuffleBoard(params: {
     // (Codex P2 on #447 round 2) — no root field moves once the standings
     // are settled, mirroring the mark/reconcile paths.
     const frozenNarrowed =
-      statWrite && standingsFrozen({ frozenAt: eventData?.frozenAt, days })
+      statWrite &&
+      standingsFrozen({
+        frozenAt: eventData?.frozenAt,
+        standingsFreezeAt: eventData?.standingsFreezeAt,
+        days,
+      })
         ? { dayStats: { [dayIndex]: statWrite.dayStats[dayIndex] } }
         : statWrite;
     tx.set(playerRef, { reshufflesUsed: nextUsed, ...(frozenNarrowed ?? {}) }, { merge: true });

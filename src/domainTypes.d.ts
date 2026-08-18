@@ -179,6 +179,24 @@ export interface DayDef {
   // vocabularies during the transition.
   pool: 'main' | 'easy' | 'closing';
   tutorial: boolean;    // true for the tutorial Days (GCB: Day 1 and Day 10)
+  /**
+   * This Day's Scoring Policy (ADR 0011, CONTEXT.md § Scoring Policy): whether
+   * its Marks count toward the Event standings. STATED here, never inferred
+   * from `pool` — a Day's Pool identity, its Tutorial framing and its Scoring
+   * Policy are three independent facts, and a weekend Event's final morning can
+   * be real competitive play on the closing pool.
+   *
+   * Optional in the contract because every doc written before ADR 0011 has no
+   * such key, and BOTH live Events are such docs. Never read directly: resolve
+   * through `scoringForDay` (src/game/scoring.ts, or the Functions mirror
+   * `functions/src/scoringVocab.ts`), which falls back to the closing-pool
+   * derivation the old comparisons hard-coded, so legacy Days resolve exactly
+   * as they did before. `eventConverter` fills it on read for the same reason
+   * `migrateDayFields` fills `place`/`pool`; raw-hydrated paths still resolve
+   * at comparison time, which is why the resolver — not this field — is the
+   * contract consumers hold.
+   */
+  scoring?: 'competitive' | 'ceremonial';
   unlockAt: number;     // ms epoch — 08:00 event-tz on `date`; an easy first Day may use the 0 open sentinel
   freeText?: string;    // per-day free-space override (tutorial Days)
   // The Day Snapshot: the frozen list of item ids stamped at `unlockAt` by the
@@ -240,6 +258,26 @@ export interface EventDoc {
   // the contract; `eventConverter` defaults a missing legacy field to [] so a
   // not-yet-migrated Event doc read in dev/tests never throws downstream.
   days: DayDef[];
+  /**
+   * The CONFIGURED Standings Freeze (ms epoch, ADR 0011): the moment this
+   * Event's competitive scoring stops and the podium is computed. An Event
+   * setting, not a Day one — the freeze is a property of the Event's shape,
+   * and tying it to the closing Day's `unlockAt` is what made a competitive
+   * final morning unrepresentable.
+   *
+   * Named at arm's length from `frozenAt` on purpose: this is the SCHEDULE,
+   * `frozenAt` is the STAMP recording that it happened. `freezeAt`/`frozenAt`
+   * one character apart in the same interface is a bug waiting to be written.
+   *
+   * Optional because no doc written before ADR 0011 carries it. Never read
+   * directly: resolve through `standingsFreezeAtFor` (src/game/logic.ts),
+   * which falls back to the first ceremonial Day's `unlockAt` — the instant the
+   * old derivation used — so both live Events freeze at exactly the same
+   * moment they always did. An Event with neither a stored value nor a
+   * ceremonial Day has no scheduled freeze, which is the pre-Phase-1.5
+   * "legacy events never freeze" behaviour, unchanged.
+   */
+  standingsFreezeAt?: number;
   // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
   // the standings freeze and the podium Moment posts. Absent until the finale.
   frozenAt?: number;

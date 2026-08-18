@@ -1,6 +1,7 @@
 // Pure, framework-free game logic. No Firebase, no React — fully unit-testable.
 import type { Cell, DayDef, EventDoc, PlayerDoc } from '../types';
 import { normalizePool } from './pool';
+import { isCeremonialDay } from './scoring';
 
 export const GRID = 5;
 export const CENTER = 12;
@@ -775,37 +776,85 @@ export function tutorialDayIndexSet(days: readonly DayDef[] | undefined): Set<nu
   return s;
 }
 
-/** The CEREMONIAL Day indexes — the farewell pool only (#265, spec § "Scoring"):
- *  "the farewell card is ceremonial—it unlocks at the freeze, so its marks never
- *  move the standings." Distinct from `tutorialDayIndexSet` because the embark
- *  card COUNTS (pre-freeze real play, just easy); only farewell is standings-
- *  inert. Its daily honor still stands — the exclusion applies to the summed
- *  root totals, never the per-Day bucket. */
+/** The CEREMONIAL Day indexes — the Days whose Scoring Policy is `ceremonial`
+ *  (ADR 0011; #265, spec § "Scoring"): "its marks never move the standings."
+ *  Distinct from `tutorialDayIndexSet` because the two flags answer different
+ *  questions — an easy-pool opener COUNTS (pre-freeze real play, just easy)
+ *  while still being excluded from the Event-wide First to BINGO honour, and a
+ *  competitive final morning is neither. A ceremonial Day's daily honor still
+ *  stands: the exclusion applies to the summed root totals and the podium,
+ *  never to the per-Day bucket.
+ *
+ *  Resolved through `scoringForDay`, so a Day carrying no `scoring` key — every
+ *  Day of both live Events — still resolves by the closing-pool derivation this
+ *  function used to hard-code, and nothing about either Event changes. */
 export function ceremonialDayIndexSet(days: readonly DayDef[] | undefined): Set<number> {
   const s = new Set<number>();
-  for (const d of days ?? []) if (normalizePool(d.pool) === 'closing') s.add(d.index);
+  for (const d of days ?? []) if (isCeremonialDay(d)) s.add(d.index);
   return s;
+}
+
+/** The Event's inputs to the freeze question. `standingsFreezeAt` is spelled
+ *  out rather than `Pick`ed so a caller assembling a partial Event by hand
+ *  (`{ frozenAt, days }` — the admin and API transaction paths re-read raw
+ *  event data) reads as an Event that has no CONFIGURED freeze and falls back
+ *  to the schedule derivation, which is the correct answer for both live
+ *  Events. */
+export type FreezeSchedule = Pick<EventDoc, 'frozenAt' | 'days'> & {
+  standingsFreezeAt?: number;
+};
+
+/**
+ * The Event's Standings Freeze instant (ADR 0011): the CONFIGURED
+ * `standingsFreezeAt` when the doc carries a usable one, else the first
+ * ceremonial Day's `unlockAt` — the instant the old `pool === 'closing'`
+ * derivation used, so both live Events resolve to exactly the moment they
+ * always did. `null` when the Event has neither: a legacy Event with no
+ * schedule, or an all-competitive schedule that has not been given a freeze,
+ * has no scheduled freeze at all and never freezes on its own.
+ *
+ * The FIRST ceremonial Day, matching every other finale consumer
+ * (`finaleTimes`, the podium builders) — the wizard's `extra-closing-day`
+ * validation exists precisely because that "first match" is load-bearing.
+ *
+ * A non-finite or non-positive stored value is ignored rather than honoured: 0
+ * is the schedule's "always unlocked" sentinel elsewhere in this contract, and
+ * reading it as a freeze instant would freeze every Event at the epoch.
+ */
+export function standingsFreezeAtFor(
+  event: FreezeSchedule | null | undefined,
+): number | null {
+  if (!event) return null;
+  const configured = event.standingsFreezeAt;
+  if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  for (const d of event.days ?? []) {
+    if (isCeremonialDay(d)) return d.unlockAt;
+  }
+  return null;
 }
 
 /**
  * Whether the standings are FROZEN (#265; Codex P2 on #278): the scheduler's
- * `frozenAt` stamp when present, OR — the stale-cache belt — the farewell
- * Day's scheduled `unlockAt` having passed. The freeze moment IS the farewell
- * unlock (daily-cards-spec § "Scoring": the two-beat finish), and the schedule
- * is cached with the event doc, so a client whose persistent cache predates
- * the scheduler's stamp (or is offline at sea) still fails CLOSED at 08:00 on
- * Day 10 by its own clock. Legacy events (no schedule) never freeze.
+ * `frozenAt` stamp when present, OR — the stale-cache belt — the Event's
+ * scheduled Standings Freeze having passed. The schedule is cached with the
+ * event doc, so a client whose persistent cache predates the scheduler's stamp
+ * (or is offline at sea) still fails CLOSED at the freeze by its own clock.
+ * Events with no scheduled freeze (see `standingsFreezeAtFor`) never freeze.
+ *
+ * Reads the freeze through `standingsFreezeAtFor` rather than scanning pools
+ * (ADR 0011): a competitive final Day now counts right up to the configured
+ * freeze instead of being frozen out by the pool its card happens to deal.
  */
 export function standingsFrozen(
-  event: Pick<EventDoc, 'frozenAt' | 'days'> | null | undefined,
+  event: FreezeSchedule | null | undefined,
   now: number = Date.now(),
 ): boolean {
   if (!event) return false;
   if (event.frozenAt != null) return true;
-  for (const d of event.days ?? []) {
-    if (normalizePool(d.pool) === 'closing' && now >= d.unlockAt) return true;
-  }
-  return false;
+  const freezeAt = standingsFreezeAtFor(event);
+  return freezeAt != null && now >= freezeAt;
 }
 
 /** Sum `bingoCount` + `squaresMarked` across EVERY Day Card, tutorial Days

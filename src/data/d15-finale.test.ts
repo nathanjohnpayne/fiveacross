@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPodium, farewellPinIndex } from './finale';
+import { buildPodium, finalePinIndex } from './finale';
 import type { DayDef, PlayerDoc } from '../types';
 
 // Fixtures (#217, specs/d15-finale.md): a 3-Day cruise — embark (Day 0,
@@ -41,23 +41,51 @@ function player(overrides: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid'>): PlayerD
   };
 }
 
-describe('farewellPinIndex — default-view pin (never before the freeze)', () => {
-  it('returns null when frozenAt is unset, even with the farewell Day unlocked', () => {
-    expect(farewellPinIndex(DAYS, undefined, NOW)).toBeNull();
-    expect(farewellPinIndex(DAYS, null, NOW)).toBeNull();
+describe('finalePinIndex — default-view pin (never before the freeze)', () => {
+  it('returns null when frozenAt is unset, even with the closing Day unlocked', () => {
+    expect(finalePinIndex(DAYS, undefined, NOW)).toBeNull();
+    expect(finalePinIndex(DAYS, null, NOW)).toBeNull();
   });
 
-  it('returns null when frozen but the farewell Day is still locked', () => {
+  it('returns null when frozen but the ceremonial Day is still locked', () => {
     const lockedFarewell = [DAYS[0], DAYS[1], day({ index: 2, pool: 'closing', unlockAt: NOW + HOUR })];
-    expect(farewellPinIndex(lockedFarewell, NOW, NOW)).toBeNull();
+    expect(finalePinIndex(lockedFarewell, NOW, NOW)).toBeNull();
   });
 
-  it('pins the farewell array index once frozen AND unlocked', () => {
-    expect(farewellPinIndex(DAYS, NOW, NOW)).toBe(2);
+  it('pins the ceremonial array index once frozen AND unlocked', () => {
+    expect(finalePinIndex(DAYS, NOW, NOW)).toBe(2);
   });
 
-  it('returns null when the schedule has no farewell Day', () => {
-    expect(farewellPinIndex([DAYS[0], DAYS[1]], NOW, NOW)).toBeNull();
+  it('returns null when there are no Days at all', () => {
+    expect(finalePinIndex([], NOW, NOW)).toBeNull();
+    expect(finalePinIndex(undefined, NOW, NOW)).toBeNull();
+  });
+
+  // ADR 0011: an Event whose final morning is real competitive play has no
+  // ceremonial card to pin, and falling back to "today" would drop a returning
+  // Player onto a Day the schedule no longer has. The podium is posted on the
+  // last Day in that shape, so that is where the pin lands.
+  it('pins the LAST Day when the schedule is all competitive', () => {
+    const allCompetitive = [DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })];
+    expect(finalePinIndex(allCompetitive, NOW, NOW)).toBe(2);
+  });
+
+  // …and it still respects the unlock gate in that shape.
+  it('returns null when the all-competitive last Day is still locked', () => {
+    const lockedLast = [DAYS[0], DAYS[1], day({ index: 2, pool: 'main', unlockAt: NOW + HOUR })];
+    expect(finalePinIndex(lockedLast, NOW, NOW)).toBeNull();
+  });
+
+  // A stated `scoring` beats the pool it deals: a closing-pool Day that is
+  // explicitly competitive is not the ceremonial card, so the pin falls through
+  // to the last-Day rule (which here is that same Day, by position).
+  it('pins by stated scoring, not by pool', () => {
+    const competitiveClose = [
+      DAYS[0],
+      day({ index: 1, pool: 'closing', scoring: 'competitive', unlockAt: NOW - HOUR }),
+      day({ index: 2, pool: 'main', unlockAt: NOW - HOUR }),
+    ];
+    expect(finalePinIndex(competitiveClose, NOW, NOW)).toBe(2);
   });
 });
 

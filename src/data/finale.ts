@@ -4,8 +4,9 @@
 // mounting a component. The functions-side mirror (functions/src/finaleContent.ts)
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
-import { normalizePool } from '../game/pool';
+import { isCeremonialDay } from '../game/scoring';
 import {
+  ceremonialDayIndexSet,
   comparePlayers,
   cruiseFirstBingoUid,
   effectiveCruiseFirstBingoAt,
@@ -27,7 +28,7 @@ export interface PodiumFirstBingo {
   at: number;
 }
 export interface Podium {
-  /** Top of the frozen standings (farewell Day excluded); `null` on an empty board. */
+  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty board. */
   champion: PodiumChampion | null;
   /** Cruise-wide First to BINGO across main-game Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
@@ -43,29 +44,32 @@ export interface Podium {
   runnersUp: PodiumChampion[];
 }
 
-/** The farewell Day's `DayDef.index`, or `-1` when the schedule has none. */
-function farewellDayIndex(days: readonly DayDef[] | undefined): number {
-  const f = (days ?? []).find((d) => normalizePool(d.pool) === 'closing');
-  return f ? f.index : -1;
-}
-
 /**
- * A Player's standings row for the podium, re-aggregated to EXCLUDE the farewell
- * Day. The farewell Day Card unlocks AT the freeze, so its marks are all
- * post-freeze and ceremonial — they must never move the frozen podium (the
- * "standings shown are as of `frozenAt`, not live" rule). A Player with no
- * `dayStats` breakdown (a roster predating Day Cards) keeps its root totals —
- * there is nothing to exclude. `firstBingoAt` is the tutorial-excluded cruise
- * value so the row ranks on the same first-bingo tie-break the Leaderboard uses.
+ * A Player's standings row for the podium, re-aggregated to EXCLUDE every
+ * CEREMONIAL Day (ADR 0011). A ceremonial Day Card's marks never move the
+ * standings — on the cruise shape that card unlocks AT the freeze, so its marks
+ * are all post-freeze — and they must never move the frozen podium (the
+ * "standings shown are as of `frozenAt`, not live" rule).
+ *
+ * Keyed off the Day's stated Scoring Policy rather than its pool, so a weekend
+ * Event whose final morning is real competitive play keeps that morning's marks
+ * in the podium, and a schedule with no ceremonial Day at all excludes nothing.
+ * A Player with no `dayStats` breakdown (a roster predating Day Cards) keeps its
+ * root totals, and so does every Player when the schedule has NO ceremonial Day:
+ * in both cases there is nothing to exclude, and re-summing the buckets anyway
+ * would silently rewrite a legacy/hybrid row whose roots and buckets disagree
+ * (the state `playerRowRootLag` exists to detect) instead of leaving it alone.
+ * `firstBingoAt` is the tutorial-excluded Event-wide value so the row ranks on
+ * the same first-bingo tie-break the Leaderboard uses.
  */
 function podiumStandingRow(
   player: PlayerDoc,
-  farewellIndex: number,
+  ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
 ): Rankable & { uid: string; displayName: string } {
   const firstBingoAt = effectiveCruiseFirstBingoAt(player, isTutorialDay);
   const dayStats = player.dayStats;
-  if (!dayStats || farewellIndex < 0) {
+  if (!dayStats || ceremonial.size === 0) {
     return {
       uid: player.uid,
       displayName: player.displayName,
@@ -77,7 +81,7 @@ function podiumStandingRow(
   let bingoCount = 0;
   let squaresMarked = 0;
   for (const [key, stat] of Object.entries(dayStats)) {
-    if (Number(key) === farewellIndex) continue;
+    if (ceremonial.has(Number(key))) continue;
     bingoCount += stat.bingoCount;
     squaresMarked += stat.squaresMarked;
   }
@@ -86,7 +90,7 @@ function podiumStandingRow(
 
 /**
  * The podium the farewell view renders: cruise champion (top of the standings,
- * farewell Day excluded), cruise-wide First to BINGO (main-game Days only), and
+ * ceremonial Days excluded), Event-wide First to BINGO (main-game Days only), and
  * the per-Day honors strip. Computed from the live `PlayerDoc` aggregates + the
  * per-Day `dayStats`, with the farewell Day frozen out so a post-freeze goodbye
  * mark never changes who is on the podium.
@@ -127,10 +131,10 @@ export function buildPodium(
 ): Podium {
   const tutorial = tutorialDayIndexSet(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
-  const farewellIndex = farewellDayIndex(days);
+  const ceremonial = ceremonialDayIndexSet(days);
 
   const standings = players
-    .map((p) => podiumStandingRow(p, farewellIndex, isTutorialDay))
+    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay))
     .sort(comparePlayers);
   const top = standings[0];
   const champion: PodiumChampion | null =
@@ -174,21 +178,34 @@ export function buildPodium(
 }
 
 /**
- * The default-view pin once the cruise has ended: the farewell Day's ARRAY index
- * (the position Board indexes `days[viewedIndex]` by) once `frozenAt` is set AND
- * the farewell Day is unlocked. Returns `null` before the freeze — or when the
- * farewell Day is somehow still locked, or absent — so the caller falls back to
- * the normal "today" default. Never pins the farewell view early.
+ * The default-view pin once the Event has ended: the ARRAY index (the position
+ * Board indexes `days[viewedIndex]` by) of the Day the finale lives on, once
+ * `frozenAt` is set AND that Day is unlocked. Returns `null` before the freeze —
+ * or while the target Day is still locked, or when there are no Days — so the
+ * caller falls back to the normal "today" default. Never pins early.
+ *
+ * The target is the first CEREMONIAL Day when the schedule has one (the cruise
+ * shape: the goodbye card the podium banner mounts on), else the LAST Day (ADR
+ * 0011). An Event whose final morning is competitive play has no ceremonial card
+ * to pin, and pinning nothing would drop a returning Player onto "today" — which
+ * after the Event has ended is a Day that no longer exists in the schedule. The
+ * last Day is where the podium is posted in that shape, so it is where the
+ * podium should be read.
+ *
+ * Renamed from `farewellPinIndex`: the pin follows the Scoring Policy and the
+ * schedule's end, not the closing pool, and a `farewell`-named helper in a
+ * finale path is now exactly the kind of pool-inference ADR 0011 removed.
  */
-export function farewellPinIndex(
+export function finalePinIndex(
   days: readonly DayDef[] | undefined,
   frozenAt: number | null | undefined,
   now: number,
 ): number | null {
   if (frozenAt == null) return null;
   const arr = days ?? [];
-  const idx = arr.findIndex((d) => normalizePool(d.pool) === 'closing');
-  if (idx < 0) return null;
+  if (arr.length === 0) return null;
+  const ceremonialIdx = arr.findIndex((d) => isCeremonialDay(d));
+  const idx = ceremonialIdx >= 0 ? ceremonialIdx : arr.length - 1;
   if (arr[idx].unlockAt > now) return null;
   return idx;
 }

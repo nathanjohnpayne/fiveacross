@@ -56,7 +56,7 @@ import DaySwitcher, { defaultViewedIndex } from './DaySwitcher';
 import TutorialBanner, { TutorialTag } from './TutorialBanner';
 import { formatUnlockAt, unlockCaption } from '../unlockCopy';
 import FarewellPodium from './FarewellPodium';
-import { farewellPinIndex } from '../data/finale';
+import { finalePinIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
 import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
@@ -1731,11 +1731,11 @@ export default function Board() {
   // never override a Player's own later chip tap (adjust-during-render, mirroring
   // `edgeStateUid` above). Once the cruise has ended (`frozenAt` set + farewell
   // Day unlocked) the farewell Day — podium included — is pinned as the default
-  // view (#217, `farewellPinIndex`); before the freeze it falls back to today's Day.
+  // view (#217, `finalePinIndex`); before the freeze it falls back to today's Day.
   if (!viewedIndexInitialized.current && hasDays) {
     viewedIndexInitialized.current = true;
     const initNow = Date.now();
-    setViewedIndex(farewellPinIndex(days, event?.frozenAt, initNow) ?? defaultViewedIndex(days, initNow));
+    setViewedIndex(finalePinIndex(days, event?.frozenAt, initNow) ?? defaultViewedIndex(days, initNow));
   }
   const viewedDay = hasDays ? (days[viewedIndex] ?? days[0]) : undefined;
   // The viewed Day's deal state (#246), folding the schedule + clock + the
