@@ -4426,6 +4426,155 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   }
 }
 
+/* ---------- setup wizard shell (#788, specs/event-setup-wizard.md) ----------
+   The organizer wizard mounts at its own top-level route (/setup/*), not as
+   an overlay sheet — so unlike .sheet-backdrop/.admin-sheet it fills the page
+   rather than floating above other tab content. `.wizard-cancel-confirm`
+   below is the one exception: it IS a transient overlay, so it reuses
+   .sheet-backdrop/.sheet/.sheet-actions as-is (see CancelConfirmDialog.tsx). */
+.wizard-shell {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wizard-sheethead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0 10px;
+  background: var(--bg);
+}
+.wizard-back,
+.wizard-save {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.wizard-back:hover,
+.wizard-back:focus-visible,
+.wizard-save:hover,
+.wizard-save:focus-visible {
+  color: var(--ink);
+}
+.wizard-cancel {
+  color: var(--dim);
+}
+.wizard-title {
+  font-weight: 700;
+  outline: none;
+}
+.wizard-save-spacer {
+  min-width: 1px;
+}
+.wizard-saved-flash {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  margin-top: -6px;
+}
+
+/* ---------- five-step indicator ---------- */
+.wizard-steps {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.wizard-step-item {
+  flex: 1;
+  display: flex;
+}
+.wizard-step-pill {
+  flex: 1;
+  min-width: max-content;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.wizard-step-pill:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.wizard-step-pill.is-done {
+  color: var(--ink);
+}
+.wizard-step-pill.is-current {
+  border-color: var(--primary);
+  color: var(--ink);
+  box-shadow: 0 0 10px var(--shadow);
+}
+.wizard-step-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  font-size: 9px;
+  flex: none;
+}
+
+.wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* The frames' `.secthead` equivalent — rendered once by the shell from the
+   registry's `heading`, not by each step's own body (Codex P2, PR #840). */
+.wizard-step-heading {
+  font-weight: 700;
+  font-size: 13px;
+}
+.wizard-step-placeholder {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.wizard-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wizard-issues {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1.5px solid var(--danger, #ff6b7a);
+  border-radius: 12px;
+  color: var(--ink);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wizard-btnrow {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* ---------- reduced motion: the kill switch ----------
    One universal neutralizer instead of per-animation opt-outs, so a future
    animation can never ship un-covered (the pre-pass block only caught the
