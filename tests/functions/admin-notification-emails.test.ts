@@ -1122,16 +1122,15 @@ describe('sendAdminDigestForEvent', () => {
     // The real EMAIL_FROM param's `.value()` reads `process.env.EMAIL_FROM`
     // directly — its `default` is a deploy-time-only concern the firebase-tools
     // CLI resolves, never consulted at plain runtime — so an unset env var
-    // resolves to `''`, not the documented default. Mock the module, the same
-    // technique `tests/functions/w4-email-resend-admin-notify.test.ts` uses,
-    // for a deterministic fallback value in the three "falls back" cases below.
-    const mockEmailFromParam = () =>
-      vi.doMock('../../functions/src/params', () => ({
-        EMAIL_FROM: { value: () => 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>' },
-        EMAIL_FROM_GCB: { value: () => '' },
-        EMAIL_FROM_VACAY: { value: () => '' },
-        EMAIL_FROM_FIVEACROSS: { value: () => '' },
-      }));
+    // resolves to `''`, not the documented default. Stub the env var directly
+    // rather than mocking the whole `./params` module: `resolveEmailFrom`
+    // reaches it via a fresh `await import('./params')` on every call, and an
+    // earlier test in this file may already have resolved that dynamic import
+    // before a `vi.doMock` registration here would take effect. Stubbing
+    // `process.env` sidesteps that question entirely (CodeRabbit finding on
+    // PR #810). The value is deliberately NOT the real EMAIL_FROM default, so
+    // a passing assertion can only mean the stub was read.
+    const STUBBED_EMAIL_FROM = 'Stubbed Sender <stub@example.invalid>';
 
     it('sends from the Edition-configured address when the host resolves a known Edition', async () => {
       const send = vi.fn(async () => true);
@@ -1144,21 +1143,19 @@ describe('sendAdminDigestForEvent', () => {
     });
 
     it('falls back to EMAIL_FROM when the resolved Edition has no configured override', async () => {
-      mockEmailFromParam();
+      vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
       const send = vi.fn(async () => true);
       const db = seeded(
         [pendingAlert('a1')],
         [{ eventId: 'med-2026', canonicalHost: 'gaycruisebingo.com', edition: 'gcb', isCanonical: true, status: 'active' }],
       );
       await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, {}));
-      expect((send.mock.calls[0][0] as { from: string }).from).toBe(
-        'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
-      );
-      vi.doUnmock('../../functions/src/params');
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(STUBBED_EMAIL_FROM);
+      vi.unstubAllEnvs();
     });
 
     it('falls back to EMAIL_FROM for an unrecognized Edition rather than failing the send', async () => {
-      mockEmailFromParam();
+      vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
       const send = vi.fn(async () => true);
       const db = seeded(
         [pendingAlert('a1')],
@@ -1170,21 +1167,17 @@ describe('sendAdminDigestForEvent', () => {
         editionDeps(send, { 'some-future-edition': 'Should Not <use@example.com>' }),
       );
       expect(result.sent).toBe(1);
-      expect((send.mock.calls[0][0] as { from: string }).from).toBe(
-        'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
-      );
-      vi.doUnmock('../../functions/src/params');
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(STUBBED_EMAIL_FROM);
+      vi.unstubAllEnvs();
     });
 
     it('falls back to EMAIL_FROM when the Event has no hostname documents at all', async () => {
-      mockEmailFromParam();
+      vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
       const send = vi.fn(async () => true);
       const db = seeded([pendingAlert('a1')], []); // no hostnames → edition: null
       await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, { gcb: 'Should Not <use@example.com>' }));
-      expect((send.mock.calls[0][0] as { from: string }).from).toBe(
-        'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
-      );
-      vi.doUnmock('../../functions/src/params');
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(STUBBED_EMAIL_FROM);
+      vi.unstubAllEnvs();
     });
   });
 });

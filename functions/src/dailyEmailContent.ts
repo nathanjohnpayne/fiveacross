@@ -179,8 +179,12 @@ export function fromAddressFor(
 ): string | undefined {
   if (!edition || !Object.prototype.hasOwnProperty.call(REGISTERS, edition)) return undefined;
   if (!Object.prototype.hasOwnProperty.call(overrides, edition)) return undefined;
-  const value = overrides[edition];
-  return value && value.trim() !== '' ? value : undefined;
+  // Trim and return the SAME value: a value that is blank once trimmed falls
+  // back (the case above), but a value with incidental padding — a stray
+  // space pasted into an env file — must not carry that whitespace into the
+  // `From:` header the return sends (CodeRabbit finding on PR #810).
+  const value = overrides[edition]?.trim();
+  return value || undefined;
 }
 
 // --- Standings ------------------------------------------------------------------

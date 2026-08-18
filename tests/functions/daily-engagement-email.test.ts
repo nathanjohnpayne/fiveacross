@@ -426,6 +426,14 @@ describe('fromAddressFor (#671)', () => {
     expect(fromAddressFor('constructor', {})).toBeUndefined();
     expect(fromAddressFor('toString', {})).toBeUndefined();
   });
+
+  it('trims incidental whitespace from a configured override before returning it', () => {
+    // A stray space pasted into an env file must not ride into the `From:`
+    // header the caller sends (CodeRabbit finding on PR #810).
+    expect(fromAddressFor('vacay', { vacay: '  Vacay Bingo <hello@vacaybingo.com>  ' })).toBe(
+      'Vacay Bingo <hello@vacaybingo.com>',
+    );
+  });
 });
 
 describe('resolveEmailFrom (#671)', () => {
@@ -440,35 +448,31 @@ describe('resolveEmailFrom (#671)', () => {
   // caller in `dailyEmail.ts`/`adminAlerts.ts`), and that param's `.value()`
   // reads `process.env.EMAIL_FROM` directly — its `default` is a deploy-time
   // resolution concern, never consulted outside the CLI, so an unset env var
-  // resolves to `''` rather than the documented default. Mock the module, the
-  // same technique `w4-email-resend-admin-notify.test.ts` uses, so these
-  // assertions are about the FALLBACK WIRING, not about firebase-functions'
-  // param-resolution internals.
-  const mockParams = (emailFrom: string) =>
-    vi.doMock('../../functions/src/params', () => ({
-      EMAIL_FROM: { value: () => emailFrom },
-      EMAIL_FROM_GCB: { value: () => '' },
-      EMAIL_FROM_VACAY: { value: () => '' },
-      EMAIL_FROM_FIVEACROSS: { value: () => '' },
-    }));
+  // resolves to `''` rather than the documented default. Stub the env var
+  // directly (`vi.stubEnv`/`vi.unstubAllEnvs`) rather than mocking the whole
+  // `./params` module: `resolveEmailFrom` reaches it via a fresh `await
+  // import('./params')` on every call, and an EARLIER test in this same file
+  // that already resolved that dynamic import (any of the `fromOverrides`
+  // cases above, which still touch `EMAIL_FROM` for the unused fallback
+  // value) can leave a `vi.doMock` registration racing the module's cache —
+  // stubbing `process.env` sidesteps that question entirely (CodeRabbit
+  // finding on PR #810). The value is deliberately NOT the real EMAIL_FROM
+  // default, so a passing assertion can only mean the stub was read.
+  const STUBBED_EMAIL_FROM = 'Stubbed Sender <stub@example.invalid>';
 
   it('falls back to the EMAIL_FROM param when no override is configured', async () => {
-    mockParams('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
-    await expect(resolveEmailFrom('gcb', {})).resolves.toBe(
-      'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
-    );
-    vi.doUnmock('../../functions/src/params');
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+    await expect(resolveEmailFrom('gcb', {})).resolves.toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
   });
 
   it('falls back to EMAIL_FROM for a null or unrecognized Edition, so an unknown Edition still sends', async () => {
-    mockParams('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
-    await expect(resolveEmailFrom(null, {})).resolves.toBe(
-      'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
-    );
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+    await expect(resolveEmailFrom(null, {})).resolves.toBe(STUBBED_EMAIL_FROM);
     await expect(
       resolveEmailFrom('some-future-edition', { 'some-future-edition': 'Should Not <use@example.com>' }),
-    ).resolves.toBe('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
-    vi.doUnmock('../../functions/src/params');
+    ).resolves.toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
   });
 });
 
@@ -1182,24 +1186,20 @@ describe('sendDailyEmailForEvent', () => {
   // The real EMAIL_FROM param's `.value()` reads `process.env.EMAIL_FROM`
   // directly (its `default` is a deploy-time-only concern — see the
   // `resolveEmailFrom` describe block above for the full explanation), so
-  // these two mock the params module for a deterministic fallback value.
-  const mockEmailFromParam = () =>
-    vi.doMock('../../functions/src/params', () => ({
-      EMAIL_FROM: { value: () => 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>' },
-      EMAIL_FROM_GCB: { value: () => '' },
-      EMAIL_FROM_VACAY: { value: () => '' },
-      EMAIL_FROM_FIVEACROSS: { value: () => '' },
-    }));
+  // these two stub the env var directly rather than mocking the whole
+  // `./params` module (CodeRabbit finding on PR #810 — see that describe
+  // block's comment for why `vi.doMock` is the wrong tool here).
+  const STUBBED_EMAIL_FROM = 'Stubbed Sender <stub@example.invalid>';
 
   it('falls back to EMAIL_FROM when the resolved Edition has no configured override', async () => {
-    mockEmailFromParam();
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
     const { sent } = await run(seedEvent(), { from: undefined, fromOverrides: {} }); // edition: 'gcb'
-    expect(sent[0].from).toBe('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
-    vi.doUnmock('../../functions/src/params');
+    expect(sent[0].from).toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
   });
 
   it('falls back to EMAIL_FROM for an unrecognized Edition rather than failing the send', async () => {
-    mockEmailFromParam();
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
     const docs = seedEvent();
     docs['hostnames/gaycruisebingo.com'] = { ...docs['hostnames/gaycruisebingo.com'], edition: 'some-future-edition' };
     const { result, sent } = await run(docs, {
@@ -1207,8 +1207,8 @@ describe('sendDailyEmailForEvent', () => {
       fromOverrides: { 'some-future-edition': 'Should Not <use@example.com>' },
     });
     expect(result.sent).toBe(2);
-    expect(sent[0].from).toBe('Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>');
-    vi.doUnmock('../../functions/src/params');
+    expect(sent[0].from).toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
   });
 
   it('sends nothing when the Event-level admin toggle is off (the shipped default)', async () => {
