@@ -204,6 +204,41 @@ function constructorBindings(sourceFile, filePath) {
 }
 
 /**
+ * Local name → constructor kind, for names `sourceFile` imports DIRECTLY
+ * (not through any barrel) from the params module. Deliberately narrow and
+ * non-recursive: it exists only to resolve a bare `export { X }` (no `from`
+ * clause) re-exporting an import in the SAME file — the "import, then
+ * separately export" barrel idiom (Codex P2 round 4 on PR #826) — and is
+ * not a substitute for `constructorBindings`' full binding resolution (see
+ * `reExportedParamsBindings`'s own doc comment for why calling that back in
+ * from here would be unsafe).
+ */
+function directParamsImportBindings(sourceFile) {
+  const bindings = new Map();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      statement.importClause?.isTypeOnly ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== PARAMS_MODULE
+    ) {
+      continue;
+    }
+    const named = statement.importClause?.namedBindings;
+    if (named && ts.isNamedImports(named)) {
+      for (const element of named.elements) {
+        if (element.isTypeOnly) continue;
+        const kind = CONSTRUCTOR_RE.exec((element.propertyName ?? element.name).text);
+        if (kind) {
+          bindings.set(element.name.text, kind[1]);
+        }
+      }
+    }
+  }
+  return bindings;
+}
+
+/**
  * Local export name → constructor kind, for names `filePath` re-exports
  * (directly, or through a chain of further local re-export barrels) from the
  * params module (#738).
@@ -230,6 +265,18 @@ function constructorBindings(sourceFile, filePath) {
  * until the call stack overflows. A namespace re-export barrel (`import *
  * as params from './barrel'`) is NOT resolved here — only named re-exports —
  * a narrower, still-useful scope for the common idiom.
+ *
+ * Also resolves the "import, then separately export" barrel idiom —
+ * `import { defineString } from 'firebase-functions/params'; export {
+ * defineString };` — via `directParamsImportBindings`, a deliberately
+ * NARROW, non-recursive lookup of names THIS file imports straight from the
+ * params module (Codex P2 round 4 on PR #826). It does not follow a
+ * relative import the same way: that would mean calling the full
+ * `constructorBindings` (which itself calls back into
+ * `reExportedParamsBindings` for a relative barrel import) from inside this
+ * function, on a SEPARATE, unlinked `visited` set — reopening the exact
+ * unbounded-recursion class of bug fixed above, for a cycle this function's
+ * own cycle guard would no longer be positioned to catch.
  */
 function reExportedParamsBindings(filePath, visited = new Set()) {
   const result = new Map();
@@ -240,13 +287,27 @@ function reExportedParamsBindings(filePath, visited = new Set()) {
   try {
     const text = readFileSync(filePath, 'utf8');
     const sourceFile = ts.createSourceFile(filePath, text, ts.ScriptTarget.Latest, true);
+    const localImports = directParamsImportBindings(sourceFile);
     for (const statement of sourceFile.statements) {
-      if (
-        !ts.isExportDeclaration(statement) ||
-        statement.isTypeOnly ||
-        !statement.moduleSpecifier ||
-        !ts.isStringLiteral(statement.moduleSpecifier)
-      ) {
+      if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) {
+        continue;
+      }
+      if (!statement.moduleSpecifier) {
+        // `export { defineString }` — no `from` clause: re-exporting a name
+        // THIS file imported separately, resolved against `localImports`.
+        const bareClause = statement.exportClause;
+        if (bareClause && ts.isNamedExports(bareClause)) {
+          for (const element of bareClause.elements) {
+            if (element.isTypeOnly) continue;
+            const kind = localImports.get((element.propertyName ?? element.name).text);
+            if (kind) {
+              result.set(element.name.text, kind);
+            }
+          }
+        }
+        continue;
+      }
+      if (!ts.isStringLiteral(statement.moduleSpecifier)) {
         continue;
       }
       const specifier = statement.moduleSpecifier.text;
@@ -333,6 +394,30 @@ function isHoistedDeclarationList(declarationList) {
 }
 
 /**
+ * Whether `sourceFile` is strict — a module (`ts.isExternalModule`), OR a
+ * script that opts in with its own leading `'use strict'` directive (Codex
+ * P2 round 4 on PR #826): a `.cjs` file has no import/export syntax, so
+ * `ts.isExternalModule` is false for it regardless, but a literal `'use
+ * strict';` as its first statement (the ECMAScript "directive prologue" —
+ * only leading string-literal expression statements count, and only the
+ * exact text matters) disables Annex B hoisting there too.
+ */
+function isStrictSourceFile(sourceFile) {
+  if (ts.isExternalModule(sourceFile)) {
+    return true;
+  }
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExpressionStatement(statement) || !ts.isStringLiteral(statement.expression)) {
+      break;
+    }
+    if (statement.expression.text === 'use strict') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Every `var`/function-declaration name bound ANYWHERE within `node` — at any
  * nesting depth through blocks, `if`/`for`/`while`/`try`/`catch`, etc. — but
  * never crossing into a nested function's own body (#741).
@@ -354,12 +439,11 @@ function collectHoistedNames(node, names) {
   // genuinely block-scoped: collecting it as though it hoists creates a
   // FALSE shadow over a call that, in the real module, still reaches the
   // outer import — dropping the exact real param this file exists to catch,
-  // not adding a spurious one). Every `.ts` source in this tree is written
-  // as ESM (`import`/`export`), making it a module by construction;
-  // `ts.isExternalModule` is the general, syntax-driven test (any top-level
-  // import or export makes a file a module) rather than assuming the
-  // extension.
-  if (ts.isFunctionDeclaration(node) && node.name && !ts.isExternalModule(node.getSourceFile())) {
+  // not adding a spurious one). `isStrictSourceFile` covers a `.cjs` SCRIPT
+  // that opts into strict mode with its own `'use strict'` directive too
+  // (Codex P2 round 4 on PR #826) — `ts.isExternalModule` alone only catches
+  // the module case.
+  if (ts.isFunctionDeclaration(node) && node.name && !isStrictSourceFile(node.getSourceFile())) {
     // Recorded BEFORE the function-like early return below, not after it —
     // `ts.isFunctionLike` also matches `FunctionDeclaration`, so putting
     // this in the `else if` chain after that check made it unreachable dead
@@ -399,6 +483,23 @@ function collectHoistedNames(node, names) {
     bindingNames(node.initializer.declarations[0].name, names);
   }
   ts.forEachChild(node, (child) => collectHoistedNames(child, names));
+}
+
+/**
+ * Whether `name` is `var`/function-declaration hoisted to `sourceFile`'s own
+ * top level, from ANY nesting depth of `if`/`for`/`while`/etc — the file-top
+ * counterpart of what `collectHoistedNames` already does for a function
+ * body. `collectHoistedNames` accepts a `SourceFile` directly: it is not
+ * function-like, so the walk simply recurses through every top-level
+ * statement (stopping only at a nested function's own boundary, same as
+ * always). Used only by the `require`-identifier shadow check (#740) — see
+ * its call site for why that check needs file-top coverage a param
+ * constructor name does not (Codex P2 round 4 on PR #826).
+ */
+function fileTopHoistsName(sourceFile, name) {
+  const names = new Set();
+  collectHoistedNames(sourceFile, names);
+  return names.has(name);
 }
 
 /**
@@ -858,12 +959,19 @@ function relativeDependencies(sourceFile, label) {
         // positive would abort validation over unrelated application code.
         //
         // Checked at EVERY level including the file top — `!isShadowed(...)`
-        // covers every ancestor scope up to (but excluding) the file top,
-        // and `!scopeDeclares(sourceFile, 'require')` covers the file top
-        // itself. `require` needs that file-top coverage, unlike the
-        // `isShadowed`-only check `constructorKindOf` uses for a param
-        // constructor name: `require` is not necessarily imported, so a
-        // plain top-level `const require = …;` is legal TS and genuinely
+        // covers every ancestor scope up to (but excluding) the file top;
+        // `!scopeDeclares(sourceFile, 'require')` covers a direct top-level
+        // declaration (including one nested inside a plain block, which
+        // `scopeDeclares`'s Block/SourceFile branch also now recurses into —
+        // see that branch); and `!fileTopHoistsName(sourceFile, 'require')`
+        // covers a `var`/function declaration hoisted to the file top from
+        // ANY depth of nested `if`/`for`/`while` — `var` hoists to the
+        // module/script top exactly like it hoists to a function, and
+        // `scopeDeclares`'s own top-level scan is intentionally shallow
+        // (Codex P2 round 4 on PR #826). `require` needs all of this,
+        // unlike the `isShadowed`-only check `constructorKindOf` uses for a
+        // param constructor name: `require` is not necessarily imported, so
+        // a plain top-level `const require = …;` is legal TS and genuinely
         // shadows Node's global for the whole module (Codex P2 round 2 on
         // PR #826) — where a param constructor's name always IS imported,
         // making a top-level redeclaration of ITS name a TypeScript
@@ -874,7 +982,8 @@ function relativeDependencies(sourceFile, label) {
         (ts.isIdentifier(node.expression) &&
           node.expression.text === 'require' &&
           !isShadowed(node, 'require') &&
-          !scopeDeclares(sourceFile, 'require')))
+          !scopeDeclares(sourceFile, 'require') &&
+          !fileTopHoistsName(sourceFile, 'require')))
     ) {
       const [first] = node.arguments;
       if (first) {

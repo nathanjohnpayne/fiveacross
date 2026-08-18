@@ -454,6 +454,30 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(nestedFunctionDeclarationInScript).params).toEqual(['CJS_REAL_PARAM']);
   });
 
+  // Codex P2 round 4 on PR #826: a `.cjs` file has no import/export syntax
+  // (so `ts.isExternalModule` is false), but a leading `'use strict';`
+  // directive disables Annex B hoisting there too — the same as a module.
+  it('does not hoist a block-nested function declaration in a script with its own "use strict" directive', () => {
+    const nestedFunctionDeclarationInStrictScript = [
+      "'use strict';",
+      "const { defineString } = require('firebase-functions/params');",
+      'function helper(flag) {',
+      "  const early = defineString('STRICT_CJS_PARAM_STILL_REAL');",
+      '  if (flag) {',
+      '    function defineString() { return null; }',
+      '  }',
+      '  return early;',
+      '}',
+      "exports.A = defineString('CJS_REAL_PARAM');",
+      'exports.B = helper;',
+    ].join('\n');
+
+    expect(declaredParamNames(nestedFunctionDeclarationInStrictScript).params).toEqual([
+      'STRICT_CJS_PARAM_STILL_REAL',
+      'CJS_REAL_PARAM',
+    ]);
+  });
+
   // Codex P2 round 2 on PR #826: a call inside a PARAMETER's own default-
   // value initializer runs in a separate parameter scope that cannot see
   // the function BODY's `var`/function-declaration bindings — only a call
@@ -635,6 +659,29 @@ describe('functions source-tree reachability and barrel resolution', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // Codex P2 round 4 on PR #826: the "import, then separately export" form
+  // — `import { defineString } from 'firebase-functions/params'; export {
+  // defineString };` — has no `moduleSpecifier` on its export declaration at
+  // all, unlike `export { defineString } from '...'`, and was skipped
+  // entirely.
+  it('resolves a constructor reached through an import-then-export barrel', () => {
+    const dir = makeTree({
+      'barrel.ts': [
+        "import { defineString } from 'firebase-functions/params';",
+        'export { defineString };',
+      ].join('\n'),
+      'index.ts': [
+        "import { defineString } from './barrel';",
+        "defineString('IMPORT_THEN_EXPORT_PARAM');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['IMPORT_THEN_EXPORT_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   // Codex P2 on PR #826: two SIBLING barrels that both re-export from the
   // SAME shared upstream module are two separate, non-cyclic paths, not a
   // cycle — the first version of the cycle guard shared one `visited` set
@@ -709,6 +756,24 @@ describe('functions source-tree reachability and barrel resolution', () => {
       'loader.ts': 'export default function loader(name) { return name; }\n',
       'index.ts': [
         "import require from './loader';",
+        'require(computeSomethingUnrelated());',
+      ].join('\n'),
+    });
+
+    expect(() => functionsSources(join(dir, 'index.ts'))).not.toThrow();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 round 4 on PR #826: `var` hoists to the module/script top the
+  // same way it hoists to a function — including from inside a nested `if`
+  // at the file's own top level, not just a direct top-level statement.
+  it('does not fail closed on a non-literal call through a require shadowed by a var nested at the file top', () => {
+    const dir = makeTree({
+      'index.ts': [
+        'if (typeof globalThis.flag !== "undefined") {',
+        '  var require = (name) => name;',
+        '}',
         'require(computeSomethingUnrelated());',
       ].join('\n'),
     });
