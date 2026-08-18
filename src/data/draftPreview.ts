@@ -172,17 +172,19 @@ function curatedDealItems(list: readonly DraftCuratedPrompt[], poolId: 'easy' | 
 /**
  * The `DealItem[]` `dealBoard` deals from, for a deal from `pool`.
  *
- * `mixEasy` (true only for an actual `daily_cards` MAIN Day) mirrors the
- * live deal's own membership rule (`src/data/api.ts` `dealDayCard`): a main
- * Day mixes BOTH the main and easy pools in, so `dealBoard` can stratify the
- * easy half per specs/easy-mix.md. A `one_card` draft's main deal (`pool ===
- * 'main'` with `mixEasy` false — see `dealPreviewCard`) is deliberately NOT
- * the same rule: `joinAndDeal`'s one-card path pulls from the main pool
- * ONLY, and `assignedPools` agrees (`one_card` ⇒ `['main']`), so mixing easy
- * items in here would preview squares the launched Board never deals
- * (Codex P2, PR #857 round 2 — reachable because `applyOccasionDefaults`
- * preserves an authored easy pool across an occasion switch INTO one-card).
- * `easy`/`closing` always deal their own pool alone, regardless of `mixEasy`.
+ * `mixEasy` (true for any `daily_cards` MAIN deal — an actual main Day, OR a
+ * `daily_cards` draft with no Days authored yet, which still previews as a
+ * main deal per the spec) mirrors the live deal's own membership rule
+ * (`src/data/api.ts` `dealDayCard`): a main deal mixes BOTH the main and
+ * easy pools in, so `dealBoard` can stratify the easy half per
+ * specs/easy-mix.md. A `one_card` draft's main deal (`mixEasy` false — see
+ * `dealPreviewCard`'s `cardFormat` check) is deliberately NOT the same rule:
+ * `joinAndDeal`'s one-card path pulls from the main pool ONLY, and
+ * `assignedPools` agrees (`one_card` ⇒ `['main']`), so mixing easy items in
+ * here would preview squares the launched Board never deals (Codex P2, PR
+ * #857 round 2 — reachable because `applyOccasionDefaults` preserves an
+ * authored easy pool across an occasion switch INTO one-card). `easy`/
+ * `closing` always deal their own pool alone, regardless of `mixEasy`.
  */
 function previewDealItems(draft: EventDraft, pool: PoolId, mixEasy: boolean): DealItem[] {
   if (pool === 'main') {
@@ -199,9 +201,13 @@ export type PreviewDeal = { cells: Cell[] } | { shortfall: string };
 /**
  * Deal the expanded preview's sample card for `day` — or, when `day` is
  * `null` (a `one_card` draft, or a `daily_cards` draft with no Days yet),
- * the draft's main pool, unstratified-mix rules identical to a main Day. The
- * REAL deal path (`dealBoard`), a fixed seed, and the draft's own mix ratio
- * and free-space text — exactly what the acceptance criteria ask for.
+ * the draft's main pool. The REAL deal path (`dealBoard`), a fixed seed, and
+ * the draft's own mix ratio and free-space text — exactly what the
+ * acceptance criteria ask for. Those two `day === null` cases are NOT dealt
+ * identically, though — a `one_card` draft's main-only deal never mixes in
+ * the easy pool, exactly matching a `daily_cards` MAIN Day, but a
+ * `daily_cards` draft with no Days *does*, because its eventual main Day
+ * will (see `mixEasy` in `previewDealItems`, Codex P2, PR #857 round 3).
  *
  * `dealBoard` throws its own `MIN_POOL` guard message when the assigned
  * pool is too thin to deal (`src/game/logic.ts`). This catches THAT message
@@ -219,7 +225,15 @@ export type PreviewDeal = { cells: Cell[] } | { shortfall: string };
  */
 export function dealPreviewCard(draft: EventDraft, day: DraftDayDef | null): PreviewDeal {
   const pool = day ? normalizePool(day.pool) : 'main';
-  const mixEasy = day !== null && pool === 'main';
+  // Easy mixing is a `cardFormat` question, NOT a "day is null" one — a
+  // `daily_cards` draft with no Days authored yet (Custom, before Step 4)
+  // is still going to deal a main-Day-shaped card once one exists, and the
+  // spec says so explicitly (§ "Live preview strip"). Gating on `day !==
+  // null` alone (round 2's one-card fix) wrongly swept up THIS case too,
+  // since it is also `day === null` (Codex P2, PR #857 round 3). Only an
+  // actual `one_card` draft — whose LAUNCHED deal is main-only, per
+  // `joinAndDeal` and `assignedPools` — skips the mix.
+  const mixEasy = draft.cardFormat !== 'one_card' && pool === 'main';
   const assignedList = pool === 'main' ? draft.prompts.main : draft.prompts[pool];
   const assignedCount = assignedList.filter(() => true).length;
   if (assignedCount < MIN_POOL) {

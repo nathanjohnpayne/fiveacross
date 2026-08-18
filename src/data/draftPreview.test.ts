@@ -240,12 +240,32 @@ describe('dealPreviewCard', () => {
     expect('cells' in result).toBe(true);
   });
 
+  it('DOES mix the easy pool into a daily_cards draft with no Days yet (day: null, but not one_card)', () => {
+    // Custom before Step 4 authors any Days: day is null, cardFormat stays
+    // 'daily_cards', and the eventual main Day WILL mix in easy per
+    // specs/easy-mix.md — round 2's one-card fix wrongly swept this case up
+    // too, since it is also day === null (Codex P2, PR #857 round 3).
+    const draft = draftWith({
+      cardFormat: 'daily_cards',
+      days: [],
+      prompts: { main: mainPrompts(24), easy: curatedPrompts(24, 'easy'), closing: [] },
+      settings: { ...createEventDraft({ now: 0 }).settings, easyMixRatio: 1 },
+    });
+    const result = dealPreviewCard(draft, null);
+    expect('cells' in result).toBe(true);
+    if ('cells' in result) {
+      const texts = result.cells.filter((c) => !c.free).map((c) => c.text);
+      expect(texts.every((t) => t.startsWith('easy prompt'))).toBe(true);
+    }
+  });
+
   it('never mixes the easy pool into a one_card (day: null) deal, even when easy Prompts exist and easyMixRatio is 100%', () => {
     // Reachable when an occasion switch INTO one-card leaves an authored
     // easy pool behind (applyOccasionDefaults preserves Prompts) — the
     // launched one-card Board deals from main ALONE (Codex P2, PR #857
     // round 2), so the preview must too.
     const draft = draftWith({
+      cardFormat: 'one_card',
       prompts: { main: mainPrompts(24), easy: curatedPrompts(24, 'easy'), closing: [] },
       settings: { ...createEventDraft({ now: 0 }).settings, easyMixRatio: 1 },
     });
