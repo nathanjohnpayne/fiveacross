@@ -312,7 +312,20 @@ export function finaleClosingPoolIssues(draft: EventDraft): DraftIssue[] {
  */
 export function firstUnlockIssues(draft: EventDraft, now: number): DraftIssue[] {
   if (draft.cardFormat === 'one_card') return [];
-  const first = daysInOrder(draft)[0];
+  // Specifically the Day whose INDEX IS 0, found directly — NOT
+  // `daysInOrder(draft)[0]`. `daysInOrder` sorts ascending, so on a malformed
+  // schedule carrying a negative index alongside a real Day 0 (e.g. indexes
+  // `-1` and `0`), position `[0]` in that sorted array is the Day at index
+  // `-1`, not Day 0 — `[0].index !== 0` would then report NO first-unlock
+  // issue even though Day 0 exists and needs one (CodeRabbit, #833 review).
+  // A schedule missing Day 0 entirely is already its own failure —
+  // `dayCompletenessIssues` reports the gap as `day-index-out-of-order` — and
+  // treating a later Day as "first" here would double-misreport it: the
+  // hardcoded "Day 1" message would actually describe Day 2 or later, AND
+  // `validateEventDraft`'s dedup would suppress that Day's own generic
+  // `day-missing-unlock` / `day-unlock-date-mismatch` diagnostic because it
+  // believes the specific row already covers it (#816).
+  const first = daysInOrder(draft).find((day) => day.index === 0);
   if (!first) return [];
   if (first.unlockAt === null) {
     return [
@@ -493,6 +506,14 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
       isIsoDate(day.date) &&
       isIsoDate(draft.startsOn) &&
       isIsoDate(draft.endsOn) &&
+      // ORDERED, not just individually valid. `eventCompletenessIssues`
+      // already reports a reversed window as its own `event-invalid-date-window`
+      // issue; comparing a Day's date against a window that is backwards is
+      // not a second, independent repair — every Day would additionally fail
+      // `day-outside-event-window` for the one mistake the event-level issue
+      // already names, burying the checklist under an issue-per-Day pile that
+      // clears the instant `startsOn`/`endsOn` are fixed (#815).
+      draft.startsOn <= draft.endsOn &&
       (day.date < draft.startsOn || day.date > draft.endsOn)
     ) {
       // Both dates can be individually valid and still contradict each other:
