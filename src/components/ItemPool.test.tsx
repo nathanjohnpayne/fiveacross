@@ -125,6 +125,35 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
     render(<ItemPool />);
     expect(screen.getByText('Just submitted')).toBeInTheDocument();
   });
+
+  // #559, Codex P2 on PR #845: once a locally-tracked submission is approved,
+  // it lands in BOTH `useItems`' active pool AND the local tracker's own
+  // resolved status list — rendering `items` unfiltered duplicated the row.
+  // This jsdom project ships no localStorage of its own (same stub every
+  // other localStorage-dependent test in this file / CoachOverlay.test /
+  // reshuffle-intro.test uses) — stubbed and torn down within the test since
+  // no other test in this describe block needs it.
+  it('never renders an approved own-submission twice — once as a plain pool row and once with its status pill', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage);
+    try {
+      H.items = [item('mine-1', { status: 'active', text: 'My approved prompt' })];
+      localStorage.setItem(
+        'gcb.mySuggestions.ev-1.u1',
+        JSON.stringify([{ id: 'mine-1', text: 'My approved prompt', submittedAt: 1 }]),
+      );
+      render(<ItemPool />);
+      expect(screen.getAllByText('My approved prompt')).toHaveLength(1);
+      const row = screen.getByText('My approved prompt').closest('.row') as HTMLElement;
+      expect(row.querySelector('.pill')?.textContent).toMatch(/approved/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // #610 — the PLAYER half: a first-time 🔞 tick gets an explainer, once per

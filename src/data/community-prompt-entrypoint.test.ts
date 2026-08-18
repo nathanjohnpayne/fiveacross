@@ -152,29 +152,50 @@ describe('deriveMySubmissions (#559)', () => {
 
   it('reports every row in the LIVE pending query as "pending", even one this device never tracked (cross-device visibility)', () => {
     const pendingMine = [item({ id: 'p1', status: 'pending', text: 'from another device', createdAt: 10 })];
-    const views = deriveMySubmissions([], pendingMine, [], days, 0);
+    const views = deriveMySubmissions([], pendingMine, [], days, 0, true);
     expect(views).toEqual([{ id: 'p1', text: 'from another device', submittedAt: 10, status: 'pending' }]);
   });
 
-  it('resolves a tracked id that is now active to its derived submitterStatus, with dayIndex when scheduled', () => {
-    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5 }];
-    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
-    const views = deriveMySubmissions(tracked, [], activeMine, days, 0);
+  it('resolves a tracked id that is now active to its derived submitterStatus, with dayIndex when scheduled, using the ACTIVE document\'s text', () => {
+    const tracked = [{ id: 'a1', text: 'original wording', submittedAt: 5 }];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2, text: 'authoritative wording' })];
+    const views = deriveMySubmissions(tracked, [], activeMine, days, 0, true);
     expect(views).toEqual([
-      { id: 'a1', text: 'Wore Crocs', submittedAt: 5, status: 'scheduled', dayIndex: 2 },
+      { id: 'a1', text: 'authoritative wording', submittedAt: 5, status: 'scheduled', dayIndex: 2 },
     ]);
   });
 
-  it('reports a tracked id absent from BOTH live queries as "not_selected" — the rejected-and-unreadable inference', () => {
+  it('reports a tracked id absent from BOTH live queries as "not_selected" once both queries are ready — the rejected-and-unreadable inference', () => {
     const tracked = [{ id: 'gone', text: 'Too spicy for this crowd', submittedAt: 5 }];
-    const views = deriveMySubmissions(tracked, [], [], days, 0);
+    const views = deriveMySubmissions(tracked, [], [], days, 0, true);
     expect(views).toEqual([{ id: 'gone', text: 'Too spicy for this crowd', submittedAt: 5, status: 'not_selected' }]);
+  });
+
+  it('OMITS (never guesses) a tracked id absent from both live queries while they are not yet ready', () => {
+    const tracked = [{ id: 'gone', text: 'Too spicy for this crowd', submittedAt: 5 }];
+    const views = deriveMySubmissions(tracked, [], [], days, 0, false);
+    expect(views).toEqual([]);
+  });
+
+  it('still resolves a tracked id already found in a live query even while NOT ready — only the absence case waits', () => {
+    const tracked = [{ id: 'a1', text: 'Wore Crocs', submittedAt: 5 }];
+    const activeMine = [item({ id: 'a1', status: 'active', targetDayIndex: 2 })];
+    const views = deriveMySubmissions(tracked, [], activeMine, days, 0, false);
+    expect(views).toHaveLength(1);
+    expect(views[0].status).toBe('scheduled');
+  });
+
+  it("uses the active document's authoritative text once approved, not the locally tracked original", () => {
+    const tracked = [{ id: 'a1', text: 'original wording', submittedAt: 5 }];
+    const activeMine = [item({ id: 'a1', status: 'active', text: 'admin-edited wording' })];
+    const views = deriveMySubmissions(tracked, [], activeMine, days, 0, true);
+    expect(views[0].text).toBe('admin-edited wording');
   });
 
   it('never double-counts a tracked id that is ALSO in the live pending query', () => {
     const tracked = [{ id: 'p1', text: 'mine', submittedAt: 1 }];
     const pendingMine = [item({ id: 'p1', status: 'pending', text: 'mine', createdAt: 1 })];
-    const views = deriveMySubmissions(tracked, pendingMine, [], days, 0);
+    const views = deriveMySubmissions(tracked, pendingMine, [], days, 0, true);
     expect(views).toHaveLength(1);
     expect(views[0].status).toBe('pending');
   });
@@ -182,7 +203,7 @@ describe('deriveMySubmissions (#559)', () => {
   it('sorts the merged view oldest-first', () => {
     const tracked = [{ id: 'later', text: 'b', submittedAt: 200 }];
     const pendingMine = [item({ id: 'earlier', status: 'pending', text: 'a', createdAt: 100 })];
-    const views = deriveMySubmissions(tracked, pendingMine, [], days, 0);
+    const views = deriveMySubmissions(tracked, pendingMine, [], days, 0, true);
     expect(views.map((v) => v.id)).toEqual(['earlier', 'later']);
   });
 });

@@ -102,6 +102,16 @@ export interface MySubmissionView {
  * existing pending visibility). A tracked id absent from BOTH queries is the
  * one case this module exists for — `'not_selected'`, inferred rather than
  * read.
+ *
+ * `ready` gates that inference (Codex P2, PR #845): the two live queries do
+ * not resolve their FIRST snapshot in lockstep — a cold load, an offline
+ * cache, or `useMyPendingItems` simply finishing after `useItems` all leave
+ * one query's result incomplete while the other has already settled. Reading
+ * absence from an INCOMPLETE pair would flash a still-pending (or still-
+ * loading) submission as `'not_selected'`. While `ready` is false, a tracked
+ * id resolved by neither query is OMITTED from the result entirely — never
+ * defaulted to a guessed state — and reappears correctly once both queries
+ * have delivered their first snapshot.
  */
 export function deriveMySubmissions(
   tracked: readonly TrackedSuggestion[],
@@ -109,6 +119,7 @@ export function deriveMySubmissions(
   activeMine: readonly ItemDoc[],
   days: readonly TargetableDay[],
   now: number,
+  ready: boolean,
 ): MySubmissionView[] {
   const seen = new Set<string>();
   const views: MySubmissionView[] = [];
@@ -122,9 +133,15 @@ export function deriveMySubmissions(
     if (seen.has(t.id)) continue;
     seen.add(t.id);
     const active = activeMine.find((it) => it.id === t.id);
+    if (!active && !ready) continue;
     views.push({
       id: t.id,
-      text: t.text,
+      // The authoritative text once approved (Codex P2, PR #845): an admin
+      // may edit a submission's wording before or after approval, and the
+      // active document carries whatever text will actually be dealt — the
+      // locally tracked original is a fallback ONLY for the unreadable
+      // (not-selected) case, where no authoritative copy is available at all.
+      text: active ? active.text : t.text,
       submittedAt: t.submittedAt,
       status: active ? submitterStatus(active, days, now) : 'not_selected',
       dayIndex: active && typeof active.targetDayIndex === 'number' ? active.targetDayIndex : undefined,

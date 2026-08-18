@@ -1871,6 +1871,17 @@ export default function Board() {
   const daySwitcher = hasDays ? (
     <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} />
   ) : null;
+  // "Put it on tomorrow's card" entry point (#559), computed once alongside
+  // `daySwitcher` and included everywhere `daySwitcher` itself is (every
+  // early-return branch below, plus the main dealt-card return) — CodeRabbit
+  // P1 finding: the earlier single instantiation lived ONLY inside the dealt-
+  // card return, so it vanished on every other Board state (locked/waking
+  // preview, deal error, thin pool, cached fallback, the "Dealing…" spinner)
+  // even though a later eligible Day could still be open. Hidden on its own
+  // (`TomorrowsCardInvite`'s own `targetableDays` check) whenever there is
+  // genuinely nothing to invite a suggestion for. Deliberately does NOT call
+  // `useNavigate` itself — see the doc comment where it renders below.
+  const promptInvite = <TomorrowsCardInvite days={days} now={now} onOpen={requestOpenSuggestPanel} />;
   // The tutorial (embark/farewell) Day indexes, threaded to the Mark/proof write
   // paths so the persisted cruise-wide `firstBingoAt` excludes them (spec §
   // "Resolved decisions" #2). `undefined` for legacy events excludes nothing.
@@ -1905,6 +1916,7 @@ export default function Board() {
     return (
       <>
         {daySwitcher}
+        {promptInvite}
         <LockedDayPreview
           day={viewedDay}
           timezone={event?.timezone}
@@ -1923,6 +1935,7 @@ export default function Board() {
       return (
         <>
           {daySwitcher}
+          {promptInvite}
           <div className="center muted" role="alert">
             <p>We couldn’t deal this day’s card.</p>
             <p>Check your connection, then retry.</p>
@@ -1980,6 +1993,7 @@ export default function Board() {
       return (
         <>
           {daySwitcher}
+          {promptInvite}
           <div className="center muted" role="alert">
             <p>Not enough prompts to deal a full card yet.</p>
             <p>
@@ -2001,6 +2015,7 @@ export default function Board() {
         return (
           <>
             {daySwitcher}
+            {promptInvite}
             <CachedCardFallback
               snapshot={snapshot}
               onRetry={() => {
@@ -2020,6 +2035,7 @@ export default function Board() {
     return (
       <>
         {daySwitcher}
+        {promptInvite}
         <LoadingState label="Dealing your card…" />
       </>
     );
@@ -2480,15 +2496,11 @@ export default function Board() {
           />
         )}
         {viewedDay && <TutorialBanner day={viewedDay} event={event} />}
-        {/* "Put it on tomorrow's card" entry point (#559) — hidden once no
-            later eligible Day remains (TomorrowsCardInvite's own check).
-            `days`/`now` are the SAME schedule + clock every lock check on
-            this page already reads. Deliberately does NOT call
-            `useNavigate` itself — Board is kept react-router-free (many of
-            its unit tests mount it standalone, with no <Router> wrapper);
-            `SuggestPanelBridge.tsx` (mounted from App.tsx, always inside the
-            Router) does the actual navigation once this intent lands. */}
-        <TomorrowsCardInvite days={days} now={now} onOpen={requestOpenSuggestPanel} />
+        {/* "Put it on tomorrow's card" entry point (#559) — the SAME
+            `promptInvite` every early-return branch above also renders (see
+            its doc comment near `daySwitcher`), so the entry point is exactly
+            as persistent as the Day switcher itself. */}
+        {promptInvite}
         {/* Keyed + gated like the grid below (Codex P3 on #421 round 3): the
             header letters cascade once per board identity — replaying for a
             genuinely new card (Day switch, reshuffle) and mounting landed on

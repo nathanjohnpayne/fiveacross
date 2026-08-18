@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useItems, useMyPendingItems, useEventDoc } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
-import { defaultTargetDayIndex } from '../data/communityPrompts';
 import {
   loadTrackedSuggestions,
   trackSuggestion,
@@ -89,7 +88,7 @@ export default function ItemPool() {
   // `status == 'active'`, so a fresh `pending` add would otherwise vanish from
   // this list the instant it lands. `deriveMySubmissions` below unions this
   // LIVE, cross-device query with the local tracker for the follow-up states.
-  const { items: myPending } = useMyPendingItems(user?.uid);
+  const { items: myPending, loading: pendingLoading } = useMyPendingItems(user?.uid);
   // The Day schedule, for `submitterStatus`'s "is the promised Day still
   // open" check (#559) — the SAME `useEventDoc` subscription every other
   // schedule-reading surface (Board, More) already holds; no new read.
@@ -110,7 +109,16 @@ export default function ItemPool() {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
   }, [uid]);
   const activeMine = user ? items.filter((it) => it.createdBy === user.uid) : [];
-  const mySubmissions = deriveMySubmissions(tracked, myPending, activeMine, days, Date.now());
+  // `ready` (#559, Codex P2): both live queries must have delivered their
+  // first snapshot before an absent tracked id can honestly mean "not
+  // selected" — see `deriveMySubmissions`'s own doc comment for the flash
+  // this prevents.
+  const mySubmissions = deriveMySubmissions(tracked, myPending, activeMine, days, Date.now(), !loading && !pendingLoading);
+  // Every id `mySubmissions` already renders WITH a status pill (#559, Codex
+  // P2) — excluded here so the plain pool list below never shows the SAME
+  // Prompt a second time with no status at all.
+  const mySubmissionIds = new Set(mySubmissions.map((s) => s.id));
+  const poolItems = items.filter((it) => !mySubmissionIds.has(it.id));
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
   // The first-time explainer (#610). State, not a render-time storage read:
@@ -149,23 +157,22 @@ export default function ItemPool() {
       return;
     }
     try {
-      const id = await addItem(user.uid, text, adult && spicy);
+      const result = await addItem(user.uid, text, adult && spicy);
       track('add_item');
       // `prompt_suggestion_submitted` (#559): NO Prompt text in the payload —
-      // just whether a Day could be named. `defaultTargetDayIndex` re-derives
-      // the SAME "earliest still-open Day" `addItem` itself resolves
-      // (specs/community-prompt-targeting.md), off the schedule this panel
-      // already holds — an approximation for analytics only; the write's own
-      // fresh read is what's authoritative for the actual placement.
-      const approxTarget = defaultTargetDayIndex(days, Date.now());
+      // just whether a Day could be named. Reports the target `addItem`
+      // itself ACTUALLY committed, never a client-recomputed guess (Codex
+      // P2, PR #845): a stale/reloading schedule snapshot here could disagree
+      // with what the write resolved against its OWN fresh read, corrupting
+      // the analytics at exactly the schedule boundaries it exists to measure.
       track('prompt_suggestion_submitted', {
-        hasTargetDay: approxTarget != null,
-        ...(approxTarget != null ? { dayIndex: approxTarget } : {}),
+        hasTargetDay: result?.targetDayIndex != null,
+        ...(result?.targetDayIndex != null ? { dayIndex: result.targetDayIndex } : {}),
       });
-      if (id) {
-        const submitted = { id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
+      if (result) {
+        const submitted = { id: result.id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
         trackSuggestion(EVENT_ID, user.uid, submitted);
-        setTracked((prev) => [...prev.filter((s) => s.id !== id), submitted]);
+        setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
       }
       setText('');
       setSpicy(false);
@@ -250,7 +257,7 @@ export default function ItemPool() {
         <LoadingState label="Fetching prompts…" />
       ) : (
         <div className="list">
-          {items.map((it) => (
+          {poolItems.map((it) => (
             <div key={it.id} className="row">
               <div className="grow">
                 <div className="name" style={{ fontWeight: 500 }}>

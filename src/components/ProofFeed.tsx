@@ -956,6 +956,25 @@ export default function ProofFeed() {
   // (#211/#216). Read-only; absent while loading or on a pre-days[] event, in
   // which case dayChipLabel falls back to a bare "Day N".
   const { data: event } = useEventDoc();
+  // "Put it on tomorrow's card" (#559) reads a clock for its eligibility
+  // check, and without a live tick that check only re-evaluates on some
+  // OTHER render — a Feed left open past the last targetable Day's
+  // `unlockAt` would keep showing the invitation and opening a flow with
+  // nothing left to target (CodeRabbit Minor, #845). Same pattern as
+  // Board.tsx's own `now`: a timer bumps it exactly when the earliest
+  // still-open Day's `unlockAt` in the whole schedule passes, so this
+  // component doesn't need its own reschedule per Day.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const schedule = event?.days ?? [];
+    const nextUnlock = schedule
+      .map((d) => d.unlockAt)
+      .filter((t) => t > Date.now())
+      .sort((a, b) => a - b)[0];
+    if (nextUnlock == null) return;
+    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
+    return () => clearTimeout(timer);
+  }, [event?.days, now]);
   // ONE flat Doubts subscription for the whole Feed (#262): the doubts
   // collection is event-flat, so a single unfiltered read powers every proof
   // card's "👀 cleared N doubts" pill. Ban semantics ride useAllDoubts.
@@ -1110,6 +1129,12 @@ export default function ProofFeed() {
   if (!entries.length)
     return (
       <>
+        {/* "Put it on tomorrow's card" entry point (#559) — a quiet or brand-
+            new Event's Feed has nothing to scroll, but that is exactly when a
+            first suggestion matters most; the SAME early-return trap Codex/
+            CodeRabbit flagged on Board.tsx's locked-Day branches applies here
+            (Codex P2, CodeRabbit Major #845). */}
+        <TomorrowsCardInvite days={event?.days ?? []} now={now} onOpen={requestOpenSuggestPanel} />
         <div className="center muted">Nothing in the feed yet. Somebody do something.</div>
         {whoListSheet}
       </>
@@ -1148,14 +1173,14 @@ export default function ProofFeed() {
     <div className="list">
       {/* "Put it on tomorrow's card" entry point (#559) — the SAME component
           Board.tsx mounts on the Card, hidden once no later eligible Day
-          remains. `event?.days`/`Date.now()` mirror Board's own inputs; the
-          Feed has no equivalent of Board's ticking `now` state, so this reads
-          the clock fresh on each render, which is fine for a visibility gate
-          that only needs to flip once a Day boundary passes, not live-tick.
-          `onOpen` only signals the intent — `SuggestPanelBridge.tsx`
+          remains. `now` is this component's own ticking clock (declared
+          above, alongside `event`) — not a fresh `Date.now()` per render —
+          so a Feed left open across the last targetable Day's `unlockAt`
+          re-evaluates and hides the invitation on its own (CodeRabbit Minor,
+          #845). `onOpen` only signals the intent — `SuggestPanelBridge.tsx`
           (App.tsx) does the actual navigation, the SAME split Board.tsx
           uses, so this isn't a special case. */}
-      <TomorrowsCardInvite days={event?.days ?? []} now={Date.now()} onOpen={requestOpenSuggestPanel} />
+      <TomorrowsCardInvite days={event?.days ?? []} now={now} onOpen={requestOpenSuggestPanel} />
       {/* The Hearts cue (#534/#561, specs/feed-hearts.md): a quiet standing
           invitation while Hearts still count toward the Most-Loved Photo
           freeze — no streaks, no badges, no notification pressure, and it

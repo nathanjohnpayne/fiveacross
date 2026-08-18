@@ -195,6 +195,22 @@ describe('dealBoard — Community Prompt affordance + attribution stamping (#559
       expect(c.suggestedBy).toBeUndefined();
     }
   });
+
+  // The exact regression Codex P2 + CodeRabbit Major both caught on PR #845:
+  // an untargeted item that STILL carries a real `createdBy` — the seed
+  // sentinel uid every organiser/seed Prompt is stamped with — must not
+  // leak `suggestedBy` onto an ordinary Square just because `createdBy` is
+  // present. Both fields are gated behind the SAME usable-target check.
+  it('stamps neither field for an untargeted item whose createdBy is a real (non-community) uid — the seed-sentinel regression', () => {
+    const seedPool: DealItem[] = [
+      { id: 'seeded-1', text: 'An organiser prompt', spicy: false, createdBy: 'seed' },
+      ...Array.from({ length: 23 }, (_, i) => ({ id: `organiser-${i}`, text: `Organiser prompt ${i}`, spicy: false })),
+    ];
+    const cells = nonFreeCells(dealBoard(seedPool, FREE_TEXT, 1, 0, { stratify: false }));
+    const seeded = cells.find((c) => c.itemId === 'seeded-1');
+    expect(seeded?.communityPrompt).toBeUndefined();
+    expect(seeded?.suggestedBy).toBeUndefined();
+  });
 });
 
 describe('scripts/seed-data/med-2026.mjs — replace semantics (no Firestore/emulator; plain import assertions)', () => {

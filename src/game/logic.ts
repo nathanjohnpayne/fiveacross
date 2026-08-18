@@ -342,8 +342,15 @@ export function dealBoard(
         // deal time from the picked ItemDoc — see the `communityPrompt`/
         // `suggestedBy` doc comments on `Cell` (domainTypes.d.ts) for why
         // this is denormalized here instead of resolved live post-deal.
-        ...(item && isUsableDealTarget(item.targetDayIndex) ? { communityPrompt: true } : {}),
-        ...(item?.createdBy ? { suggestedBy: item.createdBy } : {}),
+        // BOTH fields gated behind the SAME usable-target check (Codex P2 +
+        // CodeRabbit Major, PR #845): organiser/seed prompts carry a real
+        // `createdBy` too (the seed sentinel uid), so a bare `createdBy`
+        // check alone stamped `suggestedBy` on nearly every ordinary Square
+        // — wrong attribution in Prompt detail, and an unconditional
+        // `fetchDisplayName` read the instant a normal Square's sheet opens.
+        ...(item && isUsableDealTarget(item.targetDayIndex)
+          ? { communityPrompt: true, ...(item.createdBy ? { suggestedBy: item.createdBy } : {}) }
+          : {}),
       });
     }
   }

@@ -2687,6 +2687,15 @@ export function itemRateLimitRemainingMs(key: string, now: number = Date.now()):
   return remaining > 0 ? remaining : 0;
 }
 
+/** `addItem`'s result (#559): the new item's id, plus the target it was
+ *  ACTUALLY committed with — absent when the write resolved untargeted
+ *  (no schedule, or no Day left to name), exactly mirroring what
+ *  `ItemDoc.targetDayIndex` itself holds. */
+export interface AddItemResult {
+  id: string;
+  targetDayIndex?: number;
+}
+
 /**
  * Add a prompt to the community pool.
  *
@@ -2712,13 +2721,18 @@ export async function addItem(
   // one, NO target is written at all and the Prompt keeps the untargeted every-Day
   // behaviour that predates this feature — see `targetDayIndex` in ItemDoc.
   targetDayIndex?: number,
-  // Returns the new item's id (or `undefined` for the blank-text no-op below)
-  // so a caller can track ITS OWN submission for a later state check (#559,
-  // ItemPool.tsx's `trackSuggestion` — a rejected row is unreadable by its own
-  // submitter, see communityPrompts.ts's `submitterStatus` doc comment, so a
-  // "not selected" verdict has to start from an id the submitter already
-  // holds rather than a later read).
-): Promise<string | undefined> {
+  // Returns the new item's id and the target it was ACTUALLY committed with
+  // (or `undefined` for the blank-text no-op below) — never a caller-side
+  // recomputation. `ItemPool.tsx` uses the id to track its own submission for
+  // a later state check (#559, `trackSuggestion` — a rejected row is
+  // unreadable by its own submitter, see communityPrompts.ts's
+  // `submitterStatus` doc comment) and the target for its
+  // `prompt_suggestion_submitted` analytics payload: recomputing the default
+  // target client-side, off a schedule snapshot that can be stale or reload
+  // mid-await, could report a Day that disagrees with what this write
+  // actually persisted (Codex P2, PR #845) — this return is the single
+  // source of truth for both.
+): Promise<AddItemResult | undefined> {
   const t = text.trim();
   if (!t) return undefined;
   // An OMITTED argument means "resolve the default"; an argument that is present
@@ -2759,7 +2773,7 @@ export async function addItem(
     // null would mint a third state the snapshot filter would have to know about.
     ...(isUsableTarget(target) ? { targetDayIndex: target } : {}),
   });
-  return ref.id;
+  return { id: ref.id, ...(isUsableTarget(target) ? { targetDayIndex: target } : {}) };
 }
 
 /**
