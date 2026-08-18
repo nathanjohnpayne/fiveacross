@@ -199,9 +199,17 @@ function targetsDay(targetDayIndex: unknown, dayIndex: number | undefined): bool
   // put that Prompt back on every Day (Codex P2, PR #812).
   if (targetDayIndex === undefined) return true;
   if (dayIndex === undefined) return true; // caller opted out of targeting entirely
+  // The `>= 0` bound is part of what "well-formed" MEANS here (`isUsableTarget`
+  // and `validTargetDayIndex()` in firestore.rules both define it that way), so
+  // the mirror states it rather than relying on Day indices happening to be
+  // non-negative today. Leaving it out made this predicate admit a stored
+  // negative target to a negative Day index — unreachable through the current
+  // schedule, but a mirror that only accidentally agrees is one refactor away
+  // from disagreeing (Phase 4b P2, PR #812).
   return (
     typeof targetDayIndex === 'number' &&
     Number.isInteger(targetDayIndex) &&
+    targetDayIndex >= 0 &&
     targetDayIndex === dayIndex
   );
 }

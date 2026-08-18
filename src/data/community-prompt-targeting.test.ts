@@ -21,12 +21,21 @@ type Ref = {
   withConverter: () => Ref;
 };
 
-const { addDocMock, updateMock, eventDataMock, getDocMock } = vi.hoisted(() => ({
+const { addDocMock, updateMock, eventDataMock, getDocMock, itemDocs } = vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
   updateMock: vi.fn(),
   eventDataMock: vi.fn((): Record<string, unknown> | undefined => ({ days: [] })),
   getDocMock: vi.fn(),
+  // The AUTHORITATIVE item state the approval transaction reads. Approval routes
+  // on what is stored here, never on the queue row the caller passes — that is
+  // the stale-approval guard, so these two can deliberately disagree in tests.
+  itemDocs: {} as Record<string, Record<string, unknown> | undefined>,
 }));
+
+/** Seed the stored item a later `approveItems` will read. */
+const putItem = (id: string, data: Record<string, unknown> = {}) => {
+  itemDocs[id] = { status: 'pending', ...data };
+};
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', functions: {} }));
 vi.mock('firebase/functions', () => ({ httpsCallable: () => async () => ({ data: {} }) }));
@@ -61,10 +70,16 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       return Promise.resolve(snap());
     },
     // The transaction seam approval routing depends on: the callback reads the
-    // Event through `tx.get` (the schedule read set) and writes only items.
+    // Event through `tx.get` (the schedule read set), reads each ITEM through
+    // `tx.get` (the stale guard's authoritative state) and writes only items.
     runTransaction: (_db: unknown, fn: (tx: unknown) => Promise<unknown>) =>
       fn({
-        get: () => Promise.resolve(snap()),
+        get: (ref: Ref) => {
+          const at = ref.path.indexOf('/items/');
+          if (at < 0) return Promise.resolve(snap());
+          const data = itemDocs[ref.path.slice(at + '/items/'.length)];
+          return Promise.resolve({ exists: () => data !== undefined, data: () => data });
+        },
         update: (ref: Ref, data: unknown) => updateMock(ref.path, data),
       }),
   };
@@ -93,6 +108,7 @@ const openDay = (index: number, over: Partial<TargetableDay> = {}): TargetableDa
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const id of Object.keys(itemDocs)) delete itemDocs[id];
   eventDataMock.mockReturnValue({ days: [] });
 });
 
@@ -311,6 +327,17 @@ describe('approveItems — routing an approval into one Day', () => {
   const written = () => updateMock.mock.calls.map(([path, data]) => ({ path, data }));
 
   beforeEach(() => {
+    // Every id these tests approve, STORED as still-pending with its intended
+    // Day. Routing reads these documents, not the rows the tests pass, so a test
+    // that wants the two to disagree seeds a different stored target on purpose.
+    putItem('p1', { targetDayIndex: 2 });
+    putItem('legacy');
+    putItem('bad', { targetDayIndex: -3 });
+    putItem('nulled', { targetDayIndex: null });
+    putItem('a', { targetDayIndex: 2 });
+    putItem('b', { targetDayIndex: 1 });
+    putItem('c', { targetDayIndex: 9 });
+    putItem('d');
     eventDataMock.mockReturnValue({
       days: [
         { index: 0, unlockAt: NOW - 2 * HOUR, pool: 'main', snapshotItemIds: ['a'] },
@@ -332,6 +359,7 @@ describe('approveItems — routing an approval into one Day', () => {
   });
 
   it('rolls a Prompt approved after its Day closed forward to the next open Day', async () => {
+    putItem('p1', { targetDayIndex: 1 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 1 }], 'admin-uid');
     expect(placements).toEqual([{ itemId: 'p1', dayIndex: 2, retained: false }]);
     expect(written()[0].data).toMatchObject({ status: 'active', targetDayIndex: 2 });
@@ -340,6 +368,7 @@ describe('approveItems — routing an approval into one Day', () => {
   it('RETAINS a Prompt with nowhere left to go, keeping its original target', async () => {
     // Never dropped, never deleted, and never re-aimed at a Day that has dealt:
     // the unreachable target IS the retention, and retainedAt makes it legible.
+    putItem('p1', { targetDayIndex: 9 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
     expect(placements).toEqual([{ itemId: 'p1', dayIndex: null, retained: true }]);
     const { data } = written()[0];
@@ -419,8 +448,47 @@ describe('approveItems — routing an approval into one Day', () => {
   it('STAMPS retainedAt as a real instant when it retains — the two paths differ', async () => {
     // The control for the two above: retention is the one outcome that writes a
     // number, so "cleared" and "stamped" can never be confused for each other.
+    putItem('p1', { targetDayIndex: 9 });
     await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
     expect(typeof (written()[0].data as { retainedAt: unknown }).retainedAt).toBe('number');
+  });
+
+  it('REFUSES to re-approve a row that is no longer pending — the double-deal guard', async () => {
+    // The hazard: two organisers hold the same queue row. The first approval
+    // places the Prompt on Day 2 and Day 2 freezes with its id; a second
+    // approval of that stale row would find Day 2 closed, roll FORWARD, and
+    // rewrite it for Day 3 — which then freezes with it too. The Prompt would be
+    // dealt on TWO Days, the one outcome this ticket exists to prevent, and no
+    // Day is mutated on the way there so nothing downstream would catch it
+    // (Phase 4b P1, PR #812).
+    putItem('p1', { status: 'active', targetDayIndex: 2 });
+    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
+    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 2, retained: false }]);
+    // Reported where it already stands, and NOT rewritten.
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an already-RETAINED row as retained, still without writing', async () => {
+    putItem('p1', { status: 'active', targetDayIndex: 9, retainedAt: NOW });
+    const placements = await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
+    expect(placements).toEqual([{ itemId: 'p1', dayIndex: null, retained: true }]);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a row that has VANISHED rather than inventing one', async () => {
+    delete itemDocs['p1'];
+    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
+    expect(placements).toEqual([{ itemId: 'p1', dayIndex: null, retained: false }]);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it('routes on the STORED target, ignoring a stale one on the caller row', async () => {
+    // The queue row is a client snapshot and may be out of date; the document is
+    // not. An organiser re-aimed this Prompt at Day 3 after the queue rendered.
+    putItem('p1', { targetDayIndex: 3 });
+    const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
+    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 3, retained: false }]);
+    expect(written()[0].data).toMatchObject({ targetDayIndex: 3 });
   });
 
   it('never writes to a Day — an approval touches only the Prompt', async () => {
@@ -458,6 +526,7 @@ describe('approveItems — routing an approval into one Day', () => {
   });
 
   it('approveItem takes the queue ROW so a target can never be dropped', async () => {
+    putItem('p1', { targetDayIndex: 3 });
     const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');
     expect(placement).toEqual({ itemId: 'p1', dayIndex: 3, retained: false });
   });

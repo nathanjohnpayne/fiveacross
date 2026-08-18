@@ -158,6 +158,19 @@ describe('activeSnapshotIds — Day targeting decides what a Day freezes (#557)'
     }
   });
 
+  it('excludes a NEGATIVE target even from a matching negative Day index', () => {
+    // Phase 4b P2 (PR #812). `>= 0` is part of what well-formed MEANS here —
+    // `isUsableTarget` and the rules' `validTargetDayIndex()` both say so — and
+    // leaving it out of this mirror made the predicate admit -1 to a Day indexed
+    // -1. Unreachable through today's schedule, but a mirror that only
+    // accidentally agrees is one refactor away from disagreeing.
+    const negative = [{ id: 'neg', pool: 'main', targetDayIndex: -1 }];
+    expect(activeSnapshotIds(negative, mainDayFilter(-1))).toEqual([]);
+    for (const dayIndex of [0, 3]) {
+      expect(activeSnapshotIds(negative, mainDayFilter(dayIndex))).toEqual([]);
+    }
+  });
+
   it('applies NO targeting filter when the caller omits dayIndex (pre-#557 callers)', () => {
     const { dayIndex: _omitted, ...noTargeting } = mainDayFilter(3);
     expect(activeSnapshotIds(items, noTargeting)).toEqual([
