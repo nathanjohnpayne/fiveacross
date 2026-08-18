@@ -1431,6 +1431,83 @@ describe('the frozen outbound request', () => {
     );
   });
 
+  it('ABANDONS a frozen batch whose abuse source has been deleted, rather than replaying it (#670)', async () => {
+    // A batch that keeps failing to send is retried every sweep for as long as
+    // it keeps failing — easily long enough for the 90-day retention sweep to
+    // remove a report the frozen bytes quote. The replay path deliberately
+    // re-derives nothing, so without this check the deleted report's
+    // description would be mailed anyway, which is the one thing the tombstone
+    // design promises not to do.
+    const send = vi.fn(async () => true);
+    const abuseRow = alert('a1', {
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: 'report_gone',
+      label: 'Someone is posting slurs in the feed',
+      status: 'new',
+      batchId: 'a1__1',
+    });
+    const db = build([abuseRow], {
+      // No `bugReports/report_gone`: retention removed it while the batch sat
+      // frozen behind a failing send.
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['u1@example.com'],
+        subject: 'Admin · Trieste → Barcelona—1 abuse report',
+        html: '<p>Someone is posting slurs in the feed</p>',
+        text: 'Someone is posting slurs in the feed',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'rebatched',
+    });
+    expect(send).not.toHaveBeenCalled();
+    // Same escape hatch as the roster-changed case: the freeze is dropped and
+    // the claim released, so the rows re-batch from scratch.
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+    // And the next sweep RETIRES the row through `currentRowFor` instead of
+    // mailing it — the deleted report never reaches an inbox.
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 1,
+      reason: 'nothing-current',
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('REPLAYS a frozen abuse batch whose source report is still there', async () => {
+    const send = vi.fn(async () => true);
+    const abuseRow = alert('a1', {
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: 'report_live',
+      label: 'Someone is posting slurs in the feed',
+      status: 'new',
+      batchId: 'a1__1',
+    });
+    const db = build([abuseRow], {
+      'bugReports/report_live': { kind: 'abuse', eventId: 'med-2026', reporterInEvent: true },
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['u1@example.com'],
+        subject: 'Admin · frozen abuse',
+        html: '<p>frozen</p>',
+        text: 'frozen',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({ sent: 1, retired: 0 });
+    // Byte-for-byte the frozen request, under its own key — a re-render would
+    // 409 against a key this batch has already used.
+    expect((send.mock.calls[0][0] as { html: string }).html).toBe('<p>frozen</p>');
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe('admin-digest/med-2026/a1__1');
+  });
+
   it('LEAVES the row untouched when release finds a NEWER claim already in place (stale)', async () => {
     // The concurrency guard `releaseBatch` exists for: a second invocation
     // re-claims (or settles) these rows between this drain reading the frozen

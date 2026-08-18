@@ -855,6 +855,46 @@ export function currentRowFor(
  * the id survives to keep failing `create`, and a Firestore TTL policy on
  * `expiresAt` reaps it after the redelivery window.
  */
+/**
+ * Does this claimed page carry an abuse row whose source report is GONE?
+ *
+ * The frozen-replay path deliberately re-derives nothing, because any difference
+ * at all would 409 against the key the batch has already used. The roster was
+ * the first exception (see `sendAdminDigestForEvent`), and a deleted bug report
+ * is the second, for the same underlying reason: a freeze is written BEFORE the
+ * send, so a crash or a rejected send leaves bytes that may never have been
+ * delivered — and a batch that keeps failing is retried every sweep for as long
+ * as it keeps failing, which is easily long enough for the 90-day retention
+ * sweep to remove a report the frozen bytes quote.
+ *
+ * Scoped to abuse rows on purpose. A deleted Prompt or Proof is ordinary
+ * moderation churn, and replaying a stale row about one is the trade #638 made
+ * knowingly; a deleted bug report is a deliberate act of retention on private
+ * evidence, and mailing it afterwards is the one thing the tombstone design
+ * promises not to do.
+ *
+ * A FAILED read is not a deletion, matching `currentRowFor`'s fail-open.
+ */
+async function frozenAbuseSourceMissing(
+  db: AdminAlertFirestore,
+  eventId: string,
+  page: readonly AlertSnapshot[],
+): Promise<boolean> {
+  for (const snapshot of page) {
+    const data = snapshot.data();
+    if (data?.kind !== 'abuse-reported') continue;
+    const docId = typeof data.docId === 'string' ? data.docId : '';
+    if (!docId) continue;
+    try {
+      const live = await db.doc(livePathFor(eventId, 'bugReports', docId)).get();
+      if (live.data() === undefined) return true;
+    } catch (err) {
+      console.error('sendAdminDigestForEvent: frozen abuse source re-read failed', eventId, docId, err);
+    }
+  }
+  return false;
+}
+
 export async function sendAdminDigestForEvent(
   db: AdminAlertFirestore,
   eventId: string,
@@ -905,6 +945,18 @@ export async function sendAdminDigestForEvent(
       // Another invocation settled or re-batched this work first; do not let a
       // stale replay overwrite its newer claim. A failed transaction likewise
       // leaves the original frozen batch intact for a later safe retry.
+      return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
+    }
+    // THE SECOND THING A FROZEN REQUEST MUST NOT SIMPLY TRUST: that the bug
+    // report it quotes still exists (#670). Same escape hatch as the roster
+    // above, and for the same reason — abandon rather than replay, so the rows
+    // re-batch from scratch and `currentRowFor` retires the deleted one on the
+    // way past. Re-rendering here instead would change the bytes under a key
+    // that has already been used, which is the 409 that strands a batch forever.
+    if (await frozenAbuseSourceMissing(db, eventId, page)) {
+      console.log(`sendAdminDigestForEvent: an abuse source was deleted under batch ${batchId}; re-batching`);
+      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
+      if (release === 'released') return { sent: 0, retired: 0, reason: 'rebatched' };
       return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
     }
     const replayed = await (deps.send ?? (await import('./email')).sendEmail)({
