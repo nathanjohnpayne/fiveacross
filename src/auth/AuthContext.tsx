@@ -166,6 +166,20 @@ function clearCollectedAcknowledgement(): void {
   }
 }
 
+function hasLiveLocalTimestamp(key: string, ttlMs: number, now: number = Date.now()): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    const at = Number(raw);
+    const age = now - at;
+    // Both bounds matter: an upper bound alone treats a future-dated value as
+    // indefinitely fresh until the wall clock catches up. Corrupt, expired,
+    // and clock-skewed records all fail toward the safe recovery path.
+    return Number.isFinite(at) && at > 0 && age >= 0 && age <= ttlMs;
+  } catch {
+    return false;
+  }
+}
+
 // Read WITHOUT consuming, TTL-checked (Codex P2 round 2 on #836 — the same
 // class of bug as `peekRedirectPending`'s history below, for the same
 // record). A mount that reads this before either redirect-completion signal
@@ -178,20 +192,7 @@ function clearCollectedAcknowledgement(): void {
 // (terminal success) or the redirect-result effect's `.catch()` (terminal
 // failure) below.
 function peekCollectedAcknowledgement(now: number = Date.now()): boolean {
-  try {
-    const raw = localStorage.getItem(SIGNIN_ADULT_ACK_KEY);
-    const at = Number(raw);
-    const age = now - at;
-    // Both bounds matter (Codex P2 on #836): the upper bound is the TTL
-    // itself, but without a LOWER bound too, a future-dated `at` (a backward
-    // wall-clock adjustment, or a corrupted/tampered value) makes `age`
-    // negative — trivially `<= TTL_MS` — so the record would read as live
-    // indefinitely until the clock caught back up to it, rather than
-    // expiring on schedule.
-    return Number.isFinite(at) && at > 0 && age >= 0 && age <= SIGNIN_ADULT_ACK_TTL_MS;
-  } catch {
-    return false;
-  }
+  return hasLiveLocalTimestamp(SIGNIN_ADULT_ACK_KEY, SIGNIN_ADULT_ACK_TTL_MS, now);
 }
 
 // Read the marker WITHOUT consuming it. Evaluated during the first render —
@@ -219,14 +220,17 @@ function peekPendingRedirectAttestation(): boolean {
  * lost the receipt." This record is the second, independent signal the
  * redirect-return effect races against `getRedirectResult`: written at
  * redirect START (`signIn`, alongside `markCollectedAcknowledgement`) and
- * cleared only on a TERMINAL outcome for the transaction it tracks — either
- * completion signal succeeding, or a genuine getRedirectResult rejection
- * (see `completeRedirectReturn` and the redirect-result effect below) —
- * never merely because a mount READ it. A mount that reads it live but never
- * reaches a terminal outcome (e.g. it reloads before onAuthStateChanged
- * publishes the restored user) must leave it standing for the NEXT mount to
- * pick up; that durability across a reload is the entire reason this record
- * exists, so consuming it eagerly on read would defeat it (Codex P2 on #836).
+ * cleared only on a terminal, Firebase-verified outcome for the transaction
+ * it tracks — a non-null redirect result or a confirmed getRedirectResult
+ * rejection (see `completeRedirectReturn` and the redirect-result effect
+ * below) — never merely because a mount READ it. The durable signal can log
+ * an unverified completion, but leaves the record intact so a later verified
+ * result can finish the security-sensitive work. A mount that reads it live
+ * but never reaches a terminal outcome (e.g. it reloads before
+ * onAuthStateChanged publishes the restored user) must leave it standing for
+ * the NEXT mount to pick up; that durability across a reload is the entire
+ * reason this record exists, so consuming it eagerly on read would defeat it
+ * (Codex P2 on #836).
  */
 export const REDIRECT_PENDING_KEY = 'gcb.signin.redirectPending';
 const REDIRECT_PENDING_TTL_MS = SIGNIN_ADULT_ACK_TTL_MS;
@@ -253,19 +257,7 @@ function clearRedirectPending(): void {
 // `consumeRedirectContextOnce` below, which deliberately never clears this
 // specific record on read (Codex P2 on #836) — see its own comment for why.
 function peekRedirectPending(now: number = Date.now()): boolean {
-  try {
-    const raw = localStorage.getItem(REDIRECT_PENDING_KEY);
-    const at = Number(raw);
-    const age = now - at;
-    // Both bounds matter (Codex P2 on #836): see `peekCollectedAcknowledgement`
-    // above for why an upper bound alone (age <= TTL) is not enough — a
-    // future-dated `at` makes `age` negative, trivially satisfying it, and
-    // would leave this "10-minute" signal live indefinitely instead of
-    // expiring on schedule.
-    return Number.isFinite(at) && at > 0 && age >= 0 && age <= REDIRECT_PENDING_TTL_MS;
-  } catch {
-    return false;
-  }
+  return hasLiveLocalTimestamp(REDIRECT_PENDING_KEY, REDIRECT_PENDING_TTL_MS, now);
 }
 
 function trackSignInFailure(err: unknown): void {
@@ -1714,21 +1706,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // in-time answer; (b) the durable `gcb.signin.redirectPending` record being
   // live when onAuthStateChanged next publishes a signed-in User — the signal
   // that survives the exact partitioning that can leave (a) resolving null on
-  // a return Firebase otherwise completed. `completeRedirectReturn` is the ONE
-  // latch both route through, so `login` fires exactly once and the
-  // attestation persists at most once no matter which signal wins, or whether
-  // both fire (the common case for an actual successful return). The pending
+  // a return Firebase otherwise completed. `completeRedirectReturn` records
+  // `login` exactly once and persists the attestation at most once, no matter
+  // which signal arrives first or whether both fire (the common case for an
+  // actual successful return). The pending
   // record is written ONLY at redirect start (signIn), so signal (b) is a
   // no-op on every ordinary mount — including a normal cached-session restore,
   // which publishes a signed-in User via onAuthStateChanged just as often.
-  // This latch also doubles as the shared outcome decision with the
-  // redirect-result effect's failure path below (Codex P2 round 2 on #836):
-  // whichever of a SUCCESS (here) or a genuine getRedirectResult REJECTION
-  // (there) is decided first wins, and the other becomes a no-op. Without
-  // that sharing, a rejection landing while signal (b) is still in flight —
-  // or a signal-(b) success landing after a rejection already reported — can
-  // fire both `login_failed` and `login` for the same attempt.
-  const redirectCompletionLatchRef = useRef(false);
+  // The outcome state coordinates the success signals with the redirect-result
+  // failure path below (Codex P2 round 2 on #836). A success and a rejection
+  // must never report both `login` and `login_failed`. But an UNVERIFIED
+  // durable-signal success is deliberately upgradeable: it has logged the
+  // low-stakes metric, while a later Firebase-verified result must still be
+  // allowed to clear the records and persist the acknowledgement without
+  // logging a duplicate `login`.
+  const redirectOutcomeRef = useRef<'pending' | 'unverified-success' | 'verified-success' | 'failure'>(
+    'pending',
+  );
   // `verifiedByFirebase` (Phase 4b P1 round 2 on #836 — corrects the round-1
   // fix's flawed premise): whether `u` is KNOWN to be the credential THIS
   // tab's OWN redirect attempt produced, as opposed to merely "some User is
@@ -1759,9 +1753,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the one thing that later verified completion needs.
   const completeRedirectReturn = useCallback(
     (u: User, verifiedByFirebase: boolean) => {
-      if (redirectCompletionLatchRef.current) return;
-      redirectCompletionLatchRef.current = true;
-      track('login', { method: 'google' });
+      const priorOutcome = redirectOutcomeRef.current;
+      if (priorOutcome === 'failure' || priorOutcome === 'verified-success') return;
+
+      if (priorOutcome === 'pending') {
+        redirectOutcomeRef.current = verifiedByFirebase ? 'verified-success' : 'unverified-success';
+        track('login', { method: 'google' });
+      } else if (!verifiedByFirebase) {
+        // Another unverified auth publication has no additional work. The
+        // first one already logged the metric, and none can attest safely.
+        return;
+      } else {
+        // Signal (b) logged first. Upgrade it to a Firebase-verified outcome
+        // so signal (a) still performs its security-sensitive cleanup below,
+        // without duplicating the login event.
+        redirectOutcomeRef.current = 'verified-success';
+      }
+
       const { acknowledged } = consumeRedirectContextOnce();
       if (verifiedByFirebase) {
         // The transaction is Firebase-verified and has now definitively
@@ -1826,10 +1834,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // the restored user, via the cached `pending` value above, before
         // this rejection is even caught (Firebase's own getRedirectResult()
         // throwing does not mean the session it restored failed to land).
-        // Sharing `redirectCompletionLatchRef` with `completeRedirectReturn`
-        // keeps the two outcomes mutually exclusive in EITHER firing order —
-        // whichever lands first wins, and the other becomes a no-op, so a
-        // single attempt can never report both `login_failed` and `login`.
+        // Sharing `redirectOutcomeRef` with `completeRedirectReturn` keeps
+        // the outcomes mutually exclusive in either firing order: once any
+        // success has logged `login`, a later rejection cannot report
+        // `login_failed`; once a confirmed rejection wins, neither success
+        // signal can report `login`.
         //
         // Gated on `appOwnedRedirect`, NOT `pending` (Codex P2 on the merged
         // HEAD — the round after the round-2 fix this comment used to
@@ -1847,8 +1856,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // here for the "mount saw an inconclusive rejection" case. Left
         // standing, it simply expires on its own TTL if truly abandoned.
         if (appOwnedRedirect) {
-          if (!redirectCompletionLatchRef.current) {
-            redirectCompletionLatchRef.current = true;
+          if (redirectOutcomeRef.current === 'pending') {
+            redirectOutcomeRef.current = 'failure';
             trackSignInFailure(err);
           }
           clearRedirectPending();

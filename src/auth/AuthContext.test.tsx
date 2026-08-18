@@ -806,6 +806,30 @@ describe('AuthContext deal-error hardening', () => {
       expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
     });
 
+    it('lets a Firebase-verified result finish attestation after signal (b) already logged in', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      const redirect = deferred<{ user: typeof FAKE_USER }>();
+      mocks.getRedirectResult.mockReturnValueOnce(redirect.promise);
+
+      mount();
+      // Signal (b) wins the analytics race, but it is not safe to attest or
+      // consume the records until Firebase later verifies this tab's result.
+      await signInUser();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+
+      await act(async () => {
+        redirect.settle({ user: FAKE_USER });
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER));
+      expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBeNull();
+    });
+
     it('treats an EXPIRED pending record as absent: neither login nor attestation fire from signal (b)', async () => {
       // An abandoned redirect from days ago must not "complete" an unrelated
       // later sign-in the moment onAuthStateChanged happens to publish a User —
