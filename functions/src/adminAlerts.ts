@@ -470,13 +470,21 @@ export function bugReportEventId(after: BugReportDoc | undefined): string | null
  * The whole abuse producer in one call — the shape `index.ts`'s
  * `notifyAbuseBugReport` trigger uses. Best-effort and NEVER throws (ADR 0001).
  *
- * THE EVENT MUST EXIST, and that read is not defensive boilerplate. The sweep
- * (`runAdminAlertSweep`) finds work by iterating the `events` collection, so a
- * queue row written under an `eventId` that resolves to no Event would never be
- * visited, never drained and never tombstoned — an orphaned copy of a report's
- * text sitting in Firestore forever, which is precisely the retention outcome
- * the tombstone design exists to avoid. One read per ABUSE report (never per
- * bug: the predicate above runs first) is a cheap price for that.
+ * THE EVENT MUST EXIST AND BE ACTIVE, and that read is not defensive
+ * boilerplate. The sweep (`runAdminAlertSweep`) finds work with
+ * `where('status', '==', 'active')`, so this precondition is written to match
+ * the drain's precondition EXACTLY. A queue row under an `eventId` that resolves
+ * to no Event — or to an archived one that may never be reactivated — would
+ * never be visited, never drained and never tombstoned: an orphaned copy of a
+ * report's text sitting in Firestore forever, which is precisely the retention
+ * outcome the tombstone design exists to avoid. One read per ABUSE report (never
+ * per bug: the predicate above runs first) is a cheap price for that.
+ *
+ * The archived case is genuinely reachable in a way it is not for the moderation
+ * producers: those fire on writes to an Event's own content, which stops when
+ * the Event does, while a player can open the app and file a report against an
+ * Event long after it was archived. The report still lands in the inbox; nobody
+ * is mailed about an Event that is over.
  *
  * A read that FAILS is treated as unresolvable rather than assumed-present. The
  * asymmetry with `currentRowFor`'s fail-open is deliberate: there, failing open
@@ -510,6 +518,10 @@ export async function recordBugReportAlerts(
     }
     if (!event) {
       console.error('recordBugReportAlerts: abuse report names an unresolvable event', eventId, reportId);
+      return 0;
+    }
+    if (event.status !== 'active') {
+      console.log('recordBugReportAlerts: abuse report names a non-active event; not queueing', eventId, reportId);
       return 0;
     }
     return await enqueueAdminAlerts(db, eventId, drafts, transitionId, deps);

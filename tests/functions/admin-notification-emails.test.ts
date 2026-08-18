@@ -1835,8 +1835,8 @@ describe('bugReportEventId', () => {
 });
 
 describe('recordBugReportAlerts', () => {
-  const reportDb = (eventExists = true) =>
-    fakeDb({}, eventExists ? { 'events/med-2026': { name: 'Trieste → Barcelona' } } : {});
+  const reportDb = (eventExists = true, status = 'active') =>
+    fakeDb({}, eventExists ? { 'events/med-2026': { name: 'Trieste → Barcelona', status } } : {});
 
   it('enqueues an abuse alert scoped to the report’s own Event', async () => {
     const db = reportDb();
@@ -1887,9 +1887,24 @@ describe('recordBugReportAlerts', () => {
     spy.mockRestore();
   });
 
+  it('refuses to enqueue against a non-ACTIVE Event, matching the sweep’s own precondition', async () => {
+    // `runAdminAlertSweep` finds work with `where('status', '==', 'active')`, so
+    // a row under an archived Event is never visited unless somebody reactivates
+    // it. Reachable here in a way it is not for the moderation producers: those
+    // fire on writes to an Event's own content, which stop when the Event does,
+    // while a player can file a report against an Event long after it ended.
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    for (const event of [{ status: 'archived' }, { status: 'draft' }, { name: 'no status field at all' }]) {
+      const db = fakeDb({}, { 'events/med-2026': event });
+      expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
+      expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    }
+    spy.mockRestore();
+  });
+
   it('treats a FAILED Event lookup as unresolvable rather than assuming it exists', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const db = fakeDb({}, { 'events/med-2026': { name: 'x' } }, ['events/med-2026']);
+    const db = fakeDb({}, { 'events/med-2026': { name: 'x', status: 'active' } }, ['events/med-2026']);
     expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
     expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
     spy.mockRestore();
