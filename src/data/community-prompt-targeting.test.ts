@@ -354,7 +354,9 @@ describe('approveItems — routing an approval into one Day', () => {
 
   it('approves a Prompt onto the Day it was submitted for', async () => {
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 2, retained: false }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
     expect(written()[0].data).toMatchObject({
       status: 'active',
       approvedBy: 'admin-uid',
@@ -365,7 +367,9 @@ describe('approveItems — routing an approval into one Day', () => {
   it('rolls a Prompt approved after its Day closed forward to the next open Day', async () => {
     putItem('p1', { targetDayIndex: 1 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 1 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 2, retained: false }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
     expect(written()[0].data).toMatchObject({ status: 'active', targetDayIndex: 2 });
   });
 
@@ -374,26 +378,50 @@ describe('approveItems — routing an approval into one Day', () => {
     // the unreachable target IS the retention, and retainedAt makes it legible.
     putItem('p1', { targetDayIndex: 9 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: null, retained: true }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: null, retained: true, outcome: 'retained' },
+    ]);
     const { data } = written()[0];
     expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
     expect(data).toHaveProperty('retainedAt');
     expect(data).not.toHaveProperty('targetDayIndex');
   });
 
-  it('leaves an UNTARGETED Prompt untargeted — approval invents no Day', async () => {
-    // The organiser pool and every pre-#557 row: eligible for every Day, and
-    // narrowing it to one would change behaviour nobody asked to change.
+  it('RESOLVES the Day a pending row with no target should have had', async () => {
+    // A PENDING row is a player submission by construction — organiser and seed
+    // Prompts are created `active` and never enter this queue — so an absent
+    // target is a gap, not a request for every Day. Leaving it would let a
+    // crafted or cached client submit without one and be approved onto EVERY
+    // Day, around the create rule (Phase 4b P1, PR #812).
     const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'legacy', dayIndex: null, retained: false }]);
+    expect(placements).toEqual([
+      { itemId: 'legacy', dayIndex: 2, retained: false, outcome: 'placed' },
+    ]);
     const { data } = written()[0];
-    expect(data).toMatchObject({
-      status: 'active',
-      approvedBy: 'admin-uid',
-      approvedAt: expect.any(Number),
+    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid', targetDayIndex: 2 });
+    expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
+  });
+
+  it('RETAINS an untargeted pending row when the schedule has nothing left', async () => {
+    eventDataMock.mockReturnValue({
+      days: [{ index: 0, unlockAt: NOW - HOUR, pool: 'main', snapshotItemIds: [] }],
     });
-    // No Day is invented, and no retention is claimed. `retainedAt` appears only
-    // as the CLEAR (see below), never as a stamp.
+    const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
+    expect(placements).toEqual([
+      { itemId: 'legacy', dayIndex: null, retained: true, outcome: 'retained' },
+    ]);
+  });
+
+  it('keeps a Prompt UNTARGETED on an Event with no schedule at all', async () => {
+    // The one honest untargeted case: there are no Days, so "every Day" is the
+    // single legacy board and narrowing it would mean nothing.
+    eventDataMock.mockReturnValue({});
+    const placements = await approveItems([{ id: 'legacy' }], 'admin-uid');
+    expect(placements).toEqual([
+      { itemId: 'legacy', dayIndex: null, retained: false, outcome: 'untargeted' },
+    ]);
+    const { data } = written()[0];
+    expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
     expect(data).not.toHaveProperty('targetDayIndex');
     expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
   });
@@ -408,7 +436,9 @@ describe('approveItems — routing an approval into one Day', () => {
       [{ id: 'bad', targetDayIndex: -3 as number }],
       'admin-uid',
     );
-    expect(placements).toEqual([{ itemId: 'bad', dayIndex: null, retained: true }]);
+    expect(placements).toEqual([
+      { itemId: 'bad', dayIndex: null, retained: true, outcome: 'retained' },
+    ]);
     const { data } = written()[0];
     expect(data).toMatchObject({ status: 'active', approvedBy: 'admin-uid' });
     expect(data).toHaveProperty('retainedAt');
@@ -425,7 +455,9 @@ describe('approveItems — routing an approval into one Day', () => {
       [{ id: 'nulled', targetDayIndex: null as unknown as number }],
       'admin-uid',
     );
-    expect(placements).toEqual([{ itemId: 'nulled', dayIndex: null, retained: true }]);
+    expect(placements).toEqual([
+      { itemId: 'nulled', dayIndex: null, retained: true, outcome: 'retained' },
+    ]);
     expect(written()[0].data).toHaveProperty('retainedAt');
   });
 
@@ -442,7 +474,7 @@ describe('approveItems — routing an approval into one Day', () => {
     expect(typeof (data as { retainedAt: unknown }).retainedAt).not.toBe('number');
   });
 
-  it('CLEARS it on an UNTARGETED approval too — every placement, not just routed ones', async () => {
+  it('CLEARS it on a RESOLVED placement too — every placement, not just routed ones', async () => {
     await approveItems([{ id: 'legacy' }], 'admin-uid');
     const { data } = written()[0];
     expect(data).toHaveProperty('retainedAt');
@@ -467,7 +499,9 @@ describe('approveItems — routing an approval into one Day', () => {
     // (Phase 4b P1, PR #812).
     putItem('p1', { status: 'active', targetDayIndex: 2 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 2, retained: false }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: 2, retained: false, outcome: 'stale' },
+    ]);
     // Reported where it already stands, and NOT rewritten.
     expect(updateMock).not.toHaveBeenCalled();
   });
@@ -475,14 +509,18 @@ describe('approveItems — routing an approval into one Day', () => {
   it('reports an already-RETAINED row as retained, still without writing', async () => {
     putItem('p1', { status: 'active', targetDayIndex: 9, retainedAt: NOW });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 9 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: null, retained: true }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: null, retained: true, outcome: 'stale' },
+    ]);
     expect(updateMock).not.toHaveBeenCalled();
   });
 
   it('reports a row that has VANISHED rather than inventing one', async () => {
     delete itemDocs['p1'];
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: null, retained: false }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: null, retained: false, outcome: 'missing' },
+    ]);
     expect(updateMock).not.toHaveBeenCalled();
   });
 
@@ -491,7 +529,9 @@ describe('approveItems — routing an approval into one Day', () => {
     // not. An organiser re-aimed this Prompt at Day 3 after the queue rendered.
     putItem('p1', { targetDayIndex: 3 });
     const placements = await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
-    expect(placements).toEqual([{ itemId: 'p1', dayIndex: 3, retained: false }]);
+    expect(placements).toEqual([
+      { itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' },
+    ]);
     expect(written()[0].data).toMatchObject({ targetDayIndex: 3 });
   });
 
@@ -520,10 +560,12 @@ describe('approveItems — routing an approval into one Day', () => {
       'admin-uid',
     );
     expect(placements).toEqual([
-      { itemId: 'a', dayIndex: 2, retained: false },
-      { itemId: 'b', dayIndex: 2, retained: false },
-      { itemId: 'c', dayIndex: null, retained: true },
-      { itemId: 'd', dayIndex: null, retained: false },
+      { itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' },
+      { itemId: 'b', dayIndex: 2, retained: false, outcome: 'placed' },
+      { itemId: 'c', dayIndex: null, retained: true, outcome: 'retained' },
+      // 'd' has no stored target: a pending row is a player submission, so
+      // approval resolves the Day it should have had rather than every Day.
+      { itemId: 'd', dayIndex: 2, retained: false, outcome: 'placed' },
     ]);
     const stamps = new Set(written().map(({ data }) => (data as { approvedAt: number }).approvedAt));
     expect(stamps.size).toBe(1);
@@ -532,6 +574,6 @@ describe('approveItems — routing an approval into one Day', () => {
   it('approveItem takes the queue ROW so a target can never be dropped', async () => {
     putItem('p1', { targetDayIndex: 3 });
     const placement = await approveItem({ id: 'p1', targetDayIndex: 3 }, 'admin-uid');
-    expect(placement).toEqual({ itemId: 'p1', dayIndex: 3, retained: false });
+    expect(placement).toEqual({ itemId: 'p1', dayIndex: 3, retained: false, outcome: 'placed' });
   });
 });

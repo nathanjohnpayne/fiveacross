@@ -105,6 +105,8 @@ export interface SnapshotItem {
   approvedAt?: number;
   /** The Day this Prompt is intended for (#557). Absent = every Day. */
   targetDayIndex?: number;
+  /** Set when approval found no Day that could deal this Prompt (#557). */
+  retainedAt?: number;
 }
 
 /** The item pools a Day's snapshot draws from (specs/easy-mix.md § "Snapshot carries
@@ -260,6 +262,16 @@ export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter)
     .filter((it) => !isReportHidden(it.reportCount ?? 0, reportHideThreshold))
     .filter((it) => !isBanned(it.createdBy, bannedUids))
     .filter((it) => targetsDay(it.targetDayIndex, dayIndex))
+    // RETAINED Prompts are admitted to no Day, on the strength of the stored
+    // marker rather than the schedule. Until now retention held only because the
+    // target had become unreachable — which is true of the schedule as it stood
+    // at approval, and stops being true if the schedule is later extended, a Day
+    // is repaired, or a curated Day is switched to deal the main pool. Any of
+    // those would silently resurrect a Prompt the organiser was already told was
+    // retained and dealt nowhere (Phase 4b P2, PR #812). `retainedAt` is written
+    // only by a retention and CLEARED by any placement, so honouring it here
+    // makes the recorded decision the thing that binds.
+    .filter((it) => it.retainedAt == null)
     .filter((it) => {
       if (!cutoffApplies) return true;
       const enteredAt = it.approvedAt ?? it.createdAt;
@@ -449,6 +461,10 @@ function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
       // apart from an absent one, and coercing here would erase that difference
       // and silently promote a broken target to "every Day".
       targetDayIndex: data.targetDayIndex as number | undefined,
+      // Retention is a DECISION that was recorded and reported to the organiser,
+      // so the snapshot honours it directly rather than re-deriving it from the
+      // schedule (Phase 4b P2, PR #812).
+      retainedAt: data.retainedAt as number | undefined,
     };
   });
 }

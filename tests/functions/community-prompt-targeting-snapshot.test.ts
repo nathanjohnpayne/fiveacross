@@ -171,6 +171,23 @@ describe('activeSnapshotIds — Day targeting decides what a Day freezes (#557)'
     }
   });
 
+  it('excludes a RETAINED Prompt even from a Day its target now matches', () => {
+    // Retention used to hold only because the target had become unreachable —
+    // true of the schedule as it stood at approval, and false again the moment a
+    // Day is added, repaired, or switched to deal the main pool. Any of those
+    // would silently resurrect a Prompt the organiser was already told was
+    // retained and dealt nowhere (Phase 4b P2, PR #812). The stored marker is
+    // what binds now, so the recorded decision survives a schedule change.
+    const retained = [{ id: 'kept', pool: 'main', targetDayIndex: 3, retainedAt: 123 }];
+    expect(activeSnapshotIds(retained, mainDayFilter(3))).toEqual([]);
+    // And an untargeted retained row is excluded from every Day too, rather than
+    // falling through the absent-target branch onto all of them.
+    const loose = [{ id: 'loose', pool: 'main', retainedAt: 123 }];
+    for (const dayIndex of [0, 3, 4]) {
+      expect(activeSnapshotIds(loose, mainDayFilter(dayIndex))).toEqual([]);
+    }
+  });
+
   it('applies NO targeting filter when the caller omits dayIndex (pre-#557 callers)', () => {
     const { dayIndex: _omitted, ...noTargeting } = mainDayFilter(3);
     expect(activeSnapshotIds(items, noTargeting)).toEqual([

@@ -8,7 +8,7 @@ import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
-import { routeApprovalToDay, isUsableTarget } from './communityPrompts';
+import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = () => doc(db, 'events', EVENT_ID);
@@ -44,17 +44,33 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
 // by `firestore.rules` under the `isAdmin(eventId)` arm — no client-side field
 // allowlist needed beyond what the rule already checks.
 /**
- * Where one approval landed (#557). `dayIndex` is the Day the Prompt is now
- * scheduled for; `retained: true` means no eligible Day remained, so the Prompt
- * is approved and kept in the pool but is dealt nowhere. An untargeted Prompt
- * (no `targetDayIndex` — the organiser pool and every pre-#557 row) reports
- * `dayIndex: null, retained: false`: it is not scheduled for one Day because it
- * is eligible for all of them.
+ * Where one approval landed (#557), in two independent parts: `dayIndex` /
+ * `retained` say where the Prompt now STANDS, and `outcome` says what this call
+ * DID to get it there.
+ *
+ * What THIS call did to the Prompt — kept separate from what state the Prompt is
+ * in, because a caller that conflates them announces a placement for something
+ * it never approved (Phase 4b P2, PR #812).
+ *
+ *   - `placed`      — approved onto `dayIndex`.
+ *   - `untargeted`  — approved with no Day, which is only reachable on an Event
+ *                     that has no schedule at all; it means every Day, and on a
+ *                     Day-less Event that is the single board.
+ *   - `retained`    — approved, but no Day can deal it, so it is dealt nowhere.
+ *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
+ *                     and `retained` then describe where it already stands.
+ *   - `missing`     — NOT approved: no such item.
  */
+export type ApprovalOutcome = 'placed' | 'untargeted' | 'retained' | 'stale' | 'missing';
+
 export interface ApprovalPlacement {
   itemId: string;
+  /** The Day this Prompt is scheduled for, or `null` for none. */
   dayIndex: number | null;
+  /** Whether the Prompt is in the retained state — dealt nowhere. */
   retained: boolean;
+  /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
+  outcome: ApprovalOutcome;
 }
 
 /**
@@ -143,12 +159,25 @@ export async function approveItems(
       // A row that has moved on is a no-op reported where it actually stands, so
       // a double-click or a stale queue is harmless rather than corrupting. A
       // row that has vanished is likewise reported, not invented.
-      if (row === undefined || row.status !== 'pending') {
-        const stored = row?.targetDayIndex;
+      if (row === undefined) {
+        placements.push({ itemId: it.id, dayIndex: null, retained: false, outcome: 'missing' });
+        continue;
+      }
+      if (row.status !== 'pending') {
+        // Report where it ALREADY stands, and say plainly that this call did not
+        // approve it. `outcome` is what happened; `dayIndex`/`retained` are the
+        // row's state. Keeping them separate is what stops a consumer announcing
+        // "scheduled for Day 3" for a row that was actually REJECTED, or for one
+        // that no longer exists (Phase 4b P2, PR #812). Only a live `active` row
+        // can be described as scheduled at all.
+        const stored = row.targetDayIndex;
+        const isRetained = row.retainedAt != null;
+        const live = row.status === 'active';
         placements.push({
           itemId: it.id,
-          dayIndex: isUsableTarget(stored) && row?.retainedAt == null ? stored : null,
-          retained: row?.retainedAt != null,
+          dayIndex: live && !isRetained && isUsableTarget(stored) ? stored : null,
+          retained: isRetained,
+          outcome: 'stale',
         });
         continue;
       }
@@ -166,11 +195,36 @@ export async function approveItems(
       // this is the second line rather than the only one.
       const placed = { ...base, retainedAt: deleteField() };
       if (targetDayIndex === undefined) {
-        // Genuinely untargeted: approve exactly as before this feature. No
-        // target is invented — inferring one would quietly narrow an organiser
-        // Prompt that is meant for every Day.
-        tx.update(item(it.id), placed);
-        placements.push({ itemId: it.id, dayIndex: null, retained: false });
+        // A PENDING row with no target is a player submission that lost one —
+        // never an organiser Prompt meant for every Day. Organiser and seed
+        // Prompts are created `active` directly (the rules' admin-active-create
+        // arm) and never enter this queue, so by construction everything here is
+        // a suggestion aimed at one Day. Leaving the absence in place would let a
+        // crafted or cached client submit without a target and be approved onto
+        // EVERY Day — the feature's central failure mode, reachable around the
+        // create rule, which cannot cheaply tell "no Day was available" from "the
+        // client declined to say" (Phase 4b P1, PR #812). So approval resolves
+        // the target it should have had.
+        //
+        // The exception is an Event with NO schedule at all, where untargeted is
+        // the honest record rather than a gap: there are no Days, so "every Day"
+        // is the single legacy board and narrowing it would mean nothing.
+        if (days.length === 0) {
+          tx.update(item(it.id), placed);
+          placements.push({ itemId: it.id, dayIndex: null, retained: false, outcome: 'untargeted' });
+          continue;
+        }
+        const resolved = defaultTargetDayIndex(days, approvedAt);
+        if (resolved == null) {
+          // A schedule exists but nothing in it can still take a Prompt. Retained
+          // is the honest outcome, and the same one a targeted Prompt with
+          // nowhere left to go gets.
+          tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+          placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
+          continue;
+        }
+        tx.update(item(it.id), { ...placed, targetDayIndex: resolved });
+        placements.push({ itemId: it.id, dayIndex: resolved, retained: false, outcome: 'placed' });
         continue;
       }
       if (!isUsableTarget(targetDayIndex)) {
@@ -182,7 +236,7 @@ export async function approveItems(
         // malformed value is left in place rather than repaired: this write is a
         // merge, and guessing which Day was meant would be inventing one.
         tx.update(item(it.id), { ...base, retainedAt: approvedAt });
-        placements.push({ itemId: it.id, dayIndex: null, retained: true });
+        placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
         continue;
       }
       const routed = routeApprovalToDay(days, targetDayIndex, approvedAt);
@@ -191,11 +245,11 @@ export async function approveItems(
         // the Prompt untargeted, which reads as "every Day" — the one outcome
         // this ticket exists to prevent.
         tx.update(item(it.id), { ...base, retainedAt: approvedAt });
-        placements.push({ itemId: it.id, dayIndex: null, retained: true });
+        placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
         continue;
       }
       tx.update(item(it.id), { ...placed, targetDayIndex: routed });
-      placements.push({ itemId: it.id, dayIndex: routed, retained: false });
+      placements.push({ itemId: it.id, dayIndex: routed, retained: false, outcome: 'placed' });
     }
     return placements;
   });
