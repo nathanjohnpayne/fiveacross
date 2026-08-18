@@ -40,6 +40,13 @@ export interface SubmitBugReportInput {
 
 export interface SubmitBugReportResult {
   reportId: string;
+  /** Whether an admin was actually alerted. Only ever true for an `abuse`
+   *  report, and only when the server could confirm the reporter belongs to the
+   *  Event — a fact the client cannot know, which is why the sheet reports the
+   *  OUTCOME rather than promising one up front (#670). Optional so an older
+   *  deployed callable, which returns only `reportId`, degrades to "no claim
+   *  made" instead of to a false negative. */
+  notified?: boolean;
 }
 
 const TRANSPARENT_IMAGE_PLACEHOLDER =

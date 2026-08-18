@@ -113,16 +113,69 @@ describe('W4 bug-report inbox', () => {
     // Bug is pre-selected, so the default is visible rather than implied.
     expect(bug).toBeChecked();
     expect(abuse).not.toBeChecked();
-    // The consequence is stated only once the reporter has chosen it: an abuse
-    // report reaches an admin, a bug report waits in the inbox.
-    expect(screen.queryByText('An admin is notified about abuse reports.')).not.toBeInTheDocument();
+    // The consequence is stated only once the reporter has chosen it, and it is
+    // stated as an ATTEMPT: whether an admin is actually reached depends on a
+    // membership fact only the server holds.
+    const promise = /try to alert this event.s admins/i;
+    expect(screen.queryByText(promise)).not.toBeInTheDocument();
     fireEvent.click(abuse);
     expect(abuse).toBeChecked();
-    expect(screen.getByText('An admin is notified about abuse reports.')).toBeInTheDocument();
+    expect(screen.getByText(promise)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
+  });
+
+  it('reports what the SERVER did about an abuse report, rather than what the sheet promised (#670)', async () => {
+    // A person reporting harm must not be left believing an admin was reached
+    // when the report only entered the inbox — the sheet cannot know, so the
+    // receipt states the outcome the callable returned.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    const fileAbuse = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+      fireEvent.click(await screen.findByRole('radio', { name: 'Abuse or harmful content' }));
+      fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    };
+
+    submitSpy.mockResolvedValue({ reportId: 'report-alerted', notified: true });
+    renderFlow();
+    await fileAbuse();
+    expect(await screen.findByText('This event’s admins have been alerted.')).toBeInTheDocument();
+
+    submitSpy.mockResolvedValue({ reportId: 'report-quiet', notified: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await fileAbuse();
+    expect(await screen.findByText(/couldn’t alert this event’s admins/)).toBeInTheDocument();
+
+    // An older deployed callable returns only `reportId`. That is "no claim
+    // made", not "an admin was alerted" — it must degrade to the honest half.
+    submitSpy.mockResolvedValue({ reportId: 'report-legacy' });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await fileAbuse();
+    expect(await screen.findByText(/couldn’t alert this event’s admins/)).toBeInTheDocument();
+  });
+
+  it('gives each report-kind label a real 44px tap target', () => {
+    // A 13px line plus a few px of padding measures ~24px, which is the sort of
+    // thing a comment can claim and the box model quietly refuse. Phone-first
+    // UI, so the whole label has to reach the floor the rest of the app uses.
+    const optionBlock = INDEX_CSS.match(/\.bug-report-kind-option\s*\{[^}]*\}/s)?.[0] ?? '';
+    expect(optionBlock).toMatch(/min-height:\s*44px/);
+    expect(optionBlock).toMatch(/cursor:\s*pointer/);
+  });
+
+  it('opens the sheet on the kind choice, so forward navigation cannot skip it (#670)', async () => {
+    // The textarea used to take autoFocus, and it sits BELOW the kind control —
+    // so tabbing forward never reached the classification, and a report of harm
+    // could be submitted under the default `bug` without the reporter ever
+    // meeting the control that escalates it.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    expect(await screen.findByRole('radio', { name: 'Something is broken' })).toHaveFocus();
+    expect(screen.getByLabelText('What happened?')).not.toHaveFocus();
   });
 
   it('resets the kind to bug when a fresh report is opened', async () => {

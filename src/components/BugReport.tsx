@@ -59,6 +59,7 @@ const BugReportFlowContext = createContext<BugReportFlow | null>(null);
 export function BugReportProvider({ children }: { children: ReactNode }) {
   const dialogRef = useRef<HTMLElement>(null);
   const pickRef = useRef<HTMLDivElement>(null);
+  const kindRef = useRef<HTMLInputElement>(null);
   const captureAttemptRef = useRef(0);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const [stage, setStage] = useState<FlowStage>('closed');
@@ -78,17 +79,33 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
+  // What the SERVER did, not what the sheet hoped it would do. Only the server
+  // knows whether an abuse report reached an admin, so the receipt reports the
+  // outcome rather than the sheet promising one before submitting (#670).
+  const [notified, setNotified] = useState(false);
   const previewUrl = useMemo(() => (screenshot ? URL.createObjectURL(screenshot) : null), [screenshot]);
 
   useEffect(() => () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
   }, [previewUrl]);
   useEffect(() => {
-    // The sheet's focus lands via the textarea's autoFocus on (re)mount; the
-    // pick bar has no field, so move focus onto it explicitly for
+    // The pick bar has no field, so move focus onto it explicitly for
     // screen-reader users when the sheet parks.
     if (stage === 'pick') pickRef.current?.focus();
   }, [stage]);
+  useEffect(() => {
+    // THE SHEET OPENS ON THE KIND CHOICE, not on the textarea it used to
+    // autofocus (#670). Forward navigation from the textarea never reaches a
+    // control that sits ABOVE it, so a keyboard or screen-reader user could
+    // describe harmful content and submit it under the default `bug`
+    // classification without ever meeting the control that escalates it.
+    //
+    // It costs every reporter one Tab to start typing, which is a real cost paid
+    // by the common case; it is worth it because the failure it removes is a
+    // report of harm being silently misclassified, and because a classification
+    // question is a reasonable thing to be asked first.
+    if (stage === 'sheet' && !submittedId) kindRef.current?.focus();
+  }, [stage, submittedId]);
 
   const capture = useCallback(async () => {
     const attempt = ++captureAttemptRef.current;
@@ -133,6 +150,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       setKind('bug');
       setError(null);
       setSubmittedId(null);
+      setNotified(false);
       void capture();
     },
     [stage, capture],
@@ -222,6 +240,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
         }),
       );
       setSubmittedId(result.reportId);
+      setNotified(result.notified === true);
       setScreenshot(null);
     } catch (submitError) {
       setError(errorMessage(submitError));
@@ -259,6 +278,13 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                   <>
                     <h2 className="sheet-title" id="bug-report-title">Report received</h2>
                     <p>Thanks. Your report ID is <code>{submittedId}</code>.</p>
+                    {kind === 'abuse' && (
+                      <p className="bug-report-privacy">
+                        {notified
+                          ? 'This event’s admins have been alerted.'
+                          : 'We couldn’t alert this event’s admins automatically, but your report was filed and the team will see it.'}
+                      </p>
+                    )}
                     <div className="sheet-actions">
                       <button className="btn primary" type="button" onClick={close}>Done</button>
                     </div>
@@ -279,6 +305,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       <legend className="bug-report-label">What kind of report is this?</legend>
                       <label className="bug-report-kind-option">
                         <input
+                          ref={kind === 'bug' ? kindRef : undefined}
                           type="radio"
                           name="bug-report-kind"
                           value="bug"
@@ -289,6 +316,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       </label>
                       <label className="bug-report-kind-option">
                         <input
+                          ref={kind === 'abuse' ? kindRef : undefined}
                           type="radio"
                           name="bug-report-kind"
                           value="abuse"
@@ -299,7 +327,14 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       </label>
                     </fieldset>
                     {kind === 'abuse' && (
-                      <p className="bug-report-privacy">An admin is notified about abuse reports.</p>
+                      // "We try to" rather than "we will": whether an admin is
+                      // actually alerted depends on a membership fact only the
+                      // server holds, and somebody reporting harm must not be
+                      // left believing an admin was reached when the report only
+                      // entered the inbox. The receipt states what happened.
+                      <p className="bug-report-privacy">
+                        We’ll try to alert this event’s admins as well as filing the report.
+                      </p>
                     )}
                     <label className="bug-report-label" htmlFor="bug-report-description">What happened?</label>
                     <textarea
@@ -307,7 +342,6 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       className="input bug-report-description"
                       rows={5}
                       maxLength={BUG_REPORT_DESCRIPTION_MAX}
-                      autoFocus
                       placeholder="What were you trying to do, and what happened instead?"
                       value={description}
                       onChange={(event) => setDescription(event.target.value)}

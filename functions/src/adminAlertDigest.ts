@@ -309,7 +309,12 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
   return {
     theme,
     subject: `Admin · ${eventName}—${summary}`,
-    preheader: `${plural(total, 'item', 'items')} in the review queue for ${eventName}.`,
+    // DESTINATION-NEUTRAL. It used to say "in the review queue", which is true
+    // of approvals and moderation and false of abuse reports — those are not in
+    // that queue at all, so an abuse-only digest would send an admin looking at
+    // a surface holding none of its work (#670). The count is the useful half;
+    // the location belongs to the modules, which each name their own.
+    preheader: `${plural(total, 'item', 'items')} waiting for ${eventName}.`,
     brandLine: `${register.brandLine} · Admin`,
     headline: 'Needs your eyes',
     contextLine,

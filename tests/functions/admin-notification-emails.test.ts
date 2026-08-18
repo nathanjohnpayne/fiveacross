@@ -540,7 +540,9 @@ describe('buildAdminDigestModel', () => {
     ]);
     expect(model.sections.map((s) => s.heading)).toEqual(['Awaiting approval', 'Reported & hidden']);
     expect(model.subject).toBe('Admin · Trieste → Barcelona—1 to approve, 1 to review');
-    expect(model.preheader).toBe('2 items in the review queue for Trieste → Barcelona.');
+    // DESTINATION-NEUTRAL (#670): abuse rows are not in the Review queue at all,
+    // so the preheader states the count and lets each module name its own home.
+    expect(model.preheader).toBe('2 items waiting for Trieste → Barcelona.');
     expect(model.sections[0].rows).toEqual([{ label: 'Spot a speedo', detail: 'new Prompt · pending approval' }]);
     expect(model.sections[1].rows[0].label).toBe('Prompt: Rude one');
   });

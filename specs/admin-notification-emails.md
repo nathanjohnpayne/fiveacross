@@ -87,7 +87,7 @@ That precondition is written to match the DRAIN's precondition exactly. The swee
 
 Seven modules, in the wireframe's fixed order. An empty module is OMITTED rather than rendered empty—the daily email's standings module has a designed empty state because it ships every day either way; a digest with nothing to approve should simply not carry an approvals heading.
 
-1. **Preheader**—how much is waiting, for which Event.
+1. **Preheader**—how much is waiting, for which Event. Deliberately DESTINATION-NEUTRAL since [#670](https://github.com/nathanjohnpayne/gaycruisebingo/issues/670): it used to say "in the review queue", which is true of approvals and moderation and false of abuse reports, so an abuse-only digest sent an admin to a surface holding none of its work. The count is the useful half; each module names its own home.
 2. **Theme header**—the Day's palette over the two-token gradient band, with the admin brand line and the five-swatch palette strip. The Day supplies the palette so the digest looks like the Event it is about; the HEADLINE states the job ("Needs your eyes") rather than the Theme's name, because an admin opening this is being told there is work, not what today's Theme is. The Theme's own name rides the context line instead.
 3. **Abuse reports**—one row per report marked `abuse` ([#670](https://github.com/nathanjohnpayne/gaycruisebingo/issues/670)).
 4. **Awaiting approval**—one row per `pending` Prompt.

@@ -3006,18 +3006,24 @@ body.install-prompt-visible.update-prompt-visible .bug-report-pick {
   padding: 0;
   border: 0;
 }
+/* The whole label is the tap target, and it has to be a REAL 44px on a
+   phone-first UI — a 13px line plus a few px of padding measures ~24px, which
+   is the sort of thing a comment can claim and the box model quietly refuse.
+   `min-height` rather than padding so the row grows only when the text alone
+   would not reach the floor. */
 .bug-report-kind-option {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 44px;
   padding: 3px 0;
   font-size: 13px;
   line-height: 1.4;
   cursor: pointer;
 }
 .bug-report-kind-option input {
-  /* A 16px control on a 44px-tall row: the whole label is the target, so the
-     dot itself never has to be. */
+  /* A 16px control inside that 44px row: the label carries the target, so the
+     dot itself never has to. */
   width: 16px;
   height: 16px;
   margin: 0;

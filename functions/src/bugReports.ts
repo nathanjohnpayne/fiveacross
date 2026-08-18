@@ -49,7 +49,7 @@ export async function reporterBelongsToEvent(
 export async function handleSubmitBugReport(
   request: CallableRequest<unknown>,
   requireAppCheck: boolean,
-): Promise<{ reportId: string }> {
+): Promise<{ reportId: string; notified: boolean }> {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in before reporting a bug.');
   if (requireAppCheck && !request.app) throw new HttpsError('failed-precondition', 'App Check is required.');
@@ -131,5 +131,14 @@ export async function handleSubmitBugReport(
     if (file) await file.delete({ ignoreNotFound: true }).catch(() => undefined);
     throw error;
   }
-  return { reportId: reportRef.id };
+  // TELL THE REPORTER WHAT ACTUALLY HAPPENED (#670, Codex P2). The sheet cannot
+  // know whether an abuse report will escalate — that depends on a membership
+  // fact only the server holds — and a person reporting harm must not be left
+  // believing an admin was alerted when the report only reached the inbox. So
+  // the outcome is returned rather than promised up front.
+  //
+  // It discloses nothing a caller could not already establish by observation,
+  // and the alternative (staying silent) is worse for exactly the person the
+  // escalation exists to protect.
+  return { reportId: reportRef.id, notified: reporterInEvent };
 }
