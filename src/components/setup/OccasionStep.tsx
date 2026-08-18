@@ -51,9 +51,13 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * - `draft.occasion` may resolve, but disagree with `draft.edition`
  *   (specs/event-setup-wizard.md § Validation's `event-occasion-edition-mismatch`,
  *   which routes the organizer back to THIS step to fix it). A same-occasion
- *   re-click there recommits — the repair the validator is asking for —
- *   rather than a no-op that would leave "switch away and back" as the only
- *   way out.
+ *   re-click there patches ONLY `edition` — never the full `commit` (Codex
+ *   P2, PR #855 round 4): that would reintroduce the same silent-overwrite
+ *   risk round 3 fixed for a stale occasion id, this time for a stale
+ *   EDITION on an otherwise-recognized one. The validator's complaint is
+ *   specifically that `edition` disagrees with `occasion`, so the repair is
+ *   exactly that field — never a no-op, which would leave "switch away and
+ *   back" as the only way out, but never a full recommit either.
  */
 export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   const [pending, setPending] = useState<OccasionDef | null>(null);
@@ -79,11 +83,16 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
         // disagrees with it (specs/event-setup-wizard.md § Validation, "The
         // occasion must agree with the draft's edition"). `eventCompletenessIssues`
         // reports `event-occasion-edition-mismatch` and routes the organizer
-        // BACK to this step specifically to fix it by re-picking — so
-        // recommitting here IS the repair, not a clobber. A bare no-op would
-        // leave "switch to another occasion, then switch back" as the only
-        // way out, resetting unrelated fields twice for one fix.
-        commit(occasion);
+        // BACK to this step specifically to fix it by re-picking — so this
+        // must repair the mismatch, not no-op past it. But it must NOT go
+        // through `commit`/`applyOccasionDefaults` to do it (Codex P2, PR
+        // #855 round 4): that recommits card format, claim mode, default
+        // Theme and settings too — the SAME silent-overwrite risk round 3
+        // fixed for a stale/unrecognized occasion id, reintroduced here for
+        // a stale EDITION on an otherwise-recognized one. The validator's
+        // complaint is specifically that `edition` disagrees with
+        // `occasion`, so the repair is exactly that field, and nothing else.
+        updateDraft((d) => ({ ...d, edition: occasion.edition }));
         return;
       }
       // A TRUE no-op otherwise (Codex P1, PR #855 round 1): nothing about

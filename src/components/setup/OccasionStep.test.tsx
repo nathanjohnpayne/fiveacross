@@ -222,11 +222,17 @@ describe('OccasionStep', () => {
     expect(row('Custom')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('a same-occasion click repairs a stale occasion/edition mismatch instead of no-op-ing past it (Codex P2, PR #855 round 2)', async () => {
+  it('a same-occasion click repairs a stale occasion/edition mismatch with a SCOPED patch, not a full recommit (Codex P2, PR #855 rounds 2 and 4)', async () => {
     // A resumed/imported draft can carry a recognized occasion whose
     // `edition` disagrees with it — eventCompletenessIssues' own
     // event-occasion-edition-mismatch, which routes the organizer back to
-    // THIS step to fix it. The true no-op must not swallow that repair path.
+    // THIS step to fix it. The true no-op must not swallow that repair path
+    // (round 2) — but the repair must ALSO not go through the full
+    // `applyOccasionDefaults` commit (round 4), which would silently reset
+    // claim mode / card format / default Theme / settings the SAME way a
+    // stale occasion id's full commit would (round 3's lesson). This draft
+    // hand-edits claimMode and cardFormat away from what weekend-away's own
+    // defaults would set, specifically to prove they survive the repair.
     // `OccasionStep`'s own render never reads `draft.edition` (the pill
     // reflects the MATRIX's edition for the selected row, not the draft's
     // stored value) — so a spy is what actually proves the repair commits,
@@ -235,6 +241,8 @@ describe('OccasionStep', () => {
     const draft: EventDraft = {
       ...applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('weekend-away')!),
       edition: 'fiveacross', // stale — weekend-away binds vacay
+      claimMode: 'proof_required', // hand-edited on a later step — must survive
+      cardFormat: 'one_card', // hand-edited on a later step — must survive
     };
     const updateDraft = vi.fn();
     render(<OccasionStep draft={draft} updateDraft={updateDraft} />);
@@ -244,6 +252,11 @@ describe('OccasionStep', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(updateDraft).toHaveBeenCalledTimes(1);
     const updater = updateDraft.mock.calls[0]![0] as (d: EventDraft) => EventDraft;
-    expect(updater(draft).edition).toBe('vacay');
+    const repaired = updater(draft);
+    expect(repaired.edition).toBe('vacay');
+    // Everything else is untouched — NOT reset to weekend-away's matrix
+    // defaults ('honor' / 'daily_cards').
+    expect(repaired.claimMode).toBe('proof_required');
+    expect(repaired.cardFormat).toBe('one_card');
   });
 });
