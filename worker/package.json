@@ -1,0 +1,15 @@
+{
+  "name": "five-across-event-router",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Cloudflare Worker Event router for the Five Across wildcard Namespaces (#545, epic #529).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "versions:upload": "wrangler versions upload"
+  },
+  "devDependencies": {
+    "wrangler": "^4.123.0"
+  }
+}

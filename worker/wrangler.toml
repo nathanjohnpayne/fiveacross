@@ -1,0 +1,60 @@
+# Five Across Event router — Cloudflare Worker configuration (#545, epic #529).
+#
+# Deliberately deployable but NOT routed. `routes` is commented out below, so
+# `wrangler deploy` uploads a new version and changes nothing about what the
+# public sees. Attaching the routes IS the cutover, it is a human step gated on
+# the DNS work in #539 and the PRD's Gate ladder, and it must not be something a
+# deploy command can do by accident. See README.md § Deploying and attaching.
+
+name = "five-across-event-router"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# The dedicated `*.workers.dev` address. Kept ON on purpose: it is the only way
+# to exercise the real Worker — real Cache API, real Firestore reads, real
+# origin proxying — against production data WITHOUT putting it in front of a
+# live hostname. That matters more here than it usually would, because real
+# players are already carrying installed PWA shells and service workers minted
+# from the direct-to-Hosting path, so the cutover has to be verified against
+# already-installed shells rather than clean installs (#569 carry-forward).
+workers_dev = true
+
+[observability]
+enabled = true
+
+[vars]
+# The Firebase Hosting origin every Namespace proxies to. The site's own
+# `*.web.app` address, which serves regardless of which public hostname the
+# guest typed — that is precisely why the Host header is rewritten to it.
+ORIGIN_HOST = "fiveacross.web.app"
+FIREBASE_PROJECT_ID = "fiveacross"
+# Stamped onto every response as `x-event-router`, so an operator can tell from
+# outside whether this Worker is in front of a host yet. Bump it per release.
+ROUTER_VERSION = "v1"
+# Optional overrides; the defaults in src/index.ts are 2000 and 300000.
+# LOOKUP_TIMEOUT_MS = "2000"
+# HOSTNAME_CACHE_TTL_MS = "300000"
+#
+# FIREBASE_API_KEY is deliberately absent from this file. It is the Firebase
+# WEB api key — not a secret, and the identical value already ships in every
+# production bundle — but committing it here would raise a standing
+# `google_api_key` finding on every future secret-scanning pass for no security
+# benefit at all. Set it at deploy time instead:
+#     npx wrangler secret put FIREBASE_API_KEY
+# With it unset the router fails CLOSED on every address and stamps
+# `x-event-router-reason: lookup-unavailable`, which is the intended posture for
+# a misconfigured router and the first thing the smoke check below catches.
+
+# ---------------------------------------------------------------------------
+# Routes — the cutover. Uncomment ONLY as the deliberate Gate step.
+# ---------------------------------------------------------------------------
+# Both apexes are absent from this list on purpose. `fiveacross.app` and
+# `vacaybingo.com` are exact Firebase Hosting custom domains today; the router
+# classifies an apex correctly and would serve it, but moving them onto the
+# Worker is a separate decision from lighting up the wildcards, and doing both
+# in one step would leave nothing to roll back to.
+#
+# routes = [
+#   { pattern = "*.fiveacross.app/*", zone_name = "fiveacross.app" },
+#   { pattern = "*.vacaybingo.com/*", zone_name = "vacaybingo.com" },
+# ]
