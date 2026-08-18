@@ -90,6 +90,18 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
     expect(screen.getByText(/admin review/i)).toBeInTheDocument();
     expect(screen.getByText(/once your card is dealt it's frozen/i)).toBeInTheDocument();
   });
+
+  // Post-review #750/#755/#758 on PR #720: the marker used raw non-emptiness
+  // while Add's own `disabled` predicate uses `text.trim()`, so whitespace-only
+  // text marked the add bar as unsaved work even though Add stayed disabled and
+  // could never clear it — pinning the tab to a condemned build forever.
+  it('does not mark the add bar for whitespace-only text, which Add can never clear', () => {
+    render(<ItemPool />);
+    const marker = `[${UNSAVED_WORK_ATTRIBUTE}]`;
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), { target: { value: '   ' } });
+    expect(document.querySelector(marker)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
+  });
 });
 
 describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
