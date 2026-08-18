@@ -153,8 +153,21 @@ export function isIsoDate(value: string): boolean {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+/**
+ * The Days that actually EXIST, in index order.
+ *
+ * Holes are dropped rather than dereferenced. A sparse `days` array is
+ * reachable in memory (`new Array(n)`, a partially built schedule), and
+ * spreading one yields `undefined` entries that would throw in the sort
+ * comparator or on any field access — crashing the Step 5 checklist and the
+ * provisioner gate before `dayCompletenessIssues` could report the gap.
+ *
+ * Every predicate that READS Days goes through here; the gap itself is
+ * reported once, by `dayCompletenessIssues`, which walks by index (#787
+ * Phase 4b review).
+ */
 function daysInOrder(draft: EventDraft): DraftDayDef[] {
-  return [...draft.days].sort((a, b) => a.index - b.index);
+  return draft.days.filter((day) => day !== null && day !== undefined).sort((a, b) => a.index - b.index);
 }
 
 /**
@@ -172,7 +185,10 @@ function daysInOrder(draft: EventDraft): DraftDayDef[] {
 export function assignedPools(draft: EventDraft): PoolId[] {
   if (draft.cardFormat === 'one_card') return ['main'];
   const seen = new Set<PoolId>();
-  for (const day of draft.days) seen.add(normalizePool(day.pool));
+  // `daysInOrder` rather than `draft.days`: a hole yields `undefined` and
+  // `day.pool` would THROW here — and this predicate runs BEFORE the one that
+  // reports the gap, so a sparse schedule crashed the whole gate.
+  for (const day of daysInOrder(draft)) seen.add(normalizePool(day.pool));
   return [...seen];
 }
 

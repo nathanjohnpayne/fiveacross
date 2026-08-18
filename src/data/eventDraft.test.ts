@@ -490,3 +490,51 @@ describe('sparse and mislabelled blobs (#787 review)', () => {
     expect(storage.raw.has('gcb:event-draft:wrong-key')).toBe(true);
   });
 });
+
+describe('save never replaces a good draft with an unreadable one (#787 Phase 4b)', () => {
+  it('refuses to write a snapshot that would not read back', async () => {
+    // JSON.stringify turns a sparse array into explicit nulls, which
+    // parseEventDraft rejects — so writing it would destroy the stored draft.
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+
+    const good = draft({ draftId: 'd1', name: 'Good' });
+    await store.save(good);
+    expect(await store.load('d1')).not.toBeNull();
+
+    const sparseTonight: string[] = [];
+    sparseTonight.length = 2;
+    const bad = {
+      ...good,
+      name: 'Sparse',
+      days: [
+        {
+          index: 0,
+          date: '2026-08-07',
+          unlockAt: Date.parse('2026-08-07T13:00:00Z'),
+          place: 'p',
+          placeEmoji: '🌊',
+          theme: 'the-birds',
+          pool: 'main',
+          tutorial: false,
+          tonight: sparseTonight,
+        },
+      ],
+    } as unknown as EventDraft;
+
+    await store.save(bad);
+
+    // The PREVIOUS draft is intact — the save did not destroy it.
+    const loaded = await store.load('d1');
+    expect(loaded).not.toBeNull();
+    expect(loaded?.name).toBe('Good');
+  });
+
+  it('still returns the stamped in-memory draft, so the wizard is unaffected', async () => {
+    const store = createLocalDraftStore(fakeStorage(), () => NOW);
+    const sparse: string[] = [];
+    sparse.length = 2;
+    const bad = { ...draft(), days: [{ ...draft().days[0], tonight: sparse }] } as unknown as EventDraft;
+    await expect(store.save(bad)).resolves.toMatchObject({ v: DRAFT_SCHEMA_VERSION });
+  });
+});

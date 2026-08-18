@@ -991,3 +991,32 @@ describe('main-pool spicy must be a real boolean in the launch gate (#787 review
     ).toEqual([]);
   });
 });
+
+describe('a sparse day schedule reports, never crashes (#787 Phase 4b)', () => {
+  it('survives assignedPools, which runs before the gap is reported', () => {
+    // assignedPoolIssues composes THIRD in validateEventDraft, so a hole here
+    // used to throw on day.pool before dayCompletenessIssues could report it.
+    const days: DraftDayDef[] = [];
+    days.length = 3;
+    days[0] = day(0, { pool: 'easy' });
+    days[2] = day(2, { pool: 'closing', date: '2026-08-09' });
+    const draft = launchableDraft({ days });
+
+    expect(() => assignedPools(draft)).not.toThrow();
+    expect(() => validateEventDraft(draft, NOW)).not.toThrow();
+    expect(() => isDraftLaunchable(draft, NOW)).not.toThrow();
+    // The real Days still drive the pool set...
+    expect(assignedPools(draft).sort()).toEqual(['closing', 'easy']);
+    // ...and the gap is reported exactly once, by the predicate that owns it.
+    expect(validateEventDraft(draft, NOW).map((i) => i.code)).toContain('day-index-out-of-order');
+  });
+
+  it('survives the finale and first-unlock predicates too', () => {
+    const days: DraftDayDef[] = [];
+    days.length = 2;
+    days[1] = day(1, { pool: 'closing' });
+    const draft = launchableDraft({ days });
+    expect(() => finaleClosingPoolIssues(draft)).not.toThrow();
+    expect(() => firstUnlockIssues(draft, NOW)).not.toThrow();
+  });
+});

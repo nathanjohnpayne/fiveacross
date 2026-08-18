@@ -494,7 +494,21 @@ export function createLocalDraftStore(
       const ls = store(storage);
       if (ls) {
         try {
-          ls.setItem(KEY_PREFIX + stamped.draftId, JSON.stringify(stamped));
+          const serialized = JSON.stringify(stamped);
+          // Only write a snapshot that will READ BACK. `JSON.stringify` is not
+          // round-trip safe for every in-memory draft: a sparse array becomes
+          // explicit `null` entries, which `parseEventDraft` rejects. Writing
+          // one would replace a perfectly good stored draft with a blob the
+          // next `load()` misses and `list()` may reclaim — a save DESTROYING
+          // the thing it was meant to preserve (#787 Phase 4b review).
+          //
+          // On failure the previous stored value is left exactly as it was.
+          // That matches the existing best-effort posture: the in-memory draft
+          // the organizer is editing is untouched, and the save that follows a
+          // repaired schedule will succeed.
+          if (parseEventDraft(JSON.parse(serialized)) !== null) {
+            ls.setItem(KEY_PREFIX + stamped.draftId, serialized);
+          }
         } catch {
           // Quota or serialization failure. Best-effort, exactly like the card
           // snapshot: the in-memory draft the organizer is editing is
