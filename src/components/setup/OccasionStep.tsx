@@ -32,10 +32,26 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * `OccasionChangeConfirm` first, because Steps 2/4/5 (#790/#792/#793) can
  * each hand-edit exactly the fields a re-pick would silently recommit.
  * Re-selecting the SAME occasion is a TRUE no-op — `handleSelect` returns
- * without calling `commit` at all (Codex P1, PR #855): nothing about the
- * draft changes, so nothing needs re-applying, and re-running
+ * without calling `commit` at all (Codex P1, PR #855 round 1): nothing about
+ * the draft changes, so nothing needs re-applying, and re-running
  * `applyOccasionDefaults` here would silently discard exactly the same
  * later-step hand-edits the confirm dialog exists to protect.
+ *
+ * TWO EDGE CASES where re-applying IS the right move (Codex P2, PR #855
+ * round 2), both about a draft this step did not itself produce — resumed,
+ * imported, or hand-crafted:
+ * - `draft.occasion` may hold an id `OCCASIONS` no longer recognizes (a
+ *   stale/removed matrix entry). `current` (`occasionById(draft.occasion)`)
+ *   is then `null`, so the confirm dialog — which needs a real occasion to
+ *   name as "what you're leaving" — could never render if every pick still
+ *   required matching a `current` that doesn't exist. Any pick commits
+ *   directly in that case, same as a first pick.
+ * - `draft.occasion` may resolve, but disagree with `draft.edition`
+ *   (specs/event-setup-wizard.md § Validation's `event-occasion-edition-mismatch`,
+ *   which routes the organizer back to THIS step to fix it). A same-occasion
+ *   re-click there recommits — the repair the validator is asking for —
+ *   rather than a no-op that would leave "switch away and back" as the only
+ *   way out.
  */
 export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   const [pending, setPending] = useState<OccasionDef | null>(null);
@@ -46,19 +62,39 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   }
 
   function handleSelect(occasion: OccasionDef) {
-    if (draft.occasion === null) {
+    if (draft.occasion === null || current === null) {
+      // A first pick, OR a resumed/imported draft whose STORED occasion no
+      // longer resolves in the matrix — a stale/unknown id (Codex P2, PR
+      // #855 round 2). The confirm dialog below needs a real `current`
+      // occasion to name as "what you're leaving"; requiring one here too
+      // would mean every row falls through to `setPending` with no way for
+      // the dialog to ever render, permanently stranding the organizer on
+      // Step 1. There is nothing valid to protect in either case, so commit
+      // directly.
       commit(occasion);
       return;
     }
     if (draft.occasion === occasion.id) {
-      // A TRUE no-op (Codex P1, PR #855): nothing about the draft changes on
-      // a same-occasion re-click, so this must not fall through to `commit`.
-      // Doing so would re-run `applyOccasionDefaults` and silently restore
-      // matrix defaults over card format / claim mode / default Theme /
-      // settings the organizer may have hand-edited on a LATER step since
-      // the first pick — exactly the silent clobber the confirm dialog below
-      // exists to prevent for a DIFFERENT occasion. Nothing to confirm here
-      // either, since nothing would change.
+      if (draft.edition !== occasion.edition) {
+        // A stale Edition binding (Codex P2, PR #855 round 2): a resumed or
+        // imported draft can carry a recognized occasion whose `edition`
+        // disagrees with it (specs/event-setup-wizard.md § Validation, "The
+        // occasion must agree with the draft's edition"). `eventCompletenessIssues`
+        // reports `event-occasion-edition-mismatch` and routes the organizer
+        // BACK to this step specifically to fix it by re-picking — so
+        // recommitting here IS the repair, not a clobber. A bare no-op would
+        // leave "switch to another occasion, then switch back" as the only
+        // way out, resetting unrelated fields twice for one fix.
+        commit(occasion);
+        return;
+      }
+      // A TRUE no-op otherwise (Codex P1, PR #855 round 1): nothing about
+      // the draft changes on a same-occasion re-click, so this must not fall
+      // through to `commit`. Doing so would re-run `applyOccasionDefaults`
+      // and silently restore matrix defaults over card format / claim mode /
+      // default Theme / settings the organizer may have hand-edited on a
+      // LATER step since the first pick — exactly the silent clobber the
+      // confirm dialog below exists to prevent for a DIFFERENT occasion.
       return;
     }
     setPending(occasion);

@@ -190,4 +190,49 @@ describe('OccasionStep', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'true');
   });
+
+  it('a draft whose stored occasion no longer resolves in the matrix commits any pick directly, never stranding it (Codex P2, PR #855 round 2)', async () => {
+    // A resumed/imported/hand-crafted draft can carry an id OCCASIONS no
+    // longer recognizes. `occasionById` returns null for it, so the confirm
+    // dialog — which needs a real "current" occasion to name — could never
+    // render if every pick still routed through `setPending`. Cast is the
+    // same shape a stale-schema blob or a widened `string` would produce;
+    // the type itself only admits real `OccasionId`s.
+    const user = userEvent.setup();
+    const draft: EventDraft = {
+      ...createEventDraft({ now: NOW }),
+      occasion: 'retired-occasion' as unknown as EventDraft['occasion'],
+    };
+    renderHarness(draft);
+
+    await user.click(row('Custom'));
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(row('Custom')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a same-occasion click repairs a stale occasion/edition mismatch instead of no-op-ing past it (Codex P2, PR #855 round 2)', async () => {
+    // A resumed/imported draft can carry a recognized occasion whose
+    // `edition` disagrees with it — eventCompletenessIssues' own
+    // event-occasion-edition-mismatch, which routes the organizer back to
+    // THIS step to fix it. The true no-op must not swallow that repair path.
+    // `OccasionStep`'s own render never reads `draft.edition` (the pill
+    // reflects the MATRIX's edition for the selected row, not the draft's
+    // stored value) — so a spy is what actually proves the repair commits,
+    // not just that the UI still looks selected.
+    const user = userEvent.setup();
+    const draft: EventDraft = {
+      ...applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('weekend-away')!),
+      edition: 'fiveacross', // stale — weekend-away binds vacay
+    };
+    const updateDraft = vi.fn();
+    render(<OccasionStep draft={draft} updateDraft={updateDraft} />);
+
+    await user.click(row('Weekend away'));
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(updateDraft).toHaveBeenCalledTimes(1);
+    const updater = updateDraft.mock.calls[0]![0] as (d: EventDraft) => EventDraft;
+    expect(updater(draft).edition).toBe('vacay');
+  });
 });
