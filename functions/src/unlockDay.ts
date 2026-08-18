@@ -44,6 +44,11 @@ export interface EventLike {
   days?: DayLike[];
   frozenAt?: number | null;
   admins?: string[];
+  /** IANA zone the Day schedule is authored in (#800: the last-call freeze
+   *  phrase is formatted in this zone). Optional here because this reads the
+   *  raw Firestore doc directly rather than through `eventConverter`'s legacy
+   *  default — `freezePhraseForUnlock` falls back to UTC when absent. */
+  timezone?: string;
   /** ADR 0004 Phase 0 community auto-hide threshold (mirrors the live deal pool). */
   settings?: { reportHideThreshold?: number; easyMixRatio?: number };
   /** ADR 0004 Phase 0 event-scoped ban roster (#108; mirrors the live deal pool). */
@@ -59,6 +64,7 @@ import {
   lastCallStandingsCopy,
   buildPodiumPayload,
   buildMostLovedPhotoAward,
+  freezePhraseForUnlock,
   type FinalePlayer,
   type FinaleDay,
   type FinaleDayStat,
@@ -823,9 +829,15 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       let extra: Record<string, unknown> | undefined;
       try {
         const roster = await readFinaleRoster(db, eventId);
+        // #800: the actual closing-Day unlock, formatted in the Event's own
+        // timezone — computed ONCE here and persisted on the Moment so the
+        // client's ban-aware reconstruction (`src/lastCallCopy.ts`) reads the
+        // same string instead of an independently hardcoded literal.
+        const freezePhrase = freezePhraseForUnlock(times.farewellUnlockAt, event.timezone);
         extra = {
-          line: lastCallStandingsCopy(visibleFinaleRoster(roster, event.bannedUids ?? [])),
+          line: lastCallStandingsCopy(visibleFinaleRoster(roster, event.bannedUids ?? []), { freezePhrase }),
           lastCall: {
+            freezePhrase,
             players: roster.map((p) => ({
               uid: p.uid,
               displayName: p.displayName,

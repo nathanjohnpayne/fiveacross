@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   lastCallStandingsCopy,
   buildPodiumPayload,
+  freezePhraseForUnlock,
   DEFAULT_FREEZE_PHRASE,
   type FinaleDay,
   type FinaleDayHonorDoc,
@@ -79,6 +80,44 @@ describe('lastCallStandingsCopy', () => {
     expect(lastCallStandingsCopy(players, { freezePhrase: 'standings freeze at noon' })).toBe(
       'Jess leads by 1 bingo—standings freeze at noon.',
     );
+  });
+});
+
+describe('freezePhraseForUnlock (#800)', () => {
+  it('formats the ACTUAL closing-Day unlock in the Event timezone, not a hardcoded 8 a.m.', () => {
+    // Bodega's tail: closing Day unlocks at 11:00 America/Los_Angeles.
+    const unlockAt = Date.UTC(2026, 6, 25, 18, 0); // 11:00 PDT (UTC-7)
+    expect(freezePhraseForUnlock(unlockAt, 'America/Los_Angeles')).toBe('standings freeze at 11 a.m');
+  });
+
+  it('keeps the minutes when the unlock is off the hour', () => {
+    const unlockAt = Date.UTC(2026, 6, 25, 15, 30); // 8:30 a.m. America/Los_Angeles
+    expect(freezePhraseForUnlock(unlockAt, 'America/Los_Angeles')).toBe('standings freeze at 8:30 a.m');
+  });
+
+  it('formats a p.m. unlock', () => {
+    const unlockAt = Date.UTC(2026, 6, 25, 20, 0); // 1:00 p.m. America/Los_Angeles
+    expect(freezePhraseForUnlock(unlockAt, 'America/Los_Angeles')).toBe('standings freeze at 1 p.m');
+  });
+
+  it('defaults to UTC when no timezone is given', () => {
+    const unlockAt = Date.UTC(2026, 6, 25, 11, 0);
+    expect(freezePhraseForUnlock(unlockAt, undefined)).toBe('standings freeze at 11 a.m');
+  });
+
+  it('falls back to the historical default phrase when the unlock is missing or invalid', () => {
+    expect(freezePhraseForUnlock(undefined, 'America/Los_Angeles')).toBe(DEFAULT_FREEZE_PHRASE);
+    expect(freezePhraseForUnlock(Number.NaN, 'America/Los_Angeles')).toBe(DEFAULT_FREEZE_PHRASE);
+  });
+
+  it('degrades to UTC formatting on an unusable timezone, rather than crashing the beat', () => {
+    const unlockAt = Date.UTC(2026, 6, 25, 11, 0);
+    expect(freezePhraseForUnlock(unlockAt, 'Not/A_Zone')).toBe('standings freeze at 11 a.m');
+  });
+
+  it('produces the exact string DEFAULT_FREEZE_PHRASE bakes when the unlock genuinely IS 08:00', () => {
+    const unlockAt = Date.UTC(2026, 6, 25, 8, 0);
+    expect(freezePhraseForUnlock(unlockAt, 'UTC')).toBe(DEFAULT_FREEZE_PHRASE);
   });
 });
 

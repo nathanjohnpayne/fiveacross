@@ -175,6 +175,58 @@ export interface LastCallOptions {
 export const DEFAULT_FREEZE_PHRASE = 'standings freeze at 8 a.m';
 
 /**
+ * "8 a.m.", "11:30 p.m." — bare hour, minutes only off the hour, no trailing
+ * period on the meridiem (the caller's own sentence supplies the final full
+ * stop — see the `DEFAULT_FREEZE_PHRASE` note above, same reason). Mirrors the
+ * clock-formatting rule in `src/unlockCopy.ts`'s `spokenHour`, restated here
+ * because the app and functions packages are deliberately decoupled (ADR 0011).
+ */
+function spokenHour(unlockAt: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone,
+  }).formatToParts(new Date(unlockAt));
+  const part = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+  const minute = part('minute');
+  const hour = part('hour');
+  const meridiem = part('dayPeriod').toUpperCase().startsWith('P') ? 'p.m' : 'a.m';
+  return `${hour}${minute === '00' ? '' : `:${minute}`} ${meridiem}`;
+}
+
+/**
+ * "standings freeze at 8 a.m" — the Event's ACTUAL closing-Day unlock,
+ * formatted in the Event's timezone (#800). Both rendering paths that quote
+ * the freeze time used to hardcode this as the literal "8 a.m." regardless of
+ * the schedule; this is the one place that now derives it from
+ * `farewellUnlockAt`, so an Event whose closing Day unlocks at, say, 11:00
+ * announces "11 a.m.", not a copy-pasted 8. `runFinaleBeats`
+ * (`functions/src/unlockDay.ts`) computes this once and writes it into the
+ * `last_call` Moment's payload; `src/lastCallCopy.ts`'s client reconstruction
+ * reads that same persisted string rather than reformatting the instant
+ * itself, so the two rendering paths cannot drift apart.
+ *
+ * Falls back to `DEFAULT_FREEZE_PHRASE` when `farewellUnlockAt` is
+ * missing/non-finite or formatting throws, so a malformed schedule degrades to
+ * the historical literal rather than crashing the finale beat.
+ */
+export function freezePhraseForUnlock(farewellUnlockAt: number | undefined, timeZone: string | undefined): string {
+  if (typeof farewellUnlockAt !== 'number' || !Number.isFinite(farewellUnlockAt)) {
+    return DEFAULT_FREEZE_PHRASE;
+  }
+  try {
+    return `standings freeze at ${spokenHour(farewellUnlockAt, timeZone || 'UTC')}`;
+  } catch {
+    try {
+      return `standings freeze at ${spokenHour(farewellUnlockAt, 'UTC')}`;
+    } catch {
+      return DEFAULT_FREEZE_PHRASE;
+    }
+  }
+}
+
+/**
  * The going-into-the-final-night last-call line posted at 20:00 on Day 9. Names
  * the current leader and their margin over the runner-up — by bingos when they
  * lead on bingos, else by squares when the bingos tie — degrading gracefully:
