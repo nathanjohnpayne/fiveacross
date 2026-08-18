@@ -8,37 +8,17 @@
 // thin enough to read in one sitting and verify by eye. Adding logic here means
 // adding logic that only `wrangler dev` can exercise, so don't.
 
-import { handleRequest, type RouterConfig, type RouterDeps } from './router';
+import { routerConfigFromEnv, type RouterEnv } from './config';
+import { handleRequest, type RouterDeps } from './router';
 import { CACHE_VERSION, type CacheEnvelope, type HostnameCache } from './resolve';
 
-export interface Env {
-  /** The Firebase Hosting origin, e.g. `fiveacross.web.app`. */
-  ORIGIN_HOST: string;
-  FIREBASE_PROJECT_ID: string;
-  /** The Firebase WEB API key — the same non-secret value that ships in every
-   *  production bundle. Set at deploy time rather than committed, purely so
-   *  GitHub's secret scanner does not raise a standing false positive on the
-   *  repo; it grants nothing a page view does not already grant. */
-  FIREBASE_API_KEY: string;
-  LOOKUP_TIMEOUT_MS?: string;
-  HOSTNAME_CACHE_TTL_MS?: string;
-  ROUTER_VERSION?: string;
-}
-
-const DEFAULT_LOOKUP_TIMEOUT_MS = 2_000;
-const DEFAULT_CACHE_TTL_MS = 300_000;
+export type { RouterEnv as Env };
 
 /** How long an envelope may survive in Cloudflare's cache. This is NOT the
  *  freshness window — `resolve.ts` owns that via `fetchedAt` — it is the
  *  ceiling on how stale a stale-serve may get when Firestore is unreachable.
  *  Kept long precisely so a Firestore outage does not become an outage here. */
 const CACHE_RETENTION_SECONDS = 86_400;
-
-function positiveInt(raw: string | undefined, fallback: number): number {
-  if (raw === undefined) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 /**
  * Cloudflare's `caches.default` behind the narrow `HostnameCache` seam.
@@ -84,15 +64,8 @@ function cloudflareCache(cache: Cache, ctx: ExecutionContext): HostnameCache {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const config: RouterConfig = {
-      originHost: env.ORIGIN_HOST,
-      projectId: env.FIREBASE_PROJECT_ID,
-      apiKey: env.FIREBASE_API_KEY,
-      lookupTimeoutMs: positiveInt(env.LOOKUP_TIMEOUT_MS, DEFAULT_LOOKUP_TIMEOUT_MS),
-      cacheTtlMs: positiveInt(env.HOSTNAME_CACHE_TTL_MS, DEFAULT_CACHE_TTL_MS),
-      version: env.ROUTER_VERSION ?? 'v1',
-    };
+  async fetch(request: Request, env: RouterEnv, ctx: ExecutionContext): Promise<Response> {
+    const config = routerConfigFromEnv(env);
 
     const deps: RouterDeps = {
       // Wrapped rather than passed by reference so the global keeps its own
@@ -105,4 +78,4 @@ export default {
 
     return handleRequest(request, config, deps);
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<RouterEnv>;

@@ -21,7 +21,7 @@
     "test:functions": "npm --prefix functions install && vitest run --config vitest.functions.config.ts",
     "test:e2e": "scripts/test-e2e.sh",
     "worker:dev": "npm --prefix worker install && npm --prefix worker run dev",
-    "worker:deploy": "npm --prefix worker install && npm --prefix worker run deploy",
+    "worker:deploy": "scripts/worker-deploy.sh",
     "test:synthetic": "playwright test --config playwright.synthetic.config.ts",
     "emulator": "firebase emulators:start --only auth,firestore,storage",
     "seed": "node scripts/seed.mjs",

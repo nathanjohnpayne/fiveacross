@@ -45,12 +45,15 @@ curl -sI http://localhost:8787/ -H 'Host: admin.fiveacross.app'      # expect 40
 ### 1. Configure and deploy, unrouted
 
 ```bash
-cd worker
-npx wrangler secret put FIREBASE_API_KEY    # the fiveacross project's WEB api key
-npx wrangler deploy
+npx wrangler secret put FIREBASE_API_KEY --cwd worker   # the fiveacross project's WEB api key
+npm run worker:deploy                                   # from the repo root
 ```
 
 This uploads the Worker and publishes it on its `*.workers.dev` address only. Nothing about what the public sees changes.
+
+**Deploy through `npm run worker:deploy`, never a bare `wrangler deploy`.** `wrangler` publishes the caller's working directory, not `origin/main`, and once the routes are attached this Worker fronts every wildcard Event hostname — so a bare deploy from a feature branch or a dirty tree would replace the router for every Event at once with code no reviewer has seen. `scripts/worker-deploy.sh` applies the same three guards `scripts/deploy.sh` applies to the Firebase surface (on `main`, exactly matching `origin/main`, clean tree) with the same `--force` break-glass.
+
+Between this step and the next, the Worker is deployed but **unconfigured** if the secret has not been set — a state this procedure passes through on purpose. It answers `404` with `x-event-router-reason: lookup-unavailable` on every address rather than erroring, which is the last row of the table below.
 
 ### 2. Verify on `workers.dev`, against production data
 

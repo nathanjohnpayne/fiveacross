@@ -58,6 +58,23 @@ function isAuthPassthrough(pathname: string): boolean {
   return pathname === AUTH_PREFIX || pathname.startsWith(`${AUTH_PREFIX}/`);
 }
 
+/**
+ * Whether this router can do its job at all.
+ *
+ * Wider than `isLookupConfigured` by exactly one field, and the extra field is
+ * the one an auth-path request would otherwise reach: with no `ORIGIN_HOST`
+ * there is nothing to proxy TO, so a passthrough would fail somewhere inside
+ * the URL rewrite rather than as the documented fail-closed response. Every
+ * check here is against `''` rather than against nullishness, because
+ * `config.ts` has already normalised an unbound binding to the empty string —
+ * that normalisation is what makes "deployed but not yet configured", a state
+ * the cutover procedure deliberately passes through, a rendered 404 instead of
+ * a Worker runtime error.
+ */
+export function isRouterConfigured(config: RouterConfig): boolean {
+  return config.originHost.length > 0 && isLookupConfigured(config);
+}
+
 export async function handleRequest(
   request: Request,
   config: RouterConfig,
@@ -81,7 +98,7 @@ export async function handleRequest(
   // `/__/auth/*` proxying under a misconfigured deployment would make the
   // documented "fails closed on every address" posture quietly untrue for the
   // one path hardest to notice.
-  if (!isLookupConfigured(config)) {
+  if (!isRouterConfigured(config)) {
     return notFoundResponse('lookup-unavailable', config.version);
   }
 

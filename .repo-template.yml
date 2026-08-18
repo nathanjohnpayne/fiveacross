@@ -95,6 +95,7 @@ spec_test_map:
     - worker/src/host.test.ts
     - worker/src/resolve.test.ts
     - worker/src/router.test.ts
+    - worker/src/config.test.ts
   og-renderer-commit-safety:
     - scripts/og/og-size-guard.test.mjs
     - scripts/og/og-scratch-path.test.mjs
