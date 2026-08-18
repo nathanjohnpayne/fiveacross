@@ -2,7 +2,13 @@ import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useEventDoc, useDayMetasStatus, useLeaderboard, useProofKindsByUid, isBanned } from '../hooks/useData';
 import type { ProofKindFlags } from '../hooks/useData';
-import { cruiseFirstBingoUid, perDayHonors, tutorialDayIndexSet } from '../game/logic';
+import {
+  ceremonialDayIndexSet,
+  cruiseFirstBingoUid,
+  perDayHonors,
+  standingsFreezeAtFor,
+  tutorialDayIndexSet,
+} from '../game/logic';
 import { THEMES } from '../theme/themes';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
@@ -167,7 +173,24 @@ export default function Leaderboard() {
   // banned: a ban never rewrites who was first to BINGO (specs/w2-ban-console.md
   // § Leaderboard). Only whether that Player's row is currently VISIBLE changes.
   const tutorialDays = tutorialDayIndexSet(event?.days);
-  const firstBingoUid = cruiseFirstBingoUid(players, (i) => tutorialDays.has(i));
+  // The SAME cutoff the frozen podium applies (Phase 4b P1). A ceremonial Day
+  // deliberately keeps recording per-Day stats after the freeze, so without
+  // this the live Leaderboard could name a post-freeze winner while the card
+  // and the immutable podium Moment name nobody, or someone else — two screens
+  // answering one question differently. `standingsFreezeAtFor` resolves to the
+  // ceremonial Day's unlock when nothing is configured, so both live Events are
+  // unchanged; `frozenAt` is stamped to the scheduled instant, so the two agree
+  // once the scheduler has run.
+  const freezeAt = event?.frozenAt ?? standingsFreezeAtFor(event ?? null);
+  const firstBingoUid = cruiseFirstBingoUid(players, (i) => tutorialDays.has(i), freezeAt);
+  // The footnote's standings caveat, derived from the resolved Scoring Policy
+  // rather than naming the exception by pool (ADR 0011, Codex P2 on PR #841).
+  // A closing-pool Day that states `scoring: 'competitive'` DOES count, and a
+  // ceremonial Day on another pool does not — copy that says "except the
+  // farewell" contradicts the actual ranking rule in both directions. An Event
+  // with no ceremonial Day at all gets no caveat, because there is no exception
+  // to explain.
+  const ceremonialDays = ceremonialDayIndexSet(event?.days);
 
   // The Admin ban (#108) is PRESENTATIONAL and applied HERE, in the view only — the
   // shared `useLeaderboard` roster stays RAW so Board's First-to-BINGO ceremony reads
@@ -394,7 +417,10 @@ export default function Leaderboard() {
       )}
       {/* The wireframes' explanatory footnote (#264), re-voiced as player copy (#298). */}
       <p className="muted lb-footnote">
-        Every Day Card counts here—except the farewell, which is pure ceremony. ⭐ marks the
+        {ceremonialDays.size > 0
+          ? `Every Day Card counts here—except ${ceremonialDays.size === 1 ? 'the wrap-up, which is' : 'the wrap-up Days, which are'} pure ceremony. `
+          : 'Every Day Card counts here. '}
+        ⭐ marks the
         {editionLexicon().occasionWide} First to BINGO—main days only. Proof chips show every kind of
         proof a player has used. Tap a proof chip for the receipts in the Feed.
       </p>

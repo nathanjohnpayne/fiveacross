@@ -95,6 +95,7 @@ function ProofQueueRow({
   admins,
   days,
   frozenAt,
+  standingsFreezeAt,
 }: {
   proof: ProofDoc;
   threshold: number | undefined;
@@ -106,6 +107,10 @@ function ProofQueueRow({
   // The scheduler's freeze stamp (#265) — folded with the schedule through
   // standingsFrozen at delete time.
   frozenAt?: number;
+  // The Event's CONFIGURED Standings Freeze (ADR 0011), passed alongside the
+  // stamp so the delete-time gate honours an Event that states its own freeze
+  // rather than falling back to the ceremonial-Day derivation.
+  standingsFreezeAt?: number;
 }) {
   const autoHidden = isReportHidden(p.reportCount, threshold);
   return (
@@ -150,7 +155,7 @@ function ProofQueueRow({
             // observes the same freeze/ceremonial gates as the player's own —
             // evaluated inside the transaction via the getter.
             ceremonialDayIndexes: days ? [...ceremonialDayIndexSet(days)] : undefined,
-            statsFrozen: () => standingsFrozen({ frozenAt, days: days ?? [] }),
+            statsFrozen: () => standingsFrozen({ frozenAt, standingsFreezeAt, days: days ?? [] }),
           })
         }
       >
@@ -362,6 +367,7 @@ export default function ReviewQueue({
                 admins={admins}
                 days={event?.days}
                 frozenAt={event?.frozenAt}
+                standingsFreezeAt={event?.standingsFreezeAt}
               />
             ) : (
               <ItemQueueRow
