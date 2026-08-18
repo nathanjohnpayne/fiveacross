@@ -390,6 +390,22 @@ function PromptRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(text);
+  // Rows are keyed by POSITION, because Prompt text is not unique — duplicates
+  // are explicitly allowed. So a delete, a compaction or a pack swap can slide
+  // a DIFFERENT Prompt into a position whose row is mid-edit, and React keeps
+  // that row's state. Without this the editor would stay open over the new
+  // Prompt holding the old one's draft, and Save would overwrite it.
+  //
+  // Compared DURING RENDER (React's documented "adjusting state when a prop
+  // changes" pattern), the same way `WizardChrome` resets `showIssues` on a
+  // step change rather than in an effect: an effect-based reset fires after
+  // the commit, so the stale draft would reach the DOM first.
+  const [seenText, setSeenText] = useState(text);
+  if (text !== seenText) {
+    setSeenText(text);
+    setValue(text);
+    setEditing(false);
+  }
   const label = `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool`;
 
   const commit = () => {

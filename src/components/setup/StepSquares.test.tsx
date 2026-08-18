@@ -214,6 +214,33 @@ describe('prompt CRUD', () => {
     expect(current().prompts.main).toHaveLength(1);
   });
 
+  it('closes an open editor when a delete slides a different Prompt into that row', async () => {
+    // Rows are keyed by position (Prompt text is not unique — duplicates are
+    // allowed), so deleting an earlier row moves a DIFFERENT Prompt under an
+    // open editor. Leaving it open would let Save overwrite that Prompt with
+    // the previous one's draft.
+    const { current } = renderStep(
+      draftWith({
+        days: [day(0, { pool: 'closing' })],
+        prompts: { main: mainPrompts(3), easy: [], closing: [] },
+      }),
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Edit Prompt 2 in the main pool' }));
+    const input = screen.getByRole('textbox', { name: 'Edit Prompt 2 in the main pool' });
+    await userEvent.clear(input);
+    await userEvent.type(input, 'a draft that must not leak');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Delete Prompt 1 in the main pool' }));
+    // Position 1 now holds 'main 2'. The editor is closed and nothing leaked.
+    // Scoped to the inline editors — the add bar is a textbox too, and it is
+    // always present.
+    expect(screen.queryByRole('textbox', { name: /^Edit Prompt/ })).toBeNull();
+    expect(current().prompts.main).toEqual([
+      { text: 'main 1', spicy: false },
+      { text: 'main 2', spicy: false },
+    ]);
+  });
+
   it('flags repeated wording without blocking on it', async () => {
     const { current } = renderStep(
       draftWith({
