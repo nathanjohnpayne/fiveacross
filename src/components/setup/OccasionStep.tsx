@@ -31,8 +31,11 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * pick that would change an ALREADY-SELECTED occasion interposes
  * `OccasionChangeConfirm` first, because Steps 2/4/5 (#790/#792/#793) can
  * each hand-edit exactly the fields a re-pick would silently recommit.
- * Re-selecting the SAME occasion is a no-op in every field
- * `applyOccasionDefaults` touches, so it re-applies without a prompt.
+ * Re-selecting the SAME occasion is a TRUE no-op — `handleSelect` returns
+ * without calling `commit` at all (Codex P1, PR #855): nothing about the
+ * draft changes, so nothing needs re-applying, and re-running
+ * `applyOccasionDefaults` here would silently discard exactly the same
+ * later-step hand-edits the confirm dialog exists to protect.
  */
 export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   const [pending, setPending] = useState<OccasionDef | null>(null);
@@ -43,11 +46,22 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   }
 
   function handleSelect(occasion: OccasionDef) {
-    if (draft.occasion !== null && draft.occasion !== occasion.id) {
-      setPending(occasion);
+    if (draft.occasion === null) {
+      commit(occasion);
       return;
     }
-    commit(occasion);
+    if (draft.occasion === occasion.id) {
+      // A TRUE no-op (Codex P1, PR #855): nothing about the draft changes on
+      // a same-occasion re-click, so this must not fall through to `commit`.
+      // Doing so would re-run `applyOccasionDefaults` and silently restore
+      // matrix defaults over card format / claim mode / default Theme /
+      // settings the organizer may have hand-edited on a LATER step since
+      // the first pick — exactly the silent clobber the confirm dialog below
+      // exists to prevent for a DIFFERENT occasion. Nothing to confirm here
+      // either, since nothing would change.
+      return;
+    }
+    setPending(occasion);
   }
 
   return (
@@ -82,7 +96,12 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
         })}
       </div>
       <p className="wizard-occasion-note muted">
-        The occasion sets the edition your players see, the starter square pack, and sensible defaults — every one
+        {/* Frame copy (`#frame-setup-occasion`) named a starter square pack
+            here too, but every `starterPackId` in the matrix is `null` today
+            (content ownership is open, #786 Decision 2) — no occasion seeds
+            one yet, so this note only promises what selecting an occasion
+            actually commits right now (CodeRabbit, PR #855). */}
+        The occasion sets the edition your players see and sensible defaults for your schedule and Look — every one
         changeable before launch.
       </p>
       {pending && current && (

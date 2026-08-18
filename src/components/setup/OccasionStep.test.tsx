@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { EventDraft } from '../../types';
@@ -171,13 +171,22 @@ describe('OccasionStep', () => {
     expect(dialog).not.toHaveTextContent(/clears the schedule/i);
   });
 
-  it('re-picking the SAME already-selected occasion commits immediately without a prompt', async () => {
+  it('re-picking the SAME already-selected occasion is a TRUE no-op — no confirm, and updateDraft is never called', async () => {
+    // Codex P1, PR #855: an earlier version fell through to `commit()` here,
+    // which re-runs `applyOccasionDefaults` and would silently discard any
+    // hand-edit a LATER step (Basics/Look/Launch) made to card format, claim
+    // mode, default Theme or settings since the first pick. A spy-based
+    // render (not the round-tripping `Harness`) is what actually proves the
+    // call never happens — asserting the rendered result alone can't
+    // distinguish "nothing happened" from "the same values got reapplied".
     const user = userEvent.setup();
     const draft = applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('weekend-away')!);
-    renderHarness(draft);
+    const updateDraft = vi.fn();
+    render(<OccasionStep draft={draft} updateDraft={updateDraft} />);
 
     await user.click(row('Weekend away'));
 
+    expect(updateDraft).not.toHaveBeenCalled();
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'true');
   });
