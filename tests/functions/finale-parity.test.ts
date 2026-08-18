@@ -356,6 +356,68 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
     expect(fns.firstBingo).toEqual(client.firstBingo);
   });
 
+  // Phase 4b P1: the podium is "as of the freeze", not live. The client reads
+  // the LIVE roster, and a ceremonial Day deliberately keeps recording Marks
+  // after the freeze (its bucket is retained so its own daily honour renders).
+  // Without a cutoff, a post-freeze bingo mints a First to BINGO that the
+  // scheduler's already-posted, immutable podium Moment does not have — the
+  // Card and the Feed naming different winners.
+  it('ignores post-freeze Marks on both sides, so the card cannot drift from the Moment', () => {
+    const FREEZE = 1_000;
+    const days: Array<Pick<DayDef, 'index' | 'pool' | 'tutorial'> & { scoring?: string }> = [
+      { index: 0, pool: 'main', tutorial: false },
+      // Ceremonial but NOT a Tutorial Day, so it stays eligible for the honour
+      // — which is exactly what makes the cutoff load-bearing here.
+      { index: 1, pool: 'closing', tutorial: false, scoring: 'ceremonial' },
+    ];
+    // Nobody bingoed before the freeze; one Player does so afterwards on the
+    // ceremonial Day. The frozen podium must still report NO First to BINGO.
+    const players: PlayerDoc[] = [
+      {
+        uid: 'late',
+        displayName: 'Late',
+        photoURL: null,
+        joinedAt: 0,
+        bingoCount: 1,
+        squaresMarked: 10,
+        firstBingoAt: FREEZE + 500,
+        reshufflesUsed: 0,
+        dayStats: {
+          0: { bingoCount: 0, squaresMarked: 6, firstBingoAt: null },
+          1: { bingoCount: 1, squaresMarked: 4, firstBingoAt: FREEZE + 500 },
+        },
+      },
+    ];
+
+    const frozenClient = buildPodium(players, days as DayDef[], undefined, true, FREEZE);
+    const frozenFns = buildPodiumPayload(asFinalePlayers(players), asFinaleDays(days), [], FREEZE);
+    expect(frozenClient.firstBingo).toBeNull();
+    expect(frozenFns.firstBingo).toEqual(frozenClient.firstBingo);
+
+    // Pin that the cutoff is what does it: with no cutoff the SAME data mints a
+    // First to BINGO on both sides, which is the drift being prevented.
+    expect(buildPodium(players, days as DayDef[]).firstBingo).toEqual({
+      uid: 'late',
+      displayName: 'Late',
+      at: FREEZE + 500,
+    });
+
+    // A PRE-freeze bingo is still reported normally — the cutoff filters, it
+    // does not blank the honour outright.
+    const early = players.map((p) => ({
+      ...p,
+      dayStats: { ...p.dayStats, 0: { bingoCount: 1, squaresMarked: 6, firstBingoAt: FREEZE - 100 } },
+    }));
+    expect(buildPodium(early, days as DayDef[], undefined, true, FREEZE).firstBingo).toEqual({
+      uid: 'late',
+      displayName: 'Late',
+      at: FREEZE - 100,
+    });
+    expect(
+      buildPodiumPayload(asFinalePlayers(early), asFinaleDays(days), [], FREEZE).firstBingo,
+    ).toEqual(buildPodium(early, days as DayDef[], undefined, true, FREEZE).firstBingo);
+  });
+
   it('agrees on an empty roster and on a schedule-less Event', () => {
     expect(buildPodiumPayload([], asFinaleDays(CRUISE_SHAPE)).champion).toEqual(
       buildPodium([], CRUISE_SHAPE as DayDef[]).champion,

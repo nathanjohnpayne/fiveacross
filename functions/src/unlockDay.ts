@@ -371,17 +371,30 @@ export function finaleTimes(days: DayLike[], standingsFreezeAt?: number): Finale
   const freezeAt = configured ?? ceremonial?.unlockAt ?? null;
   if (freezeAt == null) return null;
 
-  // The Day the podium Moment is filed under: the ceremonial Day when the
-  // schedule has one (the cruise shape's goodbye card), else the LAST Day — an
-  // all-competitive Event with a configured freeze still has a finale, and it
-  // belongs on the Day the Event ends on. Matches `finalePinIndex`
-  // (src/data/finale.ts), which pins the view to the same Day.
+  // The Day the podium Moment is filed under: the LAST Day still OPEN at the
+  // freeze. Mirrors `finaleDayIndex` (src/data/finale.ts), which pins the view
+  // to the same Day.
+  //
+  // Keyed on the freeze rather than on the ceremonial Day (Phase 4b P1). The
+  // two coincide whenever the freeze is derived — a derived freeze IS that
+  // Day's unlock, so it is the last Day open at it, and both live Events are
+  // unchanged — but they come apart the moment a freeze is configured. A
+  // schedule with an EARLY ceremonial Day, later competitive Days, and an
+  // end-of-Event freeze would otherwise file the podium on the early Day and
+  // derive last call from ITS predecessor, stranding the finale mid-Event. A
+  // Day's Scoring Policy says whether its Marks count; it does not elect the
+  // finale's host.
   const lastDayIndex = days.reduce((max, d) => (d.index > max ? d.index : max), -1);
   // A configured freeze on an Event with no schedule at all has no Day to file
   // the Moments under, and a Moment at Day -1 renders nowhere. Treat it the
   // same as no finale rather than posting into the void.
-  if (!ceremonial && lastDayIndex < 0) return null;
-  const podiumDayIndex = ceremonial ? ceremonial.index : lastDayIndex;
+  if (lastDayIndex < 0) return null;
+  const openAtFreeze = days.filter((d) => d.unlockAt <= freezeAt).map((d) => d.index);
+  // A freeze before EVERY Day opens is a misconfiguration rather than a shape;
+  // fall back to the lowest Day index so the podium still lands somewhere.
+  const podiumDayIndex = openAtFreeze.length
+    ? Math.max(...openAtFreeze)
+    : days.reduce((min, d) => (d.index < min ? d.index : min), lastDayIndex);
   // Clamped at 0: a single-Day Event would otherwise file the last-call Moment
   // under Day -1, which is not a Day any surface can render. Both beats landing
   // on the one Day is the honest answer for a one-Day schedule.

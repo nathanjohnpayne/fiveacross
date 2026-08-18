@@ -228,6 +228,37 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days }));
   });
 
+  it('DENIES a malformed scoring value on a still-future Day', async () => {
+    const days = seededDays();
+    days[1] = { ...days[1], scoring: 'ceremoniall' };
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
+
+  // Bodega Bay's shape — FOUR Days, the largest Event that actually evaluates
+  // within Firestore's expression cap today. The enum check unrolls ten times,
+  // so this is the measurement that decides whether it can ship at all: if a
+  // legitimate four-Day edit still succeeds, the check costs nothing real for
+  // every Event that works, and the ten-Day case is #850's to fix.
+  it('still ALLOWS a legitimate edit on a FOUR-Day schedule with the enum check', async () => {
+    const fourDays = Array.from({ length: 4 }, (_, index) => ({
+      index,
+      date: `2026-08-0${7 + Math.min(index, 2)}`,
+      port: 'Bodega Bay',
+      portEmoji: '🐦',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 3 ? 'farewell' : 'main',
+      tutorial: index === 3,
+      scoring: index === 3 ? 'ceremonial' : 'competitive',
+      unlockAt: index < 2 ? PAST() : FUTURE(),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: fourDays });
+    });
+    const edited = fourDays.map((d, i) => (i === 2 ? { ...d, theme: 'neon-pink-playground' } : d));
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
+
   // KNOWN FAILING — a PRE-EXISTING production bug, not a regression from #551.
   //
   // Firestore caps a rule at 1000 evaluated expressions. Every fixture in this

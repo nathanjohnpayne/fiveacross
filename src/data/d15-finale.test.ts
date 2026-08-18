@@ -49,21 +49,46 @@ function player(overrides: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid'>): PlayerD
 // rendered no podium at all.
 describe('finaleDayIndex — the one definition of the finale Day', () => {
   it('is the first ceremonial Day when the schedule has one', () => {
-    expect(finaleDayIndex(DAYS)).toBe(2);
+    expect(finaleDayIndex(DAYS, DAYS[2].unlockAt)).toBe(2);
   });
 
   it('falls back to the LAST Day when no Day is ceremonial', () => {
-    expect(finaleDayIndex([DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })])).toBe(2);
+    expect(finaleDayIndex([DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })], NOW)).toBe(2);
   });
 
-  it('follows the stated policy onto a non-closing pool', () => {
-    const days = [DAYS[0], day({ index: 1, pool: 'main', scoring: 'ceremonial' }), day({ index: 2, pool: 'main' })];
-    expect(finaleDayIndex(days)).toBe(1);
+  // Phase 4b P1: a Day's Scoring Policy says whether its Marks count. It does
+  // NOT elect the finale's host. A schedule with an EARLY ceremonial Day, later
+  // competitive Days and an end-of-Event freeze must not strand the podium in
+  // the middle of an Event that was still being played.
+  it('does NOT let an early ceremonial Day elect the host when a freeze is configured', () => {
+    const days = [
+      DAYS[0],
+      day({ index: 1, pool: 'main', scoring: 'ceremonial', unlockAt: NOW - 3 * HOUR }),
+      day({ index: 2, pool: 'main', unlockAt: NOW - HOUR }),
+    ];
+    // The configured freeze sits after every Day has opened, so the finale
+    // hosts on the LAST Day — not on the ceremonial one at index 1.
+    expect(finaleDayIndex(days, NOW)).toBe(2);
+  });
+
+  // …and the derived case is unchanged, because a derived freeze IS the
+  // ceremonial Day's unlock, so that Day is the last one open at it.
+  it('still resolves to the ceremonial Day when the freeze is DERIVED from it', () => {
+    const days = [
+      DAYS[0],
+      day({ index: 1, pool: 'main', scoring: 'ceremonial', unlockAt: NOW - 3 * HOUR }),
+      day({ index: 2, pool: 'main', unlockAt: NOW - HOUR }),
+    ];
+    expect(finaleDayIndex(days, days[1].unlockAt)).toBe(1);
+  });
+
+  it('hosts on the first Day when the freeze precedes every unlock', () => {
+    expect(finaleDayIndex(DAYS, DAYS[0].unlockAt - HOUR)).toBe(0);
   });
 
   it('is -1 when there are no Days', () => {
-    expect(finaleDayIndex([])).toBe(-1);
-    expect(finaleDayIndex(undefined)).toBe(-1);
+    expect(finaleDayIndex([], NOW)).toBe(-1);
+    expect(finaleDayIndex(undefined, NOW)).toBe(-1);
   });
 
   it('agrees with finalePinIndex whenever the pin resolves', () => {
@@ -72,7 +97,7 @@ describe('finaleDayIndex — the one definition of the finale Day', () => {
       [DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })],
       [DAYS[0], day({ index: 1, pool: 'main', scoring: 'ceremonial' }), day({ index: 2, pool: 'main' })],
     ]) {
-      expect(finalePinIndex(days, NOW, NOW)).toBe(finaleDayIndex(days));
+      expect(finalePinIndex(days, NOW, NOW)).toBe(finaleDayIndex(days, NOW));
     }
   });
 });

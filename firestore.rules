@@ -447,23 +447,44 @@ service cloud.firestore {
     // raised alongside its own EventDoc. A size mismatch between the incoming
     // and existing arrays is rejected outright (`days[]` length is fixed at
     // seed — this ticket builds no row add/remove editor).
-    // NOT VALIDATED HERE: the VALUE of a present `scoring` (Codex P2, PR #841).
-    // A typo'd `scoring: 'ceremoniall'` is a successful write that quietly does
-    // nothing, because `scoringForDay` treats anything it does not recognise as
-    // absent and falls back to the pool derivation — the same silent-no-op the
-    // `standingsFreezeAt` bounds below deliberately reject, so the asymmetry is
-    // real and it is not the preferred end state.
+    // Every present `scoring` is one of the two stated policies (ADR 0011).
+    // Unrolled like `daysThemeLockOk` below, and applied on CREATE too, which
+    // that function deliberately skips (a create has no prior array to lock
+    // against). Absent is always valid: no doc written before ADR 0011 carries
+    // the field, and `scoringForDay` resolves absence from the pool.
     //
-    // It is deferred on MEASURED evidence rather than taste. An enum check must
-    // unroll per Day like `daysThemeLockOk` does, and this rule is already past
-    // Firestore's 1000-expression evaluation cap on a ten-Day schedule: with
-    // `origin/main`'s rules and no change of ours, an admin editing a
-    // still-future Day on a full ten-Day Event is DENIED by budget exhaustion
-    // (see the skipped ten-Day case in tests/rules/d15-admin-schedule.test.ts and
-    // and issue #850). Adding ten more evaluations to a rule
-    // that already cannot finish would deepen a live production bug to close a
-    // fail-safe one. The enum check belongs with the fix that makes this rule
-    // cheap enough to evaluate.
+    // Needed because a typo'd value fails SILENTLY, and then STICKS.
+    // `scoringForDay` treats anything it does not recognise as absent and falls
+    // back to the pool derivation — a deliberate, tested direction, since
+    // reading a malformed value as `ceremonial` would drop a competitive Day's
+    // real play out of the standings. So `scoring: 'ceremoniall'` is a
+    // successful write that quietly does nothing, and once that Day unlocks the
+    // lock below makes it permanent: the organiser can never correct it.
+    //
+    // Deferred once on an unmeasured expression-budget worry, then MEASURED: a
+    // legitimate admin edit on a FOUR-Day schedule (Bodega Bay, the largest
+    // Event that evaluates within Firestore's 1000-expression cap today) still
+    // succeeds with this check in place. It is pinned by a test, alongside the
+    // ten-Day case that fails WITHOUT this check on origin/main and belongs to
+    // issue #850.
+    function dayScoringValid(day) {
+      return !('scoring' in day)
+        || day.scoring == 'competitive'
+        || day.scoring == 'ceremonial';
+    }
+    function daysScoringValid(days) {
+      return (days.size() < 1  || dayScoringValid(days[0]))
+        && (days.size() < 2  || dayScoringValid(days[1]))
+        && (days.size() < 3  || dayScoringValid(days[2]))
+        && (days.size() < 4  || dayScoringValid(days[3]))
+        && (days.size() < 5  || dayScoringValid(days[4]))
+        && (days.size() < 6  || dayScoringValid(days[5]))
+        && (days.size() < 7  || dayScoringValid(days[6]))
+        && (days.size() < 8  || dayScoringValid(days[7]))
+        && (days.size() < 9  || dayScoringValid(days[8]))
+        && (days.size() < 10 || dayScoringValid(days[9]));
+    }
+
     function daysThemeLockOk(newDays, oldDays) {
       return newDays.size() == oldDays.size()
         && (newDays.size() < 1  || dayThemeChangeOk(newDays[0], oldDays[0]))
@@ -745,6 +766,8 @@ service cloud.firestore {
         // gates above already use), every entry's theme change must be on a
         // still-future Day. See `daysThemeLockOk` above.
         && (!('days' in request.resource.data)
+            || daysScoringValid(request.resource.data.days))
+        && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
             || daysThemeLockOk(request.resource.data.days, resource.data.days))
@@ -761,7 +784,32 @@ service cloud.firestore {
             || !('standingsFreezeAt' in resource.data)
             || request.time.toMillis() < resource.data.standingsFreezeAt
             || ('standingsFreezeAt' in request.resource.data
-                && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt));
+                && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt))
+        // …and no write may CREATE a settled boundary either (Phase 4b P1). The
+        // clause above only bites once an explicit value has passed, so on its
+        // own an admin could still set a freeze in the PAST — instantly frozen
+        // for a refreshed client, still live for a cached one — or delete a
+        // future one and drop back to a ceremonial-Day derivation that has
+        // already elapsed. Any write that CHANGES the field must therefore land
+        // it strictly in the future, and deletion is refused outright.
+        //
+        // RESIDUAL, and it needs the derived boundary rather than the stored
+        // one: on a legacy Event carrying no explicit freeze, whose ceremonial
+        // Day has already unlocked, adding a future freeze passes both clauses
+        // and un-freezes refreshed clients while cached ones stay frozen.
+        // Closing it means resolving the ceremonial Day's unlock inside the
+        // rule — a ten-way unroll on a rule that already exceeds Firestore's
+        // 1000-expression cap at ten Days (issue #850). It is deliberately left
+        // to that fix rather than deepening a live bug; the scheduler stamps
+        // `frozenAt` within one sweep, which bounds the window in practice.
+        && (resource == null
+            || !('standingsFreezeAt' in request.resource.data)
+            || ('standingsFreezeAt' in resource.data
+                && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt)
+            || request.resource.data.standingsFreezeAt > request.time.toMillis())
+        && (resource == null
+            || !('standingsFreezeAt' in resource.data)
+            || 'standingsFreezeAt' in request.resource.data);
       allow delete: if isAdmin(eventId);
 
       // Community-editable prompt pool.

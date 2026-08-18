@@ -85,16 +85,25 @@ describe('d15-finale — frozenAt is admin/Function-writable only', () => {
 // `frozenAt` is the stamp. It rides the same admin gate, and carries the shape
 // check the read side depends on.
 describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () => {
-  it('ALLOWS an admin to set a numeric standingsFreezeAt', async () => {
-    await assertSucceeds(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+  it('ALLOWS an admin to set a numeric, still-FUTURE standingsFreezeAt', async () => {
+    // Future by construction: a freeze may only ever be scheduled ahead of
+    // itself, so `NOW()` is deliberately not the fixture.
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
   });
 
   it('DENIES a non-admin Player setting standingsFreezeAt', async () => {
-    await assertFails(updateDoc(doc(db(MALLORY), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+    // A FUTURE value, so the denial is about identity rather than the bound.
+    await assertFails(
+      updateDoc(doc(db(MALLORY), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
   });
 
   it('DENIES an unauthenticated write of standingsFreezeAt', async () => {
-    await assertFails(updateDoc(doc(unauthDb(), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+    await assertFails(
+      updateDoc(doc(unauthDb(), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
   });
 
   it('DENIES even an admin writing a non-POSITIVE standingsFreezeAt', async () => {
@@ -117,7 +126,9 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
       await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { standingsFreezeAt: past });
     });
     // Moving it is rejected.
-    await assertFails(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
     // So is DELETING it, which would fall back to the ceremonial-Day
     // derivation — just as much a change of a settled boundary.
     await assertFails(
@@ -148,6 +159,25 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     });
     await assertSucceeds(
       updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: future + 7200_000 }),
+    );
+  });
+
+  it('DENIES setting a freeze that is already in the PAST', async () => {
+    // Instantly frozen for a refreshed client, still live for a cached one.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() - 3600_000 }),
+    );
+  });
+
+  it('DENIES deleting a still-FUTURE freeze', async () => {
+    // Removal falls back to the ceremonial-Day derivation, which may already
+    // have elapsed — the same settled-boundary crossing, by another route.
+    const future = NOW() + 3600_000;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { standingsFreezeAt: future });
+    });
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: deleteField() }),
     );
   });
 

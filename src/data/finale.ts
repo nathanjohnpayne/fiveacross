@@ -4,11 +4,11 @@
 // mounting a component. The functions-side mirror (functions/src/finaleContent.ts)
 // posts the SAME podium as a Moment; this module is what the farewell VIEW renders.
 import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
-import { isCeremonialDay } from '../game/scoring';
 import {
   ceremonialDayIndexSet,
   comparePlayers,
   rankingExcludedDay,
+  standingsFreezeAtFor,
   cruiseFirstBingoUid,
   effectiveCruiseFirstBingoAt,
   perDayHonors,
@@ -67,15 +67,15 @@ function podiumStandingRow(
   player: PlayerDoc,
   ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
+  withinFreeze: (at: number | null) => number | null,
 ): Rankable & { uid: string; displayName: string } {
   // RANKING first-bingo: Tutorial OR ceremonial (ADR 0011). `comparePlayers`
   // breaks ties on this timestamp, so leaving ceremonial Days in would let a
   // ceremonial Mark decide the podium while its bingos and squares are being
   // excluded two lines below. The First to BINGO HONOUR keeps its own
   // tutorial-only value — different question, different exclusion.
-  const firstBingoAt = effectiveCruiseFirstBingoAt(
-    player,
-    rankingExcludedDay(isTutorialDay, (i) => ceremonial.has(i)),
+  const firstBingoAt = withinFreeze(
+    effectiveCruiseFirstBingoAt(player, rankingExcludedDay(isTutorialDay, (i) => ceremonial.has(i))),
   );
   const dayStats = player.dayStats;
   if (!dayStats || ceremonial.size === 0) {
@@ -137,13 +137,27 @@ export function buildPodium(
   days: readonly DayDef[] | undefined,
   dayMetas?: ReadonlyMap<number, DayMetaDoc>,
   dayMetasLoaded = true,
+  freezeAt?: number | null,
 ): Podium {
+  // The podium is "as of the freeze", not live (Phase 4b P1). This module reads
+  // the LIVE roster, and a ceremonial Day deliberately keeps recording Marks
+  // after the freeze — its bucket is retained so its own daily honour still
+  // renders. Without a cutoff those post-freeze Marks can mint a First to BINGO
+  // the scheduler's already-posted, immutable podium Moment does not have: a
+  // Player whose only bingo lands after the freeze on a ceremonial,
+  // `tutorial: false` Day would appear on the card while the Feed shows none.
+  // The card and the Feed must not name different winners — that is the same
+  // class of split ADR 0011 was written to close.
+  //
+  // `null`/absent means no cutoff, which is what every pre-freeze render wants.
+  const withinFreeze = (at: number | null): number | null =>
+    at != null && freezeAt != null && at > freezeAt ? null : at;
   const tutorial = tutorialDayIndexSet(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
   const ceremonial = ceremonialDayIndexSet(days);
 
   const standings = players
-    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay))
+    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay, withinFreeze))
     .sort(comparePlayers);
   const top = standings[0];
   const champion: PodiumChampion | null =
@@ -170,13 +184,18 @@ export function buildPodium(
       squaresMarked: r.squaresMarked,
     }));
 
-  const firstUid = cruiseFirstBingoUid(players, isTutorialDay);
-  const firstPlayer = firstUid ? players.find((p) => p.uid === firstUid) : undefined;
-  const firstAt = firstPlayer ? effectiveCruiseFirstBingoAt(firstPlayer, isTutorialDay) : null;
-  const firstBingo: PodiumFirstBingo | null =
-    firstPlayer && firstAt != null
-      ? { uid: firstPlayer.uid, displayName: firstPlayer.displayName, at: firstAt }
-      : null;
+  // Re-derived here rather than via `cruiseFirstBingoUid` so the freeze cutoff
+  // applies to the SELECTION as well as the reported instant — picking the
+  // winner from uncut data and then blanking their timestamp would report no
+  // First to BINGO at all while an eligible pre-freeze one existed.
+  let firstBingo: PodiumFirstBingo | null = null;
+  for (const p of players) {
+    const at = withinFreeze(effectiveCruiseFirstBingoAt(p, isTutorialDay));
+    if (at == null) continue;
+    if (!firstBingo || at < firstBingo.at) {
+      firstBingo = { uid: p.uid, displayName: p.displayName, at };
+    }
+  }
 
   return {
     champion,
@@ -209,30 +228,52 @@ export function finalePinIndex(
   days: readonly DayDef[] | undefined,
   frozenAt: number | null | undefined,
   now: number,
+  standingsFreezeAt?: number,
 ): number | null {
   if (frozenAt == null) return null;
-  const idx = finaleDayIndex(days);
+  const idx = finaleDayIndex(days, standingsFreezeAtFor({ frozenAt, days: [...(days ?? [])], standingsFreezeAt }));
   if (idx < 0) return null;
   if ((days ?? [])[idx].unlockAt > now) return null;
   return idx;
 }
 
 /**
- * The ARRAY index of the Day the finale lives on: the first CEREMONIAL Day when
- * the schedule has one, else the LAST Day; `-1` when there are no Days.
+ * The ARRAY index of the Day the finale lives on: the LAST Day still open at the
+ * Event's Standings Freeze. `-1` when there are no Days.
  *
- * Time-independent and freeze-independent on purpose, so the "which Day is the
- * finale" question has exactly ONE answer that the default-view pin
- * (`finalePinIndex`) and the podium's mount gate in `Board.tsx` both read.
- * Those two used to disagree by construction — the pin resolved the closing
- * Day while the mount re-inferred it from `viewedDay.pool === 'closing'` — so
- * an Event that states a ceremonial Day on some other pool, or none at all,
- * would pin a returning Player to a Day that then rendered no podium and no
- * share action (Codex P1, PR #841).
+ * One answer, read by the default-view pin (`finalePinIndex`) and the podium's
+ * mount gate in `Board.tsx`. Those two used to disagree by construction — the
+ * pin resolved the closing Day while the mount re-inferred it from
+ * `viewedDay.pool === 'closing'` — so an Event stating a ceremonial Day on some
+ * other pool, or none at all, would pin a returning Player to a Day that then
+ * rendered no podium and no share action (Codex P1).
+ *
+ * KEYED ON THE FREEZE, not on the first ceremonial Day (Phase 4b P1). Those
+ * coincide whenever the freeze is derived — the derived freeze IS that Day's
+ * unlock, so it is the last Day open at it — but they come apart the moment a
+ * freeze is configured. A schedule with an EARLY ceremonial Day, later
+ * competitive Days, and an end-of-Event freeze would otherwise file the podium
+ * on the early Day and derive last call from ITS predecessor, stranding the
+ * finale in the middle of an Event that was still being played. A Day's Scoring
+ * Policy says whether its Marks count; it does not elect the finale's host.
+ * `functions/src/unlockDay.ts` resolves `podiumDayIndex` by the same rule.
  */
-export function finaleDayIndex(days: readonly DayDef[] | undefined): number {
+export function finaleDayIndex(
+  days: readonly DayDef[] | undefined,
+  freezeAt: number | null | undefined,
+): number {
   const arr = days ?? [];
   if (arr.length === 0) return -1;
-  const ceremonialIdx = arr.findIndex((d) => isCeremonialDay(d));
-  return ceremonialIdx >= 0 ? ceremonialIdx : arr.length - 1;
+  if (freezeAt == null) return arr.length - 1;
+  // The LAST Day open at the freeze. One rule, and it subsumes the case that
+  // used to be special: when nothing is configured the freeze IS the first
+  // ceremonial Day's unlock, so that Day is the last one open at it and the
+  // answer is unchanged for both live Events.
+  let best = -1;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].unlockAt <= freezeAt) best = i;
+  }
+  // A freeze before EVERY Day opens is a misconfiguration rather than a shape;
+  // host the finale on the first Day so the podium still lands somewhere.
+  return best >= 0 ? best : 0;
 }

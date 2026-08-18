@@ -163,15 +163,15 @@ function podiumStandingRow(
   player: FinalePlayer,
   ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
+  withinFreeze: (at: number | null) => number | null = (at) => at,
 ): FinalePlayer {
   // RANKING first-bingo: Tutorial OR ceremonial (ADR 0011), mirroring
   // `rankingExcludedDay` in `src/game/logic.ts`. `compareFinalePlayers` breaks
   // ties on this timestamp, so a ceremonial Mark must not decide the podium
   // while its bingos and squares are excluded. The First to BINGO HONOUR below
   // keeps its own tutorial-only value.
-  const firstBingoAt = effectiveFirstBingoAt(
-    player,
-    (i: number) => isTutorialDay(i) || ceremonial.has(i),
+  const firstBingoAt = withinFreeze(
+    effectiveFirstBingoAt(player, (i: number) => isTutorialDay(i) || ceremonial.has(i)),
   );
   const dayStats = player.dayStats;
   if (!dayStats || ceremonial.size === 0) {
@@ -389,13 +389,21 @@ export function buildPodiumPayload(
   players: readonly FinalePlayer[],
   days: readonly FinaleDay[] | undefined,
   dayHonors: readonly FinaleDayHonorDoc[] = [],
+  freezeAt?: number | null,
 ): PodiumPayload {
+  // The podium is "as of the freeze", not live. The scheduler builds this AT
+  // the freeze, so its own input is already frozen and the cutoff is a no-op
+  // here — it exists so this stays byte-identical to `buildPodium`
+  // (src/data/finale.ts), which reads the LIVE roster and genuinely needs it
+  // (Phase 4b P1). The parity test feeds both the same post-freeze data.
+  const withinFreeze = (at: number | null): number | null =>
+    at != null && freezeAt != null && at > freezeAt ? null : at;
   const tutorial = tutorialDayIndexes(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
   const ceremonial = ceremonialDayIndexes(days);
 
   const standings = players
-    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay))
+    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay, withinFreeze))
     .sort(compareFinalePlayers);
   const top = standings[0];
   const champion: PodiumChampion | null =
@@ -410,7 +418,7 @@ export function buildPodiumPayload(
 
   let firstBingo: PodiumFirstBingo | null = null;
   for (const p of players) {
-    const at = effectiveFirstBingoAt(p, isTutorialDay);
+    const at = withinFreeze(effectiveFirstBingoAt(p, isTutorialDay));
     if (at == null) continue;
     if (!firstBingo || at < firstBingo.at) {
       firstBingo = { uid: p.uid, displayName: p.displayName, at };
