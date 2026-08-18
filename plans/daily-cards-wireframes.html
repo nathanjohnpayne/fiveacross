@@ -970,7 +970,7 @@
       <div class="lock"><div class="vlock"><div class="vb">VACAY BINGO</div><div class="by">by Five Across</div></div>
         <div class="tagline">Take the detour. <span style="opacity:.75">For the story.</span></div>
       </div>
-      <div class="swrow"><span class="swbig" style="background:#2e7fa8"></span><span class="swbig" style="background:#8fd0c3"></span><span class="swbig" style="background:#e8862e"></span><span class="swbig" style="background:#0a141c"></span></div>
+      <div class="swrow"><span class="swbig" style="background:#74e0c8"></span><span class="swbig" style="background:#ff9d4d"></span><span class="swbig" style="background:#ffd98a"></span><span class="swbig" style="background:#041826"></span></div>
       <div class="rule"></div>
         <div class="brow"><div class="k">Domain</div><div class="v">vacaybingo.com</div></div>
         <div class="brow"><div class="k">Register</div><div class="v">Trip · <em>Days are Stops · the crowd is "the whole group" · offline holds up wherever you land</em></div></div>
@@ -1008,7 +1008,7 @@
 
   <!-- ---------- Join · Gay Cruise Bingo ---------- -->
   <div class="unit" id="fx-join-gcb">
-    <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
+    <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span><span class="brand-chip">🌱 seeded-preview state</span>
     <div class="mini" data-theme="neon-playground">
       <div class="board" style="gap:12px;justify-content:center">
         <div style="text-align:center">
@@ -1016,7 +1016,7 @@
         </div>
         <div class="desc" style="text-align:center;margin-top:0;font-size:12px">Sign in, get your card, mark it if you see it.</div>
         <div class="banner" style="border-style:solid;border-color:var(--border)">
-          <b>🛳️ Trieste → Barcelona</b>Jul 15–24 · 10 Days, 10 cards · 🇮🇹 Trieste first, 🇪🇸 Barcelona last<br><span style="font-size:9.5px;color:var(--dim)">gaycruisebingo.com</span>
+          <b>🛳️ Trieste → Barcelona</b>Jul 15–24 · 10 Days, 10 cards · 🇮🇹 Trieste first, 🇪🇸 Barcelona last<br><span style="font-size:9.5px;color:var(--dim)">gaycruisebingo.com · drawn from a seeded preview slice; <code>EventPostcard</code> returns <code>null</code> without one</span>
         </div>
         <div class="lgd" style="align-items:flex-start;gap:9px">
           <span class="lgdchip freec" style="border-radius:5px;padding:3px 6px;font-size:10px">☐</span>
@@ -1679,7 +1679,7 @@
 </div>
 
 <h2 id="sec-social">The social surfaces—Feed, Notice, Ranks, More</h2>
-<p class="sub">Where the group sees itself. The mechanics are platform-owned end to end—tally cards, proof cards with their live/library source badge (#190), Moments, hearts (<code>specs/feed-hearts.md</code>), the overall leaderboard summing every card except the ceremonial farewell, the daily First-to-BINGO strip, and the More menu’s ordering. The Edition-visible strings are few and they are exactly what these twelve frames isolate: the occasion qualifier on the champion line, the schedule row’s noun, the offline promise under Install, and the register of the Notice a player reads.</p>
+<p class="sub">Where the group sees itself. The mechanics are platform-owned end to end—tally cards, proof cards with their live/library source badge (#190), Moments, hearts (<code>specs/feed-hearts.md</code>), the overall leaderboard and its standings exception (derived from each Day’s resolved Scoring Policy, never from its pool), the daily First-to-BINGO strip, and the More menu’s ordering. The Edition-visible strings are few and they are exactly what these twelve frames isolate: the occasion qualifier on the champion line, the schedule row’s noun, the offline promise under Install, and the register of the Notice a player reads.</p>
 
 <h3 id="sec-social-feed">Feed—tally cards, proofs, Moments, hearts</h3>
 <div class="frames">
@@ -1954,7 +1954,7 @@
         <div class="rank"><div class="n">3</div><div class="avatar"></div>Dan<div class="stats">6 bingos<br>77 squares</div></div>
         <div class="rank"><div class="n">4</div><div class="avatar"></div>Theo<span class="thumb">📷</span><div class="stats">5 bingos<br>80 squares</div></div>
         <div class="rank"><div class="n">5</div><div class="avatar"></div>Big Denver Chris<span class="thumb">🎙</span><div class="stats">4 bingos<br>62 squares</div></div>
-        <div class="note">Every Day Card counts here—except the farewell, which is pure ceremony. ⭐ marks the cruise-wide First to BINGO—main days only. Proof chips show every kind of proof a player has used—tap one for the receipts in the Feed.</div>
+        <div class="note">Every Day Card counts here—except the wrap-up, which is pure ceremony. ⭐ marks the cruise-wide First to BINGO—main days only. Proof chips show every kind of proof a player has used. Tap a proof chip for the receipts in the Feed.</div>
         <div class="btnrow"><span class="btn">Share leaderboard</span></div>
         <div class="note">Shares as “Check out the Gay Cruise Bingo leaderboard 🏆” · <code>gay-cruise-bingo-leaderboard.png</code></div>
       </div>
@@ -1965,7 +1965,7 @@
         <div class="tab"><span><i class="tabavatar"></i></span>More</div>
       </div>
     </div>
-    <p class="cap"><b>Ranks—overall + daily honors</b>One cruise-long leaderboard summing every card except the ceremonial farewell; per-day First to BINGO strip above it, one chip per theme night. The list itself has no section head—the surface runs filter row → honors strip → rows → footnote, and the Edition shows first in the footnote's occasion-wide credit, then in the share copy/filename. Shipped rows also carry each player's first-BINGO time (the final tiebreak) and a BLACKOUT badge when earned—elided here for width. Feed Moments carry the same day chip. Two shipped affordances the earlier wireframe omitted are drawn so the tri-brand comparison is honest: the <i>filter row</i> (All / With BINGO / Blackout, brand-invariant) and <i>Share leaderboard</i>.</p>
+    <p class="cap"><b>Ranks—overall + daily honors</b>One cruise-long leaderboard summing every card except the ceremonial wrap-up—an exception <b>derived from the resolved Scoring Policy</b> (ADR 0011), not from pool identity: a closing Day that declares itself competitive still counts, a ceremonial Day on another pool does not, and an Event with no ceremonial Day gets no caveat sentence at all; per-day First to BINGO strip above it, one chip per theme night. The list itself has no section head—the surface runs filter row → honors strip → rows → footnote, and the Edition shows first in the footnote's occasion-wide credit, then in the share copy/filename. Shipped rows also carry each player's first-BINGO time (the final tiebreak) and a BLACKOUT badge when earned—elided here for width. Feed Moments carry the same day chip. Two shipped affordances the earlier wireframe omitted are drawn so the tri-brand comparison is honest: the <i>filter row</i> (All / With BINGO / Blackout, brand-invariant) and <i>Share leaderboard</i>.</p>
   </div>
 
   <!-- Ranks · Vacay Bingo -->
@@ -1991,7 +1991,7 @@
         <div class="rank"><div class="n">3</div><div class="avatar"></div>Dev<span class="thumb">✍️</span><div class="stats">2 bingos<br>38 squares</div></div>
         <div class="rank"><div class="n">4</div><div class="avatar"></div>Kim<span class="thumb">🎙</span><div class="stats">1 bingo<br>35 squares</div></div>
         <div class="rank"><div class="n">5</div><div class="avatar"></div>Sam<div class="stats">1 bingo<br>29 squares</div></div>
-        <div class="note">Every Day Card counts here—except the farewell, which is pure ceremony. ⭐ marks the trip-wide First to BINGO—main days only. Proof chips show every kind of proof a player has used—tap one for the receipts in the Feed.</div>
+        <div class="note">Every Day Card counts here—except the wrap-up, which is pure ceremony. ⭐ marks the trip-wide First to BINGO—main days only. Proof chips show every kind of proof a player has used. Tap a proof chip for the receipts in the Feed.</div>
         <div class="btnrow"><span class="btn">Share leaderboard</span></div>
         <div class="note">Shares as “Check out the Vacay Bingo leaderboard 🏆” · <code>vacay-bingo-leaderboard.png</code></div>
       </div>
@@ -2027,7 +2027,7 @@
         <div class="rank"><div class="n">3</div><div class="avatar"></div>Alex<span class="thumb">📷</span><div class="stats">3 bingos<br>44 squares</div></div>
         <div class="rank"><div class="n">4</div><div class="avatar"></div>Jordan<div class="stats">2 bingos<br>40 squares</div></div>
         <div class="rank"><div class="n">5</div><div class="avatar"></div>Nour<span class="thumb">🖼️</span><div class="stats">1 bingo<br>31 squares</div></div>
-        <div class="note">Every Day Card counts here—except the farewell, which is pure ceremony. ⭐ marks the event-wide First to BINGO—main days only. Proof chips show every kind of proof a player has used—tap one for the receipts in the Feed.</div>
+        <div class="note">Every Day Card counts here—except the wrap-up, which is pure ceremony. ⭐ marks the event-wide First to BINGO—main days only. Proof chips show every kind of proof a player has used. Tap a proof chip for the receipts in the Feed.</div>
         <div class="btnrow"><span class="btn">Share leaderboard</span></div>
         <div class="note">Shares as “Check out the Five Across leaderboard 🏆” · <code>five-across-leaderboard.png</code></div>
       </div>
@@ -2455,7 +2455,7 @@
           <div class="sq on"></div><div class="sq"></div><div class="sq"></div><div class="sq"></div><div class="sq"></div>
         </div>
         <div class="note" style="text-align:left">Sample squares: Walk to a Bodega Head viewpoint · Find the best boat name in the harbor · Stage an original suspense-movie still · Spot a whale spout, or convincingly claim you did · Find a seashell on the beach · Take a windblown group selfie.</div>
-        <div class="suggestcard">💡<div class="grow"><b>Put it on tomorrow's card</b>Something happen today that belongs on Sunday's card? Suggest it—approved ideas appear at 6:00.</div><span class="btn">Suggest</span></div>
+        <div class="suggestcard"><div class="grow">Got a moment worth sharing?</div><span class="btn">🙋 Put it on tomorrow's card</span></div>
       </div>
       <div class="tabs">
         <div class="tab on"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div>
@@ -2467,13 +2467,13 @@
     <p class="cap"><b>Day 2—🌊 Saturday, Bodega Bay Side Quests + co-creation</b>Sat Aug 8 · Bodega Bay · main trip pool · the canonical <code>card</code> surface for this Edition. Pacific blue and sea-glass with a buoy-orange accent; grid, marking, tally and navigation are untouched Five Across mechanics (board drawn abstractly here—the real card uses the standard prompt-text cells). The 50/50 easy/exploratory mix reads in the day chip. The dashed "Put it on tomorrow's card" invitation sits under the grid on Friday and Saturday—shipped as <code>TomorrowsCardInvite</code> (#559), rendered only while a targetable future main Day exists (hidden after Sunday's 06:00 cutoff—the wrap-up card never takes suggestions, its pool is closing); submissions go to the organizer's overnight approval queue, and 2–4 approved ideas join the Sunday-morning main card's snapshot. <span class="sw" style="background:#74e0c8"></span><span class="sw" style="background:#ff9d4d"></span><span class="sw" style="background:#041826"></span></p>
   </div>
 
-  <div class="unit" id="fx-day-3-vacay">
-    <a class="alias" id="fx-day-4-vacay"></a>
+  <div class="unit" id="fx-day-4-vacay">
+    <a class="alias" id="fx-day-3-vacay"></a>
     <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="fog-froth-farewells">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
-        <div class="today"><div class="port">👋 Sunday · The drive home</div><div class="theme">Fog, Froth &amp; Farewells</div></div>
+        <div class="today"><div class="port">👋 The drive home</div><div class="theme">🌫️ Fog, Froth &amp; Farewells</div></div>
       </div>
       <div class="strip">
         <div class="chip">✓ Fri 🐦</div>
@@ -3396,7 +3396,7 @@
       <td>All of the above</td><td>—</td>
       <td>Theme tokens</td>
       <td>15-theme wardrobe<br><span class="sw" style="background:#ff2d95"></span><span class="sw" style="background:#00e6ff"></span></td>
-      <td>Bodega day themes<br><span class="sw" style="background:#2e7fa8"></span><span class="sw" style="background:#8fd0c3"></span></td>
+      <td>Bodega day themes<br><span class="sw" style="background:#74e0c8"></span><span class="sw" style="background:#ff9d4d"></span></td>
       <td><code>fiveacross-slate</code> (proposed)<br><span class="sw" style="background:#3f66f0"></span><span class="sw" style="background:#2c4bd8"></span></td>
       <td>tokens</td>
     </tr>
@@ -4067,10 +4067,10 @@
         <div class="promptrow">Sun · wrap-up (closing)<span class="act"><span class="dd">11:00 ▾</span></span></div>
         <div class="note" style="margin-top:0">All times in the Event timezone set in Basics (America/Los_Angeles), and each unlock must land on its Day's own calendar date in that zone—the scheduler reads the instant while schedule copy and the daily email read the date, so a mismatch opens a card on one day and labels it as another. Last call is <b>derived</b>, never typed: <code>finaleTimes</code> prefers adding 12h to the unlock of the Day <i>immediately preceding</i> the closing Day, but falls back to subtracting 12h from the closing Day's own unlock whenever that forward offset would land at-or-after the close (#784). Here the preceding Day is Sun 06:00, so the forward candidate (Sun 18:00) lands after the 11:00 closing unlock—so it derives backward instead: <b>Sat 23:00</b>, 12 hours before the close. Shown as the scheduler computes it. Defaults to 06:00 local—change any Day and this line recomputes.</div>
         <div class="secthead">Theme per day</div>
-        <div class="menurow"><div class="grow">Fri · arrival<span class="who"><span class="sw" style="background:#7fb8a4"></span><span class="sw" style="background:#c94f3d"></span> The Birds Have Entered the Chat</span></div><span class="dd">Change ▾</span></div>
-        <div class="menurow"><div class="grow">Sat · main day<span class="who"><span class="sw" style="background:#2e7fa8"></span><span class="sw" style="background:#e8862e"></span> Bodega Bay Side Quests</span></div><span class="dd">Change ▾</span></div>
-        <div class="menurow"><div class="grow">Sun · last full day<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
-        <div class="menurow"><div class="grow">Sun · wrap-up<span class="who"><span class="sw" style="background:#b0764f"></span><span class="sw" style="background:#a8b8b2"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Fri · arrival<span class="who"><span class="sw" style="background:#6fbf9f"></span><span class="sw" style="background:#e07a6f"></span> The Birds Have Entered the Chat</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sat · main day<span class="who"><span class="sw" style="background:#74e0c8"></span><span class="sw" style="background:#ff9d4d"></span> Bodega Bay Side Quests</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sun · last full day<span class="who"><span class="sw" style="background:#8a5533"></span><span class="sw" style="background:#4f6b63"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
+        <div class="menurow"><div class="grow">Sun · wrap-up<span class="who"><span class="sw" style="background:#8a5533"></span><span class="sw" style="background:#4f6b63"></span> Fog, Froth &amp; Farewells</span></div><span class="dd">Change ▾</span></div>
         <div class="secthead">Place &amp; tonight, per day</div>
         <div class="promptrow">Fri<span class="act"><span class="cls">🌊 Point Reyes</span></span></div>
         <div class="msgbox" style="font-size:10px">Tonight: 🦀 Crab shack · 🔥 Fire pit</div>
