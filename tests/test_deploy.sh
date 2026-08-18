@@ -774,10 +774,14 @@ fi
 # ---------------------------------------------------------------------------
 # Case 11b (#768 r2): a credential that reads fine before publishing but fails
 # afterwards still fails the deploy loudly — the pre-publish check is not a
-# licence to swallow a later failure. GCLOUD_FAIL_AFTER=2 lets the two
-# read-only Step 1.6 describes through and fails everything after, which is
-# what an expired credential (or describe-without-update permission) looks
-# like from Step 2.5.
+# licence to swallow a later failure. GCLOUD_FAIL_AFTER lets the read-only
+# Step 1.6 describes through and fails everything after, which is what an
+# expired credential (or describe-without-update permission) looks like from
+# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — four since
+# #548 added the two auth-handoff callables (submitbugreport, emailunsubscribe,
+# mintauthhandoff, exchangeauthhandoff). Bump it when that set grows, or this
+# case silently stops testing the post-publish path and starts testing the
+# pre-publish abort instead.
 # ---------------------------------------------------------------------------
 REPO11B="$WORKDIR/case11b-invoker-late-fail"
 init_fixture_repo "$REPO11B"
@@ -792,7 +796,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-11b.log" \
 NPM_LOG="$WORKDIR/npm-calls-11b.log" \
 GCLOUD_CALL_COUNTER="$WORKDIR/gcloud-counter-11b" \
-GCLOUD_FAIL_AFTER=2 \
+GCLOUD_FAIL_AFTER=4 \
   bash -c "cd '$REPO11B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
   >"$OUT11B" 2>"$ERR11B"
 RC11B=$?
@@ -1612,6 +1616,81 @@ elif ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-21.log"; then
   cat "$WORKDIR/gcloud-calls-21.log" >&2
 else
   pass "scoped-email-first-deploy: an emailUnsubscribe-only first deploy never touches unrelated submitbugreport (rc=$RC21)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22 (#548): a full Functions deploy reconciles BOTH auth-handoff services.
+#
+# The handoff callables are the first endpoints where a missed reconciliation
+# breaks authentication itself rather than one feature: an `allUsers` binding
+# rejected by the org policy leaves mintAuthHandoff and exchangeAuthHandoff
+# 403ing, and sign-in on every Event origin fails. Firebase reports that as a
+# PARTIAL deploy failure, which is precisely why this must be asserted rather
+# than assumed.
+# ---------------------------------------------------------------------------
+REPO22="$WORKDIR/case22-auth-handoff"
+init_fixture_repo "$REPO22"
+OUT22="$WORKDIR/case22.out"
+ERR22="$WORKDIR/case22.err"
+: >"$WORKDIR/ofd-calls-22.log"
+: >"$WORKDIR/gcloud-calls-22.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22.log" \
+  bash -c "cd '$REPO22' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$OUT22" 2>"$ERR22"
+RC22=$?
+set -e
+
+if [[ $RC22 -ne 0 ]]; then
+  fail "auth-handoff: a full Functions deploy returned $RC22. stderr was:"
+  cat "$ERR22" >&2
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-22.log"; then
+  fail "auth-handoff: deploy.sh never reconciled mintauthhandoff — sign-in would 403 after this deploy. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22.log" >&2
+elif ! grep -q 'exchangeauthhandoff' "$WORKDIR/gcloud-calls-22.log"; then
+  fail "auth-handoff: deploy.sh never reconciled exchangeauthhandoff — the exchange half would 403. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22.log" >&2
+else
+  pass "auth-handoff: a full Functions deploy reconciles both handoff services (rc=$RC22)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22b (#548): naming EITHER handoff endpoint reconciles the PAIR.
+#
+# Selecting one half releases a function whose partner must stay reachable for
+# sign-in to work at all, so an exact `functions:mintAuthHandoff` scope is a
+# selection of both services rather than of the one named.
+# ---------------------------------------------------------------------------
+REPO22B="$WORKDIR/case22b-auth-handoff-scoped"
+init_fixture_repo "$REPO22B"
+OUT22B="$WORKDIR/case22b.out"
+ERR22B="$WORKDIR/case22b.err"
+: >"$WORKDIR/ofd-calls-22b.log"
+: >"$WORKDIR/gcloud-calls-22b.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22b.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22b.log" \
+  bash -c "cd '$REPO22B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintAuthHandoff" \
+  >"$OUT22B" 2>"$ERR22B"
+RC22B=$?
+set -e
+
+if [[ $RC22B -ne 0 ]]; then
+  fail "auth-handoff-scoped: deploy.sh returned $RC22B. stderr was:"
+  cat "$ERR22B" >&2
+elif ! grep -q 'exchangeauthhandoff' "$WORKDIR/gcloud-calls-22b.log"; then
+  fail "auth-handoff-scoped: --only functions:mintAuthHandoff did not reconcile the exchange half. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22b.log" >&2
+elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-22b.log"; then
+  fail "auth-handoff-scoped: deploy.sh inspected unrelated submitbugreport despite an exact handoff scope. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22b.log" >&2
+else
+  pass "auth-handoff-scoped: naming one handoff endpoint reconciles both services and nothing else (rc=$RC22B)."
 fi
 
 # ---------------------------------------------------------------------------

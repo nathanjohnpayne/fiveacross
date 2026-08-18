@@ -32,8 +32,9 @@ set -euo pipefail
 #     than allowed to abort at `set -e`, because Firebase reports the
 #     org-policy rejection of the `allUsers` invoker binding as a partial
 #     FAILURE — the exact case the reconciliation below exists to repair.
-#   - Reconciles the Cloud Run invoker config for submitBugReport and
-#     emailUnsubscribe (#768; see docs/app/bug-reports.md § Repeat-deploy
+#   - Reconciles the Cloud Run invoker config for submitBugReport,
+#     emailUnsubscribe, and the two auth-handoff callables (#768, #548;
+#     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
 #     this deploy could have RELEASED Functions, on success or failure; the
 #     deploy's own exit status is honoured afterwards either way. Skipped —
@@ -158,6 +159,10 @@ FUNCTIONS_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+# Both handoff callables share ONE selection flag: they are two halves of one
+# sign-in flow, always released together, and either left 403ing breaks
+# authentication outright (#548). See scripts/set-auth-handoff-invoker.sh.
+AUTH_HANDOFF_INVOKER_SELECTED=true
 # An endpoint selected by an exact `functions:<endpoint>` (or the whole
 # `functions` scope) MUST exist after a successful Functions deploy, so its
 # post-publish reconciliation stays strict. An unfamiliar `functions:<name>`
@@ -166,6 +171,7 @@ EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
 # named so a valid scoped first deploy is not failed by an absent service.
 BUG_REPORT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 ONLY_VALUES=()
 EXCEPT_VALUES=()
 DEPLOY_PROJECT="${DEPLOY_TARGET_PROJECT:-}"
@@ -206,8 +212,10 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   FUNCTIONS_ATTEMPTED=false
   BUG_REPORT_INVOKER_SELECTED=false
   EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+  AUTH_HANDOFF_INVOKER_SELECTED=false
   BUG_REPORT_INVOKER_CONSERVATIVE=false
   EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+  AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
   for only_value in "${ONLY_VALUES[@]}"; do
     IFS=',' read -r -a only_selectors <<< "$only_value"
     for selector in "${only_selectors[@]}"; do
@@ -216,8 +224,10 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           FUNCTIONS_ATTEMPTED=true
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
           BUG_REPORT_INVOKER_CONSERVATIVE=false
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
           ;;
         functions:submitBugReport)
           FUNCTIONS_ATTEMPTED=true
@@ -228,6 +238,15 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           FUNCTIONS_ATTEMPTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+          ;;
+        # Either handoff endpoint selects BOTH services, and not
+        # conservatively: naming one half of the sign-in flow releases a
+        # function whose partner must stay reachable for that flow to work at
+        # all, so this is an exact selection of the pair, not an inference.
+        functions:mintAuthHandoff|functions:exchangeAuthHandoff)
+          FUNCTIONS_ATTEMPTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
           ;;
         # A selector after `functions:` is not necessarily a single exported
         # function. Firebase also accepts codebase and function-group selectors
@@ -245,8 +264,12 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" != "true" ]]; then
             EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=true
           fi
+          if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" != "true" ]]; then
+            AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
+          fi
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
           ;;
       esac
     done
@@ -269,8 +292,10 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        AUTH_HANDOFF_INVOKER_SELECTED=false
         BUG_REPORT_INVOKER_CONSERVATIVE=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
         ;;
       functions:submitBugReport)
         BUG_REPORT_INVOKER_SELECTED=false
@@ -279,6 +304,13 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
       functions:emailUnsubscribe)
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        ;;
+      # Excluding ONE handoff endpoint does not deselect the pair: the other
+      # half is still released and still needs reconciling, and the shared
+      # wrapper is idempotent on the excluded one. Deselecting here to match
+      # the exclusion exactly would leave the released half 403ing.
+      functions:mintAuthHandoff|functions:exchangeAuthHandoff)
+        AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
         ;;
       functions:default)
         # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
@@ -290,8 +322,10 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        AUTH_HANDOFF_INVOKER_SELECTED=false
         BUG_REPORT_INVOKER_CONSERVATIVE=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
         ;;
     esac
   done
@@ -316,11 +350,18 @@ done
 INVOKER_ENV=(env
   -u BUG_REPORT_PROJECT -u BUG_REPORT_REGION -u BUG_REPORT_SERVICE
   -u EMAIL_UNSUBSCRIBE_PROJECT -u EMAIL_UNSUBSCRIBE_REGION -u EMAIL_UNSUBSCRIBE_SERVICE
+  -u AUTH_HANDOFF_PROJECT -u AUTH_HANDOFF_REGION
+  -u AUTH_HANDOFF_MINT_SERVICE -u AUTH_HANDOFF_EXCHANGE_SERVICE
 )
 if [[ -n "${DEPLOY_TARGET_PROJECT:-}" ]]; then
   INVOKER_ENV+=(
     BUG_REPORT_PROJECT="$DEPLOY_TARGET_PROJECT"
     EMAIL_UNSUBSCRIBE_PROJECT="$DEPLOY_TARGET_PROJECT"
+    # Pinned like the other two, and load-bearing here: this wrapper's own
+    # default project is `fiveacross` (the handoff's home), so an unpinned
+    # gaycruisebingo deploy would otherwise reconcile the WRONG project's
+    # services and report success over two freshly-403ing callables.
+    AUTH_HANDOFF_PROJECT="$DEPLOY_TARGET_PROJECT"
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
@@ -349,6 +390,9 @@ if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
 fi
 if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-email-unsubscribe-invoker.sh")
+fi
+if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-auth-handoff-invoker.sh")
 fi
 
 resolve_invoker_deploy_credential() {
@@ -779,7 +823,7 @@ if [[ "$INVOKER_SKIP" == "true" ]]; then
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
-  echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport or emailUnsubscribe)"
+  echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport, emailUnsubscribe, or the auth-handoff callables)"
 elif [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (Firebase --dry-run: nothing was deployed, so nothing could have been released — mutating the invoker config here would be the exact footgun a dry run exists to rule out)"
 else
@@ -814,11 +858,17 @@ EOF
     run_postdeploy_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" \
       "$EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
   fi
+  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_invoker "$SCRIPT_DIR/set-auth-handoff-invoker.sh" \
+      "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
+  fi
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 
 ✗ The Cloud Run invoker reconciliation FAILED and the deploy is already live.
-  submitBugReport and/or emailUnsubscribe may be returning 403 right now.
+  submitBugReport, emailUnsubscribe, and/or the auth-handoff callables may be
+  returning 403 right now — and a 403 on the handoff pair means sign-in is down
+  on every Event origin, not just one feature.
 
   The read-only check before publishing passed, so this is not a plain
   "no credential" case. Most likely, in order:
@@ -830,10 +880,11 @@ EOF
     • The org policy also blocks the annotation (it should not — that is a
       service setting, not an IAM binding — but read the gcloud error above).
 
-  Re-run by hand once fixed; both are idempotent, so a re-run is safe:
+  Re-run by hand once fixed; all are idempotent, so a re-run is safe:
 
     scripts/set-bug-report-invoker.sh
     scripts/set-email-unsubscribe-invoker.sh
+    scripts/set-auth-handoff-invoker.sh
 EOF
   fi
 fi

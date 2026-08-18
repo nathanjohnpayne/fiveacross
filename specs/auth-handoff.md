@@ -166,6 +166,16 @@ A rejection that happens *before* the transaction commits—wrong origin, wrong 
 
 `tests/rules/auth-handoff.test.ts` (`npm run test:rules`, Firestore emulator)—two halves under its own `projectId` so `clearFirestore()` cannot race the other rules suites. The rules half exercises every deny arm for an unauthenticated caller, the code's own player, another player, and an Event admin, and asserts the deny stays scoped by checking the pre-auth `hostnames` read still succeeds. The consumption half drives the **same** `exchangeHandoff` through a thin web-SDK adapter onto the real emulator, because single-use is a claim about transaction semantics and a fake that implements those semantics can only prove itself. Its fixture is built by the production `buildHandoffRecord`, so it cannot drift from what mint writes.
 
+## Deployment: both callables need the Cloud Run invoker check disabled
+
+These projects' org policy (Domain Restricted Sharing) **rejects** the `allUsers` Cloud Run invoker binding that `firebase deploy` adds to make a function publicly reachable. Firebase reports the rejection as a *partial* deploy failure, and the backing service is left 403ing. The org-policy-compatible repair is to disable the invoker IAM check on the service, which `scripts/set-auth-handoff-invoker.sh` does for both handoff services; `scripts/deploy.sh` runs it automatically after any deploy that could have released Functions.
+
+**Both services need it, for different reasons, and neither is an oversight.** `exchangeAuthHandoff` is unauthenticated by design—its caller has no session yet, so there is no identity to present at the IAM layer. `mintAuthHandoff` *does* require a signed-in caller, but that is a Firebase ID token verified by the callable runtime, which is not a Google IAM identity: the invoker check would reject the request before the function ever ran. This is the same shape as `submitBugReport`, also an authenticated callable.
+
+**One wrapper covers both**, unlike the per-endpoint sibling scripts, because the two are halves of one sign-in flow: they are always released together, and either one left 403ing breaks authentication on every Event origin. There is no deploy in which reconciling one without the other is correct, so `deploy.sh` carries a single selection flag for the pair rather than two.
+
+The handoff lives in the `fiveacross` project—`gaycruisebingo` is a single registered origin that signs in same-origin and never mints a handoff—but a `gaycruisebingo` deploy still publishes the functions, so `deploy.sh` pins the reconciliation project from the selected deploy target rather than trusting the wrapper's default.
+
 ## Not in scope
 
 - **Client code (#549).** No `src/**` change ships with this contract.
