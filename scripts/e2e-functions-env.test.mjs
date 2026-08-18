@@ -353,6 +353,31 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(hoistedFromSibling).params).toEqual(['REAL_PARAM']);
   });
 
+  // Codex P2 on PR #826: a class/object-literal METHOD or accessor's own
+  // name is a property name, not a local binding inside its body — unlike a
+  // named FUNCTION EXPRESSION, calling the bare identifier from inside a
+  // same-named method does NOT call the method itself, it still resolves to
+  // the outer import. `ts.isFunctionLike` matches methods too, and the first
+  // version of this fix treated a method's own name exactly like a function
+  // expression's, falsely marking the call shadowed and dropping a real
+  // param.
+  it('does not treat a method or accessor name as self-shadowing its own body', () => {
+    const methodNamedLikeConstructor = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export const schema = {',
+      '  defineString() {',
+      "    return defineString('REAL_PARAM_VIA_METHOD');",
+      '  },',
+      '};',
+    ].join('\n');
+
+    expect(declaredParamNames(methodNamedLikeConstructor).params).toEqual([
+      'REAL_PARAM',
+      'REAL_PARAM_VIA_METHOD',
+    ]);
+  });
+
   // Codex P2 on PR #730, and the exact counterpart of the earlier finding that a
   // params.ts-only scan misses too much: presence on disk is not reachability,
   // and Firebase discovery runs the entrypoint's import graph.
@@ -474,6 +499,56 @@ describe('functions source-tree reachability and barrel resolution', () => {
 
     const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
     expect(declared.params).toEqual(['CHAINED_BARREL_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 on PR #826: two SIBLING barrels that both re-export from the
+  // SAME shared upstream module are two separate, non-cyclic paths, not a
+  // cycle — the first version of the cycle guard shared one `visited` set
+  // across the whole traversal, so the first sibling's resolution left the
+  // shared module permanently "visited" and the second sibling's own,
+  // unrelated re-export silently resolved to nothing.
+  it('resolves constructors reached through sibling barrels sharing an upstream module', () => {
+    const dir = makeTree({
+      'shared.ts': [
+        "export { defineString } from 'firebase-functions/params';",
+        "export { defineSecret } from 'firebase-functions/params';",
+      ].join('\n'),
+      'string-barrel.ts': "export { defineString } from './shared';\n",
+      'secret-barrel.ts': "export { defineSecret } from './shared';\n",
+      'index.ts': [
+        "import { defineString } from './string-barrel';",
+        "import { defineSecret } from './secret-barrel';",
+        "defineString('DIAMOND_STRING_PARAM');",
+        "defineSecret('DIAMOND_SECRET_PARAM');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['DIAMOND_STRING_PARAM']);
+    expect(declared.secrets).toEqual(['DIAMOND_SECRET_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 on PR #826: `require` is an ordinary identifier a reachable
+  // module can rebind locally (a param NAME, a test helper — anything), not
+  // a keyword. A call through that local binding is not a module specifier
+  // at all, and — now that a non-literal argument fails closed (#740) —
+  // wrongly treating it as one would abort validation over unrelated
+  // application code instead of just missing a dependency.
+  it('does not fail closed on a non-literal call through a locally shadowed require', () => {
+    const dir = makeTree({
+      'index.ts': [
+        'function helper(require) {',
+        '  return require(computeSomethingUnrelated());',
+        '}',
+        'export { helper };',
+      ].join('\n'),
+    });
+
+    expect(() => functionsSources(join(dir, 'index.ts'))).not.toThrow();
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -643,10 +718,41 @@ describe('secret values the emulator can actually use', () => {
 
     expect(message).not.toContain('0 malformed');
     expect(message).toContain('line 1');
+    expect(message).toContain('1 invalid key');
+  });
+
+  // Codex P1 on PR #826, on an earlier version of this fix: `LINE_RE` (the
+  // parser these files are written for) captures whatever text sits before
+  // `=` as the key, with no check that it LOOKS like one — so a reversed
+  // assignment in `.secret.local` puts the credential in the KEY position,
+  // `validateKey` rejects it (lowercase), and a first version of this fix
+  // surfaced `KeyValidationError.message`, which repeats the rejected key
+  // verbatim. Neither `.message` nor the key itself may ever appear here.
+  it('never echoes a credential that lands in the key position on a reversed assignment', () => {
+    const reversedAssignment = 'sk_live_do_not_leak_me=RESEND_API_KEY\n';
+
+    expect(parse(reversedAssignment).errors).toEqual([]);
+    // The leak lives in `.children[].message`, not the top-level thrown
+    // message (which is just "Validation failed") — confirming this is the
+    // real vector a naive `error.children.map(c => c.message).join(...)`
+    // would have exposed, and that this test is not a hypothetical.
+    try {
+      parseStrict(reversedAssignment);
+      throw new Error('expected parseStrict to throw');
+    } catch (error) {
+      expect(error.children.map((child) => child.message).join('; ')).toContain('sk_live_do_not_leak_me');
+    }
+
+    let message = '';
+    try {
+      parseDotenv(reversedAssignment, 'functions/.secret.local');
+    } catch (error) {
+      message = error.message;
+    }
+
     expect(message).not.toContain('sk_live_do_not_leak_me');
-    // The key name itself is not a credential — surfacing it (unlike the
-    // value) matches firebase-tools' own KeyValidationError message.
-    expect(message).toContain('resend_api_key');
+    expect(message).toContain('functions/.secret.local');
+    expect(message).toContain('line 1');
   });
 
   it('locates every line when more than one key fails strict validation', () => {

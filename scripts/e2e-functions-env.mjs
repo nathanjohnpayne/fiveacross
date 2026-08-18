@@ -223,7 +223,19 @@ function reExportedParamsBindings(filePath, visited = new Set()) {
     if (!resolved) {
       continue;
     }
+    // `visited` tracks the CURRENT traversal path, not every file ever seen
+    // (Codex P2 on PR #826): two sibling `export … from` statements in the
+    // same barrel that converge on the same upstream module — e.g. one
+    // re-exporting `defineString` and another re-exporting `defineSecret`,
+    // both from the same shared file — are two SEPARATE, non-cyclic paths.
+    // Leaving the first one's resolution permanently in `visited` made the
+    // second sibling see a false cycle and return nothing. Deleting the
+    // entry after this statement's traversal completes (backtracking, like
+    // an on-the-stack DFS visited set) still catches a REAL cycle — the
+    // entry stays present for every statement still on the call stack — and
+    // frees the entry for the next sibling once this one is done with it.
     const upstream = reExportedParamsBindings(resolved, visited);
+    visited.delete(resolved);
     if (clause && ts.isNamedExports(clause)) {
       for (const element of clause.elements) {
         if (element.isTypeOnly) continue;
@@ -345,7 +357,15 @@ function scopeDeclares(scope, name) {
     for (const parameter of scope.parameters) {
       bindingNames(parameter.name, names);
     }
-    if (scope.name && ts.isIdentifier(scope.name)) {
+    // A named FUNCTION EXPRESSION's own name is a real local binding inside
+    // its own body (`const f = function g() { g(); }` calls itself via `g`).
+    // `ts.isFunctionLike` also matches methods, accessors, and arrow
+    // functions — a class or object-literal method named `defineString`
+    // does NOT bind that name as a bare identifier inside its own body (you
+    // would need `this.defineString(…)`), so treating its `.name` the same
+    // way falsely marked an unrelated, unshadowed call as shadowed and
+    // silently dropped a real param (Codex P2 on PR #826).
+    if (ts.isFunctionExpression(scope) && scope.name && ts.isIdentifier(scope.name)) {
       names.add(scope.name.text);
     }
     if (names.has(name)) {
@@ -703,7 +723,16 @@ function relativeDependencies(sourceFile, label) {
     } else if (
       ts.isCallExpression(node) &&
       (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-        (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+        // `require` is an ordinary identifier, not a keyword — a reachable
+        // module that declares its OWN local `require` (a param, a test
+        // helper, anything) shadows Node's loader, and a call through it is
+        // not a module specifier at all (Codex P2 on PR #826). Treating it
+        // as one used to just miss a dependency silently; now that a
+        // non-literal argument fails closed below, the same false positive
+        // would abort validation over unrelated application code — checked
+        // with the same `isShadowed` this file already uses for param
+        // constructor names, rather than inventing a second mechanism.
+        (ts.isIdentifier(node.expression) && node.expression.text === 'require' && !isShadowed(node, 'require')))
     ) {
       const [first] = node.arguments;
       if (first) {
@@ -861,9 +890,20 @@ export function parseDotenv(body, label) {
  * line just fine and only `validateKey` rejects the resulting key. Grepping
  * `parse(body).errors` for that second case found nothing and reported "0
  * malformed lines" — true of the (empty) syntax-error set, but not of why
- * the file was actually rejected. `KeyValidationError.message` is safe to
- * surface: it repeats the (non-secret) key name and a fixed policy sentence,
- * never the value the key was assigned.
+ * the file was actually rejected.
+ *
+ * `KeyValidationError.message` (and `.key`) is NEVER surfaced in the
+ * returned string, even though a key name is not itself normally a
+ * credential: `LINE_RE` captures whatever text sits before `=` as the key,
+ * with no check that it LOOKS like a key, so a reversed assignment in
+ * `.secret.local` — `sk_live_do_not_leak_me=RESEND_API_KEY`, the `=`
+ * fumbled the other way — puts the credential in the key position, and
+ * `validateKey` rejects it (lowercase) with a message that repeats it
+ * verbatim (Codex P1 on PR #826, on an earlier version of this function
+ * that DID surface `.message`). A generic category, not the parser's
+ * classification, is all this reports, matching the syntax-error path's
+ * existing withholding below. `.key` is still used internally, only to
+ * LOCATE the line via `lineAssignsKey` — never printed.
  */
 function describeBadLines(body, error) {
   const keyErrors = (error?.children ?? []).filter((child) => child instanceof KeyValidationError);
@@ -875,7 +915,10 @@ function describeBadLines(body, error) {
     const count = keyErrors.length;
     const plural = count === 1 ? 'key' : 'keys';
     const location = numbers.length > 0 ? ` (line ${numbers.join(', ')})` : '';
-    return `${count} invalid ${plural}${location} — ${keyErrors.map((keyError) => keyError.message).join('; ')}`;
+    return (
+      `${count} invalid ${plural}${location} — reserved for internal use, not ` +
+      'ALL_CAPS_WITH_UNDERSCORES, or starting with a reserved prefix'
+    );
   }
   const rejected = new Set(parse(body).errors.map((line) => line.trim()));
   const numbers = body
