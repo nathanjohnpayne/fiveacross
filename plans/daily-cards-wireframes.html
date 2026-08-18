@@ -196,6 +196,13 @@
   .postcard::after{content:"🐦";position:absolute;top:6px;right:8px;padding:4px 6px;
     border:1.5px dashed var(--border);border-radius:2px;font-size:12px;line-height:1;
     transform:rotate(3deg)}
+  /* The same postage treatment the postcard uses, for the gates whose Event
+     panel is a plain banner: the glyph rides in `data-stamp` so each Edition
+     sets its own, and it must never repeat an emoji already on that screen. */
+  .stamped{position:relative;padding-right:46px}
+  .stamped::after{content:attr(data-stamp);position:absolute;top:6px;right:8px;padding:4px 6px;
+    border:1.5px dashed var(--border);border-radius:2px;font-size:12px;line-height:1;
+    transform:rotate(3deg)}
   .suggestcard{border:1.5px dashed var(--primary);border-radius:12px;padding:8px 11px;
     display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--dim)}
   .suggestcard b{color:var(--ink);display:block;font-size:11.5px}
@@ -1036,9 +1043,10 @@
       <div class="board" style="gap:12px;justify-content:center">
         <div style="text-align:center">
           <div class="title" style="font-size:27px;line-height:1.15">GAY CRUISE <b>BINGO</b><i class="gate-by">BY FIVE ACROSS</i></div>
+          <div class="tag" style="font-style:italic;margin-top:7px">What happens at sea. <span style="opacity:.75">Goes on the card.</span></div>
         </div>
         <div class="desc" style="text-align:center;margin-top:0;font-size:12px">Sign in, get your card, mark it if you see it.</div>
-        <div class="banner" style="border-style:solid;border-color:var(--border)">
+        <div class="banner stamped" data-stamp="🏳️‍🌈" style="border-style:solid;border-color:var(--border)">
           <b>🛳️ Trieste → Barcelona</b>Jul 15–24 · 10 Days, 10 cards · 🇮🇹 Trieste first, 🇪🇸 Barcelona last<br><span style="font-size:9.5px;color:var(--dim)">gaycruisebingo.com · drawn from a seeded preview slice; <code>EventPostcard</code> returns <code>null</code> without one</span>
         </div>
         <div class="lgd" style="align-items:flex-start;gap:9px">
@@ -1046,10 +1054,10 @@
           <div>I'm 18 or older and I know exactly what I'm getting into. Keep it legal, no minors, and don't post people who didn't consent.</div>
         </div>
         <div class="btnrow"><span class="btn ok" style="opacity:.4">Continue with Google</span></div>
-        <div class="note">Lost signal at sea? The printed cards and PDF still work.</div>
+        <div class="note">Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.</div>
       </div>
     </div>
-    <p class="cap"><b>Join—the 18+ gate, drawn</b>Full camp: the wordmark keeps its soft glow, the tagline is the shipped <code>gcb</code> string (the itinerary lives in <code>metaDescription</code>, never on the gate), and the sailing sits in a plain panel rather than Vacay's postcard. The panel is conditional chrome, though: <code>EventPostcard</code> renders only from a seeded <code>hostnames/{host}.preview</code> slice, and gaycruisebingo.com has none provisioned—today's shipped GCB gate draws no box. <b>New in #688—the <code>BY FIVE ACROSS</code> endorsement line.</b> GCB predates the platform but is now an Edition of it, so it wears the platform's signature exactly as Vacay does, in the same slot: a sibling of the h1, never inside it. <b>An endorsement, not a rename.</b> The wordmark, the cruise register, the adult posture, <code>gaycruisebingo.com</code> and the legacy Firebase project are all untouched—and what GCB still does <i>not</i> take from Vacay is the Join <i>voice</i>: no tagline chip, no invite note, no postcard stamp, because those are separate brand-table fields. At iPhone widths the 16-character wordmark stacks to two lines and the byline centres under it—design intent for this gate stack, not yet measured; what <code>scripts/verify-wordmark-one-line.mjs</code> proves is the post-auth <i>header</i> wordmark staying one-line at 390×844 and 375×667. The attestation is shown because this Event's pool holds active spicy Prompts, so <code>adultContent</code> derives <code>true</code>; sign-in stays disabled (40% here) until the box is ticked, and ticking it persists the attestation through <code>signIn → attest</code>. Splash before this frame reads "Checking your cruise pass…"; the advisory row in More reads "18+ advisory &amp; acceptable use", and the sheet behind it opens "This is an 18+ space for one sailing's friend group."</p>
+    <p class="cap"><b>Join—the 18+ gate, drawn</b>Full camp: the wordmark keeps its soft glow, the tagline is the shipped <code>gcb</code> string (the itinerary lives in <code>metaDescription</code>, never on the gate) under a new cruise-register chip, and the sailing sits in a plain panel rather than Vacay's postcard. The panel is conditional chrome, though: <code>EventPostcard</code> renders only from a seeded <code>hostnames/{host}.preview</code> slice, and gaycruisebingo.com has none provisioned—today's shipped GCB gate draws no box. <b>New in #688—the <code>BY FIVE ACROSS</code> endorsement line.</b> GCB predates the platform but is now an Edition of it, so it wears the platform's signature exactly as Vacay does, in the same slot: a sibling of the h1, never inside it. <b>An endorsement, not a rename.</b> The wordmark, the cruise register, the adult posture, <code>gaycruisebingo.com</code> and the legacy Firebase project are all untouched—and the Join <i>voice</i> is now harmonised across all three gates: every Edition gets a tagline chip in the same slot and an Event panel wearing the same postage stamp, because a treatment that only one brand receives reads as an accident rather than a system. What stays Vacay-only is the <i>invite note</i> under the CTA. <b>The chips and the gcb stamp are proposed brand-table values</b>—<code>signinTaglineChip</code> ships for <code>vacay</code> alone today, and the gcb/fiveacross chips plus the 🏳️‍🌈 and 💒 postage are new fields this document is asking for, tracked in the parity issue below. At iPhone widths the 16-character wordmark stacks to two lines and the byline centres under it—design intent for this gate stack, not yet measured; what <code>scripts/verify-wordmark-one-line.mjs</code> proves is the post-auth <i>header</i> wordmark staying one-line at 390×844 and 375×667. The offline line drops the old printed-cards-and-PDF claim: all three Editions now promise the same mechanic and vary only the opener. The attestation is shown because this Event's pool holds active spicy Prompts, so <code>adultContent</code> derives <code>true</code>; sign-in stays disabled (40% here) until the box is ticked, and ticking it persists the attestation through <code>signIn → attest</code>. Splash before this frame reads "Checking your cruise pass…"; the advisory row in More reads "18+ advisory &amp; acceptable use", and the sheet behind it opens "This is an 18+ space for one sailing's friend group."</p>
   </div>
 
   <!-- ---------- Join · Vacay Bingo (absorbs #frame-vacay-join) ---------- -->
@@ -1065,7 +1073,7 @@
         <div class="note">Patchy signal? Your card keeps working offline—marks sync when you reconnect.</div>
       </div>
     </div>
-    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through any serving hostname draws this same identity in place—<code>hostnames/{host}.edition</code> selects the brand, no redirect (#599; the canonical host is analytics-only, #607): one identity, the Vacay lockup with the <b>BY FIVE ACROSS</b> endorsement line, the trip as a postcard whose stamp corner carries the current Day's emoji as its postage (slightly rotated, like it was pressed on; the box is content-sized so the postage can never overflow it, and the postcard reserves its corner so text never runs beneath the stamp; an empty stamp box reads as a rendering bug—if no Day emoji exists, render no stamp and no reserved corner; and the glyph is drawn <i>once</i>—the stamp takes it, so the Day line below drops its leading emoji and names the Day in words instead), the same Google sign-in. <b>No 18+ attestation</b>—Bodega's pool holds no active spicy Prompts (and no Admin override forces it), so <code>adultContent</code> derives <code>false</code> and the button is enabled on load; the same Edition would draw the gate for a spicier trip. Moderate camp: no decorative lead-in emoji, offline stated plainly. <b>The offline line is the shipped vacay <code>offlineNote</code></b> (<code>src/editions.ts</code>, the #647 follow-through to #608): GCB's "Lost signal at sea? The printed cards and PDF still work." would have put a cruise noun (and a printed-cards claim no road trip has) on the trip gate, so vacay overrides it. Splash reads "Checking your trip pass…"; installed-PWA name <b>Vacay Bingo</b>.</p>
+    <p class="cap"><b>Join—the postcard, not the casino</b>Arrival through any serving hostname draws this same identity in place—<code>hostnames/{host}.edition</code> selects the brand, no redirect (#599; the canonical host is analytics-only, #607): one identity, the Vacay lockup with the <b>BY FIVE ACROSS</b> endorsement line, the trip as a postcard whose stamp corner carries the current Day's emoji as its postage (slightly rotated, like it was pressed on; the box is content-sized so the postage can never overflow it, and the postcard reserves its corner so text never runs beneath the stamp; an empty stamp box reads as a rendering bug—if no Day emoji exists, render no stamp and no reserved corner; and the glyph is drawn <i>once</i>—the stamp takes it, so the Day line below drops its leading emoji and names the Day in words instead), the same Google sign-in. <b>No 18+ attestation</b>—Bodega's pool holds no active spicy Prompts (and no Admin override forces it), so <code>adultContent</code> derives <code>false</code> and the button is enabled on load; the same Edition would draw the gate for a spicier trip. Moderate camp: no decorative lead-in emoji, offline stated plainly. <b>The offline line is the shipped vacay <code>offlineNote</code></b> (<code>src/editions.ts</code>, the #647 follow-through to #608): All three now promise the same mechanic in the same words—<i>your card keeps working offline, marks sync when you reconnect</i>—and only the opener changes register: <i>Lost signal at sea?</i> / <i>Patchy signal?</i> / <i>Packed room, no bars?</i> The old gcb string claimed printed cards and a PDF, which no road trip has and which the app does not ship. Splash reads "Checking your trip pass…"; installed-PWA name <b>Vacay Bingo</b>.</p>
   </div>
 
   <!-- ---------- Join · Five Across ---------- -->
@@ -1075,17 +1083,17 @@
       <div class="board" style="gap:12px;justify-content:center">
         <div style="text-align:center">
           <div class="title fa-title" style="font-size:25px;line-height:1.15">FIVE <b>ACROSS</b></div>
-          <div style="font-size:10.5px;color:var(--dim);margin-top:5px">Bring everyone into the game.</div>
+          <div class="tag" style="font-style:italic;margin-top:7px">Bring everyone. <span style="opacity:.75">Into the game.</span></div>
         </div>
         <div class="desc" style="text-align:center;margin-top:0;font-size:12px">Sign in, get your card, mark it if you see it.</div>
-        <div class="banner" style="border-style:solid;border-color:var(--border)">
+        <div class="banner stamped" data-stamp="💒" style="border-style:solid;border-color:var(--border)">
           <b>Kim &amp; Jo's Wedding</b>The Barn at Green Valley · Aug 21–23 · hosted by Kim &amp; Jo<br><span style="font-size:9.5px;color:var(--dim)">kim-and-jo.fiveacross.app · drawn from a seeded preview slice; <code>EventPostcard</code> returns <code>null</code> without one</span>
         </div>
         <div class="btnrow"><span class="btn ok">Continue with Google</span></div>
         <div class="note">Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.</div>
       </div>
     </div>
-    <p class="cap"><b>Join—the platform, set in type</b>The restraint is the differentiation: no glow on the wordmark (<code>.fa-title</code>), one confident hue, sentence case, functional emoji only. The Event is occasion-neutral—name, place, date window—where GCB shows a sailing and Vacay shows a postcard. The sample is <b>Kim &amp; Jo's wedding weekend, a Custom-occasion daily-cards Event</b> (three Days, Aug 21–23); the Wedding occasion proper deals <code>one_card</code>—"One card, one celebration" (<code>src/data/occasions.ts</code>)—so a Days-bearing wedding sample has to be the Custom path. The offline note stays the same muted footnote <code>SignIn</code> renders on every Edition, but the fiveacross <i>string</i> is the strongest offline story of the three: a few hundred phones on one cell, behind concrete and structural steel, drops signal harder than a ship does (#608 § offlineWhy—congestion and barriers named together; jammers never mentioned). No 18+ gate on this Event's tame pool—the gate carries no advisory footer; the More advisory row reads "Community guidelines" on a tame pool—and see <a href="#fx-join-gcb">fx-join-gcb</a> for the gate drawn on an Event whose pool derives it. Drawn in the <b>proposed</b> <code>fiveacross-slate</code>; the shipped gate wears ✨ Marquee, the Edition default. Splash reads "Checking your pass…".</p>
+    <p class="cap"><b>Join—the platform, set in type</b>The restraint is the differentiation: no glow on the wordmark (<code>.fa-title</code>), one confident hue, sentence case, functional emoji only. The Event is occasion-neutral—name, place, date window—where GCB shows a sailing and Vacay shows a postcard, and all three now wear a tagline chip and a postage stamp so the gates read as one system. The sample is <b>Kim &amp; Jo's wedding weekend, a Custom-occasion daily-cards Event</b> (three Days, Aug 21–23); the Wedding occasion proper deals <code>one_card</code>—"One card, one celebration" (<code>src/data/occasions.ts</code>)—so a Days-bearing wedding sample has to be the Custom path. The offline note stays the same muted footnote <code>SignIn</code> renders on every Edition, but the fiveacross <i>string</i> is the strongest offline story of the three: a few hundred phones on one cell, behind concrete and structural steel, drops signal harder than a ship does (#608 § offlineWhy—congestion and barriers named together; jammers never mentioned). No 18+ gate on this Event's tame pool—the gate carries no advisory footer; the More advisory row reads "Community guidelines" on a tame pool—and see <a href="#fx-join-gcb">fx-join-gcb</a> for the gate drawn on an Event whose pool derives it. Drawn in the <b>proposed</b> <code>fiveacross-slate</code>; the shipped gate wears ✨ Marquee, the Edition default. Splash reads "Checking your pass…".</p>
   </div>
 
 </div>
@@ -1100,7 +1108,7 @@
     <div class="mini" data-theme="welcome-aboard">
       <div class="hdr">
         <div class="title">GAY CRUISE <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
-        <div class="today"><div class="port">Sails Jul 15</div><div class="theme">🛳️ Welcome Aboard</div></div>
+        <div class="today"><div class="port">⚓ Sails Jul 15</div><div class="theme">🛳️ Welcome Aboard</div></div>
       </div>
       <div class="board">
         <div class="daybar">
@@ -1140,12 +1148,12 @@
     <div class="mini" data-theme="the-birds">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
-        <div class="today"><div class="port">🐦 Bodega Bay</div><div class="theme">🐦 The Birds Have Entered the Chat</div></div>
+        <div class="today"><div class="port">🐚 Bodega Bay</div><div class="theme">🐦 The Birds Have Entered the Chat</div></div>
       </div>
       <div class="board">
         <div class="daybar">
           <div class="dayname">Day 1 · The Birds</div>
-          <div class="daymeta">🐦 Bodega Bay</div>
+          <div class="daymeta">🐚 Bodega Bay</div>
         </div>
         <div class="lockwrap">
           <div style="opacity:.25;display:flex;flex-direction:column;gap:7px">
@@ -1196,7 +1204,7 @@
         <div class="tab"><span><i class="tabavatar"></i></span>More</div>
       </div>
     </div>
-    <p class="cap"><b>First open on a trip—same legend, trip register</b>Identical overlay mechanics; the Edition shows up in the chrome and the Day underneath. Header names a <b>stop</b>, not a port—<code>headerDayIdentity</code> draws "🐦 Bodega Bay" over "🐦 The Birds Have Entered the Chat", no weekday, and Friday's <code>placeEmoji</code> is the bird—while the sea-glass/weathered-red day theme retints the whole frame. The grid is Friday's shipped easy pool verbatim (<code>scripts/seed-data/bodega-bay-2026.mjs</code>, free space "The flock has landed"). <b>No warm-up banner and no Warm-up tag:</b> Bodega ships Friday <code>tutorial: false</code>—a competitive easy card—so <code>TutorialBanner</code> renders nothing here and the banner is GCB-only across these three frames. The coach copy is verbatim <code>CoachOverlay.tsx</code>—it contains no cruise noun, so it needs no per-Edition override, which is exactly the kind of string the #608 sweep should leave alone. Replay entry in More reads "Replay the welcome walkthrough" (GCB keeps "Replay the Welcome Aboard walkthrough").</p>
+    <p class="cap"><b>First open on a trip—same legend, trip register</b>Identical overlay mechanics; the Edition shows up in the chrome and the Day underneath. Header names a <b>stop</b>, not a port—<code>headerDayIdentity</code> draws "🐚 Bodega Bay" over "🐦 The Birds Have Entered the Chat", no weekday, and Friday's <code>placeEmoji</code> is the bird—while the sea-glass/weathered-red day theme retints the whole frame. The grid is Friday's shipped easy pool verbatim (<code>scripts/seed-data/bodega-bay-2026.mjs</code>, free space "The flock has landed"). <b>No warm-up banner and no Warm-up tag:</b> Bodega ships Friday <code>tutorial: false</code>—a competitive easy card—so <code>TutorialBanner</code> renders nothing here and the banner is GCB-only across these three frames. The coach copy is verbatim <code>CoachOverlay.tsx</code>—it contains no cruise noun, so it needs no per-Edition override, which is exactly the kind of string the #608 sweep should leave alone. Replay entry in More reads "Replay the welcome walkthrough" (GCB keeps "Replay the Welcome Aboard walkthrough").</p>
   </div>
 
   <!-- ---------- Coach · Five Across ---------- -->
@@ -1339,8 +1347,8 @@
   <div class="unit" id="fx-locked-vacay">
     <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="fog-froth-farewells">
-      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
-      <div class="strip"><div class="chip">✓ Fri 🐦</div><div class="chip">Sat 🌊</div><div class="chip lock now">🔒 Sun 🌅</div><div class="chip lock">🔒 Sun 👋</div></div>
+      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🦪 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
+      <div class="strip"><div class="chip">✓ Fri 🐚</div><div class="chip">Sat 🦪</div><div class="chip lock now">🔒 Sun 🌅</div><div class="chip lock">🔒 Sun 👋</div></div>
       <div class="board">
         <div class="daybar"><div class="dayname">Day 3 · Fog, Froth &amp; Farewells</div><div class="daymeta">🌅 Bodega Bay</div></div>
         <div class="desc">The last slow morning. Fog silver, chowder cream, coffee brown, and dusk coral through the window.</div>
@@ -1425,9 +1433,9 @@
   <div class="unit" id="fx-claim-vacay">
     <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="side-quests">
-      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
+      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🦪 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
       <div class="board" style="padding-bottom:0">
-        <div class="daybar"><div class="dayname">Day 2 · Bodega Bay Side Quests</div><div class="daymeta">🌊 Bodega Bay</div></div>
+        <div class="daybar"><div class="dayname">Day 2 · Bodega Bay Side Quests</div><div class="daymeta">🦪 Bodega Bay</div></div>
         <div class="grid" style="opacity:.3"><div class="cell">Walk to a Bodega Head viewpoint</div><div class="cell">Find the best boat name in the harbor</div><div class="cell">Stage an original suspense-movie still</div><div class="cell">Get a bird into the background of a photo</div><div class="cell">Karaoke your best song</div><div class="cell">Take a windblown group selfie</div><div class="cell">Photograph the fog</div><div class="cell">Capture a colorful buoy or crab pot</div><div class="cell">Find a seashell on the beach</div><div class="cell">Spot a gull, pelican, or heron doing something undignified</div><div class="cell">Walk part of the Bodega Dunes</div><div class="cell">Photograph someone's hair losing a fight with the wind</div><div class="cell free">FREE<br>Main character on the coast</div><div class="cell">Spot a whale spout, or convincingly claim you did</div><div class="cell">Photograph the drink of the day</div><div class="cell">Get a group photo with the whole Pacific behind you</div><div class="cell">Take a picture of something red</div><div class="cell">Take a photo of your feet in the sand</div><div class="cell">Find a hand-painted sign</div><div class="cell">Take a picture of a wildflower</div><div class="cell">Photograph something the exact color of the sea today</div><div class="cell">Find the best bench on this coast and sit in it a while</div><div class="cell">Get a group photo where nobody is ready</div><div class="cell">Find a bakery, farm stand, or roadside sign worth coming back for</div><div class="cell">Take a picture of yourself in the hot tub</div></div>
       </div>
       <div class="tabs" style="opacity:.35"><div class="tab on"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div><div class="tab"><span><svg data-lucide="radio" class="lucide lucide-radio" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" /> </svg></span>Feed</div><div class="tab"><span><svg data-lucide="trophy" class="lucide lucide-trophy" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /> <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /> <path d="M18 9h1.5a1 1 0 0 0 0-5H18" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6 9H4.5a1 1 0 0 1 0-5H6" /> </svg></span>Ranks</div><div class="tab"><span><i class="tabavatar"></i></span>More</div></div>
@@ -1499,9 +1507,9 @@
   <div class="unit" id="fx-add-proof-vacay">
     <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="side-quests">
-      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
+      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🦪 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
       <div class="board" style="padding-bottom:0">
-        <div class="daybar"><div class="dayname">Day 2 · Bodega Bay Side Quests</div><div class="daymeta">🌊 Bodega Bay</div></div>
+        <div class="daybar"><div class="dayname">Day 2 · Bodega Bay Side Quests</div><div class="daymeta">🦪 Bodega Bay</div></div>
         <div style="height:280px;overflow:hidden"><div class="grid" style="opacity:.3"><div class="cell">Walk to a Bodega Head viewpoint</div><div class="cell">Find the best boat name in the harbor</div><div class="cell">Stage an original suspense-movie still</div><div class="cell">Get a bird into the background of a photo</div><div class="cell">Karaoke your best song</div><div class="cell">Take a windblown group selfie</div><div class="cell">Photograph the fog</div><div class="cell">Capture a colorful buoy or crab pot</div><div class="cell">Find a seashell on the beach</div><div class="cell">Spot a gull, pelican, or heron doing something undignified</div><div class="cell">Walk part of the Bodega Dunes</div><div class="cell">Photograph someone's hair losing a fight with the wind</div><div class="cell free">FREE<br>Main character on the coast</div><div class="cell">Spot a whale spout, or convincingly claim you did</div><div class="cell">Photograph the drink of the day</div><div class="cell">Get a group photo with the whole Pacific behind you</div><div class="cell">Take a picture of something red</div><div class="cell">Take a photo of your feet in the sand</div><div class="cell">Find a hand-painted sign</div><div class="cell">Take a picture of a wildflower</div><div class="cell">Photograph something the exact color of the sea today</div><div class="cell">Find the best bench on this coast and sit in it a while</div><div class="cell">Get a group photo where nobody is ready</div><div class="cell">Find a bakery, farm stand, or roadside sign worth coming back for</div><div class="cell">Take a picture of yourself in the hot tub</div></div></div>
       </div>
       <div class="tabs" style="opacity:.35"><div class="tab on"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div><div class="tab"><span><svg data-lucide="radio" class="lucide lucide-radio" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" /> </svg></span>Feed</div><div class="tab"><span><svg data-lucide="trophy" class="lucide lucide-trophy" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /> <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /> <path d="M18 9h1.5a1 1 0 0 0 0-5H18" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6 9H4.5a1 1 0 0 1 0-5H6" /> </svg></span>Ranks</div><div class="tab"><span><i class="tabavatar"></i></span>More</div></div>
@@ -1564,11 +1572,11 @@
   <div class="unit" id="fx-notice-card-vacay">
     <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
     <div class="mini" data-theme="side-quests">
-      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🌊 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
+      <div class="hdr"><div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div><div class="today"><div class="port">🦪 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div></div>
       <div class="noticecard" style="margin:9px 12px 0"><span class="dx">✕</span><b>Sunday: oysters at 11</b>Meet at The Tides at 11—Kim’s driving the second car. Sunday’s card still unlocks at 6, so mark before you eat.</div>
-      <div class="strip"><div class="chip">✓ Fri 🐦</div><div class="chip now">Sat 🌊</div><div class="chip lock">🔒 Sun 🌅</div><div class="chip lock">🔒 Sun 👋</div></div>
+      <div class="strip"><div class="chip">✓ Fri 🐚</div><div class="chip now">Sat 🦪</div><div class="chip lock">🔒 Sun 🌅</div><div class="chip lock">🔒 Sun 👋</div></div>
       <div class="board">
-        <div class="daybar"><div class="dayname">Day 2 · Bodega Bay Side Quests</div><div class="daymeta">🌊 Bodega Bay</div></div>
+        <div class="daybar"><div class="dayname">Day 2 · Bodega Bay Side Quests</div><div class="daymeta">🦪 Bodega Bay</div></div>
         <div class="grid"><div class="cell">Walk to a Bodega Head viewpoint</div><div class="cell">Find the best boat name in the harbor</div><div class="cell">Stage an original suspense-movie still</div><div class="cell m">Get a bird into the background of a photo<span class="tally">6</span></div><div class="cell">Karaoke your best song</div><div class="cell">Take a windblown group selfie</div><div class="cell">Photograph the fog</div><div class="cell">Capture a colorful buoy or crab pot</div><div class="cell">Find a seashell on the beach</div><div class="cell">Spot a gull, pelican, or heron doing something undignified</div><div class="cell">Walk part of the Bodega Dunes</div><div class="cell m">Photograph someone's hair losing a fight with the wind<span class="tally">3</span></div><div class="cell free">FREE<br>Main character on the coast</div><div class="cell">Spot a whale spout, or convincingly claim you did</div><div class="cell">Photograph the drink of the day</div><div class="cell">Get a group photo with the whole Pacific behind you</div><div class="cell">Take a picture of something red</div><div class="cell">Take a photo of your feet in the sand</div><div class="cell">Find a hand-painted sign</div><div class="cell">Take a picture of a wildflower</div><div class="cell m">Photograph something the exact color of the sea today<span class="tally">2</span></div><div class="cell">Find the best bench on this coast and sit in it a while</div><div class="cell">Get a group photo where nobody is ready</div><div class="cell">Find a bakery, farm stand, or roadside sign worth coming back for</div><div class="cell">Take a picture of yourself in the hot tub</div></div>
       </div>
       <div class="tabs"><div class="tab on"><span><svg data-lucide="grid-3x3" class="lucide lucide-grid-3x3" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M3 9h18" /> <path d="M3 15h18" /> <path d="M9 3v18" /> <path d="M15 3v18" /> </svg></span>Card</div><div class="tab"><span><svg data-lucide="radio" class="lucide lucide-radio" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M16.247 7.761a6 6 0 0 1 0 8.478" /> <path d="M19.075 4.933a10 10 0 0 1 0 14.134" /> <path d="M4.925 19.067a10 10 0 0 1 0-14.134" /> <path d="M7.753 16.239a6 6 0 0 1 0-8.478" /> <circle cx="12" cy="12" r="2" /> </svg></span>Feed</div><div class="tab"><span><svg data-lucide="trophy" class="lucide lucide-trophy" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /> <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /> <path d="M18 9h1.5a1 1 0 0 0 0-5H18" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6 9H4.5a1 1 0 0 1 0-5H6" /> </svg></span>Ranks</div><div class="tab"><span><i class="tabavatar"></i></span>More</div></div>
@@ -1767,7 +1775,7 @@
     <div class="mini" data-theme="side-quests">
       <div class="hdr">
         <div class="title vc-title">VACAY <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
-        <div class="today"><div class="port">🌊 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div>
+        <div class="today"><div class="port">🦪 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div>
       </div>
       <div class="board" style="gap:8px">
         <div class="tcard">
@@ -1812,7 +1820,7 @@
         <div class="tab"><span><i class="tabavatar"></i></span>More</div>
       </div>
     </div>
-    <p class="cap"><b>Feed—trip register</b>Same three entry kinds, same hearts, same debounce. What moves: the header carries a <i>stop</i> (🌊 Bodega Bay) where GCB carries a port, the day is a named vignette rather than a themed party night, and the lockup runs the VACAY BINGO wordmark over the BY FIVE ACROSS endorsement micro-line—the one-identity rule, never two competing brands in one chrome. Moderate camp: functional and Theme emoji survive, decorative lead-ins do not. Palette is the shipped <code>side-quests</code> reference (deep Pacific blue ground, seafoam primary, buoy-orange secondary, sand accent—the marked-cell gradient stays a coastal tonal pair; tokens synced from <code>themes.css</code>). Prompt voice is invitation, not chore.</p>
+    <p class="cap"><b>Feed—trip register</b>Same three entry kinds, same hearts, same debounce. What moves: the header carries a <i>stop</i> (🦪 Bodega Bay) where GCB carries a port, the day is a named vignette rather than a themed party night, and the lockup runs the VACAY BINGO wordmark over the BY FIVE ACROSS endorsement micro-line—the one-identity rule, never two competing brands in one chrome. Moderate camp: functional and Theme emoji survive, decorative lead-ins do not. Palette is the shipped <code>side-quests</code> reference (deep Pacific blue ground, seafoam primary, buoy-orange secondary, sand accent—the marked-cell gradient stays a coastal tonal pair; tokens synced from <code>themes.css</code>). Prompt voice is invitation, not chore.</p>
   </div>
 
   <!-- Feed · Five Across -->
@@ -2113,7 +2121,7 @@
     <div class="mini" data-theme="side-quests">
       <div class="hdr">
         <div class="title vc-title">VACAY <b>BINGO</b><i class="by">BY FIVE ACROSS</i></div>
-        <div class="today"><div class="port">🐦 Bodega Bay</div><div class="theme">🐦 The Birds Have Entered the Chat</div></div>
+        <div class="today"><div class="port">🐚 Bodega Bay</div><div class="theme">🐦 The Birds Have Entered the Chat</div></div>
       </div>
       <div class="board" style="gap:7px">
         <div class="menucard">
@@ -2408,11 +2416,11 @@
     <div class="mini" data-theme="the-birds">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
-        <div class="today"><div class="port">🐦 Bodega Bay</div><div class="theme">🐦 The Birds Have Entered the Chat</div></div>
+        <div class="today"><div class="port">🐚 Bodega Bay</div><div class="theme">🐦 The Birds Have Entered the Chat</div></div>
       </div>
       <div class="strip">
-        <div class="chip now">Fri 🐦</div>
-        <div class="chip lock">🔒 Sat 🌊</div>
+        <div class="chip now">Fri 🐚</div>
+        <div class="chip lock">🔒 Sat 🦪</div>
         <div class="chip lock">🔒 Sun 🌅</div>
         <div class="chip lock">🔒 Sun 👋</div>
       </div>
@@ -2466,7 +2474,7 @@
     <div class="mini" data-theme="side-quests">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
-        <div class="today"><div class="port">🌊 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div>
+        <div class="today"><div class="port">🦪 Bodega Bay</div><div class="theme">🌊 Bodega Bay Side Quests</div></div>
       </div>
       <div class="board" style="gap:7px">
         <div class="schedrow" style="border-bottom:none;font-size:10.5px">Sat 8 · 🌊 Bodega Bay Side Quests <span class="pill">12 easy · 12 exploratory</span><span class="dd dis" style="margin-left:auto">Free: Main character on the coast</span></div>
@@ -2499,8 +2507,8 @@
         <div class="today"><div class="port">👋 The drive home</div><div class="theme">🌫️ Fog, Froth &amp; Farewells</div></div>
       </div>
       <div class="strip">
-        <div class="chip">✓ Fri 🐦</div>
-        <div class="chip">✓ Sat 🌊</div>
+        <div class="chip">✓ Fri 🐚</div>
+        <div class="chip">✓ Sat 🦪</div>
         <div class="chip">✓ Sun 🌅</div>
         <div class="chip now">Sun 👋</div>
       </div>
@@ -2556,7 +2564,7 @@
     <div class="mini" data-theme="fog-froth-farewells">
       <div class="hdr">
         <div><div class="title" style="font-size:19px;line-height:1">VACAY <b>BINGO</b></div><div style="font-size:8.5px;letter-spacing:.16em;color:var(--dim);margin-top:2px">BY FIVE ACROSS</div></div>
-        <div class="today"><div class="port">👋 The drive home</div><div class="theme">Final standings</div></div>
+        <div class="today"><div class="port">👋 The drive home</div><div class="theme">🏆 Final standings</div></div>
       </div>
       <div class="board" style="gap:9px">
         <div class="secthead">Most-loved photo of the trip</div>
@@ -2590,7 +2598,7 @@
     <div class="mini" data-theme="fiveacross-slate">
       <div class="hdr">
         <div class="title fa-title">FIVE <b>ACROSS</b></div>
-        <div class="today"><div class="port">Cedar Hall</div><div class="theme">✨ Marquee</div></div>
+        <div class="today"><div class="port">🎤 Cedar Hall</div><div class="theme">✨ Marquee</div></div>
       </div>
       <div class="strip">
         <div class="chip now">Thu ✨</div>
@@ -2647,7 +2655,7 @@
     <div class="mini" data-theme="fiveacross-slate">
       <div class="hdr">
         <div class="title fa-title">FIVE <b>ACROSS</b></div>
-        <div class="today"><div class="port">Riverside Park</div><div class="theme">🌙 Afterglow</div></div>
+        <div class="today"><div class="port">🌳 Riverside Park</div><div class="theme">🌙 Afterglow</div></div>
       </div>
       <div class="strip">
         <div class="chip">✓ Thu ✨</div>
@@ -3367,7 +3375,7 @@
     <tr>
       <td>Crash panel<br>+ DealError</td><td><code>fx-util-crash-fa</code></td>
       <td>Offline footnote <code>offlineNote</code></td>
-      <td>Lost signal at sea? The printed cards and PDF still work.</td>
+      <td>Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.</td>
       <td>Patchy signal? Your card keeps working offline—marks sync when you reconnect. <span class="inv">(shipped, #647—the override this doc once flagged to #608 landed in <code>src/editions.ts</code>)</span></td>
       <td>Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.</td>
       <td>override</td>
@@ -3670,8 +3678,8 @@
       <div class="hname">Maya</div>
       <div class="htitle">Daily honors</div>
       <div class="hrows">
-        <div class="hrow"><span class="hd">Day 1 · Bodega Bay 🐦</span><span class="hn">Jess</span></div>
-        <div class="hrow"><span class="hd">Day 2 · Bodega Bay 🌊</span><span class="hn">Maya</span></div>
+        <div class="hrow"><span class="hd">Day 1 · Bodega Bay 🐚</span><span class="hn">Jess</span></div>
+        <div class="hrow"><span class="hd">Day 2 · Bodega Bay 🦪</span><span class="hn">Maya</span></div>
         <div class="hrow"><span class="hd">Day 3 · Bodega Bay 🌅</span><span class="hn">Priya</span></div>
         <div class="hrow"><span class="hd">Day 4 · The drive home 👋</span><span class="hn">Maya</span></div>
       </div>
@@ -3736,7 +3744,7 @@
       <div class="ev">Bodega Bay · Day 4 · The drive home</div>
       <div class="big sm">FINAL STANDINGS</div>
       <div class="mlph"><span class="mlbadge">📷 Most-loved photo</span><span class="mlhearts">❤ 9</span></div>
-      <div class="mlby">Priya · “Stage an original suspense-movie still” · Day 2 · Bodega Bay 🌊</div>
+      <div class="mlby">Priya · “Stage an original suspense-movie still” · Day 2 · Bodega Bay 🦪</div>
       <div class="mlrows">
         <div class="mlrow champ"><span class="r">1</span><span class="nm2">Maya</span><span class="mlrole">🏆 Trip champion</span><span class="s">5 bingos</span></div>
         <div class="mlrow"><span class="r">2</span><b>Priya</b><span class="s">4 bingos · 55 sq</span></div>
@@ -3926,7 +3934,7 @@
       <div class="ehead">
         <div class="ebrand">Vacay Bingo · by Five Across</div>
         <div class="etheme">🐦 The Birds Have Entered the Chat</div>
-        <div class="ectx">Day 1 of 4 · Friday, Aug 7 · 🐦 Bodega Bay</div>
+        <div class="ectx">Day 1 of 4 · Friday, Aug 7 · 🐚 Bodega Bay</div>
         <div class="epal"><i style="background:#6fbf9f"></i><i style="background:#e07a6f"></i><i style="background:#e8d9a0"></i><i style="background:#151c19"></i><i style="background:#0b0f0e"></i></div>
       </div>
       <div class="emod">
@@ -3990,7 +3998,7 @@
   <tr><th>Module</th><th>🚢 Gay Cruise Bingo</th><th>🧳 Vacay Bingo</th><th>✳ Five Across</th></tr>
   <tr><td>Sender (<code>EMAIL_FROM</code> per-Edition resolution, #671/#810)</td><td>Gay Cruise Bingo &lt;…@gaycruisebingo.com&gt;</td><td>Vacay Bingo &lt;…@vacaybingo.com&gt;</td><td>Five Across &lt;…@fiveacross.app&gt;</td></tr>
   <tr><td>Subject shape (<code>Day N · label emoji—tail</code>)</td><td>Day 4 · Sporty Splash 💦—standings + tonight</td><td>Day 1 · The Birds Have Entered the Chat 🐦—your card is live</td><td>Day 2 · Confetti Hour 🎊—standings + today's card</td></tr>
-  <tr><td>Context-line noun</td><td>the port, with flag (🇲🇹 Valletta)</td><td>the Stop (🐦 Bodega Bay)</td><td>the Place (💍 The Barn at Green Valley)</td></tr>
+  <tr><td>Context-line noun</td><td>the port, with flag (🇲🇹 Valletta)</td><td>the Stop (🐚 Bodega Bay)</td><td>the Place (💍 The Barn at Green Valley)</td></tr>
   <tr><td>Morning line</td><td>"The boat docks in Valletta today"</td><td>"The group lands in Bodega Bay today"</td><td>"Today at The Barn at Green Valley starts now"</td></tr>
   <tr><td>Photos nudge</td><td>"BINGO without a photo is a rumor. Post a pic with every claim—the boat wants receipts."</td><td>"Got BINGO? Post a photo with it. Every claim is a photo op, and the group chat wants receipts."</td><td>"Post a photo with every BINGO. That's what the Feed is for."</td></tr>
   <tr><td>Award line</td><td>most-loved photo of the <b>cruise</b></td><td>most-loved photo of the <b>trip</b></td><td>most-loved photo of the <b>event</b></td></tr>
@@ -4204,7 +4212,7 @@ const DAYS = [
 {n:1, date:"Wed Jul 15", port:"Trieste", flag:"🇮🇹", theme:"welcome-aboard", emoji:"🛳️", label:"Welcome Aboard",
  tonight:"⛵ Sail-Away Party · 🎉 Welcome Party",
  desc:"You made it. Learn the game, find the soft-serve, wave goodbye to land.",
- pool:EMBARK, free:"You made it aboard", tag:"Warm-up", headPort:"Sails Jul 15",
+ pool:EMBARK, free:"You made it aboard", tag:"Warm-up", headPort:"⚓ Sails Jul 15",
  banner:"<b>How this works</b><ol><li><b>Mark what happens.</b> Tap a square when you see it, do it, or survive it.</li><li><b>Five in a row is BINGO.</b> The center is free. Blackout the card if you're ambitious.</li><li><b>The feed is the proof.</b> Attach a pic, doubt a friend, watch the Moments roll in.</li></ol>",
  note:"This one's a warm-up—easy squares, all on the ship. The real chaos starts tomorrow at 8 a.m."},
 {n:2, date:"Thu Jul 16", port:"Split", flag:"🇭🇷", theme:"uniforms-without-borders", emoji:"🌍", label:"Uniforms Without Borders",
