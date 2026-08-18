@@ -13,7 +13,7 @@ Nothing ships from this spec. It answers the nine questions #799 enumerates as d
 
 ## Glossary
 
-**Addressing regime**—the rule pairing a class of serving host with the way an Event is named on it. There are exactly three (§ The three regimes), and they differ in capability, not only in URL shape. *Avoid:* routing mode, URL scheme.
+**Addressing regime**—the rule pairing a class of serving host with the way an Event is named on it. There are exactly three (§ The three regimes), and they differ in capability, not only in URL shape. Note that "regime" counts *addressing* rules, not surfaces: a mirror's flagship visit at `/` is addressed by host rather than by path, so it belongs to no path regime while still being its own **surface**—which is why D6's entry dimension carries four values against these three regimes. *Avoid:* routing mode, URL scheme.
 
 **Path-addressed surface**—a rendering of an Event reached as `<host>/<slug>` rather than as `<slug>.<namespace>`. Deliberately a **narrower** way to reach the same `eventId`, never an alias of the subdomain's capability set. *Avoid:* path alias, mirror route.
 
