@@ -1,10 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { THEMES, defaultThemeForEdition } from '../../src/theme/themes';
 import { EMAIL_THEME_TOKENS, emailThemeTokens, fallbackThemeForEdition } from '../../functions/src/dailyEmailTheme';
 import {
   buildDailyEmailModel,
+  fromAddressFor,
   registerFor,
   standingsThrough,
   formatDayDate,
@@ -19,6 +20,7 @@ import {
   dailyEmailEnabled,
   DEFAULT_SEND_LOCAL_HOUR,
   dueDayForDailyEmail,
+  resolveEmailFrom,
   resolveEventOrigin,
   readEmailRoster,
   runDailyEmailSweep,
@@ -388,6 +390,89 @@ describe('Edition registers (#608 lexicon)', () => {
     expect(registerFor('nope').brandLine).toBe('Gay Cruise Bingo · by Five Across');
     expect(registerFor(null).brandLine).toBe('Gay Cruise Bingo · by Five Across');
     expect(registerFor('constructor').brandLine).toBe('Gay Cruise Bingo · by Five Across');
+  });
+});
+
+// --- ③b Edition-aware sender (#671) ---------------------------------------------
+
+describe('fromAddressFor (#671)', () => {
+  it('resolves the configured override for a known Edition', () => {
+    expect(fromAddressFor('vacay', { vacay: 'Vacay Bingo <hello@vacaybingo.com>' })).toBe(
+      'Vacay Bingo <hello@vacaybingo.com>',
+    );
+    expect(fromAddressFor('gcb', { gcb: 'Gay Cruise Bingo <bingo@gaycruisebingo.com>' })).toBe(
+      'Gay Cruise Bingo <bingo@gaycruisebingo.com>',
+    );
+    expect(fromAddressFor('fiveacross', { fiveacross: 'Five Across <hello@fiveacross.app>' })).toBe(
+      'Five Across <hello@fiveacross.app>',
+    );
+  });
+
+  it('falls back (returns undefined) when a known Edition has no configured or a blank override', () => {
+    expect(fromAddressFor('gcb', {})).toBeUndefined();
+    expect(fromAddressFor('gcb', { gcb: '' })).toBeUndefined();
+    expect(fromAddressFor('gcb', { gcb: '   ' })).toBeUndefined();
+  });
+
+  it('falls back for a null, absent, or unrecognized Edition even if the key is present', () => {
+    expect(fromAddressFor(null, { gcb: 'x <x@example.com>' })).toBeUndefined();
+    expect(fromAddressFor(undefined, { gcb: 'x <x@example.com>' })).toBeUndefined();
+    // An override object cannot inject an address for an Edition this file
+    // does not recognize — the REGISTERS membership check gates it first.
+    expect(fromAddressFor('some-future-edition', { 'some-future-edition': 'x <x@example.com>' })).toBeUndefined();
+  });
+
+  it('is immune to prototype pollution, matching registerFor (#597)', () => {
+    expect(fromAddressFor('constructor', {})).toBeUndefined();
+    expect(fromAddressFor('toString', {})).toBeUndefined();
+  });
+
+  it('trims incidental whitespace from a configured override before returning it', () => {
+    // A stray space pasted into an env file must not ride into the `From:`
+    // header the caller sends (CodeRabbit finding on PR #810).
+    expect(fromAddressFor('vacay', { vacay: '  Vacay Bingo <hello@vacaybingo.com>  ' })).toBe(
+      'Vacay Bingo <hello@vacaybingo.com>',
+    );
+  });
+});
+
+describe('resolveEmailFrom (#671)', () => {
+  it('prefers the configured per-Edition override over the EMAIL_FROM fallback', async () => {
+    await expect(resolveEmailFrom('vacay', { vacay: 'Vacay Bingo <hello@vacaybingo.com>' })).resolves.toBe(
+      'Vacay Bingo <hello@vacaybingo.com>',
+    );
+  });
+
+  // The `EMAIL_FROM` fallback always goes through the REAL `firebase-functions`
+  // param (`resolveEmailFrom` reads it unconditionally, same as every other
+  // caller in `dailyEmail.ts`/`adminAlerts.ts`), and that param's `.value()`
+  // reads `process.env.EMAIL_FROM` directly — its `default` is a deploy-time
+  // resolution concern, never consulted outside the CLI, so an unset env var
+  // resolves to `''` rather than the documented default. Stub the env var
+  // directly (`vi.stubEnv`/`vi.unstubAllEnvs`) rather than mocking the whole
+  // `./params` module: `resolveEmailFrom` reaches it via a fresh `await
+  // import('./params')` on every call, and an EARLIER test in this same file
+  // that already resolved that dynamic import (any of the `fromOverrides`
+  // cases above, which still touch `EMAIL_FROM` for the unused fallback
+  // value) can leave a `vi.doMock` registration racing the module's cache —
+  // stubbing `process.env` sidesteps that question entirely (CodeRabbit
+  // finding on PR #810). The value is deliberately NOT the real EMAIL_FROM
+  // default, so a passing assertion can only mean the stub was read.
+  const STUBBED_EMAIL_FROM = 'Stubbed Sender <stub@example.invalid>';
+
+  it('falls back to the EMAIL_FROM param when no override is configured', async () => {
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+    await expect(resolveEmailFrom('gcb', {})).resolves.toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
+  });
+
+  it('falls back to EMAIL_FROM for a null or unrecognized Edition, so an unknown Edition still sends', async () => {
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+    await expect(resolveEmailFrom(null, {})).resolves.toBe(STUBBED_EMAIL_FROM);
+    await expect(
+      resolveEmailFrom('some-future-edition', { 'some-future-edition': 'Should Not <use@example.com>' }),
+    ).resolves.toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
   });
 });
 
@@ -1082,6 +1167,48 @@ describe('sendDailyEmailForEvent', () => {
     ]);
     // The Feed CTA deep-links the Event's CANONICAL host, not the fallback.
     expect(sent[0].text).toContain('Open the Feed: https://gaycruisebingo.com/feed');
+  });
+
+  // #671: the sender is Edition-aware, resolved from the SAME host lookup the
+  // Feed CTA above uses — not the deps.from override, which these three cases
+  // deliberately omit (baseDeps() always sets it, so `from: undefined` here
+  // exercises resolveEmailFrom for real).
+  it('sends from the Edition-configured address when the host resolves a known Edition', async () => {
+    const docs = seedEvent();
+    docs['hostnames/gaycruisebingo.com'] = { ...docs['hostnames/gaycruisebingo.com'], edition: 'vacay' };
+    const { sent } = await run(docs, {
+      from: undefined,
+      fromOverrides: { vacay: 'Vacay Bingo <hello@vacaybingo.com>' },
+    });
+    expect(sent[0].from).toBe('Vacay Bingo <hello@vacaybingo.com>');
+  });
+
+  // The real EMAIL_FROM param's `.value()` reads `process.env.EMAIL_FROM`
+  // directly (its `default` is a deploy-time-only concern — see the
+  // `resolveEmailFrom` describe block above for the full explanation), so
+  // these two stub the env var directly rather than mocking the whole
+  // `./params` module (CodeRabbit finding on PR #810 — see that describe
+  // block's comment for why `vi.doMock` is the wrong tool here).
+  const STUBBED_EMAIL_FROM = 'Stubbed Sender <stub@example.invalid>';
+
+  it('falls back to EMAIL_FROM when the resolved Edition has no configured override', async () => {
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+    const { sent } = await run(seedEvent(), { from: undefined, fromOverrides: {} }); // edition: 'gcb'
+    expect(sent[0].from).toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
+  });
+
+  it('falls back to EMAIL_FROM for an unrecognized Edition rather than failing the send', async () => {
+    vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+    const docs = seedEvent();
+    docs['hostnames/gaycruisebingo.com'] = { ...docs['hostnames/gaycruisebingo.com'], edition: 'some-future-edition' };
+    const { result, sent } = await run(docs, {
+      from: undefined,
+      fromOverrides: { 'some-future-edition': 'Should Not <use@example.com>' },
+    });
+    expect(result.sent).toBe(2);
+    expect(sent[0].from).toBe(STUBBED_EMAIL_FROM);
+    vi.unstubAllEnvs();
   });
 
   it('sends nothing when the Event-level admin toggle is off (the shipped default)', async () => {
