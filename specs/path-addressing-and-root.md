@@ -135,7 +135,9 @@ This is ADR 0009's own named mitigation—"the nested-install breakage … is av
 
 **The doorway itself is not installable either.** An organiser does not install a create form, and an installable root is the exact thing ADR 0009 says never to build.
 
-**A brand mirror's flagship root is the one deliberate exception, and it is consistent rather than grudging.** The rule the whole section rests on is that the only safe number of installable surfaces per origin is **one**, and on a doorway origin it is zero. A mirror origin serves exactly one Event at `/` (#625) and everything else by path, so leaving `/` installable spends that single budget on the surface #625 exists for and leaves nothing for a path to collide with. The invariant to implement against is therefore not "paths are non-installable" but **"at most one installable surface per origin, and never a path"**—stated this way because a guard written as "suppress install when a basename is present" satisfies both readings, while a guard written as "suppress install on mirrors" would wrongly dark the flagship.
+**A brand mirror's flagship root is the one deliberate exception, and it is consistent rather than grudging.** The rule the whole section rests on is that the only safe number of installable surfaces per origin is **one**, and on a doorway origin it is zero. A mirror origin serves exactly one Event at `/` (#625) and everything else by path, so leaving `/` installable spends that single budget on the surface #625 exists for and leaves nothing for a path to collide with. The invariant to implement against is therefore not "paths are non-installable" but **"at most one installable surface per origin, and never a path"**.
+
+**The guard must key on the resolved regime, never on the presence of a basename.** This is stated as a prohibition because the basename test is the obvious shortcut and it is wrong: a **doorway root resolves with an empty basename, exactly like a live Event subdomain**, so "suppress install when a basename is present" would leave the doorway installable and contradict the requirement two paragraphs up. "Suppress install on mirrors" fails in the other direction, wrongly darkening the flagship #625 depends on. The decision input is the resolution outcome itself—regime (a) and a mirror flagship are installable; a root marker and every path-addressed surface are not—which is available precisely because D1 makes the root a resolution outcome rather than a hardcoded route.
 
 ### D5 — Share URLs keep the entry-point surface, path included
 
@@ -222,6 +224,26 @@ Sources, so the list can be re-derived rather than trusted:
 
 The list is a floor. #545 and #790 may reserve more (platform words, profanity, single characters); nothing here may be removed without a route table changing under it.
 
+## Contracts this spec extends, and what each amendment must say
+
+This spec introduces a `hostnames/{host}` document with **no `eventId`**, a **third** resolution outcome, and a **new optional field**. Two accepted specs currently exclude all three, and an implementation that reuses today's resolver against today's written contract would reject the root marker or mount the wrong branch. Naming the required amendments here—rather than leaving an implementer to infer them—is part of this spec's job, but the amendments themselves land with the implementation ticket, since changing an accepted contract ahead of the code that honours it would leave both specs describing something that does not exist.
+
+**`specs/hostnames-lookup.md` must gain:**
+
+- The **root marker** as a documented variant: `eventId` becomes optional, and its absence is what makes the document a doorway rather than a malformed Event mapping. Today's coercion (`coerceHostnameDoc`) must read a missing `eventId` as a root marker, never as null-and-drop.
+- **`pathNamespace`** as an optional field, with the fail-closed default (absent ⇒ no path addressing) and the validity rule (it may only name an apex that issues Event subdomains).
+- A note that neither addition changes the rules contract: still `allow get: if true; allow list: if false`, still no client writes. Nothing here is rules-gated, so the disclosure posture is unchanged.
+
+**`specs/event-resolution.md` must gain:**
+
+- The **third outcome** `{ kind: 'root', edition, pathNamespace }` alongside `event` and `not-found`, and `src/main.tsx`'s handling of it—the doorway mounts, so this is not the `EventNotFound` branch and must not be folded into it.
+- The **derived-target cache key** for path resolution, kept separate from the root marker's own entry.
+- The **single `timeoutMs` budget spanning both reads**, and the failure behaviour when it is exhausted mid-chain.
+- The **resolved routing key** in the resolution result, and the requirement that live `hostnames/{host}` subscriptions read it rather than `window.location.hostname`.
+- The **route-aware status rule**: `archived` is not-found at its own host and servable by path, so status can no longer be evaluated without knowing which door was used.
+
+The last point is the one most likely to be missed, because today's contract states a status rule that is unconditionally true and would stay compiling while becoming wrong.
+
 ## Deliberately not in this spec
 
 - **The rules workstream for tenant isolation.** `specs/x-multi-event-schema.md` § "Rules / indexes / hosting implications" already carries the honest inventory: today's rules are path-scoped, not membership-scoped. Path addressing changes no rule and widens no read—it changes which URL reaches a document, not who may read it.
@@ -274,6 +296,7 @@ The list is a floor. #545 and #790 may reserve more (platform words, profanity, 
 - **Given** the worker source, **when** it registers the navigation route, **then** that route carries a denylist covering path-addressed routes alongside the existing `/^\/__\//` pattern.
 - **Given** a doorway host, **when** `/` renders, **then** it is not installable either.
 - **Given** a brand mirror, **when** its flagship Event renders at `/`, **then** it remains installable exactly as today; **when** any `/<slug>` renders on that same origin, **then** it is not—at most one installable surface per origin, and never a path.
+- **Given** a doorway root, **which resolves with an empty basename exactly like a live Event subdomain**, **when** the install guard evaluates it, **then** it is still suppressed—so **given** any implementation, **then** the guard keys on the resolved regime and never on the presence of a basename.
 
 **D5 — share composition**
 
