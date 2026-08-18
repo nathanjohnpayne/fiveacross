@@ -485,6 +485,18 @@ service cloud.firestore {
         && (days.size() < 10 || dayScoringValid(days[9]));
     }
 
+    // Has the finale BEGUN? The last-call beat writes at the deterministic id
+    // `moments/last_call` (the Feed only surfaces a finale Moment when its id
+    // equals its kind), so its existence is a cheap, exact signal that the
+    // boundary has been announced to players.
+    //
+    // Once it exists, the finale's clock is settled: that Moment persists the
+    // freeze phrase it announced and is deduped on every later scheduler run,
+    // so nothing that could move the freeze may still change (Phase 4b P1).
+    function finaleAnnounced(eventId) {
+      return exists(/databases/$(database)/documents/events/$(eventId)/moments/last_call);
+    }
+
     function daysThemeLockOk(newDays, oldDays) {
       return newDays.size() == oldDays.size()
         && (newDays.size() < 1  || dayThemeChangeOk(newDays[0], oldDays[0]))
@@ -802,9 +814,14 @@ service cloud.firestore {
         // 1000-expression cap at ten Days (issue #850). It is deliberately left
         // to that fix rather than deepening a live bug; the scheduler stamps
         // `frozenAt` within one sweep, which bounds the window in practice.
-        && (resource == null
-            || !('standingsFreezeAt' in request.resource.data)
-            || ('standingsFreezeAt' in resource.data
+        // Applies to CREATE as well (Phase 4b P2): the other boundary clauses
+        // short-circuit on `resource == null`, which let an Event be created
+        // already carrying a past freeze — instantly frozen, and in violation
+        // of the "only ever written into the future" invariant the rest of
+        // these clauses maintain.
+        && (!('standingsFreezeAt' in request.resource.data)
+            || (resource != null
+                && 'standingsFreezeAt' in resource.data
                 && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt)
             || request.resource.data.standingsFreezeAt > request.time.toMillis())
         && (resource == null
@@ -832,7 +849,35 @@ service cloud.firestore {
             || !('days' in resource.data)
             || resource.data.days.size() < 1
             || request.time.toMillis()
-                 < resource.data.days[resource.data.days.size() - 1].unlockAt);
+                 < resource.data.days[resource.data.days.size() - 1].unlockAt)
+        // ONCE THE FINALE HAS BEEN ANNOUNCED, its clock is immutable (Phase 4b
+        // P1). The `last_call` Moment persists the freeze phrase it announced
+        // and is deduped on every later scheduler run, so a freeze moved after
+        // it posts leaves a permanently wrong deadline on the Feed — and can
+        // move the Day the podium is filed under. Worse, `scoring` was locked
+        // only from a Day's own unlock, while last-call posts BEFORE that: an
+        // admin could flip the sole future ceremonial Day to competitive after
+        // the announcement, at which point `finaleTimes` returns null and the
+        // announced freeze simply never happens — no freeze, no podium, and the
+        // already-posted Moment still promising one.
+        //
+        // Both are closed by freezing the whole boundary: after the
+        // announcement neither `standingsFreezeAt` nor `days` may change. That
+        // is broader than strictly required (it also pins Tonight and theme
+        // edits for the last few hours of an Event) and deliberately so — it is
+        // ONE O(1) array comparison instead of a per-Day unroll on a rule
+        // already past Firestore's expression cap (#850), and "the schedule is
+        // settled once the finale is announced" is a rule that can be stated in
+        // one sentence.
+        && (resource == null
+            || !finaleAnnounced(eventId)
+            || (('standingsFreezeAt' in request.resource.data)
+                  == ('standingsFreezeAt' in resource.data)
+                && (!('standingsFreezeAt' in request.resource.data)
+                    || request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt)
+                && ('days' in request.resource.data) == ('days' in resource.data)
+                && (!('days' in request.resource.data)
+                    || request.resource.data.days == resource.data.days)));
       allow delete: if isAdmin(eventId);
 
       // Community-editable prompt pool.

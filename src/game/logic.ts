@@ -835,7 +835,15 @@ export function standingsFreezeAtFor(
     return configured;
   }
   for (const d of event.days ?? []) {
-    if (isCeremonialDay(d)) return d.unlockAt;
+    // The SAME non-positive guard the configured value gets. `unlockAt: 0` is
+    // the schedule's "live from event open" sentinel, not an instant — the
+    // snapshot path already treats a non-positive cutoff as NO cutoff (#289),
+    // and reading it here as a freeze would freeze the Event at the epoch:
+    // every Mark in its history lands at-or-after the boundary, so the podium
+    // and the Leaderboard's First to BINGO would both go permanently blank.
+    // A ceremonial Day carrying the sentinel therefore schedules no freeze
+    // rather than an immediate one.
+    if (isCeremonialDay(d) && Number.isFinite(d.unlockAt) && d.unlockAt > 0) return d.unlockAt;
   }
   return null;
 }
@@ -1024,14 +1032,50 @@ export function effectiveCruiseFirstBingoAt(
 export function cruiseFirstBingoUid(
   players: readonly PlayerDoc[],
   isTutorialDay: (dayIndex: number) => boolean,
+  freezeAt?: number | null,
 ): string | undefined {
-  let best: { uid: string; at: number } | undefined;
+  return eventFirstBingoWinner(players, isTutorialDay, freezeAt)?.uid;
+}
+
+/**
+ * The Event-wide First to BINGO honour: the earliest eligible bingo across the
+ * roster, as ONE selector every surface shares (Phase 4b P1). The Leaderboard's
+ * pin, the frozen podium and its Share Card all render this honour, and they
+ * were each deriving it — so the podium could gain a freeze cutoff while the
+ * public Leaderboard kept naming a post-freeze winner, printing two different
+ * answers to the same question on two screens.
+ *
+ * Two exclusions, and they are NOT the same set:
+ *
+ *   - Tutorial Days, always. An onboarding or send-off card is framed as
+ *     non-competition, so its bingo never takes the headline honour.
+ *   - Anything at or after `freezeAt`, when a cutoff is supplied. The standings
+ *     are "as of the freeze", and a ceremonial Day deliberately keeps recording
+ *     Marks afterwards so its own daily honour still renders — without the
+ *     cutoff those late Marks can mint an honour the scheduler's immutable
+ *     podium Moment does not carry.
+ *
+ * The cutoff is INCLUSIVE (`>= freezeAt`), matching `standingsFrozen`'s
+ * `now >= freezeAt` and the half-open `[lastCallAt, freezeAt)` last-call window:
+ * the freeze instant itself is already frozen, so a Mark stamped on that exact
+ * millisecond is not eligible (Phase 4b P2). Absent/`null` means no cutoff,
+ * which is every pre-freeze render.
+ *
+ * Ties go to the first Player in roster order, unchanged.
+ */
+export function eventFirstBingoWinner(
+  players: readonly PlayerDoc[],
+  isTutorialDay: (dayIndex: number) => boolean,
+  freezeAt?: number | null,
+): { uid: string; displayName: string; at: number } | undefined {
+  let best: { uid: string; displayName: string; at: number } | undefined;
   for (const p of players) {
     const at = effectiveCruiseFirstBingoAt(p, isTutorialDay);
     if (at == null) continue;
-    if (!best || at < best.at) best = { uid: p.uid, at };
+    if (freezeAt != null && at >= freezeAt) continue;
+    if (!best || at < best.at) best = { uid: p.uid, displayName: p.displayName, at };
   }
-  return best?.uid;
+  return best;
 }
 
 /** A Player-write bucket: the day/root stats, with `firstBingoAt` OPTIONAL so a

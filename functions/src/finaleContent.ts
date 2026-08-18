@@ -396,8 +396,11 @@ export function buildPodiumPayload(
   // here — it exists so this stays byte-identical to `buildPodium`
   // (src/data/finale.ts), which reads the LIVE roster and genuinely needs it
   // (Phase 4b P1). The parity test feeds both the same post-freeze data.
+  // INCLUSIVE at the freeze instant, mirroring the client (Phase 4b P2):
+  // `standingsFrozen` is `now >= freezeAt` and the last-call window is
+  // half-open `[lastCallAt, freezeAt)`, so that millisecond is already frozen.
   const withinFreeze = (at: number | null): number | null =>
-    at != null && freezeAt != null && at > freezeAt ? null : at;
+    at != null && freezeAt != null && at >= freezeAt ? null : at;
   const tutorial = tutorialDayIndexes(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
   const ceremonial = ceremonialDayIndexes(days);

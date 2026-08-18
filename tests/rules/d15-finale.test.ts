@@ -238,6 +238,92 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     );
   });
 
+  // Phase 4b P1: once `last_call` has posted, the finale's clock is settled.
+  // That Moment persists the freeze phrase it announced and is deduped on every
+  // later scheduler run, so moving the boundary afterwards leaves a permanently
+  // wrong deadline on the Feed — and `scoring` was previously locked only from
+  // a Day's own unlock, which is AFTER last-call posts.
+  describe('once the finale has been announced', () => {
+    const announce = async () => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), `events/${EVENT}/moments/last_call`), {
+          kind: 'last_call',
+          uid: 'system',
+          createdAt: NOW(),
+        });
+      });
+    };
+
+    it('DENIES moving a still-future standingsFreezeAt', async () => {
+      const future = NOW() + 7200_000;
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { standingsFreezeAt: future });
+      });
+      // Allowed right up until the announcement…
+      await assertSucceeds(
+        updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: future + 60_000 }),
+      );
+      await announce();
+      // …and refused after it.
+      await assertFails(
+        updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: future + 120_000 }),
+      );
+    });
+
+    it('DENIES flipping the sole future ceremonial Day to competitive', async () => {
+      // The sharper half: this would make `finaleTimes` return null, so the
+      // announced freeze never happens and no podium is ever posted — while the
+      // last-call Moment sits on the Feed still promising one.
+      const days = [
+        { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
+        { index: 1, unlockAt: NOW() + 7200_000, theme: 'get-sporty', pool: 'closing' },
+      ];
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+      });
+      const flipped = days.map((d, i) => (i === 1 ? { ...d, scoring: 'competitive' } : d));
+      // The Day is still in the future, so the per-Day lock alone permits this.
+      await assertSucceeds(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { days: flipped }));
+
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+      });
+      await announce();
+      await assertFails(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { days: flipped }));
+    });
+
+    it('still ALLOWS unrelated admin config edits', async () => {
+      await announce();
+      await assertSucceeds(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { claimMode: 'proof' }));
+    });
+  });
+
+  // Phase 4b P2 noted that the future-boundary clauses short-circuit on
+  // `resource == null`, so a CREATE could smuggle in an already-elapsed freeze.
+  // The clause now applies on create too — but the finding turns out not to be
+  // reachable from a client at all, and that is worth recording rather than
+  // leaving as an assumption: `isAdmin` resolves the roster by READING the
+  // event doc, so on a create there is no doc to read, the `get()` errors, and
+  // the write denies before any field check runs. Client-side Event creation is
+  // a seed/Admin-SDK operation. The clause stands as defence-in-depth for any
+  // future path that does permit creation.
+  it('DENIES creating an Event at all — with a past freeze or a future one', async () => {
+    for (const freeze of [NOW() - 3600_000, NOW() + 3600_000]) {
+      await assertFails(
+        setDoc(doc(db(ADMIN), `events/cruise-fresh-${freeze}`), {
+          name: 'Fresh',
+          status: 'active',
+          admins: [ADMIN],
+          bannedUids: [],
+          settings: { reportHideThreshold: 3 },
+          timezone: 'Europe/Rome',
+          days: [],
+          standingsFreezeAt: freeze,
+        }),
+      );
+    }
+  });
+
   it('DENIES a positive-INFINITE standingsFreezeAt', async () => {
     // Infinity is a Firestore number and passes `> 0`, but both readers discard
     // it via Number.isFinite — so without the upper bound it is another

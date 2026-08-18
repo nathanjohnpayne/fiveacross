@@ -7,6 +7,7 @@ import type { DayDef, DayMetaDoc, PlayerDoc } from '../types';
 import {
   ceremonialDayIndexSet,
   comparePlayers,
+  eventFirstBingoWinner,
   rankingExcludedDay,
   standingsFreezeAtFor,
   effectiveCruiseFirstBingoAt,
@@ -149,8 +150,11 @@ export function buildPodium(
   // class of split ADR 0011 was written to close.
   //
   // `null`/absent means no cutoff, which is what every pre-freeze render wants.
+  // INCLUSIVE at the freeze instant, matching `standingsFrozen`'s
+  // `now >= freezeAt` and the half-open `[lastCallAt, freezeAt)` last-call
+  // window: that millisecond is already frozen (Phase 4b P2).
   const withinFreeze = (at: number | null): number | null =>
-    at != null && freezeAt != null && at > freezeAt ? null : at;
+    at != null && freezeAt != null && at >= freezeAt ? null : at;
   const tutorial = tutorialDayIndexSet(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
   const ceremonial = ceremonialDayIndexSet(days);
@@ -183,18 +187,13 @@ export function buildPodium(
       squaresMarked: r.squaresMarked,
     }));
 
-  // Re-derived here rather than via `cruiseFirstBingoUid` so the freeze cutoff
-  // applies to the SELECTION as well as the reported instant — picking the
-  // winner from uncut data and then blanking their timestamp would report no
-  // First to BINGO at all while an eligible pre-freeze one existed.
-  let firstBingo: PodiumFirstBingo | null = null;
-  for (const p of players) {
-    const at = withinFreeze(effectiveCruiseFirstBingoAt(p, isTutorialDay));
-    if (at == null) continue;
-    if (!firstBingo || at < firstBingo.at) {
-      firstBingo = { uid: p.uid, displayName: p.displayName, at };
-    }
-  }
+  // ONE selector, shared with the Leaderboard's pin (Phase 4b P1): the honour
+  // must read the same on the card and in the standings, and the cutoff applies
+  // to the SELECTION rather than only the reported instant — picking the winner
+  // from uncut data and then blanking their timestamp would report no First to
+  // BINGO at all while an eligible pre-freeze one existed.
+  const firstBingo: PodiumFirstBingo | null =
+    eventFirstBingoWinner(players, isTutorialDay, freezeAt) ?? null;
 
   return {
     champion,

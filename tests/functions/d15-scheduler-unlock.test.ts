@@ -480,6 +480,18 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
     }
   });
 
+  it('treats a ceremonial Day carrying the unlockAt-0 sentinel as scheduling NO freeze', () => {
+    // "Live from event open", not an instant. Deriving a freeze at the epoch
+    // would put every Mark in the Event's history at-or-after the boundary.
+    expect(finaleTimes([{ index: 0, pool: 'farewell', unlockAt: 0 }])).toBeNull();
+    // …and a later ceremonial Day carrying a real instant is still found.
+    const t = finaleTimes([
+      { index: 0, pool: 'farewell', unlockAt: 0 },
+      { index: 1, pool: 'farewell', unlockAt: D10_UNLOCK },
+    ])!;
+    expect(t.standingsFreezeAt).toBe(D10_UNLOCK);
+  });
+
   it('returns null for a configured freeze on an Event with no schedule at all', () => {
     // There is no Day to file the Moments under, and a Moment at Day -1 renders
     // nowhere — the same "no finale" answer, not a podium posted into the void.

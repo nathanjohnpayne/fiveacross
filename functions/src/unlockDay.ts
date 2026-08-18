@@ -359,7 +359,14 @@ export interface FinaleTimes {
  * of #552 is that this file's arithmetic is timezone-free.
  */
 export function finaleTimes(days: DayLike[], standingsFreezeAt?: number): FinaleTimes | null {
-  const ceremonial = days.find((d) => isCeremonialDay(d));
+  // The sentinel guard applies to the DERIVED instant too, not just the stored
+  // one: `unlockAt: 0` means "live from event open" (this file already treats a
+  // non-positive snapshot cutoff as no cutoff, #289), so a ceremonial Day
+  // carrying it schedules no freeze rather than one at the epoch. Mirrors
+  // `standingsFreezeAtFor` in `src/game/logic.ts`.
+  const ceremonial = days.find(
+    (d) => isCeremonialDay(d) && Number.isFinite(d.unlockAt) && d.unlockAt > 0,
+  );
   // A non-finite or non-positive stored value is ignored rather than honoured:
   // 0 is the schedule's "always unlocked" sentinel elsewhere in this file, and
   // reading it as a freeze instant would freeze every Event at the epoch.

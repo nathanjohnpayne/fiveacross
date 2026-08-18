@@ -3,6 +3,7 @@ import { scoringForDay, isCeremonialDay } from './scoring';
 import {
   aggregatePlayerStats,
   ceremonialDayIndexSet,
+  eventFirstBingoWinner,
   foldEchoStats,
   playerRowRootLag,
   rankingExcludedDay,
@@ -13,7 +14,7 @@ import { migrateDayFields } from '../data/converters';
 import { normalizePool } from './pool';
 import { DAYS as GCB_DAYS } from '../data/seed';
 import * as BODEGA from '../../scripts/seed-data/bodega-bay-2026.mjs';
-import type { DayDef } from '../types';
+import type { DayDef, PlayerDoc } from '../types';
 
 // ADR 0011: a Day's Scoring Policy is STATED, and the Standings Freeze is an
 // Event setting. The load-bearing promise of this ticket is that stating them
@@ -360,5 +361,82 @@ describe('foldEchoStats — the echo path ranks the same way the mark path does'
     expect(out).toMatchObject({ bingoCount: 1, squaresMarked: 10 });
     // …while its own per-Day bucket is still recorded (its daily honour stands).
     expect(out.dayStats[2]).toMatchObject({ bingoCount: 1, squaresMarked: 10 });
+  });
+});
+
+// --- Phase 4b P1/P2: the shared honour selector and its inclusive boundary -------
+describe('eventFirstBingoWinner — one selector, one boundary', () => {
+  const isTutorial = (i: number) => i === 0;
+  const row = (uid: string, dayIndex: number, at: number): PlayerDoc =>
+    ({
+      uid,
+      displayName: uid,
+      photoURL: null,
+      joinedAt: 0,
+      bingoCount: 1,
+      squaresMarked: 5,
+      firstBingoAt: at,
+      reshufflesUsed: 0,
+      dayStats: { [dayIndex]: { bingoCount: 1, squaresMarked: 5, firstBingoAt: at } },
+    }) as PlayerDoc;
+
+  it('excludes Tutorial Days regardless of any cutoff', () => {
+    expect(eventFirstBingoWinner([row('t', 0, 10), row('c', 1, 50)], isTutorial)?.uid).toBe('c');
+  });
+
+  it('ignores bingos at or after the freeze — INCLUSIVE at the instant itself', () => {
+    const FREEZE = 1_000;
+    // Strictly before: eligible.
+    expect(eventFirstBingoWinner([row('a', 1, FREEZE - 1)], isTutorial, FREEZE)?.at).toBe(FREEZE - 1);
+    // Exactly AT the freeze: not eligible. `standingsFrozen` is already true at
+    // `now >= freezeAt` and the last-call window is half-open at the same
+    // boundary, so that millisecond belongs to the frozen side.
+    expect(eventFirstBingoWinner([row('a', 1, FREEZE)], isTutorial, FREEZE)).toBeUndefined();
+    expect(eventFirstBingoWinner([row('a', 1, FREEZE + 1)], isTutorial, FREEZE)).toBeUndefined();
+  });
+
+  it('picks the earliest ELIGIBLE bingo, not the earliest overall', () => {
+    const FREEZE = 1_000;
+    // The globally earliest is post-freeze; the honour must skip it entirely
+    // rather than report nobody.
+    const winner = eventFirstBingoWinner(
+      [row('late', 1, FREEZE + 5), row('early', 1, FREEZE - 5)],
+      isTutorial,
+      FREEZE,
+    );
+    expect(winner?.uid).toBe('early');
+  });
+
+  it('applies no cutoff when none is supplied', () => {
+    expect(eventFirstBingoWinner([row('a', 1, 9_999)], isTutorial)?.uid).toBe('a');
+    expect(eventFirstBingoWinner([row('a', 1, 9_999)], isTutorial, null)?.uid).toBe('a');
+  });
+});
+
+// A ceremonial Day carrying the `unlockAt: 0` "live from event open" sentinel
+// schedules NO freeze, rather than one at the epoch. Caught by the Leaderboard
+// suite when the honour cutoff landed: an epoch freeze puts every Mark in the
+// Event's history at-or-after the boundary, blanking the podium and the pin
+// permanently. Mirrors the snapshot path, where a non-positive cutoff has
+// always meant "no cutoff" (#289).
+describe('the unlockAt sentinel is not a freeze instant', () => {
+  it('schedules no freeze for a ceremonial Day carrying the 0 sentinel', () => {
+    const days = [day({ index: 0 }), day({ index: 1, pool: 'closing', unlockAt: 0 })];
+    expect(standingsFreezeAtFor({ frozenAt: undefined, days })).toBeNull();
+    expect(standingsFrozen({ frozenAt: undefined, days }, NOW)).toBe(false);
+  });
+
+  it('falls through the sentinel to a LATER ceremonial Day that carries a real instant', () => {
+    const days = [
+      day({ index: 0, pool: 'closing', unlockAt: 0 }),
+      day({ index: 1, pool: 'closing', unlockAt: NOW }),
+    ];
+    expect(standingsFreezeAtFor({ frozenAt: undefined, days })).toBe(NOW);
+  });
+
+  it('still honours the scheduler stamp even with a sentinel schedule', () => {
+    // `frozenAt` is evidence the freeze HAPPENED, independent of derivation.
+    const days = [day({ index: 0 }), day({ index: 1, pool: 'closing', unlockAt: 0 })];
+    expect(standingsFrozen({ frozenAt: NOW, days }, NOW)).toBe(true);
   });
 });
