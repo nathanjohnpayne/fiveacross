@@ -129,8 +129,20 @@ export const MAX_PROMPT_TEXT = 80;
 
 function isPromptText(v: unknown): v is string {
   if (typeof v !== 'string') return false;
-  const trimmed = v.trim();
-  return trimmed.length > 0 && trimmed.length <= MAX_PROMPT_TEXT;
+  // The bound is on the RAW string, because `firestore.rules` applies
+  // `text.size() <= 80` to the value as PERSISTED — measuring the trimmed form
+  // would accept 80 visible characters plus trailing whitespace, store 82, and
+  // be refused at provisioning. Non-blank is judged on the trimmed form,
+  // because whitespace is not content.
+  return v.trim().length > 0 && v.length <= MAX_PROMPT_TEXT;
+}
+
+/** Whether an array holds a real entry at every index. `every` and `forEach`
+ *  SKIP holes, so a sparse array would otherwise satisfy both the element
+ *  predicate and the pool minimum while holding fewer Prompts than its
+ *  `length` claims — and a save/load would turn each hole into `null`. */
+function isDenseArray(v: unknown): v is unknown[] {
+  return Array.isArray(v) && v.filter(() => true).length === v.length;
 }
 
 function isMainPrompt(v: unknown): v is DraftMainPrompt {
@@ -157,11 +169,11 @@ function isCuratedPrompt(v: unknown): v is DraftCuratedPrompt {
 function isPromptPools(v: unknown): v is DraftPromptPools {
   return (
     isRecord(v) &&
-    Array.isArray(v.main) &&
+    isDenseArray(v.main) &&
     v.main.every(isMainPrompt) &&
-    Array.isArray(v.easy) &&
+    isDenseArray(v.easy) &&
     v.easy.every(isCuratedPrompt) &&
-    Array.isArray(v.closing) &&
+    isDenseArray(v.closing) &&
     v.closing.every(isCuratedPrompt)
   );
 }
@@ -365,22 +377,33 @@ export function createLocalDraftStore(
   }
 
   /**
-   * Whether an unreadable blob was written by a FUTURE schema version.
+   * Whether a blob classified as unreadable must nevertheless be KEPT.
    *
-   * Unreadable is not one condition. An obsolete or corrupt blob is dead
-   * bytes, but a blob whose `v` exceeds this build's is a draft the organizer
-   * can still open — in the newer bundle they were using before a cached
-   * service worker or a rolled-back deployment served them this one. Deleting
-   * it would destroy live work to reclaim quota, so reclamation stops at the
-   * version boundary and lets the newer build reclaim its own.
+   * Re-read at cleanup time, deliberately, because "unreadable" is neither one
+   * condition nor a stable one:
+   *
+   * - A blob whose `v` exceeds this build's is a draft the organizer can still
+   *   open — in the newer bundle they were using before a cached service
+   *   worker or a rolled-back deployment served them this one. Deleting it
+   *   would destroy live work to reclaim quota, so reclamation stops at the
+   *   version boundary and lets the newer build reclaim its own.
+   * - A blob that is READABLE NOW was written between the scan and this
+   *   cleanup: `localStorage` is shared across same-origin tabs, so another
+   *   tab can save a perfectly valid draft into a key this pass already
+   *   classified from its previous contents. Deleting on the stale verdict
+   *   would let merely rendering the resume list erase a concurrent save.
+   *
+   * Anything still unparseable with no honourable version is dead bytes.
    */
-  function isFutureVersion(key: string): boolean {
+  function mustPreserve(key: string): boolean {
     const ls = store(storage);
     if (!ls) return false;
     try {
       const raw = ls.getItem(key);
-      if (!raw) return false;
+      // Already gone — nothing to preserve and nothing to reclaim.
+      if (!raw) return true;
       const parsed: unknown = JSON.parse(raw);
+      if (parseEventDraft(parsed) !== null) return true;
       return isRecord(parsed) && isFiniteNumber(parsed.v) && parsed.v > DRAFT_SCHEMA_VERSION;
     } catch {
       // A blob that will not even parse carries no version to respect.
@@ -425,9 +448,10 @@ export function createLocalDraftStore(
       // Drafts written by a NEWER version are deliberately exempt: they are
       // not dead bytes but live work belonging to a build the organizer may
       // return to, and destroying them would make a rollback or a stale cached
-      // bundle permanently delete a draft (#787 review).
+      // bundle permanently delete a draft (#787 review). So is anything that
+      // became readable since the scan — another tab's concurrent save.
       for (const key of unreadable) {
-        if (isFutureVersion(key)) continue;
+        if (mustPreserve(key)) continue;
         try {
           ls.removeItem(key);
         } catch {

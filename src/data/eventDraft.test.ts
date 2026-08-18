@@ -360,3 +360,64 @@ describe('parseEventDraft — persisted value bounds (#787 review)', () => {
     expect(parseEventDraft(JSON.parse(JSON.stringify(defined)))).toBeNull();
   });
 });
+
+describe('parseEventDraft — round-3 hardening (#787 review)', () => {
+  it('bounds Prompt text as STORED, not as trimmed', () => {
+    // firestore.rules applies text.size() <= 80 to the persisted value, so 80
+    // visible characters plus trailing whitespace is 82 on the wire.
+    const withMain = (text: string): EventDraft => ({
+      ...draft(),
+      prompts: { ...draft().prompts, main: [{ text, spicy: false }] },
+    });
+    expect(parseEventDraft(withMain(`${'x'.repeat(80)}  `))).toBeNull();
+    expect(parseEventDraft(withMain(`${'x'.repeat(78)}  `))).not.toBeNull();
+  });
+
+  it('rejects a sparse Prompt pool, whose holes every() would skip', () => {
+    const sparse: { text: string; spicy: boolean }[] = [];
+    sparse.length = 3;
+    sparse[0] = { text: 'real', spicy: false };
+    const blob = { ...draft(), prompts: { ...draft().prompts, main: sparse } };
+    // `every` returns true over the holes, so only a density check catches it.
+    expect(sparse.every((p) => typeof p?.text === 'string')).toBe(true);
+    expect(parseEventDraft(blob)).toBeNull();
+  });
+});
+
+describe('reclamation never races a concurrent save (#787 review)', () => {
+  it('keeps a blob that became readable between the scan and the cleanup', async () => {
+    // localStorage is shared across same-origin tabs: another tab can save a
+    // valid draft into a key this pass already classified from its previous
+    // contents. Rendering the resume list must not erase that save.
+    const storage = fakeStorage();
+    const key = 'gcb:event-draft:racy';
+    storage.setItem(key, 'not json yet');
+
+    let reads = 0;
+    const racy: Storage & { raw: Map<string, string> } = {
+      ...storage,
+      raw: storage.raw,
+      get length() {
+        return storage.raw.size;
+      },
+      key: (i: number) => [...storage.raw.keys()][i] ?? null,
+      getItem: (k: string) => {
+        reads++;
+        // After the enumeration pass has read it once as garbage, the "other
+        // tab" lands a perfectly valid draft in the same key.
+        if (k === key && reads >= 2) {
+          return JSON.stringify({ ...draft(), draftId: 'racy' });
+        }
+        return storage.raw.get(k) ?? null;
+      },
+      setItem: (k: string, v: string) => void storage.raw.set(k, v),
+      removeItem: (k: string) => void storage.raw.delete(k),
+      clear: () => storage.raw.clear(),
+    };
+
+    const store = createLocalDraftStore(racy, () => NOW);
+    await store.list();
+
+    expect(racy.raw.has(key)).toBe(true);
+  });
+});

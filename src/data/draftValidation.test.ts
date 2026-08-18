@@ -31,11 +31,28 @@ function curatedPrompts(n: number, label: string) {
   return Array.from({ length: n }, (_, i) => ({ text: `${label} ${i}` }));
 }
 
+/**
+ * An unlock instant that genuinely falls on `date` in the fixture's zone
+ * (America/Los_Angeles). 13:00Z is 06:00 PDT in August, and the per-Day hour
+ * offset keeps every Day well inside its own calendar day.
+ *
+ * Derived from the date rather than from a flat `NOW + n` offset because the
+ * two must AGREE: a Day whose stated date and unlock instant name different
+ * calendar days unlocks its card on one day and is emailed as another, which
+ * `day-unlock-date-mismatch` now rejects. A malformed date has no instant to
+ * derive, so those cases keep a fixed valid unlock and fail on the date alone.
+ */
+function unlockOn(date: string, index: number): number {
+  const parsed = Date.parse(`${date}T13:00:00Z`);
+  return Number.isNaN(parsed) ? FUTURE + index * 3_600_000 : parsed + index * 3_600_000;
+}
+
 function day(index: number, over: Partial<DraftDayDef> = {}): DraftDayDef {
+  const date = over.date ?? '2026-08-07';
   return {
     index,
-    date: '2026-08-07',
-    unlockAt: FUTURE + index * 3_600_000,
+    date,
+    unlockAt: unlockOn(date, index),
     place: 'Point Reyes',
     placeEmoji: '🌊',
     theme: 'the-birds' as ThemeId,
@@ -606,5 +623,140 @@ describe('curated spicy is judged by VALUE, so a save/load cannot flip it', () =
       },
     });
     expect(promptPoolIssues(draft).map((i) => i.code)).toEqual(['curated-prompt-is-spicy']);
+  });
+});
+
+describe('stored Day order is the contract, not just index membership (#787 review)', () => {
+  it('rejects a shuffled days array even when every index appears exactly once', () => {
+    // Board, eventPreview and DaySwitcher all read days[i] BY POSITION, so a
+    // schedule that only sorts correctly would deal another Day's card.
+    const draft = launchableDraft({
+      days: [
+        day(1),
+        day(0, { pool: 'easy' }),
+        day(2, { date: '2026-08-09' }),
+        day(3, { date: '2026-08-09', pool: 'closing', tutorial: true }),
+      ],
+    });
+    const issues = dayCompletenessIssues(draft).filter((i) => i.code === 'day-index-out-of-order');
+    expect(issues.length).toBeGreaterThan(0);
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('still accepts the correctly ordered baseline', () => {
+    expect(
+      dayCompletenessIssues(launchableDraft()).filter((i) => i.code === 'day-index-out-of-order'),
+    ).toEqual([]);
+  });
+});
+
+describe('only the final Day may carry the closing pool (#787 review)', () => {
+  it('rejects an earlier closing Day, which would hijack the finale', () => {
+    // finaleTimes and farewellDayIndex both resolve the farewell with
+    // days.find(closing) — the FIRST match — so an earlier closing Day freezes
+    // standings and posts the podium before the intended finale.
+    const draft = launchableDraft({
+      days: [
+        day(0, { pool: 'easy' }),
+        day(1, { pool: 'closing' }),
+        day(2, { date: '2026-08-09' }),
+        day(3, { date: '2026-08-09', pool: 'closing', tutorial: true }),
+      ],
+    });
+    const issues = finaleClosingPoolIssues(draft);
+    expect(issues.map((i) => i.code)).toContain('extra-closing-day');
+    expect(issues.find((i) => i.code === 'extra-closing-day')?.dayIndex).toBe(1);
+    // The final Day is still closing, so the original gate is satisfied...
+    expect(issues.map((i) => i.code)).not.toContain('no-closing-day');
+    // ...but the draft is not launchable.
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('is silent when exactly one closing Day sits last', () => {
+    expect(finaleClosingPoolIssues(launchableDraft())).toEqual([]);
+  });
+});
+
+describe('a Day unlock must land on the Day it is dated (#787 review)', () => {
+  it('rejects an unlock that falls on a different calendar day in the Event zone', () => {
+    // The scheduler and board lock read unlockAt; email ownership and schedule
+    // copy read date. Disagreement means the card opens one day and is
+    // announced on another.
+    const draft = launchableDraft({
+      days: [day(0, { pool: 'closing', unlockAt: Date.parse('2026-08-09T13:00:00Z') })],
+      timezone: 'America/Los_Angeles',
+    });
+    const issues = dayCompletenessIssues(draft).filter(
+      (i) => i.code === 'day-unlock-date-mismatch',
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('2026-08-09');
+  });
+
+  it('reads the boundary through the Event timezone, not UTC', () => {
+    // 2026-08-08T02:00Z is still Aug 7 at 19:00 in Los Angeles, so a Day dated
+    // 2026-08-07 is CORRECT here — a UTC-based check would wrongly reject it.
+    const draft = launchableDraft({
+      days: [day(0, { pool: 'closing', date: '2026-08-07', unlockAt: Date.parse('2026-08-08T02:00:00Z') })],
+      timezone: 'America/Los_Angeles',
+    });
+    expect(
+      dayCompletenessIssues(draft).filter((i) => i.code === 'day-unlock-date-mismatch'),
+    ).toEqual([]);
+  });
+
+  it('does not pile on when the date is already malformed', () => {
+    const codes = dayCompletenessIssues(
+      launchableDraft({ days: [day(0, { pool: 'closing', date: '2026-02-30' })] }),
+    ).map((i) => i.code);
+    expect(codes).toContain('day-invalid-date');
+    expect(codes).not.toContain('day-unlock-date-mismatch');
+  });
+});
+
+describe('sparse pools are counted honestly (#787 review)', () => {
+  it('does not let holes satisfy the per-pool minimum', () => {
+    // A sparse array of length 24 passes a nominal length check while holding
+    // no Prompt objects at all; every/forEach both skip the holes.
+    const sparse: { text: string; spicy: boolean }[] = [];
+    sparse.length = MIN_POOL;
+    const draft = launchableDraft({
+      cardFormat: 'one_card',
+      days: [],
+      prompts: { main: sparse, easy: [], closing: [] },
+    });
+    expect(draft.prompts.main.length).toBe(MIN_POOL);
+    const issues = assignedPoolIssues(draft);
+    expect(issues.map((i) => i.code)).toContain('pool-below-minimum');
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('reports each missing slot rather than silently skipping it', () => {
+    const holed = [...mainPrompts(3)];
+    delete holed[1];
+    const draft = launchableDraft({
+      prompts: { main: holed, easy: curatedPrompts(28, 'easy'), closing: curatedPrompts(26, 'closing') },
+    });
+    const issues = promptTextIssues(draft).filter((i) => i.pool === 'main');
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('missing');
+  });
+});
+
+describe('Prompt text is bounded as STORED, not as trimmed (#787 review)', () => {
+  it('rejects 80 visible characters plus trailing whitespace', () => {
+    // firestore.rules applies text.size() <= 80 to the persisted value, so the
+    // trimmed reading would launch a draft the server then refuses.
+    const draft = launchableDraft({
+      prompts: {
+        main: [...mainPrompts(31), { text: `${'x'.repeat(80)}  `, spicy: false }],
+        easy: curatedPrompts(28, 'easy'),
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    const issues = promptTextIssues(draft);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('82');
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
   });
 });

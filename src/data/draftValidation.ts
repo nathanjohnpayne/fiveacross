@@ -30,6 +30,9 @@ import { occasionById } from './occasions';
 // The SAME bound `parseEventDraft` enforces on the stored blob, so the
 // in-memory gate and the persistence gate cannot drift apart.
 import { MAX_PROMPT_TEXT } from './eventDraft';
+// The SAME conversion the Day header uses, so "which calendar day is this
+// instant on" has one answer across the gate and its consumers.
+import { isoDateInTz } from './tzDate';
 
 /**
  * The ten-Day ceiling. `daysThemeLockOk` (`firestore.rules`) unrolls its
@@ -54,6 +57,8 @@ export type DraftIssueCode =
   | 'day-missing-unlock'
   | 'day-missing-date'
   | 'day-invalid-date'
+  | 'day-unlock-date-mismatch'
+  | 'extra-closing-day'
   | 'day-tonight-not-two'
   | 'day-off-edition-theme'
   | 'one-card-has-days'
@@ -154,6 +159,12 @@ const POOL_LABEL: Record<PoolId, string> = {
   closing: 'closing',
 };
 
+/** Prompt entries that actually EXIST — `Array.prototype.filter` skips holes,
+ *  so this is the count a sparse array really holds rather than its `length`. */
+function countPrompts(prompts: readonly unknown[]): number {
+  return prompts.filter(() => true).length;
+}
+
 /**
  * Every ASSIGNED pool independently holds at least `MIN_POOL` (24) Prompts.
  *
@@ -170,7 +181,12 @@ const POOL_LABEL: Record<PoolId, string> = {
 export function assignedPoolIssues(draft: EventDraft): DraftIssue[] {
   const issues: DraftIssue[] = [];
   for (const pool of assignedPools(draft)) {
-    const count = draft.prompts[pool].length;
+    // REAL entries, not the array's nominal length. A sparse array of length 24
+    // satisfies a length check while holding fewer than 24 Prompt objects —
+    // and `every`/`forEach` both SKIP holes, so neither the parser nor
+    // `promptTextIssues` would notice. A save/load then turns each hole into
+    // `null` and the same draft stops being readable at all (#787 review).
+    const count = countPrompts(draft.prompts[pool]);
     if (count < MIN_POOL) {
       issues.push({
         code: 'pool-below-minimum',
@@ -195,14 +211,32 @@ export function finaleClosingPoolIssues(draft: EventDraft): DraftIssue[] {
   const ordered = daysInOrder(draft);
   const finalDay = ordered[ordered.length - 1];
   if (!finalDay) return [];
-  if (normalizePool(finalDay.pool) === 'closing') return [];
-  return [
-    {
+  const issues: DraftIssue[] = [];
+  if (normalizePool(finalDay.pool) !== 'closing') {
+    issues.push({
       code: 'no-closing-day',
       dayIndex: finalDay.index,
       message: `Day ${finalDay.index + 1} is the final Day but deals from the ${POOL_LABEL[normalizePool(finalDay.pool)]} pool; assign it the closing pool or the finale never runs.`,
-    },
-  ];
+    });
+  }
+  // The final Day carrying the closing pool is necessary but NOT sufficient:
+  // every finale consumer resolves the farewell by `days.find(closing)` — the
+  // FIRST match, not the last (`finaleTimes`, `farewellDayIndex` on both the
+  // client and the server). So an earlier closing Day silently becomes the
+  // finale: it freezes standings, posts the podium and excludes its own scores
+  // days before the intended one, while this predicate's final-Day check still
+  // passes (#787 review).
+  const closingDays = ordered.filter((d) => normalizePool(d.pool) === 'closing');
+  if (closingDays.length > 1) {
+    for (const day of closingDays.slice(0, -1)) {
+      issues.push({
+        code: 'extra-closing-day',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} also deals from the closing pool, and the finale resolves to the FIRST closing Day — it would freeze standings and post the podium before Day ${finalDay.index + 1}. Only the final Day may use the closing pool.`,
+      });
+    }
+  }
+  return issues;
 }
 
 /**
@@ -297,13 +331,19 @@ export function dayCountIssues(draft: EventDraft): DraftIssue[] {
 export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
   if (draft.cardFormat === 'one_card') return [];
   const issues: DraftIssue[] = [];
-  const ordered = daysInOrder(draft);
-  ordered.forEach((day, position) => {
+  // The RAW stored array, deliberately NOT sorted. Sorting first would accept a
+  // shuffled schedule whose indexes are individually perfect, and the stored
+  // order is what ships: `Board`, `eventPreview` and `DaySwitcher` all select
+  // `days[i]` BY ARRAY POSITION, so a launched Event would deal and reshuffle
+  // using another Day's unlock and snapshot. Requiring `days[position].index
+  // === position` collapses contiguity, uniqueness and stored order into the
+  // one property every consumer actually relies on (#787 review).
+  draft.days.forEach((day, position) => {
     if (day.index !== position) {
       issues.push({
         code: 'day-index-out-of-order',
         dayIndex: day.index,
-        message: `Day indexes must be contiguous from 0; found index ${day.index} in position ${position}.`,
+        message: `Day indexes must be contiguous from 0 AND stored in that order; found index ${day.index} in position ${position}. Consumers read days[i] by position, so a reordered array deals the wrong Day.`,
       });
     }
     if (!day.date.trim()) {
@@ -360,6 +400,23 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
         // launch a Day that never unlocks.
         message: `Day ${day.index + 1} has no usable unlock time.`,
       });
+    } else if (isIsoDate(day.date) && isSupportedTimezone(draft.timezone)) {
+      // The instant and the label must name the SAME calendar day. The
+      // scheduler and the board lock read `unlockAt`, while daily-email
+      // ownership and every piece of schedule copy read `date` — so a Day
+      // edited on one side only unlocks its card on one day and is announced,
+      // labelled and emailed as another. Converted through the Event's own
+      // zone via the same `isoDateInTz` the Day header uses, so the gate and
+      // the consumer cannot disagree (#787 review). Only checked once both
+      // inputs are themselves valid, so one bad date yields one issue.
+      const unlockDate = isoDateInTz(day.unlockAt, draft.timezone);
+      if (unlockDate !== day.date) {
+        issues.push({
+          code: 'day-unlock-date-mismatch',
+          dayIndex: day.index,
+          message: `Day ${day.index + 1} is dated ${day.date} but its unlock time falls on ${unlockDate} in ${draft.timezone}; the card would unlock on one day and be labelled and emailed as another.`,
+        });
+      }
     }
     // The ARRAY length is what matters, not the non-blank count: `tonight` is
     // persisted verbatim and consumers join it or assume `length === 2`, so a
@@ -515,22 +572,39 @@ export function promptPoolIssues(draft: EventDraft): DraftIssue[] {
 export function promptTextIssues(draft: EventDraft): DraftIssue[] {
   const issues: DraftIssue[] = [];
   for (const pool of ['main', 'easy', 'closing'] as const) {
-    draft.prompts[pool].forEach((prompt, position) => {
-      const text = typeof prompt.text === 'string' ? prompt.text.trim() : '';
-      if (text.length === 0) {
+    const prompts = draft.prompts[pool];
+    // An INDEX walk, not `forEach`: `forEach` skips holes, so a sparse array
+    // would slip its missing entries past this gate entirely.
+    for (let position = 0; position < prompts.length; position++) {
+      const prompt: unknown = prompts[position];
+      if (prompt === null || prompt === undefined) {
+        issues.push({
+          code: 'prompt-text-out-of-bounds',
+          pool,
+          message: `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool is missing; the pool has a gap where an authored Prompt should be.`,
+        });
+        continue;
+      }
+      const raw = (prompt as { text?: unknown }).text;
+      const rawText = typeof raw === 'string' ? raw : '';
+      if (rawText.trim().length === 0) {
         issues.push({
           code: 'prompt-text-out-of-bounds',
           pool,
           message: `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool has no text; a blank Square cannot be created or repaired later.`,
         });
-      } else if (text.length > MAX_PROMPT_TEXT) {
+      } else if (rawText.length > MAX_PROMPT_TEXT) {
+        // The RAW length, matching `firestore.rules`, which applies
+        // `text.size() <= 80` to the value as PERSISTED. Measuring the trimmed
+        // form would accept 80 visible characters plus trailing whitespace and
+        // then be refused at provisioning (#787 review).
         issues.push({
           code: 'prompt-text-out-of-bounds',
           pool,
-          message: `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool is ${text.length} characters; the limit is ${MAX_PROMPT_TEXT}.`,
+          message: `Prompt ${position + 1} in the ${POOL_LABEL[pool]} pool is ${rawText.length} characters as stored; the limit is ${MAX_PROMPT_TEXT}.`,
         });
       }
-    });
+    }
   }
   return issues;
 }
