@@ -353,6 +353,31 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(hoistedFromSibling).params).toEqual(['REAL_PARAM']);
   });
 
+  // #830 (Phase 4b post-review on PR #826): `using`/`await using`
+  // declarations (TS 5.2+ explicit resource management) are block-scoped
+  // exactly like `let`/`const`, but `isHoistedDeclarationList` checked only
+  // for the ABSENCE of `Let`/`Const` — so a `using` inside a sibling block
+  // was collected as a function-hoisted `var`, creating a false shadow over
+  // a call outside that block and dropping a real param, the mirror image
+  // of the `var` case proven above. `ts.NodeFlags.BlockScoped` is
+  // TypeScript's own union of every block-scoped flag, `using`/`await
+  // using` included, so this call keeps resolving to the real import.
+  it('does not treat a using declaration in a sibling block as hoisted', () => {
+    const usingInSibling = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(flag) {',
+      "  const early = defineString('SHOULD_STILL_RESOLVE');",
+      '  if (flag) {',
+      '    using defineString = getResource();',
+      '  }',
+      '  return early;',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(usingInSibling).params).toEqual(['REAL_PARAM', 'SHOULD_STILL_RESOLVE']);
+  });
+
   // Codex P2 on PR #826: a class/object-literal METHOD or accessor's own
   // name is a property name, not a local binding inside its body — unlike a
   // named FUNCTION EXPRESSION, calling the bare identifier from inside a
@@ -729,6 +754,29 @@ describe('functions source-tree reachability and barrel resolution', () => {
 
     const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
     expect(declared.secrets).toEqual(['WILDCARD_CHAIN_SECRET']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #832 (Phase 4b post-review on PR #826): the local-barrel handling above
+  // only recognized a NAMED import (`import { defineString } from
+  // './barrel'`) — `import * as params from './barrel'`, where `./barrel`
+  // re-exports from `firebase-functions/params`, was never added to
+  // `namespaces` at all, so `params.defineSecret(...)` reached through such
+  // a barrel was silently missed entirely: no env value would ever be
+  // generated for it, and the emulator would go looking for the live Secret
+  // Manager secret instead of staying self-contained.
+  it('resolves a constructor reached through a namespace import of a local barrel', () => {
+    const dir = makeTree({
+      'barrel.ts': "export { defineSecret } from 'firebase-functions/params';\n",
+      'index.ts': [
+        "import * as params from './barrel';",
+        "params.defineSecret('BARRELED_NAMESPACE_SECRET');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.secrets).toEqual(['BARRELED_NAMESPACE_SECRET']);
 
     rmSync(dir, { recursive: true, force: true });
   });

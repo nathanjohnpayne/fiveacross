@@ -159,6 +159,28 @@ function constructorBindings(sourceFile, filePath) {
             }
           }
         }
+      } else if (specifier.startsWith('.') && named && ts.isNamespaceImport(named) && !isTypeOnlyImport) {
+        // Local re-export barrel, NAMESPACE form (#832, filed as a
+        // post-review observation on PR #826): `import * as params from
+        // './barrel'`, where `./barrel` re-exports (named or wildcard) from
+        // `firebase-functions/params`. The named-import sibling branch above
+        // already traces a local barrel's PROVENANCE per name; this only
+        // needs to know whether the barrel carries params-module exports AT
+        // ALL, since `constructorKindOf`'s namespace check (below) resolves
+        // the specific property purely from `CONSTRUCTOR_RE`, the same
+        // imprecision already accepted for a direct `import * as params from
+        // 'firebase-functions/params'`. Skipping this case would silently
+        // miss a real `params.defineSecret(...)` call through the barrel —
+        // the false-negative direction this file treats as the dangerous one
+        // (a missed param hangs the emulator; a spurious one merely throws
+        // loudly asking for a value).
+        const resolved = resolveRelative(filePath, specifier);
+        if (resolved) {
+          const upstream = reExportedParamsBindings(resolved);
+          if (upstream.size > 0) {
+            namespaces.add(named.name.text);
+          }
+        }
       }
       continue;
     }
@@ -419,9 +441,25 @@ function bindingNames(nameNode, into) {
   }
 }
 
-/** Whether a `VariableDeclarationList` is `var` (function-scoped/hoisted), not `let`/`const`. */
+/**
+ * Whether a `VariableDeclarationList` is `var` (function-scoped/hoisted), not
+ * block-scoped.
+ *
+ * Checked against `ts.NodeFlags.BlockScoped` — TypeScript's own union of
+ * every block-scoped declaration-list flag — rather than `Let | Const`
+ * directly (#829 [sic; filed as a post-review observation on PR #826]):
+ * `using`/`await using` (explicit resource management, TS 5.2+) are
+ * block-scoped exactly like `let`/`const` but carry their own flag bits, so
+ * `using defineString = …` inside a sibling block was previously collected
+ * as function-hoisted and could hide a real constructor call outside that
+ * block — the false-shadow failure mode `collectHoistedNames`'s own leading
+ * comment already warns is the dangerous direction (a real param silently
+ * dropped, not a spurious one added). No live case exists in this repo's
+ * Functions source today (no `using` declarations, checked at the time of
+ * this fix), but the flag check costs nothing extra to get right.
+ */
 function isHoistedDeclarationList(declarationList) {
-  return (declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0;
+  return (declarationList.flags & ts.NodeFlags.BlockScoped) === 0;
 }
 
 /**
