@@ -197,6 +197,31 @@ describe('withDestinationLocks — abandoned-lock recovery', () => {
   });
 });
 
+// #824 (Codex P2 on PR #824): the takeover-gate tests above only exercise a
+// STEALER's own recovery paths (a dead lock holder, a dead prior stealer, a
+// dead recovery process) — none of them puts a competing ORDINARY acquirer
+// in flight while a takeover gate is actively held by a live process, so
+// none of them would fail if `tryAcquireOne`'s before-takeover check
+// (og-commit-lock.mjs) were deleted entirely. This closes that gap directly.
+describe('withDestinationLocks — a live takeover gate excludes ordinary waiters', () => {
+  it('blocks an ordinary acquirer for as long as another process holds a live takeover gate, and never publishes a lock in that window', () => {
+    const dest = join(dir, 'gcb.png');
+    const takeover = `${dest}.commit-lock.takeover`;
+    // A live takeover holder stands in for another process actively mid-steal
+    // — past its own staleness read, not yet through the unlink+republish.
+    // This process's own pid keeps the holder "alive" for pidAlive's
+    // `process.kill(pid, 0)` probe without needing to spawn a real process.
+    writeFileSync(takeover, `${process.pid}\n`);
+    // Every attempt `acquireOne`'s poll loop makes below is a real
+    // publication attempt overlapping the active takeover, so a passing
+    // assertion here proves no compliant waiter's lock is ever published
+    // while the gate stands — not merely that a timeout error is eventually
+    // thrown for some unrelated reason.
+    expect(() => withDestinationLocks([{ dest }], { timeoutMs: 300 })).toThrow(/timed out/);
+    expect(isLocked(dest)).toBe(false);
+  });
+});
+
 describe('mutual exclusion under real concurrency (id 3762521202)', () => {
   // Both cases below use the same harness: N worker THREADS (real OS
   // scheduling — not cooperative async interleaving on one thread, which
