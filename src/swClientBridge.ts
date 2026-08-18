@@ -74,9 +74,23 @@ export function postClientBuild(stamp: string, container = swContainer()): void 
   try {
     if (!container) return;
     const message = { type: CLIENT_BUILD_MESSAGE, stamp };
-    const send = () => container.controller?.postMessage(message);
-    send();
-    container.addEventListener('controllerchange', send);
+    // `send` is isolated in its own `try` (post-review #757): a controller
+    // that became redundant between the read and the call throws on
+    // `postMessage`, and that throw must not skip registering the other two
+    // delivery paths below, or a rare failure here permanently strands this
+    // window unregistered.
+    const send = () => {
+      try {
+        container.controller?.postMessage(message);
+      } catch {
+        /* the controller became redundant; the other two paths still fire */
+      }
+    };
+    try {
+      send();
+    } finally {
+      container.addEventListener('controllerchange', send);
+    }
     // Fire-and-forget, and swallowed: this runs at module scope in `main.tsx`,
     // where an unhandled rejection is a console error on every load of a
     // browser that has no worker to become ready.

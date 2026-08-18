@@ -5,6 +5,7 @@ import {
   FORCED_FLAG_URL,
   SHELL_META_CACHE,
   UNKNOWN_ACTIVE_STAMP,
+  UNREGISTERED_CLIENT_CONFIRM_ATTEMPTS,
   UNREGISTERED_CLIENT_CONFIRM_MS,
   confirmClientStamps,
   dueForFloorRecheck,
@@ -515,6 +516,74 @@ describe('confirming an absence before believing it (#516)', () => {
       await recordClientStamp(cs, 'tab-fresh', NEW_SHELL, live);
     });
     expect(decide(confirmed)).toBe(false);
+  });
+
+  // Post-review #756: one look assumes delivery to the ACTIVE worker and its
+  // Cache API write both land inside a single `UNREGISTERED_CLIENT_CONFIRM_MS`
+  // window, but nothing bounds either. A background-throttled tab can still be
+  // absent after the first confirmation read, so more than one look is taken
+  // before the absence is believed.
+  it('takes more than one look — a background-throttled client can miss the first', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-throttled'];
+    const sleep = vi.fn(async () => {});
+    // The late write lands only on the SECOND look, simulating a client whose
+    // postMessage-then-Cache-write took longer than one confirm window.
+    let reads = 0;
+    const confirmed = await confirmClientStamps(cs, live, {}, async () => {
+      reads += 1;
+      sleep();
+      if (reads === 2) await recordClientStamp(cs, 'tab-throttled', NEW_SHELL, live);
+    });
+    expect(confirmed).toEqual({ 'tab-throttled': NEW_SHELL });
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after UNREGISTERED_CLIENT_CONFIRM_ATTEMPTS looks, not forever', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-legacy'];
+    const sleep = vi.fn(async () => {});
+    const confirmed = await confirmClientStamps(cs, live, {}, sleep);
+    expect(hasUnregisteredClient(live, confirmed)).toBe(true);
+    expect(sleep).toHaveBeenCalledTimes(UNREGISTERED_CLIENT_CONFIRM_ATTEMPTS);
+  });
+
+  it('stops as soon as every live id has a record — the common case pays for one wait', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-old', 'tab-fresh'];
+    await recordClientStamp(cs, 'tab-old', OLD_SHELL, live);
+    const first = await readClientStamps(cs);
+    const sleep = vi.fn(async () => {
+      await recordClientStamp(cs, 'tab-fresh', NEW_SHELL, live);
+    });
+    await confirmClientStamps(cs, live, first, sleep);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  // CodeRabbit on #819 (post-review #756's fix): each retry re-reads the WHOLE
+  // registry, so a naive `{ ...merged, ...fresh }` spread on every attempt
+  // would let a LATER read's answer for an id already confirmed on an EARLIER
+  // attempt silently replace it — reintroducing the overwrite the "only ever
+  // adds entries" contract exists to rule out, just spread across retries
+  // instead of against the original snapshot.
+  it('never lets a later re-read overwrite a client id already confirmed on an earlier attempt', async () => {
+    const cs = fakeCacheStorage();
+    const live = ['tab-confirmed', 'tab-late'];
+    await recordClientStamp(cs, 'tab-confirmed', OLD_SHELL, live);
+    const first = await readClientStamps(cs);
+    let attempt = 0;
+    const confirmed = await confirmClientStamps(cs, live, first, async () => {
+      attempt += 1;
+      if (attempt === 1) {
+        // A same-id write races in between attempts — the kind of drift the
+        // registry does not promise cannot happen — but the already-confirmed
+        // value must not be replaced by it.
+        await recordClientStamp(cs, 'tab-confirmed', NEW_SHELL, live);
+      } else {
+        await recordClientStamp(cs, 'tab-late', NEW_SHELL, live);
+      }
+    });
+    expect(confirmed).toEqual({ 'tab-confirmed': OLD_SHELL, 'tab-late': NEW_SHELL });
   });
 });
 
