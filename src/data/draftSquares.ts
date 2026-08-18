@@ -414,8 +414,20 @@ function mapPool(
     if (mapped === null || mapped === undefined) continue;
     next.push(mapped);
   }
+  // EVERY pool is compacted, not just the edited one. Storability is a
+  // property of the whole draft: `save` re-parses its own serialization and
+  // `parseEventDraft` refuses the `null` a hole or an explicit missing entry
+  // serializes to, so leaving a gap in either OTHER pool means this edit —
+  // and every edit after it — silently stops persisting while the organizer
+  // keeps typing. `addPrompt` already compacted all three; this is the same
+  // guarantee for the edit paths (Codex P2, round 4).
   return {
     ...draft,
-    prompts: { ...draft.prompts, [pool]: next } as DraftPromptPools,
+    prompts: {
+      main: densePrompts(draft.prompts.main),
+      easy: densePrompts(draft.prompts.easy),
+      closing: densePrompts(draft.prompts.closing),
+      [pool]: next,
+    } as DraftPromptPools,
   };
 }

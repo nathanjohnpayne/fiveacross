@@ -4660,6 +4660,12 @@ body:has(.sheet-backdrop) .guidelines-trigger {
 .squares-day-head > .grow {
   min-width: 8ch;
   flex: 1 1 8ch;
+  /* Prompt text is organizer-authored and can run 80 unbroken characters —
+     a URL, a hashtag, a long compound. Without this the flex item refuses to
+     shrink below its longest word and pushes the row's controls off a narrow
+     screen (Codex P2, round 4). `anywhere` rather than `break-word` so the
+     break also counts toward the item's intrinsic minimum width. */
+  overflow-wrap: anywhere;
 }
 .squares-day-row {
   padding: 0;

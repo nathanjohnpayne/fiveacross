@@ -323,6 +323,21 @@ describe('sparse pools', () => {
     expect(promptTextIssues(after)).toEqual([]);
   });
 
+  it('compacts EVERY pool on an edit, not just the one being edited', () => {
+    // Storability is a property of the whole draft: a gap left in another
+    // pool means this edit, and every edit after it, silently stops
+    // persisting (Codex P2, round 4).
+    const withNull = [{ text: 'c1' }, null] as unknown as { text: string }[];
+    const d = draftWith({
+      prompts: { main: [{ text: 'm1', spicy: false }], easy: holedMain() as never, closing: withNull },
+    });
+    const after = setPromptText(d, 'main', 0, 'renamed');
+    expect(after.prompts.main).toEqual([{ text: 'renamed', spicy: false }]);
+    expect(after.prompts.easy).toEqual([{ text: 'a', spicy: false }, { text: 'c', spicy: false }]);
+    expect(after.prompts.closing).toEqual([{ text: 'c1' }]);
+    expect(promptTextIssues(after)).toEqual([]);
+  });
+
   it('never dereferences a hole while producing the per-pool verdict', () => {
     const d = draftWith({
       cardFormat: 'daily_cards',
