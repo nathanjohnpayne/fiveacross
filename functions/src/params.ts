@@ -74,6 +74,22 @@ export const ADMIN_NOTIFY_EMAIL = defineString('ADMIN_NOTIFY_EMAIL', { default: 
 export const APP_BASE_URL = defineString('APP_BASE_URL', { default: 'https://gaycruisebingo.com' });
 /** Enforce a valid App Check token on bug intake after #44 enables clients. */
 export const BUG_REPORT_APP_CHECK = defineBoolean('BUG_REPORT_APP_CHECK', { default: false });
+
+/**
+ * Enforce App Check on the auth-handoff callables (#548).
+ *
+ * OFF by default, like BUG_REPORT_APP_CHECK, and for the same reason: enforcing
+ * attestation before the client attests would lock out the very sign-in flow it
+ * protects. Turning it on is a launch prerequisite once #549 initialises App
+ * Check on the client — see specs/auth-handoff.md § Deployment.
+ *
+ * It is the abuse control for `exchangeAuthHandoff`, which is unauthenticated by
+ * design. The risk it answers is resource exhaustion, not compromise: the code
+ * space is 2^256 so guessing is hopeless, but every well-formed guess still
+ * costs a Firestore transaction, and a flood of them can crowd out real
+ * sign-ins.
+ */
+export const AUTH_HANDOFF_APP_CHECK = defineBoolean('AUTH_HANDOFF_APP_CHECK', { default: false });
 /**
  * Public URL of the `emailUnsubscribe` endpoint (#616) — the target of every
  * daily email's visible Unsubscribe link and its `List-Unsubscribe` header.
