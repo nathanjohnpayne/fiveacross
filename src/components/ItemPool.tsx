@@ -38,6 +38,16 @@ const APPROVAL_NOTE = "New prompts go to admin review before they join the pool�
 const ADD_THROTTLE_MESSAGE = 'Slow down—you can add another prompt in a few seconds.';
 const REPORT_THROTTLE_MESSAGE = 'Slow down—you can report again in a few seconds.';
 
+// How long a submission that just vacated the live pending query, with no
+// active arrival yet, keeps reporting "pending" instead of falling through
+// to `deriveMySubmissions`' `not_selected` default (#559, Codex P2, PR #845
+// round 8). Generous enough to absorb realistic skew between the
+// `useMyPendingItems`/`useMyActiveItems` listeners for the SAME underlying
+// approval write — they ride the same watch stream, so in practice this
+// resolves in well under a second — without leaving a genuinely rejected
+// submission looking like it is still under review for long.
+export const APPROVAL_GRACE_MS = 5000;
+
 // First-time 🔞 explainer (#610) — the PLAYER half of the ticket, and
 // deliberately an EXPLAINER, not a confirm. A player's tick is a request:
 // their submission lands `status: 'pending'` (#210) and the #608 derivation
@@ -117,9 +127,21 @@ export default function ItemPool() {
   useEffect(() => {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
   }, [uid]);
-  // The previous render's `myPending` ids (#559, Codex P2, PR #845 round 8) —
-  // see the `graceIds` computation below, just above where this is read.
+  // The previous render's `myPending` ids (#559, Codex P2, PR #845 rounds 8
+  // + 9) — see the `graceIds` effect below, just above where this is read.
   const prevPendingIdsRef = useRef<ReadonlySet<string>>(new Set());
+  // Ids currently within their post-pending grace window (#559, Codex P2,
+  // PR #845 round 8), and the live timer that will expire each one. Real
+  // STATE, not a ref (Codex P2, PR #845 round 9): round 8's first cut kept
+  // this in a plain ref and relied on "some later render" to notice the
+  // window had passed — but mutating a ref never itself schedules a
+  // re-render, so a submission that is genuinely REJECTED (no active
+  // snapshot ever arriving to trigger one) had nothing left to trigger that
+  // later render at all, and could keep showing "pending review" forever.
+  // `setGraceIds` on the timer's own fire is what guarantees the window
+  // actually closes on its own.
+  const [graceIds, setGraceIds] = useState<ReadonlySet<string>>(new Set());
+  const graceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // A ticking clock (#559, Codex P2 round 2, PR #845), shared with
   // Board.tsx/ProofFeed.tsx's identical need (Codex P2, PR #845 round 5 —
   // extracted into one hook after the same unclamped-timer overflow bug,
@@ -156,27 +178,71 @@ export default function ItemPool() {
   // submission read as `not_selected` while offline — see
   // `deriveMySubmissions`'s own doc comment for the flash this prevents.
   //
-  // One render's worth of grace for the FIRST-time approval race (#559,
-  // Codex P2, PR #845 round 8): `myPending`/`activeMine` are independent
-  // listeners, so the pending-removal snapshot can land one render before
-  // the active-addition snapshot — for a submission this device has NEVER
+  // A bounded grace window for the FIRST-time approval race (#559, Codex P2,
+  // PR #845 rounds 8 + 9): `myPending`/`activeMine` are independent
+  // listeners, so the pending-removal snapshot can land before the
+  // active-addition snapshot — for a submission this device has NEVER
   // before seen active (round 7's `lastKnownStatus` cache is still unset),
-  // that overlap would otherwise read `'not_selected'` for one render.
-  // `prevPendingIdsRef` remembers the PREVIOUS render's pending ids; an id
-  // that was there but is now in NEITHER set gets exactly one render of
-  // "still pending" (see `deriveMySubmissions`'s own doc comment for why one
-  // render is enough — the active listener's own arrival is what triggers
-  // the very next render, so a genuine rejection, which has no such arrival
-  // coming, simply ages out of `prevPendingIdsRef` on the render after next
-  // and correctly falls through to `'not_selected'`).
-  const currentPendingIds = new Set(myPending.map((it) => it.id));
-  const activeIds = new Set(activeMine.map((it) => it.id));
-  const graceIds = new Set(
-    [...prevPendingIdsRef.current].filter((id) => !currentPendingIds.has(id) && !activeIds.has(id)),
-  );
+  // that overlap would otherwise read `'not_selected'` the instant the
+  // pending listener fires. An id that just vacated `myPending` without yet
+  // appearing in `activeMine` enters `graceIds` and gets a real
+  // `APPROVAL_GRACE_MS` timer (round 9 — a PLAIN ref-diff with no timer, the
+  // round-8 cut, relied on some LATER render to notice the window had
+  // passed; mutating a ref never schedules one, so a genuine rejection, with
+  // no active arrival ever coming to trigger a re-render, could keep
+  // reporting "pending review" forever). The timer's own `setGraceIds` fire
+  // is what guarantees the window closes on its own; the second effect below
+  // clears it EARLIER, the moment the id actually resolves active, so a fast
+  // approval does not have to wait out the full window.
   useEffect(() => {
+    const currentPendingIds = new Set(myPending.map((it) => it.id));
+    const activeIds = new Set(activeMine.map((it) => it.id));
+    const vacated = [...prevPendingIdsRef.current].filter((id) => !currentPendingIds.has(id) && !activeIds.has(id));
     prevPendingIdsRef.current = currentPendingIds;
-  });
+    if (vacated.length === 0) return;
+    setGraceIds((prev) => {
+      const next = new Set(prev);
+      for (const id of vacated) next.add(id);
+      return next;
+    });
+    for (const id of vacated) {
+      if (graceTimersRef.current.has(id)) continue;
+      const timer = setTimeout(() => {
+        graceTimersRef.current.delete(id);
+        setGraceIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, APPROVAL_GRACE_MS);
+      graceTimersRef.current.set(id, timer);
+    }
+  }, [myPending, activeMine]);
+  useEffect(() => {
+    if (graceIds.size === 0) return;
+    const activeIds = new Set(activeMine.map((it) => it.id));
+    const resolved = [...graceIds].filter((id) => activeIds.has(id));
+    if (resolved.length === 0) return;
+    setGraceIds((prev) => {
+      const next = new Set(prev);
+      for (const id of resolved) {
+        next.delete(id);
+        const timer = graceTimersRef.current.get(id);
+        if (timer) {
+          clearTimeout(timer);
+          graceTimersRef.current.delete(id);
+        }
+      }
+      return next;
+    });
+  }, [activeMine, graceIds]);
+  useEffect(
+    () => () => {
+      for (const timer of graceTimersRef.current.values()) clearTimeout(timer);
+    },
+    [],
+  );
   const mySubmissions = deriveMySubmissions(
     tracked,
     myPending,

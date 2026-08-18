@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react';
 import type { ItemDoc } from '../types';
 
 // specs/d15-approvals.md, component layer (RTL-jsdom). Drives the REAL ItemPool
@@ -50,7 +50,7 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 // #610: ItemPool reads EVENT_ID for the explainer's event-keyed storage key.
 vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
-import ItemPool from './ItemPool';
+import ItemPool, { APPROVAL_GRACE_MS } from './ItemPool';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 import { track } from '../analytics';
 
@@ -190,45 +190,105 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
     }
   });
 
-  // #559, Codex P2, PR #845 round 8: `useMyPendingItems`/`useMyActiveItems`
+  // #559, Codex P2, PR #845 rounds 8 + 9: `useMyPendingItems`/`useMyActiveItems`
   // are independent listeners, so an admin's approval can land the
-  // pending-removal snapshot one render before the active-addition snapshot
-  // — for a submission this device has NEVER before seen active (round 7's
+  // pending-removal snapshot before the active-addition snapshot — for a
+  // submission this device has NEVER before seen active (round 7's
   // `lastKnownStatus` cache still unset), that overlap used to read
-  // "not selected" for exactly that render. `graceIds` (ItemPool's own
-  // previous-render memory of `myPending`'s ids) covers it for one render,
-  // then correctly ages out into `not_selected` if nothing ever shows up
-  // active — pinning both halves against ItemPool's real render cycle, not
-  // just the pure `deriveMySubmissions` unit above.
-  it('shows a submission still as "pending" for one render after it vacates the pending query with no active arrival yet, then ages out to "not selected"', () => {
-    const store = new Map<string, string>();
-    vi.stubGlobal('localStorage', {
-      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
-      setItem: (key: string, value: string) => void store.set(key, value),
-      removeItem: (key: string) => void store.delete(key),
-    } as unknown as Storage);
-    try {
+  // "not selected" the instant the pending listener fired. `APPROVAL_GRACE_MS`
+  // covers it with a REAL timer (round 9 — a plain ref-diff, the round-8 cut,
+  // relied on some LATER unrelated render to notice the window had passed,
+  // which a genuinely rejected submission — no active arrival ever coming —
+  // might never get), and genuinely ages out to `not_selected` once that
+  // timer fires with nothing having resolved — pinning both halves against
+  // ItemPool's real render cycle, not just the pure `deriveMySubmissions`
+  // unit above.
+  describe('the pending→active approval-race grace window (#559, Codex P2, PR #845 rounds 8 + 9)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function seedTrackedMine() {
+      const store = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      } as unknown as Storage);
       localStorage.setItem(
         'gcb.mySuggestions.ev-1.u1',
         JSON.stringify([{ id: 'mine-1', text: 'About to be approved', submittedAt: 1 }]),
       );
-      H.myPending = [item('mine-1', { text: 'About to be approved', status: 'pending' })];
-      const { rerender } = render(<ItemPool />);
-      expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
-
-      // The pending listener's removal snapshot lands; the active listener's
-      // addition has NOT arrived yet — the grace render.
-      H.myPending = [];
-      rerender(<ItemPool />);
-      expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
-
-      // Still nothing active on the NEXT render — grace has aged out, and a
-      // genuine rejection (no active arrival ever coming) correctly resolves.
-      rerender(<ItemPool />);
-      expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/not selected/i);
-    } finally {
-      vi.unstubAllGlobals();
     }
+
+    it('keeps reporting "pending" through the grace window, then ages out to "not selected" once it elapses with no active arrival', async () => {
+      seedTrackedMine();
+      try {
+        H.myPending = [item('mine-1', { text: 'About to be approved', status: 'pending' })];
+        const { rerender } = render(<ItemPool />);
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // The pending listener's removal snapshot lands; the active
+        // listener's addition has NOT arrived (and, in this test, never
+        // will) — a genuine rejection.
+        H.myPending = [];
+        await act(async () => rerender(<ItemPool />));
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // Still within the window, and still nothing active — stays graced.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(APPROVAL_GRACE_MS - 1);
+        });
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // The window elapses with no active arrival — the timer itself (not
+        // some unrelated render) is what resolves this to "not selected".
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1);
+        });
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/not selected/i);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('resolves EARLY, before the grace window elapses, the moment the active listener catches up', async () => {
+      seedTrackedMine();
+      try {
+        H.myPending = [item('mine-1', { text: 'About to be approved', status: 'pending' })];
+        const { rerender } = render(<ItemPool />);
+        H.myPending = [];
+        await act(async () => rerender(<ItemPool />));
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // Still well within the window when the active listener's own
+        // snapshot lands — resolves immediately, not on the timer. No Day
+        // schedule is configured here (H.event is undefined by default), so
+        // an untargeted active row derives to 'approved' — the point under
+        // test is EARLY resolution to the live document's real status, not
+        // the specific status itself (that split is `submitterStatus`'s own
+        // contract, covered elsewhere).
+        H.myActive = [item('mine-1', { text: 'About to be approved', status: 'active' })];
+        await act(async () => rerender(<ItemPool />));
+        let row = screen.getByText('About to be approved').closest('.row') as HTMLElement;
+        expect(row).toHaveTextContent(/approved/i);
+        expect(row).not.toHaveTextContent(/pending review/i);
+
+        // Advancing the rest of the way past the (already-cleared) window is
+        // a no-op — the early resolution stands.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(APPROVAL_GRACE_MS);
+        });
+        row = screen.getByText('About to be approved').closest('.row') as HTMLElement;
+        expect(row).toHaveTextContent(/approved/i);
+        expect(row).not.toHaveTextContent(/pending review/i);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   // #559, Codex P1, PR #845 round 4: an unclamped `setTimeout(..., nextUnlock
