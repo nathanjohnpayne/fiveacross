@@ -55,11 +55,17 @@ This uploads the Worker and publishes it on its `*.workers.dev` address only. No
 
 Between this step and the next, the Worker is deployed but **unconfigured** if the secret has not been set — a state this procedure passes through on purpose. It answers `404` with `x-event-router-reason: lookup-unavailable` on every address rather than erroring, which is the last row of the table below.
 
-### 2. Verify on `workers.dev`, against production data
+### 2. Verify against production data, before any route exists
 
-Every check below runs against the real Firestore and the real Hosting origin without any hostname being in front of it. A router that fails any of them must not be attached.
+**Do not try to smoke-test this by curling the `*.workers.dev` address with a `Host` override.** It cannot work, and the reason is worth stating so nobody rediscovers it during a cutover: a request dispatched to the workers.dev address carries *that* hostname in `request.url`, and overriding `Host` changes the authority Cloudflare routes on (or is rejected as domain fronting) rather than presenting a different hostname to the router. The Worker would classify every such request as `out-of-namespace` and return `404`. That is correct behaviour — `host.test.ts` pins it — but it means workers.dev can only ever prove the refusal path.
 
-| Check | `curl` | Expected |
+Use `wrangler dev --remote` instead. It executes **this deployed code on Cloudflare's network** with real bindings, a real Cache API, real Firestore reads and the real Hosting origin, while serving on `localhost`, where the URL the Worker sees *is* built from the `Host` header you send. That is a genuine end-to-end rehearsal with no production route and no test-only bypass compiled into the router.
+
+```bash
+npx wrangler dev --remote --cwd worker    # leave running; requests below go to localhost:8787
+```
+
+| Check | `curl -sI http://localhost:8787/ …` | Expected |
 |---|---|---|
 | A serving Event address | `-H 'Host: bodega-bay.fiveacross.app'` | `200`, the app shell, `x-event-router: v1` |
 | The same Event on its other host | `-H 'Host: bodega-bay.vacaybingo.com'` | `200` and **no** `location` header — it serves in place |
@@ -67,12 +73,23 @@ Every check below runs against the real Firestore and the real Hosting origin wi
 | The PostHog ingest label | `-H 'Host: d.fiveacross.app'` | `404`, `x-event-router-reason: reserved-label` |
 | An unknown Event | `-H 'Host: no-such-event.fiveacross.app'` | `404`, `x-event-router-reason: unknown-host`, `cache-control: no-store` |
 | A foreign hostname | `-H 'Host: example.com'` | `404`, `x-event-router-reason: out-of-namespace` |
-| The auth helper | `-H 'Host: bodega-bay.fiveacross.app' /__/auth/handler` | `200` or the origin's own status — never a router `404` |
+| The auth helper | `-H 'Host: bodega-bay.fiveacross.app' http://localhost:8787/__/auth/handler` | `200` or the origin's own status — never a router `404` |
 | Misconfiguration | with `FIREBASE_API_KEY` unset | `404`, `x-event-router-reason: lookup-unavailable` on **every** address |
 
-Then verify the two things a `curl` cannot: load the `workers.dev` address in a browser with the `Host` override tooling of your choice and confirm the app boots and signs in, and confirm the routing document for **every serving host** carries a `slug` field. The router cross-checks `hostnames/{host}.slug` against the address's first label and fails closed with `slug-missing` when it is absent, so a document written before that field became load-bearing would 404 the moment the routes were attached. This is the single most likely way a correct router still takes an Event down, and it is checkable in advance.
+The `wrangler deploy` from step 1 is still worth doing first: it proves the bundle builds and uploads, and its workers.dev address gives you a liveness check (expect `404` / `out-of-namespace` — that *is* the pass condition there).
 
-### 3. Attach the routes — the cutover
+Then confirm the routing document for **every serving host** carries a `slug` field. The router cross-checks `hostnames/{host}.slug` against the address's first label and fails closed with `slug-missing` when it is absent, so a document written before that field became load-bearing would 404 the moment the routes were attached. This is the single most likely way a correct router still takes an Event down, and it is checkable in advance.
+
+### 3. Prerequisites that are NOT this Worker's code — and that block a multi-Event cutover
+
+A correct router is not sufficient. Two properties live in the application and the origin bundle, and until both hold, attaching the wildcards serves at most the one Event that is already live. Both were surfaced in review of this PR and each has its own follow-up issue — [#851](https://github.com/nathanjohnpayne/gaycruisebingo/issues/851) and [#852](https://github.com/nathanjohnpayne/gaycruisebingo/issues/852).
+
+- **The origin bundle must stop baking `VITE_EVENT_ID`.** `scripts/build-target.mjs` sets `VITE_EVENT_ID: 'bodega-bay-2026'` for the `fiveacross` target, and `specs/event-resolution.md` rule 1 is that a present `VITE_EVENT_ID` short-circuits hostname resolution with no network read. So a second Event's hostname would pass this router correctly and then mount **Bodega** in the browser — the Worker validating one `eventId` while the client uses another. Before the wildcards carry a second Event, `ORIGIN_HOST` must point at a bundle built with an empty `VITE_EVENT_ID` (or a separate hostname-resolved Hosting site).
+- **Sign-in must be reachable on a newly provisioned host.** `isSignInReachableOnHost` (`src/auth-domain.ts`) admits an exact set of first-party hosts plus local origins plus the documented handoff. An arbitrary new `*.fiveacross.app` label is in none of those, so the app renders `auth-unconfigured` rather than a sign-in button — even after the OAuth redirect URI is registered. Delivering "a new Event needs no code change" needs the [ADR 0010](../docs/adr/0010-centralised-auth-origin-with-handoff.md) handoff or a registration-aware readiness check.
+
+Neither is a defect in `worker/`, and neither blocks *this* Worker from serving the Event that is already live on its existing hosts. They block the wildcard from being useful for Event number two, which is the point of the epic — so treat them as gates on step 4, not as paperwork.
+
+### 4. Attach the routes — the cutover
 
 Uncomment the `routes` block in `wrangler.toml` and redeploy. Attach **one Namespace at a time**, verify, and only then attach the second.
 
@@ -80,7 +97,7 @@ Before doing so, note the constraint carried forward from the closed Gate 3 issu
 
 Both apexes stay off the route list. `fiveacross.app` and `vacaybingo.com` are exact Firebase Hosting custom domains today; the router classifies an apex correctly and would serve it, but moving them is a separate decision from lighting up the wildcards, and doing both at once leaves nothing to roll back to.
 
-### 4. Rolling back
+### 5. Rolling back
 
 Comment the `routes` block out and redeploy, or delete the routes in the Cloudflare dashboard. Traffic returns to the exact-record Hosting path immediately. Nothing in this Worker writes anything, so a rollback has no state to unwind.
 

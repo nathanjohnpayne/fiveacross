@@ -95,6 +95,21 @@ describe('classifyHost — the guard', () => {
     expect(classifyHost(host)).toEqual({ kind: 'rejected', host, reason: 'invalid-slug', detail });
   });
 
+  it('refuses the Worker\'s own workers.dev address, which constrains how it can be smoke-tested', () => {
+    // Not a defect — a `*.workers.dev` hostname is genuinely outside every
+    // Namespace this router guards, and admitting it would be the bug. It is
+    // pinned because it has an operational consequence that cost a round of
+    // review: a request dispatched TO the workers.dev address carries that
+    // hostname in `request.url`, and sending `Host: bodega-bay.fiveacross.app`
+    // does not change it. So the deployed-but-unrouted Worker cannot be
+    // smoke-tested by curling workers.dev with a Host override, and
+    // worker/README.md uses `wrangler dev --remote` for that instead.
+    expect(classifyHost('five-across-event-router.nathanpayne.workers.dev')).toMatchObject({
+      kind: 'rejected',
+      reason: 'out-of-namespace',
+    });
+  });
+
   it('guards a suffix boundary rather than a substring', () => {
     // The dot is part of the comparison: `evilfiveacross.app` must not inherit
     // the Namespace by ending with its characters.

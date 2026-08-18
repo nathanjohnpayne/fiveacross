@@ -118,5 +118,13 @@ EOF
 fi
 
 echo "✅ Guards passed. Publishing the Worker (routes are NOT attached by this step)." >&2
-npm --prefix worker install
+
+# `npm ci`, never `npm install`, and the difference is the whole point of the
+# guards above. `npm install` would re-resolve wrangler's caret range against
+# the registry at deploy time, so an operator could start from the required
+# clean, reviewed origin/main commit and still publish a bundle built by a
+# toolchain version nobody reviewed — the guards would verify the source and
+# the toolchain would slip underneath them. `npm ci` installs exactly
+# worker/package-lock.json and fails closed if it and package.json disagree.
+npm --prefix worker ci
 npm --prefix worker run deploy -- "${WRANGLER_ARGS[@]+"${WRANGLER_ARGS[@]}"}"
