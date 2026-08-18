@@ -112,7 +112,7 @@ https://<target-origin><returnPath>#fa_handoff=<code>
 
 **Keyed by a hash, deliberately, and this is a considered deviation from ADR 0010's literal `authHandoffs/{code}`.** The ADR's substance—one opaque document per code, consumed transactionally—is preserved exactly; what changes is that the value at rest is no longer redeemable. A stored raw code is a live bearer credential to anyone who obtains the database; a stored hash is not. Rules already deny every client, so this is defence in depth against a future rules widening, a backup, or an export, and it costs one hash per call.
 
-**`consumedAt: null` is written explicitly rather than left absent.** The consume check reads it, and "the field is missing" versus "the field is null" being different shapes is how a redemption check quietly stops checking.
+**`consumedAt: null` is written explicitly rather than left absent, and the consume check enforces that rather than assuming it.** Redemption requires the field to be **present and exactly `null`**; an absent field is rejected as a malformed record, and any other value is treated as already consumed. The distinction is not pedantry: a loose `!= null` collapses missing and null together, so a consumed record that later *lost* the field—an admin repair, a migration, some future writer—would become redeemable again by anyone still holding its code and verifier. That is a replay reached through a data-shape accident rather than through the exchange path, which is exactly the kind of hole a redemption check is supposed to close.
 
 ## Rules contract
 

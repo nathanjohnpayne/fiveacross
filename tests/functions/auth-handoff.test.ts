@@ -536,6 +536,40 @@ describe('exchangeHandoff', () => {
     expect(fake.docs.get(handoffPath(CODE))?.data.consumedAt).not.toBeNull();
   });
 
+  it('refuses a record whose consumedAt field is absent rather than null', async () => {
+    // A consumed record that LOSES the field must not become redeemable again.
+    // `!= null` treated absent and null identically, so an admin repair, a
+    // migration, or a future writer could silently re-arm a spent code for
+    // anyone still holding its code and verifier.
+    const seeded = seedHandoff();
+    const record = { ...seeded[handoffPath(CODE)] };
+    delete record.consumedAt;
+    const fake = makeDb({ [handoffPath(CODE)]: record });
+
+    expect(
+      await exchangeHandoff(
+        { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN },
+        exchangeDeps(fake),
+      ),
+    ).toEqual({ ok: false, reason: 'malformed-record' });
+  });
+
+  it('refuses a record whose consumedAt is neither a stamp nor null', async () => {
+    // Anything that is not exactly null is treated as consumed — failing closed
+    // beats guessing which half of a malformed record to trust.
+    const seeded = seedHandoff();
+    const fake = makeDb({
+      [handoffPath(CODE)]: { ...seeded[handoffPath(CODE)], consumedAt: false },
+    });
+
+    expect(
+      await exchangeHandoff(
+        { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN },
+        exchangeDeps(fake),
+      ),
+    ).toEqual({ ok: false, reason: 'replayed' });
+  });
+
   it('rejects the loser of two concurrent exchanges of the same code', async () => {
     const fake = makeDb(seedHandoff());
 

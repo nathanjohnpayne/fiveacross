@@ -177,7 +177,10 @@ export type HandoffExchangeReason =
   | 'replayed'
   | 'expired'
   | 'transaction-mismatch'
-  | 'account-unusable';
+  | 'account-unusable'
+  /** The stored document is not the shape this module writes — fail closed
+   *  rather than guess which half of it to trust. */
+  | 'malformed-record';
 
 export type HandoffMintResult =
   | {
@@ -532,7 +535,16 @@ export async function exchangeHandoff(
       if (!snap.exists) return { ok: false, reason: 'unknown-code' };
       const data = snap.data() ?? {};
 
-      if (data.consumedAt != null) return { ok: false, reason: 'replayed' };
+      // `consumedAt` must be PRESENT and exactly `null` to redeem. Absent is
+      // NOT "unconsumed": a record that lost the field — an admin repair, a
+      // migration, some future writer — would otherwise become redeemable
+      // again by anyone still holding its code and verifier, which is a replay
+      // through a data-shape accident rather than through this code path. The
+      // module note and the spec both say missing and null are different
+      // shapes; this pair of checks is what makes that true rather than merely
+      // stated, and a loose `!= null` collapsed them back together.
+      if (!('consumedAt' in data)) return { ok: false, reason: 'malformed-record' };
+      if (data.consumedAt !== null) return { ok: false, reason: 'replayed' };
 
       const expiresAt = readMillis(data.expiresAt);
       // A record with no readable expiry is not treated as never-expiring — an
