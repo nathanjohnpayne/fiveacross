@@ -43,8 +43,11 @@ function AdminAddItemForm({ adminUid }: { adminUid: string | undefined }) {
   // `data-unsaved-work` while a prompt is half-typed (Codex P2 round 5, PR
   // #720): the draft lives only in `text`, so an automatic post-deploy reload
   // would eat it. See `midInteraction` in src/swClientBridge.ts.
+  // Trimmed, matching `submit`'s own `!text.trim()` guard above (post-review
+  // #751/#754): whitespace-only text can never be committed to release the
+  // marker, so leaving it untrimmed would pin the tab to a condemned build.
   return (
-    <div className="row admin-add-item" data-unsaved-work={text !== '' || undefined}>
+    <div className="row admin-add-item" data-unsaved-work={text.trim() !== '' || undefined}>
       <input
         className="grow"
         value={text}

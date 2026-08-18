@@ -148,6 +148,37 @@ describe('postClientBuild (#516)', () => {
     await Promise.resolve();
     await Promise.resolve();
   });
+
+  // Post-review #757 on PR #720: the initial `send()` and the two fallback
+  // delivery paths shared one outer `try`, so a controller that became
+  // redundant between the read and the call (`postMessage` throws) skipped
+  // registering `controllerchange` AND the `registration.active` fallback —
+  // permanently stranding an otherwise-recoverable window unregistered.
+  it('still registers via controllerchange and the ready fallback when the controller throws', async () => {
+    const controller = {
+      postMessage: vi.fn(() => {
+        throw new DOMException('controller is redundant', 'InvalidStateError');
+      }),
+    };
+    const registration = fakeRegistration();
+    const active = { postMessage: vi.fn() };
+    registration.active = active;
+    const container = fakeContainer(registration, controller);
+    expect(() => postClientBuild(OLD_SHELL, container)).not.toThrow();
+
+    // The redundant controller's own `postMessage` still throws, but the
+    // `registration.active` fallback fires anyway.
+    await vi.waitFor(() =>
+      expect(active.postMessage).toHaveBeenCalledWith({ type: CLIENT_BUILD_MESSAGE, stamp: OLD_SHELL }),
+    );
+
+    // And `controllerchange` is still registered: a working controller
+    // arriving later still gets the message.
+    const workingController = { postMessage: vi.fn() };
+    (container as unknown as { controller: unknown }).controller = workingController;
+    container.emit('controllerchange');
+    expect(workingController.postMessage).toHaveBeenCalledWith({ type: CLIENT_BUILD_MESSAGE, stamp: OLD_SHELL });
+  });
 });
 
 // Codex P2 round 3. `navigator.serviceWorker` is not always a plainly absent

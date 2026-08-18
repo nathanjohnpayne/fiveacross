@@ -72,7 +72,7 @@ vi.mock('../hooks/useData', () => ({
   useProofFeed: () => ({ proofs: H.proofs, loading: H.proofsLoading }),
   // #218: no Proofs fixtured in this suite — an empty map keeps every row
   // chip-less, which is orthogonal to the Share Card assertions here.
-  useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
+  useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),
   // Mirrors src/data/moderation.ts isBanned (#108); the fixtures carry no bannedUids,
   // so it filters nothing and the share-card standings are unchanged. The ban filter
   // is pinned in src/components/w2-ban-console.test.tsx.
@@ -1680,6 +1680,127 @@ describe('shareCardBlob — native share sheet + fallback chain', () => {
 
     expect(outcome).toBe('cancelled');
     expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+  });
+
+  // Issue #759 — an older, slower `shareCardBlob` call must never supersede a
+  // NEWER call's already-mounted fallback sheet. `showShareFallbackSheet`
+  // unconditionally tears down whatever sheet is currently mounted via
+  // `closeMountedFallbackSheet`, and nothing used to stop an older call from
+  // reaching that leg after a newer overlapping call had already put its own
+  // sheet on screen — reachable from an ordinary fast double-tap on Share.
+  // Both calls are routed to the clipboard leg (blob: null + no share API +
+  // dead activation), with the FIRST call's clipboard write held open by a
+  // manually-released gate so it resolves strictly after the SECOND call has
+  // already mounted its sheet.
+  it('does not let an older, slower call supersede a newer call\'s already-mounted sheet (#759)', async () => {
+    stubUserActivation(false); // no share legs reachable — only clipboard, then the sheet
+    let calls = 0;
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const clipboardMock = vi.fn().mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) await firstGate; // the OLDER call stalls here
+      throw Object.assign(new Error('denied'), { name: 'NotAllowedError' });
+    });
+    stubNavigator({ clipboard: { writeText: clipboardMock } });
+
+    // The OLDER call starts first and immediately stalls inside its own
+    // clipboard write, before it has any chance to reach the sheet leg.
+    const older = shareCardBlob({
+      blob: null,
+      filename: 'card.png',
+      title: 'T',
+      text: 'body',
+      url: 'https://older.test',
+    });
+    await waitFor(() => expect(clipboardMock).toHaveBeenCalledTimes(1));
+
+    // The NEWER call starts after, and runs all the way through to mounting
+    // its own sheet while the older call is still stalled above.
+    const newer = shareCardBlob({
+      blob: null,
+      filename: 'card.png',
+      title: 'T',
+      text: 'body',
+      url: 'https://newer.test',
+    });
+    await expect(newer).resolves.toBe('prompt');
+    expect(fallbackSheet().querySelector<HTMLInputElement>('.share-fallback-url')?.value).toBe(
+      'https://newer.test',
+    );
+
+    // Only now does the older call's clipboard write settle — its resolution
+    // arrives strictly AFTER the newer call already mounted its sheet, which
+    // is exactly the out-of-order completion the ticket describes.
+    releaseFirst?.();
+    await expect(older).resolves.toBe('cancelled');
+
+    // The newer sheet must still be the one on screen, untouched: not
+    // superseded, not replaced with the older call's stale link.
+    expect(document.querySelectorAll('.share-fallback-backdrop')).toHaveLength(1);
+    expect(fallbackSheet().querySelector<HTMLInputElement>('.share-fallback-url')?.value).toBe(
+      'https://newer.test',
+    );
+  });
+
+  // Issue #760 — a real pointer dismissal of the backdrop blurs focus to
+  // `document.body` as part of the BROWSER'S OWN default action for a
+  // mousedown on a plain, non-focusable `<div>`, and that default action runs
+  // strictly between the backdrop's `mousedown` and its paired `click`. jsdom
+  // never reproduces that blur on its own — a bare `fireEvent.click` leaves
+  // whatever was focused still focused — so the old suite could not see
+  // `close()`'s live `backdrop.contains(document.activeElement)` read
+  // evaluate false and skip focus restoration. This reproduces the real
+  // sequence by hand: focus a control inside the sheet, fire `mousedown` on
+  // the backdrop, manually blur that control (standing in for the browser's
+  // default action) BEFORE the `click` fires, then assert the opener still
+  // regains focus.
+  it('restores focus to the opener even when a real pointer dismissal blurs the backdrop before the click fires (#760)', async () => {
+    const opener = await openFallbackFrom('Share');
+    const copy = sheetButton('Copy link');
+    expect(document.activeElement).toBe(copy); // the sheet's own primary action, focused on mount
+
+    const backdropEl = fallbackSheet();
+    fireEvent.mouseDown(backdropEl); // captures focus-in-sheet BEFORE any blur
+    copy.blur(); // the browser's own mousedown default action, simulated
+    expect(document.activeElement).toBe(document.body); // confirms the blur really happened
+    fireEvent.click(backdropEl); // the paired click that actually calls close()
+
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  // Codex P2 on this PR — the #760 capture above must be scoped to its OWN
+  // paired click, never left sitting in a variable a LATER, unrelated close
+  // can read. A backdrop `mousedown` can be abandoned (pointer released
+  // outside the sheet, cancelled mid-gesture, used for a context click) with
+  // no `click` ever following it — and if that captured "focus was inside
+  // the sheet" value survived past its own gesture, a subsequent Escape after
+  // focus had genuinely moved elsewhere would wrongly steal it back, exactly
+  // the theft `close()`'s live read exists to prevent (mirrors "leaves focus
+  // alone when something else has taken it before the sheet closes" above,
+  // but via the #760 capture path instead of the plain live-read path).
+  it('does not let an abandoned backdrop mousedown steal focus on a later, unrelated Escape close (#760 follow-up)', async () => {
+    const opener = await openFallbackFrom('Share');
+    const backdropEl = fallbackSheet();
+
+    // A pointer-down on the backdrop that is never followed by its own
+    // click — the capture fires, but the gesture is abandoned.
+    fireEvent.mouseDown(backdropEl);
+
+    // Focus has genuinely moved elsewhere by the time the sheet closes.
+    const elsewhere = plantOpener('Somewhere else');
+    elsewhere.focus();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(document.querySelector('.share-fallback-backdrop')).toBeNull();
+    expect(document.activeElement).toBe(elsewhere);
+    expect(document.activeElement).not.toBe(opener);
+    opener.remove();
   });
 });
 
