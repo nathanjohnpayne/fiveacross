@@ -2997,6 +2997,39 @@ body.install-prompt-visible.update-prompt-visible .bug-report-pick {
   font-size: 13px;
   font-weight: 600;
 }
+/* The bug/abuse choice (#670). A bare fieldset renders with a browser default
+   border and inline padding that reads as a stray box inside the sheet, so it
+   is reset to a plain stacked group; the legend keeps `.bug-report-label`'s
+   type so the group heading matches "What happened?" above the textarea. */
+.bug-report-kind {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* The whole label is the tap target, and it has to be a REAL 44px on a
+   phone-first UI — a 13px line plus a few px of padding measures ~24px, which
+   is the sort of thing a comment can claim and the box model quietly refuse.
+   `min-height` rather than padding so the row grows only when the text alone
+   would not reach the floor. */
+.bug-report-kind-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.bug-report-kind-option input {
+  /* A 16px control inside that 44px row: the label carries the target, so the
+     dot itself never has to. */
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  flex: none;
+}
 .bug-report-description {
   width: 100%;
   resize: vertical;
@@ -4706,6 +4739,67 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   display: flex;
   flex-direction: column;
   gap: 5px;
+/* ---------- live preview strip (#795) ----------
+   The strip's swatch and the expanded card both render inside a
+   `ThemeIsland` (src/theme/ThemeIsland.tsx) — the same `[data-theme]`
+   scoped-retint mechanism `.board-area[data-theme]` already uses (Scope C,
+   above) — so the swatch/card genuinely pick up the DRAFT's own Theme
+   tokens (--primary/--secondary/--bg/…) rather than the wizard chrome's,
+   with no theme-specific CSS needed here. */
+.wizard-prevbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.wizard-prevbar-swatch {
+  flex: none;
+  width: 26px;
+  height: 32px;
+  border-radius: 6px;
+  background: linear-gradient(160deg, var(--primary), var(--secondary));
+  border: 1px solid var(--border);
+}
+.wizard-prevbar-caption {
+  flex: 1;
+}
+.wizard-prevbar-open {
+  flex: none;
+  margin-left: 0;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.wizard-preview-sheet {
+  /* Unlike the other content-heavy sheets, a full 5x5 board can make this
+     bottom-aligned fixed sheet taller than a short viewport (a phone in
+     landscape) — bound it and let the sheet's own content scroll rather
+     than push the close control off-screen (Codex P2, PR #857). */
+  max-height: 88dvh;
+  overflow-y: auto;
+}
+.wizard-preview-days {
+  margin-bottom: 8px;
+  overflow-x: auto;
+}
+.wizard-preview-board {
+  margin: 0;
+}
+.wizard-preview-daymeta {
+  font-size: 12px;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+.wizard-preview-shortfall {
+  margin: 0;
+  color: var(--dim);
+  font-size: 13px;
 }
 
 /* ---------- reduced motion: the kill switch ----------

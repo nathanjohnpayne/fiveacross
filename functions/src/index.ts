@@ -4,16 +4,19 @@ import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
+import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
-import { BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import {
   recordAdminAlerts,
+  recordBugReportAlerts,
   runAdminAlertSweep,
   type AdminAlertFirestore,
   type AlertableDoc,
+  type BugReportDoc,
 } from './adminAlerts';
 import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
@@ -23,6 +26,7 @@ import {
   reconcileHostnameAdultContent,
 } from './adultContent';
 import { handleSubmitBugReport } from './bugReports';
+import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
   resnapshotDayIfNoBoards,
@@ -82,6 +86,141 @@ const ADMIN_SDK_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${resolveProjectId() 
 export const submitBugReport = onCall(
   { maxInstances: 10, timeoutSeconds: 30, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (request) => handleSubmitBugReport(request, BUG_REPORT_APP_CHECK.value()),
+);
+
+// --- Centralised-auth handoff (#548, ADR 0010, specs/auth-handoff.md) -----------
+//
+// Two callables spanning one origin boundary: `mintAuthHandoff` runs at the
+// central auth origin where the player has just signed in, `exchangeAuthHandoff`
+// runs for the Event origin that has no session yet. The whole decision surface
+// lives in `authHandoff.ts` — these are seams, and deliberately thin ones,
+// because everything worth reviewing here should be reachable by a unit test
+// rather than only by a deployed function.
+
+/**
+ * Whether loopback return origins are acceptable. TRUE ONLY UNDER AN EMULATOR:
+ * in a deployed function neither variable is set, so `http://localhost:5173`
+ * fails the allowlist exactly like any other unregistered address. Reading the
+ * environment at CALL time rather than at module load keeps it out of the
+ * endpoint manifest, where a discovery-time read would be `undefined` anyway.
+ */
+function handoffAllowsLocalDev(): boolean {
+  return (
+    process.env.FIRESTORE_EMULATOR_HOST !== undefined || process.env.FUNCTIONS_EMULATOR === 'true'
+  );
+}
+
+/**
+ * Mint a single-use handoff code for the signed-in caller (#548).
+ *
+ * A CALLABLE, and that is the security property rather than a convenience: the
+ * uid comes from `request.auth`, which the Functions runtime derives from a
+ * verified Firebase ID token. A payload field would let any signed-in caller
+ * mint a code bound to somebody else's UID.
+ *
+ * The response carries only the server-built `handoffUrl`. The caller supplies a
+ * target origin and a deep-link path and gets back the exact URL to redirect to,
+ * so it never gets to assemble a redirect target of its own — which is what
+ * keeps the return leg from being an open redirect.
+ */
+export const mintAuthHandoff = onCall(
+  { maxInstances: 10, timeoutSeconds: 30, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  async (request) => {
+    const payload = (request.data ?? {}) as Record<string, unknown>;
+    const result = await mintHandoff(
+      {
+        uid: request.auth?.uid,
+        targetOrigin: payload.targetOrigin,
+        transactionId: payload.transactionId,
+        returnPath: payload.returnPath,
+        appCheckPresent: request.app != null,
+      },
+      {
+        db: db as unknown as HandoffFirestore,
+        now: () => Date.now(),
+        timestamp: (ms) => Timestamp.fromMillis(ms),
+        policy: { allowLocalDev: handoffAllowsLocalDev() },
+        requireAppCheck: AUTH_HANDOFF_APP_CHECK.value(),
+      },
+    );
+
+    if (!result.ok) {
+      if (result.reason === 'unauthenticated') {
+        throw new HttpsError('unauthenticated', 'Sign in before starting a handoff.');
+      }
+      if (result.reason === 'app-check-required') {
+        throw new HttpsError('failed-precondition', 'App Check is required.');
+      }
+      // The reason stays in the log, never in the response.
+      console.warn('mintAuthHandoff rejected', { reason: result.reason });
+      throw new HttpsError('invalid-argument', 'That is not a valid Event address to return to.');
+    }
+
+    return {
+      handoffUrl: result.handoffUrl,
+      targetOrigin: result.targetOrigin,
+      expiresAt: result.expiresAt,
+    };
+  },
+);
+
+/**
+ * Exchange a handoff code for a Firebase custom token (#548).
+ *
+ * UNAUTHENTICATED BY NECESSITY: the Event origin calling this has no session —
+ * obtaining one is the entire point. Authorization is the code plus the private
+ * transaction verifier, checked against a document that is consumed in the same
+ * transaction. CORS stays open because the set of legitimate callers is every
+ * registered Event hostname, which is dynamic; CORS is not the boundary here and
+ * was never going to be, since a non-browser client ignores it. The boundary is
+ * the code, the verifier, and the origin recorded at mint time.
+ *
+ * Every rejection returns the SAME error. A caller that could distinguish
+ * "expired" from "already used" from "no such code" would learn whether a
+ * guessed code was ever real.
+ */
+export const exchangeAuthHandoff = onCall(
+  { maxInstances: 20, timeoutSeconds: 30, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  async (request) => {
+    const payload = (request.data ?? {}) as Record<string, unknown>;
+    const headerOrigin = request.rawRequest?.headers?.origin;
+    const result = await exchangeHandoff(
+      {
+        code: payload.code,
+        transactionVerifier: payload.transactionVerifier,
+        origin: payload.origin,
+        headerOrigin: typeof headerOrigin === 'string' ? headerOrigin : null,
+        appCheckPresent: request.app != null,
+      },
+      {
+        db: db as unknown as HandoffFirestore,
+        now: () => Date.now(),
+        timestamp: (ms) => Timestamp.fromMillis(ms),
+        requireAppCheck: AUTH_HANDOFF_APP_CHECK.value(),
+        createCustomToken: (uid) => getAuth().createCustomToken(uid),
+        // Fails closed: `getUser` rejects for a deleted account, and a lookup
+        // that errors must not be read as "the account is fine".
+        isAccountUsable: async (uid) => {
+          try {
+            return !(await getAuth().getUser(uid)).disabled;
+          } catch (err) {
+            console.error('exchangeAuthHandoff account check failed', err);
+            return false;
+          }
+        },
+      },
+    );
+
+    if (!result.ok) {
+      console.warn('exchangeAuthHandoff rejected', { reason: result.reason });
+      throw new HttpsError(
+        'permission-denied',
+        'This sign-in link is no longer valid. Please sign in again.',
+      );
+    }
+
+    return { customToken: result.customToken };
+  },
 );
 
 // Cloud Vision (moderateProof) stays deferred by default (#126): the gate keeps
@@ -249,6 +388,47 @@ export const notifyItemModeration = onDocumentWritten(
       event.data?.before.data(),
       event.data?.after.data(),
     ),
+);
+
+/**
+ * The third producer for the same queue: a bug report the reporter marked
+ * `abuse` (#670, specs/admin-notification-emails.md § Abuse reports).
+ *
+ * ITS DOCUMENT PATH IS TOP-LEVEL, unlike the two above, because `bugReports` is
+ * — the callable writes one document per report with an `eventId` FIELD rather
+ * than nesting it under an Event. So this trigger has no `{eventId}` wildcard to
+ * read: `recordBugReportAlerts` takes the Event off the document, checks it
+ * resolves, and refuses to enqueue otherwise rather than guessing one.
+ *
+ * It fires on EVERY bug report, which is the cost of the collection being flat,
+ * but a plain `bug` is rejected by a pure predicate before any read — so the
+ * common case costs one no-op invocation and nothing else. That predicate also
+ * runs before anything that can throw, so `retry: true` never re-runs a bug.
+ *
+ * Pins `ADMIN_SDK_SERVICE_ACCOUNT` for the same reason the two above do: it
+ * reads `events/{eventId}` and writes the queue, neither of which the project's
+ * default Gen2 compute identity can reach (ADR 0008). It writes only under
+ * `events/{eventId}/adminAlerts`, never back into `bugReports`, so it cannot
+ * re-fire itself.
+ */
+export const notifyAbuseBugReport = onDocumentWritten(
+  // `retry: true` (Phase 4b P1). `recordBugReportAlerts` acknowledges every
+  // PERMANENT answer by returning normally and lets only TRANSIENT Firestore
+  // failures escape, so retries are reserved for the case where retrying can
+  // actually help. They are safe because the queue's document ids derive from
+  // this event's own id: a retry landing after a write already succeeded hits
+  // ALREADY_EXISTS and is a no-op, never a duplicate row. Without it, one blip
+  // silently and permanently loses a report of harm.
+  { document: 'bugReports/{reportId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
+  async (event) => {
+    await recordBugReportAlerts(
+      db as unknown as AdminAlertFirestore,
+      event.params.reportId,
+      event.id,
+      event.data?.before.data() as BugReportDoc | undefined,
+      event.data?.after.data() as BugReportDoc | undefined,
+    );
+  },
 );
 
 /**

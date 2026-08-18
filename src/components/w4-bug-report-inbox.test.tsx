@@ -93,11 +93,172 @@ describe('W4 bug-report inbox', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'The card froze after I marked a square.',
+      // A reporter who never touches the kind control sends `bug` — the same
+      // thing an already-shipped client sends by sending nothing (#670).
+      kind: 'bug',
       screenshotDataUrl: null,
       captureError: 'Canvas unavailable',
       route: undefined,
     });
     expect(await screen.findByText('report-123')).toBeInTheDocument();
+  });
+
+  it('lets the reporter mark a report as abuse, defaulting to bug (#670)', async () => {
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy.mockResolvedValue({ reportId: 'report-abuse' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const bug = await screen.findByRole('radio', { name: 'Something is broken' });
+    const abuse = screen.getByRole('radio', { name: 'Abuse or harmful content' });
+    // Bug is pre-selected, so the default is visible rather than implied.
+    expect(bug).toBeChecked();
+    expect(abuse).not.toBeChecked();
+    // The consequence is stated only once the reporter has chosen it, and it is
+    // stated as an ATTEMPT: whether an admin is actually reached depends on a
+    // membership fact only the server holds.
+    const promise = /try to raise this with the event.s admins/i;
+    expect(screen.queryByText(promise)).not.toBeInTheDocument();
+    fireEvent.click(abuse);
+    expect(abuse).toBeChecked();
+    expect(screen.getByText(promise)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
+    expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
+  });
+
+  it('reports what the SERVER did about an abuse report, rather than what the sheet promised (#670)', async () => {
+    // A person reporting harm must not be left believing an admin was reached
+    // when the report only entered the inbox — the sheet cannot know, so the
+    // receipt states the outcome the callable returned.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    const fileAbuse = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+      fireEvent.click(await screen.findByRole('radio', { name: 'Abuse or harmful content' }));
+      fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    };
+
+    submitSpy.mockResolvedValue({ reportId: 'report-alerted', escalationEligible: true });
+    renderFlow();
+    await fileAbuse();
+    expect(await screen.findByText('Your report is marked for this event’s admins.')).toBeInTheDocument();
+    // The safety line is UNCONDITIONAL: even the positive branch reflects only
+    // checks made before the alert is queued, so neither branch can promise that
+    // an admin sees this — and a reporter must not be steered away from a faster
+    // route by a receipt that sounds like one is already underway.
+    expect(screen.getByText(/If someone may be in danger, tell an/)).toBeInTheDocument();
+
+    submitSpy.mockResolvedValue({ reportId: 'report-quiet', escalationEligible: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await fileAbuse();
+    expect(await screen.findByText(/isn’t marked for this event’s admins/)).toBeInTheDocument();
+
+    // An older deployed callable returns only `reportId`. That is "no claim
+    // made", not a success — it must degrade to the honest half.
+    submitSpy.mockResolvedValue({ reportId: 'report-legacy' });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await fileAbuse();
+    expect(await screen.findByText(/isn’t marked for this event’s admins/)).toBeInTheDocument();
+  });
+
+  it('freezes the classification while a submit is in flight, so the receipt cannot describe a report nobody filed (#670)', async () => {
+    // The sheet stays mounted across a slow submit. Reading the LIVE `kind` on
+    // the receipt would describe whatever is selected now rather than what was
+    // sent — select abuse, press Send, switch to bug, and the abuse outcome
+    // silently disappears.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    let resolveSubmit!: (result: { reportId: string; escalationEligible: boolean }) => void;
+    submitSpy.mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const abuse = await screen.findByRole('radio', { name: 'Abuse or harmful content' });
+    fireEvent.click(abuse);
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+
+    // Frozen at source: the control cannot move mid-flight in the first place.
+    await waitFor(() => expect(abuse).toBeDisabled());
+    expect(screen.getByRole('radio', { name: 'Something is broken' })).toBeDisabled();
+
+    // And even if it did, the receipt reports the kind that was SENT.
+    fireEvent.click(screen.getByRole('radio', { name: 'Something is broken' }));
+    resolveSubmit({ reportId: 'report-abuse', escalationEligible: true });
+    expect(await screen.findByText('Your report is marked for this event’s admins.')).toBeInTheDocument();
+    expect(buildInputSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: 'abuse' }));
+  });
+
+  it('keeps the focus trap on controls the browser will actually focus, mid-submit included', async () => {
+    // The radios are disabled by their parent `<fieldset disabled>` and carry no
+    // attribute of their own, so an attribute-based query kept them in the trap's
+    // list while the browser refused to focus them. Mid-submit, with Send
+    // disabled too, the boundary stopped matching anything reachable and Tab
+    // walked out of the modal (Phase 4b P2).
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    let resolveSubmit!: (result: { reportId: string; escalationEligible: boolean }) => void;
+    submitSpy.mockReturnValue(new Promise((resolve) => { resolveSubmit = resolve; }));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const textarea = await screen.findByLabelText('What happened?');
+    fireEvent.change(textarea, { target: { value: 'Something broke.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Something is broken' })).toBeDisabled());
+
+    const dialog = screen.getByRole('dialog', { name: 'Report a bug' });
+    const landed = () => document.activeElement as HTMLElement;
+    const stillTrapped = () => {
+      expect(dialog.contains(landed())).toBe(true);
+      expect(landed()).not.toBeDisabled();
+    };
+
+    // Backwards from the FIRST reachable control must wrap onto the last
+    // reachable one — not onto a disabled radio the browser would skip, and
+    // never out of the dialog.
+    textarea.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    stillTrapped();
+    expect(landed()).not.toBe(textarea);
+    // ...and forwards from there wraps back to the textarea, which is now the
+    // first control the browser will actually focus.
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(textarea).toHaveFocus();
+    stillTrapped();
+    resolveSubmit({ reportId: 'report-1', escalationEligible: false });
+    await screen.findByText('report-1');
+  });
+
+  it('gives each report-kind label a real 44px tap target', () => {
+    // A 13px line plus a few px of padding measures ~24px, which is the sort of
+    // thing a comment can claim and the box model quietly refuse. Phone-first
+    // UI, so the whole label has to reach the floor the rest of the app uses.
+    const optionBlock = INDEX_CSS.match(/\.bug-report-kind-option\s*\{[^}]*\}/s)?.[0] ?? '';
+    expect(optionBlock).toMatch(/min-height:\s*44px/);
+    expect(optionBlock).toMatch(/cursor:\s*pointer/);
+  });
+
+  it('opens the sheet on the kind choice, so forward navigation cannot skip it (#670)', async () => {
+    // The textarea used to take autoFocus, and it sits BELOW the kind control —
+    // so tabbing forward never reached the classification, and a report of harm
+    // could be submitted under the default `bug` without the reporter ever
+    // meeting the control that escalates it.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    expect(await screen.findByRole('radio', { name: 'Something is broken' })).toHaveFocus();
+    expect(screen.getByLabelText('What happened?')).not.toHaveFocus();
+  });
+
+  it('resets the kind to bug when a fresh report is opened', async () => {
+    // The draft survives a park/reopen inside one flow (#324), but a NEW report
+    // must not inherit the last one's abuse marking.
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy.mockResolvedValue({ reportId: 'report-1' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Abuse or harmful content' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    expect(await screen.findByRole('radio', { name: 'Something is broken' })).toBeChecked();
   });
 
   it('encodes an approved screenshot and keeps the sheet open on a retryable submit error', async () => {
@@ -191,12 +352,40 @@ describe('W4 bug-report inbox', () => {
     fireEvent.change(textarea, { target: { value: 'The board froze.' } });
     const send = screen.getByRole('button', { name: 'Send report' });
     expect(send).toBeEnabled();
+    // The wrap targets whatever is FIRST in the sheet, which since #670 is the
+    // kind control rather than the textarea — the reporter classifies the report
+    // before they describe it.
+    const first = screen.getByRole('radio', { name: 'Something is broken' });
     send.focus();
     fireEvent.keyDown(document, { key: 'Tab' });
-    expect(textarea).toHaveFocus();
-    textarea.focus();
+    expect(first).toHaveFocus();
+    first.focus();
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     expect(send).toHaveFocus();
+  });
+
+  it('treats the radio group as ONE tab stop, so focus cannot escape past a selected abuse radio', async () => {
+    // Browsers visit only the CHECKED member of a radio group. Comparing the
+    // backward-wrap against the first DOM radio therefore never matches once a
+    // later member is selected, and focus walks out of the modal (#670 Codex P2).
+    captureSpy.mockRejectedValue(new Error('Capture unavailable'));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const abuse = await screen.findByRole('radio', { name: 'Abuse or harmful content' });
+    fireEvent.click(abuse);
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+    const send = screen.getByRole('button', { name: 'Send report' });
+    // Backward from the now-checked abuse radio wraps to the last stop rather
+    // than leaving the dialog.
+    abuse.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(send).toHaveFocus();
+    // And forward from the last stop returns to the CHECKED radio, which is the
+    // one the browser would actually focus.
+    send.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(abuse).toHaveFocus();
+    expect(screen.getByRole('radio', { name: 'Something is broken' })).not.toHaveFocus();
   });
 });
 
@@ -264,6 +453,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     expect(blobToDataUrlSpy).toHaveBeenCalledWith(moreBlob);
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'The selected screen would not capture.',
+      kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,more',
       captureError: null,
       route: '/more',
@@ -307,6 +497,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'A tile on my card is broken.',
+      kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,card',
       captureError: null,
       route: '/',
@@ -377,6 +568,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
       description: 'Slow capture race.',
+      kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,card',
       captureError: null,
       route: '/',

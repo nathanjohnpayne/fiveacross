@@ -73,6 +73,16 @@ describe('bug-report client diagnostics', () => {
     ).toHaveLength(200);
   });
 
+  it('defaults the report kind to bug, and carries an abuse marking when one is passed (#670)', () => {
+    // The default matters as much as the marking: a caller with no opinion must
+    // produce exactly the payload an already-shipped client sends, so adding the
+    // control changed what an abuse report does and nothing about a bug report.
+    const base = { description: 'The board froze.', screenshotDataUrl: null, captureError: null };
+    expect(buildBugReportInput(base).kind).toBe('bug');
+    expect(buildBugReportInput({ ...base, kind: 'bug' }).kind).toBe('bug');
+    expect(buildBugReportInput({ ...base, kind: 'abuse' }).kind).toBe('abuse');
+  });
+
   it('retries screenshot capture with Safari-safe media filtering after a full capture failure', async () => {
     const root = document.createElement('main');
     root.className = 'app';
