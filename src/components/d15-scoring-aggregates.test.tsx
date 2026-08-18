@@ -88,7 +88,7 @@ vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: H.event, loading: false }),
   // #218: no Proofs fixtured in this scoring-aggregates suite — an empty map
   // keeps every row chip-less, which is exactly what these tests assert on.
-  useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
+  useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),
   isBanned: (uid: string | null | undefined, bannedUids: readonly string[] | undefined) =>
     !!uid && Array.isArray(bannedUids) && bannedUids.includes(uid),
 }));
