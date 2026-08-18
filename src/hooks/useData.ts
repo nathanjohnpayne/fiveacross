@@ -884,12 +884,44 @@ export function usePendingItems() {
  * ADMIN arm. Pass `null`/`undefined` (signed-out) to open no subscription.
  */
 export function useMyPendingItems(uid: string | null | undefined) {
-  const { data, loading } = useColSub<ItemDoc>(
+  // `hasServerData` (#559, Codex P2, PR #845): ItemPool's submitter-state
+  // derivation needs to tell "no matching doc" apart from "no CONFIRMED
+  // answer yet" — an offline/cold-cache start clears `loading` on an empty
+  // CACHE snapshot too, which would otherwise let a genuinely still-pending
+  // submission read as `not_selected`. See `deriveMySubmissions`'s `ready`
+  // doc comment.
+  const { data, loading, hasServerData } = useColSub<ItemDoc>(
     uid ? query(itemsCol(), where('createdBy', '==', uid), where('status', '==', 'pending')) : null,
     uid ? `items-pending-mine:${uid}` : 'items-pending-mine:none',
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
-  return { items, loading };
+  return { items, loading, hasServerData };
+}
+
+/**
+ * The signed-in Player's OWN ACTIVE (approved) Prompts — the submitter-state
+ * companion to `useMyPendingItems` above (#559, Codex P2, PR #845). Reads
+ * are scoped `where('createdBy','==',uid) + where('status','==','active')`,
+ * the same two-equality shape (no composite index), and satisfies the item
+ * read rule's public `status == 'active'` arm.
+ *
+ * Deliberately its OWN unfiltered query rather than a client-side filter of
+ * `useItems()`'s public pool: `useItems` additionally drops a Prompt that has
+ * crossed the community auto-hide report threshold, is withheld by the
+ * adult-content posture, or was authored by a since-banned uid — all three
+ * are PRESENTATIONAL hides for the public pool, not a change to the
+ * document's own `status`. A submitter whose approved Prompt got reported
+ * into auto-hide is still genuinely `active` and should see `'approved'` (or
+ * `'scheduled'`), not have it read as `'not_selected'` because the public
+ * pool no longer lists it.
+ */
+export function useMyActiveItems(uid: string | null | undefined) {
+  const { data, loading, hasServerData } = useColSub<ItemDoc>(
+    uid ? query(itemsCol(), where('createdBy', '==', uid), where('status', '==', 'active')) : null,
+    uid ? `items-active-mine:${uid}` : 'items-active-mine:none',
+  );
+  const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
+  return { items, loading, hasServerData };
 }
 
 /**

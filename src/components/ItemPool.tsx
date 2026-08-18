@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { useItems, useMyPendingItems, useEventDoc } from '../hooks/useData';
+import { useItems, useMyPendingItems, useMyActiveItems, useEventDoc } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
 import {
   loadTrackedSuggestions,
@@ -88,7 +88,14 @@ export default function ItemPool() {
   // `status == 'active'`, so a fresh `pending` add would otherwise vanish from
   // this list the instant it lands. `deriveMySubmissions` below unions this
   // LIVE, cross-device query with the local tracker for the follow-up states.
-  const { items: myPending, loading: pendingLoading } = useMyPendingItems(user?.uid);
+  const { items: myPending, hasServerData: pendingServerReady } = useMyPendingItems(user?.uid);
+  // The submitter's own ACTIVE submissions (#559, Codex P2 round 2, PR #845):
+  // its OWN unfiltered query, not a client-side filter of `useItems()`'s
+  // public pool — see `useMyActiveItems`'s own doc comment for why the public
+  // pool's presentational hides (report threshold, adult-content posture, a
+  // since-banned author) must never make a genuinely `active` submission of
+  // the submitter's OWN read as `'not_selected'`.
+  const { items: activeMine, hasServerData: activeServerReady } = useMyActiveItems(user?.uid);
   // The Day schedule, for `submitterStatus`'s "is the promised Day still
   // open" check (#559) — the SAME `useEventDoc` subscription every other
   // schedule-reading surface (Board, More) already holds; no new read.
@@ -108,12 +115,30 @@ export default function ItemPool() {
   useEffect(() => {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
   }, [uid]);
-  const activeMine = user ? items.filter((it) => it.createdBy === user.uid) : [];
-  // `ready` (#559, Codex P2): both live queries must have delivered their
-  // first snapshot before an absent tracked id can honestly mean "not
-  // selected" — see `deriveMySubmissions`'s own doc comment for the flash
-  // this prevents.
-  const mySubmissions = deriveMySubmissions(tracked, myPending, activeMine, days, Date.now(), !loading && !pendingLoading);
+  // A ticking clock (#559, Codex P2 round 2, PR #845), mirroring Board.tsx's
+  // and ProofFeed.tsx's own `now`: without it, a panel left open across the
+  // submission's target Day's `unlockAt` keeps reporting `'scheduled'` off a
+  // stale `Date.now()` until some UNRELATED render happens to fire. A timer
+  // bumps it exactly when the earliest still-open Day's `unlockAt` passes.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const nextUnlock = days
+      .map((d) => d.unlockAt)
+      .filter((t) => t > Date.now())
+      .sort((a, b) => a - b)[0];
+    if (nextUnlock == null) return;
+    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days` (a fresh [] literal each render on a schedule-less Event); the effect's own reschedule (`now` in the deps) is what re-evaluates it, matching Board.tsx's identical pattern.
+  }, [event?.days, now]);
+  // `ready` (#559, Codex P2 rounds 1 + 2): BOTH live queries must have
+  // delivered a SERVER-CONFIRMED snapshot — not merely cleared `loading` —
+  // before an absent tracked id can honestly mean "not selected". `loading`
+  // alone clears on an empty CACHE-only snapshot too (an offline or cold
+  // start), which would have let a genuinely still-pending or still-active
+  // submission read as `not_selected` while offline — see
+  // `deriveMySubmissions`'s own doc comment for the flash this prevents.
+  const mySubmissions = deriveMySubmissions(tracked, myPending, activeMine, days, now, pendingServerReady && activeServerReady);
   // Every id `mySubmissions` already renders WITH a status pill (#559, Codex
   // P2) — excluded here so the plain pool list below never shows the SAME
   // Prompt a second time with no status at all.

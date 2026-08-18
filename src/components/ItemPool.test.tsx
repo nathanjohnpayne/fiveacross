@@ -14,6 +14,7 @@ const H = vi.hoisted(() => ({
   user: { uid: 'u1' } as { uid: string } | null,
   items: [] as ItemDoc[],
   myPending: [] as ItemDoc[],
+  myActive: [] as ItemDoc[],
   addItem: vi.fn(),
   reportItem: vi.fn(),
 }));
@@ -25,7 +26,11 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useItems: () => ({ items: H.items, loading: false }),
-  useMyPendingItems: () => ({ items: H.myPending, loading: false }),
+  useMyPendingItems: () => ({ items: H.myPending, loading: false, hasServerData: true }),
+  // #559 round 2 (Codex P2, PR #845): ItemPool's own unfiltered "my active
+  // submissions" query — deliberately SEPARATE from `H.items` (the public
+  // pool), mirroring `useMyActiveItems`'s own doc comment.
+  useMyActiveItems: () => ({ items: H.myActive, loading: false, hasServerData: true }),
   // #559: ItemPool now reads the Day schedule for its submitter-state pills.
   // No schedule here — this file's existing assertions predate #559 and
   // don't exercise scheduled/approved/not-selected states (own suite below).
@@ -63,6 +68,7 @@ beforeEach(() => {
   H.user = { uid: 'u1' };
   H.items = [];
   H.myPending = [];
+  H.myActive = [];
 });
 
 describe('ItemPool submission (specs/d15-approvals.md)', () => {
@@ -141,7 +147,12 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
       removeItem: (key: string) => void store.delete(key),
     } as unknown as Storage);
     try {
-      H.items = [item('mine-1', { status: 'active', text: 'My approved prompt' })];
+      const mine = item('mine-1', { status: 'active', text: 'My approved prompt' });
+      // Present in BOTH the public pool AND the submitter-scoped active
+      // query (#559 round 2) — exactly the normal case for an approved
+      // submission that hasn't been presentationally hidden.
+      H.items = [mine];
+      H.myActive = [mine];
       localStorage.setItem(
         'gcb.mySuggestions.ev-1.u1',
         JSON.stringify([{ id: 'mine-1', text: 'My approved prompt', submittedAt: 1 }]),

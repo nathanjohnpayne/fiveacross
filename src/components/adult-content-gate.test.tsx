@@ -31,7 +31,10 @@ vi.mock('../data/api', () => ({
 }));
 vi.mock('../hooks/useData', () => ({
   useItems: () => ({ items: [], loading: false }),
-  useMyPendingItems: () => ({ items: [] }),
+  useMyPendingItems: () => ({ items: [], hasServerData: true }),
+  // #559 round 2: ItemPool's own unfiltered "my active submissions" query —
+  // empty/no-op here, for the same reason as useMyPendingItems above.
+  useMyActiveItems: () => ({ items: [], loading: false, hasServerData: true }),
   // #559: ItemPool now reads the Day schedule for its submitter-state pills.
   // No schedule here — a no-op for this file's adult-content-gate assertions.
   useEventDoc: () => ({ data: undefined }),
