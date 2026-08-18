@@ -260,6 +260,20 @@ describe('e2e functions dotenv generation', () => {
     expect(declaredParamNames(namespaced).secrets).toEqual(['CJS_SECRET']);
   });
 
+  // #738 (Phase 4b post-review on PR #730): the destructured CJS form above
+  // is not the only way to bind a constructor off a `require` call — a
+  // direct property access (`require(...).defineString`) is a distinct AST
+  // shape (the require call is the property access's EXPRESSION, not the
+  // declaration's own initializer) that the destructured-only check missed.
+  it('resolves a constructor bound by a direct require property access', () => {
+    const propertyAccess = [
+      "const defineString = require('firebase-functions/params').defineString;",
+      "exports.A = defineString('CJS_PROPERTY_PARAM');",
+    ].join('\n');
+
+    expect(declaredParamNames(propertyAccess).params).toEqual(['CJS_PROPERTY_PARAM']);
+  });
+
   // Codex P2 on PR #730: a file-wide name lookup cannot see that an inner scope
   // rebound the name, so a shadowed call read as a param and aborted every run.
   it('ignores a call whose name is shadowed in an inner scope', () => {
@@ -272,6 +286,71 @@ describe('e2e functions dotenv generation', () => {
     ].join('\n');
 
     expect(declaredParamNames(shadowing).params).toEqual(['REAL_PARAM']);
+  });
+
+  // #741 (Phase 4b post-review on PR #730): the earlier shadowing check only
+  // recognized a plain-identifier parameter or a top-level plain-identifier
+  // `var`/`let`/`const` — a destructured parameter, a catch binding, a named
+  // function expression's own name, and a `var` hoisted out of a NESTED
+  // statement (not a direct ancestor of the call) all rebind the name too,
+  // and were previously invisible to it.
+  it('ignores a call shadowed by a destructured parameter', () => {
+    const destructuredParam = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper({ defineString }) {',
+      "  return defineString('LOCAL_NOT_A_PARAM');",
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(destructuredParam).params).toEqual(['REAL_PARAM']);
+  });
+
+  it('ignores a call shadowed by a catch binding', () => {
+    const catchBound = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper() {',
+      '  try {',
+      '    risky();',
+      '  } catch (defineString) {',
+      "    return defineString('LOCAL_NOT_A_PARAM');",
+      '  }',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(catchBound).params).toEqual(['REAL_PARAM']);
+  });
+
+  it("ignores a call shadowed by a named function expression's own name", () => {
+    const namedFnExpression = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export const helper = function defineString() {',
+      "  return defineString('LOCAL_NOT_A_PARAM');",
+      '};',
+    ].join('\n');
+
+    expect(declaredParamNames(namedFnExpression).params).toEqual(['REAL_PARAM']);
+  });
+
+  it('ignores a call shadowed by a var hoisted out of a sibling nested block', () => {
+    // `var` is function-scoped, so a call textually BEFORE and OUTSIDE the
+    // `if` block that declares it is still shadowed, by hoisting — the
+    // straight ancestor-chain walk alone cannot see this.
+    const hoistedFromSibling = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(flag) {',
+      "  const early = defineString('LOCAL_NOT_A_PARAM');",
+      '  if (flag) {',
+      '    var defineString = (name) => name;',
+      '  }',
+      '  return early;',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(hoistedFromSibling).params).toEqual(['REAL_PARAM']);
   });
 
   // Codex P2 on PR #730, and the exact counterpart of the earlier finding that a
@@ -349,6 +428,139 @@ describe('e2e functions dotenv generation', () => {
   });
 });
 
+// #738/#739/#740 (Phase 4b post-review on PR #730): the reachable-tree walk
+// (`functionsSources`/`relativeDependencies`) and the barrel-resolution half
+// of `constructorBindings` both need REAL files on disk — they resolve
+// relative specifiers with `resolveRelative`, which is an `existsSync` check
+// — so these live in their own on-disk fixture tree, mirroring the
+// `dotenv layering` describe block's pattern below.
+describe('functions source-tree reachability and barrel resolution', () => {
+  const makeTree = (files) => {
+    const dir = mkdtempSync(join(tmpdir(), 'e2e-functions-sources-'));
+    for (const [relativePath, contents] of Object.entries(files)) {
+      writeFileSync(join(dir, relativePath), contents);
+    }
+    return dir;
+  };
+
+  // #738: a params constructor reached through a LOCAL re-export barrel —
+  // `import { defineString } from './barrel'`, where `./barrel` re-exports
+  // it from `firebase-functions/params` — is bound by provenance through the
+  // barrel, not just a direct import from the params module itself.
+  it('resolves a constructor reached through a local re-export barrel', () => {
+    const dir = makeTree({
+      'barrel.ts': "export { defineString } from 'firebase-functions/params';\n",
+      'index.ts': ["import { defineString } from './barrel';", "defineString('BARRELED_PARAM');"].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['BARRELED_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #738: the same, through TWO barrels, aliasing at each hop — proves the
+  // resolution is recursive, not a single fixed lookup, and that a rename
+  // along the chain is followed rather than losing the binding.
+  it('resolves a constructor reached through a chain of re-export barrels', () => {
+    const dir = makeTree({
+      'inner-barrel.ts': "export { defineString as innerString } from 'firebase-functions/params';\n",
+      'outer-barrel.ts': "export { innerString as outerString } from './inner-barrel';\n",
+      'index.ts': [
+        "import { outerString } from './outer-barrel';",
+        "outerString('CHAINED_BARREL_PARAM');",
+      ].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['CHAINED_BARREL_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #739: `import type` is erased entirely at compile time — Firebase never
+  // executes the module it names, so a param declared there is never
+  // registered. The old walk followed it anyway and could abort a run
+  // demanding a value for a param the emulator will never ask for.
+  it('does not follow a type-only import into a module Firebase never loads', () => {
+    const dir = makeTree({
+      'types-only.ts': [IMPORT, "export const NEVER_LOADED = defineString('NEVER_LOADED_PARAM');"].join('\n'),
+      'index.ts': ["import type { Foo } from './types-only';", 'export type { Foo };'].join('\n'),
+    });
+
+    const reachable = functionsSources(join(dir, 'index.ts')).map(({ label }) => label);
+    expect(reachable).not.toEqual(expect.arrayContaining([expect.stringMatching(/types-only\.ts$/)]));
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #739, the mixed-specifier case: `import { type X, y }` still loads the
+  // module for the runtime binding `y`, so the whole specifier must NOT be
+  // dropped just because ONE named binding in it is type-only.
+  it('still follows an import that mixes a type-only and a runtime binding', () => {
+    const dir = makeTree({
+      'mixed.ts': [
+        'export const answer = 42;',
+        'export type Foo = string;',
+      ].join('\n'),
+      'index.ts': ["import { type Foo, answer } from './mixed';", 'export type { Foo }; export { answer };'].join(
+        '\n',
+      ),
+    });
+
+    const reachable = functionsSources(join(dir, 'index.ts')).map(({ label }) => label);
+    expect(reachable).toEqual(expect.arrayContaining([expect.stringMatching(/mixed\.ts$/)]));
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #740: `import x = require('./x')` is TypeScript's pre-ESM syntax for a
+  // runtime require — not expressible as an `ImportDeclaration` at all — and
+  // was invisible to the walk entirely, a false NEGATIVE (a missed
+  // dependency) rather than #739's false positive.
+  it('follows a TypeScript import-equals require', () => {
+    const dir = makeTree({
+      'legacy.ts': [IMPORT, "export const A = defineString('IMPORT_EQUALS_PARAM');"].join('\n'),
+      'index.ts': "import legacy = require('./legacy');\nexport { legacy };\n",
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['IMPORT_EQUALS_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #740: a `require`/`import()` specifier this scanner cannot read
+  // statically (not a string, not a no-substitution template literal) used
+  // to be silently dropped — the exact "indistinguishable from not existing"
+  // failure mode `scanSource`'s unresolvable-name guard already refuses for
+  // param NAMES. A dependency specifier gets the same fail-closed treatment.
+  it('fails closed on a require specifier it cannot resolve statically, rather than skipping it', () => {
+    const dir = makeTree({
+      'index.ts': ['const moduleName = computeModuleName();', "require(moduleName);"].join('\n'),
+    });
+
+    expect(() => functionsSources(join(dir, 'index.ts'))).toThrow(/cannot resolve statically/);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // A no-substitution template literal is exactly as static as a plain
+  // string, and is accepted the same way `literalNameOf` already accepts one
+  // for a param name.
+  it('accepts a no-substitution template literal require specifier as static', () => {
+    const dir = makeTree({
+      'legacy.ts': [IMPORT, "export const A = defineString('TEMPLATE_LITERAL_PARAM');"].join('\n'),
+      'index.ts': ['require(`./legacy`);'].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['TEMPLATE_LITERAL_PARAM']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 // Codex P2 on PR #730. `resolveSecretEnvs` filters with `!secretEnvs[s.key]`,
 // so an empty value is not a value: the emulator reaches for the real Secret
 // Manager, and a run that is supposed to be self-contained needs credentials.
@@ -405,6 +617,51 @@ describe('secret values the emulator can actually use', () => {
 
   it('still allows an empty PARAM value, which is a legitimate default', () => {
     expect(unassignedNames(parseDotenv('EMAIL_REPLY_TO=\n', 'empty'), ['EMAIL_REPLY_TO'])).toEqual([]);
+  });
+
+  // #742 (Phase 4b post-review on PR #730): `parseStrict` fails a
+  // syntactically fine but semantically invalid key (lowercase, or a name
+  // Firebase reserves) with ZERO entries in `parse(body).errors` — that array
+  // only ever holds SYNTAX errors, and this is a KEY-validation error, a
+  // different failure inside `parseStrict`. The old message pattern-matched
+  // only that array and reported "0 malformed lines", which is true and
+  // useless: it names no location and hides that the run failed at all.
+  // Verified empirically against the installed firebase-tools: `parse(...)
+  // .errors` is genuinely empty for a lowercase key, so this is not a
+  // hypothetical.
+  it('locates a strict-only key rejection instead of claiming 0 malformed lines', () => {
+    const lowercaseKey = 'resend_api_key=sk_live_do_not_leak_me\n';
+
+    expect(parse(lowercaseKey).errors).toEqual([]);
+
+    let message = '';
+    try {
+      parseDotenv(lowercaseKey, 'functions/.secret.local');
+    } catch (error) {
+      message = error.message;
+    }
+
+    expect(message).not.toContain('0 malformed');
+    expect(message).toContain('line 1');
+    expect(message).not.toContain('sk_live_do_not_leak_me');
+    // The key name itself is not a credential — surfacing it (unlike the
+    // value) matches firebase-tools' own KeyValidationError message.
+    expect(message).toContain('resend_api_key');
+  });
+
+  it('locates every line when more than one key fails strict validation', () => {
+    const reservedAndLowercase = 'FIREBASE_CONFIG=x\nlowercase_key=y\nGOOD_KEY=z\n';
+
+    let message = '';
+    try {
+      parseDotenv(reservedAndLowercase, 'functions/.env.local');
+    } catch (error) {
+      message = error.message;
+    }
+
+    expect(message).toContain('(line 1, 2)');
+    expect(message).not.toContain(', 3');
+    expect(message).toContain('2 invalid keys');
   });
 });
 
