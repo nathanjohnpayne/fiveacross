@@ -1963,6 +1963,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 22l (#548, Codex P2 round 8): a BARE deploy.sh invocation still pins the
+# reconciliation project.
+#
+# DEPLOY_TARGET_PROJECT is set only by scripts/deploy-target.mjs. The documented
+# `scripts/deploy.sh -- <project>` entry point leaves it unset, so without a
+# DEPLOY_PROJECT fallback the handoff wrapper falls back to its OWN default —
+# `fiveacross`, unlike its siblings' `gaycruisebingo` — and reconciles the wrong
+# project while the callables just deployed stay 403.
+# ---------------------------------------------------------------------------
+REPO22L="$WORKDIR/case22l-bare-project-pin"
+init_fixture_repo "$REPO22L"
+OUT22L="$WORKDIR/case22l.out"
+ERR22L="$WORKDIR/case22l.err"
+: >"$WORKDIR/ofd-calls-22l.log"
+: >"$WORKDIR/gcloud-calls-22l.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22l.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22l.log" \
+  bash -c "cd '$REPO22L' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$OUT22L" 2>"$ERR22L"
+RC22L=$?
+set -e
+
+if [[ $RC22L -ne 0 ]]; then
+  fail "bare-project-pin: deploy.sh returned $RC22L. stderr was:"
+  cat "$ERR22L" >&2
+elif grep -q 'fiveacross' "$WORKDIR/gcloud-calls-22l.log"; then
+  fail "bare-project-pin: a bare gaycruisebingo deploy reconciled fiveacross — the handoff wrapper's own default leaked through. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22l.log" >&2
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-22l.log"; then
+  fail "bare-project-pin: the handoff services were never reconciled at all. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22l.log" >&2
+else
+  pass "bare-project-pin: a bare deploy.sh invocation pins every wrapper to the resolved deploy project (rc=$RC22L)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

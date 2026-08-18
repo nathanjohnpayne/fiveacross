@@ -445,15 +445,27 @@ INVOKER_ENV=(env
   -u AUTH_HANDOFF_PROJECT -u AUTH_HANDOFF_REGION
   -u AUTH_HANDOFF_MINT_SERVICE -u AUTH_HANDOFF_EXCHANGE_SERVICE
 )
-if [[ -n "${DEPLOY_TARGET_PROJECT:-}" ]]; then
+# DEPLOY_TARGET_PROJECT is set only by scripts/deploy-target.mjs. The documented
+# `scripts/deploy.sh -- <project> ...` entry point is invoked directly, so it
+# leaves that unset while DEPLOY_PROJECT has already resolved (from the
+# positional argument, or .firebaserc) far above. Falling back to it keeps EVERY
+# invocation project-explicit rather than only the wrapped ones (#548, Codex P2
+# round 8).
+#
+# This is not cosmetic for the handoff. Its wrapper's own default project is
+# `fiveacross`, unlike the two siblings' `gaycruisebingo`, so an unpinned bare
+# deploy of gaycruisebingo would reconcile FIVE ACROSS — either aborting the
+# preflight on cross-project permissions, or "succeeding" against the wrong
+# project while the callables it just deployed stay 403. The same fallback is
+# applied to the siblings, where a bare `-- fiveacross` deploy had the mirror
+# image of the bug and was benign only because their default happened to match
+# the commoner target.
+INVOKER_PIN_PROJECT="${DEPLOY_TARGET_PROJECT:-${DEPLOY_PROJECT:-}}"
+if [[ -n "$INVOKER_PIN_PROJECT" ]]; then
   INVOKER_ENV+=(
-    BUG_REPORT_PROJECT="$DEPLOY_TARGET_PROJECT"
-    EMAIL_UNSUBSCRIBE_PROJECT="$DEPLOY_TARGET_PROJECT"
-    # Pinned like the other two, and load-bearing here: this wrapper's own
-    # default project is `fiveacross` (the handoff's home), so an unpinned
-    # gaycruisebingo deploy would otherwise reconcile the WRONG project's
-    # services and report success over two freshly-403ing callables.
-    AUTH_HANDOFF_PROJECT="$DEPLOY_TARGET_PROJECT"
+    BUG_REPORT_PROJECT="$INVOKER_PIN_PROJECT"
+    EMAIL_UNSUBSCRIBE_PROJECT="$INVOKER_PIN_PROJECT"
+    AUTH_HANDOFF_PROJECT="$INVOKER_PIN_PROJECT"
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
@@ -462,7 +474,7 @@ run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
 # value deploy.sh pins automatically; printed because a human re-running a bare
 # wrapper would otherwise inherit that wrapper's own default project, which is
 # only ever one of this repo's two primaries (#548, Codex P2 round 3).
-INVOKER_REPAIR_PROJECT="${DEPLOY_TARGET_PROJECT:-${DEPLOY_PROJECT:-<project-id>}}"
+INVOKER_REPAIR_PROJECT="${INVOKER_PIN_PROJECT:-<project-id>}"
 
 # A post-deploy `--allow-missing` is normally wrong: an endpoint explicitly
 # selected for Functions release must exist once Firebase returns. The one
