@@ -669,7 +669,12 @@ async function resolve(
     const ceremonial = ceremonialDayIndexSet(days);
     isCeremonialDay = (i: number) => ceremonial.has(i);
     const frozenAt = evSnap?.data()?.frozenAt as number | undefined;
-    isStatsFrozen = () => standingsFrozen({ frozenAt, days });
+    // The CONFIGURED freeze rides along with the stamp (ADR 0011): this
+    // transaction re-reads the RAW event doc, so nothing has resolved
+    // `standingsFreezeAt` for it and omitting it would silently fall back to
+    // the schedule derivation on an Event that states its own freeze.
+    const standingsFreezeAt = evSnap?.data()?.standingsFreezeAt as number | undefined;
+    isStatsFrozen = () => standingsFrozen({ frozenAt, standingsFreezeAt, days });
     if (status === 'confirmed' || status === 'rejected') {
       echoSiblingDays = days.map((d) => d.index).filter((i) => i !== (c.dayIndex as number));
     }

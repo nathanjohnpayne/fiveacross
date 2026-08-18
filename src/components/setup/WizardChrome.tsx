@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { EventDraft, SetupStep } from '../../types';
 import type { StepDefinition } from './stepRegistry';
 import { STEP_LABELS, isStepComplete, issuesForStep, stepIndex } from './wizardSteps';
+import PreviewStrip from './PreviewStrip';
 
 export interface WizardChromeProps {
   registry: readonly StepDefinition[];
@@ -84,6 +85,10 @@ export default function WizardChrome({
   const isLastStep = currentStep === 'launch';
   const issues = issuesForStep(currentStep, draft, now);
   const complete = issues.length === 0;
+  // The strip appears from Step 2 on (specs/event-setup-wizard.md § "Live
+  // preview strip"): Occasion has no draft content yet to preview, and
+  // Launch has its own full review checklist in its place.
+  const showPreview = currentStep !== 'occasion' && !isLastStep;
 
   const handleContinue = () => {
     if (complete) {
@@ -165,6 +170,8 @@ export default function WizardChrome({
       </div>
 
       <div className="wizard-body">{children}</div>
+
+      {showPreview && <PreviewStrip draft={draft} />}
 
       {!isLastStep && (
         <div className="wizard-actions">
