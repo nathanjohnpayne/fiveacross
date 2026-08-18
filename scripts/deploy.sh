@@ -259,6 +259,26 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
         # reachable for that flow to work at all. Which HALVES were named is
         # tracked so the strictness can be decided after the whole scope is
         # parsed — see the reconciliation below the loop.
+        # `functions:default` names this repo's ONE Firebase codebase with no
+        # endpoint filter, so it releases everything exactly like the bare
+        # `functions` scope above and must be just as strict (#548, Codex P2
+        # round 6). It previously fell through to the unfamiliar-selector arm
+        # and went conservative, which could report success over a released
+        # service that was missing. The `--except` side already treats
+        # `functions:default` as the whole codebase; this makes `--only` agree.
+        # If this repo ever gains NAMED codebases, give each its own arm here
+        # rather than widening this one.
+        functions:default)
+          FUNCTIONS_ATTEMPTED=true
+          BUG_REPORT_INVOKER_SELECTED=true
+          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_MINT_NAMED=true
+          AUTH_HANDOFF_EXCHANGE_NAMED=true
+          BUG_REPORT_INVOKER_CONSERVATIVE=false
+          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+          ;;
         # BOTH spellings Firebase accepts for a scoped function deploy:
         # `functions:<fn>` and the codebase-qualified `functions:<codebase>:<fn>`
         # (`firebase deploy --help`). Matching only the short form sent the

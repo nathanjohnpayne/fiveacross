@@ -1930,6 +1930,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Case 22k (#548, Codex P2 round 6): `--only functions:default` is a FULL
+# Functions release and must stay strict.
+#
+# This repo has one Firebase codebase, `default`, so naming it carries no
+# endpoint filter and releases both handoff callables exactly like the bare
+# `functions` scope. Falling through to the unfamiliar-selector arm made it
+# conservative, which could report success over a released service that was
+# missing. The --except side already treated functions:default as the whole
+# codebase; this pins that --only agrees.
+# ---------------------------------------------------------------------------
+REPO22K="$WORKDIR/case22k-default-codebase"
+init_fixture_repo "$REPO22K"
+OUT22K="$WORKDIR/case22k.out"
+ERR22K="$WORKDIR/case22k.err"
+: >"$WORKDIR/ofd-calls-22k.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22k.log" \
+GCLOUD_MISSING_SERVICE="exchangeauthhandoff" \
+  bash -c "cd '$REPO22K' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default" \
+  >"$OUT22K" 2>"$ERR22K"
+RC22K=$?
+set -e
+
+if [[ $RC22K -eq 0 ]]; then
+  fail "default-codebase: --only functions:default returned 0 though a released handoff service is missing — the whole-codebase scope went conservative. stdout was:"
+  cat "$OUT22K" >&2
+else
+  pass "default-codebase: --only functions:default keeps both handoff halves strict (rc=$RC22K)."
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo
