@@ -4,6 +4,7 @@ import type { PoolId } from '../../game/pool';
 import { MIN_POOL } from '../../game/logic';
 import { normalizePool } from '../../game/pool';
 import { MAX_DAYS, assignedPools, type DraftIssue } from '../../data/draftValidation';
+import { MAX_PROMPT_TEXT } from '../../data/eventDraft';
 import {
   POOL_ORDER,
   addDay,
@@ -427,13 +428,23 @@ function PromptRow({
         <input
           className="grow"
           value={value}
-          maxLength={80}
+          maxLength={MAX_PROMPT_TEXT}
           aria-label={`Edit ${label}`}
           autoFocus
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') commit();
-            if (e.key === 'Escape') setEditing(false);
+            // `isComposing` guards an IME: confirming a composition emits
+            // Enter, and committing there would save a half-composed Prompt.
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) commit();
+            if (e.key === 'Escape') {
+              // Escape here cancels THIS edit and nothing more. `WizardChrome`
+              // holds a document-level Escape listener that requests Cancel on
+              // the whole draft, and React dispatches from its root container,
+              // so without this an organizer backing out of a text edit would
+              // be asked whether to discard the entire Event (Codex P2).
+              e.stopPropagation();
+              setEditing(false);
+            }
           }}
         />
       ) : (
@@ -506,12 +517,15 @@ function AddPromptBar({
       <input
         className="grow"
         value={text}
-        maxLength={80}
+        maxLength={MAX_PROMPT_TEXT}
         placeholder="Add your own… ask a local for a favourite detour"
         aria-label="New Prompt text"
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') submit();
+          // Same IME guard as the inline editor: an Enter that only confirms
+          // a composition would add the half-composed Prompt AND clear the
+          // field, losing what was being typed (Codex P2).
+          if (e.key === 'Enter' && !e.nativeEvent.isComposing) submit();
         }}
       />
       <select

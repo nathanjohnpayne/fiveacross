@@ -4631,14 +4631,25 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   margin: 0;
   padding: 0;
 }
+/* Wraps rather than overflowing: a Prompt row carries a pool chip, the text,
+   a spicy toggle and two icon buttons, and a Day row two selects and a
+   remove — more than a narrow phone fits on one line (Codex P2). `min-width`
+   lets the flexible middle actually shrink instead of forcing the row wider
+   than its container, which is what makes wrapping take effect at all. */
 .squares-prompt-row,
 .squares-day-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 7px 0;
   border-bottom: 1px solid var(--border);
   font-size: 13px;
+}
+.squares-prompt-row > .grow,
+.squares-day-head > .grow {
+  min-width: 8ch;
+  flex: 1 1 8ch;
 }
 .squares-day-row {
   padding: 0;

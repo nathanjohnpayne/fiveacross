@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { DraftDayDef, EventDraft } from '../../types';
 import { MIN_POOL } from '../../game/logic';
 import { MAX_DAYS } from '../../data/draftValidation';
-import { createEventDraft } from '../../data/eventDraft';
+import { MAX_PROMPT_TEXT, createEventDraft } from '../../data/eventDraft';
 import StepSquares from './StepSquares';
 
 // Covers specs/event-setup-wizard.md § "Squares" (#791) — the UI half of the
@@ -239,6 +239,60 @@ describe('prompt CRUD', () => {
       { text: 'main 1', spicy: false },
       { text: 'main 2', spicy: false },
     ]);
+  });
+
+  it('keeps Escape in the inline editor away from the wizard-wide Cancel listener', async () => {
+    // `WizardChrome` holds a document-level Escape listener that requests
+    // Cancel on the whole draft. Backing out of a text edit must not ask the
+    // organizer whether to discard the entire Event (Codex P2, round 1).
+    const documentEscape = vi.fn();
+    document.addEventListener('keydown', documentEscape);
+    try {
+      renderStep(
+        draftWith({
+          days: [day(0, { pool: 'closing' })],
+          prompts: { main: mainPrompts(1), easy: [], closing: [] },
+        }),
+      );
+      await userEvent.click(screen.getByRole('button', { name: 'Edit Prompt 1 in the main pool' }));
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByRole('textbox', { name: /^Edit Prompt/ })).toBeNull();
+      expect(documentEscape).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener('keydown', documentEscape);
+    }
+  });
+
+  it('does not commit an Enter that is only confirming an IME composition', () => {
+    const { current } = renderStep(
+      draftWith({
+        days: [day(0, { pool: 'closing' })],
+        prompts: { main: mainPrompts(1), easy: [], closing: [] },
+      }),
+    );
+    const addInput = screen.getByLabelText('New Prompt text');
+    fireEvent.change(addInput, { target: { value: 'はじめ' } });
+    // The Enter that confirms the composition — not a submit.
+    fireEvent.keyDown(addInput, { key: 'Enter', isComposing: true });
+    expect(current().prompts.main).toHaveLength(1);
+    expect(addInput).toHaveValue('はじめ');
+    // The Enter that follows the composition IS a submit.
+    fireEvent.keyDown(addInput, { key: 'Enter' });
+    expect(current().prompts.main).toHaveLength(2);
+    expect(current().prompts.main[1]).toEqual({ text: 'はじめ', spicy: false });
+  });
+
+  it('caps both inputs at the shared persisted bound rather than a literal', () => {
+    renderStep(
+      draftWith({
+        days: [day(0, { pool: 'closing' })],
+        prompts: { main: mainPrompts(1), easy: [], closing: [] },
+      }),
+    );
+    expect(screen.getByLabelText('New Prompt text')).toHaveAttribute(
+      'maxLength',
+      String(MAX_PROMPT_TEXT),
+    );
   });
 
   it('flags repeated wording without blocking on it', async () => {
