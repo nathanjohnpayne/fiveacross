@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPodium, finalePinIndex } from './finale';
+import { buildPodium, finaleDayIndex, finalePinIndex } from './finale';
 import type { DayDef, PlayerDoc } from '../types';
 
 // Fixtures (#217, specs/d15-finale.md): a 3-Day cruise — embark (Day 0,
@@ -40,6 +40,42 @@ function player(overrides: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid'>): PlayerD
     ...overrides,
   };
 }
+
+// ADR 0011 (Codex P1, PR #841): ONE answer to "which Day is the finale", read
+// by both the default-view pin and the podium's mount gate in Board.tsx. Those
+// two used to disagree by construction — the pin resolved the closing Day while
+// the mount re-inferred it from `viewedDay.pool === 'closing'` — so a schedule
+// stating its ceremonial Day on another pool pinned a Player to a Day that then
+// rendered no podium at all.
+describe('finaleDayIndex — the one definition of the finale Day', () => {
+  it('is the first ceremonial Day when the schedule has one', () => {
+    expect(finaleDayIndex(DAYS)).toBe(2);
+  });
+
+  it('falls back to the LAST Day when no Day is ceremonial', () => {
+    expect(finaleDayIndex([DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })])).toBe(2);
+  });
+
+  it('follows the stated policy onto a non-closing pool', () => {
+    const days = [DAYS[0], day({ index: 1, pool: 'main', scoring: 'ceremonial' }), day({ index: 2, pool: 'main' })];
+    expect(finaleDayIndex(days)).toBe(1);
+  });
+
+  it('is -1 when there are no Days', () => {
+    expect(finaleDayIndex([])).toBe(-1);
+    expect(finaleDayIndex(undefined)).toBe(-1);
+  });
+
+  it('agrees with finalePinIndex whenever the pin resolves', () => {
+    for (const days of [
+      DAYS,
+      [DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })],
+      [DAYS[0], day({ index: 1, pool: 'main', scoring: 'ceremonial' }), day({ index: 2, pool: 'main' })],
+    ]) {
+      expect(finalePinIndex(days, NOW, NOW)).toBe(finaleDayIndex(days));
+    }
+  });
+});
 
 describe('finalePinIndex — default-view pin (never before the freeze)', () => {
   it('returns null when frozenAt is unset, even with the closing Day unlocked', () => {

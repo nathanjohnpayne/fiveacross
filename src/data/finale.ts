@@ -202,10 +202,28 @@ export function finalePinIndex(
   now: number,
 ): number | null {
   if (frozenAt == null) return null;
-  const arr = days ?? [];
-  if (arr.length === 0) return null;
-  const ceremonialIdx = arr.findIndex((d) => isCeremonialDay(d));
-  const idx = ceremonialIdx >= 0 ? ceremonialIdx : arr.length - 1;
-  if (arr[idx].unlockAt > now) return null;
+  const idx = finaleDayIndex(days);
+  if (idx < 0) return null;
+  if ((days ?? [])[idx].unlockAt > now) return null;
   return idx;
+}
+
+/**
+ * The ARRAY index of the Day the finale lives on: the first CEREMONIAL Day when
+ * the schedule has one, else the LAST Day; `-1` when there are no Days.
+ *
+ * Time-independent and freeze-independent on purpose, so the "which Day is the
+ * finale" question has exactly ONE answer that the default-view pin
+ * (`finalePinIndex`) and the podium's mount gate in `Board.tsx` both read.
+ * Those two used to disagree by construction — the pin resolved the closing
+ * Day while the mount re-inferred it from `viewedDay.pool === 'closing'` — so
+ * an Event that states a ceremonial Day on some other pool, or none at all,
+ * would pin a returning Player to a Day that then rendered no podium and no
+ * share action (Codex P1, PR #841).
+ */
+export function finaleDayIndex(days: readonly DayDef[] | undefined): number {
+  const arr = days ?? [];
+  if (arr.length === 0) return -1;
+  const ceremonialIdx = arr.findIndex((d) => isCeremonialDay(d));
+  return ceremonialIdx >= 0 ? ceremonialIdx : arr.length - 1;
 }

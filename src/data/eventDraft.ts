@@ -33,10 +33,11 @@ import type {
  * reads as a MISS (`null`), never as a mis-shaped draft — the ADR 0009 cache
  * convention `eventResolution.CACHE_VERSION` and `CardSnapshot.v` both follow.
  *
- * This is the forward-migration lever the ticket asks for. When #531 lands
- * `DayDef.scoring` / `EventDoc.standingsFreezeAt` and the draft grows them,
- * bumping this retires every draft written without them rather than resuming
- * a half-shaped one at Step 5.
+ * This is the forward-migration lever the ticket asks for. `DayDef.scoring` /
+ * `EventDoc.standingsFreezeAt` landed on the shared contract in #551, but the
+ * draft does not author them yet; when it grows them, bumping this retires
+ * every draft written without them rather than resuming a half-shaped one at
+ * Step 5.
  */
 export const DRAFT_SCHEMA_VERSION = 1;
 

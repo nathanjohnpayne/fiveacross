@@ -842,13 +842,17 @@ export interface DayMetaDoc {
 // document, and #531 (ADR 0011 `DayDef.scoring` / `EventDoc.standingsFreezeAt`)
 // is editing this file mid-body at the same time.
 //
-// SCOPE NOTE (#787, coordinating with #531). `DayDef.scoring` and
-// `EventDoc.standingsFreezeAt` are absent from the contract above even though
-// `scripts/seed-data/bodega-bay-2026.mjs` already writes both, so `DraftDayDef`
-// carries NEITHER — stating them here would fork the Scoring Policy vocabulary
-// ahead of the ADR that owns it. This is a recorded deferral, not an oversight:
-// when #531 lands, both land on the draft too, behind a
-// `DRAFT_SCHEMA_VERSION` bump (an older stored draft then reads as a miss).
+// SCOPE NOTE (#787, updated by #551). `DayDef.scoring` and
+// `EventDoc.standingsFreezeAt` have LANDED on the contract above (ADR 0011) and
+// `scripts/seed-data/bodega-bay-2026.mjs` writes both. `DraftDayDef`/`EventDraft`
+// still carry NEITHER — what remains deferred is the wizard's AUTHORING of them,
+// not the vocabulary. An organizer therefore cannot yet state a Scoring Policy
+// or a freeze; the launch provisioner writes neither, and both fall back to the
+// read-resolution (`scoringForDay`, `standingsFreezeAtFor`), which derives them
+// from the closing pool exactly as today. Adding them to the draft needs a
+// `DRAFT_SCHEMA_VERSION` bump (an older stored draft then reads as a miss) and
+// a matching relaxation of `finaleClosingPoolIssues`, which still requires the
+// final Day to carry the closing pool.
 
 /** Which wizard step a draft was last standing on, so Resume is lossless.
  *  Named for the frames (`#frame-setup-occasion` … `#frame-setup-launch`)

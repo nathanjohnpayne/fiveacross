@@ -56,7 +56,7 @@ import DaySwitcher, { defaultViewedIndex } from './DaySwitcher';
 import TutorialBanner, { TutorialTag } from './TutorialBanner';
 import { formatUnlockAt, unlockCaption } from '../unlockCopy';
 import FarewellPodium from './FarewellPodium';
-import { finalePinIndex } from '../data/finale';
+import { finalePinIndex, finaleDayIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
 import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
@@ -2447,16 +2447,24 @@ export default function Board() {
           />
         )}
         {/* The farewell podium (#217, daily-cards-spec § "Farewell view"):
-            shown on the farewell Day once the standings freeze (`frozenAt`
+            shown on the FINALE Day once the standings freeze (`frozenAt`
             set), ABOVE the goodbye banner below — this ticket owns the
             podium and its stacking order; the goodbye copy is
-            TutorialBanner's. `buildPodium` freezes out the farewell Day's
-            own marks, so a post-freeze goodbye tap never moves the podium.
+            TutorialBanner's. `buildPodium` freezes out every ceremonial
+            Day's own marks, so a post-freeze goodbye tap never moves the
+            podium.
+
+            The mount gate reads `finaleDayIndex` — the SAME resolver the
+            default-view pin uses (ADR 0011) — rather than re-inferring the
+            Day from `viewedDay.pool === 'closing'`. Those two disagreed for
+            any Event whose ceremonial Day is on another pool, or which has
+            none at all: the pin sent a returning Player to a Day that then
+            rendered no podium and no share action (Codex P1, PR #841).
             The roster is ban-filtered first (Leaderboard.tsx parity): the
             podium is a public leaderboard-like surface, so a banned Player
             must never surface as champion, First to BINGO, or a daily
             honor (Codex #244). */}
-        {viewedDay?.pool === 'closing' && event?.frozenAt != null && (
+        {hasDays && viewedIndex === finaleDayIndex(days) && event?.frozenAt != null && (
           <FarewellPodium
             players={players.filter((p) => !isBanned(p.uid, event?.bannedUids ?? []))}
             days={days}

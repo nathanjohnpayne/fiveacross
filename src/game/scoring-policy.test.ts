@@ -4,6 +4,7 @@ import { ceremonialDayIndexSet, standingsFreezeAtFor, standingsFrozen } from './
 import { migrateDayFields } from '../data/converters';
 import { normalizePool } from './pool';
 import { DAYS as GCB_DAYS } from '../data/seed';
+import * as BODEGA from '../../scripts/seed-data/bodega-bay-2026.mjs';
 import type { DayDef } from '../types';
 
 // ADR 0011: a Day's Scoring Policy is STATED, and the Standings Freeze is an
@@ -233,5 +234,59 @@ describe('legacy Gay Cruise Bingo docs read byte-identically (ADR 0011)', () => 
     expect(standingsFreezeAtFor({ frozenAt: undefined, days: resolved })).toBe(NOW);
     expect(standingsFrozen({ frozenAt: undefined, days: resolved }, NOW - 1)).toBe(false);
     expect(standingsFrozen({ frozenAt: undefined, days: resolved }, NOW)).toBe(true);
+  });
+});
+
+// --- The live Event that ALREADY stores both fields -----------------------------
+//
+// Bodega Bay's seed has written `scoring` on every Day and `standingsFreezeAt`
+// on the Event since #787, back when nothing read either. This change is what
+// makes them LIVE, so "legacy docs are byte-identical" is not the whole promise
+// for that Event — the stated values have to agree with what the pool-scanning
+// code inferred, or a real Event's podium moves the day this ships.
+//
+// The seed says they agree on purpose ("the same instant as the wrap-up Day's
+// unlock, so the inferred and stated freeze agree"). This asserts it, so a later
+// edit to the seed that breaks the agreement fails here rather than in the Feed.
+describe('Bodega Bay stores both fields, and they agree with the derivation', () => {
+  const days = BODEGA.EVENT_SEED.days as Array<Record<string, unknown>>;
+
+  it('states a scoring policy on every Day that matches the pool derivation', () => {
+    for (const raw of days) {
+      expect(raw.scoring).toBeDefined(); // the seed really does write it
+      // What the Day states, and what the pool alone would have said.
+      const stated = scoringForDay(raw);
+      const derived = scoringForDay({ pool: raw.pool });
+      expect(stated).toBe(derived);
+    }
+    // …and the resolved shape is the one the Event actually wants: a
+    // competitive easy-pool Friday, and a single ceremonial wrap-up.
+    expect(days.map((d) => scoringForDay(d))).toEqual([
+      'competitive',
+      'competitive',
+      'competitive',
+      'ceremonial',
+    ]);
+  });
+
+  it('states a freeze equal to the instant the derivation would have produced', () => {
+    const resolved = days.map((d) => migrateDayFields(d));
+    const stated = BODEGA.EVENT_SEED.standingsFreezeAt as number;
+    const derivedFromSchedule = standingsFreezeAtFor({ frozenAt: undefined, days: resolved });
+    expect(typeof stated).toBe('number');
+    expect(stated).toBe(derivedFromSchedule);
+    // Stated as the wrap-up Day's own unlock — the equality the seed comment
+    // promises, spelled out so breaking it is loud.
+    expect(stated).toBe(days[3].unlockAt);
+  });
+
+  it('freezes at the same instant whether the stored field is honoured or ignored', () => {
+    const resolved = days.map((d) => migrateDayFields(d));
+    const stated = BODEGA.EVENT_SEED.standingsFreezeAt as number;
+    const withField = { frozenAt: undefined, days: resolved, standingsFreezeAt: stated };
+    const withoutField = { frozenAt: undefined, days: resolved };
+    for (const at of [stated - 1, stated, stated + 1]) {
+      expect(standingsFrozen(withField, at)).toBe(standingsFrozen(withoutField, at));
+    }
   });
 });
