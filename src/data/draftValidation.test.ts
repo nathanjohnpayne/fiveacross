@@ -267,6 +267,19 @@ describe('firstUnlockIssues', () => {
     expect(firstUnlockIssues(draft, NOW)).toEqual([]);
   });
 
+  it('still finds Day 0 directly when a negative-index Day sorts before it (CodeRabbit, #833 review)', () => {
+    // daysInOrder sorts ascending, so [0] in that array would be the Day at
+    // index -1, not Day 0 — the wrong Day, from which the old `[0].index !==
+    // 0` guard concluded there was no first-unlock issue to report, even
+    // though Day 0 is right here and unlockless.
+    const draft = launchableDraft({
+      days: [day(-1, { pool: 'closing' }), day(0, { unlockAt: null })],
+    });
+    const issues = firstUnlockIssues(draft, NOW);
+    expect(issues.map((i) => i.code)).toEqual(['first-unlock-missing']);
+    expect(issues[0].dayIndex).toBe(0);
+  });
+
   it('does not suppress a later Day\'s own unlock diagnostic when Day 0 is missing (#816)', () => {
     const draft = launchableDraft({
       days: [day(1, { unlockAt: null }), day(3, { pool: 'closing' })],

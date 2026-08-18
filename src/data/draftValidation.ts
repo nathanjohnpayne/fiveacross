@@ -312,16 +312,21 @@ export function finaleClosingPoolIssues(draft: EventDraft): DraftIssue[] {
  */
 export function firstUnlockIssues(draft: EventDraft, now: number): DraftIssue[] {
   if (draft.cardFormat === 'one_card') return [];
-  const first = daysInOrder(draft)[0];
-  // Specifically Day INDEX 0, not merely the lowest-index Day that exists. A
-  // schedule missing Day 0 is already its own failure —
+  // Specifically the Day whose INDEX IS 0, found directly — NOT
+  // `daysInOrder(draft)[0]`. `daysInOrder` sorts ascending, so on a malformed
+  // schedule carrying a negative index alongside a real Day 0 (e.g. indexes
+  // `-1` and `0`), position `[0]` in that sorted array is the Day at index
+  // `-1`, not Day 0 — `[0].index !== 0` would then report NO first-unlock
+  // issue even though Day 0 exists and needs one (CodeRabbit, #833 review).
+  // A schedule missing Day 0 entirely is already its own failure —
   // `dayCompletenessIssues` reports the gap as `day-index-out-of-order` — and
   // treating a later Day as "first" here would double-misreport it: the
   // hardcoded "Day 1" message would actually describe Day 2 or later, AND
   // `validateEventDraft`'s dedup would suppress that Day's own generic
   // `day-missing-unlock` / `day-unlock-date-mismatch` diagnostic because it
   // believes the specific row already covers it (#816).
-  if (!first || first.index !== 0) return [];
+  const first = daysInOrder(draft).find((day) => day.index === 0);
+  if (!first) return [];
   if (first.unlockAt === null) {
     return [
       {
