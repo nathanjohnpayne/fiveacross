@@ -169,9 +169,13 @@ export function previewDayLine(
  *  Grapheme clusters, not code points: a flag, a skin-toned hand, or a family
  *  ZWJ sequence is several code points and one glyph, and all three are
  *  legitimate postage. `Intl.Segmenter` is the correct instrument; where it is
- *  missing the fallback bounds code points instead, which over-accepts a
- *  little (it cannot tell one ZWJ sequence from two adjacent emoji) but still
- *  keeps the box near stamp-sized. */
+ *  missing there is no way to tell one ZWJ sequence from several adjacent
+ *  emoji, so the fallback accepts only a single code point. That trades away
+ *  legitimate multi-codepoint postage (flags, skin tones, ZWJ families) on
+ *  Segmenter-less browsers, but a false decline just degrades to the
+ *  unstamped layout this module already draws correctly (see `previewDayEmoji`
+ *  below) — a far cheaper mistake than accepting several code points as one
+ *  glyph and drawing an oversized or clipped stamp (#779, #780). */
 function isSingleGlyph(value: string): boolean {
   // Typed locally rather than via `lib.esnext`: this module is deliberately
   // dependency-free and compiled against the repo's existing lib target, which
@@ -184,7 +188,7 @@ function isSingleGlyph(value: string): boolean {
   if (Segmenter) {
     return [...new Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].length === 1;
   }
-  return [...value].length <= 8;
+  return [...value].length === 1;
 }
 
 /**
