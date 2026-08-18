@@ -1115,11 +1115,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Signal (b), #346: the durable pending record proves a redirect was
       // actually started, so a User publishing HERE — even with no
       // getRedirectResult answer yet, or ever — is that redirect completing,
-      // not an ordinary cached-session restore. `consumeRedirectContextOnce`
-      // is idempotent and shared with the getRedirectResult effect (signal a),
-      // so this is a no-op read on every mount where no redirect was pending —
-      // which is every normal reload, including a normal signed-in restore.
-      if (consumeRedirectContextOnce().pending) completeRedirectReturn(u);
+      // not an ordinary cached-session restore. This is a no-op on every
+      // mount where no redirect was pending — which is every normal reload,
+      // including a normal signed-in restore.
+      //
+      // Revalidated LIVE via `peekRedirectPending()`, not the mount-time
+      // cache `consumeRedirectContextOnce()` holds (Codex P2 on #836): that
+      // cache is a snapshot taken once at mount and never expires on its
+      // own, so a mount that stays alive past the record's TTL before
+      // onAuthStateChanged ever fires — an unusually long-lived tab, or an
+      // auth change unrelated to the original redirect — would otherwise
+      // complete a redirect the TTL was supposed to have abandoned by then.
+      // A fresh peek re-checks the TTL against the CURRENT time whenever
+      // this callback actually runs, so the record's own liveness — not a
+      // stale boolean — decides whether signal (b) fires.
+      if (peekRedirectPending()) completeRedirectReturn(u);
       // Gate on "Loading…" until the bootstrap PROVES 18+ (finding B): the
       // authoritative server read online, or a cached stamp / same-session attest
       // offline. Never render the Board before proof. Not an await (that was the
@@ -1134,16 +1144,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // an onAuthStateChanged callback's return value).
       return bootstrapUser(u, profileAttempt);
     });
-    // `completeRedirectReturn`/`consumeRedirectContextOnce` (referenced above)
-    // are deliberately NOT in this array, and are safe to omit: both are
-    // declared further down this same function body (after `persistAttestation`),
-    // so putting them here would evaluate a `const` before its own declaration
+    // `completeRedirectReturn` (referenced above; `peekRedirectPending` is a
+    // module-level function, not a hook value, so it needs no entry here) is
+    // deliberately NOT in this array, and is safe to omit: it is declared
+    // further down this same function body (after `persistAttestation`), so
+    // putting it here would evaluate a `const` before its own declaration
     // line runs. That is safe ONLY because the reference above lives inside
     // this callback, which React does not invoke until after the whole
-    // component function — including those later declarations — has finished
-    // executing for this render; by then both are assigned. Listing them here
+    // component function — including that later declaration — has finished
+    // executing for this render; by then it is assigned. Listing it here
     // would additionally re-subscribe onAuthStateChanged on every identity
-    // change of either, which is exactly the subscription churn
+    // change of it, which is exactly the subscription churn
     // `redirectReturnPendingRef` (above) exists to avoid for the same
     // callback — and unnecessary besides, since neither closes over anything
     // but refs, other stable callbacks, and React's own always-stable setState

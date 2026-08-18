@@ -778,6 +778,32 @@ describe('AuthContext deal-error hardening', () => {
       expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(at);
     });
 
+    // Codex P2 round 6 on #836: `pending` must be re-validated LIVE when
+    // signal (b) actually fires, not trusted from a mount-time snapshot — a
+    // long-lived mount (or a delayed, unrelated auth change) could otherwise
+    // complete a redirect the TTL was meant to have abandoned by then.
+    it('does not complete via signal (b) once the pending record has since expired, even though it was live at mount', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // By the time onAuthStateChanged actually fires, the record has since
+      // expired — overwrite it with an already-stale timestamp to simulate
+      // that without needing real elapsed time. peekRedirectPending() reads
+      // storage fresh on every call, so this only stays blocked if the check
+      // is live rather than a cached mount-time boolean.
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
+      await signInUser();
+
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
     it('clears the pending record once the redirect actually completes (signal a)', async () => {
       localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
       mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
