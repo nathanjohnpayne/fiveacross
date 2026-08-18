@@ -846,6 +846,42 @@ describe('AuthContext deal-error hardening', () => {
       expect(mocks.track).not.toHaveBeenCalledWith('login_failed', expect.anything());
     });
 
+    // Codex P2 on the merged HEAD (#836): the marker is lost (#346's own
+    // trigger case) so the failure path never latches — by design, since the
+    // marker-absent rejection is exactly the "Safari lost the receipt" case
+    // signal (b) exists to rescue, and latching here would block that rescue.
+    // This proves the rescue still lands cleanly: no login_failed (marker
+    // absent, as always), exactly one login via signal (b), and the
+    // acknowledgement collected before the redirect still persists — the
+    // catch's storage clear does not affect the ALREADY-CACHED context object
+    // completeRedirectReturn reads (consumeRedirectContextOnce reads storage
+    // at most once per mount).
+    it('still completes cleanly via signal (b) after a marker-less getRedirectResult rejection', async () => {
+      // No sessionStorage marker — lost, as in #346.
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockRejectedValueOnce(
+        Object.assign(new Error('missing initial state'), { code: 'auth/missing-initial-state' }),
+      );
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // Marker-less rejection: no login_failed, exactly as an ordinary
+      // marker-less rejection already stays out of analytics.
+      expect(mocks.track).not.toHaveBeenCalledWith('login_failed', expect.anything());
+
+      // Signal (b) still completes the redirect Firebase's own
+      // getRedirectResult() failed to identify.
+      await signInUser();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
+      expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+      expect(mocks.track).not.toHaveBeenCalledWith('login_failed', expect.anything());
+    });
+
     // Codex P2 round 2 on #836: the SAME premature-clearing bug fixed for the
     // pending record above, but for the collected-acknowledgement record.
     it('leaves a live acknowledgement record standing when a mount reads it but neither completion signal fires', async () => {
