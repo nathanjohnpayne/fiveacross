@@ -686,9 +686,13 @@ describe('AuthContext deal-error hardening', () => {
   // PENDING_REDIRECT_ATTESTATION_KEY's sessionStorage marker AND leave
   // getRedirectResult resolving null on a return Firebase otherwise completed.
   describe('durable redirect-pending completion (signal b, #346 hardening)', () => {
-    it('completes on onAuthStateChanged alone when getRedirectResult resolves null but the pending record is live', async () => {
-      // No sessionStorage marker — lost, as in #346 — but the durable record
-      // and the collected ack both survive.
+    it('completes on onAuthStateChanged alone when getRedirectResult resolves null but the pending record is live (marker present: same-tab confirmed)', async () => {
+      // The sessionStorage marker IS present here — getRedirectResult itself
+      // failed to identify the return (unusual but possible without the
+      // #346 partitioning), while the SAME-tab confirmation the marker
+      // provides is intact. Same-tab confirmed → full completion, including
+      // the attestation.
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
       localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
       localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
@@ -703,6 +707,82 @@ describe('AuthContext deal-error hardening', () => {
       expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
       expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
       expect(mocks.track).toHaveBeenCalledTimes(1);
+    });
+
+    // Phase 4b P1 on #836: the durable record is ORIGIN-WIDE localStorage, so
+    // on its own it proves only that SOME same-origin tab started a
+    // redirect — not that THIS onAuthStateChanged publication is that same
+    // attempt returning (Firebase Auth persistence is shared across every
+    // open tab on the origin). Without the sessionStorage marker (tab-scoped)
+    // to CONFIRM same-tab, `login` still fires (low-stakes, matches the
+    // existing marker-less-rejection precedent) but the attestation — the
+    // honor-system self-statement — must NOT be persisted onto whichever
+    // account happens to be currently signed in; that would let an unrelated
+    // tab's sign-in inherit and fabricate this tab's collected checkbox.
+    it('does NOT persist the attestation via signal (b) when the marker is absent (same-tab unconfirmed)', async () => {
+      // No sessionStorage marker — lost, as in #346, OR this could be an
+      // entirely different, unrelated same-origin tab; the two are
+      // indistinguishable from here, so both are treated the same way.
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.track).toHaveBeenCalledTimes(1);
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
+    // Phase 4b P1 on #836: an unconfirmed signal-(b) completion must not
+    // destroy the durable records either — the legitimate originating tab's
+    // own return (which may still be in flight) needs them to complete WITH
+    // full confirmation later. Left standing, they simply expire on their
+    // own TTL if truly abandoned.
+    it('leaves the durable records standing after an unconfirmed signal (b) completion', async () => {
+      const pendingAt = String(Date.now());
+      const ackAt = String(Date.now());
+      localStorage.setItem(REDIRECT_PENDING_KEY, pendingAt);
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackAt);
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(pendingAt);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackAt);
+    });
+
+    // Phase 4b P1 on #836: signal (b) is scoped to the mount's OWN first-ever
+    // auth-state settle, closing the far more likely shape of a cross-tab
+    // collision — a stale record surviving into an ALREADY-SETTLED, already-
+    // running tab's LATER, unrelated auth event.
+    it('does not fire login via signal (b) once this mount has already had its first auth settle', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // First settle: signed out (an ordinary mount that never had a User).
+      await act(async () => void (await emitAuth(null)));
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+
+      // A LATER auth event on this same, already-settled mount — an
+      // unrelated same-origin tab's own sign-in, or a genuine late arrival —
+      // must not retroactively complete a redirect via signal (b) now.
+      await signInUser();
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
     });
 
     it('fires login exactly once and attests exactly once when both signals arrive for the same return', async () => {
@@ -938,13 +1018,14 @@ describe('AuthContext deal-error hardening', () => {
     // trigger case) so the failure path never latches — by design, since the
     // marker-absent rejection is exactly the "Safari lost the receipt" case
     // signal (b) exists to rescue, and latching here would block that rescue.
-    // This proves the rescue still lands cleanly: no login_failed (marker
-    // absent, as always), exactly one login via signal (b), and the
-    // acknowledgement collected before the redirect still persists — the
-    // catch's storage clear does not affect the ALREADY-CACHED context object
-    // completeRedirectReturn reads (consumeRedirectContextOnce reads storage
-    // at most once per mount).
-    it('still completes cleanly via signal (b) after a marker-less getRedirectResult rejection', async () => {
+    // This proves the rescue still lands: exactly one login via signal (b),
+    // no login_failed (marker absent, as always). The attestation does NOT
+    // persist here (Phase 4b P1 on #836, superseding this test's original
+    // expectation): the SAME marker absence that makes the rejection
+    // inconclusive also means this completion is same-tab UNCONFIRMED, and
+    // an unconfirmed signal-(b) firing must not persist an acknowledgement
+    // that might belong to a different, unrelated same-origin tab's account.
+    it('still fires login cleanly via signal (b) after a marker-less getRedirectResult rejection, without attesting', async () => {
       // No sessionStorage marker — lost, as in #346.
       localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
       localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
@@ -965,7 +1046,7 @@ describe('AuthContext deal-error hardening', () => {
       // getRedirectResult() failed to identify.
       await signInUser();
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
-      expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER);
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
       expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
       expect(mocks.track).not.toHaveBeenCalledWith('login_failed', expect.anything());
     });

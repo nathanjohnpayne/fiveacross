@@ -528,6 +528,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
   const redirectResultHandledRef = useRef(false);
+  // Whether onAuthStateChanged has ever fired for this mount — see its own
+  // check-and-clear site (Phase 4b P1 on #836) for why signal (b) is scoped
+  // to it: an unrelated same-origin tab's sign-in also publishes through
+  // every other open tab's listener, since Firebase Auth persistence is
+  // origin-wide, not tab-scoped.
+  const firstAuthSettleRef = useRef(true);
   const webAppHandoffStartedRef = useRef(false);
   // Whether THIS document lives on a fallback origin — a hostname property,
   // immutable for the document's lifetime — snapshotted once for the cheap
@@ -1095,6 +1101,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return onAuthStateChanged(auth, (u) => {
+      // Whether THIS is the very first auth-state callback this mount has
+      // ever seen — checked and cleared unconditionally, before any other
+      // branch, so it reflects mount lifecycle regardless of outcome.
+      // Narrows signal (b)'s cross-tab exposure below (Phase 4b P1 on #836):
+      // Firebase Auth persistence is ORIGIN-WIDE, not tab-scoped, so an
+      // unrelated same-origin tab's own sign-in also publishes through
+      // every other open tab's onAuthStateChanged. Restricting signal (b)
+      // to the mount's OWN first-ever settle means a stale pending record
+      // can only be (mis)consumed by an unrelated event arriving in the
+      // narrow window right at THIS tab's boot — not at any later point
+      // across an already-running session, which is the far more likely
+      // shape of an unrelated cross-tab collision.
+      const isFirstAuthSettle = firstAuthSettleRef.current;
+      firstAuthSettleRef.current = false;
       // Auth changed: retire the previous account's in-flight deal/bootstrap and
       // clear its stale state so a late result can't clobber the incoming User (P2).
       authUidRef.current = u?.uid ?? null;
@@ -1142,7 +1162,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // A fresh peek re-checks the TTL against the CURRENT time whenever
       // this callback actually runs, so the record's own liveness — not a
       // stale boolean — decides whether signal (b) fires.
-      if (peekRedirectPending()) completeRedirectReturn(u);
+      //
+      // ALSO gated on `isFirstAuthSettle` (Phase 4b P1 on #836): the durable
+      // record is an ORIGIN-WIDE localStorage entry, so on its own it proves
+      // only that SOME tab started a redirect — not that THIS auth-state
+      // publication is that same attempt returning. Firebase Auth
+      // persistence is shared across every same-origin tab, so an unrelated
+      // tab independently signing in also fires THIS tab's listener. Scoping
+      // to the mount's own first-ever settle closes the far more likely
+      // shape of that collision — a stale record surviving into an
+      // already-running, already-settled tab's LATER, unrelated auth event —
+      // without abandoning the marker-loss rescue itself (#346), which still
+      // needs to fire on an ordinary FRESH mount where no other signal
+      // exists yet. The narrower same-TAB confirmation for the higher-stakes
+      // attestation write is threaded through as `sameTabConfirmed` below.
+      if (isFirstAuthSettle && peekRedirectPending()) {
+        completeRedirectReturn(u, consumeRedirectContextOnce().appOwnedRedirect);
+      }
       // Gate on "Loading…" until the bootstrap PROVES 18+ (finding B): the
       // authoritative server read online, or a cached stamp / same-session attest
       // offline. Never render the Board before proof. Not an await (that was the
@@ -1686,30 +1722,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // or a signal-(b) success landing after a rejection already reported — can
   // fire both `login_failed` and `login` for the same attempt.
   const redirectCompletionLatchRef = useRef(false);
+  // `sameTabConfirmed` (Phase 4b P1 on #836): whether THIS completion is
+  // known to belong to THIS browsing context, not merely to SOME same-origin
+  // tab. Signal (a)'s caller always passes `true` — `getRedirectResult`
+  // resolving non-null is Firebase's OWN internal, per-tab-scoped record of
+  // ITS OWN most recent `signInWithRedirect` call, so a DIFFERENT tab that
+  // never called it can only ever see that tab's own `null`. Signal (b) has
+  // no such guarantee — the durable record is origin-wide localStorage, so
+  // it passes whether the SESSION-STORAGE marker (tab-scoped; cleared and
+  // re-created only by THIS tab's own `signIn`/redirect-return cycle) was
+  // ALSO present. Gates the ATTESTATION WRITE specifically — the honor-
+  // system self-statement that must never land on an account THIS browsing
+  // context did not itself confirm — while `login` still fires from the
+  // durable record alone (further narrowed by `isFirstAuthSettle` at the
+  // call site above), since an occasional extra analytics ping in a
+  // contrived concurrent-tab collision is a far smaller cost than
+  // fabricating an 18+ attestation for the wrong signed-in account.
   const completeRedirectReturn = useCallback(
-    (u: User) => {
+    (u: User, sameTabConfirmed: boolean) => {
       if (redirectCompletionLatchRef.current) return;
       redirectCompletionLatchRef.current = true;
-      // The redirect this record was tracking has now definitively completed
-      // — safe to clear (Codex P2 on #836). A no-op if it was already absent
-      // or expired.
-      clearRedirectPending();
       track('login', { method: 'google' });
-      // Persist ONLY an acknowledgement that was actually collected (Phase 4b
-      // round 4). The posture is read when the redirect STARTS, not when it
-      // returns: an Event that turns adult while the player is away at Google
-      // would otherwise have this branch stamp a durable, cross-Event
-      // `attestedAdultAt` for a checkbox that was never on screen — and walk
-      // them straight through the gate it had just raised. When the
-      // acknowledgement was not collected, doing nothing is exactly right:
-      // `needsAttestation` settles true against the newly raised posture and
-      // the existing re-prompt collects it properly.
       const { acknowledged } = consumeRedirectContextOnce();
-      // The transaction has now definitively completed — clear the peeked
-      // record too (Codex P2 round 2 on #836), the same terminal-outcome
-      // discipline as the pending record just above.
-      clearCollectedAcknowledgement();
-      if (acknowledged) void persistAttestation(u);
+      // Clearing the durable records is ALSO gated on `sameTabConfirmed`
+      // (Phase 4b P1 on #836), not run unconditionally: an unconfirmed
+      // signal-(b) firing (the cross-tab collision case) must not destroy
+      // the ONE thing the legitimate originating tab's own return — which
+      // may still be in flight — needs to complete WITH full confirmation
+      // later. Left standing, an unconfirmed record simply expires on its
+      // own TTL if truly abandoned, same as a mount that only ever read it.
+      if (sameTabConfirmed) {
+        clearRedirectPending();
+        clearCollectedAcknowledgement();
+      }
+      // Persist ONLY an acknowledgement that was actually collected (Phase 4b
+      // round 4) AND same-tab confirmed. The posture is read when the
+      // redirect STARTS, not when it returns: an Event that turns adult
+      // while the player is away at Google would otherwise have this branch
+      // stamp a durable, cross-Event `attestedAdultAt` for a checkbox that
+      // was never on screen — and walk them straight through the gate it
+      // had just raised. `sameTabConfirmed` closes the companion risk
+      // (Phase 4b P1 on #836): without it, an unrelated same-origin tab's
+      // own sign-in could inherit and persist THIS tab's collected
+      // acknowledgement onto a DIFFERENT account. Either gate failing is
+      // exactly right to fall through to nothing: `needsAttestation` settles
+      // against the current posture and the existing re-prompt collects it
+      // properly.
+      if (acknowledged && sameTabConfirmed) void persistAttestation(u);
     },
     [consumeRedirectContextOnce, persistAttestation],
   );
@@ -1730,7 +1789,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void getRedirectResult(auth)
       .then((result) => {
         if (!result) return;
-        completeRedirectReturn(result.user);
+        // Always same-tab CONFIRMED (Phase 4b P1 on #836): a non-null result
+        // here is Firebase's own per-tab record of THIS Auth instance's most
+        // recent signInWithRedirect() call — a different tab that never
+        // called it only ever sees its own null, regardless of the
+        // origin-wide durable record's state.
+        completeRedirectReturn(result.user, true);
       })
       .catch((err: unknown) => {
         // A genuine getRedirectResult rejection is a terminal outcome for
