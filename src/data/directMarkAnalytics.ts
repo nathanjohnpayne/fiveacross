@@ -37,6 +37,15 @@ const deliveredStorageKey = (uid: string) => `five-across:board-analytics:${EVEN
 const cursorStorageKey = (uid: string) => `five-across:board-analytics-cursor:${EVENT_ID}:${uid}`;
 const outboxStorageKey = (uid: string) => `five-across:board-analytics-outbox:${EVENT_ID}:${uid}`;
 
+// #764: a sink that throws AFTER both one-shot readiness signals
+// (`analyticsInitializationSettled`, `onPostHogReady`) have already fired
+// once has no other wake-up left short of a fresh Firestore snapshot or a
+// remount — this bounded-backoff timer is that wake-up. Kept low-single-digit
+// seconds initially so a transient hiccup drains quickly, doubling up to a
+// two-minute ceiling so a genuinely broken sink does not spin the tab.
+const RETRY_INITIAL_DELAY_MS = 5_000;
+const RETRY_MAX_DELAY_MS = 120_000;
+
 type DeliveryCursor = { seconds: number; nanoseconds: number; id: string };
 type PendingDelivery = { event: BoardAnalyticsEvent; pending: AnalyticsSinkSelection };
 
@@ -250,7 +259,29 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
   const cursor = storedCursor(uid);
   let unsubscribed = false;
   let pendingCursor: DeliveryCursor | null = null;
-  const flushOutbox = () => {
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelayMs = RETRY_INITIAL_DELAY_MS;
+  const clearRetryTimer = () => {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
+  // Reschedules itself with exponential backoff (capped) as long as the
+  // outbox still has an unacknowledged entry when the timer fires. A no-op
+  // once the outbox is empty or the caller has unsubscribed, so this never
+  // outlives what it exists to retry.
+  const scheduleRetry = () => {
+    if (unsubscribed || outbox.size === 0) return;
+    clearRetryTimer();
+    const delay = retryDelayMs;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_DELAY_MS);
+      if (!unsubscribed) flushOutbox();
+    }, delay);
+  };
+  const attemptDrain = () => {
     for (const delivery of [...outbox.values()]) {
       const updated = dispatch(delivery);
       outbox.set(updated.event.transitionId, updated);
@@ -270,6 +301,21 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
       pendingCursor = null;
     }
     return true;
+  };
+  // Every existing wake-up (a Firestore snapshot, either one-shot readiness
+  // signal, and now the retry timer below) funnels through this single
+  // entrypoint, so backoff state stays consistent no matter which one fired:
+  // a full drain resets the backoff and cancels any pending timer; a partial
+  // drain (still-unacknowledged entries) arms the next retry.
+  const flushOutbox = () => {
+    const drained = attemptDrain();
+    if (drained) {
+      retryDelayMs = RETRY_INITIAL_DELAY_MS;
+      clearRetryTimer();
+    } else {
+      scheduleRetry();
+    }
+    return drained;
   };
   try {
     const rows = collection(db, 'events', EVENT_ID, 'players', uid, 'analyticsTransitions');
@@ -330,6 +376,7 @@ export function subscribeDirectMarkAnalytics(uid: string): () => void {
       unsubscribed = true;
       unsubscribe();
       stopPostHogRetry();
+      clearRetryTimer();
     };
   } catch {
     // Keep lightweight component tests and constrained webviews from treating
