@@ -404,20 +404,37 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
       functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
         :
         ;;
+      # `--except functions:default` EXCLUDES NOTHING, so this is a documented
+      # no-op (#548, Codex P2 round 10). This REVERSES the conclusion recorded
+      # here under #767, which held that excluding this repo's one codebase
+      # excludes Functions entirely. The vendored source settles it —
+      # `node_modules/firebase-tools/lib/filterTargets.js`:
+      #
+      #     if (options.only) {
+      #       targets = intersection(targets, options.only.split(",")
+      #                   .map((opt) => opt.split(":")[0]));
+      #     } else if (options.except) {
+      #       targets = difference(targets, options.except.split(","));
+      #     }
+      #
+      # `--only` splits on `:` and keeps the first segment, which is why
+      # `--only functions:default` DOES select the `functions` target. `--except`
+      # does not split at all, so it computes difference(targets,
+      # ["functions:default"]) — and "functions:default" is not equal to
+      # "functions", so nothing is removed. Firebase still releases Functions,
+      # resets the invoker annotations, and the previous arm then skipped the
+      # reconciliation that repairs them, leaving all three endpoints 403.
+      #
+      # This is the same reasoning already applied to the endpoint-qualified
+      # `--except` arm above; the two spellings differ only in which label
+      # follows the colon, so they cannot correctly behave differently.
+      #
+      # FUNCTIONS_ATTEMPTED deliberately stays true. #767 set it false to stop
+      # Guard 4 demanding a complete functions/.env.<projectId> for "a deploy
+      # that never touches Functions params" — but such a deploy DOES touch
+      # them, so the guard was right and the premise was wrong.
       functions:default)
-        # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
-        # excluding it excludes Functions entirely, exactly like the plain
-        # `functions)` case above. Leaving FUNCTIONS_ATTEMPTED=true here
-        # (the pre-existing gap) made Guard 4 below demand a complete
-        # functions/.env.<projectId> for a deploy that never touches
-        # Functions params at all.
-        FUNCTIONS_ATTEMPTED=false
-        BUG_REPORT_INVOKER_SELECTED=false
-        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
-        AUTH_HANDOFF_INVOKER_SELECTED=false
-        BUG_REPORT_INVOKER_CONSERVATIVE=false
-        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-        AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+        :
         ;;
     esac
   done

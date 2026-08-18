@@ -1214,9 +1214,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 16e (#768 Phase 4b P2): this repo's `functions:default` exclusion
-# removes its sole Firebase codebase, so its effective Hosting-only scope
-# neither needs gcloud nor mutates Cloud Run IAM.
+# Case 16e (#548, Codex P2 round 10 — REVERSES the #768 Phase 4b P2 conclusion
+# this case previously encoded): `--except functions:default` excludes NOTHING,
+# so Functions are still released and the invoker reconciliation must still run.
+#
+# The vendored source is decisive — firebase-tools/lib/filterTargets.js applies
+# `difference(targets, options.except.split(","))` with NO `:` splitting, so
+# "functions:default" is compared literally against the target name "functions",
+# matches nothing, and removes nothing. (`--only` DOES split on `:`, which is
+# why the two spellings legitimately differ there and cannot here.)
+#
+# The old assertion — that this scope touches no gcloud — was therefore
+# asserting the bug: Firebase released Functions, reset the invoker
+# annotations, and deploy.sh skipped the repair, leaving all three protected
+# endpoints 403.
 # ---------------------------------------------------------------------------
 REPO16E="$WORKDIR/case16e-unfamiliar-except"
 init_fixture_repo "$REPO16E"
@@ -1229,22 +1240,24 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-16e.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-16e.log" \
-GCLOUD_STUB_EXIT=1 \
   bash -c "cd '$REPO16E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions --except functions:default" \
   >"$OUT16E" 2>"$ERR16E"
 RC16E=$?
 set -e
 
 if [[ $RC16E -ne 0 ]]; then
-  fail "default-codebase-except: the excluded default-codebase scope returned $RC16E because gcloud was invoked. stderr was:"
+  fail "default-codebase-except: deploy.sh returned $RC16E. stderr was:"
   cat "$ERR16E" >&2
 elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-16e.log"; then
   fail "default-codebase-except: deploy.sh never reached Firebase."
-elif [[ -s "$WORKDIR/gcloud-calls-16e.log" ]]; then
-  fail "default-codebase-except: deploy.sh invoked gcloud for endpoints excluded by functions:default. gcloud log was:"
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-16e.log"; then
+  fail "default-codebase-except: an exclusion that excludes NOTHING skipped the handoff reconciliation, leaving the released callables 403. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16e.log" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-16e.log"; then
+  fail "default-codebase-except: the sibling endpoints were skipped too. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-16e.log" >&2
 else
-  pass "default-codebase-except: functions:default skips protected-endpoint prechecks and mutations (rc=$RC16E)."
+  pass "default-codebase-except: --except functions:default excludes nothing, so every protected endpoint is still reconciled (rc=$RC16E)."
 fi
 
 # ---------------------------------------------------------------------------
