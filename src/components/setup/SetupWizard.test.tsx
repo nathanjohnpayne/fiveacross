@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -37,18 +38,75 @@ class MemoryStorage implements Storage {
   }
 }
 
-function renderApp(initialPath: string) {
-  return render(
+/** A store that ACCEPTS every write without error but never actually keeps
+ *  it — the external symptom `EventDraftStore.save`'s own best-effort
+ *  contract produces when the real `localStorage.setItem` throws internally
+ *  on a key that never existed before (quota, restricted-storage) and the
+ *  module swallows it: the call resolves normally, but nothing is there to
+ *  read back. */
+class WriteBlackHoleStorage implements Storage {
+  get length() {
+    return 0;
+  }
+  clear() {}
+  getItem() {
+    return null;
+  }
+  key() {
+    return null;
+  }
+  removeItem() {}
+  setItem() {}
+}
+
+/** Reads always return a fixed snapshot taken at construction; writes are
+ *  accepted but silently discarded. Models the OTHER shape of a swallowed
+ *  `setItem` failure: an ALREADY-SAVED draft whose next write fails,
+ *  leaving the OLD blob readable — present, but stale, rather than gone. */
+class FrozenStorage implements Storage {
+  private snapshot = new Map<string, string>();
+  constructor(source: Storage) {
+    for (let i = 0; i < source.length; i++) {
+      const key = source.key(i)!;
+      this.snapshot.set(key, source.getItem(key)!);
+    }
+  }
+  get length() {
+    return this.snapshot.size;
+  }
+  clear() {}
+  getItem(k: string) {
+    return this.snapshot.has(k) ? this.snapshot.get(k)! : null;
+  }
+  key(i: number) {
+    return [...this.snapshot.keys()][i] ?? null;
+  }
+  removeItem() {}
+  setItem() {}
+}
+
+function renderApp(initialPath: string, { strict = false }: { strict?: boolean } = {}) {
+  const tree = (
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/setup/*" element={<SetupWizard />} />
         <Route path="/" element={<div data-testid="fallback-page">Card</div>} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
 }
 
 const store = createLocalDraftStore();
+
+/** A calendar date `daysAhead` from the real clock — `SetupWizard` reads
+ *  `Date.now()` directly (it is not given an injectable clock like
+ *  `draftValidation.ts`'s pure functions are), so a fixture that needs
+ *  `firstUnlockIssues` to pass must stay in the future relative to whenever
+ *  the suite actually runs, not a fixed literal date. */
+function futureIsoDate(daysAhead: number): string {
+  return new Date(Date.now() + daysAhead * 86_400_000).toISOString().slice(0, 10);
+}
 
 /** Seeds a draft directly through the store — bypassing any UI — the way a
  *  later step ticket's real form would have committed it. */
@@ -254,8 +312,8 @@ describe('Save draft (local)', () => {
       occasion: 'weekend-away',
       edition: 'vacay',
       name: 'Weekend in Point Reyes',
-      startsOn: '2026-08-07',
-      endsOn: '2026-08-09',
+      startsOn: futureIsoDate(60),
+      endsOn: futureIsoDate(62),
       timezone: 'America/Los_Angeles',
       slugCandidate: 'point-reyes',
       defaultTheme: 'the-birds',
@@ -270,8 +328,8 @@ describe('Save draft (local)', () => {
       days: [
         {
           index: 0,
-          date: '2026-08-07',
-          unlockAt: Date.parse('2026-08-07T13:00:00Z'),
+          date: futureIsoDate(60),
+          unlockAt: Date.parse(`${futureIsoDate(60)}T13:00:00Z`),
           place: 'Point Reyes',
           placeEmoji: '🌊',
           theme: 'the-birds',
@@ -281,8 +339,8 @@ describe('Save draft (local)', () => {
         },
         {
           index: 1,
-          date: '2026-08-09',
-          unlockAt: Date.parse('2026-08-09T13:00:00Z'),
+          date: futureIsoDate(62),
+          unlockAt: Date.parse(`${futureIsoDate(62)}T13:00:00Z`),
           place: 'Point Reyes',
           placeEmoji: '🌅',
           theme: 'fog-froth-farewells',
@@ -295,5 +353,73 @@ describe('Save draft (local)', () => {
     renderApp(setupStepPath('seeded-draft', 'launch'));
     await screen.findByTestId('wizard-step-placeholder-launch');
     expect(screen.queryByRole('button', { name: 'Save draft (local)' })).not.toBeInTheDocument();
+  });
+});
+
+describe('storage failure (Codex P1, PR #840)', () => {
+  it('creating a fresh draft surfaces a retry instead of navigating to a draft that will never load', async () => {
+    vi.stubGlobal('localStorage', new WriteBlackHoleStorage());
+    renderApp('/setup');
+
+    await screen.findByRole('alert');
+    expect(screen.getByText(/couldn't start a new event/i)).toBeInTheDocument();
+    // Never redirected into the missing-draft/"/setup" loop the unverified
+    // save used to produce — the fallback Card page never mounted, and
+    // there's no stray draft to have created it from either way.
+    expect(screen.queryByTestId('fallback-page')).not.toBeInTheDocument();
+  });
+
+  it('"Save draft (local)" reports failure rather than claiming Saved when the write does not round-trip', async () => {
+    // Seed successfully against a real working store...
+    const workingStorage = new MemoryStorage();
+    vi.stubGlobal('localStorage', workingStorage);
+    await seedDraft();
+    // ...then freeze it: reads keep returning the draft as it was at that
+    // moment, but every subsequent write is silently discarded — quota
+    // exhausted mid-edit, say. The load on mount still succeeds (the
+    // snapshot has the draft), so this exercises the explicit-save path
+    // specifically, not the initial-load path the previous test covers.
+    vi.stubGlobal('localStorage', new FrozenStorage(workingStorage));
+    const user = userEvent.setup();
+    renderApp(setupStepPath('seeded-draft', 'occasion'));
+
+    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await user.click(screen.getByRole('button', { name: 'Save draft (local)' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/couldn't save/i));
+  });
+});
+
+describe('React.StrictMode (Codex P2, PR #840)', () => {
+  it('creates exactly one draft on the dev mount → cleanup → mount replay', async () => {
+    renderApp('/setup', { strict: true });
+    await waitFor(async () => {
+      const summaries = await store.list();
+      expect(summaries).toHaveLength(1);
+    });
+  });
+});
+
+describe('CancelConfirmDialog focus (Codex P2, PR #840)', () => {
+  it('focuses "Keep editing" on open, traps Tab between the two buttons, and restores focus on close', async () => {
+    const user = userEvent.setup();
+    await seedDraft({ occasion: 'custom' });
+    renderApp(setupStepPath('seeded-draft', 'occasion'));
+    const cancelButton = await screen.findByText('✕ Cancel');
+    cancelButton.focus();
+
+    await user.click(cancelButton);
+    const dialog = await screen.findByRole('alertdialog');
+    const keepEditing = within(dialog).getByRole('button', { name: 'Keep editing' });
+    const discard = within(dialog).getByRole('button', { name: 'Discard' });
+    await waitFor(() => expect(keepEditing).toHaveFocus());
+
+    await user.tab();
+    expect(discard).toHaveFocus();
+    await user.tab();
+    expect(keepEditing).toHaveFocus();
+
+    await user.click(keepEditing);
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(cancelButton).toHaveFocus();
   });
 });

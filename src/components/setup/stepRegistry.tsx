@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import type { EventDraft, SetupStep } from '../../types';
 import PlaceholderStep from './PlaceholderStep';
-import { STEP_LABELS } from './wizardSteps';
+import { SETUP_STEP_ORDER, STEP_LABELS } from './wizardSteps';
 
 /** Props every step's `render` receives. The step tickets (#789–#792, #794)
  *  plug their real bodies in behind this — the shell owns everything else. */
@@ -23,48 +23,38 @@ export interface StepDefinition {
   render: (props: StepRenderProps) => ReactNode;
 }
 
+/** Everything about a step BESIDES its position — `heading` and `render`,
+ *  keyed by id. Position itself comes from `SETUP_STEP_ORDER` alone (below),
+ *  so the two can never list a different number of steps or disagree about
+ *  their order (Codex, PR #840: two independently-maintained arrays can
+ *  silently drift the moment either one is edited without the other). */
+const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>> = {
+  occasion: { heading: "What's the occasion?", render: () => <PlaceholderStep step="occasion" /> },
+  basics: { heading: 'Name & dates', render: () => <PlaceholderStep step="basics" /> },
+  squares: { heading: 'Squares', render: () => <PlaceholderStep step="squares" /> },
+  look: { heading: 'Look', render: () => <PlaceholderStep step="look" /> },
+  launch: { heading: 'Ready when you are', render: () => <PlaceholderStep step="launch" /> },
+};
+
 /**
  * The step registry (specs/event-setup-wizard.md § "Shell & navigation").
- * Order here IS step order — `SetupWizard` and `WizardChrome` both iterate
- * this array rather than re-stating `SETUP_STEP_ORDER`, so the two can never
- * disagree about how many steps there are or what order they run in.
+ * DERIVED from `SETUP_STEP_ORDER` (`./wizardSteps.ts`) — the one place step
+ * order is stated — rather than hand-listing five objects in array order, so
+ * `SetupWizard`'s navigation (`handleAdvance`, `firstIncompleteStep`,
+ * `stepIndex`) and this registry's rendering order are structurally the same
+ * sequence, not two lists a future edit could quietly desync.
  *
  * Every `render` is `PlaceholderStep` today. A step ticket replaces its own
- * entry's `render` (and may sharpen `heading`) — never adds, removes, or
- * reorders entries, which stays this ticket's shell contract.
+ * entry's `render` (and may sharpen `heading`) in `STEP_CONTENT` above —
+ * never adds, removes, or reorders steps, which stays this ticket's shell
+ * contract (reorders belong in `SETUP_STEP_ORDER` itself, and touch both the
+ * classifier in `wizardSteps.ts` and every step ticket at once).
  */
-export const STEP_REGISTRY: readonly StepDefinition[] = [
-  {
-    id: 'occasion',
-    label: STEP_LABELS.occasion,
-    heading: "What's the occasion?",
-    render: () => <PlaceholderStep step="occasion" />,
-  },
-  {
-    id: 'basics',
-    label: STEP_LABELS.basics,
-    heading: 'Name & dates',
-    render: () => <PlaceholderStep step="basics" />,
-  },
-  {
-    id: 'squares',
-    label: STEP_LABELS.squares,
-    heading: 'Squares',
-    render: () => <PlaceholderStep step="squares" />,
-  },
-  {
-    id: 'look',
-    label: STEP_LABELS.look,
-    heading: 'Look',
-    render: () => <PlaceholderStep step="look" />,
-  },
-  {
-    id: 'launch',
-    label: STEP_LABELS.launch,
-    heading: 'Ready when you are',
-    render: () => <PlaceholderStep step="launch" />,
-  },
-];
+export const STEP_REGISTRY: readonly StepDefinition[] = SETUP_STEP_ORDER.map((id) => ({
+  id,
+  label: STEP_LABELS[id],
+  ...STEP_CONTENT[id],
+}));
 
 export function stepDefinition(id: SetupStep): StepDefinition {
   const found = STEP_REGISTRY.find((s) => s.id === id);

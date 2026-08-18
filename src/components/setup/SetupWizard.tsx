@@ -42,29 +42,96 @@ export default function SetupWizard() {
 
   if (index) return <NewDraftEntry />;
   // `params` is non-null here: `index` is false and the guard above already
-  // ruled out the remaining case.
-  return <SetupWizardStep draftId={params!.draftId} step={params!.step} />;
+  // ruled out the remaining case. Keyed by draftId (Codex, PR #840): without
+  // it, navigating directly from one `/setup/:draftId/:step` URL to another
+  // reuses this component instance, so it can render the NEW url's step
+  // against the OLD draft still sitting in state until the load effect
+  // catches up. Keying forces a clean remount per draft.
+  return <SetupWizardStep key={params!.draftId} draftId={params!.draftId} step={params!.step} />;
 }
 
-/** `/setup`: create a fresh draft, persist it immediately (so a reload before
- *  any field is touched still finds it), and land on Step 1. */
+/**
+ * Saves, then reads the draft straight back, returning it only if the round
+ * trip actually succeeded.
+ *
+ * `EventDraftStore.save` is deliberately best-effort (specs/event-setup-wizard.md
+ * § "Draft lifecycle" — "Save"): a quota or serialization failure is
+ * swallowed and the call still resolves, exactly like the durable card
+ * snapshot. That is the right contract for a fire-and-forget autosave, but it
+ * is the WRONG contract for the two moments this shell makes an explicit
+ * claim to the organizer — "this draft now lives at this URL" (creation) and
+ * "Saved" (the header button) — so both verify via a real read-back instead
+ * of trusting the write (Codex P1, PR #840).
+ */
+async function verifiedSave(store: EventDraftStore, draft: EventDraft): Promise<EventDraft | null> {
+  const saved = await store.save(draft);
+  const readBack = await store.load(saved.draftId);
+  // A non-null read is not automatically success: a write that silently
+  // failed against an ALREADY-EXISTING key can leave the OLD blob readable —
+  // present, but stale. `save` always re-stamps `updatedAt` from its clock,
+  // so comparing it is enough to tell "this write actually landed" from
+  // "something readable happens to still be sitting there".
+  if (!readBack || readBack.updatedAt !== saved.updatedAt) return null;
+  return readBack;
+}
+
+/** `/setup`: create a fresh draft, verify it actually persisted (so a reload
+ *  before any field is touched still finds it — an UNVERIFIED save that
+ *  silently failed would otherwise navigate to a draft URL that immediately
+ *  reads back as missing, and the missing-draft branch below sends it right
+ *  back here, looping forever), and land on Step 1. */
 function NewDraftEntry() {
   const navigate = useNavigate();
+  // Guards React.StrictMode's dev-only mount → cleanup → mount replay: without
+  // it, the replay creates and saves a SECOND orphan draft, because the first
+  // invocation's `save` already completed before its cleanup ran (Codex P2,
+  // PR #840). The ref is stable across the replay (same component instance),
+  // so only the first invocation ever starts the create-and-save chain; the
+  // second sees it already claimed and does nothing. Deliberately NOT paired
+  // with a "cancelled" flag guarding the eventual `navigate` call — that
+  // would suppress it precisely when StrictMode's synthetic cleanup runs
+  // between the two invocations, i.e. always in dev.
+  const startedRef = useRef(false);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
   useEffect(() => {
-    let cancelled = false;
+    if (startedRef.current) return;
+    startedRef.current = true;
     const store = createLocalDraftStore();
     const draft = createEventDraft();
-    void store.save(draft).then(() => {
-      if (!cancelled) navigate(setupStepPath(draft.draftId, 'occasion'), { replace: true });
+    void verifiedSave(store, draft).then((confirmed) => {
+      if (!confirmed) {
+        setFailed(true);
+        return;
+      }
+      navigate(setupStepPath(confirmed.draftId, 'occasion'), { replace: true });
     });
-    return () => {
-      cancelled = true;
-    };
-    // Intentionally empty-array: this effect creates exactly ONE draft for
-    // this mount. `navigate` is stable from react-router and does not need to
-    // re-run it.
+    // `attempt` is a manual retry lever (below); `navigate` is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [attempt]);
+
+  if (failed) {
+    return (
+      <div className="wizard-shell wizard-storage-error" role="alert">
+        <p>
+          Couldn't start a new event — this device isn't able to save right now (storage may be full or
+          restricted).
+        </p>
+        <button
+          type="button"
+          className="btn primary"
+          onClick={() => {
+            startedRef.current = false;
+            setFailed(false);
+            setAttempt((a) => a + 1);
+          }}
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
   return <LoadingState label="Starting a new event…" />;
 }
 
@@ -86,6 +153,14 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
   const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Forces a re-render — and so a fresh `Date.now()` read — at least once
+  // around every upcoming Day unlock, not only when the organizer happens to
+  // interact with the page. Without it, a wizard left open across an unlock
+  // deadline can keep showing Look/Launch as complete after the shared gate
+  // would no longer agree (Codex P1, PR #840): `firstUnlockIssues` is exactly
+  // the kind of check that flips from "fine" to "not fine" with no draft
+  // mutation involved.
+  const [clockTick, setClockTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,18 +183,27 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
     if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
   }, []);
 
-  // The deep-link / stale-step guard: once the draft is loaded, a requested
-  // step further ahead than the first one the draft doesn't yet satisfy is
-  // NOT rendered directly — that would show, e.g., Step 4 as if Steps 1–3
-  // were already answered. Landing earlier (including exactly on the first
-  // incomplete step) is always fine — that is ordinary back-navigation.
   useEffect(() => {
     if (!draft) return;
-    const landing = firstIncompleteStep(draft, Date.now());
-    if (stepIndex(step) > stepIndex(landing)) {
-      navigate(setupStepPath(draftId, landing), { replace: true });
-    }
-  }, [draft, step, draftId, navigate]);
+    const now = Date.now();
+    const upcoming = draft.days
+      .filter((d): d is NonNullable<typeof d> => d != null)
+      .map((d) => d.unlockAt)
+      .filter((t): t is number => typeof t === 'number' && Number.isFinite(t) && t > now);
+    const nextBoundary = upcoming.length > 0 ? Math.min(...upcoming) : null;
+    // Cap the wait rather than parking on one long-lived timer: `setTimeout`
+    // silently clamps delays beyond ~24.8 days (32-bit overflow), and even a
+    // multi-day-out single wake would leave every OTHER time-sensitive check
+    // (a first-unlock-past that flips with no Day involved at all, say) stale
+    // for just as long. Firing re-schedules itself via the `clockTick`
+    // dependency below, using a fresh `now` each time — so this always
+    // converges on the real boundary within one cap-length window of it.
+    const CAP_MS = 5 * 60_000;
+    const delay = Math.max(nextBoundary === null ? CAP_MS : Math.min(nextBoundary - now, CAP_MS), 1_000);
+    const timer = setTimeout(() => setClockTick((t) => t + 1), delay);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, clockTick]);
 
   const persist = useCallback(
     (next: EventDraft) => {
@@ -159,10 +243,10 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
 
   const handleSaveNow = useCallback(() => {
     if (!draft) return;
-    void store.save(draft).then(() => {
-      setSavedFlash('Saved');
+    void verifiedSave(store, draft).then((confirmed) => {
+      setSavedFlash(confirmed ? 'Saved' : "Couldn't save — check this device's storage");
       if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
-      savedFlashTimer.current = setTimeout(() => setSavedFlash(null), 1500);
+      savedFlashTimer.current = setTimeout(() => setSavedFlash(null), confirmed ? 1500 : 4000);
     });
   }, [draft, store]);
 
@@ -173,12 +257,21 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
 
   const requestCancel = useCallback(() => {
     if (!draft) return;
+    // A second request while the confirm dialog is already open — reachable
+    // only via Escape, since WizardChrome owns the one document-level
+    // listener for it — closes it, same as tapping "Keep editing". This
+    // keeps Escape-handling to that ONE listener rather than adding a second
+    // one inside the dialog that would race it on the same keypress.
+    if (confirmingCancel) {
+      setConfirmingCancel(false);
+      return;
+    }
     if (draftHasContent(draft)) {
       setConfirmingCancel(true);
     } else {
       void discardAndLeave();
     }
-  }, [draft, discardAndLeave]);
+  }, [draft, confirmingCancel, discardAndLeave]);
 
   if (loadState === 'missing') {
     // A dead or foreign draftId (never written by this store, a different
@@ -191,13 +284,25 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
     return <LoadingState label="Loading your draft…" />;
   }
 
+  // The deep-link / stale-step landing rule, computed IN this render rather
+  // than in a follow-up effect: an effect-based redirect lets React commit
+  // and mount the requested (too-far-ahead) step's body for one frame before
+  // correcting course — including, on Launch, briefly presenting an
+  // inaccessible draft as ready (Codex P2, PR #840). Deciding here means the
+  // mismatched step's `render` never mounts at all.
+  const now = Date.now();
+  const landing = firstIncompleteStep(draft, now);
+  if (stepIndex(step) > stepIndex(landing)) {
+    return <Navigate to={setupStepPath(draftId, landing)} replace />;
+  }
+
   return (
     <>
       <WizardChrome
         registry={STEP_REGISTRY}
         currentStep={step}
         draft={draft}
-        now={Date.now()}
+        now={now}
         onStepSelect={goToStep}
         onRequestCancel={requestCancel}
         onAdvance={handleAdvance}
