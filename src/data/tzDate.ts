@@ -22,6 +22,16 @@ export function isoDateInTz(now: number, timeZone: string): string {
   try {
     return new Intl.DateTimeFormat('en-CA', { ...opts, timeZone }).format(new Date(now));
   } catch {
-    return new Intl.DateTimeFormat('en-CA', opts).format(new Date(now));
+    // The first throw is usually an unusable timeZone, which the host-zone
+    // fallback fixes. But an instant outside the representable `Date` range
+    // makes EVERY formatter throw, fallback included — so the fallback is
+    // itself guarded and an unformattable instant yields '' rather than
+    // propagating a RangeError into a render or a validation pass. '' matches
+    // no `DayDef.date`, which is the correct answer for "no such day".
+    try {
+      return new Intl.DateTimeFormat('en-CA', opts).format(new Date(now));
+    } catch {
+      return '';
+    }
   }
 }

@@ -68,6 +68,7 @@ export type DraftIssueCode =
   | 'event-unsupported-timezone'
   | 'event-invalid-date-window'
   | 'event-occasion-edition-mismatch'
+  | 'setting-out-of-range'
   | 'curated-prompt-is-spicy'
   | 'prompt-text-out-of-bounds';
 
@@ -118,6 +119,20 @@ export function isEditionTheme(theme: ThemeId | null | undefined, edition: strin
 export function isSupportedTimezone(timezone: string): boolean {
   const trimmed = timezone.trim();
   return trimmed.length > 0 && normalizeTimezone(trimmed) === trimmed;
+}
+
+/**
+ * The widest instant a JavaScript `Date` can represent: ±100,000,000 days from
+ * the epoch (ECMA-262). Beyond it `new Date(v)` is an Invalid Date and every
+ * formatter — including `Intl.DateTimeFormat.format` — THROWS a RangeError
+ * rather than returning a fallback string.
+ */
+const MAX_TIME_VALUE = 8.64e15;
+
+/** A number that can actually become a `Date`. `Number.isFinite` alone is not
+ *  enough: `Number.MAX_VALUE` is finite and still unformattable. */
+export function isRepresentableInstant(value: number): boolean {
+  return Number.isFinite(value) && Math.abs(value) <= MAX_TIME_VALUE;
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -226,9 +241,14 @@ export function finaleClosingPoolIssues(draft: EventDraft): DraftIssue[] {
   // finale: it freezes standings, posts the podium and excludes its own scores
   // days before the intended one, while this predicate's final-Day check still
   // passes (#787 review).
-  const closingDays = ordered.filter((d) => normalizePool(d.pool) === 'closing');
-  if (closingDays.length > 1) {
-    for (const day of closingDays.slice(0, -1)) {
+  // Every closing Day that is NOT the final one, identified by its own index
+  // rather than by position in the filtered list. `slice(0, -1)` was wrong:
+  // when the final Day is not closing, the LAST closing Day is still not the
+  // final Day, and exempting it meant Step 5 first reported only "the final Day
+  // needs the closing pool" and then, once the organizer fixed that, surfaced a
+  // brand-new failure. Independent launch failures are reported together.
+  for (const day of ordered) {
+    if (day.index !== finalDay.index && normalizePool(day.pool) === 'closing') {
       issues.push({
         code: 'extra-closing-day',
         dayIndex: day.index,
@@ -391,13 +411,16 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
         message: `Day ${day.index + 1} uses a Theme this Event's Edition does not offer; pick one from its list.`,
       });
     }
-    if (day.unlockAt === null || !Number.isFinite(day.unlockAt)) {
+    if (day.unlockAt === null || !isRepresentableInstant(day.unlockAt)) {
       issues.push({
         code: 'day-missing-unlock',
         dayIndex: day.index,
         // A NaN or Infinity reaches here from schedule arithmetic over a
         // malformed date, and would otherwise pass a bare `!== null` check and
-        // launch a Day that never unlocks.
+        // launch a Day that never unlocks. Finite is not enough either: a value
+        // like Number.MAX_VALUE is finite but outside the representable `Date`
+        // range, and formatting it THROWS — so an unguarded value would crash
+        // the launch checklist instead of reporting an issue (#787 review).
         message: `Day ${day.index + 1} has no usable unlock time.`,
       });
     } else if (isIsoDate(day.date) && isSupportedTimezone(draft.timezone)) {
@@ -610,6 +633,46 @@ export function promptTextIssues(draft: EventDraft): DraftIssue[] {
 }
 
 /**
+ * The Event settings sit inside the ranges their consumers honour.
+ *
+ * `parseEventDraft` already refuses these values in a STORED blob, but the
+ * launch gate runs over drafts that never went through storage — one created
+ * with custom settings, or edited since the last save. Without this, a draft
+ * with `reportHideThreshold: 0` reaches the provisioner through
+ * `isDraftLaunchable` and persists an Event whose report-based hiding is
+ * silently off (#787 review).
+ *
+ * The bounds are the same ones the parser enforces, for the same reasons:
+ * `isReportHidden` and the server auto-hide path read a non-positive threshold
+ * as "disabled", and `dealBoard` clamps ratios rather than honouring them.
+ */
+export function settingsIssues(draft: EventDraft): DraftIssue[] {
+  const issues: DraftIssue[] = [];
+  const { reportHideThreshold, spicyRatio, easyMixRatio } = draft.settings;
+  if (!Number.isFinite(reportHideThreshold) || reportHideThreshold <= 0) {
+    issues.push({
+      code: 'setting-out-of-range',
+      field: 'reportHideThreshold',
+      message: `The report-hide threshold must be a positive number of reports; ${reportHideThreshold} disables community report hiding entirely.`,
+    });
+  }
+  const ratios: [string, number][] = [
+    ['spicyRatio', spicyRatio],
+    ['easyMixRatio', easyMixRatio],
+  ];
+  for (const [field, value] of ratios) {
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      issues.push({
+        code: 'setting-out-of-range',
+        field,
+        message: `${field} must be between 0 and 1; ${value} is outside the range the card dealer honours and would be silently clamped.`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
  * Every reason this draft cannot launch, in checklist order.
  *
  * Returns issues rather than a boolean because Step 5 renders each one as its
@@ -619,6 +682,7 @@ export function promptTextIssues(draft: EventDraft): DraftIssue[] {
 export function validateEventDraft(draft: EventDraft, now: number): DraftIssue[] {
   return [
     ...eventCompletenessIssues(draft),
+    ...settingsIssues(draft),
     ...assignedPoolIssues(draft),
     ...promptPoolIssues(draft),
     ...promptTextIssues(draft),

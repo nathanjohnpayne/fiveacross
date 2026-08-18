@@ -10,6 +10,8 @@ import {
   dayCountIssues,
   eventCompletenessIssues,
   finaleClosingPoolIssues,
+  isRepresentableInstant,
+  settingsIssues,
   firstUnlockIssues,
   isDraftLaunchable,
   isIsoDate,
@@ -195,7 +197,15 @@ describe('finaleClosingPoolIssues', () => {
     const draft = launchableDraft({
       days: [day(0, { pool: 'closing' }), day(1)],
     });
-    expect(finaleClosingPoolIssues(draft).map((i) => i.dayIndex)).toEqual([1]);
+    const issues = finaleClosingPoolIssues(draft);
+    // BOTH independent failures, reported together: the final Day is not
+    // closing (index 1), AND the middle Day wrongly is (index 0). Reporting
+    // only the first would make the second appear as a brand-new failure the
+    // moment the organizer fixed it.
+    expect(issues.map((i) => [i.code, i.dayIndex]).sort()).toEqual([
+      ['extra-closing-day', 0],
+      ['no-closing-day', 1],
+    ]);
   });
 
   it('judges the FINAL Day by index, not by array position', () => {
@@ -760,3 +770,69 @@ describe('Prompt text is bounded as STORED, not as trimmed (#787 review)', () =>
     expect(isDraftLaunchable(draft, NOW)).toBe(false);
   });
 });
+
+describe('settings bounds hold in the shared launch gate too (#787 review)', () => {
+  it('rejects a non-positive report-hide threshold on an unsaved draft', () => {
+    // parseEventDraft only guards the STORED path; a draft created with custom
+    // settings, or edited since the last save, never went through it.
+    const draft = launchableDraft({
+      settings: { ...launchableDraft().settings, reportHideThreshold: 0 },
+    });
+    const issues = settingsIssues(draft);
+    expect(issues.map((i) => i.code)).toEqual(['setting-out-of-range']);
+    expect(issues[0].field).toBe('reportHideThreshold');
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('rejects ratios outside 0-1 on an unsaved draft, naming each field', () => {
+    const draft = launchableDraft({
+      settings: { ...launchableDraft().settings, spicyRatio: 1.4, easyMixRatio: -0.2 },
+    });
+    expect(settingsIssues(draft).map((i) => i.field)).toEqual(['spicyRatio', 'easyMixRatio']);
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('is silent on the baseline settings', () => {
+    expect(settingsIssues(launchableDraft())).toEqual([]);
+  });
+});
+
+describe('an unrepresentable unlock instant is an issue, never a crash (#787 review)', () => {
+  it('reports Number.MAX_VALUE instead of throwing while formatting it', () => {
+    // Finite but outside the Date range: every Intl formatter throws on it, so
+    // an unguarded value would crash the launch checklist.
+    const draft = launchableDraft({
+      days: [day(0, { pool: 'closing', unlockAt: Number.MAX_VALUE })],
+    });
+    expect(() => dayCompletenessIssues(draft)).not.toThrow();
+    expect(dayCompletenessIssues(draft).map((i) => i.code)).toContain('day-missing-unlock');
+    expect(() => isDraftLaunchable(draft, NOW)).not.toThrow();
+  });
+
+  it('accepts an instant at the representable boundary', () => {
+    expect(isRepresentableInstant(8.64e15)).toBe(true);
+    expect(isRepresentableInstant(8.64e15 + 1)).toBe(false);
+    expect(isRepresentableInstant(Number.MAX_VALUE)).toBe(false);
+    expect(isRepresentableInstant(Number.NaN)).toBe(false);
+  });
+});
+
+describe('every non-final closing Day is reported at once (#787 review)', () => {
+  it('flags the earlier closing Day even when the final Day is not closing', () => {
+    // The slice(0, -1) reading exempted the LAST closing Day, so Step 5 first
+    // showed only "the final Day needs the closing pool" and then surfaced a
+    // brand-new failure after the organizer fixed it.
+    const draft = launchableDraft({
+      days: [
+        day(0, { pool: 'easy' }),
+        day(1, { pool: 'closing' }),
+        day(2, { date: '2026-08-09' }),
+        day(3, { date: '2026-08-09', pool: 'main' }),
+      ],
+    });
+    const issues = finaleClosingPoolIssues(draft);
+    // BOTH failures, together — not one and then the other.
+    expect(issues.map((i) => i.code).sort()).toEqual(['extra-closing-day', 'no-closing-day']);
+    expect(issues.find((i) => i.code === 'extra-closing-day')?.dayIndex).toBe(1);
+  });
+})
