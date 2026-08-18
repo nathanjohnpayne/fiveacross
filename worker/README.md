@@ -45,9 +45,12 @@ curl -sI http://localhost:8787/ -H 'Host: admin.fiveacross.app'      # expect 40
 ### 1. Configure and deploy, unrouted
 
 ```bash
-npx wrangler secret put FIREBASE_API_KEY --cwd worker   # the fiveacross project's WEB api key
-npm run worker:deploy                                   # from the repo root
+npm --prefix worker ci                                       # pinned wrangler, from the committed lockfile
+npm --prefix worker exec -- wrangler secret put FIREBASE_API_KEY   # the fiveacross project's WEB api key
+npm run worker:deploy                                        # from the repo root
 ```
+
+Install first, and invoke wrangler through the local binary rather than a bare `npx wrangler`: `npx` would fetch whatever version the registry currently resolves, which defeats the point of pinning the toolchain in `worker/package-lock.json`.
 
 This uploads the Worker and publishes it on its `*.workers.dev` address only. Nothing about what the public sees changes.
 
@@ -62,7 +65,8 @@ Between this step and the next, the Worker is deployed but **unconfigured** if t
 Use `wrangler dev --remote` instead. It executes **this deployed code on Cloudflare's network** with real bindings, a real Cache API, real Firestore reads and the real Hosting origin, while serving on `localhost`, where the URL the Worker sees *is* built from the `Host` header you send. That is a genuine end-to-end rehearsal with no production route and no test-only bypass compiled into the router.
 
 ```bash
-npx wrangler dev --remote --cwd worker    # leave running; requests below go to localhost:8787
+npm --prefix worker ci                                  # if you have not already
+npm --prefix worker exec -- wrangler dev --remote       # leave running; requests below go to localhost:8787
 ```
 
 | Check | `curl -sI http://localhost:8787/ …` | Expected |

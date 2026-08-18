@@ -58,6 +58,34 @@ export interface CacheEnvelope {
   record: HostnameRecord;
 }
 
+/**
+ * Whether a value read back from the cache is an envelope this resolver may
+ * dereference.
+ *
+ * A version check alone is NOT enough, and the gap is the same
+ * crash-instead-of-fail-closed family as an unbound binding: an envelope
+ * carrying the current `CACHE_VERSION` but a missing or partial `record` would
+ * pass a version test, reach `decide`, and throw on `record.status` — a Worker
+ * runtime error in place of the documented fail-closed page. The cache is a
+ * deserialisation boundary (JSON out of a shared store, possibly written by a
+ * different deployment), so every field the resolver dereferences is checked
+ * here. Anything short reads as a MISS, never as coerced data — the same rule
+ * `specs/event-resolution.md` gives the client's envelope.
+ */
+export function isCacheEnvelope(value: unknown): value is CacheEnvelope {
+  if (typeof value !== 'object' || value === null) return false;
+  const envelope = value as Partial<CacheEnvelope>;
+  if (envelope.version !== CACHE_VERSION) return false;
+  if (typeof envelope.fetchedAt !== 'number' || !Number.isFinite(envelope.fetchedAt)) return false;
+  if (typeof envelope.record !== 'object' || envelope.record === null) return false;
+  const record = envelope.record as Partial<HostnameRecord>;
+  return (
+    typeof record.eventId === 'string' &&
+    typeof record.status === 'string' &&
+    (record.slug === null || typeof record.slug === 'string')
+  );
+}
+
 /** The cache seam. `worker/src/index.ts` adapts Cloudflare's `caches.default`
  *  to it; the tests supply a map. Deliberately narrow — a `Cache` has a large
  *  surface this module has no use for. */
@@ -121,11 +149,12 @@ export async function resolveHost(
   // Firestore read a miss costs. Same rule `specs/event-resolution.md` gives
   // the client: "storage that throws on access degrades to 'no cache', never
   // to a failed boot."
-  const cached = await swallow(() => deps.cache.read(host), null);
-  const fresh =
-    cached !== null &&
-    cached.version === CACHE_VERSION &&
-    deps.now() - cached.fetchedAt < config.cacheTtlMs;
+  // Validated at the seam, not merely version-checked: `deps.cache` is an
+  // injected interface over a shared store, so what comes back is untrusted
+  // data rather than a value this module wrote.
+  const raw = await swallow<unknown>(() => deps.cache.read(host), null);
+  const cached = isCacheEnvelope(raw) ? raw : null;
+  const fresh = cached !== null && deps.now() - cached.fetchedAt < config.cacheTtlMs;
 
   if (fresh && cached !== null) {
     return decide(cached.record, expectedSlug, false);
@@ -140,7 +169,7 @@ export async function resolveHost(
     // simply gone, but it stops counting as evidence the mapping is still
     // good (specs/event-resolution.md). With no entry at all there is nothing
     // to fall back to, so this fails closed like every other unknown.
-    if (cached !== null && cached.version === CACHE_VERSION) {
+    if (cached !== null) {
       return decide(cached.record, expectedSlug, true);
     }
     return { kind: 'not-found', reason: 'lookup-unavailable' };

@@ -231,6 +231,41 @@ describe('resolveHost — the cache', () => {
     expect(cache.store.has(HOST)).toBe(false);
   });
 
+  it.each([
+    ['a null record at the current version', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: null }],
+    ['a missing record', { version: CACHE_VERSION, fetchedAt: 1_000_000 }],
+    ['a record missing status', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e' } }],
+    ['a record missing eventId', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { status: 'active' } }],
+    ['a non-string slug', { version: CACHE_VERSION, fetchedAt: 1_000_000, record: { eventId: 'e', status: 'active', slug: 7 } }],
+    ['a non-numeric fetchedAt', { version: CACHE_VERSION, fetchedAt: 'soon', record: { eventId: 'e', status: 'active', slug: 'bodega-bay' } }],
+    ['a bare string', 'not an envelope'],
+  ])('reads %s as a MISS rather than dereferencing it', async (_label, junk) => {
+    // A version check alone let a current-version envelope with a partial
+    // record reach `decide`, which threw on `record.status` — a Worker runtime
+    // error in place of the documented fail-closed page.
+    const cache: HostnameCache = {
+      read: async () => junk as never,
+      write: async () => {},
+      drop: async () => {},
+    };
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith(ACTIVE), cache));
+    // Fell through to the network read rather than throwing.
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: false });
+  });
+
+  it('does not resurrect a malformed envelope on the stale-serve path either', async () => {
+    const cache: HostnameCache = {
+      read: async () => ({ version: CACHE_VERSION, fetchedAt: 0, record: { eventId: 'e' } }) as never,
+      write: async () => {},
+      drop: async () => {},
+    };
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('firestore unreachable');
+    }) as unknown as ResolveDeps['fetch'];
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache));
+    expect(result).toEqual({ kind: 'not-found', reason: 'lookup-unavailable' });
+  });
+
   it('treats a failing cache as a miss rather than as a Worker error', async () => {
     // The cache is an optimisation; a rejecting Cache API must cost an extra
     // Firestore read, never the rendered fail-closed state and its headers.
@@ -293,12 +328,21 @@ describe('the Firestore request', () => {
   });
 
   it('bounds the read, so a hung dependency cannot hang the request', async () => {
+    // The assertion is deliberately OUTSIDE the fake. Asserting inside it is
+    // worthless here: `resolveHost` wraps the `deps.fetch` await in the
+    // try/catch that produces `lookup-unavailable`, so a thrown assertion is
+    // swallowed and the test passes no matter what the signal is.
+    let seenSignal: unknown = 'never called';
     const fetchImpl = vi.fn(async (_input: unknown, init: RequestInit) => {
-      expect(init.signal).toBeInstanceOf(AbortSignal);
+      seenSignal = init.signal;
       return new Response(JSON.stringify(ACTIVE), { status: 200 });
     }) as unknown as ResolveDeps['fetch'];
-    await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, memoryCache()));
-    expect(fetchImpl).toHaveBeenCalled();
+
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, memoryCache()));
+
+    expect(result.kind).toBe('serve');
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+    expect((seenSignal as AbortSignal).aborted).toBe(false);
   });
 });
 

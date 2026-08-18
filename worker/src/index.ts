@@ -10,7 +10,7 @@
 
 import { routerConfigFromEnv, type RouterEnv } from './config';
 import { handleRequest, type RouterDeps } from './router';
-import { CACHE_VERSION, type CacheEnvelope, type HostnameCache } from './resolve';
+import { isCacheEnvelope, type HostnameCache } from './resolve';
 
 export type { RouterEnv as Env };
 
@@ -40,10 +40,14 @@ function cloudflareCache(cache: Cache, ctx: ExecutionContext): HostnameCache {
       const hit = await cache.match(keyFor(host));
       if (hit === undefined) return null;
       try {
-        const envelope = (await hit.json()) as CacheEnvelope;
         // A shape-drifted or older-version envelope reads as a MISS rather
-        // than being coerced, matching the client cache's rule.
-        return envelope?.version === CACHE_VERSION ? envelope : null;
+        // than being coerced, matching the client cache's rule. The predicate
+        // checks every field the resolver dereferences, not just the version:
+        // a current-version envelope with a partial `record` would otherwise
+        // reach `decide` and throw a runtime error instead of rendering the
+        // fail-closed page.
+        const envelope: unknown = await hit.json();
+        return isCacheEnvelope(envelope) ? envelope : null;
       } catch {
         return null;
       }
