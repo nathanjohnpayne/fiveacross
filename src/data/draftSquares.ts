@@ -9,7 +9,9 @@
  *
  * TWO INVARIANTS RUN THROUGH ALL OF IT.
  *
- * 1. EVERY TRANSFORM RETURNS A DENSE ARRAY. A sparse draft is not merely
+ * 1. EVERY SUCCESSFUL TRANSFORM RETURNS A FULLY DENSE DRAFT — both `days` and
+ *    all three prompt pools, through the single `normalizeDraft` chokepoint,
+ *    whatever the edit was. A sparse draft is not merely
  *    untidy: `EventDraftStore.save` re-parses its own serialization before
  *    replacing the stored blob, `JSON.stringify` turns a hole into an explicit
  *    `null`, and `parseEventDraft` refuses that — so a draft that acquires one
@@ -79,10 +81,51 @@ function denseDays(draft: EventDraft): DraftDayDef[] {
 }
 
 /** Renumber a Day list so `days[position].index === position`, the one
- *  property every launched-Day consumer relies on. Applied after any add or
- *  remove — never as a silent repair of a schedule nobody touched. */
+ *  property every launched-Day consumer relies on. */
 function reindex(days: readonly DraftDayDef[]): DraftDayDef[] {
   return days.map((day, index) => (day.index === index ? day : { ...day, index }));
+}
+
+/**
+ * The one chokepoint every successful transform returns through: BOTH
+ * collections dense, on every edit, whatever the edit was.
+ *
+ * The guarantee has to be draft-wide because `EventDraftStore.save` is
+ * draft-wide: it re-parses its own serialization and `parseEventDraft`
+ * refuses the whole blob when EITHER `days` or any prompt pool carries a gap.
+ * Densifying only the collection an edit happens to touch therefore does not
+ * deliver the promise — a Day edit on a draft with a sparse pool, or a Prompt
+ * edit on a draft with a sparse schedule, still leaves the draft unstorable,
+ * so the change shows up in memory and is gone after a reload (Phase 4b P2).
+ * Routing every return through here is what makes "any edit repairs it" true
+ * rather than approximately true, and it is why the rule lives in one
+ * function instead of being restated in each transform — three earlier review
+ * rounds each found a different helper that had forgotten it.
+ *
+ * Entry objects are PRESERVED, only the arrays are rebuilt: `densePrompts`
+ * and `denseDays` filter rather than copy, so the Prompt-row editor's
+ * identity check still sees an untouched row as untouched.
+ *
+ * Days are renumbered as well as compacted: dropping a hole without
+ * renumbering would leave `days[position].index !== position`, which is the
+ * one property `Board`, `eventPreview` and `DaySwitcher` all select by. A
+ * hole holds nothing an organizer could lose, so this is the same repair the
+ * Day list's own gap row performs, applied consistently.
+ *
+ * No-op transforms deliberately do NOT come through here — they return the
+ * original draft by identity, because nothing was edited and a refusal should
+ * not quietly rewrite the draft it refused.
+ */
+function normalizeDraft(draft: EventDraft): EventDraft {
+  return {
+    ...draft,
+    days: reindex(denseDays(draft)),
+    prompts: {
+      main: densePrompts(draft.prompts.main),
+      easy: densePrompts(draft.prompts.easy),
+      closing: densePrompts(draft.prompts.closing),
+    },
+  };
 }
 
 /**
@@ -137,13 +180,13 @@ function daysFromOccasion(draft: EventDraft): DraftDayDef[] {
  */
 export function setCardFormat(draft: EventDraft, cardFormat: DraftCardFormat): EventDraft {
   if (cardFormat === draft.cardFormat) return draft;
-  if (cardFormat === 'one_card') return { ...draft, cardFormat, days: [] };
+  if (cardFormat === 'one_card') return normalizeDraft({ ...draft, cardFormat, days: [] });
   const existing = denseDays(draft);
-  return {
+  return normalizeDraft({
     ...draft,
     cardFormat,
-    days: reindex(existing.length > 0 ? existing : daysFromOccasion(draft)),
-  };
+    days: existing.length > 0 ? existing : daysFromOccasion(draft),
+  });
 }
 
 /** Whether another Day may be added. The ceiling is a RULES fact, not a
@@ -172,7 +215,7 @@ export function canAddDay(draft: EventDraft): boolean {
 export function addDay(draft: EventDraft): EventDraft {
   if (!canAddDay(draft)) return draft;
   const days = denseDays(draft);
-  return { ...draft, days: reindex([...days, blankDay(days.length, 'main', false)]) };
+  return normalizeDraft({ ...draft, days: [...days, blankDay(days.length, 'main', false)] });
 }
 
 /** Remove the Day at `position` in the stored array and renumber the rest, so
@@ -181,12 +224,12 @@ export function removeDay(draft: EventDraft, position: number): EventDraft {
   const days = denseDays(draft);
   if (position < 0 || position >= draft.days.length) return draft;
   const removed = draft.days[position];
-  return {
+  return normalizeDraft({
     ...draft,
     // Compare by identity rather than re-deriving the position: `denseDays`
     // may have shifted it when the stored array held holes before `position`.
-    days: reindex(removed ? days.filter((day) => day !== removed) : days),
-  };
+    days: removed ? days.filter((day) => day !== removed) : days,
+  });
 }
 
 /**
@@ -221,10 +264,10 @@ function patchDay(
 ): EventDraft {
   const target = draft.days[position];
   if (!target) return draft;
-  return {
+  return normalizeDraft({
     ...draft,
-    days: reindex(denseDays(draft).map((day) => (day === target ? patch(day) : day))),
-  };
+    days: denseDays(draft).map((day) => (day === target ? patch(day) : day)),
+  });
 }
 
 /**
@@ -240,7 +283,7 @@ function patchDay(
  * cost in the confirm instead of guessing at it.
  */
 export function seedPack(draft: EventDraft, pack: StarterPack): EventDraft {
-  return { ...draft, prompts: seedPromptsFromPack(pack) };
+  return normalizeDraft({ ...draft, prompts: seedPromptsFromPack(pack) });
 }
 
 /** Real entries per pool, for the live counter. `countPrompts` is imported
@@ -288,7 +331,7 @@ export function addPrompt(
   };
   if (pool === 'main') prompts.main = [...prompts.main, { text: trimmed, spicy }];
   else prompts[pool] = [...prompts[pool], { text: trimmed }];
-  return { ...draft, prompts };
+  return normalizeDraft({ ...draft, prompts });
 }
 
 /** Drop the Prompt at `position` in `pool`. Holes anywhere in that pool go
@@ -421,13 +464,8 @@ function mapPool(
   // and every edit after it — silently stops persisting while the organizer
   // keeps typing. `addPrompt` already compacted all three; this is the same
   // guarantee for the edit paths (Codex P2, round 4).
-  return {
+  return normalizeDraft({
     ...draft,
-    prompts: {
-      main: densePrompts(draft.prompts.main),
-      easy: densePrompts(draft.prompts.easy),
-      closing: densePrompts(draft.prompts.closing),
-      [pool]: next,
-    } as DraftPromptPools,
-  };
+    prompts: { ...draft.prompts, [pool]: next } as DraftPromptPools,
+  });
 }

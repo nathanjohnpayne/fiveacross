@@ -412,6 +412,60 @@ describe('the per-pool minimum, through these transforms', () => {
   });
 });
 
+describe('every successful transform normalizes the WHOLE draft', () => {
+  // Phase 4b P2: `save` re-parses the whole serialized draft, so a gap in
+  // EITHER collection makes the entire draft unstorable. Densifying only the
+  // collection an edit touched meant a Day edit on a sparse pool (or a Prompt
+  // edit on a sparse schedule) still vanished after a reload.
+  function bothSparse(): EventDraft {
+    const sparsePool = [{ text: 'a', spicy: false }, , { text: 'c', spicy: false }] as unknown as {
+      text: string;
+      spicy: boolean;
+    }[];
+    const sparseDays = [day(0), , day(1, { pool: 'closing' })] as unknown as DraftDayDef[];
+    return draftWith({
+      cardFormat: 'daily_cards',
+      days: sparseDays,
+      prompts: { main: sparsePool, easy: [], closing: [{ text: 'c1' }, null as never] },
+    });
+  }
+
+  function assertDense(d: EventDraft) {
+    expect(Object.keys(d.days)).toEqual(d.days.map((_u, i) => String(i)));
+    expect(d.days.every((x) => x !== null && x !== undefined)).toBe(true);
+    expect(d.days.map((x) => x.index)).toEqual(d.days.map((_u, i) => i));
+    for (const pool of ['main', 'easy', 'closing'] as const) {
+      const arr = d.prompts[pool] as readonly unknown[];
+      expect(Object.keys(arr)).toEqual(arr.map((_u, i) => String(i)));
+      expect(arr.every((x) => x !== null && x !== undefined)).toBe(true);
+    }
+    // The real proof: the shared gate sees nothing missing anywhere.
+    expect(promptTextIssues(d)).toEqual([]);
+  }
+
+  it('repairs both collections on a PROMPT edit', () => {
+    assertDense(setPromptText(bothSparse(), 'main', 2, 'c edited'));
+  });
+
+  it('repairs both collections on a DAY edit', () => {
+    assertDense(setDayPool(bothSparse(), 0, 'easy'));
+  });
+
+  it('repairs both collections on an add, a removal and a seed', () => {
+    assertDense(addPrompt(bothSparse(), 'easy', 'brand new', false));
+    assertDense(removeDay(bothSparse(), 0));
+    assertDense(addDay(bothSparse()));
+  });
+
+  it('leaves a REFUSED transform untouched rather than quietly rewriting it', () => {
+    // A no-op must not launder a sparse draft: nothing was edited, and a
+    // refusal should not rewrite the draft it refused.
+    const sparse = bothSparse();
+    expect(addPrompt(sparse, 'main', '   ', false)).toBe(sparse);
+    expect(setPromptText(sparse, 'main', 0, '  ')).toBe(sparse);
+  });
+});
+
 describe('duplicatePromptTexts', () => {
   it('reports a repeat once, per pool, ignoring case and surrounding space', () => {
     const d = draftWith({

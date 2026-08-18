@@ -4739,6 +4739,8 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   display: flex;
   flex-direction: column;
   gap: 5px;
+}
+
 /* ---------- live preview strip (#795) ----------
    The strip's swatch and the expanded card both render inside a
    `ThemeIsland` (src/theme/ThemeIsland.tsx) — the same `[data-theme]`
