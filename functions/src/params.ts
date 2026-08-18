@@ -16,10 +16,45 @@ export const RESEND_API_KEY = defineSecret('RESEND_API_KEY');
  * `sendEmail` swallowed it into a logged `false`, per ADR 0001's never-throw
  * contract). Override per project in `functions/.env.<projectId>` — the Five
  * Across deployment already does (`Vacay Bingo <fiveacross@mail.nathanpayne.com>`).
+ *
+ * DEMOTED TO THE FALLBACK (#671). ADR 0008 splits Firebase projects by
+ * cohort, not by brand, so one project can serve several brands (a Vacay Bay
+ * host and a Five Across host on the SAME `fiveacross` project deployment),
+ * and a per-project param cannot express a per-brand sender. The daily email
+ * and admin digest now resolve an Edition-aware `From:` first — see the
+ * `EMAIL_FROM_*` params below and `fromAddressFor` in `dailyEmailContent.ts`
+ * — and reach this param only when no per-Edition override is configured.
  */
 export const EMAIL_FROM = defineString('EMAIL_FROM', {
   default: 'Gay Cruise Bingo <gaycruisebingo@mail.nathanpayne.com>',
 });
+/**
+ * Per-Edition overrides of `EMAIL_FROM` (#671), one per brand in the #608
+ * lexicon. Read through `fromAddressFor` (`dailyEmailContent.ts`) once an
+ * Event's host resolves an Edition, so a Vacay-branded email can carry a
+ * Vacay sender even on a project whose `EMAIL_FROM` default is something else.
+ *
+ * DEFAULT EMPTY — same convention as `EMAIL_REPLY_TO` below, and for the same
+ * reason `EMAIL_FROM` itself must sit on a Resend-VERIFIED domain: an empty
+ * value here is the signal that the brand's domain is not verified yet, so
+ * the send falls back to `EMAIL_FROM` instead of handing Resend a `From:` it
+ * will reject (swallowed into a logged `false`, never a thrown error, per
+ * ADR 0001). Set the matching param, per project, only once that brand's
+ * domain is verified in Resend. Recommended values, from
+ * `plans/daily-cards-wireframes.html` § `#fx-email-registers-tri`:
+ *
+ *   EMAIL_FROM_GCB=Gay Cruise Bingo <bingo@gaycruisebingo.com>
+ *   EMAIL_FROM_VACAY=Vacay Bingo <hello@vacaybingo.com>
+ *   EMAIL_FROM_FIVEACROSS=Five Across <hello@fiveacross.app>
+ *
+ * As of this writing NONE of `gaycruisebingo.com`, `vacaybingo.com` or
+ * `fiveacross.app` are verified sending domains — verification is tracked
+ * separately (see the PR that introduced these params) and is a prerequisite
+ * for setting any of them, not something this code can detect on its own.
+ */
+export const EMAIL_FROM_GCB = defineString('EMAIL_FROM_GCB', { default: '' });
+export const EMAIL_FROM_VACAY = defineString('EMAIL_FROM_VACAY', { default: '' });
+export const EMAIL_FROM_FIVEACROSS = defineString('EMAIL_FROM_FIVEACROSS', { default: '' });
 /**
  * Address replies land in, applied to every transactional send.
  *

@@ -38,7 +38,7 @@
  * Functions runtime (mirrors `dailyEmail.ts` and `autohide.ts`).
  */
 import { resolveAdminEmails, type ResolveDeps } from './notify';
-import { resolveEventOrigin } from './dailyEmail';
+import { resolveEmailFrom, resolveEventOrigin } from './dailyEmail';
 import {
   buildAdminDigestModel,
   renderAdminDigestHtml,
@@ -475,8 +475,13 @@ export const DIGEST_INTERVAL_MINUTES = 5;
 export interface AdminDigestDeps extends ResolveDeps, EnqueueDeps {
   /** Override the send transport (defaults to `sendEmail`). */
   send?: typeof sendEmail;
-  /** Sender identity; defaults to the `EMAIL_FROM` param. */
+  /** Sender identity override; wins outright over Edition resolution. Defaults
+   *  to `resolveEmailFrom(edition)` — the Edition's `EMAIL_FROM_*` override if
+   *  one is configured, else the project-wide `EMAIL_FROM` param (#671). */
   from?: string;
+  /** Test-only injection point for `resolveEmailFrom`'s per-Edition lookup —
+   *  see its doc comment in `dailyEmail.ts`. Ignored when `from` is set. */
+  fromOverrides?: Readonly<Record<string, string | undefined>>;
   /** Fallback origin when the Event has no hostname documents; defaults to the
    *  `APP_BASE_URL` param. */
   appBaseUrl?: string;
@@ -766,12 +771,13 @@ export async function sendAdminDigestForEvent(
   }
 
   const appBaseUrl = deps.appBaseUrl ?? (await import('./params')).APP_BASE_URL.value();
-  const from = deps.from ?? (await import('./params')).EMAIL_FROM.value();
   const send = deps.send ?? (await import('./email')).sendEmail;
   // A FAILED hostname read is not a confirmed absence: falling back would erase
   // the Event's Edition and put the legacy brand line on a Vacay/Five Across
   // digest. Let the sweep boundary log and skip; the next run retries safely.
   const { origin, edition } = await resolveEventOrigin(db, eventId, appBaseUrl);
+  // Resolved after the Edition, not before: the sender is Edition-aware (#671).
+  const from = deps.from ?? (await resolveEmailFrom(edition, deps.fromOverrides));
 
   const model = buildAdminDigestModel({ event, eventId, alerts: current, edition, origin, now });
   const payload: FrozenDigest = {

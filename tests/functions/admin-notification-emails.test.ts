@@ -1109,6 +1109,77 @@ describe('sendAdminDigestForEvent', () => {
     expect((await sendAdminDigestForEvent(db, 'med-2026', deps(send))).sent).toBe(1);
     spy.mockRestore();
   });
+
+  // #671: the digest's sender is Edition-aware too, resolved from the same
+  // `resolveEventOrigin` hostname lookup the brand line already uses — not the
+  // `deps.from` override, which these three cases deliberately omit.
+  describe('Edition-aware sender (#671)', () => {
+    const editionDeps = (send: ReturnType<typeof vi.fn>, fromOverrides: Record<string, string>) => {
+      const { from: _from, ...rest } = deps(send);
+      return { ...rest, fromOverrides };
+    };
+
+    // The real EMAIL_FROM param's `.value()` reads `process.env.EMAIL_FROM`
+    // directly — its `default` is a deploy-time-only concern the firebase-tools
+    // CLI resolves, never consulted at plain runtime — so an unset env var
+    // resolves to `''`, not the documented default. Stub the env var directly
+    // rather than mocking the whole `./params` module: `resolveEmailFrom`
+    // reaches it via a fresh `await import('./params')` on every call, and an
+    // earlier test in this file may already have resolved that dynamic import
+    // before a `vi.doMock` registration here would take effect. Stubbing
+    // `process.env` sidesteps that question entirely (CodeRabbit finding on
+    // PR #810). The value is deliberately NOT the real EMAIL_FROM default, so
+    // a passing assertion can only mean the stub was read.
+    const STUBBED_EMAIL_FROM = 'Stubbed Sender <stub@example.invalid>';
+
+    it('sends from the Edition-configured address when the host resolves a known Edition', async () => {
+      const send = vi.fn(async () => true);
+      const db = seeded(
+        [pendingAlert('a1')],
+        [{ eventId: 'med-2026', canonicalHost: 'bodega-bay.vacaybingo.com', edition: 'vacay', isCanonical: true, status: 'active' }],
+      );
+      await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, { vacay: 'Vacay Bingo <hello@vacaybingo.com>' }));
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe('Vacay Bingo <hello@vacaybingo.com>');
+    });
+
+    it('falls back to EMAIL_FROM when the resolved Edition has no configured override', async () => {
+      vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+      const send = vi.fn(async () => true);
+      const db = seeded(
+        [pendingAlert('a1')],
+        [{ eventId: 'med-2026', canonicalHost: 'gaycruisebingo.com', edition: 'gcb', isCanonical: true, status: 'active' }],
+      );
+      await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, {}));
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(STUBBED_EMAIL_FROM);
+      vi.unstubAllEnvs();
+    });
+
+    it('falls back to EMAIL_FROM for an unrecognized Edition rather than failing the send', async () => {
+      vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+      const send = vi.fn(async () => true);
+      const db = seeded(
+        [pendingAlert('a1')],
+        [{ eventId: 'med-2026', canonicalHost: 'green-valley.fiveacross.app', edition: 'some-future-edition', isCanonical: true, status: 'active' }],
+      );
+      const result = await sendAdminDigestForEvent(
+        db,
+        'med-2026',
+        editionDeps(send, { 'some-future-edition': 'Should Not <use@example.com>' }),
+      );
+      expect(result.sent).toBe(1);
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(STUBBED_EMAIL_FROM);
+      vi.unstubAllEnvs();
+    });
+
+    it('falls back to EMAIL_FROM when the Event has no hostname documents at all', async () => {
+      vi.stubEnv('EMAIL_FROM', STUBBED_EMAIL_FROM);
+      const send = vi.fn(async () => true);
+      const db = seeded([pendingAlert('a1')], []); // no hostnames → edition: null
+      await sendAdminDigestForEvent(db, 'med-2026', editionDeps(send, { gcb: 'Should Not <use@example.com>' }));
+      expect((send.mock.calls[0][0] as { from: string }).from).toBe(STUBBED_EMAIL_FROM);
+      vi.unstubAllEnvs();
+    });
+  });
 });
 
 describe('claimed-batch retries and exclusivity', () => {
