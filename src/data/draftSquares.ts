@@ -373,9 +373,21 @@ export function duplicatePromptTexts(draft: EventDraft): Record<PoolId, string[]
   return out;
 }
 
-/** `filter` skips holes, so this is the pool's real entries in order. */
+/**
+ * The pool's real entries in order — holes AND explicit `null`/`undefined`
+ * both dropped.
+ *
+ * `filter(() => true)` drops only holes and would KEEP an explicit `null`,
+ * which defeats the whole point at the moment it matters most: `addPrompt`
+ * compacts through here, so adding a Prompt to a pool carrying an explicit
+ * missing entry left that entry in place, `parseEventDraft` refused the
+ * serialized draft, and `save` kept the previous blob — the new Prompt
+ * appeared in memory and silently vanished on the next load (Codex P2, round
+ * 3). Matches `countPrompts` and `mapPool`, and makes the spec's "every
+ * transform returns a dense array" true for the explicit case too.
+ */
 function densePrompts<T>(prompts: readonly T[]): T[] {
-  return prompts.filter(() => true);
+  return prompts.filter((prompt) => prompt !== null && prompt !== undefined);
 }
 
 /**

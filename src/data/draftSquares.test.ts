@@ -305,6 +305,24 @@ describe('sparse pools', () => {
     expect(promptTextIssues(repaired)).toEqual([]);
   });
 
+  it('compacts an EXPLICIT missing entry when adding, so the new Prompt actually persists', () => {
+    // The sharp version: `addPrompt` compacts through `densePrompts`, and a
+    // `filter(() => true)` there kept an explicit null — so `parseEventDraft`
+    // refused the serialized draft, `save` kept the previous blob, and the
+    // newly added Prompt vanished on the next load (Codex P2, round 3).
+    const withNull = [
+      { text: 'a', spicy: false },
+      null,
+    ] as unknown as { text: string; spicy: boolean }[];
+    const after = addPrompt(draftWith({ prompts: { main: withNull, easy: [], closing: [] } }), 'main', 'brand new', false);
+    expect(after.prompts.main).toEqual([
+      { text: 'a', spicy: false },
+      { text: 'brand new', spicy: false },
+    ]);
+    // The gate agrees the draft is clean, which is what makes it storable.
+    expect(promptTextIssues(after)).toEqual([]);
+  });
+
   it('never dereferences a hole while producing the per-pool verdict', () => {
     const d = draftWith({
       cardFormat: 'daily_cards',

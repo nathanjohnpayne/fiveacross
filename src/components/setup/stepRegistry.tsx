@@ -45,11 +45,13 @@ const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>
  * `stepIndex`) and this registry's rendering order are structurally the same
  * sequence, not two lists a future edit could quietly desync.
  *
- * Every `render` is `PlaceholderStep` today. A step ticket replaces its own
- * entry's `render` (and may sharpen `heading`) in `STEP_CONTENT` above —
- * never adds, removes, or reorders steps, which stays this ticket's shell
- * contract (reorders belong in `SETUP_STEP_ORDER` itself, and touch both the
- * classifier in `wizardSteps.ts` and every step ticket at once).
+ * `squares` renders its real body (#791); `occasion`, `basics`, `look` and
+ * `launch` are still `PlaceholderStep` pending #789, #790, #792 and #794. A
+ * step ticket replaces its own entry's `render` (and may sharpen `heading`)
+ * in `STEP_CONTENT` above — never adds, removes, or reorders steps, which
+ * stays #788's shell contract (reorders belong in `SETUP_STEP_ORDER` itself,
+ * and touch both the classifier in `wizardSteps.ts` and every step ticket at
+ * once).
  */
 export const STEP_REGISTRY: readonly StepDefinition[] = SETUP_STEP_ORDER.map((id) => ({
   id,

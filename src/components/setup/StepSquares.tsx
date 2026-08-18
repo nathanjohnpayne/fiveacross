@@ -464,18 +464,30 @@ function PromptRow({
           control that renders and does nothing is exactly the "looks
           honoured, silently dropped" shape #785 warns about, and `PromptPool`'s
           admin bar (which does disable it) is a different surface with a
-          different audience. */}
-      {pool === 'main' && (
-        <label className="squares-spicy">
-          <input
-            type="checkbox"
-            checked={spicy}
-            aria-label={`Spicy — ${label}`}
-            onChange={(e) => onSpicy(e.target.checked)}
-          />{' '}
-          🔞
-        </label>
-      )}
+          different audience.
+          While THIS row is being edited it shows its flag as a static chip
+          instead. Toggling spicy replaces the row's entry object, which the
+          identity check above cannot tell apart from a different Prompt
+          sliding into the position — so the editor would close and discard a
+          half-typed rename (Codex P2, round 3). Reading the flag stays
+          available; setting it waits for Save or Cancel, which is a moment
+          away, whereas the lost text is not recoverable. */}
+      {pool === 'main' &&
+        (editing ? (
+          <span className="squares-spicy" aria-label={`Spicy — ${label}`}>
+            🔞 {spicy ? 'on' : 'off'}
+          </span>
+        ) : (
+          <label className="squares-spicy">
+            <input
+              type="checkbox"
+              checked={spicy}
+              aria-label={`Spicy — ${label}`}
+              onChange={(e) => onSpicy(e.target.checked)}
+            />{' '}
+            🔞
+          </label>
+        ))}
       {editing ? (
         <>
           <button type="button" className="btn" onClick={commit}>

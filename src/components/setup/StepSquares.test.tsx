@@ -349,6 +349,32 @@ describe('prompt CRUD', () => {
     );
   });
 
+  it('shows spicy as a static chip while its own row is being edited, so a rename is not lost', async () => {
+    // Toggling spicy replaces the row's entry object, which the identity
+    // check cannot tell apart from a different Prompt sliding in — so the
+    // editor would close and discard a half-typed rename (Codex P2, round 3).
+    // Reading the flag stays available; setting it waits for Save/Cancel.
+    renderStep(
+      draftWith({
+        days: [day(0, { pool: 'closing' })],
+        prompts: { main: [{ text: 'Karaoke duet', spicy: true }], easy: [], closing: [] },
+      }),
+    );
+    expect(screen.getByRole('checkbox', { name: 'Spicy — Prompt 1 in the main pool' })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit Prompt 1 in the main pool' }));
+    const input = screen.getByRole('textbox', { name: 'Edit Prompt 1 in the main pool' });
+    await userEvent.clear(input);
+    await userEvent.type(input, 'half typed rename');
+
+    expect(screen.queryByRole('checkbox', { name: 'Spicy — Prompt 1 in the main pool' })).toBeNull();
+    expect(screen.getByLabelText('Spicy — Prompt 1 in the main pool')).toHaveTextContent('on');
+    // The draft survived, and the toggle comes back once the edit is done.
+    expect(input).toHaveValue('half typed rename');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('checkbox', { name: 'Spicy — Prompt 1 in the main pool' })).toBeChecked();
+  });
+
   it('flags repeated wording without blocking on it', async () => {
     const { current } = renderStep(
       draftWith({
