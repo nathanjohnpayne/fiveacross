@@ -378,6 +378,68 @@ describe('e2e functions dotenv generation', () => {
     ]);
   });
 
+  // Codex P2 round 2 on PR #826: a class STATIC BLOCK is its own
+  // var-hoisting scope boundary, distinct from an ordinary block — `var`
+  // inside `static { … }` is scoped to the block itself, not hoisted out to
+  // whatever function contains the class.
+  it('does not hoist a var out of a class static block into the enclosing function', () => {
+    const staticBlockVar = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper() {',
+      "  const early = defineString('LOCAL_PARAM_NOT_SHADOWED');",
+      '  class Box {',
+      '    static {',
+      '      var defineString = (name) => name;',
+      '    }',
+      '  }',
+      '  return early;',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(staticBlockVar).params).toEqual(['REAL_PARAM', 'LOCAL_PARAM_NOT_SHADOWED']);
+  });
+
+  // Codex P2 round 2 on PR #826: `ts.isFunctionLike` also matches
+  // `FunctionDeclaration`, so a first version of this fix's early return
+  // made the branch that records a function declaration's OWN name
+  // unreachable dead code — silently dropping the Annex B hoisting for any
+  // function declared two or more levels deep (inside an `if`/`for` nested
+  // in the body, not directly in the function's own top-level block, which
+  // `scopeDeclares`'s per-block scan already catches on its own).
+  it('still hoists a function declaration nested two levels deep in the body', () => {
+    const nestedFunctionDeclaration = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      'export function helper(flag) {',
+      "  const early = defineString('LOCAL_NOT_A_PARAM');",
+      '  if (flag) {',
+      '    function defineString() { return null; }',
+      '  }',
+      '  return early;',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(nestedFunctionDeclaration).params).toEqual(['REAL_PARAM']);
+  });
+
+  // Codex P2 round 2 on PR #826: a call inside a PARAMETER's own default-
+  // value initializer runs in a separate parameter scope that cannot see
+  // the function BODY's `var`/function-declaration bindings — only a call
+  // actually inside the body can be hoisting-shadowed by one.
+  it('does not let a body var shadow a call in a parameter default initializer', () => {
+    const paramDefaultNotShadowed = [
+      IMPORT,
+      "export const REAL = defineString('REAL_PARAM');",
+      "export function helper(value = defineString('PARAM_IN_DEFAULT')) {",
+      '  var defineString = (name) => name;',
+      '  return value;',
+      '}',
+    ].join('\n');
+
+    expect(declaredParamNames(paramDefaultNotShadowed).params).toEqual(['REAL_PARAM', 'PARAM_IN_DEFAULT']);
+  });
+
   // Codex P2 on PR #730, and the exact counterpart of the earlier finding that a
   // params.ts-only scan misses too much: presence on disk is not reachability,
   // and Firebase discovery runs the entrypoint's import graph.
@@ -549,6 +611,46 @@ describe('functions source-tree reachability and barrel resolution', () => {
     });
 
     expect(() => functionsSources(join(dir, 'index.ts'))).not.toThrow();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 round 2 on PR #826: a top-level `const require = …;` shadows
+  // Node's global for the whole module. Unlike a param constructor, `require`
+  // is not necessarily imported, so `isShadowed`'s own file-top-exclusive
+  // walk (safe for a constructor name, which IS always imported) is not
+  // enough on its own here — the file-top itself has to be checked too.
+  it('does not fail closed on a non-literal call through a require shadowed at the file top', () => {
+    const dir = makeTree({
+      'index.ts': ['const require = (name) => name;', 'require(computeSomethingUnrelated());'].join('\n'),
+    });
+
+    expect(() => functionsSources(join(dir, 'index.ts'))).not.toThrow();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Codex P2 round 2 on PR #826: a genuine cycle where BOTH sides re-export
+  // through MULTIPLE statements each used to overflow the call stack — an
+  // earlier fix for the sibling-barrel case (round 1) deleted a resolved
+  // path from the shared `visited` set in the CALLER, right after each
+  // statement, which could remove an entry a DIFFERENT sibling statement —
+  // still active higher up the same call stack — still depended on being
+  // marked, letting it re-enter and recurse without bound. `a` and `b` here
+  // cycle back and forth on their SECOND statement each, while their FIRST
+  // statement is the one that actually reaches the real params module
+  // through `c` — proving the cycle both terminates and does not corrupt the
+  // real resolution alongside it.
+  it('resolves through a cycle where both sides have multiple re-export statements, without overflowing the stack', () => {
+    const dir = makeTree({
+      'c.ts': "export { defineString } from 'firebase-functions/params';\n",
+      'a.ts': ["export { defineString } from './b';", "export { defineInt } from './b';"].join('\n'),
+      'b.ts': ["export { defineString } from './c';", "export { defineFloat } from './a';"].join('\n'),
+      'index.ts': ["import { defineString } from './a';", "defineString('CYCLE_PARAM');"].join('\n'),
+    });
+
+    const declared = declaredParamNamesAcross(functionsSources(join(dir, 'index.ts')));
+    expect(declared.params).toEqual(['CYCLE_PARAM']);
 
     rmSync(dir, { recursive: true, force: true });
   });
