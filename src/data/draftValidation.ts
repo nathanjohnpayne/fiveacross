@@ -59,6 +59,8 @@ export type DraftIssueCode =
   | 'day-invalid-date'
   | 'day-unlock-date-mismatch'
   | 'day-blank-free-text'
+  | 'day-outside-event-window'
+  | 'main-prompt-spicy-not-boolean'
   | 'extra-closing-day'
   | 'day-tonight-not-two'
   | 'day-off-edition-theme'
@@ -118,8 +120,13 @@ export function isEditionTheme(theme: ThemeId | null | undefined, edition: strin
  * value comes from: plenty of runtimes report `UTC`.
  */
 export function isSupportedTimezone(timezone: string): boolean {
-  const trimmed = timezone.trim();
-  return trimmed.length > 0 && normalizeTimezone(trimmed) === trimmed;
+  // The STORED value must itself be canonical — deliberately not trimmed first.
+  // A padded value like ' America/Los_Angeles ' would pass a trimming check
+  // while every consumer receives the padding: `Intl.DateTimeFormat` rejects
+  // it, so `isoDateInTz` silently falls back to the DEVICE zone, which near a
+  // date boundary can make a Day's unlock appear to match its date even though
+  // the read-side normalization puts it on another day (#787 review).
+  return timezone.length > 0 && normalizeTimezone(timezone) === timezone;
 }
 
 /**
@@ -452,6 +459,24 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
         });
       }
     }
+    if (
+      isIsoDate(day.date) &&
+      isIsoDate(draft.startsOn) &&
+      isIsoDate(draft.endsOn) &&
+      (day.date < draft.startsOn || day.date > draft.endsOn)
+    ) {
+      // Both dates can be individually valid and still contradict each other:
+      // editing `startsOn`/`endsOn` after authoring the schedule strands Days
+      // outside the window. `More` then advertises the Event-level range while
+      // the schedule and daily-email behaviour follow the out-of-window
+      // `day.date` — the same record disagreeing with itself (#787 review).
+      // ISO dates compare lexicographically, so no parsing is needed.
+      issues.push({
+        code: 'day-outside-event-window',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} is dated ${day.date}, outside the Event window ${draft.startsOn} to ${draft.endsOn}. Move the Day or widen the window.`,
+      });
+    }
     if (typeof day.freeText === 'string' && day.freeText.trim().length === 0) {
       // The in-memory half of the same rule the parser enforces on a stored
       // blob: the wizard clearing a Free Space input must produce `undefined`,
@@ -583,6 +608,23 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
  */
 export function promptPoolIssues(draft: EventDraft): DraftIssue[] {
   const issues: DraftIssue[] = [];
+  // The main pool's `spicy` is REQUIRED and must be a real boolean. An untyped
+  // starter pack or import can supply `undefined` or the STRING 'true', which
+  // `parseEventDraft` refuses but an in-memory draft never faces. The
+  // provisioner then either trips the Firestore boolean requirement or, on a
+  // trusted path, persists a value the dealer and the 18+ derivation do not
+  // recognise as true — explicit content served with no gate (#787 review).
+  for (const prompt of draft.prompts.main) {
+    if (prompt === null || prompt === undefined) continue;
+    if (typeof (prompt as { spicy?: unknown }).spicy !== 'boolean') {
+      issues.push({
+        code: 'main-prompt-spicy-not-boolean',
+        pool: 'main',
+        message:
+          'A main-pool Prompt carries a non-boolean spicy flag; it would not be recognised as spicy and could serve explicit content without raising the 18+ gate.',
+      });
+    }
+  }
   for (const pool of ['easy', 'closing'] as const) {
     for (const prompt of draft.prompts[pool]) {
       // A hole yields `undefined` here, and the property access below would

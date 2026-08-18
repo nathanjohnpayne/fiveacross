@@ -912,3 +912,82 @@ describe('one unlock mistake is one checklist row (#787 review)', () => {
     expect(codes).not.toContain('day-unlock-date-mismatch');
   });
 });
+
+describe('the stored timezone must itself be canonical (#787 review)', () => {
+  it('rejects a padded zone rather than trimming it', () => {
+    // A trimming check would pass, but every CONSUMER receives the padding:
+    // Intl rejects it and isoDateInTz falls back to the DEVICE zone, which
+    // near a date boundary can make a wrong unlock look correct.
+    expect(isSupportedTimezone(' America/Los_Angeles ')).toBe(false);
+    expect(isSupportedTimezone('America/Los_Angeles')).toBe(true);
+  });
+
+  it('reports it as the unsupported-timezone issue', () => {
+    const codes = eventCompletenessIssues(
+      launchableDraft({ timezone: ' America/Los_Angeles ' }),
+    ).map((i) => i.code);
+    expect(codes).toContain('event-unsupported-timezone');
+  });
+});
+
+describe('Days stay inside the Event window (#787 review)', () => {
+  it('rejects a Day stranded outside the window by a later date edit', () => {
+    // Both values stay individually valid; only their RELATIONSHIP breaks.
+    const draft = launchableDraft({ startsOn: '2026-08-08', endsOn: '2026-08-09' });
+    const issues = dayCompletenessIssues(draft).filter(
+      (i) => i.code === 'day-outside-event-window',
+    );
+    expect(issues.length).toBeGreaterThan(0);
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('accepts Days on the window boundaries', () => {
+    expect(
+      dayCompletenessIssues(launchableDraft()).filter((i) => i.code === 'day-outside-event-window'),
+    ).toEqual([]);
+  });
+
+  it('stays quiet while the window itself is malformed', () => {
+    // One bad window should not also accuse every Day.
+    const codes = dayCompletenessIssues(launchableDraft({ startsOn: 'nope' })).map((i) => i.code);
+    expect(codes).not.toContain('day-outside-event-window');
+  });
+});
+
+describe('main-pool spicy must be a real boolean in the launch gate (#787 review)', () => {
+  it('rejects a string "true" from an untyped import', () => {
+    const draft = launchableDraft({
+      prompts: {
+        main: [...mainPrompts(31), { text: 'imported', spicy: 'true' } as never],
+        easy: curatedPrompts(28, 'easy'),
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    const issues = promptPoolIssues(draft).filter(
+      (i) => i.code === 'main-prompt-spicy-not-boolean',
+    );
+    expect(issues).toHaveLength(1);
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('rejects a missing spicy flag', () => {
+    const draft = launchableDraft({
+      prompts: {
+        main: [...mainPrompts(31), { text: 'imported' } as never],
+        easy: curatedPrompts(28, 'easy'),
+        closing: curatedPrompts(26, 'closing'),
+      },
+    });
+    expect(
+      promptPoolIssues(draft).filter((i) => i.code === 'main-prompt-spicy-not-boolean'),
+    ).toHaveLength(1);
+  });
+
+  it('is silent on a well-formed main pool', () => {
+    expect(
+      promptPoolIssues(launchableDraft()).filter(
+        (i) => i.code === 'main-prompt-spicy-not-boolean',
+      ),
+    ).toEqual([]);
+  });
+});
