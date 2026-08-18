@@ -4507,6 +4507,12 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   flex-direction: column;
   gap: 8px;
 }
+/* The frames' `.secthead` equivalent — rendered once by the shell from the
+   registry's `heading`, not by each step's own body (Codex P2, PR #840). */
+.wizard-step-heading {
+  font-weight: 700;
+  font-size: 13px;
+}
 .wizard-step-placeholder {
   border: 1px dashed var(--border);
   border-radius: 12px;

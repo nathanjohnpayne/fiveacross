@@ -53,16 +53,22 @@ export default function WizardChrome({
 }: WizardChromeProps) {
   const titleRef = useRef<HTMLDivElement | null>(null);
   const [showIssues, setShowIssues] = useState(false);
+  // Tracks the step `showIssues` was last cleared for. Compared DURING
+  // RENDER (React's documented "adjusting state when a prop changes"
+  // pattern), not in an effect: an effect-based reset fires AFTER the first
+  // commit of the new step, so that first paint — and any screen reader
+  // watching the `role="alert"` region — would show the NEW step's own
+  // unmet-gate issues immediately, before the organizer ever pressed its
+  // Continue button (Codex P2, PR #840, round 3). Resetting synchronously
+  // here means the stale value never reaches the DOM at all.
+  const [issuesShownForStep, setIssuesShownForStep] = useState(currentStep);
+  if (currentStep !== issuesShownForStep) {
+    setIssuesShownForStep(currentStep);
+    setShowIssues(false);
+  }
 
   useEffect(() => {
     titleRef.current?.focus();
-  }, [currentStep]);
-
-  // A step change clears any "here's what's missing" panel left over from the
-  // step the organizer just came from — it would otherwise show stale issues
-  // for a different step's fields.
-  useEffect(() => {
-    setShowIssues(false);
   }, [currentStep]);
 
   useEffect(() => {

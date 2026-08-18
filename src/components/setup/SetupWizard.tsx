@@ -221,22 +221,6 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, clockTick]);
 
-  // Persists the render-time landing correction below (rather than only
-  // changing the URL) — otherwise a draft saved on, say, Launch, that later
-  // becomes unreachable (its first unlock elapses while the wizard sits
-  // open) keeps `draft.step: 'launch'` in storage forever: every future
-  // Resume reopens at the stale step, redirects, and never records that it
-  // did (Codex P2, PR #840). A plain effect, not folded into the render-body
-  // redirect itself, so the redirect stays a pure render decision — no write
-  // in the render path.
-  useEffect(() => {
-    if (!draft) return;
-    const landing = firstIncompleteStep(draft, Date.now());
-    if (stepIndex(step) > stepIndex(landing) && draft.step !== landing) {
-      void store.save({ ...draft, step: landing });
-    }
-  }, [draft, step, store]);
-
   const persist = useCallback(
     (next: EventDraft) => {
       setDraft(next);
@@ -244,6 +228,29 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
     },
     [store],
   );
+
+  // Persists the render-time landing correction below — otherwise a draft
+  // saved on, say, Launch, that later becomes unreachable (its first unlock
+  // elapses while the wizard sits open) keeps `draft.step: 'launch'` forever:
+  // every future Resume reopens at the stale step and redirects again without
+  // ever recording that it did (Codex P2, PR #840, round 2). Goes through
+  // `persist` — not a bare `store.save` — so the IN-MEMORY `draft.step` is
+  // corrected too; writing storage alone left the next `updateDraft`/Save
+  // call reading the stale in-memory value and overwriting the correction
+  // right back (Codex P2, PR #840, round 3). `clockTick` is a dependency for
+  // the same round-3 reason: a redirect can be triggered purely by the clock
+  // advancing past an unlock with NEITHER `draft` NOR `step` changing, and
+  // without it in the array this effect would never re-run to catch that
+  // case. Setting `draft.step` to `landing` here also means this effect
+  // naturally stops firing once it converges (the guard below goes false).
+  useEffect(() => {
+    if (!draft) return;
+    const landing = firstIncompleteStep(draft, Date.now());
+    if (stepIndex(step) > stepIndex(landing) && draft.step !== landing) {
+      persist({ ...draft, step: landing });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, step, clockTick, persist]);
 
   const updateDraft = useCallback(
     (updater: (d: EventDraft) => EventDraft) => {
@@ -359,7 +366,22 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
         onSaveNow={handleSaveNow}
         savedFlash={savedFlash}
       >
-        {STEP_REGISTRY.find((s) => s.id === step)?.render({ draft, updateDraft })}
+        {(() => {
+          const def = STEP_REGISTRY.find((s) => s.id === step);
+          if (!def) return null;
+          // The registry's `heading` is rendered HERE, once, by the shell —
+          // not left for every step ticket to re-render inside its own body.
+          // A step ticket that only implements `render` and updates
+          // `heading` in `STEP_CONTENT` (the documented contract) would
+          // otherwise have that heading silently never appear anywhere
+          // (Codex P2, PR #840, round 3).
+          return (
+            <>
+              <div className="wizard-step-heading">{def.heading}</div>
+              {def.render({ draft, updateDraft })}
+            </>
+          );
+        })()}
       </WizardChrome>
       {confirmingCancel && (
         <CancelConfirmDialog

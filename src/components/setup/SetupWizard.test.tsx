@@ -214,6 +214,25 @@ describe('deep link / resume landing', () => {
       expect(stored?.step).toBe('occasion');
     });
   });
+
+  it('corrects the IN-MEMORY step too, not only storage (Codex P2, PR #840, round 3)', async () => {
+    // Occasion is answered (so the landing correction lands on Basics, not
+    // Occasion) but the draft was saved standing on the now-unreachable
+    // Launch step.
+    const user = userEvent.setup();
+    await seedDraft({ step: 'launch', occasion: 'weekend-away', edition: 'vacay' });
+    renderApp(setupStepPath('seeded-draft', 'launch'));
+    await screen.findByTestId('wizard-step-placeholder-basics');
+
+    // If the correction only wrote storage and left the in-memory draft
+    // still carrying `step: 'launch'`, this explicit save reads FROM that
+    // stale in-memory value and overwrites the correction right back.
+    await user.click(screen.getByRole('button', { name: 'Save draft (local)' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved'));
+
+    const stored = await store.load('seeded-draft');
+    expect(stored?.step).toBe('basics');
+  });
 });
 
 describe('back navigation to a completed step', () => {
