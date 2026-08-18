@@ -9,6 +9,7 @@
 // verifies membership before reading Event data.
 
 import { isReservedLabel, validateSlug, type SlugRejection } from '../../src/slug';
+import { hostnameKey } from '../../src/hostnameKey';
 
 /**
  * The two Namespaces this router serves (#529 as amended 2026-08-17, #599).
@@ -58,15 +59,14 @@ export type HostClass =
  * which is the correct outcome — an Event is never addressed by IP.
  */
 export function normalizeHost(rawHost: string): string {
-  let host = rawHost.trim().toLowerCase();
+  let host = rawHost.trim();
   if (host.startsWith('[')) {
     const close = host.indexOf(']');
-    return close === -1 ? host : host.slice(0, close + 1);
+    return hostnameKey(close === -1 ? host : host.slice(0, close + 1));
   }
   const colon = host.indexOf(':');
   if (colon !== -1) host = host.slice(0, colon);
-  if (host.endsWith('.')) host = host.slice(0, -1);
-  return host;
+  return hostnameKey(host);
 }
 
 /**

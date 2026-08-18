@@ -14,9 +14,10 @@ set -euo pipefail
 # `scripts/deploy.sh` states the canonical policy and enforces it for the
 # Firebase surface; it cannot be reused here because it is bound end-to-end to
 # `op-firebase-deploy` and the Cloud Run invoker reconciliation. This script
-# applies the SAME three guards to the Cloudflare surface, deliberately
-# mirroring that script's guards, messages and `--force` break-glass so an
-# operator meets one policy rather than two.
+# applies the SAME shared guards to the Cloudflare surface, including the
+# deliberately separate `--force` (branch/freshness) and DEPLOY_ALLOW_DIRTY=1
+# (clean-tree) break-glass controls, so an operator meets one policy rather
+# than two.
 #
 #   1. Current branch is `main`.
 #   2. Local `main` exactly matches `origin/main`.
@@ -30,8 +31,11 @@ set -euo pipefail
 # Usage:
 #   scripts/worker-deploy.sh [--force] [-- <extra wrangler args>]
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
+# shellcheck source=lib/deploy-main-guard.sh
+source "$SCRIPT_DIR/lib/deploy-main-guard.sh"
 
 FORCE=false
 WRANGLER_ARGS=()
@@ -43,79 +47,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Guard 1: must be on main
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-  if [[ "$FORCE" == "true" ]]; then
-    echo "⚠️  --force: deploying the Worker from '$CURRENT_BRANCH' (not main)" >&2
-  else
-    cat >&2 <<EOF
-Refusing to deploy the Worker: current branch is '$CURRENT_BRANCH', not 'main'.
-
-wrangler publishes your working directory, not origin/main. Once the routes
-are attached this Worker fronts every wildcard Event hostname, so shipping a
-feature branch replaces the router for every Event with unreviewed code.
-
-To override (break-glass only): scripts/worker-deploy.sh --force
-EOF
-    exit 1
-  fi
-fi
-
-# Guard 2: must exactly match origin/main. Fail closed on a fetch failure —
-# stale origin/main metadata would silently defeat the freshness check.
-if ! git fetch --quiet origin main 2>/dev/null; then
-  if [[ "$FORCE" == "true" ]]; then
-    echo "⚠️  --force: git fetch failed; skipping freshness verification" >&2
-  else
-    echo "Refusing to deploy the Worker: 'git fetch origin main' failed, so freshness against origin/main cannot be verified." >&2
-    echo "To override (break-glass only): scripts/worker-deploy.sh --force" >&2
-    exit 1
-  fi
-fi
-
-if [[ "$CURRENT_BRANCH" == "main" ]] && git rev-parse --verify --quiet origin/main >/dev/null; then
-  LOCAL_HEAD="$(git rev-parse HEAD)"
-  ORIGIN_HEAD="$(git rev-parse origin/main)"
-  if [[ "$LOCAL_HEAD" != "$ORIGIN_HEAD" ]]; then
-    AHEAD="$(git rev-list --count origin/main..HEAD)"
-    BEHIND="$(git rev-list --count HEAD..origin/main)"
-    if [[ "$FORCE" == "true" ]]; then
-      echo "⚠️  --force: local main differs from origin/main ($AHEAD ahead, $BEHIND behind)" >&2
-    else
-      cat >&2 <<EOF
-Refusing to deploy the Worker: local main does not exactly match origin/main
-($AHEAD ahead, $BEHIND behind).
-
-Deploys must ship the reviewed, merged origin/main commit. Push or discard
-your local commits first.
-
-To override (break-glass only): scripts/worker-deploy.sh --force
-EOF
-      exit 1
-    fi
-  fi
-fi
-
-# Guard 3: working tree must be clean
-DIRTY="$(git status --porcelain)"
-if [[ -n "$DIRTY" ]]; then
-  if [[ "$FORCE" == "true" ]]; then
-    echo "⚠️  --force: deploying the Worker from a dirty working tree" >&2
-  else
-    cat >&2 <<EOF
-Refusing to deploy the Worker: working tree is dirty.
-
-wrangler bundles what is on disk, so uncommitted edits would ship to the
-router that fronts every Event hostname.
-
-$DIRTY
-
-To override (break-glass only): scripts/worker-deploy.sh --force
-EOF
-    exit 1
-  fi
-fi
+guard_deploy_main_checkout "scripts/worker-deploy.sh" "$FORCE"
 
 echo "✅ Guards passed. Publishing the Worker (routes are NOT attached by this step)." >&2
 

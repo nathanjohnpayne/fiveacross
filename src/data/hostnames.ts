@@ -7,6 +7,7 @@ import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
 import { coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
 import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
+import { hostnameKey } from '../hostnameKey';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
@@ -14,24 +15,6 @@ import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } fro
 
 const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
 
-/**
- * The document key for a hostname — lowercased, and with a trailing root dot
- * removed.
- *
- * The dot matters because the edge Event router removes it too
- * (`worker/src/host.ts`, specs/event-router.md). `bodega-bay.fiveacross.app.`
- * and `bodega-bay.fiveacross.app` are the same DNS name, so the Worker admits
- * the dotted form and proxies the app shell — but the browser keeps the dot in
- * `window.location.hostname`. Lowercasing alone would then send the client
- * looking for a `hostnames/bodega-bay.fiveacross.app.` document that does not
- * exist, and the guest would get EventNotFound on a host the edge had just
- * declared servable. Two seams resolving one address must not disagree about
- * what its key is (#839, Codex).
- */
-export function hostnameKey(hostname: string): string {
-  const lowered = hostname.trim().toLowerCase();
-  return lowered.endsWith('.') ? lowered.slice(0, -1) : lowered;
-}
 // The Event chosen before React mounts. The live hostname watcher is an update
 // channel, not an Event switch, so its preview must keep agreeing with this
 // bootstrap result. `null` keeps the watcher test seam usable on its own; the

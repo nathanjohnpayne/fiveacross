@@ -118,6 +118,8 @@ done
 # fixture-repo test harness invokes this script from a throwaway git repo
 # rooted elsewhere, so `scripts/foo.sh` alone is not reliable).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-main-guard.sh
+source "$SCRIPT_DIR/lib/deploy-main-guard.sh"
 # shellcheck source=firebase/lib/credential-materialization.sh
 source "$SCRIPT_DIR/firebase/lib/credential-materialization.sh"
 
@@ -364,113 +366,7 @@ resolve_invoker_deploy_credential() {
   fi
 }
 
-# Guard 1: must be on main
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-  if [[ "$FORCE" == "true" ]]; then
-    echo "⚠️  --force: deploying from '$CURRENT_BRANCH' (not main)" >&2
-  else
-    cat >&2 <<EOF
-Refusing to deploy: current branch is '$CURRENT_BRANCH', not 'main'.
-
-Deploys should ship main's state — the site must match what reviewers
-have seen in merged PRs. Worktrees and feature branches are routinely
-behind main and will silently ship stale builds (see mergepath#77).
-
-To override (break-glass only): scripts/deploy.sh --force
-EOF
-    exit 1
-  fi
-fi
-
-# Guard 2: must exactly match origin/main
-# Fail closed on fetch failure — stale origin/main metadata would
-# silently defeat the freshness check and re-open the exact class
-# of failure #77 closes.
-if ! git fetch --quiet origin main 2>/dev/null; then
-  if [[ "$FORCE" == "true" ]]; then
-    echo "⚠️  --force: git fetch failed; skipping freshness verification" >&2
-  else
-    cat >&2 <<EOF
-Refusing to deploy: 'git fetch origin main' failed, so freshness
-against origin/main cannot be verified.
-
-Network down? Try again once connectivity is restored.
-
-To override (break-glass only): scripts/deploy.sh --force
-EOF
-    exit 1
-  fi
-fi
-
-if ! git rev-parse --verify --quiet origin/main >/dev/null; then
-  if [[ "$FORCE" == "true" ]]; then
-    echo "⚠️  --force: origin/main is unavailable after fetch; skipping exact-match verification" >&2
-  else
-    cat >&2 <<EOF
-Refusing to deploy: origin/main is unavailable after fetch, so the exact
-merged commit cannot be verified.
-
-To override (break-glass only): scripts/deploy.sh --force
-EOF
-    exit 1
-  fi
-else
-  LOCAL_HEAD="$(git rev-parse HEAD)"
-  ORIGIN_HEAD="$(git rev-parse origin/main)"
-  if [[ "$LOCAL_HEAD" != "$ORIGIN_HEAD" ]]; then
-    BEHIND="$(git rev-list --count HEAD..origin/main)"
-    AHEAD="$(git rev-list --count origin/main..HEAD)"
-    if [[ "$FORCE" == "true" ]]; then
-      echo "⚠️  --force: deploying local main that differs from origin/main ($AHEAD ahead, $BEHIND behind)" >&2
-    else
-      cat >&2 <<EOF
-Refusing to deploy: local main does not exactly match origin/main
-($AHEAD commit(s) ahead, $BEHIND commit(s) behind).
-
-Deploys must ship the reviewed, merged origin/main commit. Push or discard
-local-only commits, then run: git pull --ff-only && scripts/deploy.sh
-
-To override (break-glass only): scripts/deploy.sh --force
-EOF
-      exit 1
-    fi
-  fi
-fi
-
-# Guard 3: working tree must be clean
-#
-# `git status --porcelain` prints one line per modified, staged, or
-# untracked path and is empty when the worktree matches HEAD with the
-# index. Deploying from a dirty tree silently ships whatever the
-# in-progress edits compile to — that diverges from the merged-on-main
-# state that reviewers signed off on (same failure class as #77).
-#
-# Break-glass override: DEPLOY_ALLOW_DIRTY=1 (env var, not a flag, so
-# `--force` doesn't accidentally subsume this guard — keeping the
-# override deliberate and audit-greppable). Logged with a clear ⚠️
-# trail when used.
-DIRTY="$(git status --porcelain)"
-if [[ -n "$DIRTY" ]]; then
-  if [[ "${DEPLOY_ALLOW_DIRTY:-0}" == "1" ]]; then
-    echo "⚠️  DEPLOY_ALLOW_DIRTY=1: deploying with uncommitted changes:" >&2
-    printf '%s\n' "$DIRTY" >&2
-  else
-    cat >&2 <<EOF
-Refusing to deploy: working tree is dirty.
-
-Modified / staged / untracked paths:
-$DIRTY
-
-Commit, stash, or revert these before deploying so the deploy reflects
-the merged-on-main state that reviewers approved (see mergepath#77 for
-the class of failure this guard closes).
-
-To override (break-glass only): DEPLOY_ALLOW_DIRTY=1 scripts/deploy.sh
-EOF
-    exit 1
-  fi
-fi
+guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 
 # Guard 4: functions/.env.<projectId> covers every param.ts-declared param
 # (#767).
