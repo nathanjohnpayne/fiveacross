@@ -37,15 +37,17 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * `applyOccasionDefaults` here would silently discard exactly the same
  * later-step hand-edits the confirm dialog exists to protect.
  *
- * TWO EDGE CASES where re-applying IS the right move (Codex P2, PR #855
- * round 2), both about a draft this step did not itself produce — resumed,
- * imported, or hand-crafted:
+ * TWO EDGE CASES about a draft this step did not itself produce — resumed,
+ * imported, or hand-crafted, never a normal in-flow edit:
  * - `draft.occasion` may hold an id `OCCASIONS` no longer recognizes (a
- *   stale/removed matrix entry). `current` (`occasionById(draft.occasion)`)
- *   is then `null`, so the confirm dialog — which needs a real occasion to
- *   name as "what you're leaving" — could never render if every pick still
- *   required matching a `current` that doesn't exist. Any pick commits
- *   directly in that case, same as a first pick.
+ *   stale/removed matrix entry), so `current` (`occasionById(draft.occasion)`)
+ *   is `null`. An unrecognized id is NOT proof there's nothing to protect
+ *   (Codex P2, PR #855 round 3): the rest of the draft — claim mode, card
+ *   format, default Theme, settings, Days — can still be real, organizer-
+ *   entered data that `applyOccasionDefaults` would overwrite, or for a
+ *   one-card `to`, clear outright. So this still routes through
+ *   `OccasionChangeConfirm`, which accepts `from: OccasionDef | null` and
+ *   adapts its copy when there's no valid occasion left to name.
  * - `draft.occasion` may resolve, but disagree with `draft.edition`
  *   (specs/event-setup-wizard.md § Validation's `event-occasion-edition-mismatch`,
  *   which routes the organizer back to THIS step to fix it). A same-occasion
@@ -62,19 +64,15 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
   }
 
   function handleSelect(occasion: OccasionDef) {
-    if (draft.occasion === null || current === null) {
-      // A first pick, OR a resumed/imported draft whose STORED occasion no
-      // longer resolves in the matrix — a stale/unknown id (Codex P2, PR
-      // #855 round 2). The confirm dialog below needs a real `current`
-      // occasion to name as "what you're leaving"; requiring one here too
-      // would mean every row falls through to `setPending` with no way for
-      // the dialog to ever render, permanently stranding the organizer on
-      // Step 1. There is nothing valid to protect in either case, so commit
-      // directly.
+    if (draft.occasion === null) {
+      // A genuinely fresh draft — nothing anywhere is at risk of being
+      // overwritten, so there is nothing to confirm.
       commit(occasion);
       return;
     }
     if (draft.occasion === occasion.id) {
+      // Only reachable when `current` resolves: a stale/unrecognized id can
+      // never equal a real OCCASIONS entry's id.
       if (draft.edition !== occasion.edition) {
         // A stale Edition binding (Codex P2, PR #855 round 2): a resumed or
         // imported draft can carry a recognized occasion whose `edition`
@@ -94,9 +92,12 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
       // and silently restore matrix defaults over card format / claim mode /
       // default Theme / settings the organizer may have hand-edited on a
       // LATER step since the first pick — exactly the silent clobber the
-      // confirm dialog below exists to prevent for a DIFFERENT occasion.
+      // confirm dialog below exists to prevent for a different pick.
       return;
     }
+    // Everything else — a genuinely different occasion, OR a stored id that
+    // doesn't resolve at all (`current === null`) — replaces whatever is
+    // stored, so it always confirms first (Codex P2, PR #855 round 3).
     setPending(occasion);
   }
 
@@ -140,7 +141,7 @@ export default function OccasionStep({ draft, updateDraft }: StepRenderProps) {
         The occasion sets the edition your players see and sensible defaults for your schedule and Look — every one
         changeable before launch.
       </p>
-      {pending && current && (
+      {pending && (
         <OccasionChangeConfirm
           from={current}
           to={pending}

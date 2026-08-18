@@ -191,13 +191,16 @@ describe('OccasionStep', () => {
     expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('a draft whose stored occasion no longer resolves in the matrix commits any pick directly, never stranding it (Codex P2, PR #855 round 2)', async () => {
+  it('a draft whose stored occasion no longer resolves in the matrix still confirms before replacing it (Codex P2, PR #855 round 3)', async () => {
     // A resumed/imported/hand-crafted draft can carry an id OCCASIONS no
-    // longer recognizes. `occasionById` returns null for it, so the confirm
-    // dialog — which needs a real "current" occasion to name — could never
-    // render if every pick still routed through `setPending`. Cast is the
-    // same shape a stale-schema blob or a widened `string` would produce;
-    // the type itself only admits real `OccasionId`s.
+    // longer recognizes. An earlier version treated that as "nothing worth
+    // protecting" and committed directly — but the REST of the draft (claim
+    // mode, card format, Theme, settings, Days) can still be real,
+    // organizer-entered data a direct commit would silently overwrite. The
+    // dialog must still appear; it just can't name what's being left, since
+    // `current` is null. Cast is the same shape a stale-schema blob or a
+    // widened `string` would produce; the type itself only admits real
+    // `OccasionId`s.
     const user = userEvent.setup();
     const draft: EventDraft = {
       ...createEventDraft({ now: NOW }),
@@ -206,6 +209,14 @@ describe('OccasionStep', () => {
     renderHarness(draft);
 
     await user.click(row('Custom'));
+
+    const dialog = await screen.findByRole('alertdialog', { name: /apply.*custom/i });
+    expect(dialog).toHaveTextContent(/saved occasion isn.t available anymore/i);
+    expect(within(dialog).getByRole('button', { name: /keep current answers/i })).toBeInTheDocument();
+    // Not committed yet.
+    expect(row('Custom')).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(within(dialog).getByRole('button', { name: /^apply custom$/i }));
 
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(row('Custom')).toHaveAttribute('aria-pressed', 'true');

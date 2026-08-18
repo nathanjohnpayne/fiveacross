@@ -27,7 +27,18 @@ export default function OccasionChangeConfirm({
   onKeepCurrent,
   onSwitch,
 }: {
-  from: OccasionDef;
+  /**
+   * The occasion currently stored on the draft, or `null` when it doesn't
+   * resolve in `OCCASIONS` at all — a resumed/imported draft carrying a
+   * stale/removed occasion id (Codex P2, PR #855 round 3). `null` here does
+   * NOT mean "nothing worth protecting": the rest of the draft (claim mode,
+   * card format, default Theme, settings, Days) can still be real,
+   * organizer-entered data that `applyOccasionDefaults` would silently
+   * overwrite or, for a one-card `to`, clear outright. So this dialog must
+   * still warn — it just can't name what's being left, since there's
+   * nothing valid to name.
+   */
+  from: OccasionDef | null;
   to: OccasionDef;
   /** Whether committing `to` will clear an authored schedule — true only
    *  when `to` is a one-card occasion and the draft currently holds Days
@@ -59,30 +70,42 @@ export default function OccasionChangeConfirm({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  const title = from ? `Switch to ${to.emoji} ${to.label}?` : `Apply ${to.emoji} ${to.label}?`;
+  const keepLabel = from ? `Keep ${from.label}` : 'Keep current answers';
+  const actionLabel = from ? `Switch to ${to.label}` : `Apply ${to.label}`;
+
   return (
     <div className="sheet-backdrop" onClick={onKeepCurrent}>
       <div
         className="sheet wizard-occasion-confirm"
         role="alertdialog"
         aria-modal="true"
-        aria-label={`Switch to ${to.label}?`}
+        aria-label={title}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sheet-title">
-          Switch to {to.emoji} {to.label}?
-        </div>
+        <div className="sheet-title">{title}</div>
         <p>
-          This re-applies {to.label}&rsquo;s edition, claim mode, default Theme and Event settings over{' '}
-          {from.label}&rsquo;s — anything you&rsquo;ve since changed on a later step may be reset.
+          {from ? (
+            <>
+              This re-applies {to.label}&rsquo;s edition, claim mode, default Theme and Event settings over{' '}
+              {from.label}&rsquo;s — anything you&rsquo;ve since changed on a later step may be reset.
+            </>
+          ) : (
+            <>
+              This draft&rsquo;s saved occasion isn&rsquo;t available anymore. Applying {to.label} sets its edition,
+              claim mode, default Theme and Event settings — anything you&rsquo;ve already entered for those may be
+              reset.
+            </>
+          )}
           {willClearSchedule &&
             ` It also clears the schedule you've authored, since ${to.label} is a one-card occasion.`}
         </p>
         <div className="sheet-actions">
           <button type="button" ref={keepRef} className="btn primary" onClick={onKeepCurrent}>
-            Keep {from.label}
+            {keepLabel}
           </button>
           <button type="button" ref={switchRef} className="btn danger" onClick={onSwitch}>
-            Switch to {to.label}
+            {actionLabel}
           </button>
         </div>
       </div>
