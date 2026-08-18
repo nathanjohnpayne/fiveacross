@@ -84,13 +84,21 @@ const ATTEMPT_KEY = 'gcb:firestore-poison-reload';
 export const POISON_ASSERTION_ID = 'b815';
 
 // Detection is deliberately the narrowest thing that can possibly identify the
-// tombstone, because the action it authorizes is a page reload. Three ORDERED
-// substrings must all appear: the Firestore product tag, the internal-assertion
-// header, and then this exact id. Written as index scans rather than one regex
-// so there is no backtracking to reason about on attacker-influenced text.
+// tombstone, because the action it authorizes is a page reload. The Firestore
+// product tag and the internal-assertion header must appear, in that order,
+// and the id belonging to THAT header — the first `(ID: ...)` marker
+// following it — must be exactly `b815`. Requiring the immediately-following
+// id (rather than merely searching for the marker anywhere later in the text)
+// matters because the tombstone's own CONTEXT payload can embed a second,
+// nested assertion: the 2026-07-19 Safari incident is `b815` wrapping a
+// DIFFERENT id (`3c6b`) in its context, and the reverse shape — an outer
+// assertion with some other id whose nested context happens to mention
+// `(ID: b815)` — must NOT be misread as the tombstone. Written as an index
+// scan for the header, then one bounded regex for the id, so there is no
+// backtracking to reason about on attacker-influenced text.
 const PRODUCT_TAG = 'FIRESTORE (';
 const ASSERTION_HEADER = 'INTERNAL ASSERTION FAILED';
-const ID_MARKER = `(ID: ${POISON_ASSERTION_ID})`;
+const ID_AFTER_HEADER = /\(ID: ([^)]*)\)/;
 
 /**
  * Why matching ONLY `b815` is right, rather than "any Firestore assertion".
@@ -114,15 +122,30 @@ export function isFirestorePoisonAssertion(value: unknown): boolean {
   if (product < 0) return false;
   const header = text.indexOf(ASSERTION_HEADER, product);
   if (header < 0) return false;
-  return text.indexOf(ID_MARKER, header) >= 0;
+  // The id belonging to THIS header is whichever `(ID: ...)` marker comes
+  // FIRST after it — not any marker anywhere later in the string, which could
+  // belong to a different, nested assertion embedded in the CONTEXT payload.
+  const match = ID_AFTER_HEADER.exec(text.slice(header));
+  return match !== null && match[1] === POISON_ASSERTION_ID;
 }
 
-/** The message carried by a thrown value, if it carries one at all. */
+/**
+ * The message carried by a thrown value, if it carries one at all.
+ *
+ * Reading `.message` off an arbitrary thrown value is guarded: this runs for
+ * every global `error` and `unhandledrejection` event, so a thrown value with
+ * a throwing `message` getter (or a Proxy trap) must degrade to "no match",
+ * not become a second, unhandled exception inside this fail-safe watchdog.
+ */
 function assertionText(value: unknown): string | null {
   if (typeof value === 'string') return value;
   if (value !== null && typeof value === 'object') {
-    const { message } = value as { message?: unknown };
-    if (typeof message === 'string') return message;
+    try {
+      const { message } = value as { message?: unknown };
+      if (typeof message === 'string') return message;
+    } catch {
+      return null;
+    }
   }
   return null;
 }
