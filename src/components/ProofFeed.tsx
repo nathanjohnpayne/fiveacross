@@ -15,11 +15,11 @@ import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../dat
 import { heartState, setHeart } from '../data/hearts';
 import { editionBrand } from '../editions';
 import { THEMES } from '../theme/themes';
+import { lastCallLineFromPlayers, DEFAULT_FREEZE_PHRASE } from '../lastCallCopy';
 import type {
   BoardDoc,
   DayDef,
   DoubtDoc,
-  LastCallMomentPayload,
   MomentDoc,
   MomentKind,
   NoticeDoc,
@@ -124,37 +124,17 @@ export const FEED_PAGE_SIZE = 60;
 // enough that a single scroll doesn't run through several pages at once.
 const FEED_SENTINEL_MARGIN = '400px 0px';
 
-function lastCallLineFromPlayers(players: LastCallMomentPayload['players']): string {
-  const ranked = [...players].sort((a, b) => {
-    if (b.bingoCount !== a.bingoCount) return b.bingoCount - a.bingoCount;
-    if (b.squaresMarked !== a.squaresMarked) return b.squaresMarked - a.squaresMarked;
-    return a.displayName.localeCompare(b.displayName);
-  });
-  const leader = ranked[0];
-  const freeze = 'standings freeze at 8 a.m';
-
-  if (!leader || (leader.bingoCount === 0 && leader.squaresMarked === 0)) {
-    return `The board's wide open going into the final night—${freeze}.`;
-  }
-  const runnerUp = ranked[1];
-  if (!runnerUp) {
-    return `${leader.displayName} has the board to themselves going into the final night—${freeze}.`;
-  }
-  const bingoMargin = leader.bingoCount - runnerUp.bingoCount;
-  if (bingoMargin > 0) {
-    return `${leader.displayName} leads by ${bingoMargin} bingo${bingoMargin === 1 ? '' : 's'}—${freeze}.`;
-  }
-  const squareMargin = leader.squaresMarked - runnerUp.squaresMarked;
-  if (squareMargin > 0) {
-    return `${leader.displayName} leads by ${squareMargin} square${squareMargin === 1 ? '' : 's'}—${freeze}.`;
-  }
-  return `It's neck and neck at the top going into the final night—${freeze}.`;
-}
-
 function visibleLastCallLine(moment: MomentDoc, bannedUids: readonly string[]): string | undefined {
   if (moment.kind !== 'last_call') return undefined;
   if (moment.lastCall?.players) {
-    return lastCallLineFromPlayers(moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids)));
+    return lastCallLineFromPlayers(
+      moment.lastCall.players.filter((p) => !isBannedUid(p.uid, bannedUids)),
+      // #800: read the scheduler's persisted freeze-time phrase rather than a
+      // hardcoded literal, so this reconstruction can never quote a different
+      // freeze time than the one actually posted. Absent only on a Moment
+      // posted before #800.
+      moment.lastCall.freezePhrase ?? DEFAULT_FREEZE_PHRASE,
+    );
   }
   // Legacy last-call Moments only carry a pre-rendered string, so a later ban
   // cannot be applied safely. Fail closed when any ban is active.
