@@ -1151,17 +1151,27 @@ describe('sendDailyEmailForEvent', () => {
   it('propagates a real Resend rejection (unverified domain) as a failure, not a delivery', async () => {
     const docs = seedEvent();
     const db = makeDb(docs);
+    // #726 (P2 on PR #715): the stub used to ignore the payload entirely and
+    // fail unconditionally, so this test would still pass even if `from` were
+    // dropped or corrupted on the way to Resend. Capturing it and asserting
+    // against `baseDeps().from` proves the fail-closed path still carries the
+    // real sender identity through to the transport, not just a boolean.
+    const seenFrom: string[] = [];
     const result = await sendDailyEmailForEvent(db, 'med-2026', {
       ...baseDeps(),
       send: (args) =>
         sendEmail({
           ...args,
-          sender: async () => ({
-            error: { name: 'validation_error', message: 'The gaycruisebingo.com domain is not verified' },
-          }),
+          sender: async (payload) => {
+            seenFrom.push(payload.from);
+            return {
+              error: { name: 'validation_error', message: 'The gaycruisebingo.com domain is not verified' },
+            };
+          },
         }),
     });
     expect(result).toMatchObject({ sent: 0, failed: 2 });
+    expect(seenFrom).toEqual([baseDeps().from, baseDeps().from]);
     expect(db.docs['events/med-2026/emailPrefs/theo']).not.toHaveProperty('lastSentDayIndex');
     expect(db.docs['events/med-2026/emailPrefs/jess']).not.toHaveProperty('lastSentDayIndex');
   });
@@ -1437,5 +1447,30 @@ describe('runDailyEmailSweep', () => {
       releaseFirst();
       await sweep;
     }
+  });
+});
+
+// #726 (P2 on PR #715, the "or separately test the parameter default"
+// alternative): every `sendDailyEmailForEvent`/`sendEmail` test above injects
+// `deps.from` (via `baseDeps()`), so none of them ever resolve the REAL
+// `EMAIL_FROM` param — and `EMAIL_FROM.value()` itself is not safely callable
+// here either: outside the Functions/emulator runtime it resolves to `''`,
+// not the declared `default:` (verified empirically; that gap is exactly why
+// every other test in this tree that needs a real param value mocks
+// `../../functions/src/params` with `vi.doMock` rather than calling
+// `.value()` directly). So this locks down the SOURCE declaration instead:
+// #633 moved `EMAIL_FROM`'s default off the unverified apex domain onto the
+// Resend-verified `mail.nathanpayne.com` subdomain, and a regression back to
+// the apex would otherwise pass every test above unnoticed.
+describe('functions/src/params.ts EMAIL_FROM default', () => {
+  it('defaults to the Resend-verified sending domain, not the unverified apex', () => {
+    const paramsSource = readFileSync(
+      fileURLToPath(new URL('../../functions/src/params.ts', import.meta.url)),
+      'utf8',
+    );
+
+    expect(paramsSource).toMatch(
+      /defineString\(\s*'EMAIL_FROM'\s*,\s*\{\s*\n?\s*default:\s*'Gay Cruise Bingo <gaycruisebingo@mail\.nathanpayne\.com>'/,
+    );
   });
 });
