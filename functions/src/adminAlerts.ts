@@ -196,9 +196,16 @@ export function flattenLabel(value: string): string {
 }
 
 /** Flatten, clip, and fall back — the one place a row's human subject line is
- *  derived, whatever kind of document it came from. */
-function clipLabel(text: string | undefined, fallback: string): string {
-  const trimmed = flattenLabel(text ?? '');
+ *  derived, whatever kind of document it came from.
+ *
+ *  `unknown`, not `string | undefined`, because every caller feeds it a field
+ *  read straight off a RAW Firestore snapshot with no converter. A hand-written,
+ *  migrated or admin-written document can hold a number or an object there, and
+ *  handing that to `flattenLabel`'s `.replace` throws — which, on the retryable
+ *  abuse trigger, means one malformed document redelivered forever (Phase 4b
+ *  P2). A non-string is simply not a label, so it takes the fallback. */
+function clipLabel(text: unknown, fallback: string): string {
+  const trimmed = flattenLabel(typeof text === 'string' ? text : '');
   if (!trimmed) return fallback;
   return trimmed.length > LABEL_MAX ? `${trimmed.slice(0, LABEL_MAX - 1)}…` : trimmed;
 }

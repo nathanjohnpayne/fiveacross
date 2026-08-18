@@ -1933,6 +1933,27 @@ describe('abuseAlertsForWrite', () => {
     const blank = abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ description: '   ' }));
     expect(blank[0].label).toBe('r1');
   });
+
+  it('survives a description that is not a string at all', () => {
+    // This reads a RAW snapshot with no converter, so a hand-written, migrated
+    // or admin-written document can hold anything here. Handing a number to
+    // `flattenLabel`'s `.replace` throws — and on a `retry: true` trigger that
+    // is one malformed document redelivered forever (Phase 4b P2). A non-string
+    // is simply not a label, so it takes the report id instead.
+    for (const description of [42, { text: 'nope' }, ['a'], true, null]) {
+      const drafts = abuseAlertsForWrite(
+        'r1',
+        undefined,
+        ABUSE_REPORT({ description: description as unknown as string }),
+      );
+      expect(drafts[0].label).toBe('r1');
+    }
+    // The same guard protects the moderation producers, which read equally raw
+    // `text` / `itemText` fields.
+    expect(
+      alertsForWrite('items', 'i1', undefined, { status: 'pending', text: 7 as unknown as string })[0].label,
+    ).toBe('i1');
+  });
 });
 
 describe('bugReportEventId', () => {
