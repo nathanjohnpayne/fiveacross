@@ -37,6 +37,12 @@ const ALLOWED = new Map<string, string>([
   // #535 and GCB-scoped by `themesForEdition` — they never render elsewhere.
   ['theme/themes.ts', 'GCB-scoped Theme ids + labels, deliberately kept (#535)'],
   ['domainTypes.d.ts', 'the canonical ThemeId union naming those same GCB-scoped ids'],
+  // The organizer wizard's occasion picker names KINDS OF OCCASION — "Wedding",
+  // "Conference or offsite", "Cruise" — on a Five Across platform surface that
+  // no player ever sees. The noun describes what the organizer is planning, not
+  // the vocabulary their Event will speak: the Cruise occasion binds the Vacay
+  // Edition, whose trip register is what actually reaches a card.
+  ['data/occasions.ts', "occasion NAMES on the organizer wizard, not any Edition's player-facing register"],
   // Nothing else. `Nav.tsx` and `dayIdentity.tsx` were here until #602 shipped,
   // and `ShareCard.tsx` until Phase 4b folded its app name into the Edition —
   // the allowlist shrinks as the leaks close rather than being left to rot,
@@ -158,7 +164,7 @@ describe('no cruise noun survives in a string every Edition shares', () => {
   // widening it is a visible, reviewed line in the diff rather than a one-word
   // edit nobody reads.
   it('keeps the allowlist small and reasoned', () => {
-    expect(ALLOWED.size).toBe(4);
+    expect(ALLOWED.size).toBe(5);
     for (const [file, reason] of ALLOWED) {
       expect(reason.length, `${file} needs a real reason`).toBeGreaterThan(20);
     }
