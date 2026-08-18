@@ -427,11 +427,11 @@ describe('approveItems — routing an approval into one Day', () => {
 
   it('CLEARS a stale retainedAt when it places the Prompt', async () => {
     // A marker left behind would describe an active, DEALT Prompt as one that
-    // was retained and dealt nowhere (Phase 4b P1, PR #812). Reachable two ways:
-    // a row created before the rules barred a submitter-supplied `retainedAt`,
-    // and a genuinely-retained Prompt an organiser re-aims and approves again.
-    // `tx.update` is a merge, so not-writing the field is not the same as
-    // clearing it — a placement has to unstamp it explicitly.
+    // was retained and dealt nowhere (Phase 4b P1, PR #812). `tx.update` is a
+    // merge, so not-writing the field is not the same as clearing it — a
+    // placement has to unstamp it explicitly. The rules now refuse a
+    // submitter-supplied `retainedAt`, so this is the second line behind that
+    // bar rather than the only one.
     await approveItems([{ id: 'p1', targetDayIndex: 2 }], 'admin-uid');
     const { data } = written()[0];
     expect(data).toHaveProperty('retainedAt');
