@@ -82,7 +82,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   // What the SERVER did, not what the sheet hoped it would do. Only the server
   // knows whether an abuse report reached an admin, so the receipt reports the
   // outcome rather than the sheet promising one before submitting (#670).
-  const [notified, setNotified] = useState(false);
+  const [escalated, setEscalated] = useState(false);
   // The kind the SUBMITTED report actually carried. The live `kind` keeps
   // tracking the control, and the sheet stays mounted across a slow submit, so
   // reading `kind` on the receipt would describe whatever is selected NOW rather
@@ -156,7 +156,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       setError(null);
       setSubmittedId(null);
       setSubmittedKind('bug');
-      setNotified(false);
+      setEscalated(false);
       void capture();
     },
     [stage, capture],
@@ -250,7 +250,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
       );
       setSubmittedId(result.reportId);
       setSubmittedKind(sentKind);
-      setNotified(result.notified === true);
+      setEscalated(result.escalated === true);
       setScreenshot(null);
     } catch (submitError) {
       setError(errorMessage(submitError));
@@ -290,9 +290,9 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     <p>Thanks. Your report ID is <code>{submittedId}</code>.</p>
                     {submittedKind === 'abuse' && (
                       <p className="bug-report-privacy">
-                        {notified
-                          ? 'This event’s admins have been alerted.'
-                          : 'We couldn’t alert this event’s admins automatically, but your report was filed and the team will see it.'}
+                        {escalated
+                          ? 'This report has been flagged for this event’s admins.'
+                          : 'We couldn’t flag this for the event’s admins, but your report was filed and the team will see it.'}
                       </p>
                     )}
                     <div className="sheet-actions">
@@ -340,13 +340,15 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       </label>
                     </fieldset>
                     {kind === 'abuse' && (
-                      // "We try to" rather than "we will": whether an admin is
-                      // actually alerted depends on a membership fact only the
-                      // server holds, and somebody reporting harm must not be
-                      // left believing an admin was reached when the report only
-                      // entered the inbox. The receipt states what happened.
+                      // "Flag for" rather than "alert": this promises the report
+                      // enters the path that reaches admins, which is a claim the
+                      // system can keep. Whether an admin is actually notified
+                      // depends on gates further down (a live Event, a resolvable
+                      // recipient), so somebody reporting harm is never told they
+                      // were reached when they were not. The receipt then states
+                      // what this submission actually did.
                       <p className="bug-report-privacy">
-                        We’ll try to alert this event’s admins as well as filing the report.
+                        We’ll flag this for the event’s admins as well as filing the report.
                       </p>
                     )}
                     <label className="bug-report-label" htmlFor="bug-report-description">What happened?</label>

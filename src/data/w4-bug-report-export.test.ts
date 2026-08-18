@@ -88,7 +88,7 @@ describe('local bug-report export', () => {
     const legacy = JSON.parse(await readFile(path.join(root, 'inbox/report_123/report.json'), 'utf8'));
     expect(legacy.kind).toBe('bug');
     await exportReports({
-      reports: [{ ...report('report_abuse'), kind: 'abuse' }],
+      reports: [{ ...report('report_abuse'), kind: 'abuse', reporterInEvent: true, escalatedAtIntake: true }],
       downloadScreenshot: async () => PNG,
       root,
     });
@@ -119,9 +119,9 @@ describe('local bug-report export', () => {
     // first would have an operator assume an admin saw it (#670).
     const abuse = (id: string, over: Record<string, unknown>) => ({ ...report(id), kind: 'abuse', ...over });
     for (const doc of [
-      abuse('report_alerted', { reporterInEvent: true, notifiedAtIntake: true }),
-      abuse('report_archived', { reporterInEvent: true, notifiedAtIntake: false }),
-      abuse('report_stranger', { reporterInEvent: false, notifiedAtIntake: false }),
+      abuse('report_alerted', { reporterInEvent: true, escalatedAtIntake: true }),
+      abuse('report_archived', { reporterInEvent: true, escalatedAtIntake: false }),
+      abuse('report_stranger', { reporterInEvent: false, escalatedAtIntake: false }),
     ]) {
       await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
     }
@@ -129,22 +129,29 @@ describe('local bug-report export', () => {
     const read = async (id: string) =>
       JSON.parse(await readFile(path.join(root, `inbox/${id}/report.json`), 'utf8'));
 
-    expect(await read('report_alerted')).toMatchObject({ reporterInEvent: true, notifiedAtIntake: true });
+    expect(await read('report_alerted')).toMatchObject({ reporterInEvent: true, escalatedAtIntake: true });
     // The case that motivated this: a genuine member whose Event was not live.
-    expect(await read('report_archived')).toMatchObject({ reporterInEvent: true, notifiedAtIntake: false });
-    expect(await read('report_stranger')).toMatchObject({ reporterInEvent: false, notifiedAtIntake: false });
+    expect(await read('report_archived')).toMatchObject({ reporterInEvent: true, escalatedAtIntake: false });
+    expect(await read('report_stranger')).toMatchObject({ reporterInEvent: false, escalatedAtIntake: false });
     // `null`, not `false`, for a bug report: nothing was checked because there
     // was nothing to escalate.
-    expect(await read('report_123')).toMatchObject({ reporterInEvent: null, notifiedAtIntake: null });
+    expect(await read('report_123')).toMatchObject({ reporterInEvent: null, escalatedAtIntake: null });
   });
 
-  it('fails closed on a non-boolean escalation decision', async () => {
-    for (const [field, doc] of [
-      ['Invalid reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: 'yes' }],
-      ['Invalid notifiedAtIntake', { ...report(), kind: 'abuse', notifiedAtIntake: 'yes' }],
+  it('fails closed on escalation metadata that is malformed OR incomplete', async () => {
+    // Absent is malformed too, on an abuse report. Intake writes both booleans
+    // on every abuse submission, so a missing one means a half-migrated or
+    // hand-repaired record — and exporting it as `false` would make an unknown
+    // decision indistinguishable from an explicit negative. `null` cannot stand
+    // in for "unknown" here: it already means "not applicable" (a bug report).
+    for (const [error, doc] of [
+      ['Invalid reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: 'yes', escalatedAtIntake: false }],
+      ['Invalid escalatedAtIntake', { ...report(), kind: 'abuse', reporterInEvent: true, escalatedAtIntake: 'yes' }],
+      ['Missing reporterInEvent', { ...report(), kind: 'abuse', escalatedAtIntake: false }],
+      ['Missing escalatedAtIntake', { ...report(), kind: 'abuse', reporterInEvent: true }],
     ] as const) {
       const summary = await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
-      expect(summary.failed[0].error).toContain(field);
+      expect(summary.failed[0].error).toContain(error);
       await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
     }
   });

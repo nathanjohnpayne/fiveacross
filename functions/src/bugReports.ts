@@ -39,9 +39,9 @@ export interface AbuseEscalation {
  * WHY ACTIVENESS IS CHECKED HERE TOO (Codex P2, round 5). `recordBugReportAlerts`
  * refuses to enqueue against a non-active Event, matching the sweep's own
  * precondition — so a member reporting against an ARCHIVED Event escalates to
- * nobody. Reporting `notified: true` on the strength of membership alone would
- * put the sheet right back to telling somebody an admin was alerted when none
- * was, which is the failure the receipt exists to prevent. The Event document is
+ * nobody. Reporting success on the strength of membership alone would put the
+ * sheet right back to telling somebody their report reached the admins when it
+ * did not, which is the failure the receipt exists to prevent. The Event document is
  * read either way, so this costs nothing.
  *
  * It stays a PREDICTION rather than a guarantee: the Event could be archived
@@ -74,7 +74,7 @@ export async function resolveAbuseEscalation(
 export async function handleSubmitBugReport(
   request: CallableRequest<unknown>,
   requireAppCheck: boolean,
-): Promise<{ reportId: string; notified: boolean }> {
+): Promise<{ reportId: string; escalated: boolean }> {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in before reporting a bug.');
   if (requireAppCheck && !request.app) throw new HttpsError('failed-precondition', 'App Check is required.');
@@ -146,18 +146,23 @@ export async function handleSubmitBugReport(
       //   document that never went through the check above cannot escalate. It
       //   is a necessary condition for escalation, not a sufficient one.
       //
-      //   `notifiedAtIntake` is WHAT THE REPORTER WAS TOLD — membership AND a
-      //   live Event, the same conjunction the callable returns. Persisted
-      //   because it is a durable fact about the submission rather than a stale
-      //   snapshot of Event state: if somebody says "I was told an admin had
-      //   been alerted", this is the record of whether they were.
+      //   `escalatedAtIntake` is WHETHER THIS SUBMISSION WAS ELIGIBLE to reach
+      //   the admin alert queue — membership AND a live Event, the same
+      //   conjunction the callable returns to the reporter. Persisted because it
+      //   is a durable fact about the submission rather than a stale snapshot of
+      //   Event state: if somebody asks why a report never surfaced, this is the
+      //   record of what the submission itself decided.
       //
-      // Neither is the trigger's final word. The trigger re-reads Event status
-      // at enqueue time and is the authority on what was actually queued.
+      // NEITHER IS A DELIVERY CLAIM, and the naming is deliberate (#670, Codex
+      // P2 round 7). Delivery is decided by a pipeline this callable does not
+      // own: the trigger re-reads Event status at enqueue time, and the digest
+      // can still resolve no admin recipient at all and leave the alert queued.
+      // "Escalated" is what is knowable here — the report entered the path that
+      // reaches admins — and nothing downstream can retroactively make it false.
       ...(report.kind === 'abuse'
         ? {
             reporterInEvent: escalation.member,
-            notifiedAtIntake: escalation.member && escalation.eventActive,
+            escalatedAtIntake: escalation.member && escalation.eventActive,
           }
         : {}),
       description: report.description,
@@ -177,18 +182,22 @@ export async function handleSubmitBugReport(
     if (file) await file.delete({ ignoreNotFound: true }).catch(() => undefined);
     throw error;
   }
-  // TELL THE REPORTER WHAT ACTUALLY HAPPENED (#670, Codex P2). The sheet cannot
-  // know whether an abuse report will escalate — that depends on a membership
-  // fact only the server holds — and a person reporting harm must not be left
-  // believing an admin was alerted when the report only reached the inbox. So
-  // the outcome is returned rather than promised up front.
+  // TELL THE REPORTER WHAT THIS SUBMISSION DID (#670, Codex P2). The sheet
+  // cannot work it out alone — both halves are server-side facts — and a person
+  // reporting harm must not be left believing the admins were reached when the
+  // report only entered the inbox. So the outcome is returned rather than
+  // promised up front.
+  //
+  // `escalated`, NOT `notified`, and that distinction is the whole point. This
+  // function knows exactly one thing: whether the report entered the path that
+  // reaches admins. It cannot know whether an admin was NOTIFIED — that needs
+  // the trigger's own re-check and the digest resolving a recipient, and an
+  // Event with no verified admin email and no `ADMIN_NOTIFY_EMAIL` override
+  // leaves the alert queued and unsent. Claiming delivery here would be the same
+  // over-promise a third time; claiming escalation is true when it is said and
+  // stays true.
   //
   // It discloses nothing a caller could not already establish by observation,
-  // and the alternative (staying silent) is worse for exactly the person the
-  // escalation exists to protect.
-  // BOTH halves, because either one failing means no admin heard anything: the
-  // reporter has to belong to the Event, and the Event has to be one the sweep
-  // will visit. A prediction rather than a guarantee — the trigger re-checks
-  // activeness at enqueue time — but it is the honest answer at this moment.
-  return { reportId: reportRef.id, notified: escalation.member && escalation.eventActive };
+  // and staying silent is worse for exactly the person this exists to protect.
+  return { reportId: reportRef.id, escalated: escalation.member && escalation.eventActive };
 }

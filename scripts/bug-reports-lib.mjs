@@ -151,11 +151,20 @@ function safeReport(report) {
   if (report.kind !== undefined && !REPORT_KINDS.includes(report.kind)) {
     throw new Error(`Invalid kind for ${report.id}`);
   }
-  if (report.reporterInEvent !== undefined && typeof report.reporterInEvent !== 'boolean') {
-    throw new Error(`Invalid reporterInEvent for ${report.id}`);
-  }
-  if (report.notifiedAtIntake !== undefined && typeof report.notifiedAtIntake !== 'boolean') {
-    throw new Error(`Invalid notifiedAtIntake for ${report.id}`);
+  // Both escalation fields fail closed, in BOTH directions. A wrong type is
+  // malformed; an ABSENT one on an abuse report is malformed too, because every
+  // abuse report intake writes persists both — so a missing value means a
+  // half-migrated or hand-repaired record, and serializing it as `false` would
+  // make an unknown decision indistinguishable from an explicit negative (#670).
+  // `null` is not available to mean "unknown" here: it already means "not
+  // applicable", which is what a bug report exports.
+  for (const field of ['reporterInEvent', 'escalatedAtIntake']) {
+    if (report[field] !== undefined && typeof report[field] !== 'boolean') {
+      throw new Error(`Invalid ${field} for ${report.id}`);
+    }
+    if (fields.kind === 'abuse' && report[field] === undefined) {
+      throw new Error(`Missing ${field} for ${report.id}`);
+    }
   }
   const metadata = {
     id: report.id,
@@ -172,12 +181,13 @@ function safeReport(report) {
     //   This is the trigger's gate input: NECESSARY for an alert, not
     //   sufficient. On its own it does not mean an admin heard anything.
     reporterInEvent: fields.kind === 'abuse' ? report.reporterInEvent === true : null,
-    //   `notifiedAtIntake` — did the submission expect to reach an admin?
-    //   Membership AND a live Event, which is the answer the reporter was shown
-    //   on their receipt. Still not the trigger's final word (it re-reads Event
-    //   status at enqueue time), but it is the closest thing the stored report
-    //   has to "an admin has seen this" versus "this is only here".
-    notifiedAtIntake: fields.kind === 'abuse' ? report.notifiedAtIntake === true : null,
+    //   `escalatedAtIntake` — did the submission enter the path that reaches
+    //   admins? Membership AND a live Event, which is the answer the reporter
+    //   was shown on their receipt. Deliberately not a DELIVERY claim: the
+    //   trigger re-reads Event status, and the digest can resolve no admin
+    //   recipient at all, so "an admin has seen this" is not something the
+    //   stored report can assert. This is the closest honest thing.
+    escalatedAtIntake: fields.kind === 'abuse' ? report.escalatedAtIntake === true : null,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,

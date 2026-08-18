@@ -40,13 +40,18 @@ export interface SubmitBugReportInput {
 
 export interface SubmitBugReportResult {
   reportId: string;
-  /** Whether an admin was actually alerted. Only ever true for an `abuse`
-   *  report, and only when the server could confirm the reporter belongs to the
-   *  Event — a fact the client cannot know, which is why the sheet reports the
-   *  OUTCOME rather than promising one up front (#670). Optional so an older
-   *  deployed callable, which returns only `reportId`, degrades to "no claim
-   *  made" instead of to a false negative. */
-  notified?: boolean;
+  /** Whether the report entered the path that reaches admins. Only ever true for
+   *  an `abuse` report, and only when the server confirmed both that the
+   *  reporter belongs to the Event and that the Event is live — facts the client
+   *  cannot know, which is why the sheet reports the OUTCOME rather than
+   *  promising one up front (#670).
+   *
+   *  Deliberately not `notified`: delivery is decided further down the pipeline
+   *  (the trigger re-checks, and the digest may resolve no admin recipient at
+   *  all), so this claims escalation, which is knowable, rather than receipt,
+   *  which is not. Optional so an older deployed callable degrades to "no claim
+   *  made" rather than to a false one. */
+  escalated?: boolean;
 }
 
 const TRANSPARENT_IMAGE_PLACEHOLDER =
