@@ -1832,6 +1832,43 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Cases 22g / 22h (#548, CodeRabbit round 5): an EXPLICIT half name outranks the
+# conservative inference, in EITHER selector order.
+#
+# `functions:<unfamiliar>` sets the conservative bit as a guess that the group
+# might contain a handoff endpoint. Naming a half outright is a fact that it was
+# released. When the guess came first it used to win, so a combined scope
+# tolerated the deployed half being absent — the same hole 22e closed for simple
+# scopes, reopened for combined ones. Both orders are pinned because the defect
+# was order-dependent, which is exactly the kind of thing that regresses.
+# ---------------------------------------------------------------------------
+for combined_case in "22g:functions:someGroup,functions:mintAuthHandoff" "22h:functions:mintAuthHandoff,functions:someGroup"; do
+  case_id="${combined_case%%:*}"
+  scope="${combined_case#*:}"
+  REPO_C="$WORKDIR/case${case_id}-combined-scope"
+  init_fixture_repo "$REPO_C"
+  OUT_C="$WORKDIR/case${case_id}.out"
+  ERR_C="$WORKDIR/case${case_id}.err"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+    bash -c "cd '$REPO_C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only $scope" \
+    >"$OUT_C" 2>"$ERR_C"
+  RC_C=$?
+  set -e
+
+  if [[ $RC_C -eq 0 ]]; then
+    fail "combined-scope ($case_id, --only $scope): returned 0 though the explicitly named mintauthhandoff is missing — the conservative guess outranked the explicit name. stdout was:"
+    cat "$OUT_C" >&2
+  else
+    pass "combined-scope ($case_id, --only $scope): an explicitly named half stays strict despite an unfamiliar selector in the same scope (rc=$RC_C)."
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

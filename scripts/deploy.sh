@@ -304,13 +304,31 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   # matter — if it is missing afterwards, that is the 403 this mechanism exists
   # to catch, so it must still fail loud. Naming both halves, or the whole
   # `functions` scope, releases both and leaves both strict.
-  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" \
-     && "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" != "true" ]]; then
-    if [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" && "$AUTH_HANDOFF_EXCHANGE_NAMED" != "true" ]]; then
+  #
+  # AN EXPLICIT NAME ALWAYS BEATS THE CONSERVATIVE INFERENCE (CodeRabbit, round
+  # 5). The `functions:*` arm sets the conservative bit as a GUESS that an
+  # unfamiliar group or codebase MIGHT contain a handoff endpoint; naming a half
+  # outright is a FACT that it was released. A combined scope such as
+  #
+  #   --only functions:someGroup,functions:mintAuthHandoff
+  #
+  # hit the guess first, and the guess then outranked the fact — so the half the
+  # deploy definitely released was tolerated as missing, reopening for combined
+  # scopes exactly the hole the per-half split closed for simple ones. Clearing
+  # the bit here is what makes the ORDER of selectors within one `--only`
+  # irrelevant.
+  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+    if [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" && "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" ]]; then
+      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+      AUTH_HANDOFF_STRICT_HALF=""
+    elif [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" ]]; then
+      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
       AUTH_HANDOFF_STRICT_HALF="mint"
-    elif [[ "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" && "$AUTH_HANDOFF_MINT_NAMED" != "true" ]]; then
+    elif [[ "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" ]]; then
+      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
       AUTH_HANDOFF_STRICT_HALF="exchange"
     fi
+    # Neither half named: the conservative bit stands, and both stay lenient.
   fi
 fi
 
