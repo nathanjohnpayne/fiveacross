@@ -15,6 +15,10 @@ const H = vi.hoisted(() => ({
   items: [] as ItemDoc[],
   myPending: [] as ItemDoc[],
   myActive: [] as ItemDoc[],
+  // Undefined by default (no schedule) — this file's existing assertions
+  // predate #559 and don't exercise scheduled/approved/not-selected states.
+  // Overridden per-test where the ticking-clock timer needs a real schedule.
+  event: undefined as { days?: { index: number; unlockAt: number }[] } | undefined,
   addItem: vi.fn(),
   reportItem: vi.fn(),
 }));
@@ -31,10 +35,10 @@ vi.mock('../hooks/useData', () => ({
   // submissions" query — deliberately SEPARATE from `H.items` (the public
   // pool), mirroring `useMyActiveItems`'s own doc comment.
   useMyActiveItems: () => ({ items: H.myActive, loading: false, hasServerData: true }),
-  // #559: ItemPool now reads the Day schedule for its submitter-state pills.
-  // No schedule here — this file's existing assertions predate #559 and
-  // don't exercise scheduled/approved/not-selected states (own suite below).
-  useEventDoc: () => ({ data: undefined }),
+  // #559: ItemPool now reads the Day schedule for its submitter-state pills
+  // AND its ticking-clock timer (round 4). `H.event` defaults to no
+  // schedule; overridden per-test for the clamp regression below.
+  useEventDoc: () => ({ data: H.event }),
 }));
 vi.mock('../data/api', () => ({
   addItem: (...a: unknown[]) => H.addItem(...a),
@@ -69,6 +73,7 @@ beforeEach(() => {
   H.items = [];
   H.myPending = [];
   H.myActive = [];
+  H.event = undefined;
 });
 
 describe('ItemPool submission (specs/d15-approvals.md)', () => {
@@ -163,6 +168,28 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
       expect(row.querySelector('.pill')?.textContent).toMatch(/approved/i);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  // #559, Codex P1, PR #845 round 4: an unclamped `setTimeout(..., nextUnlock
+  // - Date.now())` overflows the 32-bit signed int delay browsers accept once
+  // the next unlock is more than ~24.9 days out — which they clamp to ~0ms,
+  // firing near-instantly, recomputing the SAME far-off target, and re-arming
+  // an equally near-instant timer forever. This pins the fix: the delay
+  // handed to `setTimeout` never exceeds the clamp, even for a schedule whose
+  // next unlock is 30 days away.
+  it('clamps its ticking-clock timer to the 32-bit setTimeout max for a Day more than ~24.9 days out', () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      H.event = { days: [{ index: 0, unlockAt: Date.now() + 30 * 24 * 60 * 60 * 1000 }] };
+      render(<ItemPool />);
+      const delays = setTimeoutSpy.mock.calls.map((call) => call[1]).filter((d): d is number => typeof d === 'number');
+      expect(delays.length).toBeGreaterThan(0);
+      for (const d of delays) {
+        expect(d).toBeLessThanOrEqual(2_147_483_647);
+      }
+    } finally {
+      setTimeoutSpy.mockRestore();
     }
   });
 });

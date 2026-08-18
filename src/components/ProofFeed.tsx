@@ -952,7 +952,12 @@ export default function ProofFeed() {
       .filter((t) => t > Date.now())
       .sort((a, b) => a - b)[0];
     if (nextUnlock == null) return;
-    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
+    // Clamped to the 32-bit signed int `setTimeout` max (Codex P1, PR #845,
+    // round 4) — see ItemPool.tsx's identical timer for the overflow this
+    // prevents (an Event whose next unlock is >~24.9 days out would
+    // otherwise fire near-instantly and re-arm forever). Same clamp
+    // `admin/SchedulePanel.tsx` already applies to its own unlock timer.
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(nextUnlock - Date.now(), 2_147_483_647));
     return () => clearTimeout(timer);
   }, [event?.days, now]);
   // ONE flat Doubts subscription for the whole Feed (#262): the doubts

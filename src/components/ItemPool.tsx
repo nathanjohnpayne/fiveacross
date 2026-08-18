@@ -127,7 +127,15 @@ export default function ItemPool() {
       .filter((t) => t > Date.now())
       .sort((a, b) => a - b)[0];
     if (nextUnlock == null) return;
-    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
+    // Clamped to the 32-bit signed int `setTimeout` max (Codex P1, PR #845,
+    // round 4): an Event whose next unlock is more than ~24.9 days out would
+    // otherwise overflow the delay, which browsers clamp to ~0ms — firing
+    // near-instantly, re-computing the SAME far-off `nextUnlock`, and
+    // re-arming an equally-near-instant timer forever. Same clamp
+    // `admin/SchedulePanel.tsx` already applies to its own unlock timer: a
+    // clamped early fire just re-runs this effect and re-arms, safely, until
+    // the real unlock is within range.
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(nextUnlock - Date.now(), 2_147_483_647));
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days` (a fresh [] literal each render on a schedule-less Event); the effect's own reschedule (`now` in the deps) is what re-evaluates it, matching Board.tsx's identical pattern.
   }, [event?.days, now]);

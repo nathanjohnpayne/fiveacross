@@ -857,7 +857,15 @@ export default function Board() {
       .filter((t) => t > Date.now())
       .sort((a, b) => a - b)[0];
     if (nextUnlock == null) return;
-    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
+    // Clamped to the 32-bit signed int `setTimeout` max (Codex P1, PR #845
+    // round 4, incidentally surfaced by the SAME unclamped pattern this
+    // pre-existing timer used — the two new #559 timers below copied it
+    // verbatim): an Event whose next unlock is more than ~24.9 days out
+    // would otherwise overflow the delay, which browsers clamp to ~0ms,
+    // re-computing the SAME far-off `nextUnlock` and re-arming an equally
+    // near-instant timer forever. Same clamp `admin/SchedulePanel.tsx`
+    // already applies to its own unlock timer.
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(nextUnlock - Date.now(), 2_147_483_647));
     return () => clearTimeout(timer);
   }, [event?.days, now]);
   // Lazy per-Day dealing (#246, daily-cards-spec § "Unlock mechanics"): on opening
