@@ -125,7 +125,7 @@ afterEach(() => {
 describe('bare /setup', () => {
   it('creates a fresh draft and lands on Step 1 · Occasion', async () => {
     renderApp('/setup');
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
     expect(screen.getByText('✕ Cancel')).toBeInTheDocument();
     expect(screen.getByText('New event')).toBeInTheDocument();
     // A brand-new draft is persisted immediately, so a reload before any
@@ -141,12 +141,12 @@ describe('Continue gating', () => {
     const user = userEvent.setup();
     await seedDraft(); // occasion: null — Step 1 is unsatisfied by construction
     renderApp(setupStepPath('seeded-draft', 'occasion'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     await user.click(screen.getByRole('button', { name: 'Continue' }));
 
     // Still on Step 1 — the placeholder body for Basics never mounted.
-    expect(screen.getByTestId('wizard-step-placeholder-occasion')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-step-occasion')).toBeInTheDocument();
     expect(screen.queryByTestId('wizard-step-placeholder-basics')).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent(/occasion/i);
   });
@@ -157,7 +157,7 @@ describe('Continue gating', () => {
     // filled in, so Step 2 is not.
     await seedDraft({ occasion: 'weekend-away', edition: 'vacay' });
     renderApp(setupStepPath('seeded-draft', 'occasion'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     await user.click(screen.getByRole('button', { name: 'Continue' }));
 
@@ -174,7 +174,7 @@ describe('deep link / resume landing', () => {
     await seedDraft(); // nothing answered at all
     renderApp(setupStepPath('seeded-draft', 'look'));
 
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
     expect(screen.queryByTestId('wizard-step-placeholder-look')).not.toBeInTheDocument();
   });
 
@@ -196,7 +196,7 @@ describe('deep link / resume landing', () => {
 
   it('a miss (unknown draftId) starts a fresh draft rather than dead-ending', async () => {
     renderApp(setupStepPath('never-saved', 'basics'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
     const summaries = await store.list();
     expect(summaries.map((s) => s.draftId)).not.toContain('never-saved');
   });
@@ -208,7 +208,7 @@ describe('deep link / resume landing', () => {
     await seedDraft({ step: 'launch' });
     renderApp(setupStepPath('seeded-draft', 'launch'));
 
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
     await waitFor(async () => {
       const stored = await store.load('seeded-draft');
       expect(stored?.step).toBe('occasion');
@@ -276,7 +276,7 @@ describe('back navigation to a completed step', () => {
 
     // Occasion is done — jump back to it via its indicator pill.
     await user.click(screen.getByRole('button', { name: /Occasion/ }));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     // The header's back-affordance now reads Cancel again (Step 1), proving
     // the jump landed for real, not just a visual highlight.
@@ -307,7 +307,7 @@ describe('back navigation to a completed step', () => {
     await screen.findByTestId('wizard-step-placeholder-basics');
 
     await user.click(screen.getByRole('button', { name: '‹ Occasion' }));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
   });
 });
 
@@ -344,7 +344,7 @@ describe('Cancel', () => {
     const user = userEvent.setup();
     await seedDraft(); // nothing entered
     renderApp(setupStepPath('seeded-draft', 'occasion'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     await user.click(screen.getByText('✕ Cancel'));
 
@@ -358,14 +358,14 @@ describe('Cancel', () => {
     const user = userEvent.setup();
     await seedDraft({ occasion: 'custom' }); // one answered field is enough to count as content
     renderApp(setupStepPath('seeded-draft', 'occasion'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     await user.click(screen.getByText('✕ Cancel'));
     const dialog = await screen.findByRole('alertdialog', { name: /discard this draft/i });
     await user.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
 
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-    expect(screen.getByTestId('wizard-step-placeholder-occasion')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-step-occasion')).toBeInTheDocument();
     expect(await store.load('seeded-draft')).not.toBeNull();
 
     await user.click(screen.getByText('✕ Cancel'));
@@ -386,7 +386,7 @@ describe('Cancel', () => {
     vi.stubGlobal('localStorage', new FrozenStorage(workingStorage));
     const user = userEvent.setup();
     renderApp(setupStepPath('seeded-draft', 'occasion'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     await user.click(screen.getByText('✕ Cancel'));
 
@@ -413,7 +413,7 @@ describe('Save draft (local)', () => {
     const user = userEvent.setup();
     await seedDraft();
     renderApp(setupStepPath('seeded-draft', 'occasion'));
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
 
     await user.click(screen.getByRole('button', { name: 'Save draft (local)' }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved'));
@@ -496,7 +496,7 @@ describe('storage failure (Codex P1, PR #840)', () => {
     const user = userEvent.setup();
     renderApp(setupStepPath('seeded-draft', 'occasion'));
 
-    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await screen.findByTestId('wizard-step-occasion');
     await user.click(screen.getByRole('button', { name: 'Save draft (local)' }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/couldn't save/i));
   });
