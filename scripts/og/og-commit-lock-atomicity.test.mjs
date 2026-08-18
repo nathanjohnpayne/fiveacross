@@ -40,9 +40,9 @@ vi.mock('node:fs', async (importOriginal) => {
       linkSourceContentAtCallTime.push(actual.readFileSync(src, 'utf8'));
       return actual.linkSync(src, dest);
     }),
-    // Passthrough by default — the stale-takeover describe block below
-    // overrides this per-test to land a swap between stealIfStale's two
-    // statSync calls.
+    // Passthrough in every test in this file — spied only so a future test
+    // can assert on statSync call shape without needing to add the mock
+    // wiring separately.
     statSync: vi.fn(actual.statSync),
     writeSync: vi.fn(actual.writeSync),
   };
