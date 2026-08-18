@@ -611,6 +611,11 @@ export interface FrozenDigest {
 
 const batchPath = (eventId: string, batchId: string) => `events/${eventId}/adminAlertBatches/${batchId}`;
 
+/** The frozen request's own retention bound. It holds the fully rendered email —
+ *  the densest copy of user content in the system — so it is written with an
+ *  `expiresAt` that can never outlast the alerts it was rendered from; see the
+ *  freeze site in `sendAdminDigestForEvent` for why an unbounded one orphans. */
+
 /** Read back a frozen request, or `null` when there is none / it is unusable.
  *  A partial document is treated as absent: re-rendering is recoverable, while
  *  sending half a payload is not. */
@@ -1147,9 +1152,30 @@ export async function sendAdminDigestForEvent(
   // and the surviving freeze might not be the request Resend actually accepted.
   // With `create` exactly one render wins; the loser discards its own bytes and
   // replays the winner's, so one batch id can only ever name one request.
+  //
+  // IT CARRIES ITS OWN `expiresAt`, BOUNDED BY THE ROWS IT COVERS. This document
+  // holds the FULLY RENDERED email — every pending Prompt's words and every
+  // abuse description in the batch — so it is the single densest copy of user
+  // content in the system, and it must not be able to outlive the alerts it was
+  // built from. Without a bound it could: repeated delivery failures keep a
+  // frozen batch alive indefinitely, the pending TTL then reaps the claimed
+  // rows, and no later sweep can discover the batch to replay, release or delete
+  // it — an orphaned copy of the text with nothing left pointing at it
+  // (Phase 4b P1).
+  //
+  // The deadline is the EARLIEST row's own expiry, clamped to a week, so the
+  // batch always dies with (or before) its rows. Expiring early is safe and
+  // already handled: claimed rows with no frozen document take the documented
+  // rebuild path, and by then Resend's 24h idempotency window has long closed,
+  // so the rebuilt send cannot 409 against the key this batch used.
+  const createdStamps = page
+    .map((doc) => doc.data()?.createdAt)
+    .filter((value): value is number => typeof value === 'number' && value > 0);
+  const rowsExpireAt = (createdStamps.length > 0 ? Math.min(...createdStamps) : now) + PENDING_TTL_MS;
+  const batchExpiresAt = new Date(Math.min(rowsExpireAt, now + TOMBSTONE_TTL_MS));
   let outbound = payload;
   try {
-    await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now });
+    await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now, expiresAt: batchExpiresAt });
   } catch (err) {
     if (!isAlreadyExists(err)) {
       console.error('sendAdminDigestForEvent: freezing the outbound request failed (nothing sent)', eventId, err);

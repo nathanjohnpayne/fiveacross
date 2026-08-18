@@ -116,7 +116,7 @@ describe('W4 bug-report inbox', () => {
     // The consequence is stated only once the reporter has chosen it, and it is
     // stated as an ATTEMPT: whether an admin is actually reached depends on a
     // membership fact only the server holds.
-    const promise = /raise this with the event.s admins/i;
+    const promise = /try to raise this with the event.s admins/i;
     expect(screen.queryByText(promise)).not.toBeInTheDocument();
     fireEvent.click(abuse);
     expect(abuse).toBeChecked();

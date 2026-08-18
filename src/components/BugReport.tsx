@@ -340,16 +340,18 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       </label>
                     </fieldset>
                     {kind === 'abuse' && (
-                      // Future tense, and deliberately so. The submission is
-                      // only ever ELIGIBLE for escalation at this point: the
-                      // trigger that queues the alert runs asynchronously and
-                      // re-checks for itself, and the digest beyond it may find
-                      // no admin recipient. "Will be raised" is a statement of
-                      // intent the system can keep; "has been alerted" would
-                      // reassure somebody reporting harm about an outcome nobody
-                      // has determined yet (Phase 4b P1).
+                      // "We'll TRY", because at this point nothing has been
+                      // checked at all: eligibility is decided server-side after
+                      // Send, and the server may deliberately decline — a
+                      // stranger naming somebody else's Event, or a member
+                      // reporting against an archived one. Promising the outcome
+                      // here would be false for exactly those cases (Phase 4b
+                      // P2). The second clause is the part that is always true,
+                      // and it is the reassurance that actually matters: the
+                      // report is filed either way. The receipt then states
+                      // which of the two happened.
                       <p className="bug-report-privacy">
-                        We’ll raise this with the event’s admins as well as filing the report.
+                        We’ll try to raise this with the event’s admins; either way your report is filed.
                       </p>
                     )}
                     <label className="bug-report-label" htmlFor="bug-report-description">What happened?</label>
