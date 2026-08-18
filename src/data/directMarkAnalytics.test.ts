@@ -370,4 +370,118 @@ describe('durable direct-mark analytics delivery', () => {
     expect(storage.get('five-across:board-analytics-cursor:event:u1')).toContain('"seconds":11');
     vi.unstubAllGlobals();
   });
+
+  it('drains a stranded outbox entry on a timed retry after both one-shot readiness signals have already fired (#764)', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      });
+      let postHogReady!: () => void;
+      H.onPostHogReady.mockImplementationOnce((listener) => {
+        postHogReady = listener;
+        return () => {};
+      });
+      // The sink stays unacknowledged across the initial dispatch AND both
+      // one-shot readiness retries — a transient failure that outlives every
+      // wake-up this module had before #764. Only the fourth attempt (the
+      // timed retry) succeeds.
+      H.trackToAnalyticsSinks
+        .mockReturnValueOnce({ ga4: false, posthog: true })
+        .mockReturnValueOnce({ ga4: false, posthog: true })
+        .mockReturnValueOnce({ ga4: false, posthog: true })
+        .mockReturnValue({ ga4: true, posthog: true });
+      H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+        onNext({
+          metadata: { fromCache: false },
+          docs: [
+            {
+              id: 'row-stranded',
+              data: () => ({
+                name: 'unmark_square',
+                mode: 'honor',
+                uid: 'u1',
+                requestId: 'request-stranded',
+                transitionId: 'transition-stranded',
+                commitOrder: '0000000000000016:000000000',
+                recordedAt: { seconds: 16, nanoseconds: 0 },
+              }),
+            },
+          ],
+        });
+        return () => {};
+      });
+
+      const callsBeforeSubscribe = H.trackToAnalyticsSinks.mock.calls.length;
+      subscribeDirectMarkAnalytics('u1');
+      // Both one-shot readiness signals fire once each, per the issue's
+      // reproduction — neither drains the entry, and no further Firestore
+      // snapshot arrives afterward.
+      await H.analyticsInitializationSettled;
+      postHogReady();
+
+      expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(callsBeforeSubscribe + 3);
+      expect(storage.get('five-across:board-analytics-outbox:event:u1')).toContain('transition-stranded');
+
+      // No further wake-up short of the timer: advance past the initial
+      // backoff delay and the entry must finally drain.
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(callsBeforeSubscribe + 4);
+      expect(storage.get('five-across:board-analytics-outbox:event:u1')).toBe('[]');
+      expect(storage.get('five-across:board-analytics:event:u1')).toContain('transition-stranded');
+      vi.unstubAllGlobals();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the retry timer on unsubscribe so a stranded entry is never retried after teardown (#764)', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      });
+      H.trackToAnalyticsSinks.mockReturnValue({ ga4: false, posthog: true });
+      H.onSnapshot.mockImplementationOnce((_query, onNext) => {
+        onNext({
+          metadata: { fromCache: false },
+          docs: [
+            {
+              id: 'row-teardown',
+              data: () => ({
+                name: 'unmark_square',
+                mode: 'honor',
+                uid: 'u1',
+                requestId: 'request-teardown',
+                transitionId: 'transition-teardown',
+                commitOrder: '0000000000000017:000000000',
+                recordedAt: { seconds: 17, nanoseconds: 0 },
+              }),
+            },
+          ],
+        });
+        return () => {};
+      });
+
+      const unsubscribeAnalytics = subscribeDirectMarkAnalytics('u1');
+      const callsBeforeUnsubscribe = H.trackToAnalyticsSinks.mock.calls.length;
+      expect(callsBeforeUnsubscribe).toBeGreaterThan(0);
+
+      unsubscribeAnalytics();
+
+      // Well past what would otherwise be several retries at the (capped)
+      // backoff interval.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+      expect(H.trackToAnalyticsSinks).toHaveBeenCalledTimes(callsBeforeUnsubscribe);
+      vi.unstubAllGlobals();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
