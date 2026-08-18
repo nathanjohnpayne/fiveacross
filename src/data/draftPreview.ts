@@ -9,16 +9,17 @@
  * `daysInOrder` (it is not exported — scoped there to the validation
  * predicates) or `src/data/api.ts`'s live deal wiring (Firebase-coupled, not
  * importable here). `previewDays` and `dealPreviewCard` below re-derive the
- * same small, well-known rules — hole-dropping/index-sort, and "a main Day
- * mixes the easy pool in, everything else deals its own pool alone" — as
- * short, independently-testable functions, because a preview's job (show
+ * same small, well-known rules — hole-dropping/index-sort, and "a main
+ * DAILY-CARDS Day mixes the easy pool in; everything else, INCLUDING a
+ * `one_card` draft's main-only deal, deals its own pool alone" — as short,
+ * independently-testable functions, because a preview's job (show
  * something representative) and a validator's/live-deal's job (enforce a
  * gate / persist a real card) are different concerns that happen to want the
  * same small pieces of arithmetic.
  */
 
 import type { Cell, DraftCuratedPrompt, DraftDayDef, DraftMainPrompt, EventDraft, ThemeId } from '../types';
-import { dealBoard, type DealItem, type DealOptions } from '../game/logic';
+import { MIN_POOL, dealBoard, type DealItem, type DealOptions } from '../game/logic';
 import { normalizePool, type PoolId } from '../game/pool';
 import { THEMES, defaultThemeForEdition } from '../theme/themes';
 import { FREE_TEXT } from './seed';
@@ -42,14 +43,17 @@ export function previewDays(draft: EventDraft): DraftDayDef[] {
   return draft.days.filter((day): day is DraftDayDef => day != null).sort((a, b) => a.index - b.index);
 }
 
-/**
- * Real (non-hole) Prompt count across all three pools — "count entries, not
- * array length", the same rule `draftValidation.ts`'s `countPrompts` applies
- * to the per-pool launch minimum, restated here for a presentational total.
- */
+/** Real (non-hole) entry count in one array — "count entries, not array
+ *  length", the same rule `draftValidation.ts`'s `countPrompts` applies to
+ *  the per-pool launch minimum. `Array.prototype.filter` skips holes. */
+function realCount(list: readonly unknown[]): number {
+  return list.filter(() => true).length;
+}
+
+/** Real Prompt count across all three pools — the presentational total for
+ *  a `daily_cards` draft, which can deal from any of them. */
 export function squaresTotal(draft: EventDraft): number {
-  const count = (list: readonly unknown[]) => list.filter(() => true).length;
-  return count(draft.prompts.main) + count(draft.prompts.easy) + count(draft.prompts.closing);
+  return realCount(draft.prompts.main) + realCount(draft.prompts.easy) + realCount(draft.prompts.closing);
 }
 
 /**
@@ -69,13 +73,29 @@ export function previewDayForTheme(draft: EventDraft): DraftDayDef | null {
 }
 
 /**
+ * The Theme a Day-less part of the preview wears: the draft's own
+ * `defaultTheme`, else the bound Edition's own default. This is the tail of
+ * `previewTheme`'s chain WITHOUT the cross-Day lookup — the fallback for a
+ * specific, already-known Day (or no Day at all), never a second "pick some
+ * other Day's Theme instead" (Codex P2, PR #857 round 2: the expanded
+ * sheet's own per-selected-Day fallback must resolve from the SELECTED Day
+ * and the Event, not silently borrow another Day's Theme via `previewTheme`).
+ */
+export function draftFallbackTheme(draft: EventDraft): ThemeId {
+  return draft.defaultTheme ?? defaultThemeForEdition(draft.edition);
+}
+
+/**
  * The Theme the preview island wears: the most-specified Day's Theme, else
  * the draft's own `defaultTheme`, else the bound Edition's own default —
  * mirroring the live app's own fallback chain (Day → event default →
  * Edition default), read here from the draft instead of a live Event doc.
+ * For the COLLAPSED strip's single representative swatch only — a specific,
+ * already-selected Day's own fallback is `draftFallbackTheme` above, not
+ * this cross-Day lookup.
  */
 export function previewTheme(draft: EventDraft): ThemeId {
-  return previewDayForTheme(draft)?.theme ?? draft.defaultTheme ?? defaultThemeForEdition(draft.edition);
+  return previewDayForTheme(draft)?.theme ?? draftFallbackTheme(draft);
 }
 
 /** A short, human Day label ("Friday"), falling back to a 1-based ordinal
@@ -119,6 +139,19 @@ export function previewCaption(draft: EventDraft): string {
     const meta = THEMES.find((t) => t.id === themedDay.theme);
     return `${previewDayLabel(themedDay)} preview · ${meta?.label ?? 'themed'}`;
   }
+  // `one_card` deals from the main pool alone and has no "per day" cadence
+  // at all (specs/event-setup-wizard.md § Contract — `cardFormat`) — a
+  // one-card-specific line, counting only the pool it actually uses,
+  // instead of `squaresTotal`'s cross-pool count and the daily-cards
+  // "deals 24 per day" phrasing (Codex P2, PR #857 round 2): switching
+  // OUT of a one-card occasion leaves `applyOccasionDefaults` preserving
+  // whatever easy/closing Prompts were authored, so a raw total can name
+  // squares the launched Board will never deal from.
+  if (draft.cardFormat === 'one_card') {
+    const mainCount = realCount(draft.prompts.main);
+    if (mainCount > 0) return `${mainCount} squares · one card`;
+    return 'Live preview · updates as you build';
+  }
   const total = squaresTotal(draft);
   if (total > 0) return `${total} squares · deals 24 per day`;
   return 'Live preview · updates as you build';
@@ -137,15 +170,24 @@ function curatedDealItems(list: readonly DraftCuratedPrompt[], poolId: 'easy' | 
 }
 
 /**
- * The `DealItem[]` `dealBoard` deals from, for a deal from `pool` — the same
- * membership rule the live deal (`src/data/api.ts` `dealDayCard`) uses: a
- * `main` deal mixes BOTH the main and easy pools (so `dealBoard` can
- * stratify the easy half in per specs/easy-mix.md); `easy` and `closing`
- * each deal from their own pool alone.
+ * The `DealItem[]` `dealBoard` deals from, for a deal from `pool`.
+ *
+ * `mixEasy` (true only for an actual `daily_cards` MAIN Day) mirrors the
+ * live deal's own membership rule (`src/data/api.ts` `dealDayCard`): a main
+ * Day mixes BOTH the main and easy pools in, so `dealBoard` can stratify the
+ * easy half per specs/easy-mix.md. A `one_card` draft's main deal (`pool ===
+ * 'main'` with `mixEasy` false — see `dealPreviewCard`) is deliberately NOT
+ * the same rule: `joinAndDeal`'s one-card path pulls from the main pool
+ * ONLY, and `assignedPools` agrees (`one_card` ⇒ `['main']`), so mixing easy
+ * items in here would preview squares the launched Board never deals
+ * (Codex P2, PR #857 round 2 — reachable because `applyOccasionDefaults`
+ * preserves an authored easy pool across an occasion switch INTO one-card).
+ * `easy`/`closing` always deal their own pool alone, regardless of `mixEasy`.
  */
-function previewDealItems(draft: EventDraft, pool: PoolId): DealItem[] {
+function previewDealItems(draft: EventDraft, pool: PoolId, mixEasy: boolean): DealItem[] {
   if (pool === 'main') {
-    return [...mainDealItems(draft.prompts.main), ...curatedDealItems(draft.prompts.easy, 'easy')];
+    const mainItems = mainDealItems(draft.prompts.main);
+    return mixEasy ? [...mainItems, ...curatedDealItems(draft.prompts.easy, 'easy')] : mainItems;
   }
   return curatedDealItems(draft.prompts[pool], pool);
 }
@@ -165,11 +207,25 @@ export type PreviewDeal = { cells: Cell[] } | { shortfall: string };
  * pool is too thin to deal (`src/game/logic.ts`). This catches THAT message
  * rather than re-deriving the guard's arithmetic, so the preview's shortfall
  * wording can never drift from the Squares gate it has to stay "consistent
- * with" (specs/event-setup-wizard.md acceptance).
+ * with" (specs/event-setup-wizard.md acceptance) — EXCEPT for one case
+ * `dealBoard` cannot see on its own: `assignedPoolIssues` requires the
+ * ASSIGNED pool alone to clear `MIN_POOL`, "per pool, never as a total"
+ * (specs/event-setup-wizard.md § Validation), but a main Day's easy-mix
+ * backfill can make `dealBoard` itself succeed on a COMBINED main+easy pool
+ * that is still short on main alone — a full-looking preview the Squares
+ * gate would refuse (Codex P2, PR #857 round 2). That ASSIGNED-pool check
+ * runs first, using the SAME `MIN_POOL` constant and message shape
+ * `dealBoard` itself throws, so the wording stays identical either way.
  */
 export function dealPreviewCard(draft: EventDraft, day: DraftDayDef | null): PreviewDeal {
   const pool = day ? normalizePool(day.pool) : 'main';
-  const items = previewDealItems(draft, pool);
+  const mixEasy = day !== null && pool === 'main';
+  const assignedList = pool === 'main' ? draft.prompts.main : draft.prompts[pool];
+  const assignedCount = assignedList.filter(() => true).length;
+  if (assignedCount < MIN_POOL) {
+    return { shortfall: `dealBoard needs at least ${MIN_POOL} prompts, received ${assignedCount}.` };
+  }
+  const items = previewDealItems(draft, pool, mixEasy);
   const freeText = day?.freeText ?? FREE_TEXT;
   const opts: DealOptions = {
     stratify: pool === 'main',

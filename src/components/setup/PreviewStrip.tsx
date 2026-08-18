@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import type { DraftDayDef, EventDraft } from '../../types';
 import ThemeIsland from '../../theme/ThemeIsland';
 import SquareText from '../SquareText';
 import {
   dealPreviewCard,
+  draftFallbackTheme,
   previewCaption,
   previewDayForTheme,
   previewDayLabel,
@@ -169,7 +171,12 @@ function PreviewSheet({
     return () => document.removeEventListener('keydown', onKeyDown, { capture: true });
   }, [onClose]);
 
-  const theme = selectedDay?.theme ?? previewTheme(draft);
+  // The SELECTED Day's own fallback — never `previewTheme`, which can
+  // resolve to a DIFFERENT Day's Theme (the collapsed strip's cross-Day
+  // "most representative" pick). An explicitly-selected but not-yet-themed
+  // Day must fall back to the Event's own default, not borrow another Day's
+  // look (Codex P2, PR #857 round 2).
+  const theme = selectedDay?.theme ?? draftFallbackTheme(draft);
   const deal = dealPreviewCard(draft, selectedDay);
   const title = draft.name.trim() || 'Live preview';
 
@@ -192,7 +199,7 @@ function PreviewSheet({
             onClick={onClose}
             aria-label="Close preview"
           >
-            ✕
+            <X aria-hidden="true" />
           </button>
         </div>
         {draft.cardFormat === 'daily_cards' && days.length > 1 && (
@@ -202,6 +209,7 @@ function PreviewSheet({
                 key={d.index}
                 type="button"
                 className={'seg-btn' + (selectedDay?.index === d.index ? ' on' : '')}
+                aria-pressed={selectedDay?.index === d.index}
                 onClick={() => onSelectDay(d.index)}
               >
                 {dayTabLabel(d, days)}

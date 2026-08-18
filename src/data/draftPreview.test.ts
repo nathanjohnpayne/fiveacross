@@ -4,6 +4,7 @@ import { FREE_TEXT } from './seed';
 import {
   PREVIEW_SEED,
   dealPreviewCard,
+  draftFallbackTheme,
   previewCaption,
   previewDayForTheme,
   previewDayLabel,
@@ -103,6 +104,26 @@ describe('previewDayForTheme / previewTheme', () => {
   });
 });
 
+describe('draftFallbackTheme', () => {
+  it('prefers the draft defaultTheme, then the Edition default — never a cross-Day lookup', () => {
+    const withDefault = draftWith({ edition: 'fiveacross', defaultTheme: 'afterglow' });
+    expect(draftFallbackTheme(withDefault)).toBe('afterglow');
+
+    const withoutDefault = draftWith({ edition: 'vacay', defaultTheme: null });
+    expect(draftFallbackTheme(withoutDefault)).toBe('the-birds'); // vacay's Edition default
+
+    // Unlike previewTheme, a themed Day elsewhere in the schedule must NOT
+    // change this result (Codex P2, PR #857 round 2) — this is the SELECTED
+    // Day's own fallback, not the collapsed strip's cross-Day pick.
+    const withThemedDayElsewhere = draftWith({
+      edition: 'fiveacross',
+      defaultTheme: 'afterglow',
+      days: [day({ index: 0, theme: 'marquee' })],
+    });
+    expect(draftFallbackTheme(withThemedDayElsewhere)).toBe('afterglow');
+  });
+});
+
 describe('previewDayLabel', () => {
   it('formats a real ISO date as its weekday', () => {
     // 2026-08-07 is a Friday.
@@ -134,6 +155,27 @@ describe('previewCaption', () => {
       days: [day({ index: 0, date: '2026-08-09', theme: 'the-birds' })],
     });
     expect(previewCaption(draft)).toBe('Sunday preview · The Birds Have Entered the Chat');
+  });
+
+  it('reports a one-card-specific line, counting the main pool alone, for a one_card draft', () => {
+    // Switching a draft OUT of a one-card occasion leaves easy/closing
+    // Prompts authored but unused — squaresTotal would count them, but the
+    // launched Board never will (Codex P2, PR #857 round 2).
+    const draft = draftWith({
+      cardFormat: 'one_card',
+      prompts: { main: mainPrompts(40), easy: curatedPrompts(28, 'easy'), closing: curatedPrompts(26, 'closing') },
+      days: [],
+    });
+    expect(previewCaption(draft)).toBe('40 squares · one card');
+  });
+
+  it('stays generic for an empty-main one_card draft, even with unused easy/closing Prompts', () => {
+    const draft = draftWith({
+      cardFormat: 'one_card',
+      prompts: { main: [], easy: curatedPrompts(28, 'easy'), closing: [] },
+      days: [],
+    });
+    expect(previewCaption(draft)).toBe('Live preview · updates as you build');
   });
 });
 
@@ -196,6 +238,41 @@ describe('dealPreviewCard', () => {
     const draft = draftWith({ prompts: { main: mainPrompts(24), easy: [], closing: [] } });
     const result = dealPreviewCard(draft, null);
     expect('cells' in result).toBe(true);
+  });
+
+  it('never mixes the easy pool into a one_card (day: null) deal, even when easy Prompts exist and easyMixRatio is 100%', () => {
+    // Reachable when an occasion switch INTO one-card leaves an authored
+    // easy pool behind (applyOccasionDefaults preserves Prompts) — the
+    // launched one-card Board deals from main ALONE (Codex P2, PR #857
+    // round 2), so the preview must too.
+    const draft = draftWith({
+      prompts: { main: mainPrompts(24), easy: curatedPrompts(24, 'easy'), closing: [] },
+      settings: { ...createEventDraft({ now: 0 }).settings, easyMixRatio: 1 },
+    });
+    const result = dealPreviewCard(draft, null);
+    expect('cells' in result).toBe(true);
+    if ('cells' in result) {
+      const texts = result.cells.filter((c) => !c.free).map((c) => c.text);
+      expect(texts.every((t) => t.startsWith('main prompt'))).toBe(true);
+    }
+  });
+
+  it('reports the assigned-pool-alone shortfall even when the COMBINED main+easy pool would let dealBoard itself succeed', () => {
+    // 12 main + 12 easy at a 50% mix is 24 drawable — dealBoard alone would
+    // deal a full card — but assignedPoolIssues blocks this draft because
+    // the ASSIGNED (main) pool alone needs 24, "per pool, never as a total"
+    // (specs/event-setup-wizard.md § Validation). The preview must agree
+    // (Codex P2, PR #857 round 2).
+    const draft = draftWith({
+      prompts: { main: mainPrompts(12), easy: curatedPrompts(12, 'easy'), closing: [] },
+      settings: { ...createEventDraft({ now: 0 }).settings, easyMixRatio: 0.5 },
+    });
+    const result = dealPreviewCard(draft, day({ index: 0, pool: 'main' }));
+    expect('shortfall' in result).toBe(true);
+    if ('shortfall' in result) {
+      expect(result.shortfall).toMatch(/at least 24 prompts/);
+      expect(result.shortfall).toMatch(/received 12/);
+    }
   });
 
   it("falls back to the seed FREE_TEXT, and honors a Day's own freeText override", () => {
