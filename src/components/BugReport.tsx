@@ -171,11 +171,26 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (stage !== 'sheet' || event.key !== 'Tab') return;
-      const focusable = Array.from(
+      const candidates = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
           'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
         ) ?? [],
       );
+      // A RADIO GROUP IS ONE SEQUENTIAL TAB STOP, not one per radio. Browsers
+      // visit only the checked member (or the first, when none is checked), so a
+      // raw query makes `first` a radio the user can never actually land on once
+      // a LATER member is selected — and the backward-wrap test below, which
+      // compares against `first` by identity, then never fires and focus walks
+      // straight out of the modal. Reachable in this sheet the moment a reporter
+      // picks "Abuse or harmful content" and presses Shift+Tab (#670, Codex P2).
+      const radios = candidates.filter(
+        (element): element is HTMLInputElement => element instanceof HTMLInputElement && element.type === 'radio',
+      );
+      const focusable = candidates.filter((element) => {
+        if (!(element instanceof HTMLInputElement) || element.type !== 'radio' || !element.name) return true;
+        const group = radios.filter((radio) => radio.name === element.name);
+        return element === (group.find((radio) => radio.checked) ?? group[0]);
+      });
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];

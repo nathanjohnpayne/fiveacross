@@ -133,6 +133,14 @@ export function isEventScoped(collection: AlertedCollection): collection is Even
   return EVENT_SCOPED.includes(collection);
 }
 
+/** Where a row's live document ACTUALLY lives, which is the whole reason this
+ *  function exists rather than an inline template: an Event-scoped collection
+ *  nests under the Event, and `bugReports` is top-level. Reading a top-level
+ *  report at the nested path would find nothing and read as "deleted". */
+export function livePathFor(eventId: string, collection: AlertedCollection, docId: string): string {
+  return isEventScoped(collection) ? `events/${eventId}/${collection}/${docId}` : `${collection}/${docId}`;
+}
+
 /** The subset of a Prompt/Proof doc the producers read. Everything is optional
  *  because this reads RAW Firestore snapshots with no converter. */
 export interface AlertableDoc {
@@ -756,15 +764,24 @@ export function currentRowFor(
   live: AlertableDoc | undefined,
   readFailed: boolean,
 ): AdminAlertRecord | null {
-  // AN ABUSE REPORT IS EXEMPT, and it needs to be stated rather than fall out of
-  // the rules below. It is a RECORD OF A SUBMISSION, not a state a document is
-  // in: `bugReports/{id}` is a top-level document with no `status`/`reportCount`
-  // moderation vocabulary for the liveness rules to read, so applying them would
-  // score every abuse row as "resolved" and drop it the moment it was drained —
-  // the alert would exist, be claimed, be tombstoned, and never be mailed (#670).
-  // There is also nothing an admin can do that would make it stop being true: a
-  // report was filed, and that stays filed.
-  if (alert.kind === 'abuse-reported') return alert;
+  // AN ABUSE REPORT IS EXEMPT FROM THE MODERATION RULES, BUT NOT FROM EXISTENCE.
+  //
+  // It is a RECORD OF A SUBMISSION rather than a state a document is in, and
+  // `bugReports/{id}` carries no `status`/`reportCount` vocabulary for the rules
+  // below to read — so applying them would score every abuse row "resolved" and
+  // drop it the moment it was drained: queued, claimed, tombstoned, never mailed
+  // (#670). Nothing an admin does makes it stop being true, either; a report was
+  // filed, and it stays filed.
+  //
+  // Deletion is the one thing that does end it, and the delay can be long: a
+  // digest that cannot resolve a recipient leaves its alerts pending
+  // indefinitely, and the documented 90-day retention sweep
+  // (`docs/app/bug-reports.md`) can remove the source report in the meantime.
+  // Mailing the copied description and a dead report id AFTER the private source
+  // was deliberately deleted is exactly the retention promise this queue's
+  // tombstones exist to keep, so an absent report retires the row. A FAILED read
+  // still fails open, like every other kind.
+  if (alert.kind === 'abuse-reported') return readFailed || live ? alert : null;
   if (readFailed) return alert; // fail-open: keep the stored facts rather than lose the alert
   if (!live) return null; // deleted since it was queued — nothing left to review
   const status = typeof live.status === 'string' ? live.status : 'unknown';
@@ -917,16 +934,19 @@ export async function sendAdminDigestForEvent(
 
   // Re-read each piece of content ONCE, however many alerts point at it, then
   // render every row from what the document says now.
-  // EVENT-SCOPED ROWS ONLY. A `bugReports` alert names a top-level document that
-  // does not exist at `events/{eventId}/bugReports/{id}`, so re-reading it would
-  // spend a read to learn nothing and hand `currentRowFor` an absent document —
-  // which for every other kind means "deleted since it was queued".
+  // EVERY collection is re-read, at ITS OWN path — `livePathFor` is what keeps a
+  // top-level `bugReports/{id}` from being looked up under the Event, where it
+  // would read as absent and therefore as "deleted since it was queued". The map
+  // key stays `{collection}/{docId}`, which is already unique across both
+  // shapes. An abuse row consumes only the doc's PRESENCE (`currentRowFor` reads
+  // no moderation field from it), so the `AlertableDoc` cast is a convenience
+  // there rather than a claim about the document's shape.
   const live = new Map<string, { doc: AlertableDoc | undefined; failed: boolean }>();
-  for (const key of new Set(
-    alerts.filter((a) => isEventScoped(a.collection)).map((a) => `${a.collection}/${a.docId}`),
-  )) {
+  for (const key of new Set(alerts.map((a) => `${a.collection}/${a.docId}`))) {
+    const [collection, docId] = [key.slice(0, key.indexOf('/')) as AlertedCollection, key.slice(key.indexOf('/') + 1)];
     try {
-      live.set(key, { doc: (await db.doc(`events/${eventId}/${key}`).get()).data() as AlertableDoc | undefined, failed: false });
+      const path = livePathFor(eventId, collection, docId);
+      live.set(key, { doc: (await db.doc(path).get()).data() as AlertableDoc | undefined, failed: false });
     } catch (err) {
       console.error('sendAdminDigestForEvent: content re-read failed', eventId, key, err);
       live.set(key, { doc: undefined, failed: true });
@@ -935,11 +955,7 @@ export async function sendAdminDigestForEvent(
   const current: AdminAlertRecord[] = [];
   const resolved: string[] = [];
   for (const alert of alerts) {
-    // `failed: false` for a row that was never re-read on purpose, so the
-    // fail-open branch stays reserved for a re-read that genuinely broke.
-    const state = isEventScoped(alert.collection)
-      ? live.get(`${alert.collection}/${alert.docId}`) ?? { doc: undefined, failed: true }
-      : { doc: undefined, failed: false };
+    const state = live.get(`${alert.collection}/${alert.docId}`) ?? { doc: undefined, failed: true };
     const row = currentRowFor(alert, state.doc, state.failed);
     if (row) current.push(row);
     else resolved.push(alert.id);

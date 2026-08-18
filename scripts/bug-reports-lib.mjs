@@ -151,12 +151,24 @@ function safeReport(report) {
   if (report.kind !== undefined && !REPORT_KINDS.includes(report.kind)) {
     throw new Error(`Invalid kind for ${report.id}`);
   }
+  if (report.reporterInEvent !== undefined && typeof report.reporterInEvent !== 'boolean') {
+    throw new Error(`Invalid reporterInEvent for ${report.id}`);
+  }
   const metadata = {
     id: report.id,
     schemaVersion: fields.schemaVersion,
     // From the shared contract, so a report stored before #670 (no `kind` field)
     // exports as `bug` rather than as a hole an importer has to interpret.
     kind: fields.kind,
+    // Whether the abuse report ESCALATED, which `kind` alone does not say: an
+    // abuse report from somebody who did not belong to the Event it named is
+    // stored and exported like any other, but no admin was notified about it.
+    // An operator triaging the inbox needs to tell "an admin has seen this" from
+    // "this is only here" (#670). `null` for a bug report, because the check
+    // never ran — there was nothing to escalate. Mirrors the trigger's own
+    // strict comparison, so this says what actually happened rather than what
+    // the field literally holds.
+    reporterInEvent: fields.kind === 'abuse' ? report.reporterInEvent === true : null,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,

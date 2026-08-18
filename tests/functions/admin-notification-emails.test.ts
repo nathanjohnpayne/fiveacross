@@ -1959,15 +1959,26 @@ describe('the abuse module in the digest', () => {
     expect(renderAdminDigestHtml(model)).toContain('+2 more in the bug-report inbox');
   });
 
-  it('survives the liveness rules that would otherwise drop it as resolved', () => {
-    // A bug report has no `status`/`reportCount` vocabulary and does not live
-    // under the Event, so every liveness answer for it is "nothing there".
-    // Without the exemption the row would be scored resolved and cleared the
-    // moment it was drained — queued, claimed, tombstoned, never mailed.
+  it('survives the moderation liveness rules that would otherwise drop it as resolved', () => {
+    // A bug report has no `status`/`reportCount` vocabulary, so every moderation
+    // liveness answer for it is meaningless. Without the exemption the row would
+    // be scored resolved and cleared the moment it was drained — queued,
+    // claimed, tombstoned, never mailed.
     const alert = abuseAlert('a1');
-    expect(currentRowFor(alert, undefined, false)).toEqual(alert);
-    expect(currentRowFor(alert, undefined, true)).toEqual(alert);
+    expect(currentRowFor(alert, {}, false)).toEqual(alert);
     expect(currentRowFor(alert, { status: 'active', reportCount: 0 }, false)).toEqual(alert);
+    // A FAILED read still fails open, like every other kind.
+    expect(currentRowFor(alert, undefined, true)).toEqual(alert);
+  });
+
+  it('RETIRES an abuse row whose source report has since been deleted', () => {
+    // Exempt from the moderation rules is not exempt from existence. A digest
+    // that cannot resolve a recipient leaves alerts pending indefinitely, and
+    // the 90-day retention sweep can remove the source report meanwhile —
+    // mailing the copied description and a dead report id after the private
+    // source was deliberately deleted would break the retention promise the
+    // tombstones exist to keep.
+    expect(currentRowFor(abuseAlert('a1'), undefined, false)).toBeNull();
   });
 });
 
@@ -1993,10 +2004,13 @@ describe('sendAdminDigestForEvent with an abuse alert', () => {
         hostnames: [],
         events: [{ id: 'med-2026', status: 'active' }],
       },
-      { 'events/med-2026': EVENT },
-      // `events/med-2026/bugReports/report_xyz` is deliberately NOT seeded: the
-      // drain must never look there. If it did, the absent document would read
-      // as "deleted since it was queued".
+      {
+        'events/med-2026': EVENT,
+        // The source report at its TOP-LEVEL path. `events/med-2026/bugReports/
+        // report_xyz` is deliberately NOT seeded: looking there would find
+        // nothing and retire the row as though retention had deleted it.
+        'bugReports/report_xyz': { kind: 'abuse', eventId: 'med-2026', reporterInEvent: true },
+      },
     );
     const result = await sendAdminDigestForEvent(db, 'med-2026', {
       send: send as never,
@@ -2015,6 +2029,46 @@ describe('sendAdminDigestForEvent with an abuse alert', () => {
     expect(arg.text).toContain('report_xyz');
     expect(arg.html).toContain('Someone is posting slurs in the feed');
     // Drained and tombstoned like any other row.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
+  });
+
+  it('sends nothing and clears the row when the source report was deleted before the digest went out', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      {
+        'events/med-2026/adminAlerts': [
+          {
+            id: 'a1',
+            kind: 'abuse-reported',
+            collection: 'bugReports',
+            docId: 'report_gone',
+            label: 'Someone is posting slurs in the feed',
+            status: 'new',
+            visionFlag: null,
+            reportCount: 0,
+            createdAt: 1,
+            sentAt: null,
+          },
+        ],
+        hostnames: [],
+        events: [{ id: 'med-2026', status: 'active' }],
+      },
+      // No `bugReports/report_gone`: the retention sweep removed it while the
+      // alert sat pending behind an unresolvable recipient.
+      { 'events/med-2026': EVENT },
+    );
+    const result = await sendAdminDigestForEvent(db, 'med-2026', {
+      send: send as never,
+      getAdminUids: async () => ['u1'],
+      getEmailForUid: async (uid: string) => `${uid}@example.com`,
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'Gay Cruise Bingo <bingo@example.com>',
+      now: () => NOW,
+      quietMs: 0,
+    });
+    expect(result).toEqual({ sent: 0, retired: 1, reason: 'nothing-current' });
+    expect(send).not.toHaveBeenCalled();
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
   });
 });

@@ -240,6 +240,30 @@ describe('W4 bug-report inbox', () => {
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     expect(send).toHaveFocus();
   });
+
+  it('treats the radio group as ONE tab stop, so focus cannot escape past a selected abuse radio', async () => {
+    // Browsers visit only the CHECKED member of a radio group. Comparing the
+    // backward-wrap against the first DOM radio therefore never matches once a
+    // later member is selected, and focus walks out of the modal (#670 Codex P2).
+    captureSpy.mockRejectedValue(new Error('Capture unavailable'));
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    const abuse = await screen.findByRole('radio', { name: 'Abuse or harmful content' });
+    fireEvent.click(abuse);
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'Someone is posting slurs.' } });
+    const send = screen.getByRole('button', { name: 'Send report' });
+    // Backward from the now-checked abuse radio wraps to the last stop rather
+    // than leaving the dialog.
+    abuse.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(send).toHaveFocus();
+    // And forward from the last stop returns to the CHECKED radio, which is the
+    // one the browser would actually focus.
+    send.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(abuse).toHaveFocus();
+    expect(screen.getByRole('radio', { name: 'Something is broken' })).not.toHaveFocus();
+  });
 });
 
 describe('W4 pick-a-screen capture (#324)', () => {
