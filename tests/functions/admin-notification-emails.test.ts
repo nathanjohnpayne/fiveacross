@@ -14,6 +14,7 @@ import {
   QUIET_PERIOD_MS,
   flattenLabel,
   sameRecipients,
+  FROZEN_TTL_MARGIN_MS,
   PENDING_TTL_MS,
   TOMBSTONE_TTL_MS,
   abuseAlertsForWrite,
@@ -1412,7 +1413,7 @@ describe('the frozen outbound request', () => {
     // each fell into one side of that.
     const failing = vi.fn(async () => false);
     const LATE = 40 * 24 * 60 * 60 * 1000;
-    const oldest = 1_000;
+    const oldest = LATE - 60_000;
     const db = build([alert('a1', { createdAt: oldest })]);
     const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(failing), now: () => LATE });
     // The send failed, so the batch stays frozen — exactly the state that lasts.
@@ -1421,11 +1422,35 @@ describe('the frozen outbound request', () => {
     expect(batch).toBeDefined();
     // A Date, not epoch millis, or Firestore's TTL service ignores it entirely.
     expect(batch.expiresAt).toBeInstanceOf(Date);
-    expect((batch.expiresAt as Date).getTime()).toBe(LATE + PENDING_TTL_MS);
-    // Never earlier than the oldest claimed row's own deadline...
-    expect((batch.expiresAt as Date).getTime()).toBeGreaterThanOrEqual(oldest + PENDING_TTL_MS);
+    expect((batch.expiresAt as Date).getTime()).toBe(LATE + PENDING_TTL_MS + FROZEN_TTL_MARGIN_MS);
+    // Later than the oldest claimed row's own deadline BY A MARGIN. "Not
+    // earlier" is not enough: TTL deletion is asynchronous and unordered across
+    // the two collection groups, so a batch frozen minutes after its rows would
+    // otherwise be racing them.
+    expect((batch.expiresAt as Date).getTime() - (oldest + PENDING_TTL_MS)).toBeGreaterThanOrEqual(
+      FROZEN_TTL_MARGIN_MS,
+    );
     // ...and still comfortably past the 24h idempotency window.
     expect(PENDING_TTL_MS).toBeGreaterThan(24 * 60 * 60 * 1000);
+  });
+
+  it('RETIRES past-due claimed rows with no freeze rather than risking a duplicate send', async () => {
+    // The rebuild path is for a crash between the claim and the freeze — seconds
+    // old, nothing sent. Rows already past their own retention deadline with no
+    // frozen document are the opposite: a batch that keeps failing HAS a freeze,
+    // so an old claim without one means it existed and was reaped, and
+    // rebuilding would re-send bytes that may already have been delivered well
+    // outside Resend's window (Phase 4b P1).
+    const send = vi.fn(async () => true);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const LATE = 40 * 24 * 60 * 60 * 1000;
+    const db = build([alert('a1', { createdAt: 1_000, batchId: 'a1__1' })]);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(send), now: () => LATE });
+    expect(result).toEqual({ sent: 0, retired: 1, reason: 'nothing-current' });
+    expect(send).not.toHaveBeenCalled();
+    // Cleared rather than left to be re-considered on every future sweep.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
+    spy.mockRestore();
   });
 
   it('ABANDONS a frozen batch when the authorized recipients have changed', async () => {

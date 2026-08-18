@@ -56,8 +56,21 @@ import { readFileSync } from 'node:fs';
  *  runtime; the parity is asserted in scripts/backfill-alert-ttl.test.mjs. */
 export const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** Both collection groups that hold a copy of user content behind a TTL. */
+/** Mirrors `FROZEN_TTL_MARGIN_MS`. A frozen batch must outlive the rows it
+ *  claims by enough slack that Firestore's asynchronous, unordered TTL deletion
+ *  cannot reverse them — a freeze reaped while its rows survive sends the next
+ *  sweep down the missing-freeze rebuild path and can duplicate a delivered
+ *  digest. The backfill has to preserve that ordering too, or repairing old
+ *  documents would make every legacy pair immediately eligible and race them. */
+export const FROZEN_TTL_MARGIN_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Both collection groups that hold a copy of user content behind a TTL, and the
+ *  extra slack each one's documents get on top of their own age. */
 export const TTL_COLLECTION_GROUPS = ['adminAlerts', 'adminAlertBatches'];
+export const GROUP_TTL_MS = {
+  adminAlerts: PENDING_TTL_MS,
+  adminAlertBatches: PENDING_TTL_MS + FROZEN_TTL_MARGIN_MS,
+};
 
 const PAGE_SIZE = 300;
 
@@ -100,6 +113,7 @@ export function needsStamp(data) {
 }
 
 export async function backfillCollectionGroup(db, group, { now, dryRun, pageSize = PAGE_SIZE, log = () => {} }) {
+  const ttlMs = GROUP_TTL_MS[group] ?? PENDING_TTL_MS;
   let cursor = null;
   let scanned = 0;
   let stamped = 0;
@@ -113,7 +127,7 @@ export async function backfillCollectionGroup(db, group, { now, dryRun, pageSize
       scanned += 1;
       const data = doc.data();
       if (!needsStamp(data)) continue;
-      pending.push({ ref: doc.ref, expiresAt: expiryFor(data, now) });
+      pending.push({ ref: doc.ref, expiresAt: expiryFor(data, now, ttlMs) });
     }
     if (pending.length > 0 && !dryRun) {
       const batch = db.batch();

@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
+  FROZEN_TTL_MARGIN_MS,
+  GROUP_TTL_MS,
   PENDING_TTL_MS,
   TTL_COLLECTION_GROUPS,
   backfillCollectionGroup,
@@ -103,6 +105,21 @@ describe('backfill-alert-ttl', () => {
     // The already-protected row is untouched: rewriting a live deadline would
     // extend the very retention this bounds.
     expect(db.written.some((w) => w.path === 'adminAlerts/a2')).toBe(false);
+  });
+
+  it('preserves the freeze-outlives-its-rows ordering when repairing legacy pairs', async () => {
+    // Repairing both groups with the same span would make every legacy
+    // row/batch pair eligible within minutes of each other, and Firestore's TTL
+    // deletion is asynchronous and unordered — so the backfill would recreate
+    // exactly the race the margin exists to remove (Phase 4b P1).
+    const source = readFileSync('functions/src/adminAlerts.ts', 'utf8');
+    expect(source).toContain('export const FROZEN_TTL_MARGIN_MS = 7 * 24 * 60 * 60 * 1000;');
+    expect(GROUP_TTL_MS.adminAlertBatches - GROUP_TTL_MS.adminAlerts).toBe(FROZEN_TTL_MARGIN_MS);
+
+    const createdAt = NOW - 1000;
+    const db = fakeDb({ adminAlertBatches: [{ id: 'b1', data: { createdAt } }] });
+    await backfillCollectionGroup(db, 'adminAlertBatches', { now: NOW, dryRun: false });
+    expect(db.written[0].data.expiresAt.toMillis()).toBe(createdAt + PENDING_TTL_MS + FROZEN_TTL_MARGIN_MS);
   });
 
   it('writes nothing on a dry run, but still reports what it would do', async () => {

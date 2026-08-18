@@ -756,6 +756,29 @@ export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * Extra life given to a FROZEN request on top of its rows' own deadline.
+ *
+ * A later `expiresAt` is not by itself an ordering guarantee. Firestore's TTL
+ * deletion is asynchronous and best-effort, promises no ordering between two
+ * documents, and here the two live in DIFFERENT collection groups under separate
+ * policies — so a batch frozen shortly after its rows were enqueued has a
+ * deadline only minutes later and can genuinely be deleted first (Phase 4b P1).
+ *
+ * That specific ordering is the dangerous one: a freeze deleted while its
+ * claimed rows survive sends the next sweep down the missing-freeze rebuild
+ * path, which re-renders and re-sends — and past Resend's 24-hour window that is
+ * a second copy of a digest that may already have been delivered.
+ *
+ * A week of slack is far beyond the sub-day latency Firestore's TTL actually
+ * exhibits, so the race stops being reachable rather than merely unlikely. The
+ * cost is that the frozen bytes are the one thing in this queue retained past
+ * `PENDING_TTL_MS`, and that is the right trade: keeping a rendered email a few
+ * days longer is a bounded, self-collecting cost, while deleting it early is a
+ * duplicate delivery.
+ */
+export const FROZEN_TTL_MARGIN_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
  * How long an alert must sit still before it is eligible to be drained.
  *
  * The queue makes a burst cost ONE email; this is what stops the scheduler
@@ -1111,6 +1134,37 @@ export async function sendAdminDigestForEvent(
     return { sent: frozen.alertCount, retired: 0 };
   }
 
+  // A MISSING FREEZE ON PAST-DUE ROWS IS NOT A REBUILD, it is a retirement.
+  //
+  // The rebuild path exists for one legitimate case: the claim commits before
+  // the freeze is written, so a crash in between leaves claimed rows with no
+  // frozen document and — correctly, because no freeze means nothing was sent —
+  // the batch is rebuilt. That case is SECONDS old.
+  //
+  // Rows that are already past their own retention deadline are the opposite
+  // shape. A batch that keeps failing to send HAS a freeze (it is written before
+  // the send), so an old claim with no freeze means the freeze existed and was
+  // reaped — and rebuilding then re-sends bytes that may already have been
+  // delivered, well outside Resend's 24-hour window, which is the one thing the
+  // frozen-request design exists to prevent (Phase 4b P1). The margin above
+  // makes this unreachable in practice; this is the second line, and it errs
+  // toward silence only for rows whose retention window has already closed.
+  if (!frozen && page.length > 0) {
+    const stale = page.every((doc) => {
+      const createdAt = doc.data()?.createdAt;
+      return typeof createdAt === 'number' && createdAt > 0 && createdAt + PENDING_TTL_MS <= now;
+    });
+    if (stale) {
+      console.error(
+        `sendAdminDigestForEvent: claimed rows are past due with no frozen request; retiring rather than risking a duplicate`,
+        eventId,
+        batchId,
+      );
+      await finishBatch(db, eventId, batchId, page.map((d) => d.id), now);
+      return { sent: 0, retired: page.length, reason: 'nothing-current' };
+    }
+  }
+
   // Unreadable rows are RETIRED, not merely skipped. Skipping them leaves them
   // pending forever, and a page of malformed documents would then occupy the
   // whole drain limit on every sweep — starving valid alerts behind it
@@ -1218,9 +1272,13 @@ export async function sendAdminDigestForEvent(
   // it — an orphaned copy of the text with nothing left pointing at it
   // (Phase 4b P1).
   //
-  // THE FREEZE MUST OUTLIVE EVERY ROW IT CLAIMS, and `PENDING_TTL_MS` from NOW is
-  // what guarantees it: the rows were created at or before this moment and carry
-  // the same span, so this deadline is never earlier than any of theirs.
+  // THE FREEZE MUST OUTLIVE EVERY ROW IT CLAIMS, with room to spare. The rows
+  // were created at or before this moment and carry the same span, so
+  // `PENDING_TTL_MS` from now is already never earlier than any of theirs — but
+  // "not earlier" is not enough on its own, because TTL deletion is asynchronous
+  // and unordered across two collection groups, and a batch frozen minutes after
+  // its rows would be racing them. `FROZEN_TTL_MARGIN_MS` turns that race into a
+  // week of slack.
   //
   // Both directions here are hazards, and two earlier attempts each fell into
   // one of them (Phase 4b P1, twice). If the freeze expires EARLY relative to
@@ -1234,14 +1292,14 @@ export async function sendAdminDigestForEvent(
   //
   // Outliving the rows is the safe direction, and it is bounded: the document
   // reaps itself on its own deadline whether or not anything ever finds it
-  // again, and nothing in this queue's retention story now exceeds
-  // `PENDING_TTL_MS`.
+  // again. It is the one thing here retained past `PENDING_TTL_MS`, by the
+  // margin, and that is deliberate — see `FROZEN_TTL_MARGIN_MS`.
   //
   // This needs its OWN TTL policy. Firestore TTL is scoped to a collection
   // group, so the `adminAlerts` policy does not reach `adminAlertBatches`;
   // without the second policy this field is inert and the rendered email
   // persists (docs/app/phase-1-deploy.md § 1a).
-  const batchExpiresAt = new Date(now + PENDING_TTL_MS);
+  const batchExpiresAt = new Date(now + PENDING_TTL_MS + FROZEN_TTL_MARGIN_MS);
   let outbound = payload;
   try {
     await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now, expiresAt: batchExpiresAt });
