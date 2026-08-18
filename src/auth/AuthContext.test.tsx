@@ -603,6 +603,21 @@ describe('AuthContext deal-error hardening', () => {
     expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
+  // Codex P2 round 7 on #836: same clock-skew guard as the pending record's
+  // regression test — a future-dated ack record must not read as live.
+  it('treats a future-dated acknowledgement record as expired, not live', async () => {
+    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now() + 60 * 60 * 1000));
+    mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+    mount();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+  });
+
   it('emits nothing for a null redirect result on an ordinary mount (#346)', async () => {
     mount();
     await act(async () => {
@@ -798,6 +813,25 @@ describe('AuthContext deal-error hardening', () => {
       // storage fresh on every call, so this only stays blocked if the check
       // is live rather than a cached mount-time boolean.
       localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
+      await signInUser();
+
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
+    // Codex P2 round 7 on #836: an upper-bound-only TTL check (`age <=
+    // TTL_MS`) is trivially satisfied by a NEGATIVE age — a future-dated
+    // timestamp from a backward wall-clock adjustment or a corrupted value —
+    // which would read as live indefinitely instead of expiring on schedule.
+    it('treats a future-dated pending record as expired, not live', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() + 60 * 60 * 1000));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
       await signInUser();
 
       expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());

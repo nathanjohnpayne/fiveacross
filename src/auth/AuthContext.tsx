@@ -181,7 +181,14 @@ function peekCollectedAcknowledgement(now: number = Date.now()): boolean {
   try {
     const raw = localStorage.getItem(SIGNIN_ADULT_ACK_KEY);
     const at = Number(raw);
-    return Number.isFinite(at) && at > 0 && now - at <= SIGNIN_ADULT_ACK_TTL_MS;
+    const age = now - at;
+    // Both bounds matter (Codex P2 on #836): the upper bound is the TTL
+    // itself, but without a LOWER bound too, a future-dated `at` (a backward
+    // wall-clock adjustment, or a corrupted/tampered value) makes `age`
+    // negative — trivially `<= TTL_MS` — so the record would read as live
+    // indefinitely until the clock caught back up to it, rather than
+    // expiring on schedule.
+    return Number.isFinite(at) && at > 0 && age >= 0 && age <= SIGNIN_ADULT_ACK_TTL_MS;
   } catch {
     return false;
   }
@@ -249,7 +256,13 @@ function peekRedirectPending(now: number = Date.now()): boolean {
   try {
     const raw = localStorage.getItem(REDIRECT_PENDING_KEY);
     const at = Number(raw);
-    return Number.isFinite(at) && at > 0 && now - at <= REDIRECT_PENDING_TTL_MS;
+    const age = now - at;
+    // Both bounds matter (Codex P2 on #836): see `peekCollectedAcknowledgement`
+    // above for why an upper bound alone (age <= TTL) is not enough — a
+    // future-dated `at` makes `age` negative, trivially satisfying it, and
+    // would leave this "10-minute" signal live indefinitely instead of
+    // expiring on schedule.
+    return Number.isFinite(at) && at > 0 && age >= 0 && age <= REDIRECT_PENDING_TTL_MS;
   } catch {
     return false;
   }
