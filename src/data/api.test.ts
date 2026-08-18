@@ -25,11 +25,19 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       path: segments.join('/'),
     }),
     collectionGroup: (_db: unknown, id: string): Ref => ({ __kind: 'collection', path: id }),
-    doc: (_a: unknown, ...rest: string[]): Ref => ({
-      __kind: 'doc',
-      id: rest[rest.length - 1],
-      path: rest.join('/'),
-    }),
+    doc: (_a: unknown, ...rest: string[]): Ref => {
+      const ref: Ref = {
+        __kind: 'doc',
+        id: rest[rest.length - 1],
+        path: rest.join('/'),
+      };
+      return { ...ref, withConverter: () => ref } as Ref;
+    },
+    // `addItem` reads the Event's schedule to resolve a default target Day
+    // (#557). A read FAILURE now propagates rather than falling back to an
+    // untargeted write, so this stand-in has to answer — reporting no Event doc,
+    // which is the schedule-less case these tests already assume.
+    getDoc: () => Promise.resolve({ exists: () => false, data: () => undefined }),
     addDoc: (...args: unknown[]) => addDocMock(...args),
     getDocsFromCache: (...args: unknown[]) => getDocsFromCacheMock(...args),
   };

@@ -311,8 +311,10 @@ export default function ReviewQueue({
     setItemSpicy(id, spicy);
   };
   const explicitPending = pendingItems.filter(isSpicy);
+  // Pass the ROW, not the id (#557): approval routes the Prompt to the Day it
+  // was submitted for, which `approveItem` reads off `targetDayIndex`.
   const approveOne = (it: ItemDoc) =>
-    guard(isSpicy(it), 'approve', () => approveItem(it.id, adminUid));
+    guard(isSpicy(it), 'approve', () => approveItem(it, adminUid));
   const approveAll = () =>
     guard(explicitPending.length > 0, 'bulk-approve', () => bulkApproveItems(pendingItems, adminUid), {
       explicitCount: explicitPending.length,
