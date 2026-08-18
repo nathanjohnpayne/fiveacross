@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteField, doc, setDoc, updateDoc } from 'firebase/firestore';
 
 // specs/d15-finale.md, rules layer: `EventDoc.frozenAt` (the finale freeze stamp,
 // set by the 08:00-Day-10 scheduler run via the Admin SDK) is admin/Function-
@@ -104,6 +104,51 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
     for (const bad of [0, -1]) {
       await assertFails(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: bad }));
     }
+  });
+
+  // ADR 0011, Codex P2 on PR #841: once the configured freeze has PASSED, it is
+  // locked until the scheduler stamps `frozenAt`. Moving or removing it in that
+  // window splits the roster — clients holding the old cutoff have stopped
+  // folding stats while refreshed ones follow the new one and resume — and it
+  // is exactly the window a scheduler outage widens.
+  it('LOCKS a configured freeze once its cutoff has passed', async () => {
+    const past = NOW() - 3600_000;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { standingsFreezeAt: past });
+    });
+    // Moving it is rejected.
+    await assertFails(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() }));
+    // So is DELETING it, which would fall back to the ceremonial-Day
+    // derivation — just as much a change of a settled boundary.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: deleteField() }),
+    );
+  });
+
+  it('leaves unrelated admin config edits alone once the freeze has passed', async () => {
+    // The lock compares the RESULTING document, so a partial update that does
+    // not mention the field carries it through unchanged and is still allowed.
+    // An admin must not be locked out of the rest of the Event doc just because
+    // the freeze has settled.
+    const past = NOW() - 3600_000;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { standingsFreezeAt: past });
+    });
+    await assertSucceeds(updateDoc(doc(db(ADMIN), `events/${EVENT}`), { claimMode: 'proof' }));
+    // …as is echoing the same value back explicitly.
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { claimMode: 'honor', standingsFreezeAt: past }),
+    );
+  });
+
+  it('still allows changing a freeze that has NOT yet passed', async () => {
+    const future = NOW() + 3600_000;
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { standingsFreezeAt: future });
+    });
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: future + 7200_000 }),
+    );
   });
 
   it('DENIES a positive-INFINITE standingsFreezeAt', async () => {

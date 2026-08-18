@@ -447,6 +447,23 @@ service cloud.firestore {
     // raised alongside its own EventDoc. A size mismatch between the incoming
     // and existing arrays is rejected outright (`days[]` length is fixed at
     // seed — this ticket builds no row add/remove editor).
+    // NOT VALIDATED HERE: the VALUE of a present `scoring` (Codex P2, PR #841).
+    // A typo'd `scoring: 'ceremoniall'` is a successful write that quietly does
+    // nothing, because `scoringForDay` treats anything it does not recognise as
+    // absent and falls back to the pool derivation — the same silent-no-op the
+    // `standingsFreezeAt` bounds below deliberately reject, so the asymmetry is
+    // real and it is not the preferred end state.
+    //
+    // It is deferred on MEASURED evidence rather than taste. An enum check must
+    // unroll per Day like `daysThemeLockOk` does, and this rule is already past
+    // Firestore's 1000-expression evaluation cap on a ten-Day schedule: with
+    // `origin/main`'s rules and no change of ours, an admin editing a
+    // still-future Day on a full ten-Day Event is DENIED by budget exhaustion
+    // (see the skipped ten-Day case in tests/rules/d15-admin-schedule.test.ts and
+    // and issue #850). Adding ten more evaluations to a rule
+    // that already cannot finish would deepen a live production bug to close a
+    // fail-safe one. The enum check belongs with the fix that makes this rule
+    // cheap enough to evaluate.
     function daysThemeLockOk(newDays, oldDays) {
       return newDays.size() == oldDays.size()
         && (newDays.size() < 1  || dayThemeChangeOk(newDays[0], oldDays[0]))
@@ -730,7 +747,21 @@ service cloud.firestore {
         && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
-            || daysThemeLockOk(request.resource.data.days, resource.data.days));
+            || daysThemeLockOk(request.resource.data.days, resource.data.days))
+        // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
+        // P2 on PR #841). Between the cutoff and the scheduler's `frozenAt`
+        // stamp — precisely the window the client-side stale-cache belt exists
+        // to cover, and the window a scheduler outage widens — moving or
+        // removing it splits the roster: clients holding the old cutoff have
+        // stopped folding stats while refreshed ones follow the new one and
+        // resume, and the scheduler would then stamp the replacement. Presence
+        // AND value are held, so removal is rejected too (removal falls back to
+        // the ceremonial-Day derivation, which is just as much a change).
+        && (resource == null
+            || !('standingsFreezeAt' in resource.data)
+            || request.time.toMillis() < resource.data.standingsFreezeAt
+            || ('standingsFreezeAt' in request.resource.data
+                && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt));
       allow delete: if isAdmin(eventId);
 
       // Community-editable prompt pool.

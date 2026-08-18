@@ -227,4 +227,67 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     days[1] = { ...days[1], scoring: 'ceremonial' };
     await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days }));
   });
+
+  // KNOWN FAILING — a PRE-EXISTING production bug, not a regression from #551.
+  //
+  // Firestore caps a rule at 1000 evaluated expressions. Every fixture in this
+  // file is two Days, so nothing here ever exercised the real Gay Cruise Bingo
+  // shape — and on a full TEN-Day schedule this rule does not finish: an admin
+  // editing a still-future Day's theme is DENIED by budget exhaustion. Verified
+  // against `origin/main`'s own firestore.rules, with none of #551's changes
+  // applied, so the Admin Schedule editor is already broken for the ten-Day
+  // Event in production.
+  //
+  // Skipped rather than deleted because the scenario is exactly right and the
+  // fix belongs to issue #850 (making `daysThemeLockOk` cheap enough to
+  // evaluate — the unrolled ten-way comparison is the cost). Un-skip it there.
+  // It is also the gate on adding per-Day `scoring` VALUE validation, which
+  // firestore.rules documents as deferred for this reason.
+  it.skip('still ALLOWS a legitimate edit on a full TEN-Day schedule (expression budget)', async () => {
+    const tenDays = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+      port: `Port ${index}`,
+      portEmoji: '🇮🇹',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',
+      tutorial: index === 0 || index === 9,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+      // Days 0-4 are already open; 5-9 are still ahead.
+      unlockAt: index < 5 ? PAST() : FUTURE(),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: tenDays });
+    });
+
+    const edited = tenDays.map((d, i) => (i === 7 ? { ...d, theme: 'neon-pink-playground' } : d));
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
+
+  it('still DENIES a locked-Day edit on a full TEN-Day schedule', async () => {
+    // Retained and PASSING — but read it alongside the skipped case above: on a
+    // ten-Day schedule this rule denies everything, so this assertion currently
+    // holds for the wrong reason. It is here so that when the budget bug is
+    // fixed, the locked-Day guarantee is still pinned at ten Days rather than
+    // only at two.
+    const tenDays = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+      port: `Port ${index}`,
+      portEmoji: '🇮🇹',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',
+      tutorial: index === 0 || index === 9,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+      unlockAt: index < 5 ? PAST() : FUTURE(),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: tenDays });
+    });
+
+    const edited = tenDays.map((d, i) => (i === 2 ? { ...d, theme: 'neon-pink-playground' } : d));
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
 });
