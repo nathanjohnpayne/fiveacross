@@ -136,11 +136,30 @@ export async function handleSubmitBugReport(
       // reporter's abuse marking exists — and it is what the `notifyAbuseBugReport`
       // trigger reads to decide whether an admin hears about it (#670).
       kind: report.kind,
-      // Written only on an abuse report, so its presence means "this was
-      // checked" rather than "this defaulted". The trigger requires it to be
-      // strictly `true`, so a hand-written or migrated document that never went
-      // through the check above cannot escalate.
-      ...(report.kind === 'abuse' ? { reporterInEvent: escalation.member } : {}),
+      // Both written only on an abuse report, so their presence means "this was
+      // checked" rather than "this defaulted", and they answer DIFFERENT
+      // questions — which is the whole reason there are two of them (#670,
+      // Codex P2 round 6):
+      //
+      //   `reporterInEvent` is the trigger's GATE INPUT. `abuseAlertsForWrite`
+      //   requires it to be strictly `true`, so a hand-written or migrated
+      //   document that never went through the check above cannot escalate. It
+      //   is a necessary condition for escalation, not a sufficient one.
+      //
+      //   `notifiedAtIntake` is WHAT THE REPORTER WAS TOLD — membership AND a
+      //   live Event, the same conjunction the callable returns. Persisted
+      //   because it is a durable fact about the submission rather than a stale
+      //   snapshot of Event state: if somebody says "I was told an admin had
+      //   been alerted", this is the record of whether they were.
+      //
+      // Neither is the trigger's final word. The trigger re-reads Event status
+      // at enqueue time and is the authority on what was actually queued.
+      ...(report.kind === 'abuse'
+        ? {
+            reporterInEvent: escalation.member,
+            notifiedAtIntake: escalation.member && escalation.eventActive,
+          }
+        : {}),
       description: report.description,
       screenshotPath: storagePath,
       captureError: report.captureError,

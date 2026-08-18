@@ -112,39 +112,41 @@ describe('local bug-report export', () => {
     await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('records whether an abuse report actually escalated, which kind alone does not say', async () => {
-    // An abuse report from somebody who did not belong to the Event it named is
-    // stored and exported like any other, but notified nobody. An operator
-    // triaging the inbox has to be able to tell "an admin has seen this" from
-    // "this is only here" (#670).
-    await exportReports({
-      reports: [{ ...report('report_alerted'), kind: 'abuse', reporterInEvent: true }],
-      downloadScreenshot: async () => PNG,
-      root,
-    });
-    await exportReports({
-      reports: [{ ...report('report_suppressed'), kind: 'abuse', reporterInEvent: false }],
-      downloadScreenshot: async () => PNG,
-      root,
-    });
+  it('records BOTH escalation conditions, so a suppressed report is not read as delivered', async () => {
+    // Membership alone is necessary, not sufficient: the trigger also refuses a
+    // non-active Event, so an Event member reporting against an archived Event
+    // has `reporterInEvent: true` and still reached nobody. Exporting only the
+    // first would have an operator assume an admin saw it (#670).
+    const abuse = (id: string, over: Record<string, unknown>) => ({ ...report(id), kind: 'abuse', ...over });
+    for (const doc of [
+      abuse('report_alerted', { reporterInEvent: true, notifiedAtIntake: true }),
+      abuse('report_archived', { reporterInEvent: true, notifiedAtIntake: false }),
+      abuse('report_stranger', { reporterInEvent: false, notifiedAtIntake: false }),
+    ]) {
+      await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
+    }
     await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
     const read = async (id: string) =>
       JSON.parse(await readFile(path.join(root, `inbox/${id}/report.json`), 'utf8'));
-    expect((await read('report_alerted')).reporterInEvent).toBe(true);
-    expect((await read('report_suppressed')).reporterInEvent).toBe(false);
-    // `null`, not `false`, for a bug report: the check never ran because there
+
+    expect(await read('report_alerted')).toMatchObject({ reporterInEvent: true, notifiedAtIntake: true });
+    // The case that motivated this: a genuine member whose Event was not live.
+    expect(await read('report_archived')).toMatchObject({ reporterInEvent: true, notifiedAtIntake: false });
+    expect(await read('report_stranger')).toMatchObject({ reporterInEvent: false, notifiedAtIntake: false });
+    // `null`, not `false`, for a bug report: nothing was checked because there
     // was nothing to escalate.
-    expect((await read('report_123')).reporterInEvent).toBeNull();
+    expect(await read('report_123')).toMatchObject({ reporterInEvent: null, notifiedAtIntake: null });
   });
 
   it('fails closed on a non-boolean escalation decision', async () => {
-    const summary = await exportReports({
-      reports: [{ ...report(), kind: 'abuse', reporterInEvent: 'yes' }],
-      downloadScreenshot: async () => PNG,
-      root,
-    });
-    expect(summary.failed[0].error).toContain('Invalid reporterInEvent');
-    await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+    for (const [field, doc] of [
+      ['Invalid reporterInEvent', { ...report(), kind: 'abuse', reporterInEvent: 'yes' }],
+      ['Invalid notifiedAtIntake', { ...report(), kind: 'abuse', notifiedAtIntake: 'yes' }],
+    ] as const) {
+      const summary = await exportReports({ reports: [doc], downloadScreenshot: async () => PNG, root });
+      expect(summary.failed[0].error).toContain(field);
+      await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+    }
   });
 
   it('archives with an immutable GitHub receipt and prevents duplicate import', async () => {

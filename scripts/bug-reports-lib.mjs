@@ -154,21 +154,30 @@ function safeReport(report) {
   if (report.reporterInEvent !== undefined && typeof report.reporterInEvent !== 'boolean') {
     throw new Error(`Invalid reporterInEvent for ${report.id}`);
   }
+  if (report.notifiedAtIntake !== undefined && typeof report.notifiedAtIntake !== 'boolean') {
+    throw new Error(`Invalid notifiedAtIntake for ${report.id}`);
+  }
   const metadata = {
     id: report.id,
     schemaVersion: fields.schemaVersion,
     // From the shared contract, so a report stored before #670 (no `kind` field)
     // exports as `bug` rather than as a hole an importer has to interpret.
     kind: fields.kind,
-    // Whether the abuse report ESCALATED, which `kind` alone does not say: an
-    // abuse report from somebody who did not belong to the Event it named is
-    // stored and exported like any other, but no admin was notified about it.
-    // An operator triaging the inbox needs to tell "an admin has seen this" from
-    // "this is only here" (#670). `null` for a bug report, because the check
-    // never ran — there was nothing to escalate. Mirrors the trigger's own
-    // strict comparison, so this says what actually happened rather than what
-    // the field literally holds.
+    // TWO fields, because escalation has two conditions and conflating them is
+    // how an operator ends up assuming a suppressed report reached somebody
+    // (#670). `null` on a bug report for both: nothing was checked, because
+    // there was nothing to escalate.
+    //
+    //   `reporterInEvent` — did the reporter belong to the Event they named?
+    //   This is the trigger's gate input: NECESSARY for an alert, not
+    //   sufficient. On its own it does not mean an admin heard anything.
     reporterInEvent: fields.kind === 'abuse' ? report.reporterInEvent === true : null,
+    //   `notifiedAtIntake` — did the submission expect to reach an admin?
+    //   Membership AND a live Event, which is the answer the reporter was shown
+    //   on their receipt. Still not the trigger's final word (it re-reads Event
+    //   status at enqueue time), but it is the closest thing the stored report
+    //   has to "an admin has seen this" versus "this is only here".
+    notifiedAtIntake: fields.kind === 'abuse' ? report.notifiedAtIntake === true : null,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,
