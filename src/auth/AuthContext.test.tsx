@@ -1189,11 +1189,13 @@ describe('AuthContext late-authority generation guards (Codex P2 on #761 / #762)
       expect(screen.getByTestId('capture-live')).toBeInTheDocument();
 
       // THE FIX UNDER TEST: the underlying read rejects PERMANENTLY while the
-      // cache read is STILL pending (unresolved). The correction revokes
-      // `attested` — `attestedUidsRef` is empty here, so it downgrades to
-      // false — which flips `needsAttestation` and swaps this subtree for the
-      // SignIn re-prompt. Its disappearance is the proof the correction
-      // applied.
+      // cache read is STILL pending (unresolved). The correction revokes the
+      // provisional lift — `attestedUidsRef` is empty here, so `attested`
+      // downgrades to UNKNOWN (`undefined`), never a definite `false` (Codex
+      // P2 round 3: a rejection is not proof the profile lacks a stamp, so it
+      // must not flip `needsAttestation` and swap the just-published
+      // permanent DealError for the SignIn re-prompt — specs/w1-attestation.md
+      // § Failure state).
       const permanentErr = Object.assign(new Error('Missing or insufficient permissions.'), {
         code: 'permission-denied',
       });
@@ -1203,21 +1205,25 @@ describe('AuthContext late-authority generation guards (Codex P2 on #761 / #762)
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(screen.queryByTestId('capture-live')).not.toBeInTheDocument();
+      expect(ctx.dealErrorReason).toBe('permanent');
+      expect(ctx.needsAttestation).toBe(false); // UNKNOWN, never a definite false-&-reprompt
+      expect(ctx.canRenderEventContent).toBe(false);
 
       // THE REGRESSION UNDER TEST: the cache read finally resolves with a
-      // stamp, well after the correction. Without latching `authorityApplied`
-      // inside the correction (Codex P2 round 2 on #762), the fire-and-forget
-      // cache-lift promise would still see it false and silently re-lift
-      // `attested` back to true — remounting this subtree (undoing the
-      // correction) rather than leaving it swapped for the re-prompt.
+      // stamp, well after the correction. Without a dedicated
+      // `provisionalLiftRetired` latch (Codex P2 rounds 2 and 3 on #762), the
+      // fire-and-forget cache-lift promise would still see it unset and
+      // silently re-lift `attested` back to true, undoing the correction and
+      // masking the permanent failure behind Event content again.
       await act(async () => {
         cacheRead.settle(1);
         await cacheRead.promise.catch(() => {});
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(screen.queryByTestId('capture-live')).not.toBeInTheDocument();
+      expect(ctx.dealErrorReason).toBe('permanent');
+      expect(ctx.needsAttestation).toBe(false); // UNKNOWN, never a definite false-&-reprompt
+      expect(ctx.canRenderEventContent).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -1277,7 +1283,10 @@ describe('AuthContext late-authority generation guards (Codex P2 on #761 / #762)
       // `onLateError` at all, so this rejection was silently discarded —
       // leaving the STANDING lift from the initial bootstrap up indefinitely
       // (Codex P2 round 2 on #762). It must now correct `dealErrorReason` and
-      // revoke that lift, swapping this subtree for the SignIn re-prompt.
+      // revoke that lift — downgrading `attested` to UNKNOWN, never a
+      // definite `false` (Codex P2 round 3: a rejection is not proof the
+      // profile lacks a stamp, so this must surface the retryable DealError,
+      // never the SignIn re-prompt — specs/w1-attestation.md § Failure state).
       const permanentErr = Object.assign(new Error('Missing or insufficient permissions.'), {
         code: 'permission-denied',
       });
@@ -1287,7 +1296,12 @@ describe('AuthContext late-authority generation guards (Codex P2 on #761 / #762)
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(screen.queryByTestId('capture-live')).not.toBeInTheDocument();
+      expect(ctx.dealErrorReason).toBe('permanent');
+      expect(ctx.needsAttestation).toBe(false); // UNKNOWN, never a definite false-&-reprompt
+      expect(ctx.canRenderEventContent).toBe(false);
+      // The correction never re-prompts on an UNKNOWN attestation: this
+      // subtree stays mounted, showing the retryable error, not SignIn.
+      expect(screen.getByTestId('capture-live')).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

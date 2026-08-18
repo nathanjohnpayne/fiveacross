@@ -114,8 +114,9 @@ function setNavigatorOnline(v: boolean) {
 
 function deferred<T>() {
   let settle!: (v: T) => void;
-  const promise = new Promise<T>((res) => (settle = res));
-  return { promise, settle };
+  let fail!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => ((settle = res), (fail = rej)));
+  return { promise, settle, fail };
 }
 
 /** Stands in for what `main.tsx` does at module scope: arm the grace for this document
@@ -385,6 +386,73 @@ describe('the #519 grace repeat and the #521 cache lift (ordering)', () => {
     expect(sawDealError).toBe(false);
     expect(screen.queryByRole('alert')).toBeNull();
     repeat.settle(null); // drain the orphan so no unhandled promise leaks
+  });
+
+  // Codex P2 round 3 on #762, found reviewing the fix for the case above's
+  // FAILURE-side gap: the orphaned first read's late answer need not be a
+  // SUCCESS or a definite NULL — it can be a genuine REJECTION (a permanent
+  // Firestore failure), landing while the repeat is still in flight. The
+  // in-time timeout already published a 'connection'-worded error and (on a
+  // cache hit) a provisional render lift; the correction for a PERMANENT late
+  // rejection must retire that lift without also consuming the
+  // authoritative-settle latch `settleAuthoritative` checks — otherwise the
+  // repeat's own later, genuinely authoritative answer is silently dropped,
+  // stranding the Player behind a permanent error a fresh read then disproved.
+  it('does not let the first read’s late PERMANENT rejection suppress a repeat that then SUCCEEDS', async () => {
+    vi.useFakeTimers();
+    const first = deferred<number | null>();
+    const repeat = deferred<number | null>();
+    mocks.readAdultAttestation.mockReturnValueOnce(first.promise).mockReturnValueOnce(repeat.promise);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await controllerChange();
+    await signInUserDetached();
+
+    // The first read times out; the grace claims and starts the repeat.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTH_BOOTSTRAP_TIMEOUT_MS);
+    });
+    expect(mocks.readAdultAttestation).toHaveBeenCalledTimes(2);
+
+    // THE FIX UNDER TEST: the ORPHANED first read now rejects PERMANENTLY —
+    // not a definitive server answer, a genuine failure — while the repeat is
+    // still in flight.
+    const permanentErr = Object.assign(new Error('Missing or insufficient permissions.'), {
+      code: 'permission-denied',
+    });
+    await act(async () => {
+      first.fail(permanentErr);
+      await first.promise.catch(() => {});
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The correction DID reach the UI — this is a genuine failure, unlike the
+    // repeat-wins-outright cases above where no error ever renders. What this
+    // test pins is what happens NEXT.
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+
+    // …and only THEN does the repeat land with a genuine, definitive stamp.
+    await act(async () => {
+      repeat.settle(1);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // The deferred deal fires once attestedAuthoritative flips — one more
+    // microtask flush past the render commit above; `waitFor` polls on real
+    // timers and would hang while the fake clock is installed (see the
+    // sibling cases above, which avoid it the same way).
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // THE FIX UNDER TEST: the repeat's answer must win — authority granted,
+    // the deferred deal fires, and the permanent error the orphaned first
+    // read published is cleared, not stranded behind a settle the correction
+    // silently blocked (which is what round 2's fix, latching
+    // `authorityApplied` instead of a dedicated flag, would have done here).
+    expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   // The SIBLING of the case above, and the one the merge left open (Phase 4b P1 on
