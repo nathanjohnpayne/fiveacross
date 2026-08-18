@@ -200,6 +200,20 @@ describe('deep link / resume landing', () => {
     const summaries = await store.list();
     expect(summaries.map((s) => s.draftId)).not.toContain('never-saved');
   });
+
+  it('persists the corrected landing step, not just the URL (Codex P2, PR #840, round 2)', async () => {
+    // Saved standing on Launch, but nothing is actually answered — the shape
+    // a Launch-step draft takes once its first unlock elapses out from under
+    // it while the wizard sits open.
+    await seedDraft({ step: 'launch' });
+    renderApp(setupStepPath('seeded-draft', 'launch'));
+
+    await screen.findByTestId('wizard-step-placeholder-occasion');
+    await waitFor(async () => {
+      const stored = await store.load('seeded-draft');
+      expect(stored?.step).toBe('occasion');
+    });
+  });
 });
 
 describe('back navigation to a completed step', () => {
@@ -231,8 +245,16 @@ describe('back navigation to a completed step', () => {
     expect(stored?.name).toBe('Weekend in Point Reyes');
     expect(stored?.step).toBe('occasion');
 
-    // And Basics — also done — is reachable going forward again.
-    await user.click(screen.getByRole('button', { name: /Basics/ }));
+    // Basics' own indicator is NOT clickable from here — it's ahead of the
+    // current step, and clicking it would offer a jump `SetupWizard`'s own
+    // landing rule immediately bounces back from (Codex P2, PR #840, round
+    // 2). It's a plain <span>, not a <button>, once occasion is current
+    // again.
+    expect(screen.queryByRole('button', { name: /Basics/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Basics')).toBeInTheDocument();
+
+    // Continue is how forward motion actually happens.
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
     await screen.findByTestId('wizard-step-placeholder-basics');
   });
 
@@ -244,6 +266,34 @@ describe('back navigation to a completed step', () => {
 
     await user.click(screen.getByRole('button', { name: '‹ Occasion' }));
     await screen.findByTestId('wizard-step-placeholder-occasion');
+  });
+});
+
+describe('step indicator inertness (Codex P2, PR #840, round 2)', () => {
+  it('does not offer a later step as clickable just because IT independently has no issues yet', async () => {
+    // Occasion + Basics done; Squares is the first incomplete step (a
+    // daily-cards draft with no Days and no Prompts — `no-days` and
+    // `pool-below-minimum`). Look, however, has NOTHING to complain about
+    // YET: no Days means `dayCompletenessIssues`/`firstUnlockIssues` have
+    // nothing to walk, and a valid `defaultTheme` clears the rest — so
+    // Look's OWN gate reads satisfied even though the organizer is nowhere
+    // near it.
+    await seedDraft({
+      step: 'squares',
+      occasion: 'weekend-away',
+      edition: 'vacay',
+      name: 'Weekend in Point Reyes',
+      startsOn: '2026-08-07',
+      endsOn: '2026-08-09',
+      timezone: 'America/Los_Angeles',
+      slugCandidate: 'point-reyes',
+      defaultTheme: 'the-birds',
+    });
+    renderApp(setupStepPath('seeded-draft', 'squares'));
+    await screen.findByTestId('wizard-step-placeholder-squares');
+
+    expect(screen.queryByRole('button', { name: /Look/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Look')).toBeInTheDocument();
   });
 });
 
@@ -282,6 +332,27 @@ describe('Cancel', () => {
 
     await screen.findByTestId('fallback-page');
     expect(await store.load('seeded-draft')).toBeNull();
+  });
+
+  it('does not navigate away when discard does not actually take (Codex P2, PR #840, round 2)', async () => {
+    const workingStorage = new MemoryStorage();
+    vi.stubGlobal('localStorage', workingStorage);
+    await seedDraft(); // empty — the no-ceremony path
+    // Freeze AFTER seeding: the load on mount still succeeds (reads the
+    // snapshot), but the subsequent `discard`'s `removeItem` is a no-op, so
+    // the draft never actually leaves storage.
+    vi.stubGlobal('localStorage', new FrozenStorage(workingStorage));
+    const user = userEvent.setup();
+    renderApp(setupStepPath('seeded-draft', 'occasion'));
+    await screen.findByTestId('wizard-step-placeholder-occasion');
+
+    await user.click(screen.getByText('✕ Cancel'));
+
+    await screen.findByRole('alert');
+    expect(screen.getByText(/couldn't discard/i)).toBeInTheDocument();
+    // Stayed put — never claimed success by leaving for the fallback page.
+    expect(screen.queryByTestId('fallback-page')).not.toBeInTheDocument();
+    expect(await store.load('seeded-draft')).not.toBeNull();
   });
 
   it('Escape requests Cancel from any step, not only Step 1', async () => {

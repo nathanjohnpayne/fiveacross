@@ -118,15 +118,21 @@ export default function WizardChrome({
 
       <div className="wizard-steps" role="list" aria-label="Setup steps">
         {registry.map((step, i) => {
-          const stepComplete = isStepComplete(step.id, draft, now);
           const isCurrent = step.id === currentStep;
-          // Clickable == a COMPLETE, non-current step: real back-navigation to
-          // a step the shared gate already accepts. The current step is a
-          // no-op (already there); an incomplete, not-yet-reached step is not
-          // skippable via the indicator at all.
-          const clickable = !isCurrent && stepComplete;
-          const dot = stepComplete && !isCurrent ? '✓' : i + 1;
-          const pillClassName = `wizard-step-pill${isCurrent ? ' is-current' : ''}${stepComplete ? ' is-done' : ''}`;
+          // "Done" (✓, clickable) requires BOTH the step's own gate being
+          // satisfied AND the step being one the organizer has already
+          // reached (`i < currentIndex`). `isStepComplete` alone is not
+          // enough: a LATER step can independently satisfy its own gate —
+          // nothing assigned to it yet, so it has no issues to report —
+          // while an earlier one is still the reason the organizer hasn't
+          // reached it. Rendering that later step as done (or as a live
+          // button) would show a checkmark, or offer a forward jump, that
+          // `SetupWizard`'s own landing rule immediately bounces back from
+          // (Codex P2, PR #840).
+          const done = i < currentIndex && isStepComplete(step.id, draft, now);
+          const clickable = done; // no separate case today; kept distinct for readability
+          const dot = done ? '✓' : i + 1;
+          const pillClassName = `wizard-step-pill${isCurrent ? ' is-current' : ''}${done ? ' is-done' : ''}`;
           return (
             <div key={step.id} role="listitem" className="wizard-step-item">
               {/* A real <button> only when it does something — an inert pill

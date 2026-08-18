@@ -75,6 +75,21 @@ async function verifiedSave(store: EventDraftStore, draft: EventDraft): Promise<
   return readBack;
 }
 
+/**
+ * Discards, then confirms the key actually stopped reading back.
+ *
+ * `EventDraftStore.discard` is best-effort in the same way `save` is
+ * (specs/event-setup-wizard.md § "Draft lifecycle" — "Discard" carries no
+ * soft-delete, but the underlying `removeItem` can still throw against
+ * write-restricted storage and be swallowed). Leaving without checking would
+ * make Cancel LOOK like it worked while the "discarded" draft stays in
+ * `list()` and can resurface in a future resume UI (Codex P2, PR #840).
+ */
+async function verifiedDiscard(store: EventDraftStore, draftId: string): Promise<boolean> {
+  await store.discard(draftId);
+  return (await store.load(draftId)) === null;
+}
+
 /** `/setup`: create a fresh draft, verify it actually persisted (so a reload
  *  before any field is touched still finds it — an UNVERIFIED save that
  *  silently failed would otherwise navigate to a draft URL that immediately
@@ -151,6 +166,7 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
   const [draft, setDraft] = useState<EventDraft | null>(null);
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'missing'>('loading');
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
   const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Forces a re-render — and so a fresh `Date.now()` read — at least once
@@ -205,6 +221,22 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, clockTick]);
 
+  // Persists the render-time landing correction below (rather than only
+  // changing the URL) — otherwise a draft saved on, say, Launch, that later
+  // becomes unreachable (its first unlock elapses while the wizard sits
+  // open) keeps `draft.step: 'launch'` in storage forever: every future
+  // Resume reopens at the stale step, redirects, and never records that it
+  // did (Codex P2, PR #840). A plain effect, not folded into the render-body
+  // redirect itself, so the redirect stays a pure render decision — no write
+  // in the render path.
+  useEffect(() => {
+    if (!draft) return;
+    const landing = firstIncompleteStep(draft, Date.now());
+    if (stepIndex(step) > stepIndex(landing) && draft.step !== landing) {
+      void store.save({ ...draft, step: landing });
+    }
+  }, [draft, step, store]);
+
   const persist = useCallback(
     (next: EventDraft) => {
       setDraft(next);
@@ -251,7 +283,19 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
   }, [draft, store]);
 
   const discardAndLeave = useCallback(async () => {
-    if (draft) await store.discard(draft.draftId);
+    if (!draft) {
+      navigate(FALLBACK_PATH, { replace: true });
+      return;
+    }
+    const removed = await verifiedDiscard(store, draft.draftId);
+    if (!removed) {
+      // Stay put rather than navigating away on an unconfirmed discard — the
+      // draft the organizer just told this to throw away may still be
+      // sitting in `list()`, and leaving here would hide that (Codex P2, PR
+      // #840).
+      setCancelError("Couldn't discard this draft — this device's storage may be restricted. Try again.");
+      return;
+    }
     navigate(FALLBACK_PATH, { replace: true });
   }, [draft, store, navigate]);
 
@@ -266,6 +310,7 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
       setConfirmingCancel(false);
       return;
     }
+    setCancelError(null);
     if (draftHasContent(draft)) {
       setConfirmingCancel(true);
     } else {
@@ -298,6 +343,11 @@ function SetupWizardStep({ draftId, step }: { draftId: string; step: SetupStep }
 
   return (
     <>
+      {cancelError && (
+        <div className="wizard-shell wizard-cancel-error" role="alert">
+          {cancelError}
+        </div>
+      )}
       <WizardChrome
         registry={STEP_REGISTRY}
         currentStep={step}
