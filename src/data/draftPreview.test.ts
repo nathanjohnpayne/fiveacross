@@ -298,9 +298,13 @@ describe('dealPreviewCard', () => {
   it("falls back to the seed FREE_TEXT, and honors a Day's own freeText override", () => {
     const draft = draftWith({ prompts: { main: mainPrompts(24), easy: [], closing: [] } });
     const withoutOverride = dealPreviewCard(draft, day({ index: 0, pool: 'main' }));
+    // Guard first (CodeRabbit, PR #857) — without it, a shortfall result
+    // would make this test pass vacuously, with the `if` body never running.
+    expect('cells' in withoutOverride).toBe(true);
     if ('cells' in withoutOverride) expect(withoutOverride.cells[12]?.text).toBe(FREE_TEXT);
 
     const withOverride = dealPreviewCard(draft, day({ index: 0, pool: 'main', freeText: 'The flock has landed' }));
+    expect('cells' in withOverride).toBe(true);
     if ('cells' in withOverride) expect(withOverride.cells[12]?.text).toBe('The flock has landed');
   });
 });

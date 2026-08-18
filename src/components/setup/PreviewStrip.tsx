@@ -112,6 +112,14 @@ function dayTabLabel(day: DraftDayDef, allDays: readonly DraftDayDef[]): string 
   return collides ? `${label} — Day ${day.index + 1}` : label;
 }
 
+/**
+ * The expanded "Open ›" sheet: a Day-tab picker (when `days.length > 1`), a
+ * themed sample card dealt via `dealPreviewCard`, and the shortfall message
+ * in its place when the selected pool cannot deal. Owns its own focus trap,
+ * capture-phase Escape handling (see the `onKeyDown` comment below), and
+ * focus restore to whatever opened it — `PreviewStrip` owns only whether it
+ * is mounted at all.
+ */
 function PreviewSheet({
   draft,
   days,
