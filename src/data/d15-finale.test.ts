@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPodium, farewellPinIndex } from './finale';
+import { buildPodium, finaleDayIndex, finalePinIndex } from './finale';
 import type { DayDef, PlayerDoc } from '../types';
 
 // Fixtures (#217, specs/d15-finale.md): a 3-Day cruise — embark (Day 0,
@@ -41,23 +41,112 @@ function player(overrides: Partial<PlayerDoc> & Pick<PlayerDoc, 'uid'>): PlayerD
   };
 }
 
-describe('farewellPinIndex — default-view pin (never before the freeze)', () => {
-  it('returns null when frozenAt is unset, even with the farewell Day unlocked', () => {
-    expect(farewellPinIndex(DAYS, undefined, NOW)).toBeNull();
-    expect(farewellPinIndex(DAYS, null, NOW)).toBeNull();
+// ADR 0011 (Codex P1, PR #841): ONE answer to "which Day is the finale", read
+// by both the default-view pin and the podium's mount gate in Board.tsx. Those
+// two used to disagree by construction — the pin resolved the closing Day while
+// the mount re-inferred it from `viewedDay.pool === 'closing'` — so a schedule
+// stating its ceremonial Day on another pool pinned a Player to a Day that then
+// rendered no podium at all.
+describe('finaleDayIndex — the one definition of the finale Day', () => {
+  it('is the first ceremonial Day when the schedule has one', () => {
+    expect(finaleDayIndex(DAYS, DAYS[2].unlockAt)).toBe(2);
   });
 
-  it('returns null when frozen but the farewell Day is still locked', () => {
+  it('falls back to the LAST Day when no Day is ceremonial', () => {
+    expect(finaleDayIndex([DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })], NOW)).toBe(2);
+  });
+
+  // Phase 4b P1: a Day's Scoring Policy says whether its Marks count. It does
+  // NOT elect the finale's host. A schedule with an EARLY ceremonial Day, later
+  // competitive Days and an end-of-Event freeze must not strand the podium in
+  // the middle of an Event that was still being played.
+  it('does NOT let an early ceremonial Day elect the host when a freeze is configured', () => {
+    const days = [
+      DAYS[0],
+      day({ index: 1, pool: 'main', scoring: 'ceremonial', unlockAt: NOW - 3 * HOUR }),
+      day({ index: 2, pool: 'main', unlockAt: NOW - HOUR }),
+    ];
+    // The configured freeze sits after every Day has opened, so the finale
+    // hosts on the LAST Day — not on the ceremonial one at index 1.
+    expect(finaleDayIndex(days, NOW)).toBe(2);
+  });
+
+  // …and the derived case is unchanged, because a derived freeze IS the
+  // ceremonial Day's unlock, so that Day is the last one open at it.
+  it('still resolves to the ceremonial Day when the freeze is DERIVED from it', () => {
+    const days = [
+      DAYS[0],
+      day({ index: 1, pool: 'main', scoring: 'ceremonial', unlockAt: NOW - 3 * HOUR }),
+      day({ index: 2, pool: 'main', unlockAt: NOW - HOUR }),
+    ];
+    expect(finaleDayIndex(days, days[1].unlockAt)).toBe(1);
+  });
+
+  it('hosts on the first Day when the freeze precedes every unlock', () => {
+    expect(finaleDayIndex(DAYS, DAYS[0].unlockAt - HOUR)).toBe(0);
+  });
+
+  it('is -1 when there are no Days', () => {
+    expect(finaleDayIndex([], NOW)).toBe(-1);
+    expect(finaleDayIndex(undefined, NOW)).toBe(-1);
+  });
+
+  it('agrees with finalePinIndex whenever the pin resolves', () => {
+    for (const days of [
+      DAYS,
+      [DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })],
+      [DAYS[0], day({ index: 1, pool: 'main', scoring: 'ceremonial' }), day({ index: 2, pool: 'main' })],
+    ]) {
+      expect(finalePinIndex(days, NOW, NOW)).toBe(finaleDayIndex(days, NOW));
+    }
+  });
+});
+
+describe('finalePinIndex — default-view pin (never before the freeze)', () => {
+  it('returns null when frozenAt is unset, even with the closing Day unlocked', () => {
+    expect(finalePinIndex(DAYS, undefined, NOW)).toBeNull();
+    expect(finalePinIndex(DAYS, null, NOW)).toBeNull();
+  });
+
+  it('returns null when frozen but the ceremonial Day is still locked', () => {
     const lockedFarewell = [DAYS[0], DAYS[1], day({ index: 2, pool: 'closing', unlockAt: NOW + HOUR })];
-    expect(farewellPinIndex(lockedFarewell, NOW, NOW)).toBeNull();
+    expect(finalePinIndex(lockedFarewell, NOW, NOW)).toBeNull();
   });
 
-  it('pins the farewell array index once frozen AND unlocked', () => {
-    expect(farewellPinIndex(DAYS, NOW, NOW)).toBe(2);
+  it('pins the ceremonial array index once frozen AND unlocked', () => {
+    expect(finalePinIndex(DAYS, NOW, NOW)).toBe(2);
   });
 
-  it('returns null when the schedule has no farewell Day', () => {
-    expect(farewellPinIndex([DAYS[0], DAYS[1]], NOW, NOW)).toBeNull();
+  it('returns null when there are no Days at all', () => {
+    expect(finalePinIndex([], NOW, NOW)).toBeNull();
+    expect(finalePinIndex(undefined, NOW, NOW)).toBeNull();
+  });
+
+  // ADR 0011: an Event whose final morning is real competitive play has no
+  // ceremonial card to pin, and falling back to "today" would drop a returning
+  // Player onto a Day the schedule no longer has. The podium is posted on the
+  // last Day in that shape, so that is where the pin lands.
+  it('pins the LAST Day when the schedule is all competitive', () => {
+    const allCompetitive = [DAYS[0], DAYS[1], day({ index: 2, pool: 'main' })];
+    expect(finalePinIndex(allCompetitive, NOW, NOW)).toBe(2);
+  });
+
+  // …and it still respects the unlock gate in that shape.
+  it('returns null when the all-competitive last Day is still locked', () => {
+    const lockedLast = [DAYS[0], DAYS[1], day({ index: 2, pool: 'main', unlockAt: NOW + HOUR })];
+    expect(finalePinIndex(lockedLast, NOW, NOW)).toBeNull();
+  });
+
+  // A stated `scoring` beats the pool it deals: a closing-pool Day that is
+  // explicitly competitive is not the ceremonial card, so the pin falls through
+  // to the last-Day rule (which here is that same Day, by position).
+  it('pins by stated scoring, not by pool', () => {
+    const competitiveClose = [
+      DAYS[0],
+      day({ index: 1, pool: 'closing', scoring: 'competitive', unlockAt: NOW - HOUR }),
+      day({ index: 2, pool: 'main', unlockAt: NOW - HOUR }),
+    ];
+    expect(finalePinIndex(competitiveClose, NOW, NOW)).toBe(2);
   });
 });
 

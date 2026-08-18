@@ -188,16 +188,16 @@ describe('finaleActions — the computeMostLoved beat decision (#560)', () => {
   const base = { lastCallPosted: true, podiumPosted: true, mostLovedComputed: false };
 
   it('fires at/after the farewell unlock only while the award is not yet persisted', () => {
-    expect(finaleActions(t, t.farewellUnlockAt, base).computeMostLoved).toBe(true);
-    expect(finaleActions(t, t.farewellUnlockAt - 1, base).computeMostLoved).toBe(false);
+    expect(finaleActions(t, t.standingsFreezeAt, base).computeMostLoved).toBe(true);
+    expect(finaleActions(t, t.standingsFreezeAt - 1, base).computeMostLoved).toBe(false);
     expect(
-      finaleActions(t, t.farewellUnlockAt, { ...base, mostLovedComputed: true }).computeMostLoved,
+      finaleActions(t, t.standingsFreezeAt, { ...base, mostLovedComputed: true }).computeMostLoved,
     ).toBe(false);
   });
 
   it('is COUPLED to the freeze flip: an already-frozen Event never reconstructs an award from later moderation state', () => {
-    const d = finaleActions(t, t.farewellUnlockAt + 60_000, {
-      frozenAt: t.farewellUnlockAt,
+    const d = finaleActions(t, t.standingsFreezeAt + 60_000, {
+      frozenAt: t.standingsFreezeAt,
       lastCallPosted: true,
       podiumPosted: true,
       mostLovedComputed: false,

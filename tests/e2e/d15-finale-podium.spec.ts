@@ -84,7 +84,7 @@ test.describe('pre-freeze: no podium', () => {
     await dismissCoach(page);
     // In the scheduler-lag window the farewell is the most-recent unlock, so
     // `defaultViewedIndex` opens it as "today" — through the ordinary
-    // latest-unlock rule, NOT the freeze pin (`farewellPinIndex` stays null
+    // latest-unlock rule, NOT the freeze pin (`finalePinIndex` stays null
     // until `frozenAt` lands). The podium must still be absent: it is gated on
     // `frozenAt` itself, never on the farewell Day merely being open.
     await expect(page.getByRole('tab').nth(FAREWELL_INDEX)).toHaveAttribute('aria-selected', 'true');
