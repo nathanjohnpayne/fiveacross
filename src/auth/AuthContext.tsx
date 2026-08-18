@@ -235,7 +235,27 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number, label = 'Auth boots
 // terminal-settle latch is not theirs to remember — each caller's settle function is
 // itself idempotent, so first-settle-wins holds however the two reads interleave
 // (Phase 4b P1 on #728).
-function startAuthorityRead(u: User, onLate: (serverAttested: boolean) => void): Promise<boolean> {
+//
+// LATE REJECTION (Codex P2 on #762): a late SUCCESS is routed to `onLate`, but a
+// late REJECTION used to be dropped on the floor. That is fine for a late
+// 'connection'-class rejection — the in-time timeout already published that exact
+// classification — but bootstrapUser's failure arm provisionally lifts the render
+// gate from a cached stamp FOR THAT CLASS ONLY (#521), on the bet that the failure
+// is transient. If the underlying read then rejects with a PERMANENT cause instead
+// (permission-denied, schema, unknown-coded), the bet was wrong and nothing ever
+// revoked the lift or corrected `dealErrorReason` — contradicting the invariant
+// (enforced at every OTHER call site) that a permanent failure never stands behind
+// a lifted render gate. `onLateError` gives BOTH callers a chokepoint to correct
+// that: bootstrapUser wires one for its own in-time lift, and retryBootstrap wires
+// one too (Codex P2 round 2 on #762) — retryBootstrap never lifts on its OWN
+// failure, but it also never resets `attested` at its start, so a lift standing
+// from an earlier bootstrapUser attempt can still be up when a retry's read later
+// rejects late. Defaults to a no-op only for callers with no lift to ever correct.
+function startAuthorityRead(
+  u: User,
+  onLate: (serverAttested: boolean) => void,
+  onLateError: (err: unknown) => void = () => {},
+): Promise<boolean> {
   const authority = (async () => {
     await ensureUserProfile(u);
     return (await readAdultAttestationFromServer(u.uid)) !== null;
@@ -245,7 +265,9 @@ function startAuthorityRead(u: User, onLate: (serverAttested: boolean) => void):
     (late) => {
       if (undelivered) onLate(late);
     },
-    () => {},
+    (err: unknown) => {
+      if (undelivered) onLateError(err);
+    },
   );
   return withTimeout(authority, AUTH_BOOTSTRAP_TIMEOUT_MS).catch((err: unknown) => {
     undelivered = true;
@@ -699,6 +721,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // its sibling (repeat-SUCCEEDS) had none. Latching at the source closes both
     // and every future one.
     let authorityApplied = false;
+    // Snapshot of the deal generation as of THIS bootstrap attempt (Codex P2 on
+    // #761): a late authority result can land after a COMMITTED same-session
+    // attest has already granted authority and fired `runDeal` (the `mayDeal`
+    // effect does not wait for this read). If that deal then fails before this
+    // read's late answer arrives, an unconditional clear below would erase the
+    // NEWER, more relevant pool/connection/permanent error and nothing would
+    // necessarily retry the failed deal. `dealAttemptRef` is the same monotonic
+    // generation `runDeal` bumps on every attempt (see its own guards below), so
+    // comparing against this snapshot tells the clear whether it still owns the
+    // current `dealError` or whether a later deal attempt has taken over.
+    const dealAttemptAtBootstrap = dealAttemptRef.current;
+    // A SEPARATE latch from `authorityApplied` (Codex P2 round 3 on #762): the
+    // permanent-rejection correction below must retire the failure arm's
+    // fire-and-forget cache lift, but it must NOT consume the authoritative-
+    // settle latch — the read that just rejected can be the ORPHANED original
+    // from a #519 grace repeat, with the repeat's own read still pending. If
+    // the correction set `authorityApplied` itself, a repeat that then lands a
+    // genuine, more current server answer would find authority already
+    // "settled" and drop it on the floor — silently stranding the permanent
+    // error and failed bootstrap state even though a definitive, later answer
+    // arrived. This flag only ever gates the cache lift.
+    let provisionalLiftRetired = false;
+    // A THIRD, independent latch (Codex P2 round 4 on #762): confirming a
+    // PERMANENT failure must outrank any WEAKER failure that resolves after
+    // it, without outranking a genuine SUCCESS. `authorityApplied` can't do
+    // this alone — it stays false on purpose so a #519 grace repeat's real
+    // answer can still settle (round 3) — but that same openness lets the
+    // repeat's OWN mere TIMEOUT (not an answer, a non-conclusive failure)
+    // reach the in-time failure arm below and downgrade `dealErrorReason`
+    // from the confirmed 'permanent' back to 'connection', masking the real
+    // failure behind transient-error handling. This flag is checked ONLY in
+    // that failure arm — never in `settleAuthoritative`, so a later
+    // authoritative success is still free to clear everything, exactly as
+    // round 3 established.
+    let permanentFailureConfirmed = false;
     const settleAuthoritative = (serverAttested: boolean) => {
       if (authorityApplied) return;
       authorityApplied = true;
@@ -713,7 +770,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // reconnect this clears an error left by a prior offline/failed attempt so the
       // Board (or re-prompt) renders, not the stale panel. A confirmed-attested User
       // then deals, and a genuine re-deal failure re-sets dealError from runDeal.
-      clearDealError();
+      // Guarded on the deal generation (Codex P2 on #761): only clear while this
+      // bootstrap still owns the error — a deal attempt that started AFTER this
+      // read began owns whatever error it sets, and this late settle must not
+      // erase it.
+      if (dealAttemptRef.current === dealAttemptAtBootstrap) clearDealError();
       // The authoritative read landed — the deal may proceed on an Event that
       // asks for no attestation. Set ONLY here, never in the failure arm below.
       setProfileBootstrapOk(true);
@@ -728,9 +789,59 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // guard is the caller's job here (a settle belonging to a superseded attempt
     // must not touch current state at all); terminality is the settle's.
     const readAuthority = () =>
-      startAuthorityRead(u, (late) => {
-        if (profileAttemptRef.current === attempt) settleAuthoritative(late);
-      });
+      startAuthorityRead(
+        u,
+        (late) => {
+          if (profileAttemptRef.current === attempt) settleAuthoritative(late);
+        },
+        (err) => {
+          // A late REJECTION of a read that already timed out in-time (Codex P2
+          // on #762). The in-time failure arm below classifies THAT synthetic
+          // timeout as 'connection' and, for that class only, provisionally
+          // lifts `attested` from a cached stamp (#521) on the bet that the
+          // failure is transient. If the underlying read then rejects with a
+          // PERMANENT cause instead, the bet was wrong: correct the reason and
+          // revoke the lift, same as the invariant enforced at the in-time
+          // failure site. Skip if authority already settled for this attempt
+          // (terminal, same latch `settleAuthoritative` enforces) or if a NEWER
+          // deal attempt has taken over the error (Codex P2 on #761 — the same
+          // generation guard `settleAuthoritative` uses above).
+          if (profileAttemptRef.current !== attempt) return;
+          if (authorityApplied) return;
+          if (dealAttemptRef.current !== dealAttemptAtBootstrap) return;
+          if (dealErrorReasonFor(err) !== 'permanent') return;
+          // RETIRE THE LIFT, NOT AUTHORITY (Codex P2 round 3 on #762): this
+          // rejection belongs to a read that ALREADY lost the in-time race — it
+          // can be the ORPHANED original from a #519 grace repeat, with the
+          // repeat's own fresh read still in flight. Setting `authorityApplied`
+          // here (round-2's fix) would consume the SAME latch `settleAuthoritative`
+          // checks, silently dropping the repeat's later, more current server
+          // answer on the floor. `provisionalLiftRetired` only closes the
+          // fire-and-forget cache lift below, which — unguarded — would
+          // otherwise re-lift `attested` (and `canRenderEventContent`) right
+          // back to true behind a confirmed-permanent failure once its own read
+          // resolves.
+          provisionalLiftRetired = true;
+          // Also latch the PERMANENT confirmation itself (Codex P2 round 4 on
+          // #762): if a #519 grace repeat is what's in flight, its own read
+          // can still time out (a non-conclusive failure, not an answer) and
+          // reach the in-time failure arm below — which must not be allowed
+          // to downgrade this confirmed 'permanent' classification back to
+          // 'connection'. See `permanentFailureConfirmed`'s declaration.
+          permanentFailureConfirmed = true;
+          failDeal(err);
+          // TRI-STATE, NOT A DEFINITE `false` (Codex P2 round 3 on #762,
+          // specs/w1-attestation.md § Failure state): a REJECTED read is not
+          // evidence the server profile lacks a stamp — it is UNKNOWN, exactly
+          // like every other thrown bootstrap read. Settling it to `false`
+          // would (since `profileReady` is already true) flip `needsAttestation`
+          // true and swap the just-published permanent DealError — and its
+          // Retry control — for the SignIn re-prompt, stranding the User in a
+          // loop with no way back to the retry surface. Grant `true` only for a
+          // committed-adjacent optimistic sticky; otherwise leave it UNKNOWN.
+          setAttested(attestedUidsRef.current.has(u.uid) ? true : undefined);
+        },
+      );
     let attestedRead: boolean | undefined;
     let bootstrapFailure: { err: unknown } | null = null;
     try {
@@ -821,11 +932,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAttested(true);
         const failure = bootstrapFailure.err;
         void hasCachedBoard(u.uid).then((boarded) => {
-          if (!authorityApplied && profileAttemptRef.current === attempt && !boarded) {
+          // Also guarded on `permanentFailureConfirmed` (Codex P2 round 4 on
+          // #762): `failure` is whatever `bootstrapFailure` holds NOW, which
+          // — after a #519 grace repeat — can be the repeat's OWN mere
+          // timeout, weaker evidence than an already-confirmed permanent
+          // rejection. A weaker failure must never downgrade a confirmed one.
+          if (!authorityApplied && !permanentFailureConfirmed && profileAttemptRef.current === attempt && !boarded) {
             failDeal(failure);
           }
         });
-      } else {
+      } else if (!permanentFailureConfirmed) {
+        // Skipped entirely when a PERMANENT failure was already confirmed for
+        // this attempt (Codex P2 round 4 on #762): `bootstrapFailure` here can
+        // be a #519 grace repeat's own mere TIMEOUT — a non-conclusive
+        // failure, not an answer — and publishing it would downgrade the
+        // confirmed 'permanent' classification back to 'connection', masking
+        // the real failure behind transient-error handling. The correction
+        // already published the right error and retired the cache lift
+        // (`provisionalLiftRetired`); nothing else in this branch is safe to
+        // run over it. A genuine authoritative SUCCESS is unaffected — it
+        // lands in the `else` below, not here.
         failDeal(bootstrapFailure.err);
         // …and, for a CONNECTION-class failure ONLY, fall back to the SAME
         // cache-first proof the OFFLINE branch uses (#521). `navigator.onLine`
@@ -854,11 +980,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // from painting the cached card it lifted for.
         //
         // Fire-and-forget so the loading release below is not delayed;
-        // guarded on the attempt like every other settle here.
+        // guarded on the attempt like every other settle here. Also guarded on
+        // `provisionalLiftRetired` (Codex P2 round 3 on #762): a late PERMANENT
+        // rejection of the underlying read can retire this exact lift before
+        // this cache read resolves, and an unguarded re-lift here would
+        // silently undo that correction.
         if (dealErrorReasonFor(bootstrapFailure.err) === 'connection') {
           void readAdultAttestationFromCache(u.uid)
             .then((stamp) => {
-              if (authorityApplied || profileAttemptRef.current !== attempt) return;
+              if (authorityApplied || provisionalLiftRetired || profileAttemptRef.current !== attempt) return;
               if (stamp !== null) setAttested(true);
             })
             .catch(() => {});
@@ -1186,6 +1316,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // the bootstrap's sibling latch was breached the moment the #519 grace put one
     // there. First settle wins, at the source, on both authority paths.
     let authorityApplied = false;
+    // Snapshot of the deal generation as of THIS retry (Codex P2 on #761, the
+    // analogue of `bootstrapUser`'s `dealAttemptAtBootstrap`): an outstanding
+    // same-session attest can commit and fire `runDeal` via the `mayDeal` effect
+    // WHILE this retry's read is still in flight, independent of anything here. If
+    // that deal fails before the read settles, the "no authority" clear below must
+    // not erase it — see the guard on `clearDealError`/`setDealing` there.
+    const dealAttemptAtRetry = dealAttemptRef.current;
     const settleRetry = (read: boolean) => {
       if (authorityApplied) return;
       authorityApplied = true;
@@ -1213,8 +1350,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // the retry's answer is a definite server-null: `setAttested(false)` closes
         // the render gate the cache opened, so the re-prompt replaces the durable
         // card rather than the card standing on cache alone.
-        clearDealError();
-        setDealing(false);
+        //
+        // Guarded on the deal generation (Codex P2 on #761): only clear/reset while
+        // this retry still owns them. A deal attempt that started AFTER this read
+        // began (an outstanding attest committing mid-read, via the `mayDeal`
+        // effect) owns whatever error and `dealing` state it sets — that attempt's
+        // own settle (see `runDeal`'s `finally`) is what retires `dealing` for it,
+        // and this late "no authority" answer must not erase its fresher error.
+        if (dealAttemptRef.current === dealAttemptAtRetry) {
+          clearDealError();
+          setDealing(false);
+        }
       }
     };
     try {
@@ -1228,9 +1374,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // discarded null left the stale lift up and the durable card painted for a
       // User the server says has no stamp. Now it downgrades, same as everywhere
       // else.
-      const read = await startAuthorityRead(u, (late) => {
-        if (profileAttemptRef.current === attempt) settleRetry(late);
-      });
+      const read = await startAuthorityRead(
+        u,
+        (late) => {
+          if (profileAttemptRef.current === attempt) settleRetry(late);
+        },
+        (err) => {
+          // A late PERMANENT rejection during a retry (Codex P2 round 2 on
+          // #762). retryBootstrap does not reset `attested` at its own start,
+          // so a 'connection'-classified provisional lift (#521) carried over
+          // from an EARLIER bootstrapUser attempt — or one this retry's own
+          // in-time timeout below just made — can still be standing when this
+          // fires. Route it through the same correction bootstrapUser's
+          // onLateError applies: skip if this attempt is superseded, already
+          // terminal (latch it here too, for the same reason — nothing later
+          // may re-lift `attested` for this attempt), or a newer deal attempt
+          // now owns the error (Codex P2 on #761, the same generation guard
+          // `settleRetry`'s own clear uses above).
+          if (profileAttemptRef.current !== attempt) return;
+          if (authorityApplied) return;
+          if (dealAttemptRef.current !== dealAttemptAtRetry) return;
+          if (dealErrorReasonFor(err) !== 'permanent') return;
+          // retryBootstrap has no #519 grace-repeat analogue (a single read,
+          // no concurrent second attempt), so — unlike bootstrapUser's sibling
+          // above — latching `authorityApplied` here is safe: there is no
+          // later, more current answer this could ever suppress.
+          authorityApplied = true;
+          failDeal(err);
+          // TRI-STATE, NOT A DEFINITE `false` (Codex P2 round 3 on #762,
+          // specs/w1-attestation.md § Failure state): a REJECTED read is not
+          // evidence the profile lacks a stamp — it is UNKNOWN. Settling it to
+          // `false` would flip `needsAttestation` true and swap the
+          // just-published permanent DealError (and its Retry control) for the
+          // SignIn re-prompt, the same stranding bootstrapUser's sibling fix
+          // avoids.
+          setAttested(attestedUidsRef.current.has(u.uid) ? true : undefined);
+          setDealing(false);
+        },
+      );
       if (profileAttemptRef.current !== attempt) return;
       settleRetry(read);
     } catch (err) {
