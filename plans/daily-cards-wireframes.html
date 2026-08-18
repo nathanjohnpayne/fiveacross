@@ -797,6 +797,28 @@
   .cmpmeta code{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:#2a2a2e}
   .cmpsame{font-size:11px;color:#77777f;margin:10px 4px 0;padding-left:11px;
     border-left:2px solid #c9c9d0}
+  /* Email overview: keep the operating contract beside the editorial context,
+     not as an unscannable full-width sentence above the artboards. */
+  .email-overview{display:grid;grid-template-columns:minmax(0,760px) minmax(280px,380px);
+    gap:28px;align-items:start;max-width:1180px;margin:0 0 24px}
+  .email-overview .sub{max-width:none;margin:0}
+  .email-constraints{margin:0;padding:14px 16px;border:1px solid #c9c9d0;border-radius:14px;
+    background:#f7f7fa;color:#5f5f68}
+  .email-constraints h3{margin:0 0 6px;color:#2a2a2e;font-size:12px;line-height:1.2}
+  .email-constraints p{margin:0;font-size:11px;line-height:1.55}
+  .email-constraints b{color:#2a2a2e}
+  .email-constraints code{color:#3f4e76}
+  /* Reference links are deliberately quiet in prose, but remain obvious on
+     hover and keyboard focus. The same treatment works inside inline code. */
+  a.wire-ref{color:#304fba;text-decoration-line:underline;text-decoration-style:dotted;
+    text-decoration-thickness:1.25px;text-underline-offset:.18em;border-radius:2px}
+  a.wire-ref:hover{color:#17388f;text-decoration-style:solid}
+  a.wire-ref:focus-visible{outline:2px solid #304fba;outline-offset:3px}
+  code a.wire-ref{color:#2b478f}
+  @media (max-width:900px){
+    .email-overview{display:block;max-width:760px}
+    .email-overview .sub{margin-bottom:14px}
+  }
   /* ---------- daily engagement email (issue #616) ----------
      Drawn at HALF scale: the 300px card here represents the 600px email-safe
      canvas. This is design-doc shorthand for a table-layout, inline-styled
@@ -3845,8 +3867,13 @@
 </div>
 
 <h2 id="sec-email">Daily engagement email—the Day's Theme in the inbox (issue #616)</h2>
-<p class="sub">One email per participant per Event-local calendar date that has a Day, sent that morning in the Event's timezone, carrying the same identity the app shows that morning: the Day's Theme name, its palette, its context line. <b>Revised by #723:</b> the original rule here was one email per DAY at that Day's unlock, but an Event's <code>days</code> array does not map one-to-one onto its calendar dates—Bodega Bay puts two Days on Sunday—so a later Day sharing a date gets no email of its own, and the full cadence contract lives in <code>specs/daily-engagement-email.md</code> § Scheduling. Job order is fixed—<b>nudge participation, show standings, make the photo expected, point at the Feed</b>—and the photos message is load-bearing: every BINGO claim is a photo opportunity, and the email is where that becomes a norm rather than a feature. Delivery is the existing transactional stack (Resend via <code>functions/src/email.ts</code>); the sender identity is the Edition's (<code>EMAIL_FROM</code> resolved per Edition, #671/#810); the Feed CTA deep-links the Event's canonical host (#599). Recipients are signed-in participants only, every send carries a working unsubscribe, and the whole family is a default-off opt-in (<code>settings.dailyEmailEnabled</code>)—there is no console control for it yet (#785); the setup wizard's Basics step is where it gets collected.</p>
-<p class="cmpsame"><b>Email-safe constraints (binding on implementation, annotated per module below):</b> 600px single-column table layout, styles inlined at send time, system font stack in the body—Bebas Neue does not load in mail clients, so display type is declared as <code>'Bebas Neue','Arial Narrow',Arial</code> and must be designed to survive the fallback. Theme tokens arrive as literal hex on <code>bgcolor</code>/<code>style</code> attributes, never CSS variables. <b>Dark mode:</b> Gmail and Outlook invert unmanaged colors—every module sits on an explicit Theme background with explicit ink, so inversion has nothing unmanaged to grab; the light-Theme render (<code>fog-froth-farewells</code>-class Days) is the case to test. <b>Plain-text fallback:</b> every send is <code>multipart/alternative</code>; the text part carries the same module order—theme line, standings, nudge, photo + award line, Feed URL, unsubscribe URL—so the email works with images and styling stripped entirely.</p>
+<div class="email-overview">
+  <p class="sub">One email per participant per Event-local calendar date that has a Day, sent that morning in the Event's timezone, carrying the same identity the app shows that morning: the Day's Theme name, its palette, its context line. <b>Revised by #723:</b> the original rule here was one email per DAY at that Day's unlock, but an Event's <code>days</code> array does not map one-to-one onto its calendar dates—Bodega Bay puts two Days on Sunday—so a later Day sharing a date gets no email of its own, and the full cadence contract lives in <code>specs/daily-engagement-email.md</code> § Scheduling. Job order is fixed—<b>nudge participation, show standings, make the photo expected, point at the Feed</b>—and the photos message is load-bearing: every BINGO claim is a photo opportunity, and the email is where that becomes a norm rather than a feature. Delivery is the existing transactional stack (Resend via <code>functions/src/email.ts</code>); the sender identity is the Edition's (<code>EMAIL_FROM</code> resolved per Edition, #671/#810); the Feed CTA deep-links the Event's canonical host (#599). Recipients are signed-in participants only, every send carries a working unsubscribe, and the whole family is a default-off opt-in (<code>settings.dailyEmailEnabled</code>)—there is no console control for it yet (#785); the setup wizard's Basics step is where it gets collected.</p>
+  <aside class="email-constraints" aria-labelledby="email-constraints-title">
+    <h3 id="email-constraints-title">Email-safe constraints</h3>
+    <p><b>Layout:</b> 600px single-column table layout with styles inlined at send time. <b>Type:</b> system font stack in the body—Bebas Neue does not load in mail clients, so display type is declared as <code>'Bebas Neue','Arial Narrow',Arial</code> and must survive the fallback. <b>Tokens:</b> literal hex on <code>bgcolor</code>/<code>style</code> attributes, never CSS variables. <b>Dark mode:</b> Gmail and Outlook invert unmanaged colors, so every module owns an explicit Theme background and ink; light <code>fog-froth-farewells</code>-class Days are the test case. <b>Plain text:</b> every send is <code>multipart/alternative</code>; its text part preserves the module order—theme line, standings, nudge, photo + award line, Feed URL, unsubscribe URL—so the message still works without images or styling.</p>
+  </aside>
+</div>
 <div class="frames">
 
   <div class="unit" id="fx-email-anatomy">
@@ -4324,6 +4351,94 @@ document.querySelectorAll('.mini').forEach(m=>{
     '<div class="statusbar"><span>9:41</span><div class="dynisland"></div><span><svg data-lucide="signal" class="lucide lucide-signal" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M2 20h.01" /> <path d="M7 20v-4" /> <path d="M12 20v-8" /> <path d="M17 20V8" /> <path d="M22 4v16" /> </svg> <svg data-lucide="battery-full" class="lucide lucide-battery-full" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M10 10v4" /> <path d="M14 10v4" /> <path d="M22 14v-4" /> <path d="M6 10v4" /> <rect x="2" y="6" width="16" height="12" rx="2" /> </svg></span></div>');
   m.insertAdjacentHTML('beforeend','<div class="homebar"><i></i></div>');
 });
+
+// ---------- reference navigation ----------
+// The wireframes are a source-of-truth aid, so prose references should open the
+// cited issue or file instead of making a reviewer search for it. File targets
+// stay relative to this document: they work from a local checkout and GitHub's
+// blob view, while issue targets always point to the repository tracker.
+const ISSUE_URL='https://github.com/nathanjohnpayne/gaycruisebingo/issues/';
+const FILE_ALIASES={
+  'AdminHub.tsx':'src/components/admin/AdminHub.tsx',
+  'App.tsx':'src/App.tsx',
+  'Board.tsx':'src/components/Board.tsx',
+  'CachedCardFallback.tsx':'src/components/CachedCardFallback.tsx',
+  'CoachOverlay.tsx':'src/components/CoachOverlay.tsx',
+  'ConsentNotice.tsx':'src/components/ConsentNotice.tsx',
+  'FarewellPodium.tsx':'src/components/FarewellPodium.tsx',
+  'Leaderboard.tsx':'src/components/Leaderboard.tsx',
+  'LoadingState.tsx':'src/components/LoadingState.tsx',
+  'NoticeBanner.tsx':'src/components/NoticeBanner.tsx',
+  'ProofSheet.tsx':'src/components/ProofSheet.tsx',
+  'PullToRefresh.tsx':'src/components/PullToRefresh.tsx',
+  'ShareCard.tsx':'src/components/ShareCard.tsx',
+  'TomorrowsCardInvite.tsx':'src/components/TomorrowsCardInvite.tsx',
+  'build-floor.json':'public/build-floor.json',
+  'dailyEmailContent.ts':'functions/src/dailyEmailContent.ts',
+  'dailyEmailTheme.ts':'functions/src/dailyEmailTheme.ts',
+  'emailShell.ts':'functions/src/emailShell.ts',
+  'firestore.rules':'firestore.rules',
+  'themes.css':'src/theme/themes.css'
+};
+const FILE_PATH=/\b(?:src|functions|docs|specs|plans|scripts|public|tests|rules)(?:\/[A-Za-z0-9_.-]+)+\.(?:tsx?|mjs|js|css|md|json|rules|png|html)\b/g;
+const FILE_ALIAS=new RegExp(`\\b(?:${Object.keys(FILE_ALIASES)
+  .sort((a,b)=>b.length-a.length)
+  .map(name=>name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'))
+  .join('|')})\\b`,'g');
+const ISSUE_REF=/#\d+\b/g;
+
+function wireReferenceLink(href,text,kind){
+  const link=document.createElement('a');
+  link.className=`wire-ref ${kind}`;
+  link.href=href;
+  link.textContent=text;
+  if(kind==='issue-ref'){
+    link.target='_blank';
+    link.rel='noopener noreferrer';
+    link.title=`Open ${text} on GitHub`;
+  } else link.title=`Open ${text}`;
+  return link;
+}
+
+function linkWireframeReferences(){
+  const prohibited=new Set(['A','SCRIPT','STYLE']);
+  const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,{
+    acceptNode(node){
+      const parent=node.parentElement;
+      return parent && (prohibited.has(parent.tagName) || parent.closest('a,script,style'))
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const textNodes=[];
+  while(walker.nextNode()) textNodes.push(walker.currentNode);
+  textNodes.forEach(node=>{
+    const text=node.textContent;
+    const matches=[];
+    const addMatches=(pattern,kind,toHref)=>{
+      pattern.lastIndex=0;
+      for(let match;(match=pattern.exec(text));){
+        matches.push({start:match.index,end:match.index+match[0].length,text:match[0],kind,href:toHref(match[0])});
+      }
+    };
+    addMatches(FILE_PATH,'file-ref',path=>`../${path}`);
+    addMatches(FILE_ALIAS,'file-ref',name=>`../${FILE_ALIASES[name]}`);
+    addMatches(ISSUE_REF,'issue-ref',issue=>`${ISSUE_URL}${issue.slice(1)}`);
+    const selected=matches.sort((a,b)=>a.start-b.start || b.end-a.end)
+      .reduce((kept,match)=>match.start >= (kept.at(-1)?.end ?? 0) ? [...kept,match] : kept,[]);
+    if(!selected.length) return;
+    const fragment=document.createDocumentFragment();
+    let cursor=0;
+    selected.forEach(match=>{
+      if(match.start>cursor) fragment.append(text.slice(cursor,match.start));
+      fragment.append(wireReferenceLink(match.href,match.text,match.kind));
+      cursor=match.end;
+    });
+    if(cursor<text.length) fragment.append(text.slice(cursor));
+    node.replaceWith(fragment);
+  });
+}
+
+linkWireframeReferences();
 
 </script>
 </body>
