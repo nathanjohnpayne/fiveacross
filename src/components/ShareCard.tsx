@@ -665,6 +665,26 @@ const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:
 let closeMountedFallbackSheet: ((restoreFocus: boolean) => void) | null = null;
 
 /**
+ * Monotonic generation counter guarding the fallback sheet against
+ * out-of-order supersession (issue #759).
+ *
+ * `shareCardBlob` has several async legs (native share, clipboard write,
+ * download) before it ever reaches `showShareFallbackSheet`, which
+ * unconditionally supersedes whatever sheet is currently mounted via
+ * `closeMountedFallbackSheet?.(false)`. Nothing bounded which INVOCATION of
+ * `shareCardBlob` was allowed to do that: a slower, older call (e.g. one
+ * whose clipboard write was still pending) could resolve its own legs after a
+ * newer call had already mounted a fresh sheet, then blow that sheet away and
+ * replace it with the stale request's own card/link — reachable from an
+ * ordinary fast double-tap on the Share button, not just a contrived race.
+ * `shareCardBlob` bumps this counter and captures its own generation at
+ * entry; only the CURRENT holder of the counter is allowed to mount/supersede
+ * the singleton sheet, so a superseded call skips that leg entirely instead
+ * of clobbering whatever the newer call already put on screen.
+ */
+let shareInvocationGeneration = 0;
+
+/**
  * The chain's TERMINAL, activation-free affordance (Codex P1, PR #712 round
  * 3) — the leg that makes "the tap did nothing" unreachable.
  *
@@ -834,16 +854,40 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
    * under it.
    */
   let closed = false;
+  /**
+   * Captured at backdrop `mousedown`, before the browser's own default action
+   * for that mousedown can run (issue #760).
+   *
+   * `close()` used to read `backdrop.contains(document.activeElement)` live,
+   * which is correct for Close/Escape/supersession but wrong for a real
+   * pointer dismissal of the backdrop: a mousedown on a plain, non-focusable
+   * `<div>` blurs whatever currently holds focus to `document.body` as part
+   * of the BROWSER'S OWN default action for that mousedown, and that default
+   * action runs strictly after any `mousedown` listeners attached without
+   * `preventDefault()`. By the time the paired `click` fires and calls
+   * `close()`, `document.activeElement` is already `document.body`, so the
+   * live `contains` check evaluates false and focus restoration is wrongly
+   * skipped — a real-browser sequence jsdom's `fireEvent.click` never models
+   * (jsdom does not blur on mousedown of a plain div), which is why the prior
+   * suite could not see it. Reading focus one tick earlier, at mousedown,
+   * sidesteps that blur entirely; `preventDefault()` below additionally stops
+   * the browser from shifting focus in the first place, so this capture is
+   * belt-and-braces rather than the only fix.
+   */
+  let heldAtPointerDown = false;
   const close = (restoreFocus = true): void => {
     if (closed) return;
     closed = true;
     if (closeMountedFallbackSheet === close) closeMountedFallbackSheet = null;
     document.removeEventListener('keydown', onKeydown);
     if (previewUrl) revokeObjectUrl(previewUrl);
-    // Only reclaim focus the sheet actually holds: if something else has taken
-    // it in the meantime, yanking it back to the opener would be the theft
-    // this restoration exists to prevent.
-    const held = backdrop.contains(document.activeElement);
+    // Only reclaim focus the sheet actually held at dismissal: if something
+    // else has taken it in the meantime, yanking it back to the opener would
+    // be the theft this restoration exists to prevent. `heldAtPointerDown`
+    // covers the real-browser backdrop-blur case above; the live read still
+    // covers every other close path (Close button, Escape, supersession),
+    // none of which are preceded by a backdrop mousedown.
+    const held = heldAtPointerDown || backdrop.contains(document.activeElement);
     backdrop.remove();
     if (restoreFocus && held && opener?.isConnected) opener.focus();
   };
@@ -940,6 +984,19 @@ function showShareFallbackSheet(opts: { url?: string; blob: Blob | null; filenam
 
   sheet.appendChild(actions);
   backdrop.appendChild(sheet);
+  // Captures `heldAtPointerDown` one tick before the browser's own
+  // mousedown-default-action blur can run (issue #760; see `close`'s own
+  // comment on `heldAtPointerDown` for the full sequencing argument), and
+  // additionally asks the browser not to shift focus off the sheet at all —
+  // the standard technique for a dismissible custom surface. Harmless
+  // elsewhere: Escape never dispatches a mousedown, and a press on one of the
+  // sheet's own buttons targets the button, not the backdrop, so this branch
+  // never runs for those.
+  backdrop.addEventListener('mousedown', (e) => {
+    if (e.target !== backdrop) return;
+    heldAtPointerDown = backdrop.contains(document.activeElement);
+    e.preventDefault();
+  });
   backdrop.addEventListener('click', (e) => {
     if (e.target === backdrop) close();
   });
@@ -1098,6 +1155,11 @@ export async function shareCardBlob(opts: {
   url?: string;
 }): Promise<ShareOutcome> {
   const { blob, filename, title, text, url } = opts;
+  // Captured once, at entry (issue #759) — see `shareInvocationGeneration`.
+  // Only this call's own generation may mount/supersede the fallback sheet
+  // below; a newer overlapping call bumping the counter before this one
+  // reaches the sheet leg means this call has been superseded.
+  const myInvocation = ++shareInvocationGeneration;
 
   // Every activation check below is a FRESH read taken immediately before the
   // leg it guards (see `shareActivationAlive`) — round 2's single read at the
@@ -1166,6 +1228,19 @@ export async function shareCardBlob(opts: {
   // whenever the blind download leg could not prove a delivery, so the sheet
   // carries the card as well as the link. Only a call with NOTHING to offer —
   // or one whose sheet could not be put on screen — still reports `'none'`.
+  //
+  // Superseded check (issue #759): a newer overlapping `shareCardBlob` call
+  // may already have bumped `shareInvocationGeneration` and mounted its own
+  // sheet while THIS call was awaiting one of the legs above (most commonly a
+  // slow/rejected clipboard write). Mounting here would call through
+  // `closeMountedFallbackSheet` and tear the newer sheet down, replacing its
+  // fresh card/link with this call's stale content — exactly the race the
+  // ticket describes. `'cancelled'` is chosen over `'none'` deliberately:
+  // this call WOULD have had something to offer, it was simply overtaken by
+  // a newer request for the same action, which reads closer to a
+  // cancellation than to "nothing to share" — and every caller already
+  // treats `'cancelled'` as a quiet no-op (see the outcome's callers).
+  if (myInvocation !== shareInvocationGeneration) return 'cancelled';
   if (showShareFallbackSheet({ url, blob, filename })) return 'prompt';
 
   return 'none';
