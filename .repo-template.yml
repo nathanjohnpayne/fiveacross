@@ -10,6 +10,13 @@
 # Used by check_spec_test_alignment when the default filename search
 # wouldn't find the test.
 spec_test_map:
+  # event-setup-wizard's coverage is module-named (the draft store seam, the
+  # occasion matrix, and the shared validation predicates), so none of the
+  # three share the spec basename — map them explicitly.
+  event-setup-wizard:
+    - src/data/eventDraft.test.ts
+    - src/data/occasions.test.ts
+    - src/data/draftValidation.test.ts
   # event-resolution's coverage is module-named (the decision table, the
   # Firestore seam, the Edition brand table, and the two component surfaces that
   # render it), so none of the five share the spec basename — map them all

@@ -123,13 +123,13 @@ describe('approving the first explicit Prompt', () => {
     queue([item('a', true)]);
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
-    await waitFor(() => expect(approveItem).toHaveBeenCalledWith('a', 'admin'));
+    await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
   });
 
   it('says nothing about a tame Prompt', async () => {
     queue([item('a', false)]);
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(approveItem).toHaveBeenCalledWith('a', 'admin'));
+    await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
     expect(screen.queryByText('This makes the whole Event 18+')).toBeNull();
   });
 
@@ -139,7 +139,7 @@ describe('approving the first explicit Prompt', () => {
     setActiveAdultContent(true);
     queue([item('a', true)]);
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    await waitFor(() => expect(approveItem).toHaveBeenCalledWith('a', 'admin'));
+    await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
     expect(screen.queryByText('This makes the whole Event 18+')).toBeNull();
   });
 });

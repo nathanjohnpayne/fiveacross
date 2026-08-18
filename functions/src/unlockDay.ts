@@ -103,6 +103,10 @@ export interface SnapshotItem {
   createdBy?: string;
   createdAt?: number;
   approvedAt?: number;
+  /** The Day this Prompt is intended for (#557). Absent = every Day. */
+  targetDayIndex?: number;
+  /** Set when approval found no Day that could deal this Prompt (#557). */
+  retainedAt?: number;
 }
 
 /** The item pools a Day's snapshot draws from (specs/easy-mix.md § "Snapshot carries
@@ -138,6 +142,13 @@ export interface SnapshotFilter {
    * snapshot and retroactively change an already-open Day's pool.
    */
   cutoff: number;
+  /**
+   * The index of the Day being snapshotted (#557). Community Prompts name the
+   * Day they are meant for; this is what that name is matched against. OPTIONAL
+   * so a caller that omits it keeps the pre-#557 behaviour (no targeting filter
+   * at all) — every existing caller in this file passes it.
+   */
+  dayIndex?: number;
   reportHideThreshold?: number;
   bannedUids?: readonly string[];
 }
@@ -162,6 +173,50 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
 }
 
 /**
+ * Day targeting (#557, specs/community-prompt-targeting.md) — the snapshot-side
+ * half of the rule `src/data/communityPrompts.ts` states for the client. Local
+ * mirror rather than a shared import, exactly like `isReportHidden`/`isBanned`
+ * above: this module deliberately imports nothing from the app package.
+ *
+ * Three cases, and the middle one is the whole feature:
+ *   - target ABSENT → admitted to EVERY Day. The organiser/seed pool, and every
+ *     Prompt written before this field existed, so nothing about the existing
+ *     Event changes. This default is why the change needs no backfill.
+ *   - target === this Day → admitted here, and (by the same rule) to no other.
+ *   - anything else → admitted NOWHERE. That covers both a Prompt aimed at a
+ *     different Day and one whose target is present but malformed. The malformed
+ *     case fails CLOSED, against this module's usual fail-open posture, and the
+ *     asymmetry is deliberate: failing open on moderation risks showing one
+ *     item that should have been hidden, whereas failing open here would put an
+ *     unresolvable Prompt on every single card — precisely the bug this feature
+ *     removes. An excluded Prompt is retained, not lost: it stays `active` and
+ *     admin-visible, and no Day is harmed by its absence.
+ */
+function targetsDay(targetDayIndex: unknown, dayIndex: number | undefined): boolean {
+  // STRICTLY undefined, not `== null`. An absent Firestore field arrives here as
+  // `undefined`; an explicit `targetDayIndex: null` is a stored VALUE, and it is
+  // a malformed one. `firestore.rules` reject null on create, but the admin
+  // update arm is deliberately unconstrained and an imported or repaired row can
+  // carry one — so this path is reachable, and treating null as "absent" would
+  // put that Prompt back on every Day (Codex P2, PR #812).
+  if (targetDayIndex === undefined) return true;
+  if (dayIndex === undefined) return true; // caller opted out of targeting entirely
+  // The `>= 0` bound is part of what "well-formed" MEANS here (`isUsableTarget`
+  // and `validTargetDayIndex()` in firestore.rules both define it that way), so
+  // the mirror states it rather than relying on Day indices happening to be
+  // non-negative today. Leaving it out made this predicate admit a stored
+  // negative target to a negative Day index — unreachable through the current
+  // schedule, but a mirror that only accidentally agrees is one refactor away
+  // from disagreeing (Phase 4b P2, PR #812).
+  return (
+    typeof targetDayIndex === 'number' &&
+    Number.isInteger(targetDayIndex) &&
+    targetDayIndex >= 0 &&
+    targetDayIndex === dayIndex
+  );
+}
+
+/**
  * The ids that make up a Day's snapshot: the `status: 'active'` items in that Day's
  * pool that the LIVE deal pool would also deal. Items are pre-filtered to `active`
  * by the query; this applies the SAME predicates `src/data/api.ts` applies before
@@ -172,6 +227,9 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
  *   - drop `isFreeSpace` sentinels (the free center is dealt separately; the create
  *     rule does not constrain the flag, so a raw client write could carry it);
  *   - drop community-hidden (`isReportHidden`) and banned-author (`isBanned`) items;
+ *   - drop items targeted at a DIFFERENT Day (`targetsDay`, #557) — a Community
+ *     Prompt names the one Day it is meant for, so it joins that Day's snapshot and
+ *     no other; an untargeted item still joins every Day's;
  *   - drop items that entered the pool AFTER the Day's `unlockAt` cutoff — a snapshot
  *     is the active pool AS OF the unlock moment, even when the run is delayed. An
  *     item's pool-entry time is `approvedAt` (Phase 1.5 approval flow) falling back to
@@ -181,7 +239,7 @@ function isBanned(uid: string | undefined, bannedUids: readonly string[] | undef
  *     cutoff at all (#289) — see inside.
  */
 export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter): string[] {
-  const { pool, cutoff, reportHideThreshold, bannedUids } = filter;
+  const { pool, cutoff, dayIndex, reportHideThreshold, bannedUids } = filter;
   // The admitted pools: the explicit set when given (a main day → main + embark), else
   // just the single `pool` (pre-easy-mix behavior). Order of `items` is preserved, so
   // the deal path can re-split by pool while the main items keep their relative order.
@@ -203,6 +261,17 @@ export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter)
     .filter((it) => !it.isFreeSpace)
     .filter((it) => !isReportHidden(it.reportCount ?? 0, reportHideThreshold))
     .filter((it) => !isBanned(it.createdBy, bannedUids))
+    .filter((it) => targetsDay(it.targetDayIndex, dayIndex))
+    // RETAINED Prompts are admitted to no Day, on the strength of the stored
+    // marker rather than the schedule. Until now retention held only because the
+    // target had become unreachable — which is true of the schedule as it stood
+    // at approval, and stops being true if the schedule is later extended, a Day
+    // is repaired, or a curated Day is switched to deal the main pool. Any of
+    // those would silently resurrect a Prompt the organiser was already told was
+    // retained and dealt nowhere (Phase 4b P2, PR #812). `retainedAt` is written
+    // only by a retention and CLEARED by any placement, so honouring it here
+    // makes the recorded decision the thing that binds.
+    .filter((it) => it.retainedAt == null)
     .filter((it) => {
       if (!cutoffApplies) return true;
       const enteredAt = it.approvedAt ?? it.createdAt;
@@ -224,12 +293,25 @@ export interface FinaleTimes {
 /**
  * Resolve the finale clock boundaries from the Day schedule. The farewell Day
  * (pool `'farewell'`, Day 10) anchors the freeze/podium at its own `unlockAt`
- * (08:00 disembark morning, the standard rule). The last-call beat is Day 9's
- * 08:00 `unlockAt` + 12h = 20:00 Day 9 (a same-day forward offset, so no
- * midnight/DST cross); if Day 9 is somehow absent it falls back to
- * `farewellUnlockAt - 12h` (the 08:00→08:00 gap less the last night). Returns
- * `null` when there is no farewell Day (a non-Phase-1.5 event), so callers skip
- * the finale entirely.
+ * (08:00 disembark morning, the standard rule). The last-call beat PREFERS Day
+ * 9's 08:00 `unlockAt` + 12h = 20:00 Day 9 (a same-day forward offset, so no
+ * midnight/DST cross) — but that offset is only meaningful when the closing
+ * Day sits on its OWN calendar date. When Day 9 is absent, OR the forward
+ * candidate would land at-or-after `farewellUnlockAt` (#784 — a schedule shape
+ * that puts the closing Day on the SAME date as the preceding Day, as Bodega's
+ * tail does, makes 08:00+12h fall past the very freeze it's supposed to
+ * precede), this derives backwards instead: `farewellUnlockAt - 12h` (the
+ * 08:00→08:00 gap less the last night). Returns `null` when there is no
+ * farewell Day (a non-Phase-1.5 event), so callers skip the finale entirely.
+ *
+ * GUARD (#784): whichever branch runs, `lastCallAt` is asserted to precede
+ * `farewellUnlockAt` before returning. `LAST_CALL_LEAD_MS` is a positive
+ * constant, so the backward branch is always safe on its own — the guard
+ * exists because the issue's postmortem was exactly this: the forward branch
+ * silently produced an empty `[lastCallAt, farewellUnlockAt)` window with no
+ * throw, no log, and no visible symptom until someone read the numbers by
+ * hand. If a future schedule shape ever re-empties the window, this logs
+ * loudly instead of failing silently again.
  *
  * NO DST CAVEAT (#552). This used to warn that the 12h wall gap assumed the
  * event window did not cross a `Europe/Rome` DST switch, and that the 20:00 cron
@@ -245,7 +327,22 @@ export function finaleTimes(days: DayLike[]): FinaleTimes | null {
   const farewell = days.find((d) => normalizePool(d.pool) === 'closing');
   if (!farewell) return null;
   const dayNine = days.find((d) => d.index === farewell.index - 1);
-  const lastCallAt = dayNine ? dayNine.unlockAt + LAST_CALL_LEAD_MS : farewell.unlockAt - LAST_CALL_LEAD_MS;
+  const forwardLastCallAt = dayNine ? dayNine.unlockAt + LAST_CALL_LEAD_MS : null;
+  const lastCallAt =
+    forwardLastCallAt !== null && forwardLastCallAt < farewell.unlockAt
+      ? forwardLastCallAt
+      : farewell.unlockAt - LAST_CALL_LEAD_MS;
+
+  // #784: the last-call posting gate is `[lastCallAt, farewellUnlockAt)` — an
+  // empty or inverted window means the beat can never fire, and nothing else
+  // in the finale path would notice. Log loudly rather than let it slide by.
+  if (!(lastCallAt < farewell.unlockAt)) {
+    console.error(
+      `[finaleTimes] last-call window is empty or inverted for farewell Day index ${farewell.index}: ` +
+        `lastCallAt=${lastCallAt} >= farewellUnlockAt=${farewell.unlockAt}. The last-call beat will never post.`,
+    );
+  }
+
   return {
     lastCallAt,
     farewellUnlockAt: farewell.unlockAt,
@@ -360,6 +457,14 @@ function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
       createdBy: data.createdBy as string | undefined,
       createdAt: data.createdAt as number | undefined,
       approvedAt: data.approvedAt as number | undefined,
+      // Read RAW, not coerced: `targetsDay` needs to tell a malformed target
+      // apart from an absent one, and coercing here would erase that difference
+      // and silently promote a broken target to "every Day".
+      targetDayIndex: data.targetDayIndex as number | undefined,
+      // Retention is a DECISION that was recorded and reported to the organiser,
+      // so the snapshot honours it directly rather than re-deriving it from the
+      // schedule (Phase 4b P2, PR #812).
+      retainedAt: data.retainedAt as number | undefined,
     };
   });
 }
@@ -528,6 +633,8 @@ export async function stampDaySnapshot(
       // snapshot (specs/easy-mix.md); tutorial days freeze only their own pool.
       pools: snapshotPoolsFor(arr[i].pool),
       cutoff: arr[i].unlockAt,
+      // #557: admit Community Prompts aimed at THIS Day, and no others.
+      dayIndex: arr[i].index,
       reportHideThreshold: ev.settings?.reportHideThreshold,
       bannedUids: ev.bannedUids,
     });
@@ -881,6 +988,7 @@ export async function resnapshotDayIfNoBoards(
     pool: day.pool,
     pools: snapshotPoolsFor(day.pool),
     cutoff: day.unlockAt,
+    dayIndex: day.index,
     reportHideThreshold: pre?.settings?.reportHideThreshold,
     bannedUids: pre?.bannedUids,
   });

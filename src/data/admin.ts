@@ -1,4 +1,4 @@
-import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, updateDoc, deleteDoc, deleteField, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
@@ -8,6 +8,7 @@ import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isSystemAuthor } from './moderation';
+import { routeApprovalToDay, defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
 import type { Cell, ClaimMode, ThemeId, ClaimDoc, ItemDoc, DayDef, PlayerDoc } from '../types';
 
 const evt = () => doc(db, 'events', EVENT_ID);
@@ -42,8 +43,228 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
 // that can still see WHY a Prompt was turned down. Both writes are unconstrained
 // by `firestore.rules` under the `isAdmin(eventId)` arm — no client-side field
 // allowlist needed beyond what the rule already checks.
-export const approveItem = (id: string, adminUid: string) =>
-  updateDoc(item(id), { status: 'active', approvedBy: adminUid, approvedAt: Date.now() });
+/**
+ * Where one approval landed (#557), in two independent parts: `dayIndex` /
+ * `retained` say where the Prompt now STANDS, and `outcome` says what this call
+ * DID to get it there.
+ *
+ * What THIS call did to the Prompt — kept separate from what state the Prompt is
+ * in, because a caller that conflates them announces a placement for something
+ * it never approved (Phase 4b P2, PR #812).
+ *
+ *   - `placed`      — approved onto `dayIndex`.
+ *   - `untargeted`  — approved with no Day, which is only reachable on an Event
+ *                     that has no schedule at all; it means every Day, and on a
+ *                     Day-less Event that is the single board.
+ *   - `retained`    — approved, but no Day can deal it, so it is dealt nowhere.
+ *   - `stale`       — NOT approved: the row was no longer `pending`. `dayIndex`
+ *                     and `retained` then describe where it already stands.
+ *   - `missing`     — NOT approved: no such item.
+ */
+export type ApprovalOutcome = 'placed' | 'untargeted' | 'retained' | 'stale' | 'missing';
+
+export interface ApprovalPlacement {
+  itemId: string;
+  /** The Day this Prompt is scheduled for, or `null` for none. */
+  dayIndex: number | null;
+  /** Whether the Prompt is in the retained state — dealt nowhere. */
+  retained: boolean;
+  /** What this call DID. Only `placed`/`untargeted`/`retained` wrote anything. */
+  outcome: ApprovalOutcome;
+}
+
+/**
+ * The queue row an approval is asked about. Shaped like the Approvals-queue row
+ * so a caller can pass what it already holds, but only `id` is TRUSTED:
+ * `targetDayIndex` here is a hint, and routing deliberately ignores it in favour
+ * of the value read inside the transaction. A client row can be stale — that is
+ * exactly the double-approval hazard the stale guard below exists for — so the
+ * authoritative document is the only thing worth routing on.
+ */
+export type ApprovableItem = Pick<ItemDoc, 'id'> & Partial<Pick<ItemDoc, 'targetDayIndex'>>;
+
+/**
+ * Approve one or more pending Prompts, routing each to its intended Day (#557,
+ * specs/community-prompt-targeting.md).
+ *
+ * The routing rule, per Prompt: a Prompt targeted at a Day that can still take
+ * it keeps that Day; one whose Day's cutoff has passed rolls FORWARD to the next
+ * Day that can; one with nowhere left to go is retained — still `active`, still
+ * in the pool for the recap or a reusable pack, but aimed at a Day that has been
+ * and gone, so no snapshot will ever admit it. It is never deleted and never
+ * re-aimed at a Day that has already dealt.
+ *
+ * WHY A TRANSACTION, when every write here is to an ITEM and none to a Day. The
+ * Event doc is read inside it purely to make the schedule part of the read set.
+ * The scheduler stamps snapshots by updating that same doc
+ * (`stampDaySnapshot`), so if a Day freezes while this approval is in flight,
+ * Firestore retries and the routing is recomputed against the schedule that
+ * actually won. Without that, an approval could commit "scheduled for Day 4"
+ * microseconds after Day 4 froze, and the Prompt would silently be retained
+ * while the organiser was told it was placed. The transaction narrows that window
+ * rather than mutating anything on the Day side — the already-frozen Day is left
+ * strictly alone either way, which is the invariant that matters most here.
+ *
+ * What the two transactions do and do not guarantee, precisely, because the
+ * boundary is easy to overstate in both directions (Phase 4b, PR #812). The
+ * snapshot side is NOT the loose half: `stampDaySnapshot` reads its active-item
+ * query THROUGH its own transaction, in the same read set as the `tx.update`
+ * that stamps the Day, so the frozen ids and the committed pool always describe
+ * one Firestore state. What neither transaction can promise is the phantom edge
+ * — a row flipping pending→active is not a change to a document the scheduler's
+ * `status == 'active'` query matched when it ran — so the residual risk is that
+ * an approval landing in that instant is reported as placed on a Day whose
+ * snapshot does not list it. That is a MISREPORT of which Day, and it is the
+ * worst case: the Day itself is safe by construction, because the stamp is
+ * written once, re-confirmed as absent inside the scheduler's transaction, and
+ * never overwritten. Making even the misreport impossible means approving on the
+ * server clock, which is #813, not a stronger client-side transaction.
+ *
+ * Bulk shares ONE transaction and one `approvedAt` instant (the pre-existing
+ * `bulkApproveItems` contract: one click is one approval event). That also keeps
+ * the whole batch on the same side of every Day's cutoff, so a bulk approve can
+ * never split across a freeze.
+ */
+export async function approveItems(
+  items: readonly ApprovableItem[],
+  adminUid: string,
+): Promise<ApprovalPlacement[]> {
+  if (items.length === 0) return [];
+  return runTransaction(db, async (tx) => {
+    // EVERY read first: Firestore requires a transaction's reads to precede its
+    // writes, so the item reads cannot live inside the write loop below.
+    const evSnap = await tx.get(evt());
+    const rows: (ItemDoc | undefined)[] = [];
+    for (const it of items) {
+      const snap = await tx.get(item(it.id));
+      rows.push(snap.exists() ? (snap.data() as ItemDoc) : undefined);
+    }
+    const days = evSnap.exists() ? ((evSnap.data().days as DayDef[] | undefined) ?? []) : [];
+    const approvedAt = Date.now();
+    const placements: ApprovalPlacement[] = [];
+    for (const [i, it] of items.entries()) {
+      const row = rows[i];
+      // STALE APPROVAL GUARD. The queue row is a client snapshot, and two
+      // organisers can hold the same one: the first approval routes the Prompt
+      // to Day 2, Day 2 freezes with its id, and a second approval of that same
+      // stale row would find Day 2 closed, roll FORWARD, and rewrite the Prompt
+      // for Day 3 — which then freezes with it too. The Prompt would be dealt on
+      // two Days, which is the one outcome this whole ticket exists to prevent,
+      // and no Day is ever mutated on the way there, so nothing downstream would
+      // catch it (Phase 4b P1, PR #812).
+      //
+      // The fix is to make approval read AUTHORITATIVE state rather than trust
+      // the caller: only a row that is still `pending` is approved, and the
+      // routing below reads the STORED target, not the one the client passed.
+      // A row that has moved on is a no-op reported where it actually stands, so
+      // a double-click or a stale queue is harmless rather than corrupting. A
+      // row that has vanished is likewise reported, not invented.
+      if (row === undefined) {
+        placements.push({ itemId: it.id, dayIndex: null, retained: false, outcome: 'missing' });
+        continue;
+      }
+      if (row.status !== 'pending') {
+        // Report where it ALREADY stands, and say plainly that this call did not
+        // approve it. `outcome` is what happened; `dayIndex`/`retained` are the
+        // row's state. Keeping them separate is what stops a consumer announcing
+        // "scheduled for Day 3" for a row that was actually REJECTED, or for one
+        // that no longer exists (Phase 4b P2, PR #812). Only a live `active` row
+        // can be described as scheduled at all.
+        const stored = row.targetDayIndex;
+        const isRetained = row.retainedAt != null;
+        const live = row.status === 'active';
+        placements.push({
+          itemId: it.id,
+          dayIndex: live && !isRetained && isUsableTarget(stored) ? stored : null,
+          retained: isRetained,
+          outcome: 'stale',
+        });
+        continue;
+      }
+      // The STORED target is the one routing acts on. The caller's row is a hint
+      // that may be stale; this is the value the rules and the snapshot will see.
+      const targetDayIndex = row.targetDayIndex;
+      const base = { status: 'active' as const, approvedBy: adminUid, approvedAt };
+      // A placement CLEARS any `retainedAt` already on the row, rather than
+      // merely not writing one. Since `tx.update` is a merge, a marker left
+      // behind would describe an active Prompt that is being DEALT as one that
+      // was retained and dealt nowhere — the mirror of the malformed-target
+      // misreport, and just as misleading (Phase 4b P1, PR #812). `retained:
+      // true` is the only state that stamps it, so `retained: false` must
+      // unstamp it. The rules now refuse a submitter-supplied `retainedAt`, so
+      // this is the second line rather than the only one.
+      const placed = { ...base, retainedAt: deleteField() };
+      if (targetDayIndex === undefined) {
+        // A PENDING row with no target is a player submission that lost one —
+        // never an organiser Prompt meant for every Day. Organiser and seed
+        // Prompts are created `active` directly (the rules' admin-active-create
+        // arm) and never enter this queue, so by construction everything here is
+        // a suggestion aimed at one Day. Leaving the absence in place would let a
+        // crafted or cached client submit without a target and be approved onto
+        // EVERY Day — the feature's central failure mode, reachable around the
+        // create rule, which cannot cheaply tell "no Day was available" from "the
+        // client declined to say" (Phase 4b P1, PR #812). So approval resolves
+        // the target it should have had.
+        //
+        // The exception is an Event with NO schedule at all, where untargeted is
+        // the honest record rather than a gap: there are no Days, so "every Day"
+        // is the single legacy board and narrowing it would mean nothing.
+        if (days.length === 0) {
+          tx.update(item(it.id), placed);
+          placements.push({ itemId: it.id, dayIndex: null, retained: false, outcome: 'untargeted' });
+          continue;
+        }
+        const resolved = defaultTargetDayIndex(days, approvedAt);
+        if (resolved == null) {
+          // A schedule exists but nothing in it can still take a Prompt. Retained
+          // is the honest outcome, and the same one a targeted Prompt with
+          // nowhere left to go gets.
+          tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+          placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
+          continue;
+        }
+        tx.update(item(it.id), { ...placed, targetDayIndex: resolved });
+        placements.push({ itemId: it.id, dayIndex: resolved, retained: false, outcome: 'placed' });
+        continue;
+      }
+      if (!isUsableTarget(targetDayIndex)) {
+        // Present but MALFORMED. The snapshot already excludes such a row from
+        // every Day (`targetsDay` fails closed), so it will be dealt nowhere —
+        // which is retention, and must be REPORTED as retention. Reporting it as
+        // ordinary untargeted content would tell the organiser it is live on
+        // every Day while it is live on none (Phase 4b P2, PR #812). The
+        // malformed value is left in place rather than repaired: this write is a
+        // merge, and guessing which Day was meant would be inventing one.
+        tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+        placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
+        continue;
+      }
+      const routed = routeApprovalToDay(days, targetDayIndex, approvedAt);
+      if (routed == null) {
+        // Retained: the original target is LEFT in place. Clearing it would make
+        // the Prompt untargeted, which reads as "every Day" — the one outcome
+        // this ticket exists to prevent.
+        tx.update(item(it.id), { ...base, retainedAt: approvedAt });
+        placements.push({ itemId: it.id, dayIndex: null, retained: true, outcome: 'retained' });
+        continue;
+      }
+      tx.update(item(it.id), { ...placed, targetDayIndex: routed });
+      placements.push({ itemId: it.id, dayIndex: routed, retained: false, outcome: 'placed' });
+    }
+    return placements;
+  });
+}
+
+/**
+ * Approve one Prompt. Takes the queue ROW because that is what the Approvals
+ * queue holds, but only its `id` is load-bearing: since the stale guard reads
+ * the item inside the transaction, the intended Day comes from the stored
+ * document rather than from whatever the client was last shown. That is the
+ * stronger version of the original reason for this signature — an id is enough
+ * precisely BECAUSE approval no longer trusts the caller's copy of the target.
+ */
+export const approveItem = (row: ApprovableItem, adminUid: string) =>
+  approveItems([row], adminUid).then((placements) => placements[0]);
 export const rejectItem = (id: string, adminUid: string) =>
   updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
 
@@ -54,23 +275,25 @@ export const rejectItem = (id: string, adminUid: string) =>
 export const setItemSpicy = (id: string, spicy: boolean) => updateDoc(item(id), { spicy });
 
 /**
- * Bulk-approve every row in `items` (the Approvals queue's full pending list) in
- * ONE batched write — "Bulk approve works on the full pending list in one action"
- * (#210 AC). A `writeBatch` (not N sequential `updateDoc` calls) so the queue
- * clears atomically from the caller's perspective and the console does not fire
- * an update per row. Each row is stamped with the SAME `approvedAt` instant, on
- * the reasoning that a single bulk click is one approval EVENT even though it
- * touches many rows — mirrors how a single admin action elsewhere (e.g. a batch
- * resolve) reads as one moment in the audit trail, not many micro-timestamps.
+ * Bulk-approve every row in `items` (the Approvals queue's full pending list) —
+ * "Bulk approve works on the full pending list in one action" (#210 AC). One
+ * atomic write covering every row, so the queue clears in one go rather than
+ * firing an update per row, and every row carries the SAME `approvedAt` instant:
+ * a single bulk click is one approval EVENT even though it touches many rows,
+ * mirroring how any other single admin action reads as one moment in the audit
+ * trail rather than many micro-timestamps.
+ *
+ * Since #557 this is a thin alias for `approveItems`, so a bulk approve routes
+ * each Prompt to its intended Day exactly as a single approve does. It moved
+ * from `writeBatch` to that function's transaction to gain the schedule read set
+ * — see `approveItems` for why routing has to be serialized against the
+ * scheduler. The shared `approvedAt` survives the move.
  */
-export function bulkApproveItems(items: Pick<ItemDoc, 'id'>[], adminUid: string): Promise<void> {
-  if (items.length === 0) return Promise.resolve();
-  const batch = writeBatch(db);
-  const approvedAt = Date.now();
-  for (const it of items) {
-    batch.update(item(it.id), { status: 'active', approvedBy: adminUid, approvedAt });
-  }
-  return batch.commit();
+export function bulkApproveItems(
+  items: readonly ApprovableItem[],
+  adminUid: string,
+): Promise<ApprovalPlacement[]> {
+  return approveItems(items, adminUid);
 }
 export const hideProof = (id: string) => updateDoc(proof(id), { status: 'hidden' });
 export const restoreProof = (id: string) => updateDoc(proof(id), { status: 'active' });

@@ -39,7 +39,7 @@ vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: H.event, loading: false }),
   // #218: no Proofs fixtured in this suite — an empty map keeps every row
   // chip-less, which is orthogonal to the pin/filter/tie-break assertions here.
-  useLatestProofByUid: () => ({ latestByUid: {}, loading: false }),
+  useProofKindsByUid: () => ({ kindsByUid: {}, loading: false }),
   // Mirrors src/data/moderation.ts isBanned (#108). The event fixtures here carry no
   // bannedUids, so it filters nothing and these pin/filter assertions are unchanged;
   // the ban filter itself is pinned in src/components/w2-ban-console.test.tsx.

@@ -602,6 +602,21 @@ export function emulatorDotenvFiles(projectId) {
 }
 
 /**
+ * The dotenv files `firebase deploy` merges before resolving params — the
+ * same `findEnvfiles` order as `emulatorDotenvFiles`, minus the
+ * emulator-only `.env.local` overlay: `loadUserEnvs` is called with no
+ * `isEmulator` key from the deploy path (`lib/deploy/functions/prepare.js`),
+ * so `findEnvfiles` never appends `FUNCTIONS_EMULATOR_DOTENV` there. Reusing
+ * `emulatorDotenvFiles` for deploy-time validation
+ * (scripts/validate-functions-env.mjs, #767) would treat a
+ * `.env.local`-only value as covering a param the deploy will never
+ * actually see.
+ */
+export function deployDotenvFiles(projectId) {
+  return ['.env', `.env.${projectId}`];
+}
+
+/**
  * The merged environment the emulator resolves params against.
  *
  * Parsed per file rather than by concatenating the bodies, because that is what

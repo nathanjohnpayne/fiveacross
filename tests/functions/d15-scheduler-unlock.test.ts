@@ -375,6 +375,48 @@ describe('finaleTimes / finaleActions — the two-beat finish (AC 3)', () => {
     expect(d.freeze).toBe(false); // already frozen — never re-freeze
     expect(d.postPodium).toBe(true); // but the podium beat is still owed
   });
+
+  // #784 — Bodega's tail put the closing Day on the SAME calendar date as the
+  // Day before it, which the plain forward `dayNine.unlockAt + 12h` offset
+  // never anticipated: 06:00 + 12h = 18:00, well past the 11:00 freeze, so the
+  // posting gate `[lastCallAt, farewellUnlockAt)` was empty and the beat could
+  // never fire. Pin the exact seeded shape from
+  // scripts/seed-data/bodega-bay-2026.mjs (index 2 'main' 06:00, index 3
+  // 'farewell'/closing 11:00, both 2026-08-09) and assert the window is
+  // non-empty and lands where the issue's derive-backwards option predicted.
+  it('derives last-call backwards from the close when the preceding Day shares its calendar date (#784)', () => {
+    const dayNineUnlock = Date.parse('2026-08-09T06:00:00-07:00'); // SUN_UNLOCK
+    const farewellUnlock = Date.parse('2026-08-09T11:00:00-07:00'); // CHECKOUT_FREEZE
+    const days: DayLike[] = [
+      { index: 2, pool: 'main', unlockAt: dayNineUnlock },
+      { index: 3, pool: 'farewell', unlockAt: farewellUnlock },
+    ];
+
+    const t = finaleTimes(days)!;
+
+    // The forward offset (06:00 + 12h = 18:00) would land AFTER the freeze —
+    // confirm that's true of this fixture, otherwise the regression proves
+    // nothing.
+    expect(dayNineUnlock + LAST_CALL_LEAD_MS).toBeGreaterThan(farewellUnlock);
+
+    expect(t.lastCallAt).toBe(farewellUnlock - LAST_CALL_LEAD_MS);
+    expect(t.lastCallAt).toBe(Date.parse('2026-08-08T23:00:00-07:00'));
+    expect(t.lastCallAt).toBeLessThan(t.farewellUnlockAt);
+
+    // The posting gate itself must now admit at least one instant.
+    const base = { lastCallPosted: false, podiumPosted: false, mostLovedComputed: false };
+    expect(finaleActions(t, t.lastCallAt, base).postLastCall).toBe(true);
+  });
+
+  // The normal multi-date shape (Day 9 and the farewell Day on DIFFERENT
+  // calendar dates, as in `mainDays()`) must keep using the forward offset —
+  // the #784 fix only changes behavior when the forward candidate would land
+  // at-or-after the freeze.
+  it('keeps the forward 08:00+12h derivation when Day 9 and the farewell Day fall on different dates', () => {
+    const t = finaleTimes(mainDays())!;
+    expect(t.lastCallAt).toBe(D9_UNLOCK + LAST_CALL_LEAD_MS);
+    expect(t.lastCallAt).toBeLessThan(t.farewellUnlockAt);
+  });
 });
 
 describe('runScheduledUnlock — the finale beats through the write path (AC 3)', () => {
