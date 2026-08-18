@@ -58,6 +58,7 @@ export type DraftIssueCode =
   | 'day-missing-date'
   | 'day-invalid-date'
   | 'day-unlock-date-mismatch'
+  | 'day-blank-free-text'
   | 'extra-closing-day'
   | 'day-tonight-not-two'
   | 'day-off-edition-theme'
@@ -440,6 +441,18 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
           message: `Day ${day.index + 1} is dated ${day.date} but its unlock time falls on ${unlockDate} in ${draft.timezone}; the card would unlock on one day and be labelled and emailed as another.`,
         });
       }
+    }
+    if (typeof day.freeText === 'string' && day.freeText.trim().length === 0) {
+      // The in-memory half of the same rule the parser enforces on a stored
+      // blob: the wizard clearing a Free Space input must produce `undefined`,
+      // not `''`. `dealBoard` and the locked-card preview both read
+      // `day.freeText ?? FREE_TEXT`, so a present blank suppresses the fallback
+      // and the Day deals an EMPTY centre Square (#787 review).
+      issues.push({
+        code: 'day-blank-free-text',
+        dayIndex: day.index,
+        message: `Day ${day.index + 1} carries a blank Free Space override, which replaces the default with an empty centre Square. Clear it entirely to use the default.`,
+      });
     }
     // The ARRAY length is what matters, not the non-blank count: `tonight` is
     // persisted verbatim and consumers join it or assume `length === 2`, so a

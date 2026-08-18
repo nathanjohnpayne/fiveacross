@@ -421,3 +421,31 @@ describe('reclamation never races a concurrent save (#787 review)', () => {
     expect(racy.raw.has(key)).toBe(true);
   });
 });
+
+describe('parseEventDraft — a blank Free Space override is refused (#787 review)', () => {
+  it('rejects freeText that is present but blank', () => {
+    const withFreeText = (freeText: string | undefined): unknown => ({
+      ...draft(),
+      days: [
+        {
+          index: 0,
+          date: '2026-08-07',
+          unlockAt: Date.parse('2026-08-07T13:00:00Z'),
+          place: 'Point Reyes',
+          placeEmoji: '🌊',
+          theme: 'the-birds',
+          pool: 'main',
+          tutorial: false,
+          tonight: ['a', 'b'],
+          ...(freeText === undefined ? {} : { freeText }),
+        },
+      ],
+    });
+    // Absent is "use the default"; a real string is an override...
+    expect(parseEventDraft(withFreeText(undefined))).not.toBeNull();
+    expect(parseEventDraft(withFreeText('You made it aboard'))).not.toBeNull();
+    // ...but blank is neither, and would deal an empty centre Square.
+    expect(parseEventDraft(withFreeText(''))).toBeNull();
+    expect(parseEventDraft(withFreeText('   '))).toBeNull();
+  });
+});

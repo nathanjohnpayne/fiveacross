@@ -190,7 +190,13 @@ function isDraftDay(v: unknown): v is DraftDayDef {
     isPool(v.pool) &&
     typeof v.tutorial === 'boolean' &&
     isStringArray(v.tonight) &&
-    (typeof v.freeText === 'undefined' || typeof v.freeText === 'string')
+    // A PRESENT override must carry text. Both the deal path and the locked-card
+    // preview read `day.freeText ?? FREE_TEXT`, so a blank string is not "no
+    // override" — it SUPPRESSES the fallback and deals an empty centre Square.
+    // Absent means default; present means override; blank means neither, so it
+    // is refused rather than quietly repaired (#787 review).
+    (typeof v.freeText === 'undefined' ||
+      (typeof v.freeText === 'string' && v.freeText.trim().length > 0))
   );
 }
 

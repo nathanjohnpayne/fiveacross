@@ -836,3 +836,27 @@ describe('every non-final closing Day is reported at once (#787 review)', () => 
     expect(issues.find((i) => i.code === 'extra-closing-day')?.dayIndex).toBe(1);
   });
 })
+
+describe('a blank Free Space override is not "no override" (#787 review)', () => {
+  it('rejects a present-but-blank freeText, which deals an empty centre Square', () => {
+    // dealBoard and the locked-card preview both read `freeText ?? FREE_TEXT`,
+    // so '' suppresses the default rather than falling back to it.
+    const draft = launchableDraft({ days: [day(0, { pool: 'closing', freeText: '   ' })] });
+    const issues = dayCompletenessIssues(draft).filter((i) => i.code === 'day-blank-free-text');
+    expect(issues).toHaveLength(1);
+    expect(issues[0].dayIndex).toBe(0);
+    expect(isDraftLaunchable(draft, NOW)).toBe(false);
+  });
+
+  it('accepts an absent override and a real one alike', () => {
+    const absent = launchableDraft({ days: [day(0, { pool: 'closing' })] });
+    const real = launchableDraft({
+      days: [day(0, { pool: 'closing', freeText: 'You made it aboard' })],
+    });
+    for (const draft of [absent, real]) {
+      expect(dayCompletenessIssues(draft).filter((i) => i.code === 'day-blank-free-text')).toEqual(
+        [],
+      );
+    }
+  });
+});
