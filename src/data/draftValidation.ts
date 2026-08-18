@@ -212,9 +212,17 @@ const POOL_LABEL: Record<PoolId, string> = {
   closing: 'closing',
 };
 
-/** Prompt entries that actually EXIST — `Array.prototype.filter` skips holes,
- *  so this is the count a sparse array really holds rather than its `length`. */
-function countPrompts(prompts: readonly unknown[]): number {
+/**
+ * Prompt entries that actually EXIST — `Array.prototype.filter` skips holes,
+ * so this is the count a sparse array really holds rather than its `length`.
+ *
+ * EXPORTED (#791) so Step 3's live per-pool counter renders the same number
+ * this gate judges. The step could not re-derive it safely: a nominal
+ * `.length` reading would show "24 ✓" beside a `pool-below-minimum` issue
+ * raised over 23 real entries, which is precisely the "looks satisfied, is
+ * not" reporting #785 catalogues. One function, one answer.
+ */
+export function countPrompts(prompts: readonly unknown[]): number {
   return prompts.filter(() => true).length;
 }
 

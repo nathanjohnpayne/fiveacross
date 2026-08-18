@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { EventDraft, SetupStep } from '../../types';
 import PlaceholderStep from './PlaceholderStep';
+import StepSquares from './StepSquares';
 import { SETUP_STEP_ORDER, STEP_LABELS } from './wizardSteps';
 
 /** Props every step's `render` receives. The step tickets (#789–#792, #794)
@@ -31,7 +32,7 @@ export interface StepDefinition {
 const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>> = {
   occasion: { heading: "What's the occasion?", render: () => <PlaceholderStep step="occasion" /> },
   basics: { heading: 'Name & dates', render: () => <PlaceholderStep step="basics" /> },
-  squares: { heading: 'Squares', render: () => <PlaceholderStep step="squares" /> },
+  squares: { heading: 'Squares', render: (props) => <StepSquares {...props} /> },
   look: { heading: 'Look', render: () => <PlaceholderStep step="look" /> },
   launch: { heading: 'Ready when you are', render: () => <PlaceholderStep step="launch" /> },
 };
