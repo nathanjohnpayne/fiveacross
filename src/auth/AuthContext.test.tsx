@@ -800,6 +800,68 @@ describe('AuthContext deal-error hardening', () => {
       });
       expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
     });
+
+    // Codex P2 round 2 on #836: the failure path and signal (b) must not both
+    // report an outcome for the same attempt — whichever lands first wins.
+    it('does not fire login via signal (b) once a genuine rejection already claimed failure for the same attempt', async () => {
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      mocks.getRedirectResult.mockRejectedValueOnce(
+        Object.assign(new Error('network down'), { code: 'auth/network-request-failed' }),
+      );
+
+      mount();
+      await waitFor(() =>
+        expect(mocks.track).toHaveBeenCalledWith('login_failed', {
+          method: 'google',
+          code: 'auth/network-request-failed',
+        }),
+      );
+
+      // Signal (b) tries to complete AFTER the failure already claimed this
+      // attempt — must be a no-op: a single attempt can never report both
+      // login_failed and login.
+      await signInUser();
+      expect(mocks.track).not.toHaveBeenCalledWith('login', { method: 'google' });
+    });
+
+    it('does not report login_failed once signal (b) already claimed success for the same attempt', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      const redirect = deferred<null>();
+      mocks.getRedirectResult.mockReturnValueOnce(redirect.promise);
+
+      mount();
+      // Signal (b) completes FIRST — onAuthStateChanged publishes the
+      // restored user before this mount's getRedirectResult even settles.
+      await signInUser();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+
+      // The redirect's OWN getRedirectResult() now rejects, after signal (b)
+      // already won — must be a no-op.
+      await act(async () => {
+        redirect.fail(Object.assign(new Error('missing initial state'), { code: 'auth/missing-initial-state' }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(mocks.track).not.toHaveBeenCalledWith('login_failed', expect.anything());
+    });
+
+    // Codex P2 round 2 on #836: the SAME premature-clearing bug fixed for the
+    // pending record above, but for the collected-acknowledgement record.
+    it('leaves a live acknowledgement record standing when a mount reads it but neither completion signal fires', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      const at = String(Date.now());
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, at);
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // No signInUser() — simulating a reload before onAuthStateChanged fires.
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(at);
+    });
   });
 
   it('hands a signed-out web.app boot to firebaseapp.com before rendering a second sign-in screen', async () => {

@@ -166,10 +166,20 @@ function clearCollectedAcknowledgement(): void {
   }
 }
 
-function consumeCollectedAcknowledgement(now: number = Date.now()): boolean {
+// Read WITHOUT consuming, TTL-checked (Codex P2 round 2 on #836 — the same
+// class of bug as `peekRedirectPending`'s history below, for the same
+// record). A mount that reads this before either redirect-completion signal
+// has fired must not clear it: if this mount's getRedirectResult resolves
+// null and reloads/crashes before onAuthStateChanged publishes the restored
+// user, a NEXT mount's signal (b) still needs this to know the 18+ box was
+// actually ticked — clearing it eagerly on read would silently drop a
+// legitimately collected acknowledgement instead of persisting it once the
+// redirect completes late. Cleared only in `completeRedirectReturn`
+// (terminal success) or the redirect-result effect's `.catch()` (terminal
+// failure) below.
+function peekCollectedAcknowledgement(now: number = Date.now()): boolean {
   try {
     const raw = localStorage.getItem(SIGNIN_ADULT_ACK_KEY);
-    clearCollectedAcknowledgement();
     const at = Number(raw);
     return Number.isFinite(at) && at > 0 && now - at <= SIGNIN_ADULT_ACK_TTL_MS;
   } catch {
@@ -1611,7 +1621,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!redirectContextRef.current) {
       redirectContextRef.current = {
         appOwnedRedirect: consumePendingRedirectAttestation(),
-        acknowledged: consumeCollectedAcknowledgement(),
+        // PEEKED, not consumed (Codex P2 round 2 on #836) — same reason and
+        // same fix shape as `pending` below: this effect can run, and read
+        // this, before either completion signal is guaranteed to fire, so
+        // clearing it here could drop a legitimately collected acknowledgement
+        // a later mount's signal (b) still needs. Cleared only in
+        // `completeRedirectReturn` or the redirect-result effect's `.catch()`.
+        acknowledged: peekCollectedAcknowledgement(),
         pending: peekRedirectPending(),
       };
     }
@@ -1638,6 +1654,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // record is written ONLY at redirect start (signIn), so signal (b) is a
   // no-op on every ordinary mount — including a normal cached-session restore,
   // which publishes a signed-in User via onAuthStateChanged just as often.
+  // This latch also doubles as the shared outcome decision with the
+  // redirect-result effect's failure path below (Codex P2 round 2 on #836):
+  // whichever of a SUCCESS (here) or a genuine getRedirectResult REJECTION
+  // (there) is decided first wins, and the other becomes a no-op. Without
+  // that sharing, a rejection landing while signal (b) is still in flight —
+  // or a signal-(b) success landing after a rejection already reported — can
+  // fire both `login_failed` and `login` for the same attempt.
   const redirectCompletionLatchRef = useRef(false);
   const completeRedirectReturn = useCallback(
     (u: User) => {
@@ -1658,6 +1681,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // `needsAttestation` settles true against the newly raised posture and
       // the existing re-prompt collects it properly.
       const { acknowledged } = consumeRedirectContextOnce();
+      // The transaction has now definitively completed — clear the peeked
+      // record too (Codex P2 round 2 on #836), the same terminal-outcome
+      // discipline as the pending record just above.
+      clearCollectedAcknowledgement();
       if (acknowledged) void persistAttestation(u);
     },
     [consumeRedirectContextOnce, persistAttestation],
@@ -1682,16 +1709,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         completeRedirectReturn(result.user);
       })
       .catch((err: unknown) => {
-        if (appOwnedRedirect) trackSignInFailure(err);
-        // A genuine getRedirectResult rejection is a terminal outcome for the
-        // transaction the durable record was tracking (Codex P2 on #836) —
-        // gated on `pending`, not `appOwnedRedirect`, since it is the durable
-        // record's own liveness that decides whether THIS rejection is its
-        // terminal event (the marker can already be lost while the durable
-        // record still stands). Clearing here only affects a LATER mount;
-        // signal (b) can still complete THIS mount from the cached value
-        // above if onAuthStateChanged has not fired yet.
-        if (pending) clearRedirectPending();
+        // A genuine getRedirectResult rejection is a terminal outcome for
+        // this attempt — but ONLY if signal (b) has not already claimed it a
+        // SUCCESS (Codex P2 round 2 on #836): onAuthStateChanged can publish
+        // the restored user, via the cached `pending` value above, before
+        // this rejection is even caught (Firebase's own getRedirectResult()
+        // throwing does not mean the session it restored failed to land).
+        // Sharing `redirectCompletionLatchRef` with `completeRedirectReturn`
+        // keeps the two outcomes mutually exclusive in EITHER firing order —
+        // whichever lands first wins, and the other becomes a no-op, so a
+        // single attempt can never report both `login_failed` and `login`.
+        if (appOwnedRedirect && !redirectCompletionLatchRef.current) {
+          redirectCompletionLatchRef.current = true;
+          trackSignInFailure(err);
+        }
+        // A terminal outcome for the transaction the durable records were
+        // tracking (Codex P2 on #836) — gated on `pending`, not
+        // `appOwnedRedirect`, since it is the durable record's own liveness
+        // that decides whether THIS rejection is its terminal event (the
+        // marker can already be lost while the durable record still
+        // stands). Clearing here only affects a LATER mount; signal (b) can
+        // still complete THIS mount from the cached value above if
+        // onAuthStateChanged has not fired yet — clearing storage does not
+        // touch the in-memory `redirectContextRef` those signals share.
+        if (pending) {
+          clearRedirectPending();
+          clearCollectedAcknowledgement();
+        }
       })
       .finally(() => {
         // The app-owned redirect return has settled — release the signed-out
