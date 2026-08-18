@@ -10,11 +10,14 @@
  *
  *   ① Preheader        ~85 characters: how much is waiting, for which Event.
  *   ② Theme header     the Day's palette and the admin brand line.
- *   ③ Awaiting approval community Prompts sitting `pending`.
- *   ④ Reported & hidden reported content and moderation transitions, one row
+ *   ③ Abuse reports    bug reports the reporter marked `abuse` (#670) — first,
+ *                       because it is the only module with no automated
+ *                       backstop and no console queue behind it.
+ *   ④ Awaiting approval community Prompts sitting `pending`.
+ *   ⑤ Reported & hidden reported content and moderation transitions, one row
  *                       per piece of content rather than one per event.
- *   ⑤ Primary CTA      "Open the Review queue" — the moderation surface.
- *   ⑥ Footer           who this went to and why.
+ *   ⑥ Primary CTA      "Open the Review queue" — the moderation surface.
+ *   ⑦ Footer           who this went to and why.
  *
  * TWO DELIBERATE DEPARTURES from the daily email's seven modules, both because
  * this is operational mail rather than engagement mail:
@@ -56,8 +59,8 @@ import {
  *  `adminAlerts.ts` owns the read-boundary sanitization that produces it. */
 export interface AdminAlertRecord {
   id: string;
-  kind: 'item-created' | 'content-reported' | 'moderation';
-  collection: 'items' | 'proofs';
+  kind: 'item-created' | 'content-reported' | 'moderation' | 'abuse-reported';
+  collection: 'items' | 'proofs' | 'bugReports';
   docId: string;
   label: string;
   status: string;
@@ -96,7 +99,16 @@ export interface DigestSection {
   rows: DigestRow[];
   /** Rows beyond the render cap, summarised rather than dropped silently. */
   overflow: number;
+  /** Where the overflow rows can actually be found. The moderation modules
+   *  point at the Review queue the CTA opens; the abuse module cannot, because
+   *  bug reports have no console surface — they are pulled with
+   *  `npm run bugs:pull` (specs/w4-bug-report-inbox.md). Naming the wrong place
+   *  would be worse than naming none. */
+  overflowIn: string;
 }
+
+/** The default overflow destination: the surface the digest's own CTA opens. */
+const REVIEW_QUEUE = 'the Review queue';
 
 export interface AdminDigestModel {
   theme: EmailThemeTokens;
@@ -177,12 +189,13 @@ export function reviewDetail(alert: AdminAlertRecord, threshold: number | null):
   return `reported · ${reports}`;
 }
 
-function sectionFrom(heading: string, rows: DigestRow[]): DigestSection | null {
+function sectionFrom(heading: string, rows: DigestRow[], overflowIn = REVIEW_QUEUE): DigestSection | null {
   if (rows.length === 0) return null;
   return {
     heading,
     rows: rows.slice(0, ROWS_PER_SECTION),
     overflow: Math.max(0, rows.length - ROWS_PER_SECTION),
+    overflowIn,
   };
 }
 
@@ -227,18 +240,34 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
 
   const ordered = [...alerts].sort((a, b) => a.createdAt - b.createdAt);
 
-  // ③ Awaiting approval — one row per pending Prompt.
+  // ③ Abuse reports — one row per REPORT, never collapsed and never merged into
+  // the moderation module (#670).
+  //
+  // The moderation module keys by content because two reports about one Proof
+  // are one piece of work. There is no equivalent key here: a bug report has no
+  // subject document to collapse toward, only its own text. So each row stands
+  // for one report and says so — the detail line carries the report ID, which is
+  // what `npm run bugs:pull` and the inbox key on, and is how an admin tells two
+  // rows apart. Deliberately NOT read as "two people": intake has no submission
+  // idempotency yet, so a retried submission after a lost response can produce a
+  // second report from one reporter (tracked as a follow-up). Two rows mean two
+  // reports, which is a claim the digest can actually support.
+  const abuse: DigestRow[] = ordered
+    .filter((a) => a.kind === 'abuse-reported')
+    .map((a) => ({ label: a.label, detail: `abuse report · ${a.docId}` }));
+
+  // ④ Awaiting approval — one row per pending Prompt.
   const approvals: DigestRow[] = ordered
     .filter((a) => a.kind === 'item-created')
     .map((a) => ({ label: a.label, detail: 'new Prompt · pending approval' }));
 
-  // ④ Reported & hidden — one row per piece of CONTENT. Moderation outranks a
+  // ⑤ Reported & hidden — one row per piece of CONTENT. Moderation outranks a
   // report; among equals the later alert wins. Map insertion order is preserved
   // on overwrite, so a document keeps the position of its FIRST alert and the
   // module still reads in the order things started happening.
   const bestByDoc = new Map<string, AdminAlertRecord>();
   for (const alert of ordered) {
-    if (alert.kind === 'item-created') continue;
+    if (alert.kind === 'item-created' || alert.kind === 'abuse-reported') continue;
     const key = `${alert.collection}/${alert.docId}`;
     const held = bestByDoc.get(key);
     if (held && held.kind === 'moderation' && alert.kind !== 'moderation') continue;
@@ -249,17 +278,26 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
     detail: reviewDetail(a, threshold),
   }));
 
+  // ABUSE LEADS. The wireframe's module order is fixed for the six modules it
+  // designs, and this one is new rather than moved: it goes first because it is
+  // the only module with no automated backstop behind it. A reported Prompt has
+  // the auto-hide threshold, a flagged Proof has Vision, and both sit in a
+  // console queue an admin can open later; an abuse report has none of that —
+  // nothing acts on it until a person does. It is also the only module that can
+  // describe harm happening to a person rather than to content.
   const sections = [
+    sectionFrom('Abuse reports', abuse, 'the bug-report inbox'),
     sectionFrom('Awaiting approval', approvals),
     sectionFrom('Reported & hidden', review),
   ].filter((s): s is DigestSection => s !== null);
 
   // ① Subject and preheader — the counts, in the order an admin triages them.
   const parts: string[] = [];
+  if (abuse.length > 0) parts.push(plural(abuse.length, 'abuse report', 'abuse reports'));
   if (approvals.length > 0) parts.push(`${approvals.length} to approve`);
   if (review.length > 0) parts.push(`${review.length} to review`);
   const summary = parts.join(', ');
-  const total = approvals.length + review.length;
+  const total = abuse.length + approvals.length + review.length;
 
   // ② Theme header. The Day supplies the palette, so the digest looks like the
   // Event it is about; the headline states the job, because an admin opening
@@ -277,7 +315,12 @@ export function buildAdminDigestModel(args: BuildAdminDigestArgs): AdminDigestMo
   return {
     theme,
     subject: `Admin · ${eventName}—${summary}`,
-    preheader: `${plural(total, 'item', 'items')} in the review queue for ${eventName}.`,
+    // DESTINATION-NEUTRAL. It used to say "in the review queue", which is true
+    // of approvals and moderation and false of abuse reports — those are not in
+    // that queue at all, so an abuse-only digest would send an admin looking at
+    // a surface holding none of its work (#670). The count is the useful half;
+    // the location belongs to the modules, which each name their own.
+    preheader: `${plural(total, 'item', 'items')} waiting for ${eventName}.`,
     brandLine: `${register.brandLine} · Admin`,
     headline: 'Needs your eyes',
     contextLine,
@@ -322,7 +365,7 @@ function sectionHtml(section: DigestSection, theme: EmailThemeTokens): string {
   const overflow =
     section.overflow > 0
       ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid ${dim};` +
-        `color:${accent};font-size:13px;">${esc(`+${section.overflow} more in the Review queue`)}</div>`
+        `color:${accent};font-size:13px;">${esc(`+${section.overflow} more in ${section.overflowIn}`)}</div>`
       : '';
   return (
     moduleOpen(panel, ink) +
@@ -372,7 +415,7 @@ export function renderAdminDigestText(model: AdminDigestModel): string {
   for (const section of model.sections) {
     lines.push('', section.heading.toUpperCase());
     for (const row of section.rows) lines.push(`- ${row.label}—${row.detail}`);
-    if (section.overflow > 0) lines.push(`+${section.overflow} more in the Review queue`);
+    if (section.overflow > 0) lines.push(`+${section.overflow} more in ${section.overflowIn}`);
   }
   lines.push(
     '',
