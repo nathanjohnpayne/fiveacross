@@ -87,6 +87,24 @@ export interface EventDraftStore {
    *  Unreadable blobs are skipped, never thrown — and never deleted: listing
    *  is a read, and no read in this module destroys storage. */
   list(): Promise<EventDraftSummary[]>;
+  /**
+   * Storage-key suffixes for entries `list()` cannot show: unparseable,
+   * version-drifted, or key/id-mismatched blobs. Each returned suffix is a
+   * valid `discard(id)` argument — `discard` builds the exact same key from
+   * it — so this is the discovery path a caller needs before it can clean
+   * one of these up at all: `list()` deliberately never reclaims them (see
+   * its own doc), so without a way to NAME a hidden blob, `discard()`'s
+   * `draftId` parameter has nothing to call it with, and stale entries from
+   * an old `DRAFT_SCHEMA_VERSION` accumulate toward the storage quota
+   * forever (#814).
+   *
+   * Read-only, exactly like `list()`: it enumerates and deletes nothing.
+   * Surfacing a hidden entry here is not the same as reclaiming it — the
+   * caller still has to call `discard()` explicitly, which is what keeps the
+   * "listing never deletes" guarantee intact while still making cleanup
+   * possible.
+   */
+  unreadable(): Promise<string[]>;
   /** One draft, or `null` on any miss: absent, unparseable, version-drifted,
    *  or carrying a claimed slug. */
   load(draftId: string): Promise<EventDraft | null>;
@@ -450,8 +468,40 @@ export function createLocalDraftStore(
       // deleting one destroys an organizer's work permanently and silently.
       // So nothing is reclaimed here, and quota is left to `discard()` — the
       // one path where deletion is what the organizer actually asked for
-      // (#787 Phase 4b review).
+      // (#787 Phase 4b review). `unreadable()` below is the discovery path
+      // that makes reaching `discard()` for one of these possible at all
+      // (#814).
       return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
+    },
+
+    async unreadable(): Promise<string[]> {
+      const ls = store(storage);
+      if (!ls) return [];
+      const hidden: string[] = [];
+      try {
+        // Same guarded enumeration as `list()`: `length`/`key()` can throw in
+        // a restricted Storage, and a store that will not be read has no
+        // hidden entries to report, not a crash.
+        for (let i = 0; i < ls.length; i++) {
+          const key = ls.key(i);
+          if (!key || !key.startsWith(KEY_PREFIX)) continue;
+          const suffix = key.slice(KEY_PREFIX.length);
+          const draft = readAt(key);
+          // Exactly the complement of what `list()` shows: unreadable
+          // (absent, unparseable, version-drifted) OR readable but stored
+          // under a key that disagrees with its own embedded `draftId` — the
+          // same mismatch `list()` skips without advertising a wrong id.
+          // Either way the SUFFIX, not the embedded id, is what makes the
+          // entry reachable again: `discard(suffix)` reconstructs this exact
+          // key regardless of what the blob claims about itself.
+          if (!draft || key !== KEY_PREFIX + draft.draftId) {
+            hidden.push(suffix);
+          }
+        }
+      } catch {
+        return hidden;
+      }
+      return hidden;
     },
 
     async load(draftId: string): Promise<EventDraft | null> {

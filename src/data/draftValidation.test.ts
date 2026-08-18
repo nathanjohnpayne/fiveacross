@@ -255,6 +255,28 @@ describe('firstUnlockIssues', () => {
     });
     expect(firstUnlockIssues(draft, NOW).map((i) => i.dayIndex)).toEqual([0]);
   });
+
+  it('reports nothing when Day 0 is missing, rather than misattributing a later Day as "Day 1" (#816)', () => {
+    // No index-0 entry at all — a malformed/sparse schedule, already its own
+    // failure (`dayCompletenessIssues` → `day-index-out-of-order`). Before the
+    // fix, `daysInOrder(draft)[0]` picked Day 1 here and reported it under the
+    // hardcoded "Day 1 has no unlock time yet." message.
+    const draft = launchableDraft({
+      days: [day(1, { unlockAt: null }), day(3, { pool: 'closing' })],
+    });
+    expect(firstUnlockIssues(draft, NOW)).toEqual([]);
+  });
+
+  it('does not suppress a later Day\'s own unlock diagnostic when Day 0 is missing (#816)', () => {
+    const draft = launchableDraft({
+      days: [day(1, { unlockAt: null }), day(3, { pool: 'closing' })],
+    });
+    // Day 1's own generic diagnostic must survive — the old bug swallowed it
+    // into a wrongly labeled "Day 1" first-unlock issue instead.
+    const dayIssues = dayCompletenessIssues(draft);
+    expect(dayIssues.some((i) => i.code === 'day-missing-unlock' && i.dayIndex === 1)).toBe(true);
+    expect(validateEventDraft(draft, NOW).some((i) => i.code === 'first-unlock-missing')).toBe(false);
+  });
 });
 
 describe('dayCountIssues — the ten-Day ceiling is a rules fact', () => {
@@ -951,6 +973,23 @@ describe('Days stay inside the Event window (#787 review)', () => {
     // One bad window should not also accuse every Day.
     const codes = dayCompletenessIssues(launchableDraft({ startsOn: 'nope' })).map((i) => i.code);
     expect(codes).not.toContain('day-outside-event-window');
+  });
+
+  it('stays quiet, per Day, while the window is reversed — that is event-invalid-date-window\'s report alone (#815)', () => {
+    // Both dates are individually valid ISO dates; only their ORDER is wrong.
+    // Before the fix, every Day also failed day-outside-event-window for the
+    // very defect eventCompletenessIssues already reports once.
+    const draft = launchableDraft({ startsOn: '2026-08-09', endsOn: '2026-08-07' });
+    const dayCodes = dayCompletenessIssues(draft).map((i) => i.code);
+    expect(dayCodes).not.toContain('day-outside-event-window');
+
+    const eventCodes = eventCompletenessIssues(draft).map((i) => i.code);
+    expect(eventCodes).toContain('event-invalid-date-window');
+
+    // One organizer mistake, one checklist row — not one plus one-per-Day.
+    expect(validateEventDraft(draft, NOW).filter((i) => i.code === 'day-outside-event-window')).toEqual(
+      [],
+    );
   });
 });
 

@@ -237,6 +237,84 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     expect(storage.raw.has('gcb:event-draft:bogus')).toBe(false);
   });
 
+  it('unreadable() names exactly what list() hides, and names nothing else (#814)', async () => {
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    await store.save(draft({ draftId: 'live' }));
+    storage.setItem('gcb:event-draft:retired', JSON.stringify({ ...draft(), v: 0 }));
+    storage.setItem('gcb:event-draft:junk', 'not json');
+    // Somebody else's key in the same origin — never this module's business.
+    storage.setItem('gcb:card-snapshot:med-2026:uid:day-1', 'unrelated');
+
+    const hidden = await store.unreadable();
+    expect(hidden.sort()).toEqual(['junk', 'retired']);
+    // Not the live, readable draft list() already shows.
+    expect(hidden).not.toContain('live');
+  });
+
+  it('unreadable() is the discovery path that makes discard() reachable for a hidden blob (#814)', async () => {
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    storage.setItem('gcb:event-draft:bogus', JSON.stringify({ ...draft(), v: 'tomorrow' }));
+
+    // Before: list() cannot see it, and nothing else names it as a
+    // discard() candidate.
+    expect(await store.list()).toEqual([]);
+
+    const [id] = await store.unreadable();
+    expect(id).toBe('bogus');
+
+    // unreadable() itself deletes nothing — same posture as list().
+    expect(storage.raw.has('gcb:event-draft:bogus')).toBe(true);
+
+    // The caller can now act on it explicitly.
+    await store.discard(id);
+    expect(storage.raw.has('gcb:event-draft:bogus')).toBe(false);
+  });
+
+  it('unreadable() also names a key/id-mismatched blob, by its real key suffix', async () => {
+    const storage = fakeStorage();
+    const store = createLocalDraftStore(storage, () => NOW);
+    // Stored under 'wrong-key', but the blob itself claims draftId 'embedded'.
+    // list() skips this without advertising either id (see the dedicated
+    // mismatch test below); unreadable() must still name a suffix that
+    // reaches the blob's ACTUAL key, not the one embedded inside it.
+    storage.setItem('gcb:event-draft:wrong-key', JSON.stringify(draft({ draftId: 'embedded' })));
+
+    const hidden = await store.unreadable();
+    expect(hidden).toEqual(['wrong-key']);
+
+    await store.discard('wrong-key');
+    expect(storage.raw.has('gcb:event-draft:wrong-key')).toBe(false);
+  });
+
+  it('unreadable() reports nothing when every draft is readable and correctly keyed', async () => {
+    const store = createLocalDraftStore(fakeStorage(), () => NOW);
+    await store.save(draft({ draftId: 'a' }));
+    await store.save(draft({ draftId: 'b' }));
+
+    expect(await store.unreadable()).toEqual([]);
+  });
+
+  it('unreadable() degrades to no results when the store throws, instead of crashing', async () => {
+    const hostile: Storage = {
+      get length(): number {
+        throw new Error('blocked');
+      },
+      key: () => {
+        throw new Error('blocked');
+      },
+      getItem: () => {
+        throw new Error('blocked');
+      },
+      setItem: () => {},
+      removeItem: () => {},
+      clear: () => {},
+    };
+    const store = createLocalDraftStore(hostile, () => NOW);
+    await expect(store.unreadable()).resolves.toEqual([]);
+  });
+
   it('discards one draft and leaves the rest, and discarding twice is not an error', async () => {
     const store = createLocalDraftStore(fakeStorage(), () => NOW);
     await store.save(draft({ draftId: 'a' }));
