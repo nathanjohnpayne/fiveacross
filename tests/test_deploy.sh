@@ -774,10 +774,14 @@ fi
 # ---------------------------------------------------------------------------
 # Case 11b (#768 r2): a credential that reads fine before publishing but fails
 # afterwards still fails the deploy loudly — the pre-publish check is not a
-# licence to swallow a later failure. GCLOUD_FAIL_AFTER=2 lets the two
-# read-only Step 1.6 describes through and fails everything after, which is
-# what an expired credential (or describe-without-update permission) looks
-# like from Step 2.5.
+# licence to swallow a later failure. GCLOUD_FAIL_AFTER lets the read-only
+# Step 1.6 describes through and fails everything after, which is what an
+# expired credential (or describe-without-update permission) looks like from
+# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — four since
+# #548 added the two auth-handoff callables (submitbugreport, emailunsubscribe,
+# mintauthhandoff, exchangeauthhandoff). Bump it when that set grows, or this
+# case silently stops testing the post-publish path and starts testing the
+# pre-publish abort instead.
 # ---------------------------------------------------------------------------
 REPO11B="$WORKDIR/case11b-invoker-late-fail"
 init_fixture_repo "$REPO11B"
@@ -792,7 +796,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-11b.log" \
 NPM_LOG="$WORKDIR/npm-calls-11b.log" \
 GCLOUD_CALL_COUNTER="$WORKDIR/gcloud-counter-11b" \
-GCLOUD_FAIL_AFTER=2 \
+GCLOUD_FAIL_AFTER=4 \
   bash -c "cd '$REPO11B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
   >"$OUT11B" 2>"$ERR11B"
 RC11B=$?
@@ -1210,9 +1214,20 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Case 16e (#768 Phase 4b P2): this repo's `functions:default` exclusion
-# removes its sole Firebase codebase, so its effective Hosting-only scope
-# neither needs gcloud nor mutates Cloud Run IAM.
+# Case 16e (#548, Codex P2 round 10 — REVERSES the #768 Phase 4b P2 conclusion
+# this case previously encoded): `--except functions:default` excludes NOTHING,
+# so Functions are still released and the invoker reconciliation must still run.
+#
+# The vendored source is decisive — firebase-tools/lib/filterTargets.js applies
+# `difference(targets, options.except.split(","))` with NO `:` splitting, so
+# "functions:default" is compared literally against the target name "functions",
+# matches nothing, and removes nothing. (`--only` DOES split on `:`, which is
+# why the two spellings legitimately differ there and cannot here.)
+#
+# The old assertion — that this scope touches no gcloud — was therefore
+# asserting the bug: Firebase released Functions, reset the invoker
+# annotations, and deploy.sh skipped the repair, leaving all three protected
+# endpoints 403.
 # ---------------------------------------------------------------------------
 REPO16E="$WORKDIR/case16e-unfamiliar-except"
 init_fixture_repo "$REPO16E"
@@ -1225,22 +1240,24 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-16e.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-16e.log" \
-GCLOUD_STUB_EXIT=1 \
   bash -c "cd '$REPO16E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions --except functions:default" \
   >"$OUT16E" 2>"$ERR16E"
 RC16E=$?
 set -e
 
 if [[ $RC16E -ne 0 ]]; then
-  fail "default-codebase-except: the excluded default-codebase scope returned $RC16E because gcloud was invoked. stderr was:"
+  fail "default-codebase-except: deploy.sh returned $RC16E. stderr was:"
   cat "$ERR16E" >&2
 elif ! grep -q 'op-firebase-deploy' "$WORKDIR/ofd-calls-16e.log"; then
   fail "default-codebase-except: deploy.sh never reached Firebase."
-elif [[ -s "$WORKDIR/gcloud-calls-16e.log" ]]; then
-  fail "default-codebase-except: deploy.sh invoked gcloud for endpoints excluded by functions:default. gcloud log was:"
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-16e.log"; then
+  fail "default-codebase-except: an exclusion that excludes NOTHING skipped the handoff reconciliation, leaving the released callables 403. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-16e.log" >&2
+elif ! grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-16e.log"; then
+  fail "default-codebase-except: the sibling endpoints were skipped too. gcloud log was:"
   cat "$WORKDIR/gcloud-calls-16e.log" >&2
 else
-  pass "default-codebase-except: functions:default skips protected-endpoint prechecks and mutations (rc=$RC16E)."
+  pass "default-codebase-except: --except functions:default excludes nothing, so every protected endpoint is still reconciled (rc=$RC16E)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -1612,6 +1629,389 @@ elif ! grep -q 'emailunsubscribe' "$WORKDIR/gcloud-calls-21.log"; then
   cat "$WORKDIR/gcloud-calls-21.log" >&2
 else
   pass "scoped-email-first-deploy: an emailUnsubscribe-only first deploy never touches unrelated submitbugreport (rc=$RC21)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22 (#548): a full Functions deploy reconciles BOTH auth-handoff services.
+#
+# The handoff callables are the first endpoints where a missed reconciliation
+# breaks authentication itself rather than one feature: an `allUsers` binding
+# rejected by the org policy leaves mintAuthHandoff and exchangeAuthHandoff
+# 403ing, and sign-in on every Event origin fails. Firebase reports that as a
+# PARTIAL deploy failure, which is precisely why this must be asserted rather
+# than assumed.
+# ---------------------------------------------------------------------------
+REPO22="$WORKDIR/case22-auth-handoff"
+init_fixture_repo "$REPO22"
+OUT22="$WORKDIR/case22.out"
+ERR22="$WORKDIR/case22.err"
+: >"$WORKDIR/ofd-calls-22.log"
+: >"$WORKDIR/gcloud-calls-22.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22.log" \
+  bash -c "cd '$REPO22' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$OUT22" 2>"$ERR22"
+RC22=$?
+set -e
+
+if [[ $RC22 -ne 0 ]]; then
+  fail "auth-handoff: a full Functions deploy returned $RC22. stderr was:"
+  cat "$ERR22" >&2
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-22.log"; then
+  fail "auth-handoff: deploy.sh never reconciled mintauthhandoff — sign-in would 403 after this deploy. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22.log" >&2
+elif ! grep -q 'exchangeauthhandoff' "$WORKDIR/gcloud-calls-22.log"; then
+  fail "auth-handoff: deploy.sh never reconciled exchangeauthhandoff — the exchange half would 403. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22.log" >&2
+else
+  pass "auth-handoff: a full Functions deploy reconciles both handoff services (rc=$RC22)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22b (#548): naming EITHER handoff endpoint reconciles the PAIR.
+#
+# Selecting one half releases a function whose partner must stay reachable for
+# sign-in to work at all, so an exact `functions:mintAuthHandoff` scope is a
+# selection of both services rather than of the one named.
+# ---------------------------------------------------------------------------
+REPO22B="$WORKDIR/case22b-auth-handoff-scoped"
+init_fixture_repo "$REPO22B"
+OUT22B="$WORKDIR/case22b.out"
+ERR22B="$WORKDIR/case22b.err"
+: >"$WORKDIR/ofd-calls-22b.log"
+: >"$WORKDIR/gcloud-calls-22b.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22b.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22b.log" \
+  bash -c "cd '$REPO22B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintAuthHandoff" \
+  >"$OUT22B" 2>"$ERR22B"
+RC22B=$?
+set -e
+
+if [[ $RC22B -ne 0 ]]; then
+  fail "auth-handoff-scoped: deploy.sh returned $RC22B. stderr was:"
+  cat "$ERR22B" >&2
+elif ! grep -q 'exchangeauthhandoff' "$WORKDIR/gcloud-calls-22b.log"; then
+  fail "auth-handoff-scoped: --only functions:mintAuthHandoff did not reconcile the exchange half. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22b.log" >&2
+elif grep -q 'submitbugreport' "$WORKDIR/gcloud-calls-22b.log"; then
+  fail "auth-handoff-scoped: deploy.sh inspected unrelated submitbugreport despite an exact handoff scope. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22b.log" >&2
+else
+  pass "auth-handoff-scoped: naming one handoff endpoint reconciles both services and nothing else (rc=$RC22B)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22c (#548 Codex P2 round 3): a scoped FIRST deploy of one handoff half
+# must not fail on the partner that does not exist yet.
+#
+# `--only functions:mintAuthHandoff` is a scoped deploy — it does not create
+# exchangeAuthHandoff — so on a first scoped deploy the partner service is
+# genuinely absent. Reconciling the pair strictly would fail on that NOT_FOUND
+# and exit deploy.sh nonzero even though Firebase succeeded: a false failure on
+# a correct deploy. Naming one half therefore reconciles the pair leniently.
+# ---------------------------------------------------------------------------
+REPO22C="$WORKDIR/case22c-auth-handoff-partner-absent"
+init_fixture_repo "$REPO22C"
+OUT22C="$WORKDIR/case22c.out"
+ERR22C="$WORKDIR/case22c.err"
+: >"$WORKDIR/ofd-calls-22c.log"
+: >"$WORKDIR/gcloud-calls-22c.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22c.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22c.log" \
+GCLOUD_MISSING_SERVICE="exchangeauthhandoff" \
+  bash -c "cd '$REPO22C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintAuthHandoff" \
+  >"$OUT22C" 2>"$ERR22C"
+RC22C=$?
+set -e
+
+if [[ $RC22C -ne 0 ]]; then
+  fail "auth-handoff-partner-absent: a scoped first deploy returned $RC22C because the unselected partner does not exist yet. stderr was:"
+  cat "$ERR22C" >&2
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-22c.log"; then
+  fail "auth-handoff-partner-absent: the SELECTED half was never reconciled. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22c.log" >&2
+else
+  pass "auth-handoff-partner-absent: a scoped first deploy tolerates the absent partner and still reconciles the selected half (rc=$RC22C)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22d (#548 Codex P2 round 3): a FULL Functions deploy stays strict.
+#
+# The leniency above is scoped to a partial selection. A whole-`functions`
+# deploy releases both halves, so a service still missing afterwards is a real
+# failure and must not be swallowed — otherwise the lenient path would quietly
+# become the only path and a 403ing callable would ship green.
+# ---------------------------------------------------------------------------
+REPO22D="$WORKDIR/case22d-auth-handoff-strict"
+init_fixture_repo "$REPO22D"
+OUT22D="$WORKDIR/case22d.out"
+ERR22D="$WORKDIR/case22d.err"
+: >"$WORKDIR/ofd-calls-22d.log"
+: >"$WORKDIR/gcloud-calls-22d.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22d.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22d.log" \
+GCLOUD_MISSING_SERVICE="exchangeauthhandoff" \
+  bash -c "cd '$REPO22D' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$OUT22D" 2>"$ERR22D"
+RC22D=$?
+set -e
+
+if [[ $RC22D -eq 0 ]]; then
+  fail "auth-handoff-strict: a full Functions deploy returned 0 though exchangeauthhandoff is still missing afterwards — the lenient path leaked into the strict one. stdout was:"
+  cat "$OUT22D" >&2
+else
+  pass "auth-handoff-strict: a full Functions deploy still fails loud when a handoff service is missing after publish (rc=$RC22D)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22e (#548 Codex P2 round 4): the SELECTED half stays strict.
+#
+# The companion to 22c. Tolerating the absent partner must not decay into
+# tolerating any absent service: if the half the deploy actually RELEASED is
+# missing afterwards, that is precisely the 403 this mechanism exists to catch,
+# and it must fail loud. One shared leniency bit for both services would make
+# this case pass silently, which is what makes it worth pinning.
+# ---------------------------------------------------------------------------
+REPO22E="$WORKDIR/case22e-auth-handoff-selected-missing"
+init_fixture_repo "$REPO22E"
+OUT22E="$WORKDIR/case22e.out"
+ERR22E="$WORKDIR/case22e.err"
+: >"$WORKDIR/ofd-calls-22e.log"
+: >"$WORKDIR/gcloud-calls-22e.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22e.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22e.log" \
+GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+  bash -c "cd '$REPO22E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:mintAuthHandoff" \
+  >"$OUT22E" 2>"$ERR22E"
+RC22E=$?
+set -e
+
+if [[ $RC22E -eq 0 ]]; then
+  fail "auth-handoff-selected-missing: deploy.sh returned 0 though the SELECTED half is missing after publish — the partner leniency leaked onto the deployed service. stdout was:"
+  cat "$OUT22E" >&2
+else
+  pass "auth-handoff-selected-missing: a scoped deploy still fails when the half it released is missing afterwards (rc=$RC22E)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22f (#548 Codex P1 round 4): a skipped reconciliation that RELEASED the
+# handoff must say so.
+#
+# `scripts/deploy-target.mjs` auto-injects --skip-invoker for the fiveacross
+# target — the project the handoff lives in — so this is the routine path, not
+# an edge case. The skip cannot be silent: a 403 on these two callables is
+# sign-in unavailable on every Event origin.
+# ---------------------------------------------------------------------------
+REPO22F="$WORKDIR/case22f-auth-handoff-skip-warns"
+init_fixture_repo "$REPO22F"
+OUT22F="$WORKDIR/case22f.out"
+ERR22F="$WORKDIR/case22f.err"
+: >"$WORKDIR/ofd-calls-22f.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22f.log" \
+  bash -c "cd '$REPO22F' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-invoker -- fiveacross --only functions" \
+  >"$OUT22F" 2>"$ERR22F"
+RC22F=$?
+set -e
+
+if [[ $RC22F -ne 0 ]]; then
+  fail "auth-handoff-skip-warns: deploy.sh returned $RC22F. stderr was:"
+  cat "$ERR22F" >&2
+elif ! grep -q 'RELEASED but NOT reconciled' "$ERR22F"; then
+  fail "auth-handoff-skip-warns: --skip-invoker silently skipped a release that included the handoff. stderr was:"
+  cat "$ERR22F" >&2
+elif ! grep -q 'set-auth-handoff-invoker.sh' "$ERR22F"; then
+  fail "auth-handoff-skip-warns: the warning did not name the manual repair command. stderr was:"
+  cat "$ERR22F" >&2
+else
+  pass "auth-handoff-skip-warns: a skipped reconciliation that released the handoff warns loudly and names the repair (rc=$RC22F)."
+fi
+
+# ---------------------------------------------------------------------------
+# Cases 22g / 22h (#548, CodeRabbit round 5): an EXPLICIT half name outranks the
+# conservative inference, in EITHER selector order.
+#
+# `functions:<unfamiliar>` sets the conservative bit as a guess that the group
+# might contain a handoff endpoint. Naming a half outright is a fact that it was
+# released. When the guess came first it used to win, so a combined scope
+# tolerated the deployed half being absent — the same hole 22e closed for simple
+# scopes, reopened for combined ones. Both orders are pinned because the defect
+# was order-dependent, which is exactly the kind of thing that regresses.
+# ---------------------------------------------------------------------------
+for combined_case in "22g:functions:someGroup,functions:mintAuthHandoff" "22h:functions:mintAuthHandoff,functions:someGroup"; do
+  case_id="${combined_case%%:*}"
+  scope="${combined_case#*:}"
+  REPO_C="$WORKDIR/case${case_id}-combined-scope"
+  init_fixture_repo "$REPO_C"
+  OUT_C="$WORKDIR/case${case_id}.out"
+  ERR_C="$WORKDIR/case${case_id}.err"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+    bash -c "cd '$REPO_C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only $scope" \
+    >"$OUT_C" 2>"$ERR_C"
+  RC_C=$?
+  set -e
+
+  if [[ $RC_C -eq 0 ]]; then
+    fail "combined-scope ($case_id, --only $scope): returned 0 though the explicitly named mintauthhandoff is missing — the conservative guess outranked the explicit name. stdout was:"
+    cat "$OUT_C" >&2
+  else
+    pass "combined-scope ($case_id, --only $scope): an explicitly named half stays strict despite an unfamiliar selector in the same scope (rc=$RC_C)."
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Case 22i (#548, Codex P2 round 5): the codebase-qualified scope stays strict.
+#
+# Firebase accepts BOTH `functions:<fn>` and `functions:<codebase>:<fn>` for a
+# scoped function deploy. Matching only the short form sent the qualified one
+# into the unfamiliar-selector arm, where both halves went lenient — so the
+# service the operator explicitly scoped could vanish unnoticed.
+# ---------------------------------------------------------------------------
+REPO22I="$WORKDIR/case22i-codebase-qualified"
+init_fixture_repo "$REPO22I"
+OUT22I="$WORKDIR/case22i.out"
+ERR22I="$WORKDIR/case22i.err"
+: >"$WORKDIR/ofd-calls-22i.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22i.log" \
+GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+  bash -c "cd '$REPO22I' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default:mintAuthHandoff" \
+  >"$OUT22I" 2>"$ERR22I"
+RC22I=$?
+set -e
+
+if [[ $RC22I -eq 0 ]]; then
+  fail "codebase-qualified: --only functions:default:mintAuthHandoff returned 0 though the scoped mintauthhandoff is missing — the qualified form bypassed strict-half tracking. stdout was:"
+  cat "$OUT22I" >&2
+else
+  pass "codebase-qualified: functions:<codebase>:<fn> keeps the scoped half strict (rc=$RC22I)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22j (#548, Codex P2 round 5): endpoint-qualified --except relaxes nothing.
+#
+# Firebase's --except subtracts exact TOP-LEVEL target names, so
+# `--except functions:mintAuthHandoff` subtracts nothing from `functions` and
+# the complete Functions target is still released — including the endpoint the
+# operator believed they excluded. Treating it as an exclusion would swallow a
+# NOT_FOUND on a service Firebase was actually asked to deploy.
+# ---------------------------------------------------------------------------
+REPO22J="$WORKDIR/case22j-except-not-a-filter"
+init_fixture_repo "$REPO22J"
+OUT22J="$WORKDIR/case22j.out"
+ERR22J="$WORKDIR/case22j.err"
+: >"$WORKDIR/ofd-calls-22j.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22j.log" \
+GCLOUD_MISSING_SERVICE="mintauthhandoff" \
+  bash -c "cd '$REPO22J' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --except functions:mintAuthHandoff" \
+  >"$OUT22J" 2>"$ERR22J"
+RC22J=$?
+set -e
+
+if [[ $RC22J -eq 0 ]]; then
+  fail "except-not-a-filter: --except functions:mintAuthHandoff returned 0 though mintauthhandoff is missing and Firebase still released it. stdout was:"
+  cat "$OUT22J" >&2
+else
+  pass "except-not-a-filter: an endpoint-qualified --except keeps both halves strict (rc=$RC22J)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22k (#548, Codex P2 round 6): `--only functions:default` is a FULL
+# Functions release and must stay strict.
+#
+# This repo has one Firebase codebase, `default`, so naming it carries no
+# endpoint filter and releases both handoff callables exactly like the bare
+# `functions` scope. Falling through to the unfamiliar-selector arm made it
+# conservative, which could report success over a released service that was
+# missing. The --except side already treated functions:default as the whole
+# codebase; this pins that --only agrees.
+# ---------------------------------------------------------------------------
+REPO22K="$WORKDIR/case22k-default-codebase"
+init_fixture_repo "$REPO22K"
+OUT22K="$WORKDIR/case22k.out"
+ERR22K="$WORKDIR/case22k.err"
+: >"$WORKDIR/ofd-calls-22k.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22k.log" \
+GCLOUD_MISSING_SERVICE="exchangeauthhandoff" \
+  bash -c "cd '$REPO22K' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions:default" \
+  >"$OUT22K" 2>"$ERR22K"
+RC22K=$?
+set -e
+
+if [[ $RC22K -eq 0 ]]; then
+  fail "default-codebase: --only functions:default returned 0 though a released handoff service is missing — the whole-codebase scope went conservative. stdout was:"
+  cat "$OUT22K" >&2
+else
+  pass "default-codebase: --only functions:default keeps both handoff halves strict (rc=$RC22K)."
+fi
+
+# ---------------------------------------------------------------------------
+# Case 22l (#548, Codex P2 round 8): a BARE deploy.sh invocation still pins the
+# reconciliation project.
+#
+# DEPLOY_TARGET_PROJECT is set only by scripts/deploy-target.mjs. The documented
+# `scripts/deploy.sh -- <project>` entry point leaves it unset, so without a
+# DEPLOY_PROJECT fallback the handoff wrapper falls back to its OWN default —
+# `fiveacross`, unlike its siblings' `gaycruisebingo` — and reconciles the wrong
+# project while the callables just deployed stay 403.
+# ---------------------------------------------------------------------------
+REPO22L="$WORKDIR/case22l-bare-project-pin"
+init_fixture_repo "$REPO22L"
+OUT22L="$WORKDIR/case22l.out"
+ERR22L="$WORKDIR/case22l.err"
+: >"$WORKDIR/ofd-calls-22l.log"
+: >"$WORKDIR/gcloud-calls-22l.log"
+
+set +e
+PATH="$STUB_DIR:$PATH" \
+OFD_LOG="$WORKDIR/ofd-calls-22l.log" \
+GCLOUD_LOG="$WORKDIR/gcloud-calls-22l.log" \
+  bash -c "cd '$REPO22L' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions" \
+  >"$OUT22L" 2>"$ERR22L"
+RC22L=$?
+set -e
+
+if [[ $RC22L -ne 0 ]]; then
+  fail "bare-project-pin: deploy.sh returned $RC22L. stderr was:"
+  cat "$ERR22L" >&2
+elif grep -q 'fiveacross' "$WORKDIR/gcloud-calls-22l.log"; then
+  fail "bare-project-pin: a bare gaycruisebingo deploy reconciled fiveacross — the handoff wrapper's own default leaked through. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22l.log" >&2
+elif ! grep -q 'mintauthhandoff' "$WORKDIR/gcloud-calls-22l.log"; then
+  fail "bare-project-pin: the handoff services were never reconciled at all. gcloud log was:"
+  cat "$WORKDIR/gcloud-calls-22l.log" >&2
+else
+  pass "bare-project-pin: a bare deploy.sh invocation pins every wrapper to the resolved deploy project (rc=$RC22L)."
 fi
 
 # ---------------------------------------------------------------------------

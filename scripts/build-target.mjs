@@ -56,16 +56,32 @@ export const DEPLOY_TARGETS = Object.freeze({
     }),
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
-    // scripts/set-bug-report-invoker.sh and scripts/set-email-unsubscribe-invoker.sh
-    // default to (and are only documented/provisioned for) the gaycruisebingo
-    // project's Cloud Run services. The fiveacross deploy credential is that
-    // project's own Firebase-vault SA key, which is not provisioned with IAM
-    // access to describe or update a gaycruisebingo Cloud Run service — running
-    // the reconciliation unconditionally here would fail on a permissions error
-    // for a check this target doesn't need, not silently no-op. Opt out until
-    // (if ever) the same org-policy constraint is confirmed and provisioned for
-    // fiveacross; the scripts already support that via BUG_REPORT_PROJECT=fiveacross
-    // / EMAIL_UNSUBSCRIBE_PROJECT=fiveacross for a manual, break-glass run.
+    // Opted out because this target's deploy credential — the fiveacross
+    // Firebase-vault SA key — is not known to hold run.services.update on this
+    // project, and Step 1.6 ABORTS BEFORE PUBLISHING on a PERMISSION_DENIED.
+    // Enabling it on an unverified assumption would therefore not degrade to a
+    // warning; it would break every Five Across deploy outright.
+    //
+    // The ORIGINAL reason recorded here — that the wrappers would target
+    // gaycruisebingo's services from a fiveacross credential — no longer holds:
+    // scripts/deploy.sh pins BUG_REPORT_PROJECT / EMAIL_UNSUBSCRIBE_PROJECT /
+    // AUTH_HANDOFF_PROJECT to the selected deploy target (#768 r4), so the
+    // reconciliation is same-project now. What remains is purely the unproven
+    // IAM grant above.
+    //
+    // ⚠️  THIS SKIP NOW HIDES A REAL GAP (#548, Codex P1 round 4). The auth
+    // handoff lives in THIS project, and Domain Restricted Sharing applies
+    // here too, so a routine `npm run deploy:fiveacross` releases
+    // mintAuthHandoff and exchangeAuthHandoff and leaves both 403 — which is
+    // sign-in unavailable on every Event origin, not one degraded feature.
+    // deploy.sh prints a loud warning naming the manual repair whenever it
+    // skips a release that included the handoff, so the gap is visible rather
+    // than silent, and it is harmless only while the handoff has no caller
+    // (#549 client half and #547 central origin are both outstanding).
+    //
+    // TO CLOSE IT: grant the fiveacross deploy SA run.services.update on
+    // fiveacross, confirm the wrappers succeed there, then flip this to false.
+    // That is a console/IAM action, so it cannot ship in a code PR.
     skipInvokerReconcile: true,
   }),
 });

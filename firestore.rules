@@ -463,6 +463,42 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Centralised-auth handoff codes (ADR 0010, specs/auth-handoff.md, #548).
+    //
+    // Keyed by the SHA-256 of the code, not the code itself, so the stored
+    // document is not a redeemable credential even to a reader who obtains it.
+    //
+    // DENIED TO EVERY CLIENT, in both directions, and each direction closes a
+    // different account takeover:
+    //
+    //   READS. A document here is the live authorization to become its `uid`.
+    //   The code is single-use and short-lived, but neither property helps if a
+    //   client can enumerate unconsumed documents and redeem one first — that is
+    //   a sign-in as somebody else, which is the strongest thing this schema has
+    //   to protect. Note the deny covers `get` as well as `list`: unlike
+    //   `hostnames/{host}` above, where a caller can only `get` an address it
+    //   already knows, the document id here IS the secret being guarded.
+    //
+    //   WRITES. A client that could create a document could mint itself a code
+    //   bound to another player's uid, skipping Google sign-in altogether. A
+    //   client that could update one could clear `consumedAt` and replay a code
+    //   it had already spent, or push `expiresAt` forward and keep a stolen code
+    //   alive indefinitely. Single-use and expiry are only real while the
+    //   document backing them is unwritable.
+    //
+    // The Admin SDK bypasses rules, so the two Cloud Functions in
+    // `functions/src/authHandoff.ts` are the collection's ONLY writers, and the
+    // consume is a transaction there rather than a rules condition — rules
+    // cannot express "read this, then write it, atomically."
+    //
+    // A deny-all block reads like it could be deleted as redundant with
+    // Firestore's default deny. It cannot: `tests/rules/auth-handoff.test.ts` is
+    // what turns "we meant to deny it" into a failing test if a later edit
+    // widens it, deliberately or by a wildcard.
+    match /authHandoffs/{codeHash} {
+      allow read, write: if false;
+    }
+
     // Public hostname -> Event lookup (ADR 0009, specs/hostnames-lookup.md).
     //
     // One document per public address, keyed by the FULL hostname:
