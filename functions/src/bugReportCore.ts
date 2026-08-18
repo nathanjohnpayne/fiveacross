@@ -1,6 +1,9 @@
 import contract from './bugReportContract.cjs';
+import type { BugReportKind } from './bugReportContract.cjs';
 
 const { validateClientReportFields, validatePngBytes } = contract;
+
+export type { BugReportKind };
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_MAX = 3;
 
@@ -15,6 +18,9 @@ export class BugReportInputError extends Error {
 
 export interface ValidBugReport {
   schemaVersion: 1;
+  /** `bug` unless the reporter marked this abuse. Normalised by the shared
+   *  contract, so an absent or unknown value arrives here as `bug` (#670). */
+  kind: BugReportKind;
   description: string;
   screenshot: Buffer | null;
   captureError: string | null;

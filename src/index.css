@@ -2997,6 +2997,39 @@ body.install-prompt-visible.update-prompt-visible .bug-report-pick {
   font-size: 13px;
   font-weight: 600;
 }
+/* The bug/abuse choice (#670). A bare fieldset renders with a browser default
+   border and inline padding that reads as a stray box inside the sheet, so it
+   is reset to a plain stacked group; the legend keeps `.bug-report-label`'s
+   type so the group heading matches "What happened?" above the textarea. */
+.bug-report-kind {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* The whole label is the tap target, and it has to be a REAL 44px on a
+   phone-first UI — a 13px line plus a few px of padding measures ~24px, which
+   is the sort of thing a comment can claim and the box model quietly refuse.
+   `min-height` rather than padding so the row grows only when the text alone
+   would not reach the floor. */
+.bug-report-kind-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.bug-report-kind-option input {
+  /* A 16px control inside that 44px row: the label carries the target, so the
+     dot itself never has to. */
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  flex: none;
+}
 .bug-report-description {
   width: 100%;
   resize: vertical;
