@@ -138,7 +138,7 @@ Deletion is the one thing that ends it, and the delay can be long: a digest with
 
 - **Given** alerts of both kinds **then** the digest carries both modules in order, and the subject names both counts. (Test: "renders both modules and names both counts".)
 - **Given** an abuse alert and an approval **then** "Abuse reports" renders first and the subject names its count first. (Test: "renders abuse in its OWN module, ahead of the moderation ones, and names it in the subject".)
-- **Given** two abuse reports **then** two rows, each carrying its own report ID. (Test: "renders one row per REPORT, never collapsing two abuse reports into one".)
+- **Given** two genuine abuse reports **then** two rows, each carrying its own report ID; a retried intake with the same submission identity is the same report and therefore produces only one source document and one trigger identity ([#853](https://github.com/nathanjohnpayne/gaycruisebingo/issues/853)). (Test: "renders one row per REPORT, never collapsing two abuse reports into one".)
 - **Given** more abuse rows than the cap **then** the overflow names the bug-report inbox. (Test: "points its overflow at the bug-report inbox, not at the Review queue the CTA opens".)
 - **Given** alerts of one kind **then** the other module is absent entirely. (Test: "omits a module with no rows".)
 - **Given** a report and the hide it caused **then** the review module shows ONE row, carrying the hide. (Test: "collapses a report and its auto-hide into one row".)
