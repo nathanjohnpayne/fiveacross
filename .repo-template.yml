@@ -46,10 +46,9 @@ spec_test_map:
     - src/data/eventDraft.test.ts
     - src/data/occasions.test.ts
     - src/data/draftValidation.test.ts
-  # event-resolution's coverage is module-named (the decision table, the
-  # Firestore seam, the Edition brand table, the component surfaces that render
-  # it, and the production target/build composition), so none share the spec
-  # basename — map them all explicitly.
+  # event-resolution's coverage is module-named across the client decision,
+  # branding, production target/build composition, and authenticated predeploy
+  # seams, so the tests do not share the spec basename — map them explicitly.
   event-resolution:
     - src/eventResolution.test.ts
     - src/data/hostnames.test.ts
@@ -59,6 +58,9 @@ spec_test_map:
     - src/auth-domain.test.ts
     - scripts/build-target.test.mjs
     - scripts/fiveacross-origin.integration.test.mjs
+    - scripts/verify-deploy-hostnames.test.mjs
+    - scripts/deploy-target.test.mjs
+    - scripts/firebase/op-firebase-deploy.test.mjs
   # cells-map's pure boundary lives in src/game/cells.test.ts (module-named,
   # not spec-basename-named); the offline no-clobber proof matches by name.
   cells-map:

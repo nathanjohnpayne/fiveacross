@@ -31,6 +31,10 @@ A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host
 
 The Five Across target is the generic hostname-resolved origin behind the Worker router ([#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545)). Its target file must contain the `VITE_EVENT_ID` key with an exact empty value; target validation rejects any non-empty value and the wrapper scrubs stale ambient `VITE_*` variables before Vite starts. Each active serving hostname supplies Event, runtime Edition and adult-content posture from its live routing document before mount. Lookup failure is deliberately fail-closed to the `unreachable` screen rather than mounting a fallback Event.
 
+That fail-closed choice has an accepted availability cost. A first visit with no cached active mapping cannot mount on a captive or degraded network because the app cannot prove which Event the hostname serves. A returning visitor with a stale-but-active cache can still mount; a document that is missing or inactive removes the cache and stays not-found. Serving an unproved fallback Event would cross the routing boundary, so #961 does not trade that safety property away. The 12-hour client cache bounds ordinary revalidation but does not eliminate the cold-first-visit case.
+
+Every named Five Across deploy therefore performs a read-only predeploy check **before both build and publish**. Through the same explicit `fiveacross` deploy credential path used for Firebase publish, it reads the masked `eventId` and `status` fields for the canonical three-host inventory in `scripts/provision-bodega-preview.mjs`. The deploy fails before building if any document is missing, malformed, inactive, points anywhere except `bodega-bay-2026`, cannot be read, or comes back outside the `fiveacross` project. This catches a shared configuration outage before release; it does not make a cold client's later network reliable. It deliberately does not validate `canonicalHost`: #601 owns that separate lifecycle, and #529 still owns route attachment.
+
 Static browser/PWA identity is a separate constraint. The trusted target registry supplies `vacay` as the static fallback so the three existing Bodega hosts retain their current HTML, manifest and link-preview identity. That fallback never chooses the runtime Event or Edition. Until #546 supplies per-host static rewriting, do not attach a non-Vacay Edition hostname to the wildcard.
 
 ## Target environment files
@@ -59,7 +63,7 @@ After #547 is complete, run from the clean, current `main` checkout:
 npm run deploy:fiveacross:hosting
 ```
 
-Use `npm run deploy:fiveacross` to deploy every configured Firebase surface. The command builds from `.env.fiveacross`, passes `fiveacross` explicitly, skips the Gay Cruise Bingo Cloudflare zone, and verifies the canonical Five Across host.
+Use `npm run deploy:fiveacross` to deploy every configured Firebase surface. The command first verifies all three serving hostname documents, builds from `.env.fiveacross`, passes `fiveacross` explicitly, skips the Gay Cruise Bingo Cloudflare zone, and runs the post-deploy synthetic on the canonical Five Across host.
 
 The existing deploy guards require `main`, an exact `HEAD == origin/main`, and a clean worktree. A target command failing one of those checks should be fixed rather than bypassed with `--force`. Every named target rebuilds its own `dist/`; `--skip-build` is intentionally unavailable because a bundle built for another target would be unsafe to deploy.
 
