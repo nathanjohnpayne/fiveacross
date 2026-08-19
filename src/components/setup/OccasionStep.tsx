@@ -24,7 +24,24 @@ import OccasionChangeConfirm from './OccasionChangeConfirm';
  * `occasion: null`, a non-baseline `edition`, and every other field at
  * baseline would otherwise slip past this check and have its stored edition
  * silently replaced with no confirmation.
+ *
+ * The `settings` half is compared STRUCTURALLY (`settingsEqual` below)
+ * rather than field-by-field (#860): `applyOccasionDefaults` replaces the
+ * ENTIRE settings object, one property at a time hand-enumerated here would
+ * silently stop covering it the moment `EventDraftSettings` grows a new
+ * field — a null-occasion draft customized ONLY in that new field would
+ * still read as "fresh" and be committed over without confirmation, the
+ * exact silent-overwrite class of bug this function exists to prevent.
+ * Comparing every key `Object.keys` actually finds means a new field is
+ * covered automatically, with no edit needed here when one is added.
  */
+function settingsEqual(a: EventDraft['settings'], b: EventDraft['settings']): boolean {
+  const aKeys = Object.keys(a) as (keyof EventDraft['settings'])[];
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => a[key] === b[key]);
+}
+
 function unsetOccasionLooksFresh(draft: EventDraft): boolean {
   const baseline = createEventDraft();
   return (
@@ -33,14 +50,7 @@ function unsetOccasionLooksFresh(draft: EventDraft): boolean {
     draft.claimMode === baseline.claimMode &&
     draft.defaultTheme === baseline.defaultTheme &&
     draft.days.length === baseline.days.length &&
-    draft.settings.reportHideThreshold === baseline.settings.reportHideThreshold &&
-    draft.settings.spicyRatio === baseline.settings.spicyRatio &&
-    draft.settings.easyMixRatio === baseline.settings.easyMixRatio &&
-    draft.settings.forceAdult === baseline.settings.forceAdult &&
-    draft.settings.photoProofSource === baseline.settings.photoProofSource &&
-    draft.settings.stripPhotoExif === baseline.settings.stripPhotoExif &&
-    draft.settings.visionGate === baseline.settings.visionGate &&
-    draft.settings.dailyEmailEnabled === baseline.settings.dailyEmailEnabled
+    settingsEqual(draft.settings, baseline.settings)
   );
 }
 
