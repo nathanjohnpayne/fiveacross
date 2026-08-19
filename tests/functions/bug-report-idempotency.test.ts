@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   deriveBugReportId,
   deriveBugReportRequestHash,
+  deriveReporterHash,
   handleSubmitBugReport,
   submitValidatedBugReport,
   verifyBugReportRequestHash,
@@ -25,6 +26,10 @@ const base = () => validateBugReportInput({
 });
 
 describe('idempotent bug-report identities', () => {
+  it('pins the reporter hash used by report intake and delayed escalation', () => {
+    expect(deriveReporterHash('user-123')).toBe('fcdec6df4d44dbc637c7');
+  });
+
   it('pins the domain-separated report id vector', () => {
     expect(deriveBugReportId('user-123', 'submission_ABC-123')).toBe(
       '9420c2c8ea097b5021d35c3b906af0695d6938598705de4eb4452a1bfeebc1e9',

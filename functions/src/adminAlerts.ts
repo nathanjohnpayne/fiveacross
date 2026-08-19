@@ -37,13 +37,13 @@
  * dependencies are injected, so the whole flow is unit-testable without a
  * Functions runtime (mirrors `dailyEmail.ts` and `autohide.ts`).
  */
-import { createHash } from 'node:crypto';
 import { resolveAdminEmails, type ResolveDeps } from './notify';
 import { resolveEmailFrom, resolveEventOrigin } from './dailyEmail';
 import { firestoreErrorCodeForLog, isAlreadyExists } from './firestoreErrors';
 import {
   BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS,
   BUG_REPORT_ESCALATION_RETRY_WINDOW_MS,
+  deriveReporterHash,
 } from './bugReports';
 import {
   buildAdminDigestModel,
@@ -785,7 +785,7 @@ function reportMatchesEscalation(
     ) &&
     report.eventId === task.eventId &&
     report.reporterHash === task.reporterHash &&
-    createHash('sha256').update(task.reporterUid).digest('hex').slice(0, 20) === task.reporterHash
+    deriveReporterHash(task.reporterUid) === task.reporterHash
   );
 }
 
