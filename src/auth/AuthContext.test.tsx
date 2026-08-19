@@ -90,6 +90,16 @@ function deferred<T>() {
   return { promise, settle, fail };
 }
 
+// Builds a durable `${timestamp}:${token}` record (Phase 4b P1 round 3 on
+// #836 — see AuthContext.tsx's `liveStampedToken`/`rawStampedToken`). Tests
+// pass a fixed `token` (often 'tok-a' for "this attempt" vs 'tok-b' for "a
+// different, unrelated same-origin tab's attempt") so cross-attempt
+// correlation scenarios are deterministic rather than relying on two calls
+// to `Date.now()` happening to differ.
+function stamp(token: string, at: number = Date.now()): string {
+  return `${at}:${token}`;
+}
+
 const mount = () =>
   render(
     <AuthProvider>
@@ -551,11 +561,17 @@ describe('AuthContext deal-error hardening', () => {
   });
 
   it('persists the checked 18+ acknowledgement after returning from mobile redirect sign-in', async () => {
-    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+    // All three records carry the SAME attempt token (Phase 4b P1 round 3 on
+    // #836): the marker (session-scoped) and the pending record (durable)
+    // are what `signIn()` actually writes together at redirect start, and
+    // the acknowledgement record must correlate with both for the
+    // attestation to be trusted.
+    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+    localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
     // What the redirect START writes when the box was shown and ticked (#608,
     // Phase 4b round 4). The return path reads THIS, never the posture as it
     // stands on return.
-    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
     mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
     mount();
@@ -565,6 +581,7 @@ describe('AuthContext deal-error hardening', () => {
     expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
     // Consumed exactly once, so a later mount cannot re-attest off a stale record.
     expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBeNull();
+    expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
   });
 
   // THE ROUND-4 P1. An Event that turns adult while the player is away at Google
@@ -589,9 +606,10 @@ describe('AuthContext deal-error hardening', () => {
   });
 
   it('ignores an EXPIRED acknowledgement record', async () => {
-    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
+    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+    localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
     // An abandoned redirect from days ago must not authorize this sign-in.
-    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a', Date.now() - 24 * 60 * 60 * 1000));
     mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
     mount();
@@ -606,8 +624,9 @@ describe('AuthContext deal-error hardening', () => {
   // Codex P2 round 7 on #836: same clock-skew guard as the pending record's
   // regression test — a future-dated ack record must not read as live.
   it('treats a future-dated acknowledgement record as expired, not live', async () => {
-    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
-    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now() + 60 * 60 * 1000));
+    sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+    localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a', Date.now() + 60 * 60 * 1000));
     mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
     mount();
@@ -632,22 +651,31 @@ describe('AuthContext deal-error hardening', () => {
     expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
-  it('completes a redirect return whose app marker was lost: login and attestation still land (#346)', async () => {
+  // Phase 4b P1 round 3 on #836 — narrows this test's original #346
+  // guarantee, per the external security review: the acknowledgement record
+  // living in localStorage survives the marker drop, but on its own it is
+  // an ORIGIN-WIDE singleton with no attempt identifier, so a different
+  // same-origin tab's own redirect could overwrite it with a DIFFERENT
+  // attempt's token. Verifying it is THIS attempt's own acknowledgement
+  // requires the session-storage token specifically — the one piece of
+  // state no other tab can ever have written — which is exactly what is
+  // lost here. So `login` still lands (Firebase-verified, low-stakes), but
+  // the attestation does NOT: it cannot be confirmed as belonging to this
+  // return rather than a different tab's, and the existing re-prompt
+  // collects it instead. This is a deliberate, reviewed narrowing of the
+  // original #765 decision text (which asked for both to land here) — see
+  // the PR body and specs/w1-auth-google.md for the reasoning.
+  it('completes a redirect return whose app marker was lost: login lands, attestation is withheld (#346, narrowed by Phase 4b P1 round 3)', async () => {
     // No sessionStorage marker — Safari dropped it across the provider
     // round-trip — but Firebase still hands back the completed redirect.
-    //
-    // The acknowledgement record is in localStorage precisely so it SURVIVES
-    // that drop (Phase 4b round 4): #346's guarantee is kept intact rather than
-    // traded away for the fix above. Same partitioning that loses the marker
-    // leaves this — which is also how Firebase restores the session at all.
-    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+    localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
     mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
     mount();
 
-    await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER));
-    expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
-    expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' });
+    await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
   it('keeps a marker-less redirect rejection out of analytics: no phantom login_failed (#346)', async () => {
@@ -694,9 +722,9 @@ describe('AuthContext deal-error hardening', () => {
     // no marker; only `getRedirectResult` itself (Firebase-verified,
     // attempt-scoped) may.
     it('fires login via signal (b) but never attests, even with the marker present', async () => {
-      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -728,8 +756,8 @@ describe('AuthContext deal-error hardening', () => {
       // No sessionStorage marker — lost, as in #346, OR this could be an
       // entirely different, unrelated same-origin tab; the two are
       // indistinguishable from here, so both are treated the same way.
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -749,10 +777,10 @@ describe('AuthContext deal-error hardening', () => {
     // full confirmation later. Left standing, they simply expire on their
     // own TTL if truly abandoned.
     it('leaves the durable records standing after an unconfirmed signal (b) completion', async () => {
-      const pendingAt = String(Date.now());
-      const ackAt = String(Date.now());
-      localStorage.setItem(REDIRECT_PENDING_KEY, pendingAt);
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackAt);
+      const pendingRecord = stamp('tok-a');
+      const ackRecord = stamp('tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, pendingRecord);
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackRecord);
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -762,8 +790,8 @@ describe('AuthContext deal-error hardening', () => {
       await signInUser();
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
 
-      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(pendingAt);
-      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackAt);
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(pendingRecord);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackRecord);
     });
 
     // Phase 4b P1 on #836: signal (b) is scoped to the mount's OWN first-ever
@@ -771,7 +799,7 @@ describe('AuthContext deal-error hardening', () => {
     // collision — a stale record surviving into an ALREADY-SETTLED, already-
     // running tab's LATER, unrelated auth event.
     it('does not fire login via signal (b) once this mount has already had its first auth settle', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -791,14 +819,15 @@ describe('AuthContext deal-error hardening', () => {
     });
 
     it('fires login exactly once and attests exactly once when both signals arrive for the same return', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
       mount();
       await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledWith(FAKE_USER));
       // onAuthStateChanged also publishes the same User, as it does for a real
-      // completed redirect — the shared latch must make this a no-op.
+      // completed redirect — the shared outcome state must make this a no-op.
       await signInUser();
 
       expect(mocks.attestAdult).toHaveBeenCalledTimes(1);
@@ -807,8 +836,9 @@ describe('AuthContext deal-error hardening', () => {
     });
 
     it('lets a Firebase-verified result finish attestation after signal (b) already logged in', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       const redirect = deferred<{ user: typeof FAKE_USER }>();
       mocks.getRedirectResult.mockReturnValueOnce(redirect.promise);
 
@@ -834,8 +864,8 @@ describe('AuthContext deal-error hardening', () => {
       // An abandoned redirect from days ago must not "complete" an unrelated
       // later sign-in the moment onAuthStateChanged happens to publish a User —
       // which is what an ordinary cached-session restore does on every reload.
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a', Date.now() - 24 * 60 * 60 * 1000));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -865,7 +895,7 @@ describe('AuthContext deal-error hardening', () => {
     });
 
     it('fires login with no attestation when the pending record is live but no acknowledgement was collected', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       // No SIGNIN_ADULT_ACK_KEY: the gate showed no checkbox when this redirect
       // started (e.g. a tame-pool Event, #608).
       mocks.getRedirectResult.mockResolvedValueOnce(null);
@@ -888,8 +918,8 @@ describe('AuthContext deal-error hardening', () => {
     // standing for the next mount to pick up — that reload-survival is the
     // entire reason the record exists.
     it('leaves a live pending record standing when a mount reads it but neither completion signal fires', async () => {
-      const at = String(Date.now());
-      localStorage.setItem(REDIRECT_PENDING_KEY, at);
+      const record = stamp('tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, record);
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -899,7 +929,7 @@ describe('AuthContext deal-error hardening', () => {
       });
       // No signInUser() — onAuthStateChanged never publishes a user in this
       // mount, simulating a reload/crash before Firebase's own restore lands.
-      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(at);
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(record);
     });
 
     // Codex P2 round 6 on #836: `pending` must be re-validated LIVE when
@@ -907,7 +937,7 @@ describe('AuthContext deal-error hardening', () => {
     // long-lived mount (or a delayed, unrelated auth change) could otherwise
     // complete a redirect the TTL was meant to have abandoned by then.
     it('does not complete via signal (b) once the pending record has since expired, even though it was live at mount', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -921,7 +951,7 @@ describe('AuthContext deal-error hardening', () => {
       // that without needing real elapsed time. peekRedirectPending() reads
       // storage fresh on every call, so this only stays blocked if the check
       // is live rather than a cached mount-time boolean.
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() - 24 * 60 * 60 * 1000));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a', Date.now() - 24 * 60 * 60 * 1000));
       await signInUser();
 
       expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
@@ -933,7 +963,7 @@ describe('AuthContext deal-error hardening', () => {
     // timestamp from a backward wall-clock adjustment or a corrupted value —
     // which would read as live indefinitely instead of expiring on schedule.
     it('treats a future-dated pending record as expired, not live', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now() + 60 * 60 * 1000));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a', Date.now() + 60 * 60 * 1000));
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -948,7 +978,7 @@ describe('AuthContext deal-error hardening', () => {
     });
 
     it('clears the pending record once the redirect actually completes (signal a)', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
       mount();
@@ -959,10 +989,10 @@ describe('AuthContext deal-error hardening', () => {
     it('clears the durable records on a CONFIRMED (marker-present) getRedirectResult rejection', async () => {
       // The marker present is what makes this rejection DEFINITIVE — the
       // app knows for certain this getRedirectResult() belongs to its own
-      // attempt, so clearing is safe (nothing left to recover).
-      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      // attempt (matching token), so clearing is safe (nothing left to recover).
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockRejectedValueOnce(
         Object.assign(new Error('network down'), { code: 'auth/network-request-failed' }),
       );
@@ -981,10 +1011,10 @@ describe('AuthContext deal-error hardening', () => {
     // or a mount that reloads/crashes before signal (b) gets its chance
     // would leave the NEXT mount with nothing to recover the redirect from.
     it('leaves the durable records standing on an INCONCLUSIVE (marker-less) getRedirectResult rejection', async () => {
-      const pendingAt = String(Date.now());
-      const ackAt = String(Date.now());
-      localStorage.setItem(REDIRECT_PENDING_KEY, pendingAt);
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackAt);
+      const pendingRecord = stamp('tok-a');
+      const ackRecord = stamp('tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, pendingRecord);
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackRecord);
       mocks.getRedirectResult.mockRejectedValueOnce(
         Object.assign(new Error('missing initial state'), { code: 'auth/missing-initial-state' }),
       );
@@ -994,15 +1024,15 @@ describe('AuthContext deal-error hardening', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(pendingAt);
-      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackAt);
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(pendingRecord);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackRecord);
     });
 
     // Codex P2 round 2 on #836: the failure path and signal (b) must not both
     // report an outcome for the same attempt — whichever lands first wins.
     it('does not fire login via signal (b) once a genuine rejection already claimed failure for the same attempt', async () => {
-      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, '1');
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockRejectedValueOnce(
         Object.assign(new Error('network down'), { code: 'auth/network-request-failed' }),
       );
@@ -1023,7 +1053,7 @@ describe('AuthContext deal-error hardening', () => {
     });
 
     it('does not report login_failed once signal (b) already claimed success for the same attempt', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       const redirect = deferred<null>();
       mocks.getRedirectResult.mockReturnValueOnce(redirect.promise);
 
@@ -1056,8 +1086,8 @@ describe('AuthContext deal-error hardening', () => {
     // that might belong to a different, unrelated same-origin tab's account.
     it('still fires login cleanly via signal (b) after a marker-less getRedirectResult rejection, without attesting', async () => {
       // No sessionStorage marker — lost, as in #346.
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, String(Date.now()));
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockRejectedValueOnce(
         Object.assign(new Error('missing initial state'), { code: 'auth/missing-initial-state' }),
       );
@@ -1083,9 +1113,9 @@ describe('AuthContext deal-error hardening', () => {
     // Codex P2 round 2 on #836: the SAME premature-clearing bug fixed for the
     // pending record above, but for the collected-acknowledgement record.
     it('leaves a live acknowledgement record standing when a mount reads it but neither completion signal fires', async () => {
-      localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-      const at = String(Date.now());
-      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, at);
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      const ackRecord = stamp('tok-a');
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, ackRecord);
       mocks.getRedirectResult.mockResolvedValueOnce(null);
 
       mount();
@@ -1094,7 +1124,98 @@ describe('AuthContext deal-error hardening', () => {
         await Promise.resolve();
       });
       // No signInUser() — simulating a reload before onAuthStateChanged fires.
-      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(at);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(ackRecord);
+    });
+
+    // Phase 4b P1 round 3 on #836, finding 1: `verifiedByFirebase` correctly
+    // correlates `u` to THIS tab's own redirect, but the acknowledgement
+    // record is a SEPARATE origin-wide singleton with no attempt identifier
+    // of its own — a different same-origin tab starting its own redirect
+    // (whether or not it ticked the box) overwrites it. Even a fully
+    // Firebase-verified completion must not attest using an acknowledgement
+    // record that no longer carries THIS attempt's own token.
+    it('does NOT attest when the acknowledgement record belongs to a DIFFERENT attempt (cross-tab clobbering)', async () => {
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      // A DIFFERENT tab's own redirect attempt overwrote the shared
+      // acknowledgement record with ITS OWN token after this tab started.
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-b'));
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
+    // Phase 4b P1 round 3 on #836, finding 2: an unverified signal-(b)
+    // completion deliberately retains the pending record so a later
+    // verified result can still consume it — but a per-mount latch alone
+    // cannot stop a SECOND reload, within the TTL, from finding that same
+    // live record plus the (now genuinely) signed-in user and logging
+    // `login` again. The durable `hasLoggedRedirectLogin` check must hold
+    // ACROSS mounts, not just within one.
+    it('does not re-log login on a second mount for the same still-pending attempt (exactly-once across reloads)', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+
+      const first = mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+      first.unmount();
+
+      // A second mount — simulating a reload — with the SAME durable record
+      // still live (an unverified completion never clears it) and Firebase
+      // now genuinely restoring the already-signed-in session.
+      mocks.track.mockClear();
+      mocks.getRedirectResult.mockResolvedValueOnce(null);
+      mount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await signInUser();
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mocks.track).not.toHaveBeenCalledWith('login', expect.anything());
+    });
+
+    // Phase 4b P1 round 3 on #836, finding 3: an unconditional delete could
+    // remove records belonging to a NEWER redirect. If this mount's own
+    // (older) attempt only verifies LATE, after a different tab has already
+    // overwritten the shared singleton keys with its own newer attempt, the
+    // late verification must not clear that newer attempt's records —
+    // compare-and-delete only removes what still matches the token THIS
+    // mount is tracking.
+    it('does not clear a NEWER attempt\'s records when an older mount\'s verified result settles late', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-old'));
+      const redirect = deferred<{ user: typeof FAKE_USER }>();
+      mocks.getRedirectResult.mockReturnValueOnce(redirect.promise);
+
+      mount(); // establishes this mount's own pending token ('tok-old') at mount
+
+      // A DIFFERENT tab starts its own, newer redirect, overwriting the
+      // shared singleton keys with its own attempt.
+      const newerPending = stamp('tok-new');
+      const newerAck = stamp('tok-new');
+      localStorage.setItem(REDIRECT_PENDING_KEY, newerPending);
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, newerAck);
+
+      // This mount's OWN (older) redirect now verifies, late.
+      await act(async () => {
+        redirect.settle({ user: FAKE_USER });
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+
+      // The newer attempt's records must survive untouched.
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(newerPending);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(newerAck);
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
     });
   });
 
