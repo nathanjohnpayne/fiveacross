@@ -197,6 +197,16 @@ describe('moderateProof export gating (#126)', () => {
     );
   });
 
+  it('exports retryable archive settlement under the Admin identity with the send secret', async () => {
+    const mod = await importIndex();
+    const endpoint = mod.settleAdminAlertsOnArchive.__endpoint;
+    expect(endpoint.eventTrigger.retry).toBe(true);
+    expect(endpoint.serviceAccountEmail).toBe(
+      'firebase-adminsdk-fbsvc@gaycruisebingo-test.iam.gserviceaccount.com',
+    );
+    expect(endpoint.secretEnvironmentVariables).toContainEqual({ key: 'RESEND_API_KEY' });
+  });
+
   // ADR 0008: this repo deploys to two Firebase projects. A Service Account only
   // exists inside its own project, so a hardcoded `gaycruisebingo` pin failed the
   // `fiveacross` deploy outright with `iam.serviceaccounts.actAs` on a

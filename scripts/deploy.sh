@@ -246,12 +246,17 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
           AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
           ;;
-        functions:submitBugReport)
+        # Firebase accepts both the short endpoint selector and the
+        # codebase-qualified `functions:<codebase>:<fn>` spelling. An exact
+        # endpoint name is stronger evidence than the conservative
+        # `functions:*` inference below, so clear that inference here in either
+        # selector order (#854).
+        functions:submitBugReport|functions:*:submitBugReport)
           FUNCTIONS_ATTEMPTED=true
           BUG_REPORT_INVOKER_SELECTED=true
           BUG_REPORT_INVOKER_CONSERVATIVE=false
           ;;
-        functions:emailUnsubscribe)
+        functions:emailUnsubscribe|functions:*:emailUnsubscribe)
           FUNCTIONS_ATTEMPTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false

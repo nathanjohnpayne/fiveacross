@@ -14,6 +14,8 @@ import {
   recordAdminAlerts,
   recordBugReportAlerts,
   runAdminAlertSweep,
+  settleAdminAlertsForArchivedEvent,
+  shouldSettleAdminAlertsOnArchive,
   type AdminAlertFirestore,
   type AlertableDoc,
   type BugReportDoc,
@@ -416,9 +418,9 @@ export const notifyAbuseBugReport = onDocumentWritten(
   // PERMANENT answer by returning normally and lets only TRANSIENT Firestore
   // failures escape, so retries are reserved for the case where retrying can
   // actually help. They are safe because the queue's document ids derive from
-  // this event's own id: a retry landing after a write already succeeded hits
-  // ALREADY_EXISTS and is a no-op, never a duplicate row. Without it, one blip
-  // silently and permanently loses a report of harm.
+  // this event's own id: a retry landing after a write already succeeded finds
+  // the occupied deterministic row and is a no-op, never a duplicate. Without
+  // it, one blip silently and permanently loses a report of harm.
   { document: 'bugReports/{reportId}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
   async (event) => {
     await recordBugReportAlerts(
@@ -428,6 +430,30 @@ export const notifyAbuseBugReport = onDocumentWritten(
       event.data?.before.data() as BugReportDoc | undefined,
       event.data?.after.data() as BugReportDoc | undefined,
     );
+  },
+);
+
+/**
+ * Archive is a deliberate discard boundary for admin-alert work (#846, ADR
+ * 0013). Unclaimed rows and claims that never acquired frozen bytes become
+ * payload-free tombstones; a frozen claim keeps its original delivery identity
+ * because Resend may already have accepted it.
+ *
+ * Retry is safe: settlement is transactional and idempotent, and the scheduled
+ * digest performs the same archived-Event pass as a backstop for delayed
+ * producers or a failed transition invocation. RESEND_API_KEY stays bound here
+ * because a preserved frozen batch may need its exact request replayed.
+ */
+export const settleAdminAlertsOnArchive = onDocumentWritten(
+  {
+    document: 'events/{eventId}',
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+    secrets: [RESEND_API_KEY],
+    retry: true,
+  },
+  async (event) => {
+    if (!shouldSettleAdminAlertsOnArchive(event.data?.before.data(), event.data?.after.data())) return;
+    await settleAdminAlertsForArchivedEvent(db as unknown as AdminAlertFirestore, event.params.eventId);
   },
 );
 
@@ -764,10 +790,11 @@ export const dailyEngagementEmail = onSchedule(
 // --- Admin notification digest (#638) --------------------------------------------
 
 /**
- * Drain every active Event's admin-alert queue into ONE Theme-styled email per
- * Event (specs/admin-notification-emails.md). The producers are the two
- * `notify*Moderation` triggers above; everything about WHAT is queued, WHO
- * hears about it and HOW it reads lives in `adminAlerts.ts` /
+ * Advance every Event's admin-alert lifecycle (specs/admin-notification-
+ * emails.md). Active Events drain into ONE Theme-styled email; archived Events
+ * discard uncommitted rows while preserving frozen requests. The producers are
+ * the two `notify*Moderation` triggers above; everything about WHAT is queued,
+ * WHO hears about it and HOW it reads lives in `adminAlerts.ts` /
  * `adminAlertDigest.ts`, all pure + dependency-injected.
  *
  * FIVE MINUTES is the whole burst guarantee, and it is a floor on batching
@@ -777,12 +804,13 @@ export const dailyEngagementEmail = onSchedule(
  * sweep, because those wait on a wall-clock moment in the Event's timezone
  * while this one waits only on work existing — and moderation is the one
  * notification where latency is a real cost. A sweep with nothing queued costs
- * one indexed `sentAt == null` query per active Event and sends nothing.
+ * one indexed `sentAt == null` query per active or archived Event and sends
+ * nothing.
  *
  * Pins `ADMIN_SDK_SERVICE_ACCOUNT` (it reads Events, the alert queue, the
  * `admins` roster and `hostnames`, and stamps alerts, none of which the default
- * Gen2 compute identity can reach) and binds `RESEND_API_KEY` — it is now the
- * only admin-notification function that sends.
+ * Gen2 compute identity can reach) and binds `RESEND_API_KEY`. The archive
+ * lifecycle trigger binds the same secret because it can replay frozen work.
  */
 export const adminAlertDigest = onSchedule(
   {

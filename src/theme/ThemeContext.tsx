@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { ThemeId } from '../types';
-import { THEMES } from './themes';
+import { normalizeEventTheme, THEMES } from './themes';
 
 const KEY = 'gcb.theme';
 const DEFAULT: ThemeId = 'neon-playground';
@@ -109,7 +109,9 @@ export function ThemeProvider({
   // known, falling back to the event default while it isn't. A pure
   // derivation (not stored state), so it re-resolves on every render as
   // `autoThemeId`/`defaultTheme` arrive from Firestore.
-  const theme: ThemeId = preference === 'auto' ? (autoThemeId ?? defaultTheme) : preference;
+  const normalizedDefault = normalizeEventTheme(defaultTheme);
+  const normalizedAuto = autoThemeId == null ? null : normalizeEventTheme(autoThemeId);
+  const theme: ThemeId = preference === 'auto' ? (normalizedAuto ?? normalizedDefault) : preference;
 
   // Apply the theme to the DOM for CSS. Deliberately does NOT persist here —
   // only an explicit concrete pick (setTheme below) is ever saved, so the

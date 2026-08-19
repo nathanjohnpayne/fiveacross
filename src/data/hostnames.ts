@@ -114,7 +114,7 @@ export async function bootstrapEventResolution(
     hostname,
     fetchDoc: fetchHostnameDoc,
     storage,
-    // PRESENCE marks a single-Event build, and short-circuits the lookup
+    // A non-empty value marks a single-Event build and short-circuits the lookup
     // entirely — see resolveEvent step 0.
     envEventId: import.meta.env.VITE_EVENT_ID || null,
     // The 18+ opt-out for that same single-Event build (#608). Passed as the

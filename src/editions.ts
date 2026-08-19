@@ -355,15 +355,18 @@ export function wordmarkSegments(brand: EditionBrand = editionBrand()): {
 }
 
 /**
- * Which Edition a BUILD may bake, from the two env vars (#586).
+ * Which Edition a BUILD may bake, from the runtime env vars and optional
+ * trusted target-registry fallback (#586/#851).
  *
- * This mirrors the runtime rule rather than restating it loosely. `VITE_EVENT_ID`'s
- * PRESENCE marks a single-Event build (ADR 0009 step 0), and only such a build
- * owns an Edition: a hostname-resolved bundle defers to
+ * This mirrors the runtime rule rather than restating it loosely. A non-empty
+ * `VITE_EVENT_ID` marks a single-Event build (ADR 0009 step 0), and such a build
+ * owns its `VITE_EDITION`: a hostname-resolved bundle defers to
  * `hostnames/{host}.edition`, where an Edition-less mapping resets to the
- * default — which is exactly why `setActiveEdition('')` does the same. A
- * leftover `VITE_EDITION` in a multi-Event `.env.local` must therefore not bake
- * another product's name into a bundle every Event shares.
+ * default — which is exactly why `setActiveEdition('')` does the same. A named
+ * target may separately preserve a trusted static fallback for browser/PWA
+ * chrome that cannot yet be rewritten per host (#546). A leftover
+ * `VITE_EDITION` in a multi-Event `.env.local` must still not bake another
+ * product's name into a bundle every Event shares.
  *
  * The manifest is what makes this more than tidiness. The document title is
  * repairable after resolution; `name` / `short_name` are read from the manifest
@@ -373,8 +376,9 @@ export function wordmarkSegments(brand: EditionBrand = editionBrand()): {
 export function buildTimeEdition(
   envEventId: string | null | undefined,
   envEdition: string | null | undefined,
+  staticFallbackEdition?: string | null,
 ): string {
-  if (!envEventId) return DEFAULT_EDITION;
+  if (!envEventId) return staticFallbackEdition || DEFAULT_EDITION;
   return envEdition || DEFAULT_EDITION;
 }
 

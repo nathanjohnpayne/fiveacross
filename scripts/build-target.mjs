@@ -49,11 +49,15 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
       VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
       VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
-      VITE_EVENT_ID: 'bodega-bay-2026',
+      VITE_EVENT_ID: '',
       VITE_EDITION: 'vacay',
       VITE_ADULT_CONTENT: 'false',
       VITE_POSTHOG_HOST: '',
     }),
+    // Static browser/PWA identity for direct-serving Bodega hosts while the
+    // shared runtime resolves Event + Edition per hostname. This is deliberately
+    // outside VITE_* so it never becomes a runtime routing input (#851/#546).
+    staticFallbackEdition: 'vacay',
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
     // Opted out because this target's deploy credential — the fiveacross
@@ -92,6 +96,12 @@ export function validateTargetOperationalMetadata(target, config) {
   }
   if (typeof config.skipCloudflarePurge !== 'boolean') {
     throw new Error(`Refusing target ${target}: register skipCloudflarePurge as an explicit boolean.`);
+  }
+  if (
+    config.staticFallbackEdition !== undefined &&
+    (typeof config.staticFallbackEdition !== 'string' || !config.staticFallbackEdition.trim())
+  ) {
+    throw new Error(`Refusing target ${target}: staticFallbackEdition must be a nonblank Edition id.`);
   }
   // Required rather than defaulted (#768). An omitted skipInvokerReconcile
   // reads as `false`, which is the DANGEROUS default for a new target: it
@@ -150,7 +160,7 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
     );
   }
 
-  const { identity } = configForTarget(target);
+  const { identity, staticFallbackEdition } = configForTarget(target);
   const mismatchedIdentity = Object.entries(identity).filter(
     ([key, expectedValue]) => parsedTargetEnv[key] !== expectedValue,
   );
@@ -178,6 +188,9 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
     ...parsedTargetEnv,
     NODE_ENV: 'production',
     DEPLOY_TARGET_BUILD: '1',
+    // Always overwrite this non-VITE build-only input so a target with no
+    // fallback cannot inherit another target's ambient value.
+    DEPLOY_TARGET_STATIC_EDITION: staticFallbackEdition ?? '',
   };
 }
 

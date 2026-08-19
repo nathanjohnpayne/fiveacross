@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HANDOFF_AUTH_PATH,
   HANDOFF_FRAGMENT_KEY,
+  HANDOFF_PARAM_RETURN,
   buildAuthOriginUrl,
   clearHandoffFragment,
   consumeHandoffFailure,
@@ -45,6 +46,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -169,6 +171,7 @@ describe('parseHandoffRequest', () => {
     // A protocol-relative path is read by a browser as a different ORIGIN — the
     // payload a naive "must start with /" check waves straight through.
     ['a protocol-relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=//evil.test`],
+    ['a same-host protocol-relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=//summer-camp.fiveacross.app/board`],
     ['a relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=board`],
   ])('refuses %s', (_label, search) => {
     expect(parseHandoffRequest(search)).toBeNull();
@@ -231,6 +234,43 @@ describe('parseHandoffRequest', () => {
 });
 
 describe('startAuthHandoff', () => {
+  it('reports the safe-root fallback without logging the rejected path', async () => {
+    const rejectedPath = `/private-${'x'.repeat(600)}`;
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+    expect(
+      await startAuthHandoff({
+        authOrigin: CENTRAL,
+        targetOrigin: ORIGIN,
+        returnPath: rejectedPath,
+        navigate: vi.fn(),
+      }),
+    ).toBe(true);
+
+    expect(debug).toHaveBeenCalledOnce();
+    expect(debug).toHaveBeenCalledWith('[auth-handoff] invalid return path; using root');
+    expect(JSON.stringify(debug.mock.calls)).not.toContain(rejectedPath);
+  });
+
+  it('still starts with the safe root when the debug signal itself throws', async () => {
+    vi.spyOn(console, 'debug').mockImplementation(() => {
+      throw new Error('debug unavailable');
+    });
+    const navigate = vi.fn();
+
+    expect(
+      await startAuthHandoff({
+        authOrigin: CENTRAL,
+        targetOrigin: ORIGIN,
+        returnPath: '//evil.example/private',
+        navigate,
+      }),
+    ).toBe(true);
+    expect(new URL(navigate.mock.calls[0][0] as string).searchParams.get(HANDOFF_PARAM_RETURN)).toBe(
+      '/',
+    );
+  });
+
   it('stores the verifier and navigates to the central origin', async () => {
     const navigate = vi.fn();
     expect(
@@ -259,6 +299,21 @@ describe('startAuthHandoff', () => {
     const published = new URL(navigate.mock.calls[0][0] as string).searchParams.get('txn');
     const { transactionIdFor } = await import('./handoffTransaction');
     expect(published).toBe(await transactionIdFor(stored!.verifier));
+  });
+
+  it.each([
+    ['an over-long path', `/${'a'.repeat(600)}`],
+    ['an off-origin path', '//evil.example/steal'],
+    ['a same-host protocol-relative path', '//summer-camp.fiveacross.app/board'],
+  ])('falls back to the safe root before storing or navigating for %s', async (_label, returnPath) => {
+    const navigate = vi.fn();
+    expect(
+      await startAuthHandoff({ authOrigin: CENTRAL, targetOrigin: ORIGIN, returnPath, navigate }),
+    ).toBe(true);
+
+    expect(readHandoffTransaction(Date.now())?.returnPath).toBe('/');
+    const url = new URL(navigate.mock.calls[0][0] as string);
+    expect(url.searchParams.get(HANDOFF_PARAM_RETURN)).toBe('/');
   });
 
   // Everything that can fail happens BEFORE the navigation. Discovering

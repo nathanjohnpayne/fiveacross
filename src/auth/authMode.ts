@@ -97,8 +97,10 @@ export function parseAuthOrigin(raw: string | undefined | null): string | null {
   }
   if (url.origin !== value) return null;
   if (url.username !== '' || url.password !== '') return null;
-  const isLoopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  const isLoopback =
+    url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback)) return null;
+  if (!isLoopback && url.port !== '') return null;
   return url.origin;
 }
 

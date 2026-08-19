@@ -233,6 +233,11 @@ describe('buildTimeEdition — only a single-Event build owns an Edition', () =>
       expect(buildTimeEdition(absent, 'vacay')).toBe(DEFAULT_EDITION);
     }
   });
+
+  it('uses an explicit trusted static fallback for hostname-resolved target chrome', () => {
+    expect(buildTimeEdition('', 'gcb', 'vacay')).toBe('vacay');
+    expect(buildTimeEdition(null, 'vacay', '')).toBe(DEFAULT_EDITION);
+  });
 });
 
 describe('brandHtmlIdentity — baking the Edition into index.html', () => {

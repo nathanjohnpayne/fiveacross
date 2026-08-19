@@ -203,13 +203,117 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
           timezone: 'Europe/Rome',
           days: [
             { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
-            { index: 1, unlockAt: PAST(), theme: 'get-sporty' },
+            { index: 1, unlockAt: PAST(), theme: 'get-sporty', pool: 'closing' },
           ],
         },
       );
     });
     await assertFails(
       updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
+  });
+
+  it('DENIES adding a freeze after an early ceremonial Day has settled the derived boundary', async () => {
+    const now = NOW();
+    const days = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      unlockAt: index <= 2 ? now - (3 - index) * 3600_000 : now + index * 3600_000,
+      theme: `theme-${index}`,
+      scoring: index === 2 ? 'ceremonial' : 'competitive',
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+    });
+
+    // The derived freeze is Day 2's past unlock, even though seven later
+    // competitive Days remain in the future. Adding an explicit future freeze
+    // would make refreshed clients resume standings that cached clients keep
+    // frozen at the already-settled derived boundary.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: now + 12 * 3600_000 }),
+    );
+  });
+
+  it('keeps first-derived-freeze resolution equivalent across schedule sizes 0 through 10', async () => {
+    const setSchedule = async (days: Array<Record<string, unknown>>) => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+          days,
+          standingsFreezeAt: deleteField(),
+        });
+      });
+    };
+    const addFutureFreeze = (now: number) =>
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), {
+        standingsFreezeAt: now + 12 * 3600_000,
+      });
+
+    // No branch may invent a boundary when every Day is competitive.
+    for (let size = 0; size <= 10; size += 1) {
+      const now = NOW();
+      const days = Array.from({ length: size }, (_, index) => ({
+        index,
+        unlockAt: index === size - 1 ? now - 3600_000 : now + (index + 1) * 3600_000,
+        theme: `theme-${index}`,
+        scoring: 'competitive',
+      }));
+      await setSchedule(days);
+      await assertSucceeds(addFutureFreeze(now));
+    }
+
+    // For every possible candidate index, the ten-Day fast path and the
+    // shortest guarded-fallback prefix that can contain that index must both
+    // observe the same already-settled ceremonial boundary. Day 9 has no
+    // shorter representable prefix, so only the fast-path case applies there.
+    for (let ceremonialIndex = 0; ceremonialIndex < 10; ceremonialIndex += 1) {
+      const sizes = ceremonialIndex === 9 ? [10] : [ceremonialIndex + 1, 10];
+      for (const size of sizes) {
+        const now = NOW();
+        const days = Array.from({ length: size }, (_, index) => ({
+          index,
+          unlockAt:
+            index === ceremonialIndex ? now - 3600_000 : now + (index + 1) * 3600_000,
+          theme: `theme-${index}`,
+          scoring: index === ceremonialIndex ? 'ceremonial' : 'competitive',
+        }));
+        await setSchedule(days);
+        await assertFails(addFutureFreeze(now));
+      }
+    }
+  });
+
+  it('uses a middle legacy-pool Day as the derived freeze on a shorter schedule', async () => {
+    const now = NOW();
+    const days = Array.from({ length: 5 }, (_, index) => ({
+      index,
+      unlockAt: index === 2 ? now - 3600_000 : now + (index + 1) * 3600_000,
+      theme: `theme-${index}`,
+      pool: index === 2 ? 'farewell' : 'main',
+      ...(index === 2 ? {} : { scoring: 'competitive' }),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+    });
+
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: now + 12 * 3600_000 }),
+    );
+  });
+
+  it('still ALLOWS adding a freeze before a last-Day ceremonial boundary on a full ten-Day schedule', async () => {
+    const now = NOW();
+    const days = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      unlockAt: now + (index + 1) * 3600_000,
+      theme: `theme-${index}`,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+    });
+
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: now + 12 * 3600_000 }),
     );
   });
 

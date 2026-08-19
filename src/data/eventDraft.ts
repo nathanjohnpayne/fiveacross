@@ -117,17 +117,12 @@ export interface EventDraftStore {
    * a valid identifier `unreadable()` can report (the degenerate
    * exact-prefix key), and this method must be able to reach it.
    *
-   * Returns whether the removal could be CONFIRMED (#848): `true` when
-   * there was no storage to remove from (nothing was ever persisted, so
-   * there is nothing to confirm) or the underlying removal did not throw;
-   * `false` when the removal attempt itself failed (a write-restricted
-   * Storage — a stricter privacy mode, a security-partitioned context).
-   * A caller cannot treat a subsequent `load()` readback as proof of
-   * removal on a `false` result: the SAME restriction that broke the
-   * removal typically also breaks the read that would otherwise confirm
-   * it, and `load()` maps a failed read to `null` exactly the same way it
-   * maps a genuinely absent key to `null` — indistinguishable from the
-   * caller's side without this signal.
+   * Returns whether absence was CONFIRMED (#848, #901): `true` when there
+   * was no storage to remove from (nothing was ever persisted) or a direct
+   * post-removal key read returned `null`; `false` when removal or that raw
+   * verification read failed, or when the key remained present. The raw
+   * read is load-bearing: `load()` maps absent, unreadable, and malformed
+   * values to the same `null`, so it cannot prove deletion.
    */
   discard(draftId: string): Promise<boolean>;
 }
@@ -591,15 +586,17 @@ export function createLocalDraftStore(
       // device — there is nothing to remove, and nothing left unconfirmed.
       if (!ls) return true;
       try {
-        ls.removeItem(KEY_PREFIX + draftId);
-        return true;
+        const key = KEY_PREFIX + draftId;
+        ls.removeItem(key);
+        // Read the RAW key, not `load()`. A Storage may silently ignore the
+        // removal and then throw on read (#901); `load()` collapses that throw
+        // (and a malformed value) to `null`, which would falsely confirm the
+        // draft was gone. Here only an actual absent key is success.
+        return ls.getItem(key) === null;
       } catch {
-        // The removal itself could not be attempted (#848) — a
-        // write-restricted Storage. Report this as UNCONFIRMED rather than
-        // swallowing it silently: a caller that treats a subsequent
-        // `load()` readback as proof would be fooled by the same
-        // restriction breaking that read too (`load()` maps a failed read
-        // to `null`, indistinguishable from a genuinely absent key).
+        // The removal or its raw verification read failed. Report this as
+        // UNCONFIRMED rather than swallowing it: `load()` would turn the same
+        // failed read into a false-looking absence.
         return false;
       }
     },

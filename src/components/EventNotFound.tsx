@@ -19,12 +19,13 @@ export default function EventNotFound({
     | 'inactive'
     | 'unreachable'
     | 'auth-unconfigured'
-    // The two ways the sign-in ROUTE itself is misconfigured (#549, ADR 0010).
+    // The ways the sign-in ROUTE itself is misconfigured (#549, ADR 0010).
     // Separate reasons rather than folded into `auth-unconfigured`, because that
-    // screen means "nobody finished provisioning this address" while these two
+    // screen means "nobody finished provisioning this address" while these
     // mean "this build was told to sign in a way that cannot work here" — a
     // different person fixes each, and only one of them is fixed in a console.
     | 'auth-same-origin-unavailable'
+    | 'auth-mode-invalid'
     | 'auth-handoff-misconfigured';
 }) {
   const headline =
@@ -32,6 +33,7 @@ export default function EventNotFound({
       ? 'This game has wrapped up'
       : reason === 'auth-unconfigured' ||
           reason === 'auth-same-origin-unavailable' ||
+          reason === 'auth-mode-invalid' ||
           reason === 'auth-handoff-misconfigured'
         ? 'This address is not open yet'
         : "There's no game at this address";
@@ -52,9 +54,11 @@ export default function EventNotFound({
             // separate reasons rather than one.
             reason === 'auth-same-origin-unavailable'
             ? 'The game is here, but sign-in is set to a mode this address cannot use. Whoever set the event up needs to change one setting—this is not something you can fix from your phone.'
-            : reason === 'auth-handoff-misconfigured'
-              ? 'The game is here, but sign-in has not been finished for this address. Whoever set the event up needs to correct one setting—this is not something you can fix from your phone.'
-              : 'Double-check the link you were sent. Addresses are case-insensitive but otherwise exact.';
+            : reason === 'auth-mode-invalid'
+              ? 'The game is here, but its sign-in mode is not recognised. Whoever set the event up needs to correct one setting—this is not something you can fix from your phone.'
+              : reason === 'auth-handoff-misconfigured'
+                ? 'The game is here, but sign-in has not been finished for this address. Whoever set the event up needs to correct one setting—this is not something you can fix from your phone.'
+                : 'Double-check the link you were sent. Addresses are case-insensitive but otherwise exact.';
 
   // #585: on a `*.vercel.app` host this screen has a different audience. Every
   // registered Vercel host — `gaycruisebingo.vercel.app`, the stable preview
@@ -72,19 +76,21 @@ export default function EventNotFound({
   // about it. Duplicating the literal costs a stale string if the alias ever
   // changes — cheap, and `src/auth-domain.ts` is where that change would have
   // to start anyway.
-  // The #549 arms carry their own developer note for the same reason the
+    // The #549 arms carry their own developer note for the same reason the
   // preview one exists: this screen is most often met as a phone screenshot, and
   // a note you can read off the image is the difference between acting on it and
   // asking about it. Each names the ONE setting at fault, because that is what
-  // distinguishes these two from `auth-unconfigured` in the first place.
+  // distinguishes them from `auth-unconfigured` in the first place.
   const previewHint =
     reason === 'auth-unconfigured' && hostname.endsWith('.vercel.app')
       ? 'Developer note: per-deployment preview hosts can never sign in—Firebase and Google both match hostnames exactly, and neither accepts a wildcard. Push the branch with `git push --force origin HEAD:preview` and reopen it on the stable alias, gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app (docs/app/preview-deploys.md).'
       : reason === 'auth-same-origin-unavailable'
         ? 'Developer note: this build sets VITE_AUTH_MODE=same_origin, which only works where the OAuth helper is already same-origin—this hostname is not in FIRST_PARTY_AUTH_HOSTS (src/auth-domain.ts) and the build does not bake VITE_FIREBASE_AUTH_DOMAIN equal to it. Clear VITE_AUTH_MODE to use the handoff, or register this host (ADR 0010).'
-        : reason === 'auth-handoff-misconfigured'
-          ? 'Developer note: sign-in is in handoff mode but this build has no usable VITE_AUTH_HANDOFF_ORIGIN—it is unset, malformed, or equal to this origin. Set it to the central auth origin (https://auth.fiveacross.app) in the target env file and rebuild (ADR 0010, specs/auth-handoff-client.md).'
-          : null;
+        : reason === 'auth-mode-invalid'
+          ? 'Developer note: this build has an unrecognised VITE_AUTH_MODE. Set it to handoff or same_origin, or clear it to use the handoff default, then rebuild (ADR 0010, specs/auth-handoff-client.md).'
+          : reason === 'auth-handoff-misconfigured'
+            ? 'Developer note: sign-in is in handoff mode but this build has no usable VITE_AUTH_HANDOFF_ORIGIN—it is unset, malformed, or equal to this origin. Set it to the central auth origin (https://auth.fiveacross.app) in the target env file and rebuild (ADR 0010, specs/auth-handoff-client.md).'
+            : null;
 
   return (
     <main

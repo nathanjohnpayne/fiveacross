@@ -29,6 +29,8 @@ import {
   recordAdminAlerts,
   recordBugReportAlerts,
   runAdminAlertSweep,
+  settleAdminAlertsForArchivedEvent,
+  shouldSettleAdminAlertsOnArchive,
   sendAdminDigestForEvent,
   type AdminAlertFirestore,
   type AlertableDoc,
@@ -90,7 +92,7 @@ function fakeDb(
         if (throwOn.includes(path)) throw new Error(`backend unavailable: ${path}`);
         let rows = collections.get(path) ?? [];
         for (const [field, value] of filters) {
-          rows = rows.filter((row) => (row.data[field] ?? null) === value);
+          rows = rows.filter((row) => row.data[field] === value);
         }
         if (cap !== null) rows = rows.slice(0, cap);
         return { docs: rows.map((row) => ({ id: row.id, data: () => ({ ...row.data }) })) };
@@ -200,6 +202,8 @@ function fakeDb(
       const deletes: string[] = [];
       const result = await fn({
         get: async (ref: { path: string }) => {
+          const single = singles.get(ref.path);
+          if (single) return { data: () => ({ ...single }) };
           const found = findRow(ref.path);
           return { data: () => (found ? { ...found.data } : undefined) };
         },
@@ -231,8 +235,13 @@ function fakeDb(
     },
     /** Test-only reader. */
     rows: (path: string) => (collections.get(path) ?? []).map((r) => ({ id: r.id, ...r.data })),
+    /** Test-only singleton update for lifecycle-race interleavings. */
+    setDoc: (path: string, data: Record<string, unknown>) => singles.set(path, { ...data }),
   };
-  return db as unknown as AdminAlertFirestore & { rows: (path: string) => Record<string, unknown>[] };
+  return db as unknown as AdminAlertFirestore & {
+    rows: (path: string) => Record<string, unknown>[];
+    setDoc: (path: string, data: Record<string, unknown>) => void;
+  };
 }
 
 const ITEM = (over: Partial<AlertableDoc> = {}): AlertableDoc => ({
@@ -257,6 +266,7 @@ const ALERT = (over: Partial<AdminAlertRecord> = {}): AdminAlertRecord => ({
 
 const EVENT = {
   name: 'Trieste → Barcelona',
+  status: 'active',
   days: [
     { index: 0, unlockAt: 1_000, theme: 'welcome-aboard' },
     { index: 1, unlockAt: 2_000, theme: 'sporty-splash' },
@@ -348,7 +358,7 @@ describe('alertsForWrite', () => {
 
 describe('enqueueAdminAlerts', () => {
   it('writes sentAt: null EXPLICITLY, so the drain query can find the alert at all', async () => {
-    const db = fakeDb();
+    const db = fakeDb({}, { 'events/med-2026': EVENT });
     await enqueueAdminAlerts(
       db,
       'med-2026',
@@ -369,7 +379,7 @@ describe('enqueueAdminAlerts', () => {
     // CloudEvent id. A random-id `add` would mint a second alert for one
     // transition — a duplicate row before a drain, and a whole second email if
     // the redelivery lands after one.
-    const db = fakeDb();
+    const db = fakeDb({}, { 'events/e': EVENT });
     const drafts = alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' }));
     expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-1')).toBe(1);
     expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-1')).toBe(0); // redelivery: no-op
@@ -379,8 +389,16 @@ describe('enqueueAdminAlerts', () => {
     expect(db.rows('events/e/adminAlerts')).toHaveLength(2);
   });
 
+  it('cannot enqueue after archive wins the Event transaction', async () => {
+    const db = fakeDb({}, { 'events/e': { status: 'archived' } });
+    const drafts = alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' }));
+
+    expect(await enqueueAdminAlerts(db, 'e', drafts, 'evt-1')).toBe(0);
+    expect(db.rows('events/e/adminAlerts')).toEqual([]);
+  });
+
   it('gives one write’s two alerts distinct ids, so neither collides with the other', async () => {
-    const db = fakeDb();
+    const db = fakeDb({}, { 'events/e': EVENT });
     const drafts = alertsForWrite(
       'items',
       'i1',
@@ -410,7 +428,7 @@ describe('enqueueAdminAlerts', () => {
         create: async () => Promise.reject(new Error('firestore down')),
       }),
       batch: () => ({ set: () => undefined, delete: () => undefined, commit: async () => undefined }),
-      runTransaction: async () => undefined,
+      runTransaction: async () => Promise.reject(new Error('firestore down')),
     } as unknown as AdminAlertFirestore;
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(
@@ -975,6 +993,21 @@ describe('sendAdminDigestForEvent', () => {
     spy.mockRestore();
     expect(send).not.toHaveBeenCalled();
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
+  });
+
+  it('cannot mint a new claim after archive wins the Event transaction', async () => {
+    const send = vi.fn(async () => true);
+    const db = seeded([pendingAlert('a1')], [], {
+      'events/med-2026': { ...EVENT, status: 'archived' },
+    });
+
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'inactive-event',
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts')[0].batchId).toBeUndefined();
   });
 
   it('waits out the settling period, so a burst straddling the sweep is not split in two', async () => {
@@ -1778,7 +1811,7 @@ describe('flattenLabel', () => {
   });
 
   it('flattens at BOTH boundaries — the producer and the digest read-back', async () => {
-    const db = fakeDb();
+    const db = fakeDb({}, { 'events/e': EVENT });
     await enqueueAdminAlerts(
       db,
       'e',
@@ -1871,6 +1904,253 @@ describe('runAdminAlertSweep', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
     // The broken Event keeps its work for the next sweep.
     expect(db.rows('events/broken/adminAlerts')).toHaveLength(1);
+  });
+
+  it('uses the archived-Event pass as a backstop for late queue rows', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      {
+        events: [{ id: 'med-2026', status: 'archived' }],
+        'events/med-2026/adminAlerts': [
+          {
+            id: 'late',
+            kind: 'item-created',
+            collection: 'items',
+            docId: 'i1',
+            label: 'Late producer',
+            status: 'pending',
+            visionFlag: null,
+            reportCount: 0,
+            createdAt: 1,
+            sentAt: null,
+          },
+        ],
+      },
+      { 'events/med-2026': { ...EVENT, status: 'archived' } },
+    );
+
+    await runAdminAlertSweep(db, { send: send as never, now: () => NOW });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'late',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+  });
+});
+
+describe('settleAdminAlertsForArchivedEvent', () => {
+  const pending = (over: Record<string, unknown> = {}) => ({
+    id: 'a1',
+    kind: 'item-created',
+    collection: 'items',
+    docId: 'i1',
+    label: 'Private pending Prompt',
+    status: 'pending',
+    visionFlag: null,
+    reportCount: 0,
+    createdAt: 1,
+    sentAt: null,
+    ...over,
+  });
+
+  it('discards an unclaimed archived row as a payload-free tombstone', async () => {
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending()] },
+      { 'events/med-2026': { ...EVENT, status: 'archived' } },
+    );
+
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW })).toEqual({
+      discarded: 1,
+      preserved: 0,
+    });
+    const [row] = db.rows('events/med-2026/adminAlerts');
+    expect(row).toEqual({
+      id: 'a1',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW + 1 })).toEqual({
+      discarded: 0,
+      preserved: 0,
+    });
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(row);
+  });
+
+  it('never resurrects a discard tombstone after reactivation and producer redelivery', async () => {
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending({ id: 'evt-1-item-created' })] },
+      { 'events/med-2026': { ...EVENT, status: 'archived' } },
+    );
+    await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW });
+    db.setDoc('events/med-2026', EVENT);
+
+    const drafts = alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' }));
+    expect(await enqueueAdminAlerts(db, 'med-2026', drafts, 'evt-1')).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'evt-1-item-created',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+  });
+
+  it('does not let a stale archive invocation discard work after reactivation', async () => {
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending()] },
+      { 'events/med-2026': { ...EVENT, status: 'active' } },
+    );
+
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW })).toEqual({
+      discarded: 0,
+      preserved: 0,
+    });
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual(pending());
+  });
+
+  it('discards a claim that never acquired a frozen request', async () => {
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' })] },
+      { 'events/med-2026': { ...EVENT, status: 'archived' } },
+    );
+
+    expect(await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW })).toEqual({
+      discarded: 1,
+      preserved: 0,
+    });
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'a1',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+  });
+
+  it('preserves and settles a frozen claim under its original bytes and key', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' })] },
+      {
+        'events/med-2026': { ...EVENT, status: 'archived' },
+        'events/med-2026/items/i1': { status: 'pending', reportCount: 0 },
+        'events/med-2026/adminAlertBatches/a1__1': {
+          to: ['u1@example.com'],
+          subject: 'Admin · frozen before archive',
+          html: '<p>frozen</p>',
+          text: 'frozen',
+          from: 'Five Across <alerts@example.com>',
+          alertCount: 1,
+        },
+      },
+    );
+
+    expect(
+      await settleAdminAlertsForArchivedEvent(db, 'med-2026', {
+        now: () => NOW,
+        send: send as never,
+        getAdminUids: async () => ['u1'],
+        getEmailForUid: async () => 'u1@example.com',
+        adminNotifyEmail: '',
+      }),
+    ).toEqual({ discarded: 0, preserved: 1 });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subject: 'Admin · frozen before archive',
+        idempotencyKey: 'admin-digest/med-2026/a1__1',
+      }),
+    );
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'a1',
+      sentAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+  });
+
+  it('discards an archived frozen claim atomically when recipient revalidation releases it', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' })] },
+      {
+        'events/med-2026': { ...EVENT, status: 'archived' },
+        'events/med-2026/adminAlertBatches/a1__1': {
+          to: ['former-admin@example.com'],
+          subject: 'Admin · frozen before archive',
+          html: '<p>frozen</p>',
+          text: 'frozen',
+          from: 'Five Across <alerts@example.com>',
+          alertCount: 1,
+        },
+      },
+    );
+
+    expect(
+      await settleAdminAlertsForArchivedEvent(db, 'med-2026', {
+        now: () => NOW,
+        send: send as never,
+        getAdminUids: async () => [],
+        adminNotifyEmail: '',
+      }),
+    ).toEqual({ discarded: 1, preserved: 0 });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'a1',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+  });
+
+  it('does not send when archive tombstones the claim before its freeze commits', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending()] },
+      {
+        'events/med-2026': { ...EVENT, status: 'active' },
+        'events/med-2026/items/i1': { status: 'pending', reportCount: 0 },
+      },
+    );
+    const originalDoc = db.doc.bind(db);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      const ref = originalDoc(path);
+      if (!path.includes('/adminAlertBatches/')) return ref;
+      return {
+        ...ref,
+        create: async (data: Record<string, unknown>) => {
+          db.setDoc('events/med-2026', { ...EVENT, status: 'archived' });
+          await settleAdminAlertsForArchivedEvent(db, 'med-2026', { now: () => NOW });
+          return ref.create(data);
+        },
+      };
+    };
+
+    expect(
+      await sendAdminDigestForEvent(db, 'med-2026', {
+        send: send as never,
+        getAdminUids: async () => ['u1'],
+        getEmailForUid: async () => 'u1@example.com',
+        adminNotifyEmail: '',
+        appBaseUrl: 'https://gaycruisebingo.com',
+        from: 'Five Across <alerts@example.com>',
+        now: () => NOW,
+        quietMs: 0,
+      }),
+    ).toEqual({ sent: 0, retired: 0, reason: 'claim-lost' });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'a1',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+  });
+});
+
+describe('shouldSettleAdminAlertsOnArchive', () => {
+  it('fires once for the active-to-archived lifecycle edge', () => {
+    expect(shouldSettleAdminAlertsOnArchive({ status: 'active' }, { status: 'archived' })).toBe(true);
+    expect(shouldSettleAdminAlertsOnArchive({ status: 'archived' }, { status: 'archived' })).toBe(false);
+    expect(shouldSettleAdminAlertsOnArchive({ status: 'draft' }, { status: 'archived' })).toBe(false);
+    expect(shouldSettleAdminAlertsOnArchive({ status: 'active' }, { status: 'active' })).toBe(false);
+    expect(shouldSettleAdminAlertsOnArchive({ status: 'active' }, undefined)).toBe(false);
   });
 });
 
@@ -2119,12 +2399,8 @@ describe('recordBugReportAlerts', () => {
     const db = reportDb();
     const boom = new Error('write unavailable');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const original = (db as any).doc;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db as any).doc = (path: string) => {
-      const ref = original(path);
-      if (path.includes('/adminAlerts/')) return { ...ref, create: async () => { throw boom; } };
-      return ref;
+    (db as any).runTransaction = async () => {
+      throw boom;
     };
     await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).rejects.toThrow(boom);
     spy.mockRestore();
@@ -2134,14 +2410,10 @@ describe('recordBugReportAlerts', () => {
     // ADR 0001: their trigger guards a content write and is not retryable, so a
     // queue failure stays swallowed. The opt-in is what separates the two.
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const db = fakeDb({}, {});
+    const db = fakeDb({}, { 'events/med-2026': EVENT });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const original = (db as any).doc;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db as any).doc = (path: string) => {
-      const ref = original(path);
-      if (path.includes('/adminAlerts/')) return { ...ref, create: async () => { throw new Error('write unavailable'); } };
-      return ref;
+    (db as any).runTransaction = async () => {
+      throw new Error('write unavailable');
     };
     await expect(
       recordAdminAlerts(db, 'items', 'med-2026', 'i1', 'e1', undefined, ITEM({ status: 'pending' })),

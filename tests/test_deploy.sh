@@ -2015,6 +2015,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Cases 22m–22p (#854): codebase-qualified exact names outrank conservative
+# inference for the standalone invoker endpoints, in EITHER selector order.
+#
+# Firebase accepts `functions:<codebase>:<fn>` for a scoped function deploy.
+# If that exact spelling falls through to the unfamiliar-selector arm, a
+# missing service is tolerated as a conservative guess even though Firebase
+# was explicitly asked to release it. Combining it with another unfamiliar
+# selector pins the same order-independence contract as 22g/22h for both
+# submitBugReport and emailUnsubscribe.
+# ---------------------------------------------------------------------------
+for qualified_case in \
+  "22m:submitBugReport:submitbugreport:functions:someGroup,functions:default:submitBugReport" \
+  "22n:submitBugReport:submitbugreport:functions:default:submitBugReport,functions:someGroup" \
+  "22o:emailUnsubscribe:emailunsubscribe:functions:someGroup,functions:default:emailUnsubscribe" \
+  "22p:emailUnsubscribe:emailunsubscribe:functions:default:emailUnsubscribe,functions:someGroup"; do
+  IFS=: read -r case_id endpoint service scope <<< "$qualified_case"
+  REPO_C="$WORKDIR/case${case_id}-qualified-${endpoint}"
+  init_fixture_repo "$REPO_C"
+  OUT_C="$WORKDIR/case${case_id}.out"
+  ERR_C="$WORKDIR/case${case_id}.err"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  GCLOUD_MISSING_SERVICE="$service" \
+    bash -c "cd '$REPO_C' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only $scope" \
+    >"$OUT_C" 2>"$ERR_C"
+  RC_C=$?
+  set -e
+
+  if [[ $RC_C -eq 0 ]]; then
+    fail "qualified standalone scope ($case_id, --only $scope): returned 0 though explicitly named $service is missing. stdout was:"
+    cat "$OUT_C" >&2
+  else
+    pass "qualified standalone scope ($case_id, --only $scope): explicitly named $endpoint stays strict regardless of selector order (rc=$RC_C)."
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo

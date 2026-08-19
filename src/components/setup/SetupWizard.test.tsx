@@ -469,6 +469,43 @@ describe('Cancel', () => {
     expect(workingStorage.getItem('gcb:event-draft:seeded-draft')).not.toBeNull();
   });
 
+  it('does not navigate away when removal silently no-ops and only the verification read fails (#901)', async () => {
+    class NoOpThenUnreadableStorage implements Storage {
+      private removalAttempted = false;
+      constructor(private readonly source: Storage) {}
+      get length(): number {
+        return this.source.length;
+      }
+      clear() {}
+      getItem(key: string): string | null {
+        if (this.removalAttempted) throw new Error('read access revoked after removal attempt');
+        return this.source.getItem(key);
+      }
+      key(index: number): string | null {
+        return this.source.key(index);
+      }
+      removeItem() {
+        this.removalAttempted = true;
+      }
+      setItem() {}
+    }
+
+    const workingStorage = new MemoryStorage();
+    vi.stubGlobal('localStorage', workingStorage);
+    await seedDraft();
+    vi.stubGlobal('localStorage', new NoOpThenUnreadableStorage(workingStorage));
+    const user = userEvent.setup();
+    renderApp(setupStepPath('seeded-draft', 'occasion'));
+    await screen.findByTestId('wizard-step-occasion');
+
+    await user.click(screen.getByText('✕ Cancel'));
+
+    await screen.findByRole('alert');
+    expect(screen.getByText(/couldn't discard/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('fallback-page')).not.toBeInTheDocument();
+    expect(workingStorage.getItem('gcb:event-draft:seeded-draft')).not.toBeNull();
+  });
+
   it('Escape requests Cancel from any step, not only Step 1', async () => {
     const user = userEvent.setup();
     await seedDraft({ step: 'basics', occasion: 'weekend-away', edition: 'vacay' });

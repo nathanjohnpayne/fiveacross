@@ -431,12 +431,23 @@ service cloud.firestore {
     // a Day has unlocked, its `theme`, `unlockAt`, and `tonight` metadata may
     // not change. A still-future Day is fully editable (theme swaps, Tonight
     // edits, AND unlockAt reschedules).
+    // Most writes change one Day but must resend the whole array. Short-circuit
+    // an identical Day before expanding its field checks so a ten-Day schedule
+    // stays below Firestore's 1000-expression cap (#850); a changed Day still
+    // passes through every shape and lock invariant below.
     // Clamping `unlockAt` too (Codex P2) closes the two-step bypass where a write
     // that changes only an unlocked Day's `unlockAt` (theme unchanged) moved the
     // lock source into the future, letting a SECOND write then change the theme.
+    function dayScoringValid(day) {
+      return !('scoring' in day)
+        || day.scoring == 'competitive'
+        || day.scoring == 'ceremonial';
+    }
     function dayThemeChangeOk(newDay, oldDay) {
-      return dayTonightShapeOk(newDay, oldDay)
-        && (!dayLocked(oldDay) || daySchedUnchanged(newDay, oldDay));
+      return newDay == oldDay
+        || (dayScoringValid(newDay)
+            && dayTonightShapeOk(newDay, oldDay)
+            && (!dayLocked(oldDay) || daySchedUnchanged(newDay, oldDay)));
     }
 
     // Applies dayThemeChangeOk across the whole `days` array. Firestore rules
@@ -447,10 +458,11 @@ service cloud.firestore {
     // raised alongside its own EventDoc. A size mismatch between the incoming
     // and existing arrays is rejected outright (`days[]` length is fixed at
     // seed — this ticket builds no row add/remove editor).
-    // Every present `scoring` is one of the two stated policies (ADR 0011).
-    // Unrolled like `daysThemeLockOk` below, and applied on CREATE too, which
-    // that function deliberately skips (a create has no prior array to lock
-    // against). Absent is always valid: no doc written before ADR 0011 carries
+    // Every present `scoring` on a created or CHANGED schedule is one of the
+    // two stated policies (ADR 0011). Unchanged arrays short-circuit at the
+    // allow site, so unrelated Event config writes do not spend this ten-way
+    // validation budget or get trapped by malformed legacy state they did not
+    // introduce. Absent is always valid: no doc written before ADR 0011 carries
     // the field, and `scoringForDay` resolves absence from the pool.
     //
     // Needed because a typo'd value fails SILENTLY, and then STICKS.
@@ -467,11 +479,6 @@ service cloud.firestore {
     // succeeds with this check in place. It is pinned by a test, alongside the
     // ten-Day case that fails WITHOUT this check on origin/main and belongs to
     // issue #850.
-    function dayScoringValid(day) {
-      return !('scoring' in day)
-        || day.scoring == 'competitive'
-        || day.scoring == 'ceremonial';
-    }
     function daysScoringValid(days) {
       return (days.size() < 1  || dayScoringValid(days[0]))
         && (days.size() < 2  || dayScoringValid(days[1]))
@@ -483,6 +490,97 @@ service cloud.firestore {
         && (days.size() < 8  || dayScoringValid(days[7]))
         && (days.size() < 9  || dayScoringValid(days[8]))
         && (days.size() < 10 || dayScoringValid(days[9]));
+    }
+
+    // Initial setup can legitimately restyle every still-future Day at once.
+    // The general lock path first compares each complete Day map before
+    // expanding its shape checks; doing that ten times crosses Firestore's
+    // expression cap even though a theme-only write cannot affect scoring,
+    // Tonight metadata, or the unlock source. This narrow fast path proves
+    // each old Day is still future and each map changes ONLY `theme`, so all
+    // other invariants carry through byte-for-byte without re-evaluation.
+    function futureThemeOnlyChangeOk(newDay, oldDay) {
+      return !dayLocked(oldDay)
+        && newDay.diff(oldDay).affectedKeys().hasOnly(['theme']);
+    }
+    function tenDayFutureThemesOnlyOk(newDays, oldDays) {
+      return newDays.size() == 10
+        && oldDays.size() == 10
+        && futureThemeOnlyChangeOk(newDays[0], oldDays[0])
+        && futureThemeOnlyChangeOk(newDays[1], oldDays[1])
+        && futureThemeOnlyChangeOk(newDays[2], oldDays[2])
+        && futureThemeOnlyChangeOk(newDays[3], oldDays[3])
+        && futureThemeOnlyChangeOk(newDays[4], oldDays[4])
+        && futureThemeOnlyChangeOk(newDays[5], oldDays[5])
+        && futureThemeOnlyChangeOk(newDays[6], oldDays[6])
+        && futureThemeOnlyChangeOk(newDays[7], oldDays[7])
+        && futureThemeOnlyChangeOk(newDays[8], oldDays[8])
+        && futureThemeOnlyChangeOk(newDays[9], oldDays[9]);
+    }
+
+    // Mirror `standingsFreezeAtFor`: an explicitly stated scoring policy wins;
+    // absent or malformed scoring falls back to the legacy closing-pool names.
+    // A non-positive unlock is the schedule's "live from Event open" sentinel
+    // and supplies no freeze. A non-finite positive value cannot describe an
+    // already-settled boundary, so treating it as future has the same allow/deny
+    // result as the reader ignoring it.
+    function daySuppliesDerivedFreeze(day) {
+      let scoring = day.get('scoring', '');
+      let unlockAt = day.get('unlockAt', 0);
+      // Put the policy check first: the common explicit-competitive case stops
+      // here instead of spending unlock-shape expressions on every Day. `get`
+      // also keeps legacy missing fields cheap and non-throwing.
+      return (scoring == 'ceremonial'
+              || (!(scoring in ['competitive', 'ceremonial'])
+                  && day.get('pool', '') in ['closing', 'farewell']))
+        && unlockAt is number
+        && unlockAt > 0;
+    }
+
+    // Firestore rules cannot iterate, so resolve the FIRST usable ceremonial
+    // Day with the same ten-Day cap as the schedule lock. Returning 0 means the
+    // schedule carries no derived freeze.
+    function firstDerivedFreezeAt(days) {
+      // The production shape avoids nine redundant size checks on the hot
+      // ten-Day path; shorter test/legacy schedules retain guarded indexing.
+      return days.size() == 10
+        ? (daySuppliesDerivedFreeze(days[0]) ? days[0].unlockAt
+          : daySuppliesDerivedFreeze(days[1]) ? days[1].unlockAt
+          : daySuppliesDerivedFreeze(days[2]) ? days[2].unlockAt
+          : daySuppliesDerivedFreeze(days[3]) ? days[3].unlockAt
+          : daySuppliesDerivedFreeze(days[4]) ? days[4].unlockAt
+          : daySuppliesDerivedFreeze(days[5]) ? days[5].unlockAt
+          : daySuppliesDerivedFreeze(days[6]) ? days[6].unlockAt
+          : daySuppliesDerivedFreeze(days[7]) ? days[7].unlockAt
+          : daySuppliesDerivedFreeze(days[8]) ? days[8].unlockAt
+          : daySuppliesDerivedFreeze(days[9]) ? days[9].unlockAt
+          : 0)
+        : days.size() < 1 ? 0
+        : daySuppliesDerivedFreeze(days[0]) ? days[0].unlockAt
+        : days.size() < 2 ? 0
+        : daySuppliesDerivedFreeze(days[1]) ? days[1].unlockAt
+        : days.size() < 3 ? 0
+        : daySuppliesDerivedFreeze(days[2]) ? days[2].unlockAt
+        : days.size() < 4 ? 0
+        : daySuppliesDerivedFreeze(days[3]) ? days[3].unlockAt
+        : days.size() < 5 ? 0
+        : daySuppliesDerivedFreeze(days[4]) ? days[4].unlockAt
+        : days.size() < 6 ? 0
+        : daySuppliesDerivedFreeze(days[5]) ? days[5].unlockAt
+        : days.size() < 7 ? 0
+        : daySuppliesDerivedFreeze(days[6]) ? days[6].unlockAt
+        : days.size() < 8 ? 0
+        : daySuppliesDerivedFreeze(days[7]) ? days[7].unlockAt
+        : days.size() < 9 ? 0
+        : daySuppliesDerivedFreeze(days[8]) ? days[8].unlockAt
+        : days.size() < 10 ? 0
+        : daySuppliesDerivedFreeze(days[9]) ? days[9].unlockAt
+        : 0;
+    }
+
+    function derivedFreezeStillFuture(days) {
+      let freezeAt = firstDerivedFreezeAt(days);
+      return freezeAt <= 0 || request.time.toMillis() < freezeAt;
     }
 
     // Has the finale BEGUN? The last-call beat writes at the deterministic id
@@ -814,10 +912,19 @@ service cloud.firestore {
         // gates above already use), every entry's theme change must be on a
         // still-future Day. See `daysThemeLockOk` above.
         && (!('days' in request.resource.data)
+            // A changed existing schedule validates each changed Day inside
+            // `daysThemeLockOk`, sharing one ten-way traversal with its shape
+            // and lock checks. Running a second unroll here pushes the valid
+            // all-ten-Days-changed write past Firestore's expression cap
+            // (#934/#940). Creates and legacy docs with no prior schedule still
+            // need the standalone resulting-state validation below.
+            || (resource != null && 'days' in resource.data)
             || daysScoringValid(request.resource.data.days))
         && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
+            || request.resource.data.days == resource.data.days
+            || tenDayFutureThemesOnlyOk(request.resource.data.days, resource.data.days)
             || daysThemeLockOk(request.resource.data.days, resource.data.days))
         // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
         // P2 on PR #841). Between the cutoff and the scheduler's `frozenAt`
@@ -863,29 +970,18 @@ service cloud.firestore {
         && (resource == null
             || !('standingsFreezeAt' in resource.data)
             || 'standingsFreezeAt' in request.resource.data)
-        // ADDING an explicit freeze to a doc that had none is the remaining way
-        // to cross a settled boundary (Phase 4b P2): the derived cutoff may
-        // ALREADY have elapsed, and an explicit value takes precedence in
-        // `standingsFreezeAtFor`, so refreshed clients un-freeze while cached
-        // ones stay frozen until `frozenAt` is stamped.
-        //
-        // Guarded here by the LAST Day's unlock, which is O(1). That catches the
-        // real legacy shape — both live Events put their ceremonial Day last, so
-        // the last unlock IS the derived boundary — and it is deliberately an
-        // over-approximation rather than the exact test: resolving the first
-        // ceremonial Day's unlock needs a ten-way unroll on a rule that already
-        // exceeds Firestore's 1000-expression cap at ten Days (#850). It does
-        // NOT catch a schedule whose ceremonial Day sits EARLY with competitive
-        // Days after it; that case rides #850's fix, and the PR body records the
-        // reasoning. An Event that has not finished can still be given a freeze,
-        // which is the legitimate configuration this must not block.
+        // Adding an explicit freeze to a doc that had none must not cross an
+        // already-settled DERIVED boundary: an explicit value takes precedence,
+        // so refreshed clients would resume standings that cached clients keep
+        // frozen. Resolve the same first usable ceremonial Day the readers use,
+        // now affordable because unchanged Days short-circuit their schedule
+        // checks before the ten-way expansion (#850). An Event with no derived
+        // boundary, or one whose boundary is still future, remains configurable.
         && (resource == null
             || 'standingsFreezeAt' in resource.data
             || !('standingsFreezeAt' in request.resource.data)
             || !('days' in resource.data)
-            || resource.data.days.size() < 1
-            || request.time.toMillis()
-                 < resource.data.days[resource.data.days.size() - 1].unlockAt)
+            || derivedFreezeStillFuture(resource.data.days))
         // ONCE THE FINALE HAS BEEN ANNOUNCED, its clock is immutable (Phase 4b
         // P1). The `last_call` Moment persists the freeze phrase it announced
         // and is deduped on every later scheduler run, so a freeze moved after

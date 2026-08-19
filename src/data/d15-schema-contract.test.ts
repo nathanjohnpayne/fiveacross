@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { QueryDocumentSnapshot } from 'firebase/firestore';
 import { boardConverter, eventConverter, itemConverter } from './converters';
+import { setActiveEdition } from '../theme/themes';
 import type { BoardDoc, EventDoc, ItemDoc, MomentDoc } from '../types';
 import { THEMES } from '../theme/themes';
 import { hasCanonicalMomentId } from '../hooks/useData';
@@ -81,6 +82,8 @@ describe('itemConverter (Phase 1.5 pool default)', () => {
 });
 
 describe('eventConverter (Phase 1.5 days/timezone defaults)', () => {
+  afterEach(() => setActiveEdition('gcb'));
+
   it('defaults a missing days/timezone (legacy Event doc) rather than throwing', () => {
     const event = eventConverter.fromFirestore(snapshotOf(legacyEvent));
     expect(event.days).toEqual([]);
@@ -149,6 +152,61 @@ describe('eventConverter (Phase 1.5 days/timezone defaults)', () => {
 
     expect(event.timezone).toBe(canonical);
     expect(event.timezone).not.toBe('Europe/Rome');
+  });
+
+  it.each([
+    ['unknown', 'not-a-theme'],
+    ['retired', 'retired-theme-id'],
+    ['off-Edition', 'the-birds'],
+    ['chrome', 'fiveacross-slate'],
+  ])('normalizes %s Event and Day Theme ids to the Edition fallback', (_kind, theme) => {
+    setActiveEdition('fiveacross');
+    const event = eventConverter.fromFirestore(
+      snapshotOf({
+        ...legacyEvent,
+        defaultTheme: theme,
+        days: [
+          {
+            index: 0,
+            date: '2026-08-18',
+            place: 'Somewhere',
+            placeEmoji: '📍',
+            theme,
+            pool: 'main',
+            tutorial: false,
+            unlockAt: 0,
+          },
+        ],
+      }),
+    );
+
+    expect(event.defaultTheme).toBe('marquee');
+    expect(event.days[0]?.theme).toBe('marquee');
+  });
+
+  it('preserves pickable Theme ids belonging to the active Edition', () => {
+    setActiveEdition('vacay');
+    const event = eventConverter.fromFirestore(
+      snapshotOf({
+        ...legacyEvent,
+        defaultTheme: 'side-quests',
+        days: [
+          {
+            index: 0,
+            date: '2026-08-18',
+            place: 'Bodega Bay',
+            placeEmoji: '🌊',
+            theme: 'fog-froth-farewells',
+            pool: 'main',
+            tutorial: false,
+            unlockAt: 0,
+          },
+        ],
+      }),
+    );
+
+    expect(event.defaultTheme).toBe('side-quests');
+    expect(event.days[0]?.theme).toBe('fog-froth-farewells');
   });
 });
 

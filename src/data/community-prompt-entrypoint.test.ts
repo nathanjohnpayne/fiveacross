@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { submitterStatus, type TargetableDay } from './communityPrompts';
-import { loadTrackedSuggestions, trackSuggestion, deriveMySubmissions, refreshLastKnownStatuses } from './mySuggestions';
+import {
+  loadTrackedSuggestions,
+  persistTrackedSuggestions,
+  refreshAndPersistLastKnownStatuses,
+  trackSuggestion,
+  deriveMySubmissions,
+  refreshLastKnownStatuses,
+} from './mySuggestions';
 import type { ItemDoc } from '../types';
 
 // jsdom here leaves `window.localStorage` unset (src/data/cardCache.test.ts's
@@ -114,6 +121,80 @@ describe('mySuggestions local tracker (#559)', () => {
     const loaded = loadTrackedSuggestions('ev-1', 'u1');
     expect(loaded).toHaveLength(1);
     expect(loaded[0].text).toBe('edited text');
+  });
+
+  it('normalizes duplicate ids from a persisted blob while refreshing the first occurrence in place (#909)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([
+        { id: 'before', text: 'before', submittedAt: 1 },
+        { id: 'target', text: 'first copy', submittedAt: 2 },
+        { id: 'middle', text: 'middle', submittedAt: 3 },
+        { id: 'target', text: 'later duplicate', submittedAt: 4 },
+        { id: 'after', text: 'after', submittedAt: 5 },
+      ]),
+    );
+
+    trackSuggestion('ev-1', 'u1', { id: 'target', text: 'refreshed', submittedAt: 2 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded.map(({ id }) => id)).toEqual(['before', 'target', 'middle', 'after']);
+    expect(loaded[1]).toEqual({ id: 'target', text: 'refreshed', submittedAt: 2 });
+  });
+
+  it('caps an oversized persisted blob even when the next write only refreshes an existing id (#909)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify(Array.from({ length: 22 }, (_, i) => ({ id: `id-${i}`, text: `t${i}`, submittedAt: i }))),
+    );
+
+    trackSuggestion('ev-1', 'u1', { id: 'id-10', text: 'refreshed', submittedAt: 10 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded).toHaveLength(20);
+    expect(loaded[0].id).toBe('id-2');
+    expect(loaded.at(-1)?.id).toBe('id-21');
+    expect(loaded.find(({ id }) => id === 'id-10')?.text).toBe('refreshed');
+  });
+
+  it('persists one normalized capped snapshot when multiple stale entries refresh together (#909)', () => {
+    const oversized = Array.from({ length: 22 }, (_, i) => ({
+      id: `id-${i}`,
+      text: `original-${i}`,
+      submittedAt: i,
+    }));
+    const activeMine = oversized.map((tracked) => item({ id: tracked.id, text: `refreshed-${tracked.id}` }));
+    const write = vi.spyOn(localStorage, 'setItem');
+
+    const persisted = refreshAndPersistLastKnownStatuses('ev-1', 'u1', oversized, activeMine, [], 0);
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(persisted.map(({ id }) => id)).toEqual(Array.from({ length: 20 }, (_, i) => `id-${i + 2}`));
+    expect(persisted[0].lastKnownText).toBe('refreshed-id-2');
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual(persisted);
+  });
+
+  it('preserves a newer tab append when a stale tab persists a multi-entry refresh (#909, Codex P2)', () => {
+    const staleTab = Array.from({ length: 20 }, (_, i) => ({
+      id: `id-${i}`,
+      text: `original-${i}`,
+      submittedAt: i,
+    }));
+    const concurrentAppend = { id: 'new-tab-id', text: 'new tab', submittedAt: 20 };
+    localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify([...staleTab, concurrentAppend]));
+    const activeMine = staleTab.map((tracked) => item({ id: tracked.id, text: `refreshed-${tracked.id}` }));
+    const write = vi.spyOn(localStorage, 'setItem');
+
+    const persisted = refreshAndPersistLastKnownStatuses('ev-1', 'u1', staleTab, activeMine, [], 0);
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(persisted.map(({ id }) => id)).toEqual([
+      ...Array.from({ length: 19 }, (_, i) => `id-${i + 1}`),
+      'new-tab-id',
+    ]);
+    expect(persisted[0].lastKnownText).toBe('refreshed-id-1');
+    expect(persisted.at(-1)).toEqual(concurrentAppend);
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual(persisted);
   });
 
   it('scopes tracking per Event AND per uid — no cross-Event or cross-account bleed', () => {

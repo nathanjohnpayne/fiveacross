@@ -184,10 +184,37 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
   }
 }
 
+/** Persist one complete tracker snapshot after repairing its untrusted stored
+ *  shape. The first occurrence of an id owns its position, later duplicates
+ *  are discarded, and the cap is applied by array position without consulting
+ *  client timestamps. Returning the persisted snapshot lets callers update
+ *  in-memory state from the same normalized value. */
+export function persistTrackedSuggestions(
+  eventId: string,
+  uid: string,
+  suggestions: readonly TrackedSuggestion[],
+): TrackedSuggestion[] {
+  const seenIds = new Set<string>();
+  const normalized = suggestions
+    .filter(({ id }) => {
+      if (seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    })
+    .slice(-TRACKED_LIMIT);
+  try {
+    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(normalized));
+  } catch {
+    /* nothing to persist */
+  }
+  return normalized;
+}
+
 /**
- * Record a fresh submission from THIS device — or refresh an existing
- * tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/`lastKnownText`
- * (`refreshLastKnownStatuses`' caller, `ItemPool.tsx`, calls this for BOTH).
+ * Record one fresh submission from THIS device — or replace one existing
+ * tracked entry at its first occurrence. ItemPool's multi-entry status/text
+ * refresh uses `refreshAndPersistLastKnownStatuses` instead, so the whole
+ * refreshed batch is normalized, capped, and persisted atomically.
  * Idempotent on `id` (a retried call — e.g. React StrictMode's
  * double-invoke — never duplicates the entry); silently drops on a storage
  * error, same fallback as the read.
@@ -202,10 +229,16 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
  * genuinely brand-new submission sort BELOW older entries and be the one
  * `slice(-TRACKED_LIMIT)` evicts — the opposite of "keep the newest". An
  * existing id is instead replaced IN PLACE, at its current array position,
- * so a REFRESH never moves anything; only a genuinely NEW id is appended,
- * and only the append path is ever capped — by array position, which is
- * monotonic by construction (this function's own call order) regardless of
- * what the clock says.
+ * so a REFRESH never moves anything; only a genuinely NEW id is appended.
+ * After either path the cap is applied by array position, which is monotonic
+ * by construction (this function's own call order) regardless of what the
+ * clock says.
+ *
+ * A loaded blob is also normalized on every write (#909): the first
+ * occurrence of each id keeps its position, later duplicates are removed,
+ * and an oversized hand-edited or cross-version blob is capped even when the
+ * current call is only a refresh. This repairs untrusted persisted shape
+ * without promoting an old entry or trusting its timestamp.
  *
  * Array position is only a faithful proxy for submission order GOING
  * FORWARD — a blob a pre-round-1 build already wrote may have a REFRESHED
@@ -215,20 +248,16 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
  * exactly as untrustworthy for a one-time fix as it is for an ongoing one).
  */
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
-  try {
-    const existing = loadTrackedSuggestions(eventId, uid);
-    const index = existing.findIndex((s) => s.id === suggestion.id);
-    let next: TrackedSuggestion[];
-    if (index === -1) {
-      next = [...existing, suggestion].slice(-TRACKED_LIMIT);
-    } else {
-      next = existing.slice();
-      next[index] = suggestion;
-    }
-    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next));
-  } catch {
-    /* nothing to persist */
+  const existing = loadTrackedSuggestions(eventId, uid);
+  const index = existing.findIndex((s) => s.id === suggestion.id);
+  let next: TrackedSuggestion[];
+  if (index === -1) {
+    next = [...existing, suggestion];
+  } else {
+    next = existing.slice();
+    next[index] = suggestion;
   }
+  persistTrackedSuggestions(eventId, uid, next);
 }
 
 export type MySubmissionStatus = SubmitterStatus | 'not_selected';
@@ -372,7 +401,7 @@ export function deriveMySubmissions(
 /**
  * Refresh each tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/
  * `lastKnownText` from the CURRENT `activeMine` query, for the caller to
- * persist (`trackSuggestion`) whenever an entry actually changes.
+ * persist whenever an entry actually changes.
  * Deliberately does nothing for an entry NOT currently found in `activeMine`
  * — a transiently-absent or genuinely-hidden entry keeps whatever it last
  * recorded, which is the whole point (see `deriveMySubmissions`'s doc
@@ -398,4 +427,45 @@ export function refreshLastKnownStatuses(
     return { ...t, lastKnownStatus: status, lastKnownDayIndex: dayIndex, lastKnownText: active.text };
   });
   return changed ? next : tracked;
+}
+
+/** Refresh ItemPool's complete tracked snapshot and persist it in one write.
+ * Keeping refresh plus persistence behind this seam prevents a caller from
+ * replaying individual entries from one stale oversized snapshot. Before the
+ * write, changed last-known fields are merged by id into the latest persisted
+ * ordering so another tab's newly appended entry is not overwritten. The
+ * merged batch is normalized and capped once, and the exact persisted value
+ * is returned for in-memory state. A no-op refresh preserves the input
+ * reference and does not write. */
+export function refreshAndPersistLastKnownStatuses(
+  eventId: string,
+  uid: string,
+  tracked: readonly TrackedSuggestion[],
+  activeMine: readonly ItemDoc[],
+  days: readonly TargetableDay[],
+  now: number,
+): readonly TrackedSuggestion[] {
+  const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
+  if (refreshed === tracked) return tracked;
+
+  const changedById = new Map<string, TrackedSuggestion>();
+  refreshed.forEach((entry, index) => {
+    if (entry !== tracked[index] && !changedById.has(entry.id)) {
+      changedById.set(entry.id, entry);
+    }
+  });
+
+  const latest = loadTrackedSuggestions(eventId, uid);
+  const mergeBase = latest.length > 0 ? latest : refreshed;
+  const merged = mergeBase.map((entry) => {
+    const changed = changedById.get(entry.id);
+    if (!changed) return entry;
+    return {
+      ...entry,
+      lastKnownStatus: changed.lastKnownStatus,
+      lastKnownDayIndex: changed.lastKnownDayIndex,
+      lastKnownText: changed.lastKnownText,
+    };
+  });
+  return persistTrackedSuggestions(eventId, uid, merged);
 }

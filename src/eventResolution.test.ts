@@ -139,7 +139,7 @@ describe('eventResolution — status must be explicit', () => {
 
 describe('eventResolution — resolveEvent decision table', () => {
   it('a SINGLE-Event build never touches the network', async () => {
-    // VITE_EVENT_ID's presence means the bundle serves one Event, so consulting
+    // A non-empty VITE_EVENT_ID means the bundle serves one Event, so consulting
     // the lookup at all would be incoherent — and since resolution now gates
     // first paint, it would cost the legacy build a round trip it cannot use.
     const fetchDoc = vi.fn(never);
