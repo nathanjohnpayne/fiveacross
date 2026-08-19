@@ -392,6 +392,29 @@ describe('dayCompletenessIssues', () => {
     expect(dayCompletenessIssues(draft).map((i) => i.code)).toEqual(['day-off-edition-theme']);
   });
 
+  it('flags a platform-chrome Theme the SAME way, even on the Edition it is bound to (#882)', () => {
+    // `fiveacross-slate` is registered and THEME_EDITIONS-bound to
+    // `fiveacross` — same as `marquee` above — but `chrome: true` keeps it
+    // out of `themesForEdition('fiveacross')`'s picker, so `isEditionTheme`
+    // reads it exactly like an off-Edition Theme even though it belongs to
+    // the Event's OWN Edition. No UI path can write this id to a Day (no
+    // picker offers it), but the validator has to be right about it anyway:
+    // 'day-off-edition-theme' is a statement about the PICKER, not about
+    // which Edition a Theme's THEME_EDITIONS row names.
+    const draft = launchableDraft({
+      edition: 'fiveacross',
+      // day(1) needs its own valid fiveacross Theme — its default ('the-birds',
+      // a Vacay Theme) would otherwise ALSO trip 'day-off-edition-theme' once
+      // the draft's Edition changes, polluting the assertion below.
+      days: [
+        day(0, { theme: 'fiveacross-slate' as ThemeId }),
+        day(1, { theme: 'marquee' as ThemeId, pool: 'closing' }),
+      ],
+    });
+    expect(dayCompletenessIssues(draft).map((i) => i.code)).toEqual(['day-off-edition-theme']);
+    expect(isRegisteredTheme('fiveacross-slate' as ThemeId)).toBe(true);
+  });
+
   it('requires contiguous indexes from zero', () => {
     const draft = launchableDraft({ days: [day(1), day(2, { pool: 'closing' })] });
     expect(dayCompletenessIssues(draft).map((i) => i.code)).toEqual([
@@ -435,6 +458,22 @@ describe('eventCompletenessIssues', () => {
     expect(
       eventCompletenessIssues(launchableDraft({ occasion: 'festival' as OccasionId })).map((i) => i.field),
     ).toEqual(['occasion']);
+  });
+
+  it.each([
+    ['reserved infrastructure', 'admin', 'reserved-label'],
+    ['reserved IDNA form', 'ab--cd', 'reserved-tag'],
+    ['uppercase wire spelling', 'Point-Reyes', 'invalid-characters'],
+  ])('uses the shared router Slug contract for %s', (_label, slugCandidate, rejection) => {
+    const issues = eventCompletenessIssues(launchableDraft({ slugCandidate }));
+    expect(issues).toEqual([
+      expect.objectContaining({
+        code: 'event-invalid-slug',
+        field: 'slugCandidate',
+        message: expect.stringContaining(rejection),
+      }),
+    ]);
+    expect(isDraftLaunchable(launchableDraft({ slugCandidate }), NOW)).toBe(false);
   });
 
   it('rejects a zone the read-side contract would silently rewrite', () => {
