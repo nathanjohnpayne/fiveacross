@@ -47,13 +47,19 @@ export default defineConfig(({ command, mode }) => {
   // from scripts/build-target.mjs. It must not reload .env, .env.local, or a
   // mode-specific root file after that wrapper has removed ambient values.
   const env = targetBuild ? process.env : loadEnv(mode, process.cwd(), 'VITE_');
-  // `buildTimeEdition` decides whether this build may bake an Edition at all —
-  // a hostname-resolved bundle defers to the lookup and takes the default, so a
-  // stale VITE_EDITION cannot brand a bundle every Event shares. Always an
-  // EXPLICIT id, never `editionBrand()`'s default argument: that resolves
+  // `buildTimeEdition` keeps a hostname-resolved bundle independent of stale
+  // VITE_EDITION. A named target may carry a trusted static fallback solely for
+  // browser/PWA chrome that the edge cannot yet rewrite per host (#546). Always
+  // an EXPLICIT id, never `editionBrand()`'s default argument: that resolves
   // through `activeEdition()`, which reads `import.meta.env` and does not exist
   // here.
-  const brand = editionBrand(buildTimeEdition(env.VITE_EVENT_ID, env.VITE_EDITION));
+  const brand = editionBrand(
+    buildTimeEdition(
+      env.VITE_EVENT_ID,
+      env.VITE_EDITION,
+      targetBuild ? process.env.DEPLOY_TARGET_STATIC_EDITION : undefined,
+    ),
+  );
 
   // Guard: never let a production build ship with a blank Firebase web config.
   // Vite statically inlines import.meta.env.* at build time (see src/firebase.ts),

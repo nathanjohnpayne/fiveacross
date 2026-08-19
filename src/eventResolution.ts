@@ -216,7 +216,7 @@ export interface ResolveOptions {
   /** Injected Firestore `get`. Resolves to null when the document is absent. */
   fetchDoc: (hostname: string) => Promise<HostnameDoc | null>;
   storage?: StorageLike | null;
-  /** `VITE_EVENT_ID`. Its PRESENCE marks a single-Event build. */
+  /** `VITE_EVENT_ID`. A non-empty value marks a single-Event build. */
   envEventId?: string | null;
   /** `VITE_ADULT_CONTENT`, verbatim. Only a literal `'false'` opts a
    *  single-Event build out of the 18+ posture (#608); read as a raw string
@@ -239,8 +239,8 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  *
  * ORDER, and why:
  *
- *  0. **A single-Event build never looks up at all.** `VITE_EVENT_ID`'s
- *     PRESENCE is the signal that this bundle serves exactly one Event — the
+ *  0. **A single-Event build never looks up at all.** A non-empty
+ *     `VITE_EVENT_ID` signals that this bundle serves exactly one Event — the
  *     Gay Cruise Bingo build, whose hostname has no `hostnames/` document. It
  *     would be incoherent to consult the lookup and then discard the answer,
  *     and since resolution now blocks first paint, racing a Firestore read it
@@ -266,7 +266,7 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  * because it is the one path that would otherwise render nothing at all.
  *
  * The answer splits on the build mode, and the split is the point (Phase 4b P1
- * on #576). An env-pinned build (`envEventId` present) mounts: `EVENT_ID`
+ * on #576). An env-pinned build (`envEventId` non-empty) mounts: `EVENT_ID`
  * already holds the baked id, which IS the correct Event for that build, so a
  * blank screen would be strictly worse. A hostname-resolved build must fail
  * CLOSED instead: its pre-resolution `EVENT_ID` is the legacy fallback
