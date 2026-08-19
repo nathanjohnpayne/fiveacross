@@ -85,8 +85,9 @@ export const DEPLOY_TARGETS = Object.freeze({
     // TO CLOSE IT: complete #547 by granting the fiveacross deploy SA
     // run.services.update on fiveacross, successfully run the exact-SA
     // readiness apply (which forces updates on both callables), then flip this
-    // to false. Once false, deploy-target.mjs repeats that permission proof
-    // before it constructs any hosting-only or full build/deploy invocation.
+    // to false. Once false, deploy-target.mjs pins readiness into deploy.sh;
+    // after every pre-build guard, deploy.sh repeats that permission proof
+    // before BUILD_CMD/Firebase for each Hosting or handoff-callable scope.
     skipInvokerReconcile: true,
   }),
 });

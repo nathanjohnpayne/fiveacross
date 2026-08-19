@@ -381,18 +381,22 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   fi
 fi
 
-# `--except` removes whole Functions releases or one known invoker service.
-# This repo has one Firebase default codebase, so `functions:default` excludes
-# both protected endpoints. Any OTHER unfamiliar selector might be a single
-# unrelated function; it must leave the endpoints selected because Firebase may
-# still release them and reset their annotations. The reconciliation is
-# idempotent, while skipping a released endpoint can leave it 403ing. If this
-# repo later adds named codebases/groups, register their endpoint membership
-# here rather than treating every unknown exclusion as an all-Functions scope.
-for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
-  IFS=',' read -r -a except_selectors <<< "$except_value"
-  for selector in "${except_selectors[@]}"; do
-    case "$selector" in
+# Firebase's vendored filterTargets uses `if (options.only) ... else if
+# (options.except)`: any `--only` makes every `--except` irrelevant, regardless
+# of argument order. Applying both here can suppress readiness/reconciliation
+# for a surface Firebase still releases, so parse exclusions only when no
+# allowlist exists.
+#
+# Without `--only`, `--except` removes exact top-level targets. Firebase does
+# not split exclusion values on `:`, so every endpoint-, group-, and codebase-
+# qualified Functions exclusion is a no-op and must leave all invoker repairs
+# selected. The reconciliation is idempotent, while skipping a released
+# endpoint can leave it 403ing.
+if [[ ${#ONLY_VALUES[@]} -eq 0 ]]; then
+  for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
+    IFS=',' read -r -a except_selectors <<< "$except_value"
+    for selector in "${except_selectors[@]}"; do
+      case "$selector" in
       hosting)
         HOSTING_ATTEMPTED=false
         ;;
@@ -405,17 +409,9 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
         ;;
-      functions:submitBugReport)
-        BUG_REPORT_INVOKER_SELECTED=false
-        BUG_REPORT_INVOKER_CONSERVATIVE=false
-        ;;
-      functions:emailUnsubscribe)
-        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
-        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-        ;;
-      # ENDPOINT-QUALIFIED `--except` IS NOT A FUNCTION FILTER, and this arm is
-      # a deliberate, documented NO-OP rather than a missing case (#548, Codex
-      # P2 round 5).
+      # COLON-QUALIFIED `--except` IS NOT A FUNCTION FILTER. This arm is a
+      # deliberate, documented NO-OP rather than a missing case (#548, Codex P2
+      # round 5; #852 Standards).
       #
       # Firebase implements `--except` by subtracting exact TOP-LEVEL target
       # names (`firebase-tools/lib/filterTargets.js`); per-function filtering is
@@ -425,14 +421,8 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
       # excluded. An earlier version of this arm relaxed the excluded half to
       # "may be absent", which would have swallowed a NOT_FOUND on a service
       # Firebase was actually asked to deploy. Both halves stay strict.
-      functions:mintAuthHandoff|functions:*:mintAuthHandoff|\
-      functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
-        :
-        ;;
-      # `--except functions:default` EXCLUDES NOTHING, so this is a documented
-      # no-op (#548, Codex P2 round 10). This REVERSES the conclusion recorded
-      # here under #767, which held that excluding this repo's one codebase
-      # excludes Functions entirely. The vendored source settles it —
+      # `--except functions:default` likewise EXCLUDES NOTHING. The vendored
+      # source settles all colon-qualified spellings uniformly —
       # `node_modules/firebase-tools/lib/filterTargets.js`:
       #
       #     if (options.only) {
@@ -450,20 +440,17 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
       # resets the invoker annotations, and the previous arm then skipped the
       # reconciliation that repairs them, leaving all three endpoints 403.
       #
-      # This is the same reasoning already applied to the endpoint-qualified
-      # `--except` arm above; the two spellings differ only in which label
-      # follows the colon, so they cannot correctly behave differently.
-      #
       # FUNCTIONS_ATTEMPTED deliberately stays true. #767 set it false to stop
       # Guard 4 demanding a complete functions/.env.<projectId> for "a deploy
       # that never touches Functions params" — but such a deploy DOES touch
       # them, so the guard was right and the premise was wrong.
-      functions:default)
+      functions:*)
         :
         ;;
-    esac
+      esac
+    done
   done
-done
+fi
 
 # Reconciliation coordinates are PINNED to the selected deploy target, never
 # inherited (#768 r4 Codex P2).

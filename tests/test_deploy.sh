@@ -2013,6 +2013,42 @@ else
   pass "except-not-a-filter: an endpoint-qualified --except keeps both halves strict (rc=$RC22J)."
 fi
 
+# The same vendored filter applies to every endpoint, not only the handoff
+# pair. Short and codebase-qualified `functions:<...>:<endpoint>` exclusions
+# are still unequal to the top-level `functions` target, so ordinary
+# postdeploy repair must stay selected.
+for except_endpoint_case in \
+  "22jb:functions:submitBugReport:submitbugreport" \
+  "22jc:functions:default:submitBugReport:submitbugreport" \
+  "22jd:functions:emailUnsubscribe:emailunsubscribe" \
+  "22je:functions:default:emailUnsubscribe:emailunsubscribe"; do
+  case_id="${except_endpoint_case%%:*}"
+  case_tail="${except_endpoint_case#*:}"
+  selector="${case_tail%:*}"
+  service="${case_tail##*:}"
+  REPO_EXCEPT="$WORKDIR/case${case_id}-except-not-a-filter"
+  init_fixture_repo "$REPO_EXCEPT"
+  OUT_EXCEPT="$WORKDIR/case${case_id}.out"
+  ERR_EXCEPT="$WORKDIR/case${case_id}.err"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  GCLOUD_MISSING_SERVICE="$service" \
+    bash -c "cd '$REPO_EXCEPT' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --except $selector" \
+    >"$OUT_EXCEPT" 2>"$ERR_EXCEPT"
+  RC_EXCEPT=$?
+  set -e
+
+  if [[ $RC_EXCEPT -eq 0 ]]; then
+    fail "except-not-a-filter ($case_id, $selector): returned 0 though $service is missing and Firebase still released it. stdout was:"
+    cat "$OUT_EXCEPT" >&2
+  else
+    pass "except-not-a-filter ($case_id, $selector): endpoint-qualified --except keeps ordinary invoker repair strict (rc=$RC_EXCEPT)."
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # Case 22k (#548, Codex P2 round 6): `--only functions:default` is a FULL
 # Functions release and must stay strict.
@@ -2021,8 +2057,8 @@ fi
 # endpoint filter and releases both handoff callables exactly like the bare
 # `functions` scope. Falling through to the unfamiliar-selector arm made it
 # conservative, which could report success over a released service that was
-# missing. The --except side already treated functions:default as the whole
-# codebase; this pins that --only agrees.
+# missing. This pins `--only functions:default` independently of the opposite
+# `--except functions:default` spelling, which Firebase treats as a no-op.
 # ---------------------------------------------------------------------------
 REPO22K="$WORKDIR/case22k-default-codebase"
 init_fixture_repo "$REPO22K"
@@ -2126,7 +2162,7 @@ for qualified_case in \
 done
 
 # ---------------------------------------------------------------------------
-# Cases 23a-23o (#852): named Five Across readiness is owned by this canonical
+# Cases 23a-23z (#852): named Five Across readiness is owned by this canonical
 # deploy boundary, after its one argument/scope parse and source guard but
 # before BUILD_CMD or op-firebase-deploy. It runs only when Hosting or an auth-
 # handoff Function may be released. These cases execute deploy.sh itself with
@@ -2193,6 +2229,12 @@ run_readiness_scope_case 23m skipped --only storage
 run_readiness_scope_case 23n skipped --only functions:emailUnsubscribe
 run_readiness_scope_case 23o skipped --only functions:default:submitBugReport
 run_readiness_scope_case 23p skipped --except hosting,functions
+run_readiness_scope_case 23u required --only hosting --except hosting
+run_readiness_scope_case 23v required --except hosting --only hosting
+run_readiness_scope_case 23w required --only functions:mintAuthHandoff --except functions
+run_readiness_scope_case 23x required --except functions --only functions:default:exchangeAuthHandoff
+run_readiness_scope_case 23y skipped --only firestore --except hosting,functions
+run_readiness_scope_case 23z skipped --dry-run --only hosting --except hosting
 
 # The source guard must fail before the readiness process can make a Cloud Run
 # update. This fixture deliberately stays on feature/deploy-test and omits
