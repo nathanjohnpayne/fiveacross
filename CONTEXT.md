@@ -76,7 +76,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **User**: A person's global identity and profile—one per Google account, shared across every Event. Holds display name and photo. _Avoid_: Account, player
 
-**Player**: A User's membership and stats *within one Event*: bingo count, squares marked, first-bingo time. The same User is a distinct Player in each Event. The row is self-written and therefore evidence of *play*, never of admission—the record that admits is the Membership below. _Avoid_: User, member, participant
+**Player**: A User's participation and stats *within one Event*: bingo count, squares marked, first-bingo time. The same User is a distinct Player in each Event. The row is self-written and therefore evidence of *play*, never of admission—the record that admits is the Membership below. _Avoid_: User, member, participant
 
 **Membership**: The organizer-issued record that a User is admitted to one Event—one document per (Event, User), which no client credential may write. A Player *holds* a Membership; the Membership is the record, the Player is the person-and-stats. It carries who granted it, which invitation it came from, and whether it has been revoked. Distinct from a Ban, which hides a Player's content without putting them out of the Event, and from Admin, which is privilege rather than admission. Specified in `specs/event-membership.md`; nothing enforces it yet. _Avoid_: Roster entry, invite (an Invitation is redeemed to produce one), access, seat
 

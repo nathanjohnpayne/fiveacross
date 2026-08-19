@@ -1235,9 +1235,18 @@ export type MembershipEnforcement = 'off' | 'enforced';
  *  union below can make the revocation audit fields structurally required on
  *  a revoked record and structurally absent on an active one. */
 export interface MembershipBase {
-  /** `MEMBERSHIP_SCHEMA_VERSION` at write time. Gates the parse, never the
-   *  authorization decision — see `src/data/eventMembership.ts`. */
-  schemaVersion: number;
+  /**
+   * The envelope version, pinned to the CURRENT literal rather than `number`
+   * (Codex P2 on PR #891). A writer using this contract could otherwise set
+   * `schemaVersion: 2` and type-check, persisting a record that AUTHORIZES —
+   * `admits()` is version-blind by design — while parsing as `null` for every
+   * consumer that needs its role or provenance. Bumping the version is then a
+   * deliberate edit here, in lockstep with `MEMBERSHIP_SCHEMA_VERSION`.
+   *
+   * Gates the parse, never the authorization decision — see
+   * `src/data/eventMembership.ts`.
+   */
+  schemaVersion: 1;
   /**
    * The granting Event. Denormalised from the path on purpose: the Functions
    * and the export paths read these documents detached from their location, and

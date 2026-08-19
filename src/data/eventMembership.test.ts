@@ -21,7 +21,12 @@ const EVENT = 'cruise';
 const ALICE = 'alice-uid';
 const BOB = 'bob-uid';
 
-function activeRecord(over: Partial<MembershipDoc> = {}): Record<string, unknown> {
+// Overrides are deliberately loose: many fixtures below construct records the
+// contract forbids (a drifted schemaVersion, a bad status, a half-applied
+// revocation) precisely to prove the parser rejects them, so they cannot be
+// typed as `Partial<MembershipDoc>` — that type now excludes exactly the shapes
+// these tests exist to exercise.
+function activeRecord(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: MEMBERSHIP_SCHEMA_VERSION,
     eventId: EVENT,
