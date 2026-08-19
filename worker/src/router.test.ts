@@ -21,7 +21,7 @@ const SERVING: CacheEnvelope = {
 
 /** Every test below seeds the resolution through the cache so the assertions
  *  are about ROUTING; `resolve.test.ts` owns the lookup's own decision table. */
-function harness(options: { seed?: Record<string, CacheEnvelope>; origin?: Response } = {}) {
+function harness(options: { seed?: Record<string, CacheEnvelope>; origin?: Response; originError?: Error } = {}) {
   const store = new Map<string, CacheEnvelope>(Object.entries(options.seed ?? {}));
   const cache: HostnameCache = {
     read: async (host) => store.get(host) ?? null,
@@ -42,6 +42,7 @@ function harness(options: { seed?: Record<string, CacheEnvelope>; origin?: Respo
     if (new URL(request.url).origin === 'https://firestore.googleapis.com') {
       return new Response('{}', { status: 404 });
     }
+    if (options.originError) throw options.originError;
     return options.origin ?? new Response('<!doctype html><title>app</title>', { status: 200 });
   });
 
@@ -115,6 +116,21 @@ describe('routing a serving address', () => {
     expect(response.status).toBe(503);
     expect(response.headers.get('x-origin-marker')).toBe('yes');
     expect(response.headers.get('x-event-router')).toBe('test-1');
+  });
+
+  it.each([
+    'https://bodega-bay.fiveacross.app/board',
+    'https://bodega-bay.fiveacross.app/__/auth/handler',
+  ])('turns an origin-fetch rejection for %s into a versioned non-redirect gateway response (#902)', async (url) => {
+    const { deps } = harness({ seed: servingSeed, originError: new Error('TLS handshake leaked detail') });
+
+    const response = await handleRequest(get(url), CONFIG, deps);
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get('x-event-router')).toBe('test-1');
+    expect(response.headers.get('location')).toBeNull();
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.text()).not.toContain('TLS handshake leaked detail');
   });
 
   it('serves the Namespace apex', async () => {

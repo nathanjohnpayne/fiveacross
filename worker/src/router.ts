@@ -170,7 +170,23 @@ async function proxyToOrigin(
     init.duplex = 'half';
   }
 
-  const originResponse = await deps.fetch(new Request(originUrl.toString(), init));
+  let originResponse: Response;
+  try {
+    originResponse = await deps.fetch(new Request(originUrl.toString(), init));
+  } catch {
+    // Keep transport failures inside the router's response contract. Letting
+    // the rejection escape delegates the response to Cloudflare, which loses
+    // the version stamp operators use to prove this Worker handled the host.
+    // The body is deliberately generic so DNS/TLS/runtime details never leak.
+    return new Response('Origin temporarily unavailable.', {
+      status: 502,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-event-router': config.version,
+      },
+    });
+  }
 
   const responseHeaders = new Headers(originResponse.headers);
   responseHeaders.set('x-event-router', config.version);
