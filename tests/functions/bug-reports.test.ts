@@ -202,4 +202,18 @@ describe('resolveAbuseEscalation (#670 — the abuse escalation gate)', () => {
     expect(await resolveAbuseEscalation(known, 'med-2026', 'u1')).toEqual({ member: false, eventActive: true });
     spy.mockRestore();
   });
+
+  it('does not echo a raw reporter uid when the immediate lookup fails', async () => {
+    const db = lookup(
+      { 'events/med-2026': ACTIVE },
+      ['events/med-2026/players/private-user-123'],
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(resolveAbuseEscalation(db, 'med-2026', 'private-user-123', 1)).resolves.toEqual({
+      member: null,
+      eventActive: null,
+    });
+    expect(spy.mock.calls.flat().map(String).join(' ')).not.toContain('private-user-123');
+    spy.mockRestore();
+  });
 });

@@ -86,6 +86,7 @@ function fakeDb(
     );
   }
   const singles = new Map<string, Record<string, unknown>>(Object.entries(docs));
+  let rejectTransactions = false;
 
   const valueMs = (value: unknown) => value instanceof Date ? value.getTime() : value;
   const makeQuery = (
@@ -213,6 +214,7 @@ function fakeDb(
     // A serial transaction: reads see current state, writes apply on return.
     // Enough for the exclusive claim, whose whole content is read-then-set.
     runTransaction: async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+      if (rejectTransactions) throw new Error('all transactions unavailable');
       if (failClaim) throw new Error('transaction failed');
       const writes: Array<[string, Record<string, unknown>, boolean]> = [];
       const deletes: string[] = [];
@@ -254,10 +256,12 @@ function fakeDb(
     rows: (path: string) => (collections.get(path) ?? []).map((r) => ({ id: r.id, ...r.data })),
     /** Test-only singleton update for lifecycle-race interleavings. */
     setDoc: (path: string, data: Record<string, unknown>) => singles.set(path, { ...data }),
+    failTransactions: () => { rejectTransactions = true; },
   };
   return db as unknown as AdminAlertFirestore & {
     rows: (path: string) => Record<string, unknown>[];
     setDoc: (path: string, data: Record<string, unknown>) => void;
+    failTransactions: () => void;
   };
 }
 
@@ -479,7 +483,7 @@ describe('durable abuse-escalation sweep (#859)', () => {
     });
 
     const stranded = fakeDb({ bugReportEscalations: [pendingTask()] });
-    (stranded as any).runTransaction = async () => { throw new Error('all transactions unavailable'); };
+    stranded.failTransactions();
     await expect(runAbuseEscalationSweep(stranded, { now: () => NOW })).resolves.toBeUndefined();
     expect(stranded.rows('bugReportEscalations')[0]).toMatchObject({ state: 'pending', attemptCount: 0 });
     spy.mockRestore();

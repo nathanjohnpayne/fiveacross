@@ -40,7 +40,7 @@
 import { createHash } from 'node:crypto';
 import { resolveAdminEmails, type ResolveDeps } from './notify';
 import { resolveEmailFrom, resolveEventOrigin } from './dailyEmail';
-import { isAlreadyExists } from './firestoreErrors';
+import { firestoreErrorCodeForLog, isAlreadyExists } from './firestoreErrors';
 import {
   BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS,
   BUG_REPORT_ESCALATION_RETRY_WINDOW_MS,
@@ -723,11 +723,6 @@ function terminalEscalation(outcome: AbuseEscalationOutcome, now: number): Recor
   };
 }
 
-function escalationErrorCode(error: unknown): string | number {
-  const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === 'string' || typeof code === 'number' ? code : 'unknown';
-}
-
 function validPendingEscalation(task: Record<string, unknown>): {
   eventId: string;
   reporterUid: string;
@@ -899,12 +894,12 @@ export async function runAbuseEscalationSweep(
     } catch (err) {
       // Firestore errors may echo a Player document path. Log only the status
       // code so the task's raw reporter uid never escapes this server-only row.
-      console.error('runAbuseEscalationSweep: task failed', task.id, { code: escalationErrorCode(err) });
+      console.error('runAbuseEscalationSweep: task failed', task.id, { code: firestoreErrorCodeForLog(err) });
       try {
         await rescheduleAbuseEscalationTask(db, task.id, task.data() ?? {}, now);
       } catch (rescheduleError) {
         console.error('runAbuseEscalationSweep: reschedule failed', task.id, {
-          code: escalationErrorCode(rescheduleError),
+          code: firestoreErrorCodeForLog(rescheduleError),
         });
       }
     }

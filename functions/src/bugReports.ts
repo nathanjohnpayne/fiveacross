@@ -9,7 +9,7 @@ import {
   type RateState,
   type ValidBugReport,
 } from './bugReportCore';
-import { isAlreadyExists } from './firestoreErrors';
+import { firestoreErrorCodeForLog, isAlreadyExists } from './firestoreErrors';
 
 const REPORT_ID_DOMAIN = 'bug-report-v1\0';
 const REQUEST_HASH_DOMAIN = 'bug-report-request-v1\0';
@@ -452,10 +452,9 @@ export interface ReporterLookupFirestore {
   doc(path: string): { get(): Promise<{ exists?: boolean; data(): Record<string, unknown> | undefined }> };
 }
 
-/** How many times the escalation lookup is tried before giving up. A transient
- *  Firestore blip is recorded as a confirmed non-member and permanently
- *  suppresses the alert, so the cheapest defence is simply not to believe the
- *  first failure (Phase 4b P2). */
+/** How many times the escalation lookup is tried before it becomes durable
+ *  UNKNOWN work. Back-to-back retries still resolve the cheapest transient
+ *  blips without waiting for the scheduled sweep. */
 export const ESCALATION_LOOKUP_ATTEMPTS = 3;
 
 /** Both halves of the question "will this abuse report actually reach an admin?".
@@ -542,7 +541,7 @@ export async function resolveAbuseEscalation(
   console.error(
     `submitBugReport: escalation check failed after ${Math.max(1, attempts)} attempt(s); recording as unknown`,
     eventId,
-    lastError,
+    { code: firestoreErrorCodeForLog(lastError) },
   );
   return { member: null, eventActive: null };
 }
