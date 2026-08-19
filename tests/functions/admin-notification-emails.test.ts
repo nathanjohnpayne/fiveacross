@@ -18,6 +18,7 @@ import {
   PENDING_TTL_MS,
   TOMBSTONE_TTL_MS,
   abuseAlertsForWrite,
+  abuseAlertDraft,
   alertDocId,
   bugReportEventId,
   drainKey,
@@ -26,9 +27,12 @@ import {
   alertsForWrite,
   currentRowFor,
   enqueueAdminAlerts,
+  pendingAdminAlertRow,
   recordAdminAlerts,
   recordBugReportAlerts,
   runAdminAlertSweep,
+  runAdminAlertCycle,
+  runAbuseEscalationSweep,
   settleAdminAlertsForArchivedEvent,
   shouldSettleAdminAlertsOnArchive,
   sendAdminDigestForEvent,
@@ -83,17 +87,29 @@ function fakeDb(
   }
   const singles = new Map<string, Record<string, unknown>>(Object.entries(docs));
 
-  const makeQuery = (path: string, filters: Array<[string, unknown]>, cap: number | null) => {
+  const valueMs = (value: unknown) => value instanceof Date ? value.getTime() : value;
+  const makeQuery = (
+    path: string,
+    filters: Array<[string, string, unknown]>,
+    cap: number | null,
+    ordering: string | null = null,
+  ) => {
     const query = {
-      where: (field: string, _op: string, value: unknown) =>
-        makeQuery(path, [...filters, [field, value]], cap),
-      limit: (count: number) => makeQuery(path, filters, count),
+      where: (field: string, op: string, value: unknown) =>
+        makeQuery(path, [...filters, [field, op, value]], cap, ordering),
+      orderBy: (field: string) => makeQuery(path, filters, cap, field),
+      limit: (count: number) => makeQuery(path, filters, count, ordering),
       get: async () => {
         if (throwOn.includes(path)) throw new Error(`backend unavailable: ${path}`);
         let rows = collections.get(path) ?? [];
-        for (const [field, value] of filters) {
-          rows = rows.filter((row) => row.data[field] === value);
+        for (const [field, op, value] of filters) {
+          rows = rows.filter((row) => {
+            const actual = valueMs(row.data[field]);
+            const expected = valueMs(value);
+            return op === '<=' ? (actual as number) <= (expected as number) : actual === expected;
+          });
         }
+        if (ordering) rows = [...rows].sort((a, b) => Number(valueMs(a.data[ordering])) - Number(valueMs(b.data[ordering])));
         if (cap !== null) rows = rows.slice(0, cap);
         return { docs: rows.map((row) => ({ id: row.id, data: () => ({ ...row.data }) })) };
       },
@@ -202,6 +218,7 @@ function fakeDb(
       const deletes: string[] = [];
       const result = await fn({
         get: async (ref: { path: string }) => {
+          if (throwOn.includes(ref.path)) throw new Error(`backend unavailable: ${ref.path}`);
           const single = singles.get(ref.path);
           if (single) return { data: () => ({ ...single }) };
           const found = findRow(ref.path);
@@ -249,6 +266,316 @@ const ITEM = (over: Partial<AlertableDoc> = {}): AlertableDoc => ({
   reportCount: 0,
   text: 'Spot a speedo at breakfast',
   ...over,
+});
+
+describe('durable abuse-escalation sweep (#859)', () => {
+  const REPORT_ID = 'report-unknown-1';
+  const REPORTER_HASH = 'fcdec6df4d44dbc637c7';
+  const pendingTask = (over: Record<string, unknown> = {}) => ({
+    id: REPORT_ID,
+    state: 'pending',
+    eventId: 'med-2026',
+    reporterUid: 'user-123',
+    reporterHash: REPORTER_HASH,
+    createdAt: new Date(NOW - 60_000),
+    nextAttemptAt: new Date(NOW - 1),
+    attemptCount: 0,
+    deadlineAt: new Date(NOW - 60_000 + 7 * 24 * 60 * 60_000),
+    expiresAt: new Date(NOW - 60_000 + 8 * 24 * 60 * 60_000),
+    ...over,
+  });
+  const unresolvedReport = (over: Record<string, unknown> = {}) => ({
+    kind: 'abuse',
+    description: 'Line one\nLine two',
+    eventId: 'med-2026',
+    reporterHash: REPORTER_HASH,
+    escalationLookupFailed: true,
+    intakeState: 'complete',
+    status: 'new',
+    ...over,
+  });
+
+  it('atomically queues one deterministic alert for a currently authorized reporter', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        'bugReports/report-unknown-1': unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('bugReportEscalations')).toEqual([{
+      id: REPORT_ID,
+      state: 'terminal',
+      outcome: 'queued',
+      resolvedAt: new Date(NOW),
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    }]);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([{
+      id: alertDocId(`bug-report-escalation-${REPORT_ID}`, 'abuse-reported'),
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: REPORT_ID,
+      label: 'Line one Line two',
+      status: 'new',
+      visionFlag: null,
+      reportCount: 0,
+      createdAt: NOW,
+      sentAt: null,
+      expiresAt: new Date(NOW + PENDING_TTL_MS),
+    }]);
+  });
+
+  it('keeps infrastructure failure pending with bounded exponential backoff', async () => {
+    for (const [attemptCount, delay] of [[0, 5 * 60_000], [1, 10 * 60_000], [9, 6 * 60 * 60_000]] as const) {
+      const db = fakeDb(
+        { bugReportEscalations: [pendingTask({ attemptCount })] },
+        { 'bugReports/report-unknown-1': unresolvedReport() },
+        ['events/med-2026'],
+      );
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      await runAbuseEscalationSweep(db, { now: () => NOW });
+
+      spy.mockRestore();
+      expect(db.rows('bugReportEscalations')[0]).toMatchObject({
+        state: 'pending',
+        attemptCount: attemptCount + 1,
+        nextAttemptAt: new Date(NOW + delay),
+      });
+    }
+  });
+
+  it('never copies the raw reporter uid into failure logs', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: [] },
+      },
+      ['events/med-2026/players/user-123'],
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(spy.mock.calls.flat().map(String).join(' ')).not.toContain('user-123');
+    spy.mockRestore();
+  });
+
+  it('authorizes a current player as well as an Event admin', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: [] },
+        'events/med-2026/players/user-123': { displayName: 'Ada' },
+      },
+    );
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+  });
+
+  it.each([
+    ['source-invalid', undefined, undefined],
+    ['source-invalid', unresolvedReport({ reporterHash: '0'.repeat(20) }), undefined],
+    ['source-invalid', unresolvedReport({ escalationLookupFailed: false }), undefined],
+    ['source-invalid', unresolvedReport({ intakeState: 'pending' }), undefined],
+    ['event-missing', unresolvedReport(), undefined],
+    ['event-inactive', unresolvedReport(), { status: 'archived', admins: ['user-123'] }],
+    ['not-member', unresolvedReport(), { status: 'active', admins: [] }],
+  ])('terminalizes %s without retaining the task payload', async (outcome, report, event) => {
+    const docs: Record<string, Record<string, unknown>> = {};
+    if (report) docs[`bugReports/${REPORT_ID}`] = report;
+    if (event) docs['events/med-2026'] = event;
+    const db = fakeDb({ bugReportEscalations: [pendingTask()] }, docs);
+
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('bugReportEscalations')).toEqual([{
+      id: REPORT_ID,
+      state: 'terminal',
+      outcome,
+      resolvedAt: new Date(NOW),
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    }]);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('fails a malformed task binding closed as source-invalid', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask({ reporterUid: 42 })] },
+      { [`bugReports/${REPORT_ID}`]: unresolvedReport(), 'events/med-2026': { status: 'active' } },
+    );
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'source-invalid' });
+  });
+
+  it('accepts the legacy absent-intake-state report shape created in the same transaction', async () => {
+    const { intakeState: _intakeState, ...legacyReport } = unresolvedReport();
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: legacyReport,
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+  });
+
+  it('gives an existing deterministic queue row the distinct alert-conflict outcome', async () => {
+    const alertId = alertDocId(`bug-report-escalation-${REPORT_ID}`, 'abuse-reported');
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+        [`events/med-2026/adminAlerts/${alertId}`]: { kind: 'moderation', foreign: true },
+      },
+    );
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(db.rows('bugReportEscalations')[0]).toEqual({
+      id: REPORT_ID,
+      state: 'terminal',
+      outcome: 'alert-conflict',
+      resolvedAt: new Date(NOW),
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    expect((await db.doc(`events/med-2026/adminAlerts/${alertId}`).get()).data()).toEqual({
+      kind: 'moderation', foreign: true,
+    });
+  });
+
+  it('expires the seven-day retry window before making another relationship decision', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask({
+        createdAt: new Date(NOW - 7 * 24 * 60 * 60_000),
+        deadlineAt: new Date(NOW),
+        expiresAt: new Date(NOW + 24 * 60 * 60_000),
+      })] },
+      {},
+      ['events/med-2026'],
+    );
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'retry-window-expired' });
+  });
+
+  it('caps a retry at the deadline and tolerates a failed best-effort reschedule', async () => {
+    const capped = fakeDb(
+      { bugReportEscalations: [pendingTask({
+        createdAt: new Date(NOW + 2 * 60_000 - 7 * 24 * 60 * 60_000),
+        deadlineAt: new Date(NOW + 2 * 60_000),
+        expiresAt: new Date(NOW + 2 * 60_000 + 24 * 60 * 60_000),
+      })] },
+      { [`bugReports/${REPORT_ID}`]: unresolvedReport() },
+      ['events/med-2026'],
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await runAbuseEscalationSweep(capped, { now: () => NOW });
+    expect(capped.rows('bugReportEscalations')[0]).toMatchObject({
+      attemptCount: 1,
+      nextAttemptAt: new Date(NOW + 2 * 60_000),
+    });
+
+    const stranded = fakeDb({ bugReportEscalations: [pendingTask()] });
+    (stranded as any).runTransaction = async () => { throw new Error('all transactions unavailable'); };
+    await expect(runAbuseEscalationSweep(stranded, { now: () => NOW })).resolves.toBeUndefined();
+    expect(stranded.rows('bugReportEscalations')[0]).toMatchObject({ state: 'pending', attemptCount: 0 });
+    spy.mockRestore();
+  });
+
+  it('bounds and orders each due page to fifty tasks', async () => {
+    const tasks = Array.from({ length: 52 }, (_, index) => pendingTask({
+      id: `report-${String(index).padStart(2, '0')}`,
+      nextAttemptAt: new Date(NOW - (52 - index)),
+      deadlineAt: new Date(NOW),
+    }));
+    // Reverse insertion order proves the production query owns ordering rather
+    // than inheriting whichever physical order Firestore happens to return.
+    const db = fakeDb({ bugReportEscalations: [...tasks].reverse() });
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+    const rows = db.rows('bugReportEscalations');
+    expect(rows.filter((row) => row.state === 'terminal')).toHaveLength(50);
+    expect(rows.filter((row) => row.state === 'pending').map((row) => row.id).sort()).toEqual(['report-50', 'report-51']);
+  });
+
+  it('isolates task failures and converges overlapping sweeps on one alert id', async () => {
+    const good = pendingTask({ id: 'good', eventId: 'good-event' });
+    const bad = pendingTask({ id: 'bad', eventId: 'bad-event' });
+    const db = fakeDb(
+      { bugReportEscalations: [bad, good] },
+      {
+        'bugReports/bad': unresolvedReport({ eventId: 'bad-event' }),
+        'bugReports/good': unresolvedReport({ eventId: 'good-event' }),
+        'events/good-event': { status: 'active', admins: ['user-123'] },
+      },
+      ['events/bad-event'],
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await Promise.all([
+      runAbuseEscalationSweep(db, { now: () => NOW }),
+      runAbuseEscalationSweep(db, { now: () => NOW }),
+    ]);
+    spy.mockRestore();
+    expect(db.rows('events/good-event/adminAlerts')).toHaveLength(1);
+    expect(db.rows('bugReportEscalations').find((row) => row.id === 'good')).toMatchObject({ outcome: 'queued' });
+    expect(db.rows('bugReportEscalations').find((row) => row.id === 'bad')).toMatchObject({ state: 'pending' });
+  });
+
+  it('uses the same sanitized draft and pending row builders as the fast producer', () => {
+    const { intakeState: _intakeState, ...report } = unresolvedReport({ reporterInEvent: true });
+    const draft = abuseAlertDraft(REPORT_ID, report);
+    expect(abuseAlertsForWrite(REPORT_ID, undefined, report)).toEqual([draft]);
+    expect(pendingAdminAlertRow(draft!, NOW)).toEqual({
+      ...draft,
+      createdAt: NOW,
+      sentAt: null,
+      expiresAt: new Date(NOW + PENDING_TTL_MS),
+    });
+  });
+
+  it('failure-isolates the escalation and ordinary digest legs', async () => {
+    const send = vi.fn(async () => true);
+    const digestContinues = fakeDb(
+      {
+        events: [{ id: 'med-2026', status: 'active' }],
+        'events/med-2026/adminAlerts': [{
+          id: 'existing', kind: 'item-created', collection: 'items', docId: 'i1', label: 'Prompt',
+          status: 'pending', visionFlag: null, reportCount: 0, createdAt: 1, sentAt: null,
+        }],
+      },
+      {
+        'events/med-2026': EVENT,
+        'events/med-2026/items/i1': { status: 'pending', reportCount: 0 },
+      },
+      ['bugReportEscalations'],
+    );
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await runAdminAlertCycle(digestContinues, {
+      now: () => NOW,
+      send: send as never,
+      getAdminUids: async () => ['user-123'],
+      getEmailForUid: async () => 'admin@example.com',
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'x <x@example.com>',
+      quietMs: 0,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+
+    const escalationContinues = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+      ['events'],
+    );
+    await runAdminAlertCycle(escalationContinues, { now: () => NOW });
+    expect(escalationContinues.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+    spy.mockRestore();
+  });
 });
 
 const ALERT = (over: Partial<AdminAlertRecord> = {}): AdminAlertRecord => ({

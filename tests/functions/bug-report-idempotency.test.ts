@@ -167,6 +167,102 @@ function dependencies(memory: MemoryIntake, overrides: Partial<BugReportIntakeDe
 }
 
 describe('idempotent bug-report intake orchestration', () => {
+  it('atomically finalizes an UNKNOWN abuse lookup with one bound escalation task', async () => {
+    const memory = new MemoryIntake();
+    const deps = dependencies(memory, {
+      resolveEscalation: vi.fn(async () => ({ member: null, eventActive: null })),
+    });
+    const report = base();
+    const reportId = deriveBugReportId('user-123', report.submissionId!);
+
+    await expect(submitValidatedBugReport('user-123', report, deps)).resolves.toEqual({
+      reportId,
+      escalationEligible: false,
+    });
+
+    const stored = memory.docs.get(`bugReports/${reportId}`);
+    expect(stored).toMatchObject({
+      intakeState: 'complete',
+      escalationLookupFailed: true,
+      reporterHash: 'fcdec6df4d44dbc637c7',
+    });
+    expect(stored).not.toHaveProperty('reporterUid');
+    expect(memory.docs.get(`bugReportEscalations/${reportId}`)).toEqual({
+      state: 'pending',
+      eventId: 'med-2026',
+      reporterUid: 'user-123',
+      reporterHash: 'fcdec6df4d44dbc637c7',
+      createdAt: 1_000,
+      nextAttemptAt: 1_000,
+      attemptCount: 0,
+      deadlineAt: 604_801_000,
+      expiresAt: 691_201_000,
+    });
+
+    memory.docs.set(`bugReportEscalations/${reportId}`, {
+      state: 'terminal', outcome: 'queued', resolvedAt: 2_000, expiresAt: 3_000,
+    });
+    const retry = await submitValidatedBugReport('user-123', report, deps);
+    expect(deps.resolveEscalation).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveProperty('reporterUid');
+    expect(memory.docs.get(`bugReportEscalations/${reportId}`)).toEqual({
+      state: 'terminal', outcome: 'queued', resolvedAt: 2_000, expiresAt: 3_000,
+    });
+  });
+
+  it('atomically creates the same bound task for legacy UNKNOWN intake', async () => {
+    const memory = new MemoryIntake();
+    const deps = dependencies(memory, {
+      resolveEscalation: vi.fn(async () => ({ member: null, eventActive: null })),
+    });
+    const report = { ...base(), submissionId: null };
+
+    const receipt = await submitValidatedBugReport('user-123', report, deps);
+
+    expect(memory.docs.get(`bugReports/${receipt.reportId}`)).toMatchObject({
+      escalationLookupFailed: true,
+      reporterHash: 'fcdec6df4d44dbc637c7',
+    });
+    expect(memory.docs.get(`bugReportEscalations/${receipt.reportId}`)).toMatchObject({
+      state: 'pending',
+      eventId: 'med-2026',
+      reporterUid: 'user-123',
+      reporterHash: 'fcdec6df4d44dbc637c7',
+      attemptCount: 0,
+    });
+    expect(receipt).not.toHaveProperty('reporterUid');
+  });
+
+  it('does not create delayed work when intake gets a known answer', async () => {
+    for (const answer of [
+      { member: true, eventActive: true },
+      { member: false, eventActive: true },
+      { member: true, eventActive: false },
+    ]) {
+      const memory = new MemoryIntake();
+      const deps = dependencies(memory, { resolveEscalation: vi.fn(async () => answer) });
+      await submitValidatedBugReport('user-123', base(), deps);
+      expect([...memory.docs.keys()].filter((path) => path.startsWith('bugReportEscalations/'))).toEqual([]);
+    }
+  });
+
+  it('does not partially finalize when its deterministic escalation task collides', async () => {
+    const memory = new MemoryIntake();
+    const report = base();
+    const reportId = deriveBugReportId('user-123', report.submissionId!);
+    memory.docs.set(`bugReportEscalations/${reportId}`, { state: 'unexpected' });
+    const deps = dependencies(memory, {
+      resolveEscalation: vi.fn(async () => ({ member: null, eventActive: null })),
+    });
+
+    await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toThrow('already exists');
+    expect(memory.docs.get(`bugReports/${reportId}`)).toMatchObject({
+      intakeState: 'pending',
+      leaseExpiresAt: 1_000,
+    });
+    expect(memory.docs.get(`bugReportEscalations/${reportId}`)).toEqual({ state: 'unexpected' });
+  });
+
   it('validates before touching a reservation or rolling rate state', async () => {
     const memory = new MemoryIntake();
     const deps = dependencies(memory);
