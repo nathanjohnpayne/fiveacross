@@ -337,6 +337,15 @@ export function admits(input: {
    *
    * Defaults to `false`: the final posture is the contract, and the bypass is
    * the temporary deviation that has to be asked for explicitly.
+   *
+   * SCOPED TO THE TWO RULES SURFACES. `firestore.rules` (#804) and
+   * `storage.rules` (#806) pass it during rollout; #803's invitation callable
+   * does NOT, and that is a decision rather than an oversight — minting an
+   * invitation is a deferred action rather than an outage, and a bypass there
+   * would let a UID added to the client-writable `admins` array mint durable
+   * memberships that survive the flip. Placement matters as much as presence:
+   * on Storage this disjunct must precede the membership `get()`, whose
+   * missing-document ERROR would otherwise deny before it is reached.
    */
   transitionalAdminBypass?: boolean;
 }): AdmissionDecision {

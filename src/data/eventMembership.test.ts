@@ -431,6 +431,30 @@ describe('Decision D-A — the transitional Admin bypass #804 ships and a follow
     ).toEqual({ admitted: false, outcome: 'denied-revoked' });
   });
 
+  it('is NOT passed on the invitation-callable path — D-A is scoped to the two rules surfaces', () => {
+    // Scoping, not omission (specs/event-membership.md § The role model). The
+    // bypass exists to stop a backfill miss locking an Admin OUT of their own
+    // Event on surfaces where the alternative is an unrecoverable permission
+    // error. Failing to mint an invitation is a deferred action, not an outage,
+    // and its remedy is the same server-side grant Rollout step 2 performs.
+    // Extending it there would re-open round 7's P1: a UID added to the
+    // client-writable `admins` array could mint invitations while holding no
+    // admission — durably, since those memberships survive the flip.
+    //
+    // #803 calls admits() WITHOUT the flag, so the strict conjunction is what
+    // it gets. This pins that the default is in fact strict.
+    const asTheCallableCallsIt = {
+      uid: ALICE,
+      enforcement: 'enforced' as const,
+      membership: null,
+      isAdmin: true,
+    };
+    expect(admits(asTheCallableCallsIt)).toEqual({
+      admitted: false,
+      outcome: 'denied-not-a-member',
+    });
+  });
+
   it('is inert on an UNENFORCED Event, which is every Event today', () => {
     expect(
       admits({
