@@ -90,6 +90,27 @@ interface Props {
   onClose: () => void;
 }
 
+/**
+ * Whether a resolved {uid, name} pair is still valid to DISPLAY for the
+ * CURRENT `suggestedBy` — pulled out as a pure, exported function (CodeRabbit,
+ * PR #890 round 3) so the render-gate's correctness is provable directly,
+ * with no dependency on React's render/effect/`act()` timing at all: a bare
+ * `rerender()` call inside a test does not reliably prove "no effect ran
+ * yet" (`act()` can flush passive effects before `rerender()` returns), so
+ * asserting against a live component only shows that SOME sequence of
+ * events produced the right DOM — never that the underlying comparison
+ * itself is what makes it so, independent of when anything else runs. This
+ * function's own contract removes that ambiguity: it is correct BY
+ * CONSTRUCTION, for every possible timing, because it is not a react effect
+ * at all.
+ */
+export function resolveSuggestedByName(
+  resolved: { uid: string; name: string } | null,
+  suggestedBy: string | undefined,
+): string | null {
+  return resolved && resolved.uid === suggestedBy ? resolved.name : null;
+}
+
 export default function ProofSheet(props: Props) {
   const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, restoreFocusTo, onClose } = props;
   // Photo opens pre-selected (#309, folding in the #310 row-16 parity note):
@@ -143,20 +164,36 @@ export default function ProofSheet(props: Props) {
   // is open on a community Square — never a live subscription (see
   // `fetchDisplayName`'s own doc comment). Lives in Prompt detail, not on the
   // card tile, per the acceptance list's "not crowding the card tile".
-  const [suggestedByName, setSuggestedByName] = useState<string | null>(null);
+  //
+  // Stores the uid the name was resolved FOR, not just the name (#863,
+  // Codex + CodeRabbit PR #890 round 1): clearing state at the START of a
+  // passive effect is not enough on its own — the render that COMMITS a
+  // changed `cell.suggestedBy` happens before that effect runs, and (in a
+  // real browser) can PAINT before it runs too, so a bare "clear it in the
+  // effect" can still show the previous suggester's name for a Square it no
+  // longer belongs to. Gating the RENDER itself on `resolvedFor ===
+  // cell.suggestedBy` is correct independent of effect timing entirely: the
+  // stale pair simply stops matching the instant `cell.suggestedBy`
+  // changes, with no window where the wrong name can be displayed.
+  const [resolved, setResolved] = useState<{ uid: string; name: string } | null>(null);
   useEffect(() => {
-    if (!cell.suggestedBy) {
-      setSuggestedByName(null);
+    // Gated on `communityPrompt`, not just `suggestedBy` (#863), matching
+    // this read's documented contract (specs/community-prompt-targeting.md
+    // § Attribution: "fired only while the sheet is open on a community
+    // Square") in code, not only in the doc comment below.
+    if (!cell.communityPrompt || !cell.suggestedBy) {
       return;
     }
+    const suggestedBy = cell.suggestedBy;
     let cancelled = false;
-    fetchDisplayName(cell.suggestedBy).then((name) => {
-      if (!cancelled) setSuggestedByName(name);
+    fetchDisplayName(suggestedBy).then((name) => {
+      if (!cancelled) setResolved({ uid: suggestedBy, name });
     });
     return () => {
       cancelled = true;
     };
-  }, [cell.suggestedBy]);
+  }, [cell.communityPrompt, cell.suggestedBy]);
+  const suggestedByName = resolveSuggestedByName(resolved, cell.suggestedBy);
 
   // Modal focus management, the same contract every other sheet carries
   // (ProfileEditor, AcceptableUse, More, FeedWhoListSheet, AdminSheet): move

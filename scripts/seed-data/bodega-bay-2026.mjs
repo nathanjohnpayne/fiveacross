@@ -223,9 +223,14 @@ export const EVENT_SEED = {
       index: 0,
       date: '2026-08-07',
       place: 'Bodega Bay',
-      placeEmoji: '🐦',
+      // #881: was 🐦, matching the Theme's own glyph and rendering the bird
+      // twice in the header (`{placeEmoji} {place}` over `{themeEmoji}
+      // {themeLabel}`). placeEmoji/portEmoji move together so the #566
+      // legacy-field coercion (migrateDayFields — the legacy portEmoji wins
+      // when the two disagree) doesn't keep serving the retired glyph.
+      placeEmoji: '🐚',
       port: 'Bodega Bay',
-      portEmoji: '🐦',
+      portEmoji: '🐚',
       theme: 'the-birds',
       tonight: ['🍷 Arrival pours', '🌊 First look at the water'],
       pool: 'embark',
@@ -247,9 +252,12 @@ export const EVENT_SEED = {
       index: 1,
       date: '2026-08-08',
       place: 'Bodega Bay',
-      placeEmoji: '🌊',
+      // #881: was 🌊, matching the Theme's own glyph (same duplicate-header
+      // problem as Day 0). placeEmoji/portEmoji move together — see the Day 0
+      // comment above.
+      placeEmoji: '🦪',
       port: 'Bodega Bay',
-      portEmoji: '🌊',
+      portEmoji: '🦪',
       theme: 'side-quests',
       // Live-edited 2026-08-05: '🌅 Sunset' replaced the fire pit.
       tonight: ['🦀 Harbor dinner', '🌅 Sunset'],
@@ -278,11 +286,12 @@ export const EVENT_SEED = {
       index: 3,
       date: '2026-08-09',
       place: 'The drive home',
-      placeEmoji: '🌫️',
+      // #881: was 🌫️, matching the Theme's own glyph (same duplicate-header
+      // problem as Days 0/1). Live-edited 2026-08-05, Nathan had already set
+      // the legacy portEmoji to 👋 by hand; placeEmoji now matches it, so the
+      // two fields agree instead of diverging.
+      placeEmoji: '👋',
       port: 'The drive home',
-      // Live-edited 2026-08-05: Nathan set the wrap-up chip's emoji to 👋 on
-      // the legacy field the shipped bundle renders; the neutral field keeps
-      // the Theme table's 🌫️. Mirrored as-is.
       portEmoji: '👋',
       theme: 'fog-froth-farewells',
       tonight: ['📸 The photo dump', '📅 Next one'],

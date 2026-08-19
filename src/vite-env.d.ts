@@ -22,6 +22,19 @@ interface ImportMetaEnv {
   // `hostnames/{host}.adultContent`, which the server derives.
   readonly VITE_ADULT_CONTENT?: string;
   readonly VITE_RECAPTCHA_SITE_KEY: string;
+  // Which route sign-in takes (#549, ADR 0010): 'handoff' (the default) or
+  // 'same_origin'. OPTIONAL, and deliberately absent from `.env.example`'s
+  // parsed keys: `scripts/build-target.mjs` requires every VITE_* key that file
+  // DEFINES to exist in each target's env file, so declaring it there would
+  // hard-fail every build until the untracked `.env.<target>` files gained it.
+  // It is documented as a commented key there instead. See src/auth/authMode.ts.
+  readonly VITE_AUTH_MODE?: string;
+  // The central auth origin the handoff bounces through, e.g.
+  // 'https://auth.fiveacross.app' (#547 provisions it). Optional for the same
+  // reason as above. Absent in handoff mode means sign-in is unavailable on any
+  // host that is not already registered — reported as its own screen, never as
+  // a silent fallback to the same-origin path.
+  readonly VITE_AUTH_HANDOFF_ORIGIN?: string;
 }
 
 interface ImportMeta {

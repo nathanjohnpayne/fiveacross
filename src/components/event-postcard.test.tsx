@@ -100,17 +100,37 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
     }
   });
 
-  it('wears the stamp on vacay and a plain panel elsewhere', () => {
+  it('wears its own postage on every gate: vacay dynamic on the postcard radius, gcb/fiveacross fixed on the plain panel', () => {
+    // #881: postage used to be vacay-only ("a plain panel elsewhere"); now
+    // every Edition stamps its Join gate's card, but the glyph source AND the
+    // panel treatment differ — vacay's stamp is the previewed Day's own
+    // emoji on its tightened postcard radius; gcb/fiveacross's is a fixed
+    // per-Edition mark on the PLAIN panel (Codex P2, PR #896 round 1: the
+    // postcard radius class is not part of "postage on every gate" — the
+    // wireframes' `.stamped` treatment for gcb/fiveacross only adds corner
+    // padding, never the radius).
     applyResolvedEventPreview(PREVIEW);
     setActiveEdition('vacay');
     const vacay = render(<EventPostcard />);
     expect(vacay.container.querySelector('.event-postcard-stamped')).not.toBeNull();
+    expect(vacay.container.querySelector('.event-postcard-stamp')?.textContent).toBe('🐦');
     cleanup();
+
+    setActiveEdition('gcb');
+    applyResolvedEventPreview(PREVIEW);
+    const gcb = render(<EventPostcard />);
+    expect(gcb.container.querySelector('.event-postcard-stamped')).toBeNull();
+    expect(gcb.container.querySelector('.event-postcard-franked')).not.toBeNull();
+    expect(gcb.container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
+    cleanup();
+
     setActiveEdition('fiveacross');
     applyResolvedEventPreview(PREVIEW);
     const fa = render(<EventPostcard />);
     expect(fa.container.querySelector('.event-postcard')).not.toBeNull();
     expect(fa.container.querySelector('.event-postcard-stamped')).toBeNull();
+    expect(fa.container.querySelector('.event-postcard-franked')).not.toBeNull();
+    expect(fa.container.querySelector('.event-postcard-stamp')?.textContent).toBe('✳️');
   });
 });
 
@@ -182,32 +202,98 @@ describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
     expect(container.textContent!.split('🐦').length - 1).toBe(1);
   });
 
-  it('leaves the Day line leading with the emoji when no stamp takes it', () => {
-    // An Edition with no postcard variant draws no stamp, so the line keeps
-    // the glyph exactly as it did before the stamp existed — the emoji must
-    // not vanish from the card just because the corner is absent.
+  it('keeps the Day line leading with its own emoji when the stamp is a fixed brand mark, not a copy of it', () => {
+    // gcb's stamp (#881: 🏳️‍🌈) is a fixed per-Edition mark, not the Day's own
+    // emoji — unlike vacay's dynamic postage, it never duplicates what the
+    // meta line already shows, so the line keeps leading with the Day's glyph
+    // exactly as an Edition with no stamp at all would.
     setActiveEdition('gcb');
     applyResolvedEventPreview(PREVIEW);
     const { container } = render(<EventPostcard />);
-    expect(container.querySelector('.event-postcard-stamp')).toBeNull();
+    expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
     expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
       'Aug 7–9 · hosted by Kim · 🐦 Day 1: The Birds Have Entered the Chat',
     );
   });
 
-  it('never stamps a non-postcard Edition, even on a Day that has postage', () => {
-    // The stamp is vacay's `signinCardVariant: 'postcard'` treatment; gcb and
-    // fiveacross draw the same slice as a plain panel, and an emoji-bearing
-    // Day must not sneak a stamp onto either.
-    for (const edition of ['gcb', 'fiveacross']) {
+  it('stamps gcb and fiveacross with their fixed brand mark, not the Day’s own emoji, even when the Day has one — on the plain panel, not the postcard radius', () => {
+    // #881 gave every Edition postage. gcb/fiveacross's mark is a FIXED
+    // per-Edition glyph (`signinStampGlyph`), independent of whichever Day is
+    // showing — unlike vacay's dynamic stamp, it never comes from (or varies
+    // with) `days[].emoji`. Codex P2, PR #896 round 1: the fixed mark also
+    // does NOT opt the card into `.event-postcard-stamped` (vacay's postcard
+    // radius) — the wireframes give gcb/fiveacross's banner corner padding
+    // only, on the same 10px-radius plain panel it always had.
+    const marks: [string, string][] = [
+      ['gcb', '🏳️‍🌈'],
+      ['fiveacross', '✳️'],
+    ];
+    for (const [edition, mark] of marks) {
       setActiveEdition(edition);
       applyResolvedEventPreview(PREVIEW);
       const { container } = render(<EventPostcard />);
       expect(container.querySelector('.event-postcard')).not.toBeNull();
-      expect(container.querySelector('.event-postcard-stamp')).toBeNull();
-      expect(container.querySelector('.event-postcard-franked')).toBeNull();
+      expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe(mark);
+      expect(container.querySelector('.event-postcard-franked')).not.toBeNull();
+      expect(container.querySelector('.event-postcard-stamped')).toBeNull();
       cleanup();
     }
+  });
+
+  it('suppresses the Day’s inline emoji when a fixed brand mark happens to COINCIDE with it (Codex P2, PR #896 round 2)', () => {
+    // The "exactly once" contract is about whichever glyph actually lands in
+    // the corner, fixed or dynamic — not just the dynamic case. A gcb Day
+    // whose own seeded emoji happens to be the same rainbow flag as the
+    // fixed stamp must not print it twice.
+    setActiveEdition('gcb');
+    applyResolvedEventPreview({
+      eventName: 'Weekend in Bodega Bay',
+      dateRange: 'Aug 7–9',
+      hostedBy: 'Kim',
+      days: [{ date: '2999-08-07', title: 'Pride at Sea', emoji: '🏳️‍🌈' }],
+    });
+    const { container } = render(<EventPostcard />);
+    expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
+    expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
+      'Aug 7–9 · hosted by Kim · Day 1: Pride at Sea',
+    );
+    expect(container.textContent!.split('🏳️‍🌈').length - 1).toBe(1);
+  });
+
+  describe('the coincidence check without Intl.Segmenter (Codex P2, PR #896 round 3)', () => {
+    // Round 2's fix (above) compared the fixed stamp against previewDayEmoji's
+    // FILTERED value — safe for rendering into the stamp's fixed-size box,
+    // but on a Segmenter-less browser it degrades a genuine multi-codepoint
+    // match (a ZWJ flag) to null, so the comparison silently missed the very
+    // duplicate it exists to catch. This is the literal regression case.
+    type IntlWithOptionalSegmenter = { Segmenter?: unknown };
+    const intlWithOptionalSegmenter = Intl as unknown as IntlWithOptionalSegmenter;
+    let originalSegmenter: unknown;
+
+    beforeEach(() => {
+      originalSegmenter = intlWithOptionalSegmenter.Segmenter;
+      delete intlWithOptionalSegmenter.Segmenter;
+    });
+
+    afterEach(() => {
+      intlWithOptionalSegmenter.Segmenter = originalSegmenter;
+    });
+
+    it('still suppresses the inline copy when the fixed stamp is a multi-codepoint glyph matching the Day’s own', () => {
+      setActiveEdition('gcb');
+      applyResolvedEventPreview({
+        eventName: 'Weekend in Bodega Bay',
+        dateRange: 'Aug 7–9',
+        hostedBy: 'Kim',
+        days: [{ date: '2999-08-07', title: 'Pride at Sea', emoji: '🏳️‍🌈' }],
+      });
+      const { container } = render(<EventPostcard />);
+      expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
+      expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
+        'Aug 7–9 · hosted by Kim · Day 1: Pride at Sea',
+      );
+      expect(container.textContent!.split('🏳️‍🌈').length - 1).toBe(1);
+    });
   });
 
   it('drops the stamp across local midnight when the next Day carries no emoji', () => {
@@ -251,16 +337,21 @@ describe('SignIn — the Join frame around the card', () => {
     expect(screen.getByText('Weekend in Bodega Bay')).toBeTruthy();
   });
 
-  // #688: GCB wears the endorsement too, but ONLY the endorsement — the
-  // cruise register keeps its plain tagline, and gets neither vacay's voice
-  // chip nor its invite note. The byline and the Join-frame voice are separate
-  // brand-table fields, and this is the pairing that proves it.
-  it('draws the gcb lockup: byline over the cruise wordmark, plain tagline, no chip', () => {
+  // #688 gave GCB the platform endorsement; #881 gave it its own Join-frame
+  // voice chip (replacing the plain tagline on screen, same as vacay's chip
+  // does) and fixed postage — but still no invite note, which stays
+  // vacay-only. The byline and each Edition's chip are separate brand-table
+  // fields, and this is the pairing that proves gcb never borrows vacay's.
+  it('draws the gcb lockup: byline over the cruise wordmark, its own voice chip ADDED above the plain tagline, no invite note', () => {
+    // #881's chip is additive for gcb, not replacing (Codex P2, PR #896
+    // round 1) — the Join frame keeps its own .desc tagline line right below
+    // the chip; only vacay's frame REPLACES the tagline with its chip.
     setActiveEdition('gcb');
     applyResolvedEventPreview(PREVIEW);
     setActiveAdultContent(false);
     render(<SignIn />);
     expect(screen.getByText('BY FIVE ACROSS')).toBeTruthy();
+    expect(screen.getByText('What happens at sea. Goes on the card.')).toBeTruthy();
     expect(screen.getByText('Sign in, get your card, mark it if you see it.')).toBeTruthy();
     expect(screen.queryByText('Take the detour. For the story.')).toBeNull();
     expect(screen.queryByText(/Prompts are invitations/)).toBeNull();
@@ -275,11 +366,16 @@ describe('SignIn — the Join frame around the card', () => {
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(wordmark);
   });
 
-  it('leaves the platform Edition chipless: plain tagline, no byline, no invite note', () => {
+  it('draws the fiveacross lockup: its own voice chip ADDED above the plain tagline, no byline, no invite note', () => {
+    // #881 gave fiveacross its own chip too — additive, same as gcb (Codex
+    // P2, PR #896 round 1), not replacing. Still no byline (it IS the
+    // platform, so endorsing itself would be noise) and no invite note
+    // (vacay-only).
     setActiveEdition('fiveacross');
     applyResolvedEventPreview(PREVIEW);
     setActiveAdultContent(false);
     render(<SignIn />);
+    expect(screen.getByText('Bring everyone. Into the game.')).toBeTruthy();
     expect(screen.getByText('Sign in, get your card, mark it if you see it.')).toBeTruthy();
     expect(screen.queryByText('BY FIVE ACROSS')).toBeNull();
     expect(screen.queryByText(/Prompts are invitations/)).toBeNull();

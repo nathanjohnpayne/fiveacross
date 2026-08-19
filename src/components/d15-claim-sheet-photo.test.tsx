@@ -33,7 +33,7 @@ vi.mock('firebase/storage', () => ({
   deleteObject: vi.fn(),
 }));
 
-import ProofSheet from './ProofSheet';
+import ProofSheet, { resolveSuggestedByName } from './ProofSheet';
 import { uploadProofMedia } from '../data/storage';
 import type { Cell } from '../types';
 
@@ -389,11 +389,44 @@ describe('ProofSheet — "Suggested by [player]" attribution (#559)', () => {
     expect(H.fetchDisplayName).not.toHaveBeenCalled();
   });
 
-  it('never shows attribution for a Square whose communityPrompt flag is absent even if it somehow carries a suggestedBy uid', async () => {
+  it('never shows attribution for a Square whose communityPrompt flag is absent even if it somehow carries a suggestedBy uid, and never even FETCHES for it (#863)', async () => {
     const malformed: Cell = { ...communityCell(), communityPrompt: undefined };
     render(<ProofSheet {...baseProps()} cell={malformed} cells={[malformed]} />);
     await Promise.resolve();
     expect(screen.queryByText(/Suggested by/)).not.toBeInTheDocument();
+    // The lookup is gated on `communityPrompt`, matching this read's
+    // documented contract (specs/community-prompt-targeting.md § Attribution:
+    // fired "only while the sheet is open on a community Square") — not just
+    // the render, so a malformed cell never spends a network read on a name
+    // it will never show (#863).
+    expect(H.fetchDisplayName).not.toHaveBeenCalled();
+  });
+
+  it("clears the PREVIOUS suggester's name immediately when cell.suggestedBy changes to a DIFFERENT uid — never attributes the new Square to the prior player (#863)", async () => {
+    const first = communityCell();
+    const second: Cell = { ...communityCell(), itemId: 'i1', suggestedBy: 'u-other-suggester' };
+    H.fetchDisplayName.mockResolvedValueOnce('Suggester Sam');
+    let resolveSecond: (name: string) => void = () => {};
+    const secondPromise = new Promise<string>((resolve) => {
+      resolveSecond = resolve;
+    });
+
+    const { rerender } = render(<ProofSheet {...baseProps()} cell={first} cells={[first]} />);
+    expect(await screen.findByText(/Suggested by Suggester Sam/)).toBeInTheDocument();
+
+    H.fetchDisplayName.mockReturnValue(secondPromise);
+    rerender(<ProofSheet {...baseProps()} cell={second} cells={[second]} />);
+    // Give the effect a turn to run, WITHOUT letting the new (still-pending)
+    // fetch resolve yet.
+    await Promise.resolve();
+    // The FIRST suggester's name must already be gone — not held over until
+    // the SECOND fetch resolves, which would attribute the new Square's
+    // prompt to the wrong player in the meantime (#863).
+    expect(screen.queryByText(/Suggested by Suggester Sam/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Suggested by/)).not.toBeInTheDocument();
+
+    resolveSecond('Suggester Robin');
+    expect(await screen.findByText(/Suggested by Suggester Robin/)).toBeInTheDocument();
   });
 
   it('does not throw when the sheet unmounts before the lookup resolves (a stale in-flight fetch)', async () => {
@@ -405,5 +438,29 @@ describe('ProofSheet — "Suggested by [player]" attribution (#559)', () => {
     // an unmounted component — the effect's cleanup sets a `cancelled` flag.
     expect(() => resolveFetch('Too Late Larry')).not.toThrow();
     await Promise.resolve();
+  });
+});
+
+describe('resolveSuggestedByName (#863, CodeRabbit PR #890 round 3)', () => {
+  // Direct unit coverage of the render gate itself, with no React rendering
+  // and no `act()`/effect timing involved at all — this is what actually
+  // proves the gate is correct for every possible timing, since a
+  // component-level `rerender()` test cannot (`act()` can flush passive
+  // effects before `rerender()` returns, so it cannot isolate "before any
+  // effect ran").
+  it('returns the name when the resolved uid matches the CURRENT suggestedBy', () => {
+    expect(resolveSuggestedByName({ uid: 'u1', name: 'Sam' }, 'u1')).toBe('Sam');
+  });
+
+  it('returns null when the resolved uid no longer matches — a stale resolution for a DIFFERENT cell', () => {
+    expect(resolveSuggestedByName({ uid: 'u1', name: 'Sam' }, 'u2')).toBeNull();
+  });
+
+  it('returns null when nothing has resolved yet', () => {
+    expect(resolveSuggestedByName(null, 'u1')).toBeNull();
+  });
+
+  it('returns null when there is no current suggester at all', () => {
+    expect(resolveSuggestedByName({ uid: 'u1', name: 'Sam' }, undefined)).toBeNull();
   });
 });
