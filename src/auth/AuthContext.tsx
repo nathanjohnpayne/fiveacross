@@ -1942,22 +1942,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearRedirectLoginLoggedIfToken(appOwnedRedirectToken);
 
         // Persist ONLY an acknowledgement that was actually collected
-        // (Phase 4b round 4) for THIS SAME attempt, confirmed by the
-        // acknowledgement record's own token matching this tab's proven
-        // session token. The posture is read when the redirect STARTS, not
-        // when it returns: an Event that turns adult while the player is
-        // away at Google would otherwise have this branch stamp a durable,
-        // cross-Event `attestedAdultAt` for a checkbox that was never on
-        // screen. Never awaited inline — this function returns synchronously
-        // to its (possibly synchronous) callers — so its own rejection is
-        // handled here rather than relying on a caller's promise chain to
-        // adopt it (Codex P2 round 2 on #836: `persistAttestation` currently
-        // never rejects — its own try/catch has no rethrow — but this keeps
-        // that an implementation detail of THIS call site, not an invariant
-        // a future edit could silently violate into an unhandled
-        // rejection).
+        // (Phase 4b round 4) for THIS SAME attempt, confirmed by the FULL
+        // three-way correlation (Codex P2 round 6 on #836 — the gate
+        // previously checked only ack-vs-session, leaving the documented
+        // pending-vs-session pairing unenforced in code even though every
+        // legitimate write sets all three together, so an incomplete or
+        // mismatched durable pending record now also fails the gate rather
+        // than relying on that always holding): the acknowledgement
+        // record's own token, the pending record's own token, and this
+        // tab's proven session token must all agree. The posture is read
+        // when the redirect STARTS, not when it returns: an Event that
+        // turns adult while the player is away at Google would otherwise
+        // have this branch stamp a durable, cross-Event `attestedAdultAt`
+        // for a checkbox that was never on screen. Never awaited inline —
+        // this function returns synchronously to its (possibly
+        // synchronous) callers — so its own rejection is handled here
+        // rather than relying on a caller's promise chain to adopt it
+        // (Codex P2 round 2 on #836: `persistAttestation` currently never
+        // rejects — its own try/catch has no rethrow — but this keeps that
+        // an implementation detail of THIS call site, not an invariant a
+        // future edit could silently violate into an unhandled rejection).
         const ackToken = peekCollectedAcknowledgement();
-        if (ackToken === appOwnedRedirectToken) {
+        if (ackToken === appOwnedRedirectToken && pendingToken === appOwnedRedirectToken) {
           clearCollectedAcknowledgementIfToken(appOwnedRedirectToken);
           void persistAttestation(u).catch(() => {});
         }

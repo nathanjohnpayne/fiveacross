@@ -1363,6 +1363,26 @@ describe('AuthContext deal-error hardening', () => {
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
       expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
     });
+
+    // Phase 4b P1 round 6 on #836: the documented three-way correlation
+    // (session token == pending token == acknowledgement token) must be
+    // enforced in full, not just the session-vs-acknowledgement pairing —
+    // an incomplete or mismatched pending record must still fail the gate
+    // even when the session marker and acknowledgement happen to agree.
+    it('does NOT attest when the pending record disagrees with the session marker, even though the acknowledgement matches', async () => {
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, stamp('tok-a'));
+      // The pending record carries a DIFFERENT token — as if a different
+      // tab's own attempt overwrote it — even though the session marker and
+      // the acknowledgement record still agree with each other.
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-c'));
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
   });
 
   it('hands a signed-out web.app boot to firebaseapp.com before rendering a second sign-in screen', async () => {
