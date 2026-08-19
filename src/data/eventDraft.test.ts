@@ -341,7 +341,10 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     expect(await store.load('a')).toBeNull();
     expect(await store.load('b')).not.toBeNull();
 
-    await expect(store.discard('a')).resolves.toBeUndefined();
+    // Discarding an already-gone draft still reports CONFIRMED (#848): the
+    // underlying `removeItem` on an absent key does not throw, so there is
+    // nothing left ambiguous about it.
+    await expect(store.discard('a')).resolves.toBe(true);
   });
 
   it('reads a miss for an unknown or empty draft id', async () => {
@@ -375,7 +378,12 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     await expect(store.save(draft())).resolves.toMatchObject({ draftId: 'draft-1' });
     expect(await store.load('draft-1')).toBeNull();
     expect(await store.list()).toEqual([]);
-    await expect(store.discard('draft-1')).resolves.toBeUndefined();
+    // `removeItem` itself throws here — `discard()` reports that as
+    // UNCONFIRMED, `false`, rather than silently swallowing it (#848): a
+    // caller cannot tell this apart from a successful removal by re-reading
+    // afterward, since `getItem` throws too and `load()` maps that to the
+    // SAME `null` a genuinely absent key would produce.
+    await expect(store.discard('draft-1')).resolves.toBe(false);
   });
 
   it('re-stamps the schema version on save, so a hand-edited blob cannot persist a stale one', async () => {
@@ -671,6 +679,48 @@ describe('newDraftId calls randomUUID through its receiver (#787 Phase 4b)', () 
       expect(id.length).toBeGreaterThan('draft-'.length);
     } finally {
       Object.defineProperty(globalThis, 'crypto', { value: realCrypto, configurable: true });
+    }
+  });
+});
+
+describe('discard() distinguishes "no storage at all" from "storage exists but is inaccessible" (Codex P2, PR #894 round 1)', () => {
+  it('reports UNCONFIRMED when merely REFERENCING the global localStorage throws — not the trivial "true" a never-had-storage device gets', async () => {
+    // Models access being revoked mid-session (a stricter privacy mode
+    // toggled, a security-partitioned context) — distinct from an
+    // environment that never had `localStorage` at all: something MAY
+    // already be persisted from before, and this call cannot tell either
+    // way, so `discard()` must not claim confirmation.
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      get() {
+        throw new Error('storage access revoked');
+      },
+      configurable: true,
+    });
+    try {
+      // No explicit `storage` argument — this exercises the module's OWN
+      // global-`localStorage` fallback, not an injected fake.
+      const store = createLocalDraftStore(undefined, () => NOW);
+      await expect(store.discard('some-id')).resolves.toBe(false);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(globalThis, 'localStorage', descriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, 'localStorage');
+      }
+    }
+  });
+
+  it('still reports CONFIRMED when there genuinely is no localStorage at all (nothing was ever persisted)', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Reflect.deleteProperty(globalThis, 'localStorage');
+    try {
+      const store = createLocalDraftStore(undefined, () => NOW);
+      await expect(store.discard('some-id')).resolves.toBe(true);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(globalThis, 'localStorage', descriptor);
+      }
     }
   });
 });
