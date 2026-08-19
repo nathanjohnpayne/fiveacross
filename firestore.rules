@@ -492,6 +492,32 @@ service cloud.firestore {
         && (days.size() < 10 || dayScoringValid(days[9]));
     }
 
+    // Initial setup can legitimately restyle every still-future Day at once.
+    // The general lock path first compares each complete Day map before
+    // expanding its shape checks; doing that ten times crosses Firestore's
+    // expression cap even though a theme-only write cannot affect scoring,
+    // Tonight metadata, or the unlock source. This narrow fast path proves
+    // each old Day is still future and each map changes ONLY `theme`, so all
+    // other invariants carry through byte-for-byte without re-evaluation.
+    function futureThemeOnlyChangeOk(newDay, oldDay) {
+      return !dayLocked(oldDay)
+        && newDay.diff(oldDay).affectedKeys().hasOnly(['theme']);
+    }
+    function tenDayFutureThemesOnlyOk(newDays, oldDays) {
+      return newDays.size() == 10
+        && oldDays.size() == 10
+        && futureThemeOnlyChangeOk(newDays[0], oldDays[0])
+        && futureThemeOnlyChangeOk(newDays[1], oldDays[1])
+        && futureThemeOnlyChangeOk(newDays[2], oldDays[2])
+        && futureThemeOnlyChangeOk(newDays[3], oldDays[3])
+        && futureThemeOnlyChangeOk(newDays[4], oldDays[4])
+        && futureThemeOnlyChangeOk(newDays[5], oldDays[5])
+        && futureThemeOnlyChangeOk(newDays[6], oldDays[6])
+        && futureThemeOnlyChangeOk(newDays[7], oldDays[7])
+        && futureThemeOnlyChangeOk(newDays[8], oldDays[8])
+        && futureThemeOnlyChangeOk(newDays[9], oldDays[9]);
+    }
+
     // Mirror `standingsFreezeAtFor`: an explicitly stated scoring policy wins;
     // absent or malformed scoring falls back to the legacy closing-pool names.
     // A non-positive unlock is the schedule's "live from Event open" sentinel
@@ -900,6 +926,7 @@ service cloud.firestore {
         && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
+            || tenDayFutureThemesOnlyOk(request.resource.data.days, resource.data.days)
             || daysThemeLockOk(request.resource.data.days, resource.data.days))
         // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
         // P2 on PR #841). Between the cutoff and the scheduler's `frozenAt`
