@@ -489,12 +489,40 @@ export interface BugReportDoc {
    *  its presence means "checked" rather than "defaulted". */
   reporterInEvent?: boolean;
   escalationLookupFailed?: boolean;
+  escalationEligible?: boolean;
   status?: string;
   intakeState?: string;
   submissionId?: string;
   reporterHash?: string;
   requestHashVersion?: number;
   requestHash?: string;
+}
+
+const BUG_REPORT_COORDINATION_KEYS: Array<keyof BugReportDoc> = [
+  'submissionId',
+  'reporterHash',
+  'requestHashVersion',
+  'requestHash',
+];
+const BUG_REPORT_IDEMPOTENCY_KEYS: Array<keyof BugReportDoc> = [
+  'submissionId',
+  'requestHashVersion',
+  'requestHash',
+];
+
+function validCompleteBugReportCoordination(reportId: string, report: BugReportDoc): boolean {
+  return (
+    report.intakeState === 'complete' &&
+    /^[a-f0-9]{64}$/.test(reportId) &&
+    typeof report.submissionId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(report.submissionId) &&
+    typeof report.reporterHash === 'string' && /^[a-f0-9]{20}$/.test(report.reporterHash) &&
+    report.requestHashVersion === 1 &&
+    typeof report.requestHash === 'string' && /^[a-f0-9]{64}$/.test(report.requestHash)
+  );
+}
+
+function validLegacyBugReportCoordination(report: BugReportDoc): boolean {
+  return report.intakeState === undefined && BUG_REPORT_IDEMPOTENCY_KEYS.every((key) => report[key] === undefined);
 }
 
 /** Validate and sanitize the report-derived portion of an abuse queue row. */
@@ -547,31 +575,14 @@ export function abuseAlertsForWrite(
   after: BugReportDoc | undefined,
 ): AdminAlertDraft[] {
   if (!after) return [];
-  const coordinationKeys: Array<keyof BugReportDoc> = [
-    'submissionId',
-    'reporterHash',
-    'requestHashVersion',
-    'requestHash',
-  ];
-  const idempotencyKeys: Array<keyof BugReportDoc> = [
-    'submissionId',
-    'requestHashVersion',
-    'requestHash',
-  ];
   const hasIntakeState = before?.intakeState !== undefined || after.intakeState !== undefined;
   if (hasIntakeState) {
     if (!before || before.intakeState !== 'pending' || after.intakeState !== 'complete') return [];
-    if (!/^[a-f0-9]{64}$/.test(reportId)) return [];
-    if (coordinationKeys.some((key) => before[key] === undefined || before[key] !== after[key])) return [];
-    if (
-      typeof after.submissionId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(after.submissionId) ||
-      typeof after.reporterHash !== 'string' || !/^[a-f0-9]{20}$/.test(after.reporterHash) ||
-      after.requestHashVersion !== 1 ||
-      typeof after.requestHash !== 'string' || !/^[a-f0-9]{64}$/.test(after.requestHash)
-    ) return [];
+    if (BUG_REPORT_COORDINATION_KEYS.some((key) => before[key] === undefined || before[key] !== after[key])) return [];
+    if (!validCompleteBugReportCoordination(reportId, after)) return [];
   } else if (before) {
     return [];
-  } else if (idempotencyKeys.some((key) => after[key] !== undefined)) {
+  } else if (!validLegacyBugReportCoordination(after)) {
     // The only state-less shape is a report written by the legacy intake,
     // which predates idempotency fields but already carries reporterHash. A
     // partially migrated idempotency row must not borrow that compatibility
@@ -758,6 +769,7 @@ function validPendingEscalation(task: Record<string, unknown>): {
 }
 
 function reportMatchesEscalation(
+  reportId: string,
   report: BugReportDoc | undefined,
   task: ReturnType<typeof validPendingEscalation>,
 ): report is BugReportDoc {
@@ -765,7 +777,12 @@ function reportMatchesEscalation(
   return (
     report.kind === 'abuse' &&
     report.escalationLookupFailed === true &&
-    (report.intakeState === undefined || report.intakeState === 'complete') &&
+    report.reporterInEvent === undefined &&
+    report.escalationEligible === false &&
+    (
+      validLegacyBugReportCoordination(report) ||
+      validCompleteBugReportCoordination(reportId, report)
+    ) &&
     report.eventId === task.eventId &&
     report.reporterHash === task.reporterHash &&
     createHash('sha256').update(task.reporterUid).digest('hex').slice(0, 20) === task.reporterHash
@@ -796,7 +813,7 @@ async function resolveAbuseEscalationTask(
 
     const reportRef = db.doc(`bugReports/${reportId}`);
     const report = (await tx.get(reportRef)).data() as BugReportDoc | undefined;
-    if (!reportMatchesEscalation(report, parsed)) {
+    if (!reportMatchesEscalation(reportId, report, parsed)) {
       tx.set(taskRef, terminalEscalation('source-invalid', now));
       return;
     }

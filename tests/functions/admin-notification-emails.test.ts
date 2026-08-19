@@ -87,6 +87,7 @@ function fakeDb(
   }
   const singles = new Map<string, Record<string, unknown>>(Object.entries(docs));
   let rejectTransactions = false;
+  let retryTransactionAfter: (() => void) | null = null;
 
   const valueMs = (value: unknown) => value instanceof Date ? value.getTime() : value;
   const makeQuery = (
@@ -171,6 +172,52 @@ function fakeDb(
     },
   });
 
+  const runTransaction = async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
+    if (rejectTransactions) throw new Error('all transactions unavailable');
+    if (failClaim) throw new Error('transaction failed');
+    const writes: Array<[string, Record<string, unknown>, boolean]> = [];
+    const deletes: string[] = [];
+    const result = await fn({
+      get: async (ref: { path: string }) => {
+        if (throwOn.includes(ref.path)) throw new Error(`backend unavailable: ${ref.path}`);
+        const single = singles.get(ref.path);
+        if (single) return { data: () => ({ ...single }) };
+        const found = findRow(ref.path);
+        return { data: () => (found ? { ...found.data } : undefined) };
+      },
+      set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
+        writes.push([ref.path, data, options?.merge === true]);
+      },
+      delete: (ref: { path: string }) => {
+        deletes.push(ref.path);
+      },
+    });
+    const beforeRetry = retryTransactionAfter;
+    if (beforeRetry) {
+      retryTransactionAfter = null;
+      beforeRetry();
+      return runTransaction(fn);
+    }
+    for (const [path, data, merge] of writes) {
+      const { collectionPath, id } = split(path);
+      const rows = collections.get(collectionPath) ?? [];
+      const found = rows.find((r) => r.id === id);
+      if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
+      else rows.push({ id, data: { ...data } });
+      collections.set(collectionPath, rows);
+    }
+    for (const path of deletes) {
+      singles.delete(path);
+      const { collectionPath, id } = split(path);
+      const rows = collections.get(collectionPath) ?? [];
+      collections.set(
+        collectionPath,
+        rows.filter((r) => r.id !== id),
+      );
+    }
+    return result;
+  };
+
   const db = {
     collection: (path: string) => makeQuery(path, [], null),
     doc: docRef,
@@ -211,57 +258,21 @@ function fakeDb(
         },
       };
     },
-    // A serial transaction: reads see current state, writes apply on return.
-    // Enough for the exclusive claim, whose whole content is read-then-set.
-    runTransaction: async <T,>(fn: (tx: unknown) => Promise<T>): Promise<T> => {
-      if (rejectTransactions) throw new Error('all transactions unavailable');
-      if (failClaim) throw new Error('transaction failed');
-      const writes: Array<[string, Record<string, unknown>, boolean]> = [];
-      const deletes: string[] = [];
-      const result = await fn({
-        get: async (ref: { path: string }) => {
-          if (throwOn.includes(ref.path)) throw new Error(`backend unavailable: ${ref.path}`);
-          const single = singles.get(ref.path);
-          if (single) return { data: () => ({ ...single }) };
-          const found = findRow(ref.path);
-          return { data: () => (found ? { ...found.data } : undefined) };
-        },
-        set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge?: boolean }) => {
-          writes.push([ref.path, data, options?.merge === true]);
-        },
-        delete: (ref: { path: string }) => {
-          deletes.push(ref.path);
-        },
-      });
-      for (const [path, data, merge] of writes) {
-        const { collectionPath, id } = split(path);
-        const rows = collections.get(collectionPath) ?? [];
-        const found = rows.find((r) => r.id === id);
-        if (found) found.data = merge ? { ...found.data, ...data } : { ...data };
-        else rows.push({ id, data: { ...data } });
-        collections.set(collectionPath, rows);
-      }
-      for (const path of deletes) {
-        singles.delete(path);
-        const { collectionPath, id } = split(path);
-        const rows = collections.get(collectionPath) ?? [];
-        collections.set(
-          collectionPath,
-          rows.filter((r) => r.id !== id),
-        );
-      }
-      return result;
-    },
+    // A serial transaction with one typed conflict/retry seam. Reads see the
+    // current state, and staged writes apply only after the final attempt.
+    runTransaction,
     /** Test-only reader. */
     rows: (path: string) => (collections.get(path) ?? []).map((r) => ({ id: r.id, ...r.data })),
     /** Test-only singleton update for lifecycle-race interleavings. */
     setDoc: (path: string, data: Record<string, unknown>) => singles.set(path, { ...data }),
     failTransactions: () => { rejectTransactions = true; },
+    retryNextTransactionAfter: (callback: () => void) => { retryTransactionAfter = callback; },
   };
   return db as unknown as AdminAlertFirestore & {
     rows: (path: string) => Record<string, unknown>[];
     setDoc: (path: string, data: Record<string, unknown>) => void;
     failTransactions: () => void;
+    retryNextTransactionAfter: (callback: () => void) => void;
   };
 }
 
@@ -294,7 +305,7 @@ describe('durable abuse-escalation sweep (#859)', () => {
     eventId: 'med-2026',
     reporterHash: REPORTER_HASH,
     escalationLookupFailed: true,
-    intakeState: 'complete',
+    escalationEligible: false,
     status: 'new',
     ...over,
   });
@@ -384,7 +395,11 @@ describe('durable abuse-escalation sweep (#859)', () => {
     ['source-invalid', undefined, undefined],
     ['source-invalid', unresolvedReport({ reporterHash: '0'.repeat(20) }), undefined],
     ['source-invalid', unresolvedReport({ escalationLookupFailed: false }), undefined],
+    ['source-invalid', unresolvedReport({ reporterInEvent: false }), undefined],
+    ['source-invalid', unresolvedReport({ reporterInEvent: true }), undefined],
+    ['source-invalid', unresolvedReport({ escalationEligible: true }), undefined],
     ['source-invalid', unresolvedReport({ intakeState: 'pending' }), undefined],
+    ['source-invalid', unresolvedReport({ intakeState: 'complete' }), undefined],
     ['event-missing', unresolvedReport(), undefined],
     ['event-inactive', unresolvedReport(), { status: 'archived', admins: ['user-123'] }],
     ['not-member', unresolvedReport(), { status: 'active', admins: [] }],
@@ -415,17 +430,56 @@ describe('durable abuse-escalation sweep (#859)', () => {
     expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'source-invalid' });
   });
 
-  it('accepts the legacy absent-intake-state report shape created in the same transaction', async () => {
-    const { intakeState: _intakeState, ...legacyReport } = unresolvedReport();
+  it('accepts both atomic legacy and complete intake report shapes', async () => {
     const db = fakeDb(
       { bugReportEscalations: [pendingTask()] },
       {
-        [`bugReports/${REPORT_ID}`]: legacyReport,
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
         'events/med-2026': { status: 'active', admins: ['user-123'] },
       },
     );
     await runAbuseEscalationSweep(db, { now: () => NOW });
     expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+
+    const completeId = 'b'.repeat(64);
+    const completeDb = fakeDb(
+      { bugReportEscalations: [pendingTask({ id: completeId })] },
+      {
+        [`bugReports/${completeId}`]: unresolvedReport({
+          intakeState: 'complete',
+          submissionId: 'submission_123',
+          requestHashVersion: 1,
+          requestHash: 'c'.repeat(64),
+        }),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+    await runAbuseEscalationSweep(completeDb, { now: () => NOW });
+    expect(completeDb.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
+  });
+
+  it('retries against the archived Event and cannot queue after archive wins the race', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+    db.retryNextTransactionAfter(() => {
+      db.setDoc('events/med-2026', { status: 'archived', admins: ['user-123'] });
+    });
+
+    await runAbuseEscalationSweep(db, { now: () => NOW });
+
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    expect(db.rows('bugReportEscalations')[0]).toEqual({
+      id: REPORT_ID,
+      state: 'terminal',
+      outcome: 'event-inactive',
+      resolvedAt: new Date(NOW),
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
   });
 
   it('gives an existing deterministic queue row the distinct alert-conflict outcome', async () => {
@@ -527,16 +581,40 @@ describe('durable abuse-escalation sweep (#859)', () => {
     expect(db.rows('bugReportEscalations').find((row) => row.id === 'bad')).toMatchObject({ state: 'pending' });
   });
 
-  it('uses the same sanitized draft and pending row builders as the fast producer', () => {
-    const { intakeState: _intakeState, ...report } = unresolvedReport({ reporterInEvent: true });
-    const draft = abuseAlertDraft(REPORT_ID, report);
-    expect(abuseAlertsForWrite(REPORT_ID, undefined, report)).toEqual([draft]);
-    expect(pendingAdminAlertRow(draft!, NOW)).toEqual({
-      ...draft,
-      createdAt: NOW,
-      sentAt: null,
-      expiresAt: new Date(NOW + PENDING_TTL_MS),
+  it('queues the same sanitized row through the actual fast and delayed producers', async () => {
+    const fastReport = unresolvedReport({
+      reporterInEvent: true,
+      escalationLookupFailed: false,
+      escalationEligible: true,
     });
+    const fastDb = fakeDb({}, { 'events/med-2026': { status: 'active' } });
+    await enqueueAdminAlerts(
+      fastDb,
+      'med-2026',
+      abuseAlertsForWrite(REPORT_ID, undefined, fastReport),
+      'fast-transition',
+      { now: () => NOW },
+    );
+
+    const delayedDb = fakeDb(
+      { bugReportEscalations: [pendingTask()] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+    await runAbuseEscalationSweep(delayedDb, { now: () => NOW });
+
+    const [fastRow] = fastDb.rows('events/med-2026/adminAlerts');
+    const [delayedRow] = delayedDb.rows('events/med-2026/adminAlerts');
+    const { id: fastId, ...fastPayload } = fastRow;
+    const { id: delayedId, ...delayedPayload } = delayedRow;
+    expect(fastId).toBe(alertDocId('fast-transition', 'abuse-reported'));
+    expect(delayedId).toBe(alertDocId(`bug-report-escalation-${REPORT_ID}`, 'abuse-reported'));
+    expect(delayedPayload).toEqual(fastPayload);
+
+    const draft = abuseAlertDraft(REPORT_ID, fastReport);
+    expect(fastPayload).toEqual(pendingAdminAlertRow(draft!, NOW));
   });
 
   it('failure-isolates the escalation and ordinary digest legs', async () => {

@@ -243,6 +243,11 @@ describe('idempotent bug-report intake orchestration', () => {
       const deps = dependencies(memory, { resolveEscalation: vi.fn(async () => answer) });
       await submitValidatedBugReport('user-123', base(), deps);
       expect([...memory.docs.keys()].filter((path) => path.startsWith('bugReportEscalations/'))).toEqual([]);
+
+      const legacyMemory = new MemoryIntake();
+      const legacyDeps = dependencies(legacyMemory, { resolveEscalation: vi.fn(async () => answer) });
+      await submitValidatedBugReport('user-123', { ...base(), submissionId: null }, legacyDeps);
+      expect([...legacyMemory.docs.keys()].filter((path) => path.startsWith('bugReportEscalations/'))).toEqual([]);
     }
   });
 
