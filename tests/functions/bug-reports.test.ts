@@ -11,6 +11,7 @@ const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCA
 
 const valid = () => ({
   schemaVersion: 1,
+  submissionId: 'submit_12345678',
   kind: 'bug',
   description: 'The board stopped responding.',
   screenshotDataUrl: png,
@@ -26,8 +27,18 @@ const valid = () => ({
 describe('bug-report server validation', () => {
   it('accepts bounded diagnostics and a real PNG signature', () => {
     const report = validateBugReportInput(valid());
+    expect(report.submissionId).toBe('submit_12345678');
     expect(report.description).toBe('The board stopped responding.');
     expect(report.screenshot?.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  });
+
+  it('rejects a malformed present submission identity but preserves an absent legacy identity', () => {
+    for (const submissionId of ['', 'short', 'contains spaces', 'x'.repeat(65), 42, null]) {
+      expect(() => validateBugReportInput({ ...valid(), submissionId })).toThrow(BugReportInputError);
+    }
+    const legacy = valid() as Record<string, unknown>;
+    delete legacy.submissionId;
+    expect(validateBugReportInput(legacy).submissionId).toBeNull();
   });
 
   it('accepts a text-only fallback with a bounded capture error', () => {

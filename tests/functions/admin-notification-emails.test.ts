@@ -2173,6 +2173,7 @@ const BUG_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc => ({
  *  answer to "does this reporter belong to the Event they named?". */
 const ABUSE_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc =>
   BUG_REPORT({ kind: 'abuse', reporterInEvent: true, ...over });
+const IDEMPOTENT_REPORT_ID = 'a'.repeat(64);
 
 describe('abuseAlertsForWrite', () => {
   it('queues exactly one abuse-reported alert for a report that BECAME abuse', () => {
@@ -2187,6 +2188,44 @@ describe('abuseAlertsForWrite', () => {
         reportCount: 0,
       },
     ]);
+  });
+
+  it('queues an idempotent abuse report only for its matching pending-to-complete transition', () => {
+    const pending = BUG_REPORT({
+      intakeState: 'pending',
+      submissionId: 'submit_12345678',
+      reporterHash: '0123456789abcdefabcd',
+      requestHashVersion: 1,
+      requestHash: 'a'.repeat(64),
+    });
+    const complete = ABUSE_REPORT({
+      intakeState: 'complete',
+      submissionId: 'submit_12345678',
+      reporterHash: '0123456789abcdefabcd',
+      requestHashVersion: 1,
+      requestHash: 'a'.repeat(64),
+    });
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, pending, complete)).toHaveLength(1);
+    expect(abuseAlertsForWrite('not-deterministic', pending, complete)).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, undefined, complete)).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, { ...pending, intakeState: 'deleting' }, complete)).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, pending, { ...complete, requestHash: 'different' })).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, pending, { ...complete, intakeState: 'deleting' })).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, pending, { ...complete, requestHash: 'not-a-hash' })).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, undefined, { ...complete, intakeState: undefined })).toEqual([]);
+  });
+
+  it('never queues a staging create or a later completed-report update', () => {
+    const pending = ABUSE_REPORT({
+      intakeState: 'pending',
+      submissionId: 'submit_12345678',
+      reporterHash: '0123456789abcdefabcd',
+      requestHashVersion: 1,
+      requestHash: 'a'.repeat(64),
+    });
+    const complete = { ...pending, intakeState: 'complete' };
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, undefined, pending)).toEqual([]);
+    expect(abuseAlertsForWrite(IDEMPOTENT_REPORT_ID, complete, { ...complete, status: 'triaged' })).toEqual([]);
   });
 
   it('queues nothing for a plain bug report — the inbox is where those are answered', () => {

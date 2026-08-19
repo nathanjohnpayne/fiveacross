@@ -45,6 +45,7 @@ describe('bug-report client diagnostics', () => {
   it('records the screen path without potentially sensitive query parameters', () => {
     window.history.replaceState({}, '', '/leaderboard?invite=secret-token');
     const input = buildBugReportInput({
+      submissionId: 'submit_client_123',
       description: 'The board froze.',
       screenshotDataUrl: null,
       captureError: 'Capture unavailable',
@@ -57,6 +58,7 @@ describe('bug-report client diagnostics', () => {
     // must be labeled with the screen the screenshot actually shows.
     window.history.replaceState({}, '', '/more');
     const input = buildBugReportInput({
+      submissionId: 'submit_client_123',
       description: 'A tile on my card is broken.',
       screenshotDataUrl: 'data:image/png;base64,abc',
       captureError: null,
@@ -65,6 +67,7 @@ describe('bug-report client diagnostics', () => {
     expect(input.route).toBe('/');
     expect(
       buildBugReportInput({
+        submissionId: 'submit_client_123',
         description: 'A tile on my card is broken.',
         screenshotDataUrl: 'data:image/png;base64,abc',
         captureError: null,
@@ -77,7 +80,12 @@ describe('bug-report client diagnostics', () => {
     // The default matters as much as the marking: a caller with no opinion must
     // produce exactly the payload an already-shipped client sends, so adding the
     // control changed what an abuse report does and nothing about a bug report.
-    const base = { description: 'The board froze.', screenshotDataUrl: null, captureError: null };
+    const base = {
+      submissionId: 'submit_client_123',
+      description: 'The board froze.',
+      screenshotDataUrl: null,
+      captureError: null,
+    };
     expect(buildBugReportInput(base).kind).toBe('bug');
     expect(buildBugReportInput({ ...base, kind: 'bug' }).kind).toBe('bug');
     expect(buildBugReportInput({ ...base, kind: 'abuse' }).kind).toBe('abuse');

@@ -6,6 +6,12 @@ export interface ExportReport {
   [key: string]: unknown;
 }
 
+export interface IntakeCoordinationReport {
+  id: string;
+  intakeState: string;
+  [key: string]: unknown;
+}
+
 export interface ExportSummary {
   exported: string[];
   skipped: string[];
@@ -15,7 +21,7 @@ export interface ExportSummary {
 export function normalizeSubmittedAt(value: unknown): string | null;
 
 export function exportReports(args: {
-  reports: ExportReport[];
+  reports: Array<ExportReport | IntakeCoordinationReport>;
   downloadScreenshot: (path: string) => Promise<Buffer>;
   root: string;
 }): Promise<ExportSummary>;

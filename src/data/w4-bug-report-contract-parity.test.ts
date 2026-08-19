@@ -21,6 +21,7 @@ import contract from '../../functions/src/bugReportContract.cjs';
 describe('the client payload and the server contract are the same contract', () => {
   it('a payload the client builds validates on the server, unchanged', () => {
     const input = buildBugReportInput({
+      submissionId: 'submit_12345678',
       description: 'Someone is posting slurs in the feed.',
       kind: 'abuse',
       screenshotDataUrl: null,
@@ -33,6 +34,7 @@ describe('the client payload and the server contract are the same contract', () 
     // drops is the same bug as a server field the client never sends.
     expect(validated).toEqual({
       schemaVersion: input.schemaVersion,
+      submissionId: input.submissionId,
       kind: input.kind,
       description: input.description,
       captureError: input.captureError,
@@ -52,6 +54,7 @@ describe('the client payload and the server contract are the same contract', () 
   it('every kind the client can send is a kind the server keeps', () => {
     for (const kind of BUG_REPORT_KINDS) {
       const input = buildBugReportInput({
+        submissionId: `submit_${kind}_123`,
         description: 'A report.',
         kind,
         screenshotDataUrl: null,
@@ -67,11 +70,14 @@ describe('the client payload and the server contract are the same contract', () 
     // (specs/app-update-reload-prompt.md), so the payload shape this app used to
     // send must keep working against the server this app now talks to.
     const legacy = buildBugReportInput({
+      submissionId: 'submit_legacy_123',
       description: 'The board froze.',
       screenshotDataUrl: null,
       captureError: null,
     }) as unknown as Record<string, unknown>;
     delete legacy.kind;
+    delete legacy.submissionId;
     expect(contract.validateClientReportFields(legacy).kind).toBe('bug');
+    expect(contract.validateClientReportFields(legacy).submissionId).toBeNull();
   });
 });

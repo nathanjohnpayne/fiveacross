@@ -174,4 +174,18 @@ Scheduled runs execute in the local app environment, so they use the same creden
 
 The screenshot preview is the reporter's consent boundary. Capture is limited to `.app`, excludes the bug-report UI, and never invokes screen sharing, so browser chrome and other applications are outside the capture. Exported metadata contains a truncated SHA-256 uid hash, never the raw uid, email address, auth token, Firebase download token, proof-media URL, or console/local-storage content.
 
-Treat screenshots as potentially personal event data. Keep Firebase reports for at most 90 days, unless a linked issue still requires the evidence. During monthly maintenance, export anything needed for active issues, then delete expired `bugReports` documents and their matching Storage objects using an authenticated admin workflow. Delete imported local evidence when its issue closes or after 90 days, whichever is later. Never commit inbox/imported evidence.
+Treat screenshots as potentially personal event data. Keep Firebase reports for at most 90 days, unless a linked issue still requires the evidence. During monthly maintenance, export anything needed for active issues. Then use the same authenticated Application Default Credential, explicit Firebase project, and private bucket from steps 1–2 to inspect interrupted intake rows:
+
+```bash
+npm run bugs:prune-pending
+```
+
+The command is dry-run by default. It scans PENDING and DELETING rows separately in bounded, document-id-ordered pages and reports `scanned`, `eligible`, `claimed`, `resumed`, `deleted`, `skippedRace`, and per-report `failed` results. It selects only intake reservations at least 90 days old whose intake or cleanup lease is expired; it never prunes a COMPLETE report. Review the JSON, confirm the project and bucket again, then apply exactly that cleanup:
+
+```bash
+npm run bugs:prune-pending -- --apply
+```
+
+The apply pass leases each row transactionally before deleting its deterministic private screenshot and deletes the document only while it still owns that lease. A completion/takeover race is skipped, concurrent cleaners cannot share ownership, a missing screenshot is harmless, and a partial failure leaves a discoverable DELETING row for a later monthly run. Any `failed` entry makes the command exit nonzero; retain the output, correct the credential or service problem, and rerun rather than deleting the document manually.
+
+After staging cleanup, delete expired COMPLETE `bugReports` documents and their matching Storage objects through the existing authenticated admin procedure, preserving evidence still linked from an active issue. Delete imported local evidence when its issue closes or after 90 days, whichever is later. Never commit inbox/imported evidence.
