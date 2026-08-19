@@ -1882,12 +1882,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (pendingTokenRef.current === undefined) pendingTokenRef.current = peekRedirectPending();
       const pendingToken = pendingTokenRef.current;
+      // Consumed here, unconditionally and early (Codex P2 round 5 on
+      // #836), not only inside the verified branch below: the login-logged
+      // dedup needs it too. If tab B overwrites the origin-wide pending
+      // record while tab A is away and A's mount snapshots B's token as
+      // `pendingToken`, A's OWN verified login must still mark ITS OWN
+      // (session-proven) token as logged — marking B's token instead would
+      // silently suppress B's later, genuinely separate `login` event when
+      // B returns. Prefer the session-scoped token (provably this tab's
+      // own) for the dedup key; fall back to the possibly-foreign
+      // `pendingToken` only when the session token was lost (#346) and
+      // there is no better option — a wrong read there costs at most a
+      // harmless duplicate or missing analytics event, the same accepted
+      // tradeoff as elsewhere, never a misattributed security-sensitive
+      // write.
+      const appOwnedRedirectToken = consumeAppOwnedRedirectTokenOnce();
+      const dedupToken = appOwnedRedirectToken ?? pendingToken;
 
       if (redirectOutcomeRef.current === 'pending') {
-        const alreadyLogged = pendingToken !== null && hasLoggedRedirectLogin(pendingToken);
+        const alreadyLogged = dedupToken !== null && hasLoggedRedirectLogin(dedupToken);
         if (!alreadyLogged) {
           track('login', { method: 'google' });
-          if (pendingToken !== null) markRedirectLoginLogged(pendingToken);
+          if (dedupToken !== null) markRedirectLoginLogged(dedupToken);
         }
         redirectOutcomeRef.current = verifiedByFirebase ? 'verified-success' : 'unverified-success';
       } else if (!verifiedByFirebase) {
@@ -1915,12 +1931,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // keys, regardless of how early `pendingToken` was read. The ONLY
       // identity this tab can PROVE is its own is the session-storage
       // token — tab-scoped, so no other tab could ever have written or read
-      // it. Cleanup and the attestation gate are keyed on THAT, not on
-      // `pendingToken`; `pendingToken` is used only for the durable
-      // login-logged dedup above, whose worst case on a wrong read is a
-      // harmless extra/missing analytics event, never a wrongly-deleted or
-      // wrongly-attested record belonging to a different tab.
-      const appOwnedRedirectToken = consumeAppOwnedRedirectTokenOnce();
+      // it — already consumed into `appOwnedRedirectToken` above. Cleanup
+      // and the attestation gate are keyed on THAT, not on `pendingToken`;
+      // `pendingToken` feeds only the durable login-logged dedup's fallback
+      // above, whose worst case on a wrong read is a harmless extra/missing
+      // analytics event, never a wrongly-deleted or wrongly-attested record
+      // belonging to a different tab.
       if (appOwnedRedirectToken !== null) {
         clearRedirectPendingIfToken(appOwnedRedirectToken);
         clearRedirectLoginLoggedIfToken(appOwnedRedirectToken);

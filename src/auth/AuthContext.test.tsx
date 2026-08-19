@@ -1330,6 +1330,39 @@ describe('AuthContext deal-error hardening', () => {
       expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(newerAck);
       expect(mocks.attestAdult).not.toHaveBeenCalled();
     });
+
+    // Phase 4b P1 round 5 on #836: the SAME pre-mount overwrite as above,
+    // but proving the OTHER tab's own future return is not silently
+    // suppressed. Before the fix, tab A's mount snapshotted tab B's
+    // overwritten token as `pendingToken` and durably marked THAT token as
+    // "login logged" — even though the login that actually fired was tab
+    // A's own, verified account. When tab B genuinely returned later, its
+    // own login was then skipped as "already logged" — two separate,
+    // successful sign-ins collapsing into one analytics event.
+    it("does not suppress a DIFFERENT tab's own future login after a pre-mount token mix-up", async () => {
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
+      // Tab B already overwrote the shared pending record with its own
+      // token before tab A's mount (this render) even starts.
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-b'));
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      const tabA = mount();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+      tabA.unmount();
+
+      // Tab B now genuinely returns — its OWN mount, with its OWN session
+      // marker (never touched by tab A) and the SAME pending record it
+      // originally wrote (tab A's compare-and-delete could not touch it,
+      // since tab A's proven token never matched it).
+      mocks.track.mockClear();
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-b');
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+    });
   });
 
   it('hands a signed-out web.app boot to firebaseapp.com before rendering a second sign-in screen', async () => {
