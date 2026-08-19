@@ -10,13 +10,11 @@ name = "five-across-event-router"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
 
-# The dedicated `*.workers.dev` address. Kept ON on purpose: it is the only way
-# to exercise the real Worker — real Cache API, real Firestore reads, real
-# origin proxying — against production data WITHOUT putting it in front of a
-# live hostname. That matters more here than it usually would, because real
-# players are already carrying installed PWA shells and service workers minted
-# from the direct-to-Hosting path, so the cutover has to be verified against
-# already-installed shells rather than clean installs (#569 carry-forward).
+# The dedicated `*.workers.dev` address. Kept ON as a deployment/liveness check:
+# the router must reject it as `out-of-namespace` before any Firestore lookup or
+# origin proxy. It cannot exercise a real Event hostname; use the temporary
+# preview environment documented in README.md § Deploying and attaching for that
+# production-shaped rehearsal (#569 carry-forward).
 workers_dev = true
 
 [observability]
