@@ -147,8 +147,19 @@ export default function AuthHandoffOrigin({
     // below — the redirect settle, the auth-state settle, and the mint — rather
     // than bounding each, because the player-facing question is simply whether
     // this page ever reaches an actionable state.
+    //
+    // TERMINAL MEANS TERMINAL (Phase 4b P1). Calling `fail()` alone was not
+    // enough: the in-flight continuations were still live, so a
+    // `getRedirectResult`, auth observer, or `mintAuthHandoff` that settled
+    // afterwards could still navigate the browser away from the failure the
+    // player was already looking at. Timing out therefore cancels the effect's
+    // continuations and drops the auth subscription, exactly as unmounting does.
     const deadline = setTimeout(() => {
-      if (!cancelled && !settled) fail('sign-in-failed');
+      if (cancelled || settled) return;
+      settled = true;
+      cancelled = true;
+      unsubscribe?.();
+      fail('sign-in-failed');
     }, timeoutMs);
 
     const bounce = async (req: HandoffRequest) => {
@@ -189,11 +200,14 @@ export default function AuthHandoffOrigin({
             void bounce(request);
             return;
           }
-          // Leaving for Google is a terminal outcome for THIS page load: the
-          // browser navigates away, and the deadline must not fire against a
-          // page that is already gone.
-          settled = true;
-          clearTimeout(deadline);
+          // The deadline stays ARMED across this call, deliberately (Phase 4b
+          // P1). Disarming it here — before the navigation actually starts —
+          // was the inverse of the bug above: a `signInWithRedirect` that hangs
+          // on initiation would then spin forever with nothing left to catch
+          // it. Leaving the timer running costs nothing on the happy path,
+          // because a successful redirect unloads the page and takes the timer
+          // with it; on a hung one it is the only thing that can still rescue
+          // the player.
           setPhase('authenticating');
           void signInWithRedirect(auth, googleProvider).catch(() => {
             if (!cancelled) fail('sign-in-failed');

@@ -222,7 +222,18 @@ const appTree = (
  * `window.location.hash` can observe it, because by then it is gone.
  */
 const pendingHandoffCode = readHandoffCode(window.location.hash);
-if (pendingHandoffCode !== null) clearHandoffFragment();
+/**
+ * Whether the URL is safe for telemetry to read (Phase 4b P1).
+ *
+ * `clearHandoffFragment` can fail — a refused or no-op `replaceState` leaves a
+ * still-live code sitting in `window.location`. Proceeding to start analytics
+ * anyway would copy it into PostHog and GA4, which is precisely the leak this
+ * ordering exists to prevent, so the failure has to be load-bearing rather than
+ * swallowed. When it cannot be confirmed we FAIL CLOSED and suppress analytics
+ * for this one page load: the sign-in still completes, and one lost page view
+ * on a handoff return is not comparable to exporting a bearer credential.
+ */
+const urlSafeForTelemetry = pendingHandoffCode === null || clearHandoffFragment();
 
 /**
  * The central auth origin short-circuit (#549, ADR 0010).
@@ -288,11 +299,11 @@ if (atCentralAuthOrigin) {
       // Only NOW does PostHog itself start (#556, Phase 4b P1) — see
       // `startPostHogAfterResolution`'s own doc for why this ordering is
       // load-bearing, not incidental.
-      startPostHogAfterResolution();
+      if (urlSafeForTelemetry) startPostHogAfterResolution();
       // The ONE explicit GA4 page_view (#611, Phase 4b P1) — see
       // `emitInitialPageView`'s own doc for why Event resolution having
       // already settled here is half of the ordering guarantee it needs.
-      void emitInitialPageView();
+      if (urlSafeForTelemetry) void emitInitialPageView();
       // An Event can resolve on an origin the AUTH stack has never been
       // configured for — hostname resolution is exactly what made that possible
       // (ADR 0010; Codex P1 on #576). Mounting the app there would render a
@@ -384,8 +395,12 @@ if (atCentralAuthOrigin) {
       // is idempotent for exactly this path (#613, Phase 4b round-2 P2: a
       // second emission used to double-log the page_view), and a repeated
       // `initPostHog` no-ops once ready.
-      startPostHogAfterResolution();
-      void emitInitialPageView();
+      // Same telemetry gate as the success branch: a bootstrap failure does not
+      // make an uncleared handoff code any safer to export.
+      if (urlSafeForTelemetry) {
+        startPostHogAfterResolution();
+        void emitInitialPageView();
+      }
       if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
         root.render(appTree);
         return;

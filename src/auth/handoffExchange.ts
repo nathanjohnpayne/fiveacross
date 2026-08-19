@@ -32,6 +32,22 @@ import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTrans
 export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
 
 /**
+ * Which completion attempt is the current one.
+ *
+ * Reconciling a timed-out sign-in cannot be unconditional (Phase 4b P1). The
+ * failure surface invites an immediate retry, so the likely sequence is:
+ * attempt 1 times out, the player taps again, attempt 2 SUCCEEDS — and only
+ * then does attempt 1's abandoned promise resolve. An unconditional
+ * `signOut(auth)` at that point destroys the perfectly good session attempt 2
+ * just established, which is worse than the race it was meant to close.
+ *
+ * Every attempt takes a generation on entry. A late reconciliation only touches
+ * global auth state if it is still the newest attempt — otherwise the session
+ * it would be signing out belongs to somebody else's turn.
+ */
+let attemptGeneration = 0;
+
+/**
  * `work`, or a rejection once `ms` has passed.
  *
  * A rejection rather than a resolved sentinel, so a timeout lands in the same
@@ -94,6 +110,8 @@ export async function completeAuthHandoff(input: {
   /** Overridable so tests do not have to wait out the real bound. */
   timeoutMs?: number;
 }): Promise<boolean> {
+  attemptGeneration += 1;
+  const generation = attemptGeneration;
   const transaction = readHandoffTransaction(input.now ?? Date.now());
   if (transaction === null) {
     forgetHandoffTransaction();
@@ -156,7 +174,10 @@ export async function completeAuthHandoff(input: {
   const signIn = signInWithCustomToken(auth, customToken);
   signIn.then(
     () => {
-      if (abandoned) void signOut(auth).catch(() => {});
+      // Only if this attempt is BOTH abandoned and still the newest. A newer
+      // attempt having started means any session now present is its business,
+      // not ours — signing out here would destroy it.
+      if (abandoned && attemptGeneration === generation) void signOut(auth).catch(() => {});
     },
     () => {},
   );

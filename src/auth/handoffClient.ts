@@ -134,14 +134,21 @@ export function readHandoffCode(hash: string): string | null {
  * a `location.hash = ''` would leave a `#` behind AND push an entry the player
  * could go Back to. The fragment never reached a server (that is why it is a
  * fragment), so this is about browser history and shoulder-surfing, not logs.
+ *
+ * Returns whether the code is ACTUALLY gone, which the caller is expected to
+ * act on: it decides whether telemetry may safely read the URL at all.
  */
-export function clearHandoffFragment(): void {
+export function clearHandoffFragment(): boolean {
   try {
     const { pathname, search } = window.location;
     window.history.replaceState(window.history.state, '', `${pathname}${search}`);
+    // Confirm rather than assume. A `replaceState` that is refused, ignored, or
+    // silently no-ops still leaves a LIVE handoff code in `window.location` —
+    // and the caller's whole reason for clearing early is that anything reading
+    // the URL afterwards would capture it (Phase 4b P1).
+    return readHandoffCode(window.location.hash) === null;
   } catch {
-    /* A history API that refuses leaves the code visible in the bar; it is
-       already spent by the time this runs, so this must never throw. */
+    return false;
   }
 }
 

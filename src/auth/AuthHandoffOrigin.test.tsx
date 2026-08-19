@@ -214,12 +214,38 @@ describe('the central-origin page reaches a terminal state', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('does not fire the deadline against a page that already left for Google', async () => {
+  // Phase 4b P1, the INVERSE bug: disarming the deadline before the navigation
+  // actually starts meant a `signInWithRedirect` that hangs on initiation would
+  // spin forever with nothing left to catch it. The timer therefore stays armed
+  // across the call — harmless on the happy path, because a real redirect
+  // unloads the page and takes the timer with it.
+  it('still rescues a redirect that hangs on initiation', async () => {
     withSession(null);
-    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={30} />);
+    mocks.signInWithRedirect.mockImplementation(() => new Promise(() => {}));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
     await waitFor(() => expect(mocks.signInWithRedirect).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 60));
-    expect(screen.queryByRole('alert')).toBeNull();
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+  });
+
+  // Phase 4b P1: calling fail() alone left the continuations live, so a late
+  // mint could navigate the browser away from the failure already on screen.
+  it('a timed-out page cannot be navigated away by a late mint', async () => {
+    withSession({ uid: 'u1' });
+    let landMint: (v: string) => void = () => {};
+    mocks.mintAuthHandoff.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          landMint = resolve;
+        }),
+    );
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+
+    landMint(`${ORIGIN}/board`);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 
   it('allows a full Google round trip rather than failing eagerly', () => {

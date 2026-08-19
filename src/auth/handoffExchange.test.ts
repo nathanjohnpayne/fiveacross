@@ -276,3 +276,64 @@ describe('a timed-out sign-in cannot mutate auth state later', () => {
     expect(mocks.signOut).not.toHaveBeenCalled();
   });
 });
+
+// Phase 4b P1. The failure surface invites an immediate retry, so the likely
+// sequence is: attempt 1 times out, the player taps again, attempt 2 SUCCEEDS,
+// and only then does attempt 1's abandoned promise resolve. An unconditional
+// sign-out at that point destroys the good session attempt 2 just established.
+describe('late reconciliation is generation-aware', () => {
+  function armTransaction() {
+    rememberHandoffTransaction({
+      verifier: 'V'.repeat(43),
+      targetOrigin: ORIGIN,
+      returnPath: '/board',
+      createdAt: Date.now(),
+    });
+  }
+
+  it('does NOT sign out when a newer attempt has already succeeded', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    let landFirst: (v: unknown) => void = () => {};
+    mocks.signInWithCustomToken.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          landFirst = resolve;
+        }),
+    );
+
+    // Attempt 1 times out.
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    consumeHandoffFailure();
+
+    // The player retries; attempt 2 succeeds.
+    armTransaction();
+    mocks.signInWithCustomToken.mockResolvedValue({ user: { uid: 'u1' } });
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+
+    // Only NOW does attempt 1's abandoned promise land.
+    landFirst({ user: { uid: 'u1' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mocks.signOut).not.toHaveBeenCalled();
+  });
+
+  it('still signs out when no newer attempt intervened', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    let land: (v: unknown) => void = () => {};
+    mocks.signInWithCustomToken.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = resolve;
+        }),
+    );
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    land({ user: { uid: 'u1' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mocks.signOut).toHaveBeenCalledTimes(1);
+  });
+});

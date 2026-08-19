@@ -46,15 +46,27 @@ export const HANDOFF_TRANSACTION_KEY = 'fa:auth:handoff-transaction';
 /**
  * How long a stored verifier stays usable, in milliseconds.
  *
- * Deliberately LONGER than the server's 120s `HANDOFF_TTL_MS`, not shorter, and
- * the asymmetry is the point: the server owns expiry and is the only clock that
- * may reject a code for age. If this TTL were the tighter one, a slow-but-valid
- * return would discard the verifier locally and turn a code the server would
- * still have honoured into a dead end. Five minutes is long enough that the
- * server's deadline is always the one that fires first, and short enough that an
- * abandoned sign-in cannot authorize an unrelated one later in the day.
+ * THE TWO CLOCKS START ON DIFFERENT LEGS, which is the whole subtlety here
+ * (Phase 4b P1). The server's 120s `HANDOFF_TTL_MS` starts when the code is
+ * MINTED — after Google authentication has already completed. This clock starts
+ * when the transaction is created, BEFORE the player leaves the Event origin.
+ * Everything that happens in between — picking an account, MFA, a password
+ * reset, recovering a dropped connection, or simply putting the phone down —
+ * elapses against this timer and none of it against the server's.
+ *
+ * So "looser than the server deadline" is not a coherent justification: they do
+ * not measure the same interval. An earlier five-minute value would have
+ * rejected, as `transaction-missing`, a player who returned with a freshly
+ * minted and perfectly server-valid code after spending six minutes at Google —
+ * a dead end produced entirely by the client.
+ *
+ * Thirty minutes is therefore sized against the SLOW HUMAN LEG rather than
+ * against the server. What this timer actually exists for is narrow: stopping a
+ * transaction abandoned hours or days ago from authorizing an unrelated sign-in
+ * later. It does not enforce freshness — the server does that, on the only
+ * clock that can, and it is the one that must reject a stale code.
  */
-export const HANDOFF_TRANSACTION_TTL_MS = 300_000;
+export const HANDOFF_TRANSACTION_TTL_MS = 1_800_000;
 
 /** 32 bytes — 256 bits, 43 characters of base64url. Matches the server's code and digest shape. */
 const VERIFIER_BYTES = 32;

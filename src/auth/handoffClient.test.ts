@@ -81,18 +81,18 @@ describe('readHandoffCode', () => {
 
 describe('clearHandoffFragment', () => {
   it('drops the fragment while preserving path and query, without navigating', () => {
-    const replaceState = vi.fn();
-    vi.stubGlobal('window', {
-      location: { pathname: '/board', search: '?day=3', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` },
-      history: { state: { a: 1 }, replaceState },
+    const loc = { pathname: '/board', search: '?day=3', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` };
+    const replaceState = vi.fn(() => {
+      loc.hash = '';
     });
-    clearHandoffFragment();
+    vi.stubGlobal('window', { location: loc, history: { state: { a: 1 }, replaceState } });
+    expect(clearHandoffFragment()).toBe(true);
     expect(replaceState).toHaveBeenCalledWith({ a: 1 }, '', '/board?day=3');
   });
 
-  it('never throws when the history API refuses', () => {
+  it('never throws when the history API refuses, and says so', () => {
     vi.stubGlobal('window', {
-      location: { pathname: '/', search: '', hash: '' },
+      location: { pathname: '/', search: '', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` },
       history: {
         state: null,
         replaceState: () => {
@@ -100,7 +100,18 @@ describe('clearHandoffFragment', () => {
         },
       },
     });
-    expect(() => clearHandoffFragment()).not.toThrow();
+    expect(clearHandoffFragment()).toBe(false);
+  });
+
+  // Phase 4b P1: a `replaceState` that is accepted but does nothing still leaves
+  // a LIVE code in the URL. Assuming success there is what would let telemetry
+  // read it — so the result is confirmed against the URL, not the call.
+  it('reports failure when replaceState no-ops and the code survives', () => {
+    vi.stubGlobal('window', {
+      location: { pathname: '/', search: '', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` },
+      history: { state: null, replaceState: vi.fn() },
+    });
+    expect(clearHandoffFragment()).toBe(false);
   });
 });
 
