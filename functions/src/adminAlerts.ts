@@ -59,9 +59,9 @@ interface AlertDocRef {
   /** Unconditional write — used only to FREEZE a batch's outbound request. */
   set(data: Record<string, unknown>): Promise<unknown>;
   /** Admin-SDK `DocumentReference.create` — writes ONLY if the document does
-   *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing: it is
-   *  what makes the enqueue idempotent under trigger redelivery (see
-   *  `enqueueAdminAlerts`). Mirrors `emailOptOut.ts`'s use of the same call. */
+   *  not exist, rejecting with ALREADY_EXISTS otherwise. Load-bearing for the
+   *  immutable frozen request: two senders can render, but only one byte-for-
+   *  byte request wins the batch id. */
   create(data: Record<string, unknown>): Promise<unknown>;
 }
 interface AlertQuery {
@@ -292,8 +292,8 @@ export interface EnqueueDeps {
    * to protect, and it is declared `retry: true`. Swallowing there converts a
    * transient Firestore blip into a permanently lost report of harm, while
    * throwing hands the platform something it can retry — safely, because the
-   * alert ids are deterministic, so a retry that lands after a successful write
-   * is an ALREADY_EXISTS no-op rather than a duplicate.
+   * alert ids are deterministic and the enqueue transaction never overwrites
+   * an existing row or tombstone.
    */
   rethrowWriteErrors?: boolean;
 }
@@ -324,10 +324,10 @@ export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
  * did. Returns how many alerts it wrote. A caller whose trigger is retryable can
  * opt into propagation with `rethrowWriteErrors`.
  *
- * `create` rather than `set`, and a deterministic id rather than a random one,
- * so a redelivered trigger is a no-op. `set` would be wrong in the one case
- * that matters: a redelivery arriving after the digest drained would re-create
- * the alert and mail it a second time.
+ * The Event and deterministic row are read in one transaction; a row is set
+ * only when absent. That serializes enqueue against archive and makes a
+ * redelivered trigger a no-op without overwriting a delivered or discarded
+ * tombstone.
  *
  * `sentAt: null` is written EXPLICITLY rather than left absent, because the
  * sweep finds work with `where('sentAt', '==', null)` and Firestore's equality
@@ -337,16 +337,15 @@ export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
  * EVERY ROW CARRIES AN `expiresAt` FROM THE MOMENT IT IS WRITTEN, not only once
  * it is tombstoned. A queue row holds a COPY of user content — a pending
  * Prompt's words, a hidden Proof's text, an abuse reporter's description — and
- * until this existed that copy had exactly one exit: being drained. A row whose
- * Event is archived before the next sweep is never visited again
- * (`runAdminAlertSweep` queries `status == 'active'`), so the copy outlived the
- * source it described, the retention sweep that deletes that source, and any
- * decision anyone made about it. `PENDING_TTL_MS` is generous enough that no
- * ordinary backlog is ever reaped — orders of magnitude past the five-minute
- * sweep, and comfortably inside the source-report retention window — so it only
- * ever collects rows that were genuinely stranded. `finishBatch` REPLACES the
- * document on drain, so a delivered row's shorter tombstone expiry supersedes
- * this one rather than competing with it.
+ * until this existed that copy had exactly one exit: being drained. Archive
+ * settlement now deliberately discards uncommitted work, and TTL remains the
+ * final retention bound if both the lifecycle trigger and scheduled backstop
+ * cannot complete. `PENDING_TTL_MS` is generous enough that no ordinary backlog
+ * is ever reaped — orders of magnitude past the five-minute sweep, and
+ * comfortably inside the source-report retention window — so it only ever
+ * collects rows that were genuinely stranded. Settlement REPLACES the document,
+ * so a terminal row's shorter tombstone expiry supersedes this one rather than
+ * competing with it.
  */
 export async function enqueueAdminAlerts(
   db: AdminAlertFirestore,
@@ -361,25 +360,36 @@ export async function enqueueAdminAlerts(
   // timestamp-typed field, so a number would leave the documented policy
   // configured and reaping nothing (the same trap `finishBatch` documents).
   const expiresAt = new Date(createdAt + PENDING_TTL_MS);
-  let written = 0;
-  for (const draft of drafts) {
-    const id = alertDocId(transitionId, draft.kind);
-    try {
-      await db
-        .doc(`events/${eventId}/adminAlerts/${id}`)
-        .create({ ...draft, createdAt, sentAt: null, expiresAt });
-      written++;
-    } catch (err) {
-      // ALREADY_EXISTS is the redelivery path and is a SUCCESS: the alert this
-      // call would have written is already queued.
-      if (isAlreadyExists(err)) continue;
-      console.error('enqueueAdminAlerts: write failed', eventId, draft.kind, draft.docId, err);
-      // Only a failure a retry could actually fix escapes. A permanent one is
-      // logged and acknowledged, because redelivering it forever helps nobody.
-      if (deps.rethrowWriteErrors && isRetryableFirestoreError(err)) throw err;
-    }
+  try {
+    return await db.runTransaction(async (tx) => {
+      // The Event read and deterministic queue writes serialize with archive.
+      // Archive-first means no row is created; enqueue-first means archive
+      // settlement sees the committed row. There is no post-check write gap.
+      const event = (await tx.get(db.doc(`events/${eventId}`))).data();
+      if (event?.status !== 'active') return 0;
+
+      const rows = drafts.map((draft) => ({
+        draft,
+        ref: db.doc(`events/${eventId}/adminAlerts/${alertDocId(transitionId, draft.kind)}`),
+      }));
+      const existing = await Promise.all(rows.map(({ ref }) => tx.get(ref)));
+      let written = 0;
+      rows.forEach(({ draft, ref }, index) => {
+        // Redelivery, a delivered tombstone, and a discard tombstone all keep
+        // the deterministic id. Never overwrite any of them.
+        if (existing[index].data() !== undefined) return;
+        tx.set(ref, { ...draft, createdAt, sentAt: null, expiresAt });
+        written++;
+      });
+      return written;
+    });
+  } catch (err) {
+    console.error('enqueueAdminAlerts: transaction failed', eventId, err);
+    // Only a failure a retry could actually fix escapes. A permanent one is
+    // logged and acknowledged, because redelivering it forever helps nobody.
+    if (deps.rethrowWriteErrors && isRetryableFirestoreError(err)) throw err;
+    return 0;
   }
-  return written;
 }
 
 /**
@@ -602,8 +612,8 @@ export async function recordBugReportAlerts(
   // function swallowed exactly that into a silent, permanent loss of a report of
   // harm. Those now escape so the platform retries them, which is safe because
   // the alert id is derived from the CloudEvent id — a retry that lands after a
-  // write already succeeded hits ALREADY_EXISTS and is a no-op, never a
-  // duplicate row.
+  // write already succeeded finds that deterministic row and is a no-op, never
+  // a duplicate row.
   const drafts = abuseAlertsForWrite(reportId, before, after);
   if (drafts.length === 0) return 0;
   const eventId = bugReportEventId(after);
@@ -716,9 +726,9 @@ export const MAX_ATOMIC_WRITES = 450;
  *
  * Seven days, matching the outer bound on Cloud Functions event redelivery,
  * because the tombstone's entire job is to still be there when a delayed
- * redelivery of an already-mailed transition arrives. `create` fails on an id
- * that exists, so the tombstone is what keeps the deterministic-id dedup honest
- * once the payload row itself is gone.
+ * redelivery of an already-mailed transition arrives. Enqueue refuses to
+ * overwrite an existing deterministic id, so the tombstone is what keeps that
+ * dedup honest once the payload row itself is gone.
  *
  * The document carries `expiresAt` so a Firestore TTL policy on that field
  * reaps it (a one-time per-project setup — see docs/app/phase-1-deploy.md).
@@ -739,13 +749,12 @@ export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  *
  * The tombstone TTL above protects the id, not the payload — by the time it
  * applies, the content is already gone. This one protects the payload, and it
- * exists because until now a queued row had exactly one exit: being drained. The
- * sweep only visits `status == 'active'` Events, so a row whose Event is
- * archived before the next sweep is never looked at again, and its COPY of user
- * content — a pending Prompt's words, a hidden Proof's text, a reporter's abuse
- * description — outlives the source it describes, the retention sweep that
- * deletes that source, and every decision anyone made about it. Nothing else in
- * the system would ever collect it.
+ * exists because until now a queued row had exactly one exit: being drained.
+ * Archive settlement now deliberately discards uncommitted rows, while TTL is
+ * the final bound if both the lifecycle trigger and scheduled backstop cannot
+ * complete. Without that bound, a COPY of user content — a pending Prompt's
+ * words, a hidden Proof's text, a reporter's abuse description — could outlive
+ * the source it describes and every decision anyone made about it.
  *
  * Thirty days is chosen to be uninteresting: the drain runs every five minutes,
  * an undeliverable backlog is meant to clear as soon as a recipient exists, and
@@ -865,6 +874,9 @@ export interface AdminDigestResult {
     /** A concurrent drain claimed these rows first. This sweep steps aside and
      *  finds the winner's claim on the next one. */
     | 'claim-lost'
+    /** Archive serialized before a new claim, so this invocation cannot mint a
+     *  delivery identity for work the Event no longer exposes. */
+    | 'inactive-event'
     /** The outbound request could not be recorded, so nothing was sent: a send
      *  whose bytes were never frozen cannot be safely retried under its key. */
     | 'freeze-failed'
@@ -872,6 +884,23 @@ export interface AdminDigestResult {
      *  abandoned and its rows released to re-batch for whoever is authorized
      *  now. Never replayed to the stale set. */
     | 'rebatched';
+}
+
+export interface ArchiveSettlementResult {
+  /** Pending rows replaced by payload-free discard tombstones. */
+  discarded: number;
+  /** Pending rows retained because their claimed request is already frozen. */
+  preserved: number;
+}
+
+/** Pure trigger guard: archive settlement belongs to the lifecycle edge, not
+ * every edit of an already-archived Event. The scheduled sweep is the retrying
+ * backstop after that edge. */
+export function shouldSettleAdminAlertsOnArchive(
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown> | undefined,
+): boolean {
+  return before?.status === 'active' && after?.status === 'archived';
 }
 
 /** Read one alert snapshot into the record the digest renders, dropping rows
@@ -1051,6 +1080,39 @@ async function frozenAbuseSourceMissing(
   return false;
 }
 
+/**
+ * Confirm the frozen request still owns every row immediately before send.
+ *
+ * Archive cleanup can serialize after the claim but before the freeze create:
+ * it then knows no send could have begun and replaces the rows with discard
+ * tombstones. The create may still finish afterwards because it targets a
+ * different document. This transaction closes that final gap: stale ownership
+ * deletes the orphaned freeze and no external call begins.
+ */
+async function verifyFrozenClaim(
+  db: AdminAlertFirestore,
+  eventId: string,
+  batchId: string,
+  ids: readonly string[],
+): Promise<'valid' | 'stale' | 'failed'> {
+  try {
+    return await db.runTransaction(async (tx) => {
+      const refs = ids.map((id) => db.doc(`events/${eventId}/adminAlerts/${id}`));
+      const rows = await Promise.all(refs.map((ref) => tx.get(ref)));
+      const valid = rows.every((row) => {
+        const data = row.data();
+        return data?.sentAt === null && data.batchId === batchId;
+      });
+      if (valid) return 'valid' as const;
+      tx.delete(db.doc(batchPath(eventId, batchId)));
+      return 'stale' as const;
+    });
+  } catch (err) {
+    console.error('sendAdminDigestForEvent: frozen-claim verification failed (nothing sent)', eventId, err);
+    return 'failed';
+  }
+}
+
 export async function sendAdminDigestForEvent(
   db: AdminAlertFirestore,
   eventId: string,
@@ -1114,6 +1176,10 @@ export async function sendAdminDigestForEvent(
       const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
       if (release === 'released') return { sent: 0, retired: 0, reason: 'rebatched' };
       return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
+    }
+    const verification = await verifyFrozenClaim(db, eventId, batchId, page.map((doc) => doc.id));
+    if (verification !== 'valid') {
+      return { sent: 0, retired: 0, reason: verification === 'stale' ? 'claim-lost' : 'claim-failed' };
     }
     const replayed = await (deps.send ?? (await import('./email')).sendEmail)({
       to: frozen.to,
@@ -1317,6 +1383,11 @@ export async function sendAdminDigestForEvent(
     outbound = winner;
   }
 
+  const verification = await verifyFrozenClaim(db, eventId, batchId, page.map((doc) => doc.id));
+  if (verification !== 'valid') {
+    return { sent: 0, retired: 0, reason: verification === 'stale' ? 'claim-lost' : 'claim-failed' };
+  }
+
   const ok = await send({
     to: outbound.to,
     subject: outbound.subject,
@@ -1448,7 +1519,12 @@ async function claimDrain(
   quietMs: number,
 ): Promise<
   | { batchId: string; page: AlertSnapshot[]; frozen: FrozenDigest | null; reason?: undefined }
-  | { reason: 'settling' | 'claim-failed' | 'claim-lost'; batchId?: undefined; page?: undefined; frozen?: undefined }
+  | {
+      reason: 'settling' | 'claim-failed' | 'claim-lost' | 'inactive-event';
+      batchId?: undefined;
+      page?: undefined;
+      frozen?: undefined;
+    }
 > {
   const rows = docs.map((d) => {
     const data = d.data() ?? {};
@@ -1502,7 +1578,9 @@ async function claimDrain(
   // "check, then claim" one indivisible step; the loser abandons this sweep and
   // finds the winner's claim on the next one.
   try {
-    const won = await db.runTransaction(async (tx) => {
+    const outcome = await db.runTransaction(async (tx) => {
+      const event = (await tx.get(db.doc(`events/${eventId}`))).data();
+      if (event?.status !== 'active') return 'inactive' as const;
       const refs = plan.ids.map((id) => db.doc(`events/${eventId}/adminAlerts/${id}`));
       const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
       for (const snap of snaps) {
@@ -1512,14 +1590,15 @@ async function claimDrain(
         // tombstones, and a tombstone carries no `batchId` — so a
         // claimed-only check would read it as free, merge a new batch id onto
         // it, and mail the stale pre-tombstone snapshot a second time.
-        if (!data || data.batchId || data.sentAt !== null) return false;
+        if (!data || data.batchId || data.sentAt !== null) return 'lost' as const;
       }
       // MERGE — the claim annotates the row, it must not replace the payload
       // the digest is about to render.
       for (const ref of refs) tx.set(ref, { batchId: plan.batchId }, { merge: true });
-      return true;
+      return 'won' as const;
     });
-    if (!won) {
+    if (outcome === 'inactive') return { reason: 'inactive-event' };
+    if (outcome === 'lost') {
       console.log(`sendAdminDigestForEvent: another drain claimed these rows first; skipping ${eventId}`);
       return { reason: 'claim-lost' };
     }
@@ -1538,8 +1617,8 @@ async function claimDrain(
  * or hidden user content — is REPLACED by two numbers rather than joined by
  * them. What survives is the document ID, which is the point: it is derived
  * from the triggering CloudEvent id, so a delayed redelivery of an
- * already-mailed transition still fails its `create` instead of queueing the
- * same alert a second time. `expiresAt` is a `Date` so the documented TTL
+ * already-mailed transition still finds the occupied id instead of queueing
+ * the same alert a second time. `expiresAt` is a `Date` so the documented TTL
  * policy can actually reap it (see `TOMBSTONE_TTL_MS`).
  *
  * All-or-nothing is the other half (see `sendAdminDigestForEvent`), so a commit
@@ -1633,12 +1712,86 @@ async function finishBatch(
 }
 
 /**
- * One sweep across every active Event. Best-effort per Event: one Event's
- * failure is logged and skipped rather than crashing the run.
+ * Retire admin-alert work whose Event is archived.
  *
- * Scoped to ACTIVE Events, mirroring `runDailyEmailSweep`. An archived Event
- * has no live surface to moderate, and its queue drains the moment it is
- * reactivated rather than being lost.
+ * A frozen request is the delivery boundary: it may already have been accepted
+ * by Resend even when the Function never observed success, so its rows retain
+ * their exact claim for the ordinary replay path. Everything else is safe to
+ * discard because this queue always freezes before sending.
+ *
+ * The Event, rows, and referenced freeze documents are read in one transaction.
+ * That makes a concurrent reactivation or freeze creation invalidate the read
+ * rather than letting archive cleanup erase newer live work or an externally
+ * committed delivery identity.
+ */
+export async function settleAdminAlertsForArchivedEvent(
+  db: AdminAlertFirestore,
+  eventId: string,
+  deps: AdminDigestDeps = {},
+): Promise<ArchiveSettlementResult> {
+  const now = (deps.now ?? Date.now)();
+  const pending = await db
+    .collection(`events/${eventId}/adminAlerts`)
+    .where('sentAt', '==', null)
+    .limit(MAX_ALERTS_PER_DIGEST)
+    .get();
+  if (pending.docs.length === 0) return { discarded: 0, preserved: 0 };
+
+  const result = await db.runTransaction(async (tx) => {
+    const event = (await tx.get(db.doc(`events/${eventId}`))).data();
+    if (event?.status !== 'archived') return { discarded: 0, preserved: 0 };
+
+    const rows = await Promise.all(
+      pending.docs.map(async (snapshot) => ({
+        id: snapshot.id,
+        ref: db.doc(`events/${eventId}/adminAlerts/${snapshot.id}`),
+      })),
+    );
+    const rowSnaps = await Promise.all(rows.map(({ ref }) => tx.get(ref)));
+    const batchIds = [
+      ...new Set(
+        rowSnaps
+          .map((snapshot) => snapshot.data()?.batchId)
+          .filter((value): value is string => typeof value === 'string' && value.length > 0),
+      ),
+    ];
+    const frozen = new Set<string>();
+    const batchSnaps = await Promise.all(batchIds.map((batchId) => tx.get(db.doc(batchPath(eventId, batchId)))));
+    batchSnaps.forEach((snapshot, index) => {
+      if (snapshot.data() !== undefined) frozen.add(batchIds[index]);
+    });
+
+    let discarded = 0;
+    let preserved = 0;
+    rows.forEach(({ ref }, index) => {
+      const data = rowSnaps[index].data();
+      if (!data || data.sentAt !== null) return;
+      const batchId = typeof data.batchId === 'string' && data.batchId ? data.batchId : null;
+      if (batchId && frozen.has(batchId)) {
+        preserved++;
+        return;
+      }
+      tx.set(ref, {
+        discardedAt: now,
+        expiresAt: new Date(now + TOMBSTONE_TTL_MS),
+      });
+      discarded++;
+    });
+    return { discarded, preserved };
+  });
+  if (result.preserved > 0) await sendAdminDigestForEvent(db, eventId, deps);
+  return result;
+}
+
+/**
+ * One sweep across every Event with relevant queue lifecycle work. Active
+ * Events deliver pending alerts; archived Events deliberately discard
+ * uncommitted work and replay frozen requests. Best-effort per Event: one
+ * Event's failure is logged and skipped rather than crashing the run.
+ *
+ * The two status queries intentionally cover both live delivery and archive
+ * cleanup. The archive pass is the retrying backstop for transition-trigger
+ * failure and for any delayed producer that lost the archive race.
  */
 export async function runAdminAlertSweep(
   db: AdminAlertFirestore,
@@ -1650,6 +1803,14 @@ export async function runAdminAlertSweep(
       await sendAdminDigestForEvent(db, ev.id, deps);
     } catch (err) {
       console.error('runAdminAlertSweep: event failed', ev.id, err);
+    }
+  }
+  const archived = await db.collection('events').where('status', '==', 'archived').get();
+  for (const ev of archived.docs) {
+    try {
+      await settleAdminAlertsForArchivedEvent(db, ev.id, deps);
+    } catch (err) {
+      console.error('runAdminAlertSweep: archived event failed', ev.id, err);
     }
   }
 }
