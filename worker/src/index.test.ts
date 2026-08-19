@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { cloudflareCache } from './index';
+import { cacheForWorkerRequests, cloudflareCache } from './index';
 import { CACHE_VERSION, type CacheEnvelope } from './resolve';
 
 class MemoryCache {
@@ -39,6 +39,19 @@ class FenceReadFailingCache extends MemoryCache {
   override async match(request: Request): Promise<Response | undefined> {
     if (this.failFenceReads && request.url.endsWith('/fence')) {
       throw new Error('fence read unavailable');
+    }
+    return super.match(request);
+  }
+}
+
+class InterleavingMemoryCache extends MemoryCache {
+  onPrimaryMatch: (() => Promise<void>) | null = null;
+  private primaryMatchTriggered = false;
+
+  override async match(request: Request): Promise<Response | undefined> {
+    if (!this.primaryMatchTriggered && request.url === primaryKey.url && this.onPrimaryMatch !== null) {
+      this.primaryMatchTriggered = true;
+      await this.onPrimaryMatch();
     }
     return super.match(request);
   }
@@ -123,5 +136,26 @@ describe('Cloudflare cache revalidation fences', () => {
 
     await memory.put(fenceKey, new Response(JSON.stringify({ fenceAt: 20 })));
     expect(await edgeCache.read(HOST)).toBeNull();
+  });
+
+  it('rechecks the fence when another isolate refuses the host during a primary read', async () => {
+    const memory = new InterleavingMemoryCache();
+    const reader = cloudflareCache(memory as unknown as Cache);
+    const refusingIsolate = cloudflareCache(memory as unknown as Cache);
+
+    await reader.write(HOST, envelope('old-event', 10));
+    memory.onPrimaryMatch = async () => {
+      await refusingIsolate.drop(HOST, 20);
+      // This models an old lookup that read its fence before the refusal and
+      // only reaches the primary Cache write after that newer removal.
+      await memory.put(primaryKey, new Response(JSON.stringify(envelope('old-event', 10))));
+    };
+
+    expect(await reader.read(HOST)).toBeNull();
+  });
+
+  it('keeps the worker-request adapter alive for a shared Cache instance', () => {
+    const memory = new MemoryCache() as unknown as Cache;
+    expect(cacheForWorkerRequests(memory)).toBe(cacheForWorkerRequests(memory));
   });
 });

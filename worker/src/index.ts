@@ -108,8 +108,8 @@ export function cloudflareCache(cache: Cache): HostnameCache {
   return {
     async read(host) {
       return queue(host, async () => {
-        const fence = await readFence(host);
-        if (fence.kind === 'unreadable') return null;
+        const fenceBeforeRead = await readFence(host);
+        if (fenceBeforeRead.kind === 'unreadable') return null;
         const hit = await cache.match(keyFor(host));
         if (hit === undefined) return null;
         try {
@@ -120,11 +120,18 @@ export function cloudflareCache(cache: Cache): HostnameCache {
           // reach `decide` and throw a runtime error instead of rendering the
           // fail-closed page.
           const envelope: unknown = await hit.json();
+          // The fence and primary match are separate Cache operations. A
+          // refusal can land between them in another isolate, so re-read the
+          // barrier before serving; otherwise this request could return an old
+          // envelope the newer refusal has already removed.
+          const fenceAfterRead = await readFence(host);
+          if (fenceAfterRead.kind === 'unreadable') return null;
           // Fences are high-water marks, not permanent negative-cache entries:
           // a positive read is valid only when it came from a lookup begun
           // after the newest refusal. Keeping the fence prevents an older
           // delayed write from erasing that ordering after a newer write wins.
-          return isCacheEnvelope(envelope) && (fence.fenceAt === null || envelope.fetchedAt > fence.fenceAt)
+          return isCacheEnvelope(envelope) &&
+            (fenceAfterRead.fenceAt === null || envelope.fetchedAt > fenceAfterRead.fenceAt)
             ? envelope
             : null;
         } catch {
@@ -181,6 +188,19 @@ export function cloudflareCache(cache: Cache): HostnameCache {
   };
 }
 
+// One adapter per isolate, not per request. Its per-host tails and local
+// high-water marks only protect concurrency inside this isolate; the durable
+// fence above remains the cross-isolate barrier. Recreating it in `fetch`
+// would silently discard both local protections after every request.
+let requestCacheAdapter: { cache: Cache; adapter: HostnameCache } | null = null;
+
+export function cacheForWorkerRequests(cache: Cache): HostnameCache {
+  if (requestCacheAdapter?.cache !== cache) {
+    requestCacheAdapter = { cache, adapter: cloudflareCache(cache) };
+  }
+  return requestCacheAdapter.adapter;
+}
+
 export default {
   async fetch(request: Request, env: RouterEnv, ctx: ExecutionContext): Promise<Response> {
     const config = routerConfigFromEnv(env);
@@ -190,7 +210,7 @@ export default {
       // receiver; workerd does not require it, but a bare `fetch: fetch` is the
       // kind of detail that breaks silently if that ever changes.
       fetch: (input, init) => fetch(input, init),
-      cache: cloudflareCache(caches.default),
+      cache: cacheForWorkerRequests(caches.default),
       now: () => Date.now(),
     };
 
