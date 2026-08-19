@@ -110,6 +110,20 @@ describe('SignIn — which route the tap takes', () => {
     );
   });
 
+  // Phase 4b P2. `startAuthHandoff` also records `start-failed` in the
+  // module-level channel. Leaving it there meant a later retry could succeed,
+  // navigate, exchange — and the NEXT SignIn mount (the post-handoff 18+
+  // re-prompt, or a later sign-out) would greet the player with "That sign-in
+  // didn't finish" about a sign-in that did.
+  it('drains the module failure channel when a start fails', async () => {
+    mocks.resolveSignInStrategy.mockReturnValue(HANDOFF);
+    mocks.startAuthHandoff.mockResolvedValue(false);
+    render(<SignIn />);
+    tap();
+    await waitFor(() => expect(mocks.consumeHandoffFailure).toHaveBeenCalledTimes(2));
+    // Once at mount (the pre-mount return leg), once draining this start.
+  });
+
   // The pre-mount return leg fails before this tree exists, so the message has
   // to come from the read-once channel rather than from anything on screen.
   it('reports a return leg that failed before the app mounted', () => {

@@ -281,3 +281,23 @@ describe('the first real failure is the one that sticks', () => {
     expect(screen.getAllByRole('alert')).toHaveLength(1);
   });
 });
+
+// Phase 4b P2. Setting the guard BEFORE attempting the navigation meant a
+// `replace` that threw fell into the catch, where `terminate` returned
+// immediately because `settled` was already true — leaving the page on the
+// minting spinner forever with the deadline already cleared. No error, no
+// timeout, no way out.
+describe('a navigation that throws is still a failure', () => {
+  it('shows the mint failure when replace() throws', async () => {
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
+    const throwingNavigate = vi.fn(() => {
+      throw new Error('navigation blocked');
+    });
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={throwingNavigate} timeoutMs={5_000} />);
+
+    expect(await screen.findByText(/couldn't return you to your event/i)).toBeInTheDocument();
+    expect(throwingNavigate).toHaveBeenCalled();
+  });
+});

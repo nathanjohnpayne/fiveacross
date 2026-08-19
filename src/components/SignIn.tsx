@@ -92,6 +92,13 @@ export default function SignIn() {
           returnPath: strategy.returnPath,
         });
         if (!started) {
+          // Drain the module-level channel as well as showing the local message
+          // (Phase 4b P2). `startAuthHandoff` records `start-failed` there too,
+          // and an unconsumed entry outlives this screen: a later retry could
+          // succeed, navigate, exchange, and then the NEXT SignIn mount — the
+          // post-handoff 18+ re-prompt, or a later sign-out — would greet the
+          // player with "That sign-in didn't finish" about a sign-in that did.
+          consumeHandoffFailure();
           setStartFailed(true);
           setBusy(false);
         }

@@ -22,7 +22,8 @@ import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
 import { parseAuthOrigin, resolveSignInStrategy } from './auth/authMode';
-import { HANDOFF_AUTH_PATH, clearHandoffFragment, readHandoffCode } from './auth/handoffClient';
+import { HANDOFF_AUTH_PATH } from './auth/handoffClient';
+import { isUrlSafeForTelemetry, pendingHandoffCode } from './handoffBoot';
 import { completeAuthHandoff } from './auth/handoffExchange';
 import AuthHandoffOrigin from './auth/AuthHandoffOrigin';
 import './theme/themes.css';
@@ -206,34 +207,23 @@ const appTree = (
 );
 
 /**
- * Capture and clear the handoff code BEFORE anything else runs (#549, #898).
+ * The handoff code, captured by `entry.tsx` BEFORE this module graph loaded
+ * (#549, Phase 4b P1).
  *
- * This sits above the central-origin check and above Event resolution because
- * the thing it is racing is TELEMETRY, not rendering. Analytics startup and the
- * explicit initial page view both derive the current URL from
- * `window.location`, which still carries `#fa_handoff=<code>` until this line —
- * so a fragment chosen precisely to keep the code out of access logs, proxies
- * and `Referer` headers would have been copied straight into PostHog and GA4
- * instead. PKCE means the code alone cannot authenticate anyone, but a
- * single-use bearer credential still has no business in a telemetry pipeline.
+ * It is READ here rather than captured here, because capturing here is provably
+ * too late: this module's static imports — `firebase.ts` among them, which
+ * initialises GA4 — are fully evaluated before any statement below runs, so an
+ * analytics SDK would already be live on a URL still carrying
+ * `#fa_handoff=<code>`. Line order inside this file could never have fixed
+ * that. `src/entry.tsx` closes the window by capturing with nothing else
+ * loaded and reaching this file through a dynamic import.
  *
- * Reading and clearing here, and passing the value forward, is what makes the
- * ordering guarantee explicit rather than incidental: no later reader of
- * `window.location.hash` can observe it, because by then it is gone.
+ * `urlSafeForTelemetry` is `false` only when the fragment could not actually be
+ * removed, in which case analytics are suppressed for this one page load rather
+ * than allowed to read a live credential out of the address bar.
  */
-const pendingHandoffCode = readHandoffCode(window.location.hash);
-/**
- * Whether the URL is safe for telemetry to read (Phase 4b P1).
- *
- * `clearHandoffFragment` can fail — a refused or no-op `replaceState` leaves a
- * still-live code sitting in `window.location`. Proceeding to start analytics
- * anyway would copy it into PostHog and GA4, which is precisely the leak this
- * ordering exists to prevent, so the failure has to be load-bearing rather than
- * swallowed. When it cannot be confirmed we FAIL CLOSED and suppress analytics
- * for this one page load: the sign-in still completes, and one lost page view
- * on a handoff return is not comparable to exporting a bearer credential.
- */
-const urlSafeForTelemetry = pendingHandoffCode === null || clearHandoffFragment();
+const handoffCode = pendingHandoffCode();
+const urlSafeForTelemetry = isUrlSafeForTelemetry();
 
 /**
  * The central auth origin short-circuit (#549, ADR 0010).
@@ -293,7 +283,9 @@ if (atCentralAuthOrigin) {
       // events, so those screens should carry Event context too, same as
       // ConsentNotice's disclosure obligation a few lines down. Skipped for the
       // uptime synthetic (#142), matching `initPostHog`'s own guard above.
-      if (resolution.kind === 'event' && !isSyntheticProbe()) {
+      // Gated on the telemetry check too (Phase 4b P1): registering dimensions
+      // is an analytics call like any other, and it ran unconditionally.
+      if (urlSafeForTelemetry && resolution.kind === 'event' && !isSyntheticProbe()) {
         registerAnalyticsDimensions({ eventId: resolution.eventId, eventSlug: resolution.slug });
       }
       // Only NOW does PostHog itself start (#556, Phase 4b P1) — see
@@ -360,8 +352,8 @@ if (atCentralAuthOrigin) {
       // analytics could observe either (#898). Failure is recorded, never
       // retried: the code is single-use and is spent by the time anything here
       // can fail, so a retry could only fail again.
-      if (resolution.kind === 'event' && pendingHandoffCode !== null) {
-        await completeAuthHandoff({ code: pendingHandoffCode, origin: window.location.origin });
+      if (resolution.kind === 'event' && handoffCode !== null) {
+        await completeAuthHandoff({ code: handoffCode, origin: window.location.origin });
       }
       if (resolution.kind === 'not-found') phSetAuthState(null);
       root.render(

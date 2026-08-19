@@ -191,15 +191,20 @@ export default function AuthHandoffOrigin({
       try {
         const handoffUrl = await mintAuthHandoff(req);
         if (cancelled) return;
-        // Bouncing is a terminal outcome too: stop the clock so it cannot fire
-        // against a page that is already navigating away.
-        settled = true;
-        clearTimeout(deadline);
+        // NAVIGATE FIRST, then mark settled (Phase 4b P2). Setting the guard
+        // before attempting the navigation meant a `replace` that THREW — a
+        // malformed URL, a restricted navigation — fell into the catch below,
+        // where `terminate` returned immediately because `settled` was already
+        // true. The page then sat on the minting spinner forever with the
+        // deadline already cleared: no error, no timeout, no way out. The guard
+        // is only correct once the navigation has actually been initiated.
         // VERBATIM, and `replace` rather than `assign`: the server built this
         // URL precisely so no client assembles a redirect target, and leaving
         // the central origin in history would put a spent handoff URL one Back
         // tap away.
         navigate(handoffUrl);
+        settled = true;
+        clearTimeout(deadline);
       } catch {
         terminate('mint-failed');
       }
