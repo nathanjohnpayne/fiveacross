@@ -57,6 +57,14 @@ match /memberships/{uid} {
   // read their OWN record, or the client cannot tell them "you were removed
   // from this Event" and shows a permission error instead — and the
   // `denied-revoked` outcome this spec promises becomes unreachable.
+  //
+  // This arm is now the ONLY path to that outcome, so it is load-bearing rather
+  // than a convenience (Phase 4b P1, round 3). An earlier draft ALSO carved the
+  // Event document out of the admission gate to keep `membershipEnforcement`
+  // readable after revocation; that carve-out is withdrawn, because it leaked
+  // the whole Event document — settings, schedule, `admins`, `bannedUids` —
+  // permanently, to exactly the people revocation removed. Everything the client
+  // needs to render the removal state is in the record it reads here.
   allow get: if isOwner(uid) || (admitted(eventId) && isAdmin(eventId));
   // The roster is Admin-only AND admission-gated. Admin alone is not enough:
   // `EventDoc.admins` is client-writable, so an Admin can promote any UID by
@@ -152,6 +160,17 @@ function membershipEnforced(eventId) {
 // fitting the budget and denying every admin moderation delete.
 function admittedWith(ev, eventId) {
   return ev.get('membershipEnforcement', 'off') != 'enforced'
+    // TRANSITIONAL (Decision D-A) — REMOVE with the firestore.rules disjunct.
+    // Its POSITION is load-bearing and is not a style choice (Phase 4b P1,
+    // round 3): it must precede the membership get(), because that get() ERRORS
+    // on a missing document and an error denies the whole evaluation. Appended
+    // AFTER the get(), `|| isEventAdminWith(ev)` is unreachable in precisely the
+    // case D-A exists for — an Admin the backfill missed, who therefore has no
+    // membership document at all. Placed here it also short-circuits before the
+    // access is spent, so the bypass costs nothing against the two-document
+    // ceiling. Storage would otherwise deny a caller that firestore.rules,
+    // admits() and the Functions all admit.
+    || isEventAdminWith(ev)
     // ONE access, not exists()+get(). A `get()` on a missing document ERRORS,
     // and an error denies — the answer a non-member should get anyway.
     || firestore.get(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
@@ -177,7 +196,7 @@ function isEventAdminWith(ev) { return request.auth.uid in ev.admins; }
 
 Three properties are load-bearing and must survive any rewrite.
 
-**The `exists()` precedes the `get()`**, so a stranger — the adversary case — short-circuits after one access call and never pays for the second; only a legitimate member pays both. And **the enforcement check precedes the membership check**, so an unenforced Event costs exactly one access call and no membership read at all, which is what makes landing dark cheap rather than merely possible.
+**The `exists()` precedes the `get()`**, so a stranger — the adversary case — short-circuits after one access call and never pays for the second; only a legitimate member pays both. And **the enforcement check precedes the membership check**, so an unenforced Event costs exactly one access call and no membership read at all, which is what makes landing dark cheap rather than merely possible. While Decision D-A's transitional disjunct is deployed, Storage orders it **between** those two — after the switch, before the membership `get()` — and that position is required rather than preferred: the `get()` errors on a missing document and an error denies the evaluation, so a bypass placed after it can never fire for the backfill-missed Admin it exists for. It also costs nothing, reading the already-threaded Event data and short-circuiting before the access is spent.
 
 **Admission is CONJOINED with each rule's existing authorization, never disjoined.** The shape is `admitted(eventId) && <the rule's current condition>`. An earlier draft of this spec wrote `admitted(eventId) || isOwner(...)`, which is backwards and would have widened access rather than narrowing it: `boards` is owner/admin-only today (`:1105`) and `claims` likewise (`:1304`), so OR-ing admission in would have handed every member of an Event read access to every other member's private Board and Claims — a regression introduced by the very change meant to harden the boundary (Codex P1 on PR #891). Membership is an **additional** gate. It subtracts from what each rule already allows and never adds to it, and any rule that comes out of #804 more permissive than it went in is wrong on its face.
 
@@ -189,7 +208,7 @@ Firestore's published limits are **10 `exists()`/`get()`/`getAfter()` calls per 
 
 Firestore's caching note is *"some document access calls may be cached, and cached calls do not count towards the limits"* — a "may", not a guarantee. **This spec budgets textual access calls and treats de-duplication as headroom that was not spent.** Where the distinct-document count differs materially it is given alongside.
 
-Predicate cost, worst case: **1 call** when the Event is unenforced (the Event document, then short-circuit), **2** when enforced and the caller is not a member, **3** when enforced and they are. Distinct documents added: one (`memberships/{uid}`) — the Event document is already fetched by every rule that calls `isAdmin()`.
+Predicate cost, worst case: **1 call** when the Event is unenforced (the Event document, then short-circuit), **2** when enforced and the caller is not a member, **3** when enforced and they are. Distinct documents added: one (`memberships/{uid}`) — the Event document is already fetched by every rule that calls `isAdmin()`. Decision D-A's transitional disjunct adds **no distinct document** for the same reason, and in Storage adds no access at all because it reads the threaded `ev`; in `firestore.rules` an un-hoisted `|| isAdmin(eventId)` costs one further *call* against the ten-call ceiling on a document already counted. That cost comes back out when the disjunct is removed.
 
 | Rule | Lines | Today (textual / distinct) | + predicate, worst case | Verdict |
 |---|---|---|---|---|
@@ -245,7 +264,9 @@ Recorded as a **blocking prerequisite of #804**: the gate cannot ship on the Mar
 
 What #804 and #806 gate, and — as importantly — what they must not.
 
-**Gate (Event-scoped, currently open to any signed-in account).** `events/{eventId}` read (`:728`) — but see the carve-out below — **and its update (`:796`) and delete (`:917`) arms**; `items` (`:940-985`); `players` (`:1006-1009`); `reshuffles` (`:1043-1054`); `boards` (`:1105-1149`, create **and** update); `meta` (`:1180-1190`); `proofs` (`:1198-1298`); `claims` (`:1304-1306`); `tally` (`:1324-1325`) and its nested `markers` (`:1331-1339`); `doubts` (`:1348-1403`); `hearts` (`:1418-1457`); `moments` (`:1465-1606`); `momentRetractions` (`:1652-1681`); `notices` (`:1693-1755`); and **`players/{uid}/analyticsTransitions`** (`:1015-1018`). That last one was originally filed here as "already closed" and is not: `allow read: if isOwner(uid) || isAdmin(eventId)` stays true for a revoked owner, so without a gate a revoked member keeps listening to server-authored Event transition records (Codex P2 on PR #891). Write is already `if false` and stays so; only the read arm gains admission as a conjunct. **Carve-out: the Event document stays readable to anyone holding a membership record, active or revoked** (Codex P2 on PR #891). `membershipEnforcement` lives on that document, and `admits()` needs it to tell `denied-revoked` apart from `admitted-unenforced`. Gating the read on *active* admission would make the switch unreadable to exactly the person whose outcome depends on it, so a revoked member with a cold cache could not be told they were removed — the client would show a bare permission error, and the `denied-revoked` outcome this spec promises would be unreachable in the one case it exists for. The read arm therefore admits a caller with any membership document at their own uid; the write arms do not.
+**Gate (Event-scoped, currently open to any signed-in account).** `events/{eventId}` read (`:728`) — gated like every other arm; the carve-out an earlier draft granted it is withdrawn below — **and its update (`:796`) and delete (`:917`) arms**; `items` (`:940-985`); `players` (`:1006-1009`); `reshuffles` (`:1043-1054`); `boards` (`:1105-1149`, create **and** update); `meta` (`:1180-1190`); `proofs` (`:1198-1298`); `claims` (`:1304-1306`); `tally` (`:1324-1325`) and its nested `markers` (`:1331-1339`); `doubts` (`:1348-1403`); `hearts` (`:1418-1457`); `moments` (`:1465-1606`); `momentRetractions` (`:1652-1681`); `notices` (`:1693-1755`); and **`players/{uid}/analyticsTransitions`** (`:1015-1018`). That last one was originally filed here as "already closed" and is not: `allow read: if isOwner(uid) || isAdmin(eventId)` stays true for a revoked owner, so without a gate a revoked member keeps listening to server-authored Event transition records (Codex P2 on PR #891). Write is already `if false` and stays so; only the read arm gains admission as a conjunct. **An earlier draft carved the Event document out of this gate, and that carve-out is WITHDRAWN** (Phase 4b P1, round 3). It would have let anyone holding a membership record — *including a revoked one* — read `events/{eventId}` permanently. Firestore cannot expose a single field, so that is not read access to `membershipEnforcement`; it is read access to the Event's settings, schedule, `admins` roster and `bannedUids`, retained indefinitely by someone revocation was supposed to put out of the Event. It contradicted both this spec's central invariant and D5's ruling that revocation stops future reads.
+
+Its stated justification does not survive contact with the rules as written. The claim was that a revoked member could otherwise never be told they were removed, because `admits()` needs `membershipEnforcement` to tell `denied-revoked` from `admitted-unenforced`. But **the client does not learn its revocation from the Event document — it learns it from its own membership record**, which `match /memberships/{uid}` already keeps self-readable through `allow get: if isOwner(uid) || …` no matter what admission says. A revoked caller reads `status: 'revoked'` at their own uid and renders the removal state from that. And the case where enforcement genuinely matters to the answer is the unenforced one — where the ordinary admission branch admits every signed-in account and the Event read is permitted anyway. The carve-out therefore bought nothing that the self-read does not already provide, at the cost of a permanent leak. `events/{eventId}` read is gated on active admission like every other arm.
 
 **The root Event's write arms need admission too, and an earlier draft gated only its read** (Codex P1 on PR #891). `events/{eventId}` update and delete are `isAdmin(eventId)`-gated, and `EventDoc.admins` is client-writable, so an Admin who adds a UID to that array after enforcement creates a privileged non-member who can rewrite the Event's settings, rewrite the admin roster itself, and **delete the Event** — while holding no membership at all. Gating only the read left the most destructive operations in the file ungated. `create` is deliberately excluded: it is the provisioner's Admin-SDK path (#793), which bypasses rules entirely, and the existing client-side create arm is already unsatisfiable because `isAdmin(eventId)` reads a document that does not exist yet.
 
