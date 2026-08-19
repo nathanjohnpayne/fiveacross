@@ -252,3 +252,32 @@ describe('the central-origin page reaches a terminal state', () => {
     expect(HANDOFF_ORIGIN_TIMEOUT_MS).toBeGreaterThanOrEqual(15_000);
   });
 });
+
+// Phase 4b P2. A failure that left the timer armed meant the deadline fired
+// later and REPLACED an accurate error with a generic one — the page getting
+// less truthful the longer the player looked at it.
+describe('the first real failure is the one that sticks', () => {
+  it('keeps the mint-failure message instead of letting the deadline overwrite it', async () => {
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockRejectedValue(new Error('invalid-argument'));
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+
+    expect(await screen.findByText(/couldn't return you to your event/i)).toBeInTheDocument();
+    // Well past the deadline — the accurate message must survive it.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(screen.getByText(/couldn't return you to your event/i)).toBeInTheDocument();
+    expect(screen.queryByText(/didn't finish/i)).toBeNull();
+  });
+
+  it('keeps the redirect-failure message too', async () => {
+    withSession(null);
+    mocks.signInWithRedirect.mockRejectedValue(new Error('popup-blocked'));
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+
+    expect(await screen.findByText(/didn't finish/i)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+  });
+});

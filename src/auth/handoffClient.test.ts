@@ -173,6 +173,61 @@ describe('parseHandoffRequest', () => {
   ])('refuses %s', (_label, search) => {
     expect(parseHandoffRequest(search)).toBeNull();
   });
+
+  // Phase 4b P1. The old `startsWith('/') && !startsWith('//')` test was a
+  // BLACKLIST, and blacklists lose here: each of these begins with a single `/`
+  // and still resolves OFF-ORIGIN under WHATWG URL rules. Since `returnPath` is
+  // handed to the server to build the URL that carries the handoff code, a miss
+  // turns the trusted central auth endpoint into an open redirect that leaks a
+  // freshly minted code.
+  //
+  // The payloads are pinned by their RESOLVED origin rather than their shape,
+  // so this test states the property instead of restating the implementation.
+  it.each([
+    ['a literal backslash', '/\\evil.example'],
+    ['a backslash-slash pair', '/\\/evil.example'],
+    ['a literal tab between the slashes', '/\t/evil.example'],
+    ['a literal newline between the slashes', '/\n/evil.example'],
+    ['a literal carriage return', '/\r/evil.example'],
+  ])('refuses %s, which resolves off-origin', (_label, returnPath) => {
+    // Guard on the premise: if this ever stops resolving off-origin, the test
+    // has stopped testing what it claims to.
+    expect(new URL(returnPath, ORIGIN).origin).not.toBe(ORIGIN);
+    const search = `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=${encodeURIComponent(returnPath)}`;
+    expect(parseHandoffRequest(search)).toBeNull();
+  });
+
+  // The counterpart, and the reason resolve-and-compare beats a denylist in
+  // BOTH directions: percent-encoded sequences are NOT decoded by URL
+  // resolution, so these stay on the target origin and are perfectly safe deep
+  // links. A pattern-matcher tuned to reject "backslash-ish" strings would have
+  // broken them for no benefit.
+  it.each([
+    ['an encoded backslash', '/%5Cevil.example'],
+    ['an encoded tab', '/%09/evil.example'],
+    ['an encoded newline', '/%0A/evil.example'],
+  ])('still accepts %s, which stays on the target origin', (_label, returnPath) => {
+    expect(new URL(returnPath, ORIGIN).origin).toBe(ORIGIN);
+    const search = `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=${encodeURIComponent(returnPath)}`;
+    expect(parseHandoffRequest(search)?.returnPath).toBe(returnPath);
+  });
+
+  it.each([
+    ['a plain path', '/board'],
+    ['a path with a query', '/board?day=3'],
+    ['a nested path', '/a/b/c'],
+    ['the root', '/'],
+  ])('still accepts %s', (_label, returnPath) => {
+    const search = `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=${encodeURIComponent(returnPath)}`;
+    expect(parseHandoffRequest(search)?.returnPath).toBe(returnPath);
+  });
+
+  it('refuses a fragment or an over-long path', () => {
+    const mk = (rp: string) =>
+      `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=${encodeURIComponent(rp)}`;
+    expect(parseHandoffRequest(mk('/board#x'))).toBeNull();
+    expect(parseHandoffRequest(mk(`/${'a'.repeat(600)}`))).toBeNull();
+  });
 });
 
 describe('startAuthHandoff', () => {

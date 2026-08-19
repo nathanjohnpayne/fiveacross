@@ -194,9 +194,41 @@ export function parseHandoffRequest(search: string): HandoffRequest | null {
   } catch {
     return null;
   }
-  if (!returnPath.startsWith('/') || returnPath.startsWith('//')) return null;
+  if (!isSameOriginPath(returnPath, targetOrigin)) return null;
 
   return { targetOrigin, transactionId, returnPath };
+}
+
+/**
+ * Whether `path` is a same-origin deep link under `targetOrigin`.
+ *
+ * RESOLVED, not pattern-matched, and the difference is an open redirect
+ * (Phase 4b P1). A `startsWith('/') && !startsWith('//')` test is a blacklist,
+ * and blacklists lose here: `/%5Cevil.example` decodes to `/\evil.example`,
+ * which WHATWG URL resolves as `https://evil.example/`, and encoded tabs and
+ * newlines normalise into `//evil.example` the same way. Since this value is
+ * handed to the server to build the URL that CARRIES THE HANDOFF CODE, a miss
+ * turns the trusted central auth endpoint into an open redirect that leaks a
+ * freshly minted code to whoever chose the path.
+ *
+ * Resolving and comparing origins has no list to keep current: whatever the
+ * browser would actually navigate to is what gets checked. The server applies
+ * the same invariant (`validateReturnPath`) and remains authoritative; this is
+ * the near copy of it, so a malformed link fails here rather than one round
+ * trip later.
+ */
+function isSameOriginPath(path: string, targetOrigin: string): boolean {
+  if (!path.startsWith('/')) return false;
+  // Control characters are stripped or normalised by URL parsing rather than
+  // rejected, so they have to go before the resolve rather than after.
+  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
+  if (path.includes('#')) return false;
+  if (path.length > 512) return false;
+  try {
+    return new URL(path, targetOrigin).origin === targetOrigin;
+  } catch {
+    return false;
+  }
 }
 
 /**

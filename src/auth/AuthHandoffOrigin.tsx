@@ -154,13 +154,35 @@ export default function AuthHandoffOrigin({
     // afterwards could still navigate the browser away from the failure the
     // player was already looking at. Timing out therefore cancels the effect's
     // continuations and drops the auth subscription, exactly as unmounting does.
-    const deadline = setTimeout(() => {
+    /**
+     * The ONE way this effect reaches a failure, and the only place that
+     * decides what the player ends up reading (Phase 4b P2).
+     *
+     * Every failure has to be terminal, not just the deadline's. A
+     * `fail('mint-failed')` that left the timer armed and the observer
+     * subscribed meant the deadline fired thirty seconds later and REPLACED an
+     * accurate "we couldn't return you to your event" with a generic sign-in
+     * failure — the page actively getting less truthful the longer the player
+     * looked at it. Routing every path through here means the first real
+     * outcome wins and nothing can overwrite it.
+     */
+    // Declared before `terminate` closes over it. Runtime ordering happens to be
+    // safe here — nothing calls `terminate` before the timer is armed — but a
+    // closure reaching a `const` declared below it is exactly the
+    // temporal-dead-zone shape that already produced one bug on this page, and
+    // "safe because of call ordering" is not a property worth depending on.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+
+    const terminate = (kind: FailureKind) => {
       if (cancelled || settled) return;
       settled = true;
       cancelled = true;
+      clearTimeout(deadline);
       unsubscribe?.();
-      fail('sign-in-failed');
-    }, timeoutMs);
+      fail(kind);
+    };
+
+    deadline = setTimeout(() => terminate('sign-in-failed'), timeoutMs);
 
     const bounce = async (req: HandoffRequest) => {
       if (minted) return;
@@ -169,6 +191,8 @@ export default function AuthHandoffOrigin({
       try {
         const handoffUrl = await mintAuthHandoff(req);
         if (cancelled) return;
+        // Bouncing is a terminal outcome too: stop the clock so it cannot fire
+        // against a page that is already navigating away.
         settled = true;
         clearTimeout(deadline);
         // VERBATIM, and `replace` rather than `assign`: the server built this
@@ -177,7 +201,7 @@ export default function AuthHandoffOrigin({
         // tap away.
         navigate(handoffUrl);
       } catch {
-        if (!cancelled) fail('mint-failed');
+        terminate('mint-failed');
       }
     };
 
@@ -210,12 +234,12 @@ export default function AuthHandoffOrigin({
           // the player.
           setPhase('authenticating');
           void signInWithRedirect(auth, googleProvider).catch(() => {
-            if (!cancelled) fail('sign-in-failed');
+            terminate('sign-in-failed');
           });
         });
       },
       () => {
-        if (!cancelled) fail('sign-in-failed');
+        terminate('sign-in-failed');
       },
     );
 

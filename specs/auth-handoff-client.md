@@ -97,7 +97,9 @@ The page settles any redirect return, then asks the session directly—an existi
 
 **The `handoffUrl` is navigated to verbatim, with `replace` rather than `assign`.** The server returns a URL rather than a code precisely so that no client ever assembles a redirect target; rebuilding or appending to it is what would reintroduce the open redirect. `replace` keeps a spent handoff URL from sitting one Back tap away.
 
-Query parameters are validated for shape only. Whether `targetOrigin` is a registered Event address is the server's question, answered against the `hostnames` registry at mint time—**origin validation is not duplicated client-side**, per the server contract, because a second copy would only drift.
+`returnPath` is **resolved against `targetOrigin` and required to land on it**, not pattern-matched. A `startsWith('/') && !startsWith('//')` denylist is insufficient: a literal backslash, a backslash-slash pair, and literal tabs/newlines/carriage returns all begin with a single `/` and still resolve off-origin under WHATWG URL rules—and because this value is handed to the server to build the URL that carries the code, a miss turns the trusted central auth endpoint into an open redirect that leaks a freshly minted code. Resolving has no list to keep current and is right in both directions: percent-encoded sequences are *not* decoded by URL resolution, so `/%5Cevil.example` stays on the target origin and remains a valid deep link, where a denylist tuned to reject backslash-ish strings would have broken it for no benefit. The server applies the same invariant and stays authoritative.
+
+Query parameters are otherwise validated for shape only. Whether `targetOrigin` is a registered Event address is the server's question, answered against the `hostnames` registry at mint time—**origin validation is not duplicated client-side**, per the server contract, because a second copy would only drift.
 
 ### Leg 3—complete, back at the entry origin
 
@@ -168,6 +170,8 @@ All three are pinned by a parity test that imports both sides, the same shape `s
 - **Given** a `signInWithRedirect` that hangs on initiation, **then** the deadline still rescues the page. (Test: hung-redirect-initiation.)
 - **Given** a timed-out attempt whose sign-in lands after a LATER attempt already succeeded, **then** the newer session is left alone. (Test: generation-aware-reconciliation.)
 - **Given** a `replaceState` that fails or no-ops, **then** the clear reports failure and analytics are suppressed for that load. (Test: clear-confirmed, fail-closed telemetry gate in `src/main.tsx`.)
+- **Given** a `returnPath` that resolves off the target origin by any means—backslash, backslash-slash, or a literal control character—**then** the request is refused; and given a percent-encoded sequence that stays on-origin, it is still accepted. (Test: return-path-resolves-on-origin.)
+- **Given** any central-origin failure, **then** the first accurate message is the one that persists—the deadline cannot later overwrite it with a generic one. (Test: first-failure-sticks.)
 
 ## Test coverage
 
