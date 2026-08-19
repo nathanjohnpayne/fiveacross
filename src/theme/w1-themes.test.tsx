@@ -153,6 +153,21 @@ describe('ThemeContext — persistence and defaults (specs/w1-themes.md)', () =>
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
+  // Codex P2 on #893 (registering fiveacross-slate, #882): a platform-chrome
+  // Theme is registered — a "currently-known theme id" — but never player-
+  // wearable. localStorage is self-writable outside any picker (devtools, a
+  // stale build that once offered it, ...), so the saved-pick guard has to
+  // reject a chrome id specifically, not just an unrecognised string.
+  it('treats a saved chrome Theme id as invalid, same as an unregistered one', () => {
+    window.localStorage.setItem(STORAGE_KEY, 'fiveacross-slate');
+    render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+    expect(screen.getByRole('button')).toHaveTextContent('neon-playground');
+  });
+
   it('applies an explicit pick to <html data-theme> and persists it, well under the 5s PRD budget', async () => {
     const user = userEvent.setup();
     render(
@@ -357,6 +372,32 @@ describe('ThemeContext — Auto: match the day (specs/d15-more-menu.md § Theme)
         defaultTheme="neon-playground"
         autoThemeId="get-sporty"
         playerTheme={'retired-theme-id' as unknown as (typeof THEMES)[number]['id']}
+      >
+        <ThemePreferenceProbe />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId('preference')).toHaveTextContent('auto');
+    expect(screen.getByTestId('theme')).toHaveTextContent('get-sporty');
+  });
+
+  // Codex P2 on #893 (#882): unlike 'retired-theme-id' above, 'fiveacross-slate'
+  // IS a real, registered ThemeId — a hand-written players/{uid}.theme Firestore
+  // value (ADR 0001: self-writable, client-authoritative) survives a bare
+  // registry-membership check. The guard has to reject it as a PREFERENCE
+  // specifically (chrome is never player-wearable), not merely as an unknown id.
+  it('ignores an async-arriving playerTheme that names a registered chrome Theme', () => {
+    const { rerender } = render(
+      <ThemeProvider defaultTheme="neon-playground" autoThemeId="get-sporty" playerTheme={null}>
+        <ThemePreferenceProbe />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId('preference')).toHaveTextContent('auto');
+
+    rerender(
+      <ThemeProvider
+        defaultTheme="neon-playground"
+        autoThemeId="get-sporty"
+        playerTheme={'fiveacross-slate' as (typeof THEMES)[number]['id']}
       >
         <ThemePreferenceProbe />
       </ThemeProvider>,
