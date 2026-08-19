@@ -40,6 +40,7 @@ import {
   type AlertableDoc,
   type BugReportDoc,
 } from '../../functions/src/adminAlerts';
+import { deriveReporterHash } from '../../functions/src/bugReports';
 import {
   ROWS_PER_SECTION,
   buildAdminDigestModel,
@@ -285,7 +286,8 @@ const ITEM = (over: Partial<AlertableDoc> = {}): AlertableDoc => ({
 
 describe('durable abuse-escalation sweep (#859)', () => {
   const REPORT_ID = 'report-unknown-1';
-  const REPORTER_HASH = 'fcdec6df4d44dbc637c7';
+  // The delayed task must be accepted with the exact reporter hash intake wrote.
+  const REPORTER_HASH = deriveReporterHash('user-123');
   const pendingTask = (over: Record<string, unknown> = {}) => ({
     id: REPORT_ID,
     state: 'pending',

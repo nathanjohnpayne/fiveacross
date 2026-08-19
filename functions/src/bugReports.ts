@@ -17,6 +17,11 @@ const CURRENT_REQUEST_HASH_VERSION = 1 as const;
 export const BUG_REPORT_ESCALATION_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 export const BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS = 24 * 60 * 60 * 1_000;
 
+/** Stable, privacy-preserving identifier shared by intake and delayed escalation. */
+export function deriveReporterHash(uid: string): string {
+  return createHash('sha256').update(uid).digest('hex').slice(0, 20);
+}
+
 export function deriveBugReportId(uid: string, submissionId: string): string {
   return createHash('sha256').update(REPORT_ID_DOMAIN).update(uid).update('\0').update(submissionId).digest('hex');
 }
@@ -225,7 +230,7 @@ async function submitLegacyBugReport(
   deps: BugReportIntakeDependencies,
 ): Promise<IntakeReceipt> {
   const nowMs = deps.nowMs();
-  const reporterHash = createHash('sha256').update(uid).digest('hex').slice(0, 20);
+  const reporterHash = deriveReporterHash(uid);
   await chargeLegacyRate(deps.db, reporterHash, nowMs);
   const escalation = report.kind === 'abuse'
     ? await deps.resolveEscalation(deps.db, report.eventId, uid)
@@ -304,7 +309,7 @@ export async function submitValidatedBugReport(
   if (!report.submissionId) return submitLegacyBugReport(uid, report, deps);
 
   const nowMs = deps.nowMs();
-  const reporterHash = createHash('sha256').update(uid).digest('hex').slice(0, 20);
+  const reporterHash = deriveReporterHash(uid);
   const reportId = deriveBugReportId(uid, report.submissionId);
   const hash = deriveBugReportRequestHash(report);
   const expected: Coordination = {
