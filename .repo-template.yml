@@ -23,6 +23,7 @@ spec_test_map:
     - src/auth/handoff-parity.test.ts
     - src/auth/AuthHandoffOrigin.test.tsx
     - src/components/event-not-found-auth-reasons.test.tsx
+    - src/components/signin-handoff-route.test.tsx
     - src/auth-domain.test.ts
   # event-setup-wizard's coverage is module-named (the draft store seam, the
   # occasion matrix, and the shared validation predicates), so none of the

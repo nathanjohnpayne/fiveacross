@@ -146,6 +146,7 @@ All in the app layer (`npm test`, jsdom—no emulator).
 - `src/auth/handoffExchange.test.ts`—the two callable legs: mint returning the server URL untouched and never sending a uid, and complete's happy path plus every named failure.
 - `src/auth/AuthHandoffOrigin.test.tsx`—the central-origin bounce page: minting straight away for an existing session, redirecting when there is none, navigating to the server URL verbatim, and refusing a malformed request.
 - `src/components/event-not-found-auth-reasons.test.tsx`—the two new mount-gate screens and their operator notes.
+- `src/components/signin-handoff-route.test.tsx`—that the Sign in button actually reads the strategy: it starts a handoff where one is needed, never falls back to direct sign-in when the route is unavailable, and surfaces a return leg that failed before the tree mounted.
 - `src/auth/handoff-parity.test.ts`—the three mirrored constants and the digest, against `functions/src/authHandoff.ts` directly.
 - `src/auth-domain.test.ts`—the central auth origin's presence in `FIRST_PARTY_AUTH_HOSTS`.
 
