@@ -5,6 +5,7 @@ import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEPLOY_SCRIPT = resolve(SCRIPT_DIR, 'deploy.sh');
+const DEPLOY_SOURCE_GUARD_SCRIPT = resolve(SCRIPT_DIR, 'assert-deploy-source-ready.sh');
 const AUTH_HANDOFF_READINESS_SCRIPT = resolve(SCRIPT_DIR, 'apply-auth-handoff-deploy-readiness.sh');
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
@@ -109,16 +110,52 @@ function assertTargetDeployReady(target, config) {
   );
 }
 
+function isFirebaseDryRun(deployArgs) {
+  let expectsValue = false;
+  for (const argument of deployArgs) {
+    if (expectsValue) {
+      expectsValue = false;
+      continue;
+    }
+    if (argument === '--only' || argument === '--except' || argument === '--message') {
+      expectsValue = true;
+      continue;
+    }
+    if (argument === '--dry-run') return true;
+  }
+  return false;
+}
+
 export function executeDeployRequest(
   request,
   config = configForTarget(request.target),
   inheritedEnv = process.env,
   spawn = spawnSync,
 ) {
+  const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
+  if (handoffOrigin && request.wrapperArgs.includes('--skip-invoker')) {
+    throw new Error(
+      `Refusing to deploy ${request.target}: --skip-invoker is not allowed for a handoff-enabled target; ` +
+        `the post-Functions handoff repair cannot be skipped. Nothing has been built or published.`,
+    );
+  }
   assertTargetDeployReady(request.target, config);
 
-  const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
-  if (handoffOrigin) {
+  const firebaseDryRun = isFirebaseDryRun(request.deployArgs);
+  if (handoffOrigin && !firebaseDryRun) {
+    const sourceGuardArgs = request.wrapperArgs.includes('--force') ? ['--force'] : [];
+    const sourceGuard = spawn(DEPLOY_SOURCE_GUARD_SCRIPT, sourceGuardArgs, {
+      env: inheritedEnv,
+      stdio: 'inherit',
+    });
+    if (sourceGuard.error || sourceGuard.status !== 0) {
+      const cause = sourceGuard.error ? ` (${sourceGuard.error.message})` : '';
+      throw new Error(
+        `Refusing to deploy ${request.target}: the canonical source guard failed${cause}; ` +
+          `auth-handoff readiness was not run. Nothing has been built or published.`,
+      );
+    }
+
     const readinessEnvironment = { ...inheritedEnv };
     delete readinessEnvironment.AUTH_HANDOFF_PROJECT;
     delete readinessEnvironment.AUTH_HANDOFF_REGION;

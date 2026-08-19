@@ -46,6 +46,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
       VITE_AUTH_HANDOFF_ORIGIN: 'https://auth.fiveacross.app',
+      VITE_AUTH_MODE: 'handoff',
       VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
       VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
       VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
