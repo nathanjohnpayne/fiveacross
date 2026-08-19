@@ -48,6 +48,31 @@ ROUTER_VERSION = "v1"
 # ---------------------------------------------------------------------------
 # Routes — the cutover. Uncomment ONLY as the deliberate Gate step.
 # ---------------------------------------------------------------------------
+# ⚠️ A WILDCARD WORKER ROUTE IS NOT A WILDCARD DNS RECORD, and conflating the
+# two is the sharpest hazard in this whole cutover. Exact DNS records take
+# precedence over wildcard DNS records, but that says nothing about Worker
+# routes: `*.fiveacross.app/*` matches EVERY proxied (orange-clouded) hostname
+# in the zone, reserved infrastructure labels included. Attach these as written
+# and `d.fiveacross.app` (the PostHog ingest proxy), `auth.fiveacross.app` and
+# every other orange-clouded reserved label start resolving to THIS Worker,
+# which correctly refuses them with `reserved-label` — a 404 in front of live
+# infrastructure that was never meant to reach the router at all.
+#
+# The reserved-label guard in `host.ts` does not save you here. It is a guard
+# against a label being dealt to an Event, not a mechanism for handing traffic
+# back to another origin; once the route matches, the request is this Worker's
+# and refusing it is the most correct thing it can do.
+#
+# So BEFORE uncommenting the wildcards, for every reserved label in the zone:
+# either confirm the record is DNS-only (grey-cloud — Worker routes never see
+# it), or install a more-specific route that excludes it from this Worker. A
+# more specific pattern wins, and Cloudflare's "no script" route is exactly
+# this tool: `d.fiveacross.app/*` bound to no Worker. Those routes are created
+# in the dashboard or via the API, NOT in this file, because a `routes` entry
+# here can only attach THIS Worker. Verify with a request to each reserved
+# hostname after attaching: anything answering `x-event-router-reason:
+# reserved-label` is being intercepted and needs its exclusion.
+#
 # Both apexes are absent from this list on purpose. `fiveacross.app` and
 # `vacaybingo.com` are exact Firebase Hosting custom domains today; the router
 # classifies an apex correctly and would serve it, but moving them onto the

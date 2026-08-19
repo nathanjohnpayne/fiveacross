@@ -62,12 +62,20 @@ Between this step and the next, the Worker is deployed but **unconfigured** if t
 
 **Do not try to smoke-test this by curling the `*.workers.dev` address with a `Host` override.** It cannot work, and the reason is worth stating so nobody rediscovers it during a cutover: a request dispatched to the workers.dev address carries *that* hostname in `request.url`, and overriding `Host` changes the authority Cloudflare routes on (or is rejected as domain fronting) rather than presenting a different hostname to the router. The Worker would classify every such request as `out-of-namespace` and return `404`. That is correct behaviour — `host.test.ts` pins it — but it means workers.dev can only ever prove the refusal path.
 
-Use `wrangler dev --remote` instead. It executes **this deployed code on Cloudflare's network** with real bindings, a real Cache API, real Firestore reads and the real Hosting origin, while serving on `localhost`, where the URL the Worker sees *is* built from the `Host` header you send. That is a genuine end-to-end rehearsal with no production route and no test-only bypass compiled into the router.
+Use `wrangler dev --remote` instead — as a **rehearsal of the code, not verification of the deployed artifact**. Be precise about what it does and does not prove, because the difference is where a cutover goes wrong:
+
+- It **does** run this code on Cloudflare's network against real Firestore and the real Hosting origin, with the URL built from the `Host` header you send. That genuinely exercises routing, the reserved labels, the fail-closed paths and the origin proxy.
+- It **does not** execute the version you deployed in step 1, and it does not inherit the production secret. `wrangler dev --remote` uploads your local checkout into a temporary preview environment with its own local variables. So a green run here says nothing about whether the deployed Worker is configured — and if you supply a local key it will pass cheerfully while production has no `FIREBASE_API_KEY` at all.
+
+Give the rehearsal its own local key in `worker/.dev.vars` (gitignored, never committed):
 
 ```bash
 npm --prefix worker ci                                  # if you have not already
+printf 'FIREBASE_API_KEY=<the fiveacross WEB api key>\n' > worker/.dev.vars
 npm --prefix worker exec -- wrangler dev --remote       # leave running; requests below go to localhost:8787
 ```
+
+The deployed Worker's own binding is verified separately, and `npm run worker:deploy` now fails loudly if it is missing — see step 3.
 
 | Check | `curl -sI http://localhost:8787/ …` | Expected |
 |---|---|---|
@@ -84,7 +92,19 @@ The `wrangler deploy` from step 1 is still worth doing first: it proves the bund
 
 Then confirm the routing document for **every serving host** carries a `slug` field. The router cross-checks `hostnames/{host}.slug` against the address's first label and fails closed with `slug-missing` when it is absent, so a document written before that field became load-bearing would 404 the moment the routes were attached. This is the single most likely way a correct router still takes an Event down, and it is checkable in advance.
 
-### 3. Prerequisites that are NOT this Worker's code — and that block a multi-Event cutover
+### 3. Verify the DEPLOYED artifact's configuration
+
+The rehearsal above cannot do this, and nothing else in the ladder does either: the workers.dev URL is refused as `out-of-namespace` before configuration is consulted, so it cannot report the binding. Without an explicit check, the first evidence of a missing production secret is every hostname failing closed *after* the wildcards are attached.
+
+`npm run worker:deploy` therefore verifies it as part of deploying, and exits non-zero when the binding is absent. To check by hand at any time:
+
+```bash
+npm --prefix worker exec -- wrangler secret list        # names and types only — never values
+```
+
+`FIREBASE_API_KEY` must appear. If it does not, bind it with `wrangler secret put FIREBASE_API_KEY` and redeploy before going near a route.
+
+### 4. Prerequisites that are NOT this Worker's code — and that block a multi-Event cutover
 
 A correct router is not sufficient. Three properties live outside this Worker's present code, and each blocks the cutover in a different way. They were surfaced in review of this PR and each has its own follow-up issue — [#851](https://github.com/nathanjohnpayne/gaycruisebingo/issues/851), [#852](https://github.com/nathanjohnpayne/gaycruisebingo/issues/852), and [#888](https://github.com/nathanjohnpayne/gaycruisebingo/issues/888).
 
@@ -94,15 +114,19 @@ A correct router is not sufficient. Three properties live outside this Worker's 
 
 The first two block the wildcard from being useful for Event number two, which is the point of the epic. The third blocks route attachment whenever Firestore App Check is enforced, including for the existing Event once its cache is cold. Treat all three as gates on step 4, not as paperwork.
 
-### 4. Attach the routes — the cutover
+### 5. Attach the routes — the cutover
 
-Uncomment the `routes` block in `wrangler.toml` and redeploy. Attach **one Namespace at a time**, verify, and only then attach the second.
+**First, exclude every reserved label from the wildcard.** A wildcard Worker *route* is not a wildcard DNS *record*: exact DNS records beat wildcard DNS records, but `*.fiveacross.app/*` still matches every **proxied (orange-clouded)** hostname in the zone, reserved infrastructure labels included. Attach it as-is and `d.fiveacross.app` (the PostHog ingest proxy), `auth.fiveacross.app` and any other orange-clouded reserved label begin resolving to this Worker, which correctly refuses them with `reserved-label` — a 404 planted in front of live infrastructure. The guard in `host.ts` cannot rescue this: once the route matches, the request belongs to this Worker, and refusing it is the most correct thing it can do.
+
+So for each reserved label (`www`, `auth`, `api`, `admin`, `play`, `status`, `d`), either confirm its record is **DNS-only** (grey-cloud — Worker routes never see it), or install a more-specific route that excludes it. A more specific pattern wins, and Cloudflare's **"no script"** route is exactly this tool: `d.fiveacross.app/*` bound to no Worker. Those are created in the dashboard or via the API, not in `wrangler.toml`, whose `routes` can only attach *this* Worker.
+
+Then uncomment the `routes` block in `wrangler.toml` and redeploy. Attach **one Namespace at a time**, verify, and only then attach the second. Immediately after attaching, request each reserved hostname: anything answering `x-event-router-reason: reserved-label` is being intercepted and needs its exclusion before you go further.
 
 Before doing so, note the constraint carried forward from the closed Gate 3 issue ([#569](https://github.com/nathanjohnpayne/gaycruisebingo/issues/569)): the epic's original protective rule — do not let real players install the PWA before the cutover — is spent. Real players are already carrying installed shells and service workers minted from the direct-to-Hosting path, so this cutover has to be verified against **already-installed** shells, not clean installs. Open the app on a device that already has it installed from the home screen, not just in a fresh browser tab.
 
 Both apexes stay off the route list. `fiveacross.app` and `vacaybingo.com` are exact Firebase Hosting custom domains today; the router classifies an apex correctly and would serve it, but moving them is a separate decision from lighting up the wildcards, and doing both at once leaves nothing to roll back to.
 
-### 5. Rolling back
+### 6. Rolling back
 
 Comment the `routes` block out and redeploy, or delete the routes in the Cloudflare dashboard. Traffic returns to the exact-record Hosting path immediately. Nothing in this Worker writes anything, so a rollback has no state to unwind.
 

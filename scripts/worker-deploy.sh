@@ -61,3 +61,36 @@ echo "✅ Guards passed. Publishing the Worker (routes are NOT attached by this 
 # worker/package-lock.json and fails closed if it and package.json disagree.
 npm --prefix worker ci
 npm --prefix worker run deploy
+
+# Verify the production secret binding on the DEPLOYED Worker.
+#
+# Nothing else in the cutover ladder does. `wrangler dev --remote` uploads the
+# local checkout into a temporary preview with its own `.dev.vars`, so it can
+# pass while production has no `FIREBASE_API_KEY` at all; and the workers.dev
+# URL is refused as `out-of-namespace` before configuration is ever consulted,
+# so it cannot report the binding either. Without this check the first evidence
+# of a missing secret would be every hostname failing closed AFTER the wildcard
+# routes were attached.
+#
+# `wrangler secret list` returns names and types only — never values — so this
+# is safe to run and safe to print.
+echo "🔎 Verifying the deployed Worker's FIREBASE_API_KEY binding…" >&2
+if SECRETS="$(npm --prefix worker exec -- wrangler secret list 2>/dev/null)"; then
+  if printf '%s' "$SECRETS" | grep -q 'FIREBASE_API_KEY'; then
+    echo "✅ FIREBASE_API_KEY is bound on the deployed Worker." >&2
+  else
+    cat >&2 <<'MSG'
+
+❌ The Worker deployed, but FIREBASE_API_KEY is NOT bound on it.
+
+Every hostname will fail closed with `x-event-router-reason: lookup-forbidden`
+or `lookup-unavailable`. Bind it before attaching any route:
+
+    npm --prefix worker exec -- wrangler secret put FIREBASE_API_KEY
+
+MSG
+    exit 1
+  fi
+else
+  echo "⚠️  Could not list the deployed Worker's secrets; verify FIREBASE_API_KEY by hand before attaching routes." >&2
+fi
