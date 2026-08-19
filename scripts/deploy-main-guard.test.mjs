@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const HELPER = new URL('./lib/deploy-main-guard.sh', import.meta.url).pathname;
-const EXECUTABLE = new URL('./assert-deploy-source-ready.sh', import.meta.url).pathname;
 const temporaryRoots = [];
 
 function git(cwd, args) {
@@ -66,37 +65,6 @@ describe('shared main deploy guard', () => {
     const result = runGuard(repo);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("current branch is 'feat/unreviewed'");
-  });
-
-  it('exposes the same guard through the executable pre-readiness boundary', () => {
-    const repo = fixture();
-    git(repo, ['switch', '-c', 'feat/unreviewed']);
-
-    const result = spawnSync(EXECUTABLE, [], { cwd: repo, encoding: 'utf8' });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("current branch is 'feat/unreviewed'");
-  });
-
-  it('keeps the canonical --force and dirty-tree break-glass semantics at the executable boundary', () => {
-    const repo = fixture();
-    git(repo, ['switch', '-c', 'feat/unreviewed']);
-
-    const forced = spawnSync(EXECUTABLE, ['--force'], { cwd: repo, encoding: 'utf8' });
-    expect(forced.status).toBe(0);
-    expect(forced.stderr).toContain("--force: deploying from 'feat/unreviewed'");
-
-    writeFileSync(join(repo, 'uncommitted.txt'), 'not reviewed\n');
-    const dirtyBlocked = spawnSync(EXECUTABLE, ['--force'], { cwd: repo, encoding: 'utf8' });
-    expect(dirtyBlocked.status).toBe(1);
-    expect(dirtyBlocked.stderr).toContain('working tree is dirty');
-
-    const dirtyAllowed = spawnSync(EXECUTABLE, ['--force'], {
-      cwd: repo,
-      encoding: 'utf8',
-      env: { ...process.env, DEPLOY_ALLOW_DIRTY: '1' },
-    });
-    expect(dirtyAllowed.status).toBe(0);
-    expect(dirtyAllowed.stderr).toContain('DEPLOY_ALLOW_DIRTY=1');
   });
 
   it('rejects a local main commit that is not on origin/main', () => {

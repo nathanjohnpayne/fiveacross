@@ -15,6 +15,10 @@ set -euo pipefail
 # that does not match what reviewers have seen merged on main.
 #
 # After the guards pass, the script:
+#   - For a named handoff target, forces the exact deploy-SA update on both
+#     callables before the build when Hosting or either handoff Function may be
+#     released. The target wrapper pins the project marker; unrelated scopes
+#     and Firebase --dry-run skip this wrapper-owned IAM mutation.
 #   - Builds (default: `npm run build`; configurable via $BUILD_CMD).
 #     The build command is run under `bash -euo pipefail -c --` so a
 #     compound command (e.g. `npm run lint && npm run build`) fails
@@ -37,11 +41,11 @@ set -euo pipefail
 #     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
 #     this deploy could have RELEASED Functions, on success or failure; the
-#     deploy's own exit status is honoured afterwards either way. Skipped —
-#     mutates nothing — when the caller passed Firebase's own `--dry-run`
-#     (#768 r5): nothing was released, so there is nothing to reconcile, and
-#     running it anyway would let a supposedly no-op validation run flip live
-#     Cloud Run IAM state.
+#     deploy's own exit status is honoured afterwards either way. The wrapper-
+#     owned IAM mutation is skipped when the caller passed Firebase's own
+#     `--dry-run` (#768 r5): no app or Function is released, so there is nothing
+#     to reconcile. Firebase documents that validation may still enable APIs;
+#     this narrower gate prevents the wrapper from also changing Cloud Run IAM.
 #   - Purges Cloudflare cache (if CF_API_TOKEN + CF_ZONE_ID are set).
 #
 # Usage:
@@ -72,6 +76,11 @@ set -euo pipefail
 #                        reconciliation to the SELECTED target rather than
 #                        letting an ambient BUG_REPORT_PROJECT /
 #                        EMAIL_UNSUBSCRIBE_PROJECT override decide.
+#   AUTH_HANDOFF_DEPLOY_READINESS_PROJECT
+#                        Named-target-only project marker. When present,
+#                        deploy.sh runs exact-SA handoff readiness after every
+#                        pre-build guard and before BUILD_CMD for a Hosting or
+#                        handoff-Function scope.
 #
 # Credentials:
 #   The invoker steps (1.6 and 2.5) shell out to `gcloud`. When a named deploy
@@ -150,14 +159,15 @@ trap cleanup_deploy_artifacts EXIT
 # reconciling when they were is the published-but-403 outage.
 #
 # The same pass also detects Firebase's OWN `--dry-run` (#768 r5 Codex P2): a
-# boolean flag `firebase deploy` supports directly ("perform a dry run of your
-# deployment ... without deploying any changes"), forwarded here verbatim as
-# part of DEPLOY_ARGS. It is unrelated to FUNCTIONS_ATTEMPTED — a dry run can
-# still name `functions` in its scope — but it gates Step 2.5 below: a dry run
-# never actually releases anything, so nothing there needs reconciling, and
-# running the (mutating) reconciliation anyway is the footgun a dry run exists
-# to prevent.
+# boolean flag `firebase deploy` supports directly (validate and build without
+# releasing project changes, though Firebase may still enable APIs), forwarded
+# here verbatim as part of DEPLOY_ARGS. It is unrelated to FUNCTIONS_ATTEMPTED
+# — a dry run can still name `functions` in its scope — but it gates Step 2.5
+# below: a dry run never releases an app or Function, so nothing there needs
+# reconciling, and running the (mutating) reconciliation anyway is the footgun
+# a dry run exists to prevent.
 FUNCTIONS_ATTEMPTED=true
+HOSTING_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
@@ -200,7 +210,8 @@ for arg in ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}; do
     --only=*)   ONLY_VALUES=("${arg#*=}") ;;
     --except)   EXPECT_ARG="except" ;;
     --except=*) EXCEPT_VALUES=("${arg#*=}") ;;
-    --message) EXPECT_ARG="message" ;;
+    -m|--message) EXPECT_ARG="message" ;;
+    -p|--public) EXPECT_ARG="public" ;;
     --dry-run) FIREBASE_DRY_RUN=true ;;
     --*) ;;
     *)
@@ -220,6 +231,7 @@ fi
 # fail because the other service has not been created yet.
 if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   FUNCTIONS_ATTEMPTED=false
+  HOSTING_ATTEMPTED=false
   BUG_REPORT_INVOKER_SELECTED=false
   EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
   AUTH_HANDOFF_INVOKER_SELECTED=false
@@ -235,6 +247,9 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
     IFS=',' read -r -a only_selectors <<< "$only_value"
     for selector in "${only_selectors[@]}"; do
       case "$selector" in
+        hosting|hosting:*)
+          HOSTING_ATTEMPTED=true
+          ;;
         functions)
           FUNCTIONS_ATTEMPTED=true
           BUG_REPORT_INVOKER_SELECTED=true
@@ -378,6 +393,9 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
   IFS=',' read -r -a except_selectors <<< "$except_value"
   for selector in "${except_selectors[@]}"; do
     case "$selector" in
+      hosting)
+        HOSTING_ATTEMPTED=false
+        ;;
       functions)
         FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
@@ -611,6 +629,47 @@ else
     scripts/deploy.sh --skip-env-check
 EOF
     exit 1
+  fi
+fi
+
+# Named handoff targets pass a pinned project marker instead of running a
+# second wrapper-side Firebase argument parser. This is the single canonical
+# scope decision: after every nonmutating pre-build guard, immediately before
+# the build, force a real idempotent update of both handoff callables whenever
+# this deploy can ship Hosting or can release either handoff Function.
+#
+# Unknown functions:<selector> scopes remain conservative because the parser
+# above cannot distinguish an export group/codebase from a single endpoint.
+# Exact known unrelated endpoint scopes do not select AUTH_HANDOFF_INVOKER;
+# exact top-level --except hosting/functions can remove those surfaces, while
+# endpoint/codebase-qualified --except remains the documented Firebase no-op.
+AUTH_HANDOFF_READINESS_PROJECT="${AUTH_HANDOFF_DEPLOY_READINESS_PROJECT:-}"
+AUTH_HANDOFF_READINESS_SELECTED=false
+if [[ "$HOSTING_ATTEMPTED" == "true" ]] ||
+   [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+  AUTH_HANDOFF_READINESS_SELECTED=true
+fi
+
+if [[ -n "$AUTH_HANDOFF_READINESS_PROJECT" ]]; then
+  if [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
+    echo ">> Auth-handoff deploy readiness skipped (Firebase --dry-run)"
+  elif [[ "$AUTH_HANDOFF_READINESS_SELECTED" != "true" ]]; then
+    echo ">> Auth-handoff deploy readiness skipped (this scope cannot publish Hosting or an auth-handoff callable)"
+  else
+    echo ">> Proving exact deploy-SA auth-handoff readiness before build"
+    if ! AUTH_HANDOFF_PROJECT="$AUTH_HANDOFF_READINESS_PROJECT" \
+      "$SCRIPT_DIR/apply-auth-handoff-deploy-readiness.sh"; then
+      cat >&2 <<EOF
+
+✗ The exact deploy-SA auth-handoff readiness proof failed. NOTHING HAS BEEN
+  BUILT OR PUBLISHED.
+
+  Both mintAuthHandoff and exchangeAuthHandoff must accept the forced,
+  idempotent update before a Five Across client or callable release can start.
+  Complete #547, then rerun the named deploy.
+EOF
+      exit 1
+    fi
   fi
 fi
 
@@ -897,7 +956,7 @@ elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
   echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport, emailUnsubscribe, or the auth-handoff callables)"
 elif [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
-  echo ">> Invoker reconciliation skipped (Firebase --dry-run: nothing was deployed, so nothing could have been released — mutating the invoker config here would be the exact footgun a dry run exists to rule out)"
+  echo ">> Invoker reconciliation skipped (Firebase --dry-run: no app or Function was released — mutating the invoker config here would be the exact footgun this wrapper gate rules out)"
 else
   if [[ "$DEPLOY_STATUS" -ne 0 ]]; then
     if [[ "$INVOKER_PARTIAL_FAILURE" == "true" ]]; then

@@ -9,8 +9,6 @@ import { deployInvocation, deployRequest, executeDeployRequest } from './deploy-
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const deployTargetScript = resolve(repoRoot, 'scripts', 'deploy-target.mjs');
 const deployScript = resolve(repoRoot, 'scripts', 'deploy.sh');
-const deploySourceGuardScript = resolve(repoRoot, 'scripts', 'assert-deploy-source-ready.sh');
-const authHandoffReadinessScript = resolve(repoRoot, 'scripts', 'apply-auth-handoff-deploy-readiness.sh');
 
 describe('deploy target selection', () => {
   it('requires an explicit deploy target', () => {
@@ -59,16 +57,23 @@ describe('deploy target selection', () => {
     expect(result.stderr).toContain('Nothing has been built or published.\nUsage:');
   });
 
-  it('applies both-callable readiness before constructing or spawning a Five Across hosting deploy', () => {
+  it('pins Five Across readiness into the canonical hosting deploy entry point', () => {
     const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
+    const readyConfig = {
+      ...DEPLOY_TARGETS.fiveacross,
+      skipInvokerReconcile: false,
+    };
     const spawn = (...args) => {
       calls.push(args);
       return { status: 0 };
     };
 
     const result = executeDeployRequest(
-      { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--only', 'hosting'] },
+      {
+        target: 'fiveacross',
+        wrapperArgs: [],
+        deployArgs: ['--only', 'hosting'],
+      },
       readyConfig,
       {
         KEEP_ME: 'yes',
@@ -81,127 +86,49 @@ describe('deploy target selection', () => {
     );
 
     expect(result.status).toBe(0);
-    expect(calls).toHaveLength(3);
-    expect(calls[0]).toEqual([
-      deploySourceGuardScript,
-      [],
-      {
-        env: {
-          KEEP_ME: 'yes',
-          AUTH_HANDOFF_PROJECT: 'gaycruisebingo',
-          AUTH_HANDOFF_REGION: 'elsewhere',
-          AUTH_HANDOFF_MINT_SERVICE: 'wrong-mint',
-          AUTH_HANDOFF_EXCHANGE_SERVICE: 'wrong-exchange',
-        },
-        stdio: 'inherit',
-      },
-    ]);
-    expect(calls[1]).toEqual([
-      authHandoffReadinessScript,
-      [],
-      {
-        env: { KEEP_ME: 'yes', AUTH_HANDOFF_PROJECT: 'fiveacross' },
-        stdio: 'inherit',
-      },
-    ]);
-    expect(calls[2][0]).toBe(deployScript);
-    expect(calls[2][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross', '--only', 'hosting']);
-    expect(calls[2][2]).toMatchObject({
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross', '--only', 'hosting']);
+    expect(calls[0][2]).toMatchObject({
       env: {
         KEEP_ME: 'yes',
         BUILD_CMD: 'npm run build:fiveacross',
         DEPLOY_TARGET_PROJECT: 'fiveacross',
+        AUTH_HANDOFF_DEPLOY_READINESS_PROJECT: 'fiveacross',
       },
       stdio: 'inherit',
     });
+    expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_PROJECT');
+    expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_REGION');
+    expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_MINT_SERVICE');
+    expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_EXCHANGE_SERVICE');
   });
 
-  it('applies both-callable readiness before constructing or spawning a full Five Across deploy', () => {
+  it('pins Five Across readiness into the canonical full deploy entry point', () => {
     const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
+    const readyConfig = {
+      ...DEPLOY_TARGETS.fiveacross,
+      skipInvokerReconcile: false,
+    };
     const spawn = (...args) => {
       calls.push(args);
       return { status: 0 };
     };
 
-    executeDeployRequest(
-      { target: 'fiveacross', wrapperArgs: [], deployArgs: [] },
-      readyConfig,
-      {},
-      spawn,
-    );
+    executeDeployRequest({ target: 'fiveacross', wrapperArgs: [], deployArgs: [] }, readyConfig, {}, spawn);
 
-    expect(calls).toHaveLength(3);
-    expect(calls[0][0]).toBe(deploySourceGuardScript);
-    expect(calls[1][0]).toBe(authHandoffReadinessScript);
-    expect(calls[2][0]).toBe(deployScript);
-    expect(calls[2][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross']);
+    expect(calls[0][2].env.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT).toBe('fiveacross');
   });
 
   it('passes only the existing --force break-glass choice into the canonical pre-readiness source guard', () => {
     const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
-    const spawn = (...args) => {
-      calls.push(args);
-      return { status: 0 };
+    const readyConfig = {
+      ...DEPLOY_TARGETS.fiveacross,
+      skipInvokerReconcile: false,
     };
-
-    executeDeployRequest(
-      { target: 'fiveacross', wrapperArgs: ['--force'], deployArgs: ['--only', 'hosting'] },
-      readyConfig,
-      {},
-      spawn,
-    );
-
-    expect(calls[0][0]).toBe(deploySourceGuardScript);
-    expect(calls[0][1]).toEqual(['--force']);
-    expect(calls[2][0]).toBe(deployScript);
-    expect(calls[2][1][0]).toBe('--force');
-  });
-
-  it('does not mutate readiness when the canonical source guard fails', () => {
-    const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
-    const spawn = (...args) => {
-      calls.push(args);
-      return { status: 1 };
-    };
-
-    expect(() =>
-      executeDeployRequest(
-        { target: 'fiveacross', wrapperArgs: [], deployArgs: [] },
-        readyConfig,
-        {},
-        spawn,
-      ),
-    ).toThrow('canonical source guard failed');
-    expect(calls).toHaveLength(1);
-    expect(calls[0][0]).toBe(deploySourceGuardScript);
-  });
-
-  it('keeps Firebase dry-run nonmutating and delegates its canonical source guard to deploy.sh', () => {
-    const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
-    const spawn = (...args) => {
-      calls.push(args);
-      return { status: 0 };
-    };
-
-    executeDeployRequest(
-      { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--dry-run'] },
-      readyConfig,
-      {},
-      spawn,
-    );
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0][0]).toBe(deployScript);
-    expect(calls[0][1]).toContain('--dry-run');
-  });
-
-  it('does not mistake a Firebase option value named --dry-run for the dry-run flag', () => {
-    const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
     const spawn = (...args) => {
       calls.push(args);
       return { status: 0 };
@@ -210,39 +137,115 @@ describe('deploy target selection', () => {
     executeDeployRequest(
       {
         target: 'fiveacross',
-        wrapperArgs: [],
-        deployArgs: ['--message', '--dry-run', '--only', 'hosting'],
+        wrapperArgs: ['--force'],
+        deployArgs: ['--only', 'hosting'],
       },
       readyConfig,
       {},
       spawn,
     );
 
-    expect(calls).toHaveLength(3);
-    expect(calls[0][0]).toBe(deploySourceGuardScript);
-    expect(calls[1][0]).toBe(authHandoffReadinessScript);
-    expect(calls[2][0]).toBe(deployScript);
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][1][0]).toBe('--force');
   });
 
-  it('does not construct or spawn the Five Across deploy when either handoff callable is not ready', () => {
+  it('delegates source guarding and readiness to one canonical deploy process', () => {
     const calls = [];
-    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
+    const readyConfig = {
+      ...DEPLOY_TARGETS.fiveacross,
+      skipInvokerReconcile: false,
+    };
     const spawn = (...args) => {
       calls.push(args);
-      return { status: args[0] === authHandoffReadinessScript ? 1 : 0 };
+      return { status: 0 };
     };
 
-    expect(() =>
+    executeDeployRequest({ target: 'fiveacross', wrapperArgs: [], deployArgs: [] }, readyConfig, {}, spawn);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][2].env.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT).toBe('fiveacross');
+  });
+
+  it('delegates Firebase dry-run while leaving wrapper-owned readiness to deploy.sh', () => {
+    const calls = [];
+    const readyConfig = {
+      ...DEPLOY_TARGETS.fiveacross,
+      skipInvokerReconcile: false,
+    };
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
+
+    executeDeployRequest({ target: 'fiveacross', wrapperArgs: [], deployArgs: ['--dry-run'] }, readyConfig, {}, spawn);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][1]).toContain('--dry-run');
+    expect(calls[0][2].env.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT).toBe('fiveacross');
+  });
+
+  it.each(['-m', '--message', '-p', '--public', '--only', '--except'])(
+    'forwards the %s value named --dry-run to the canonical scanner unchanged',
+    (valueTakingOption) => {
+      const calls = [];
+      const readyConfig = {
+        ...DEPLOY_TARGETS.fiveacross,
+        skipInvokerReconcile: false,
+      };
+      const spawn = (...args) => {
+        calls.push(args);
+        return { status: 0 };
+      };
+
       executeDeployRequest(
-        { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--only', 'hosting'] },
+        {
+          target: 'fiveacross',
+          wrapperArgs: [],
+          deployArgs: [valueTakingOption, '--dry-run', '--only', 'hosting'],
+        },
         readyConfig,
         {},
         spawn,
-      ),
-    ).toThrow('both auth-handoff callables must accept the forced idempotent update');
-    expect(calls).toHaveLength(2);
-    expect(calls[0][0]).toBe(deploySourceGuardScript);
-    expect(calls[1][0]).toBe(authHandoffReadinessScript);
+      );
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toBe(deployScript);
+      expect(calls[0][1]).toEqual([
+        '--skip-cf-purge',
+        '--',
+        'fiveacross',
+        valueTakingOption,
+        '--dry-run',
+        '--only',
+        'hosting',
+      ]);
+      expect(calls[0][2].env.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT).toBe('fiveacross');
+    },
+  );
+
+  it('removes an ambient readiness target from Gay Cruise Bingo deploys', () => {
+    const calls = [];
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
+
+    executeDeployRequest(
+      {
+        target: 'gaycruisebingo',
+        wrapperArgs: [],
+        deployArgs: ['--only', 'hosting'],
+      },
+      DEPLOY_TARGETS.gaycruisebingo,
+      { AUTH_HANDOFF_DEPLOY_READINESS_PROJECT: 'fiveacross' },
+      spawn,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_DEPLOY_READINESS_PROJECT');
   });
 
   it('keeps Gay Cruise Bingo on its unchanged single deploy spawn', () => {
@@ -253,7 +256,11 @@ describe('deploy target selection', () => {
     };
 
     executeDeployRequest(
-      { target: 'gaycruisebingo', wrapperArgs: [], deployArgs: ['--only', 'hosting'] },
+      {
+        target: 'gaycruisebingo',
+        wrapperArgs: [],
+        deployArgs: ['--only', 'hosting'],
+      },
       DEPLOY_TARGETS.gaycruisebingo,
       {},
       spawn,

@@ -5,8 +5,6 @@ import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEPLOY_SCRIPT = resolve(SCRIPT_DIR, 'deploy.sh');
-const DEPLOY_SOURCE_GUARD_SCRIPT = resolve(SCRIPT_DIR, 'assert-deploy-source-ready.sh');
-const AUTH_HANDOFF_READINESS_SCRIPT = resolve(SCRIPT_DIR, 'apply-auth-handoff-deploy-readiness.sh');
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
@@ -78,6 +76,14 @@ function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wra
   // just-reset gaycruisebingo services keep 403ing. Assigned unconditionally
   // so an inherited value is overwritten, never merged.
   environment.DEPLOY_TARGET_PROJECT = config.firebaseProject;
+  delete environment.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT;
+  delete environment.AUTH_HANDOFF_PROJECT;
+  delete environment.AUTH_HANDOFF_REGION;
+  delete environment.AUTH_HANDOFF_MINT_SERVICE;
+  delete environment.AUTH_HANDOFF_EXCHANGE_SERVICE;
+  if (config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim() && !config.skipInvokerReconcile) {
+    environment.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT = config.firebaseProject;
+  }
 
   return {
     command: DEPLOY_SCRIPT,
@@ -110,22 +116,6 @@ function assertTargetDeployReady(target, config) {
   );
 }
 
-function isFirebaseDryRun(deployArgs) {
-  let expectsValue = false;
-  for (const argument of deployArgs) {
-    if (expectsValue) {
-      expectsValue = false;
-      continue;
-    }
-    if (argument === '--only' || argument === '--except' || argument === '--message') {
-      expectsValue = true;
-      continue;
-    }
-    if (argument === '--dry-run') return true;
-  }
-  return false;
-}
-
 export function executeDeployRequest(
   request,
   config = configForTarget(request.target),
@@ -140,43 +130,6 @@ export function executeDeployRequest(
     );
   }
   assertTargetDeployReady(request.target, config);
-
-  const firebaseDryRun = isFirebaseDryRun(request.deployArgs);
-  if (handoffOrigin && !firebaseDryRun) {
-    const sourceGuardArgs = request.wrapperArgs.includes('--force') ? ['--force'] : [];
-    const sourceGuard = spawn(DEPLOY_SOURCE_GUARD_SCRIPT, sourceGuardArgs, {
-      env: inheritedEnv,
-      stdio: 'inherit',
-    });
-    if (sourceGuard.error || sourceGuard.status !== 0) {
-      const cause = sourceGuard.error ? ` (${sourceGuard.error.message})` : '';
-      throw new Error(
-        `Refusing to deploy ${request.target}: the canonical source guard failed${cause}; ` +
-          `auth-handoff readiness was not run. Nothing has been built or published.`,
-      );
-    }
-
-    const readinessEnvironment = { ...inheritedEnv };
-    delete readinessEnvironment.AUTH_HANDOFF_PROJECT;
-    delete readinessEnvironment.AUTH_HANDOFF_REGION;
-    delete readinessEnvironment.AUTH_HANDOFF_MINT_SERVICE;
-    delete readinessEnvironment.AUTH_HANDOFF_EXCHANGE_SERVICE;
-    readinessEnvironment.AUTH_HANDOFF_PROJECT = config.firebaseProject;
-
-    const readiness = spawn(AUTH_HANDOFF_READINESS_SCRIPT, [], {
-      env: readinessEnvironment,
-      stdio: 'inherit',
-    });
-    if (readiness.error || readiness.status !== 0) {
-      const cause = readiness.error ? ` (${readiness.error.message})` : '';
-      throw new Error(
-        `Refusing to deploy ${request.target}: the exact deploy-SA pre-build auth-handoff readiness proof ` +
-          `failed${cause}; both auth-handoff callables must accept the forced idempotent update before the ` +
-          `client build can ship. Complete #547, then rerun this named deploy. ` +
-          `Nothing has been built or published.`,
-      );
-    }
-  }
 
   const invocation = deployInvocationForConfig(
     request.target,

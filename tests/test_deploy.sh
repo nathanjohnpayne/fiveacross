@@ -76,6 +76,7 @@ SCRIPT="$ROOT/scripts/deploy.sh"
 # EMAIL_UNSUBSCRIBE_* overrides — both of which change what the code under test
 # does. Every case that cares sets them explicitly.
 unset GOOGLE_APPLICATION_CREDENTIALS GCLOUD_BIN GCLOUD_REAL_BIN DEPLOY_TARGET_PROJECT
+unset AUTH_HANDOFF_DEPLOY_READINESS_PROJECT
 unset BUG_REPORT_PROJECT BUG_REPORT_REGION BUG_REPORT_SERVICE
 unset EMAIL_UNSUBSCRIBE_PROJECT EMAIL_UNSUBSCRIBE_REGION EMAIL_UNSUBSCRIBE_SERVICE
 
@@ -83,6 +84,11 @@ unset EMAIL_UNSUBSCRIBE_PROJECT EMAIL_UNSUBSCRIBE_REGION EMAIL_UNSUBSCRIBE_SERVI
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/test-deploy.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+
+READINESS_CREDENTIAL="$WORKDIR/fiveacross-deployer.json"
+printf '%s\n' \
+  '{"type":"service_account","client_email":"firebase-deployer@fiveacross.iam.gserviceaccount.com"}' \
+  >"$READINESS_CREDENTIAL"
 
 PASS=0
 FAIL=0
@@ -1348,12 +1354,12 @@ fi
 # Case 18 (#768 r5 — Codex P2, dry-run footgun). Firebase's OWN `--dry-run`
 # must not let Step 2.5 mutate the Cloud Run invoker config.
 #
-# `firebase deploy --dry-run` is a real, documented flag ("perform a dry run
-# of your deployment ... without deploying any changes to your project"),
+# `firebase deploy --dry-run` is a real, documented flag (validate and build
+# without releasing project changes, though Firebase may still enable APIs),
 # forwarded here through DEPLOY_ARGS exactly like `--only hosting` is. Before
 # this round, only FUNCTIONS_ATTEMPTED gated Step 2.5, so
-# `scripts/deploy.sh -- --dry-run` — a call whose entire purpose is to change
-# nothing — still ran the MUTATING reconciliation for real once
+# `scripts/deploy.sh -- --dry-run` — a call that must not release the app or
+# run wrapper-owned IAM updates — still ran the MUTATING reconciliation once
 # op-firebase-deploy's own dry run reported success (DEPLOY_STATUS=0).
 #
 # GCLOUD_STUB_ANNOTATION=false makes every `describe` answer "not yet
@@ -1381,6 +1387,10 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-18.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-18.log" \
 GCLOUD_STUB_ANNOTATION=false \
+GCLOUD_BIN="$STUB_DIR/gcloud" \
+GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+DEPLOY_TARGET_PROJECT=fiveacross \
   bash -c "cd '$REPO18' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --dry-run" \
   >"$OUT18" 2>"$ERR18"
 RC18=$?
@@ -1403,6 +1413,9 @@ elif ! grep -q 'describe' "$WORKDIR/gcloud-calls-18.log"; then
 elif ! grep -q 'Invoker reconciliation skipped (Firebase --dry-run' "$OUT18"; then
   fail "firebase-dry-run: deploy.sh did not log why Step 2.5 was skipped. stdout was:"
   cat "$OUT18" >&2
+elif ! grep -q 'Auth-handoff deploy readiness skipped (Firebase --dry-run)' "$OUT18"; then
+  fail "firebase-dry-run: deploy.sh did not skip the wrapper-owned pre-build readiness update. stdout was:"
+  cat "$OUT18" >&2
 elif grep -q 'Reconciling Cloud Run invoker config' "$OUT18"; then
   fail "firebase-dry-run: deploy.sh ran the Step 2.5 reconciliation banner despite the Firebase --dry-run. stdout was:"
   cat "$OUT18" >&2
@@ -1412,6 +1425,64 @@ elif ! grep -q 'Deploy complete.' "$OUT18"; then
 else
   pass "firebase-dry-run: a Firebase --dry-run runs the read-only pre-publish check but skips the mutating Step 2.5 reconciliation entirely (rc=$RC18, no gcloud update call)."
 fi
+
+# ---------------------------------------------------------------------------
+# Cases 18a-18f (#852, Codex P1): every documented Firebase deploy option
+# whose NEXT token is a value must consume a value named `--dry-run` rather
+# than suppressing deploy.sh's wrapper-owned readiness and repair updates.
+#
+# firebase-tools 15.27.0 documents -m/--message, -p/--public, --only, and
+# --except as the complete split value-taking set. There is deliberately no
+# second named-target scanner; it forwards these arguments here unchanged. A
+# final --only hosting makes every case a real client deploy, so the exact-SA
+# readiness update proves deploy.sh did not misclassify the earlier option
+# value as Firebase's standalone --dry-run flag.
+# ---------------------------------------------------------------------------
+for value_option_case in \
+  "18a:-m" "18b:--message" "18c:-p" "18d:--public" \
+  "18e:--only" "18f:--except"; do
+  case_id="${value_option_case%%:*}"
+  value_option="${value_option_case#*:}"
+  REPO_VALUE="$WORKDIR/case${case_id}-firebase-value"
+  init_fixture_repo "$REPO_VALUE"
+  OUT_VALUE="$WORKDIR/case${case_id}.out"
+  ERR_VALUE="$WORKDIR/case${case_id}.err"
+  : >"$WORKDIR/ofd-calls-${case_id}.log"
+  : >"$WORKDIR/gcloud-calls-${case_id}.log"
+
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-${case_id}.log" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-${case_id}.log" \
+  GCLOUD_STUB_ANNOTATION=false \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+  AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+  DEPLOY_TARGET_PROJECT=fiveacross \
+    bash -c "cd '$REPO_VALUE' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo '$value_option' --dry-run --only hosting" \
+    >"$OUT_VALUE" 2>"$ERR_VALUE"
+  RC_VALUE=$?
+  set -e
+
+  if [[ $RC_VALUE -ne 0 ]]; then
+    fail "firebase-value ($case_id, $value_option): deploy.sh returned $RC_VALUE. stderr was:"
+    cat "$ERR_VALUE" >&2
+  elif ! grep -q -- "$value_option" "$WORKDIR/ofd-calls-${case_id}.log"; then
+    fail "firebase-value ($case_id, $value_option): op-firebase-deploy did not receive the value-taking option. Call log was:"
+    cat "$WORKDIR/ofd-calls-${case_id}.log" >&2
+  elif ! grep -qw 'update' "$WORKDIR/gcloud-calls-${case_id}.log"; then
+    fail "firebase-value ($case_id, $value_option): a --dry-run option value suppressed exact-SA pre-build readiness. gcloud log was:"
+    cat "$WORKDIR/gcloud-calls-${case_id}.log" >&2
+  elif ! grep -q 'Proving exact deploy-SA auth-handoff readiness before build' "$OUT_VALUE"; then
+    fail "firebase-value ($case_id, $value_option): the canonical parser did not select readiness for the final Hosting scope. stdout was:"
+    cat "$OUT_VALUE" >&2
+  elif grep -q 'Invoker reconciliation skipped (Firebase --dry-run' "$OUT_VALUE"; then
+    fail "firebase-value ($case_id, $value_option): deploy.sh reported a dry run for an option value. stdout was:"
+    cat "$OUT_VALUE" >&2
+  else
+    pass "firebase-value ($case_id, $value_option): a value named --dry-run remains a real Hosting deploy and runs pre-build readiness (rc=$RC_VALUE)."
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Case 19a (#768 r5 — Codex P2, chicken-and-egg). A first deploy against a
@@ -2053,6 +2124,217 @@ for qualified_case in \
     pass "qualified standalone scope ($case_id, --only $scope): explicitly named $endpoint stays strict regardless of selector order (rc=$RC_C)."
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Cases 23a-23o (#852): named Five Across readiness is owned by this canonical
+# deploy boundary, after its one argument/scope parse and source guard but
+# before BUILD_CMD or op-firebase-deploy. It runs only when Hosting or an auth-
+# handoff Function may be released. These cases execute deploy.sh itself with
+# the real readiness wrapper and a PATH-stubbed gcloud; the forced `update` is
+# therefore the observable proof that the hook ran.
+# ---------------------------------------------------------------------------
+run_readiness_scope_case() {
+  local case_id="$1"
+  local expected="$2"
+  shift 2
+  local repo="$WORKDIR/case${case_id}-readiness-scope"
+  local out="$WORKDIR/case${case_id}.out"
+  local err="$WORKDIR/case${case_id}.err"
+  local gcloud_log="$WORKDIR/gcloud-calls-${case_id}.log"
+  local ofd_log="$WORKDIR/ofd-calls-${case_id}.log"
+  init_fixture_repo "$repo"
+  : >"$gcloud_log"
+  : >"$ofd_log"
+
+  set +e
+  (
+    cd "$repo"
+    PATH="$STUB_DIR:$PATH" \
+    OFD_LOG="$ofd_log" \
+    GCLOUD_BIN="$STUB_DIR/gcloud" \
+    GCLOUD_LOG="$gcloud_log" \
+    GCLOUD_STUB_ANNOTATION=true \
+    GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+    AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+    DEPLOY_TARGET_PROJECT=fiveacross \
+    BUILD_CMD=: \
+      bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross "$@"
+  ) >"$out" 2>"$err"
+  local rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    fail "readiness-scope ($case_id, $*): deploy.sh returned $rc. stderr was:"
+    cat "$err" >&2
+  elif [[ "$expected" == "required" ]] && ! grep -qw update "$gcloud_log"; then
+    fail "readiness-scope ($case_id, $*): selected Hosting/handoff work but forced readiness never ran. gcloud log was:"
+    cat "$gcloud_log" >&2
+  elif [[ "$expected" == "skipped" ]] && grep -qw update "$gcloud_log"; then
+    fail "readiness-scope ($case_id, $*): unrelated work unexpectedly mutated auth-handoff readiness. gcloud log was:"
+    cat "$gcloud_log" >&2
+  else
+    pass "readiness-scope ($case_id, $*): readiness was $expected for this exact Firebase scope (rc=$rc)."
+  fi
+}
+
+run_readiness_scope_case 23a required --only hosting
+run_readiness_scope_case 23b required --only functions
+run_readiness_scope_case 23c required --only functions:default
+run_readiness_scope_case 23d required --only functions:mintAuthHandoff
+run_readiness_scope_case 23e required --only functions:default:exchangeAuthHandoff
+run_readiness_scope_case 23f required --only functions:someGroup
+run_readiness_scope_case 23g required --only firestore,functions:mintAuthHandoff
+run_readiness_scope_case 23h required --only functions:mintAuthHandoff,firestore
+run_readiness_scope_case 23i required --except functions:mintAuthHandoff
+run_readiness_scope_case 23j required --except hosting
+run_readiness_scope_case 23k required --except functions
+run_readiness_scope_case 23l skipped --only firestore
+run_readiness_scope_case 23m skipped --only storage
+run_readiness_scope_case 23n skipped --only functions:emailUnsubscribe
+run_readiness_scope_case 23o skipped --only functions:default:submitBugReport
+run_readiness_scope_case 23p skipped --except hosting,functions
+
+# The source guard must fail before the readiness process can make a Cloud Run
+# update. This fixture deliberately stays on feature/deploy-test and omits
+# --force, so reaching gcloud or Firebase would prove the hook moved ahead of
+# the canonical guard.
+REPO23Q="$WORKDIR/case23q-readiness-after-guard"
+init_fixture_repo "$REPO23Q"
+: >"$WORKDIR/gcloud-calls-23q.log"
+: >"$WORKDIR/ofd-calls-23q.log"
+set +e
+(
+  cd "$REPO23Q"
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-23q.log" \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-23q.log" \
+  GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+  AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+  DEPLOY_TARGET_PROJECT=fiveacross \
+  BUILD_CMD=: \
+    bash "$SCRIPT" --skip-cf-purge --skip-synthetic -- fiveacross --only hosting
+) >"$WORKDIR/case23q.out" 2>"$WORKDIR/case23q.err"
+RC23Q=$?
+set -e
+if [[ $RC23Q -eq 0 ]]; then
+  fail "readiness-after-guard: a feature checkout unexpectedly passed the canonical source guard."
+elif [[ -s "$WORKDIR/gcloud-calls-23q.log" || -s "$WORKDIR/ofd-calls-23q.log" ]]; then
+  fail "readiness-after-guard: readiness or Firebase ran before the failing canonical source guard."
+else
+  pass "readiness-after-guard: source rejection happens before readiness, build, or publish (rc=$RC23Q)."
+fi
+
+# A successful forced update must already be visible when BUILD_CMD starts;
+# the same run must then reach Firebase. This pins guard -> readiness -> build
+# -> publish at the real shell entry point rather than at injected call counts.
+REPO23R="$WORKDIR/case23r-readiness-order"
+init_fixture_repo "$REPO23R"
+: >"$WORKDIR/gcloud-calls-23r.log"
+: >"$WORKDIR/ofd-calls-23r.log"
+set +e
+(
+  cd "$REPO23R"
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-23r.log" \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-23r.log" \
+  GCLOUD_STUB_ANNOTATION=true \
+  GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+  AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+  DEPLOY_TARGET_PROJECT=fiveacross \
+  BUILD_CMD="grep -qw update '$WORKDIR/gcloud-calls-23r.log'" \
+    bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross --only hosting
+) >"$WORKDIR/case23r.out" 2>"$WORKDIR/case23r.err"
+RC23R=$?
+set -e
+if [[ $RC23R -ne 0 ]]; then
+  fail "readiness-order: deploy.sh returned $RC23R. stderr was:"
+  cat "$WORKDIR/case23r.err" >&2
+elif ! grep -qw update "$WORKDIR/gcloud-calls-23r.log"; then
+  fail "readiness-order: exact-SA forced readiness never updated both callables."
+elif [[ ! -s "$WORKDIR/ofd-calls-23r.log" ]]; then
+  fail "readiness-order: Firebase was never reached after readiness and build."
+else
+  pass "readiness-order: exact-SA forced readiness completes before BUILD_CMD and Firebase publish (rc=$RC23R)."
+fi
+
+# A readiness failure is terminal before BUILD_CMD or Firebase. The failing
+# gcloud activation models an unusable exact deploy-SA key; the wrapper's own
+# suite separately proves this cannot fall through to ambient ADC.
+REPO23S="$WORKDIR/case23s-readiness-failure"
+init_fixture_repo "$REPO23S"
+: >"$WORKDIR/gcloud-calls-23s.log"
+: >"$WORKDIR/ofd-calls-23s.log"
+rm -f "$WORKDIR/build-ran-23s"
+set +e
+(
+  cd "$REPO23S"
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-23s.log" \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-23s.log" \
+  GCLOUD_STUB_EXIT=8 \
+  GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+  AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+  DEPLOY_TARGET_PROJECT=fiveacross \
+  BUILD_CMD="touch '$WORKDIR/build-ran-23s'" \
+    bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross --only hosting
+) >"$WORKDIR/case23s.out" 2>"$WORKDIR/case23s.err"
+RC23S=$?
+set -e
+if [[ $RC23S -eq 0 ]]; then
+  fail "readiness-failure: deploy.sh returned 0 for failed exact-SA readiness."
+elif [[ -e "$WORKDIR/build-ran-23s" || -s "$WORKDIR/ofd-calls-23s.log" ]]; then
+  fail "readiness-failure: build or Firebase ran after exact-SA readiness failed."
+else
+  pass "readiness-failure: exact-SA readiness failure blocks BUILD_CMD and Firebase publish (rc=$RC23S)."
+fi
+
+# Every nonmutating pre-build guard must finish before readiness mutates Cloud
+# Run. A missing Functions param reproduces Guard 4's hard failure and proves
+# that readiness, BUILD_CMD, and Firebase all remain untouched.
+REPO23T="$WORKDIR/case23t-readiness-after-param-guard"
+init_fixture_repo "$REPO23T"
+mkdir -p "$REPO23T/functions/src"
+printf '%s\n' "import './params';" >"$REPO23T/functions/src/index.ts"
+printf '%s\n' \
+  "import { defineString } from 'firebase-functions/params';" \
+  "export const REQUIRED_BEFORE_DEPLOY = defineString('REQUIRED_BEFORE_DEPLOY');" \
+  >"$REPO23T/functions/src/params.ts"
+(
+  cd "$REPO23T"
+  git add functions
+  git commit --quiet -m "add incomplete Functions params fixture"
+)
+: >"$WORKDIR/gcloud-calls-23t.log"
+: >"$WORKDIR/ofd-calls-23t.log"
+rm -f "$WORKDIR/build-ran-23t"
+set +e
+(
+  cd "$REPO23T"
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-23t.log" \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-23t.log" \
+  GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+  AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+  DEPLOY_TARGET_PROJECT=fiveacross \
+  BUILD_CMD="touch '$WORKDIR/build-ran-23t'" \
+    bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross --only functions
+) >"$WORKDIR/case23t.out" 2>"$WORKDIR/case23t.err"
+RC23T=$?
+set -e
+if [[ $RC23T -eq 0 ]]; then
+  fail "readiness-after-param-guard: missing Functions params unexpectedly passed Guard 4."
+elif ! grep -q 'REQUIRED_BEFORE_DEPLOY' "$WORKDIR/case23t.err"; then
+  fail "readiness-after-param-guard: Guard 4 did not name the missing param. stderr was:"
+  cat "$WORKDIR/case23t.err" >&2
+elif [[ -s "$WORKDIR/gcloud-calls-23t.log" || -e "$WORKDIR/build-ran-23t" || -s "$WORKDIR/ofd-calls-23t.log" ]]; then
+  fail "readiness-after-param-guard: readiness, build, or Firebase ran after Guard 4 failed."
+else
+  pass "readiness-after-param-guard: missing Functions params block readiness, BUILD_CMD, and Firebase (rc=$RC23T)."
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
