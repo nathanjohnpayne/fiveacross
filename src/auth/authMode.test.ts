@@ -63,6 +63,11 @@ describe('parseAuthOrigin', () => {
   it('accepts loopback over http so the flow can be stood up against emulators', () => {
     expect(parseAuthOrigin('http://localhost:5173')).toBe('http://localhost:5173');
     expect(parseAuthOrigin('http://127.0.0.1:5173')).toBe('http://127.0.0.1:5173');
+    expect(parseAuthOrigin('http://[::1]:5173')).toBe('http://[::1]:5173');
+  });
+
+  it('rejects a non-default port on a production auth origin', () => {
+    expect(parseAuthOrigin('https://auth.fiveacross.app:8443')).toBeNull();
   });
 
   // One comparison against `URL.origin` rejects every decoration at once,
