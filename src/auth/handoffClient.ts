@@ -250,12 +250,19 @@ export async function startAuthHandoff(input: {
   navigate?: (url: string) => void;
 }): Promise<boolean> {
   try {
+    // Apply the same boundary the central origin will enforce before leaving
+    // this page. A long or otherwise invalid current URL must not send the
+    // player into a guaranteed rejection-and-retry loop; root is the safe,
+    // same-origin fallback and preserves the sign-in itself (#912).
+    const returnPath = isSameOriginPath(input.returnPath, input.targetOrigin)
+      ? input.returnPath
+      : '/';
     const verifier = createVerifier();
     const transactionId = await transactionIdFor(verifier);
     const stored = rememberHandoffTransaction({
       verifier,
       targetOrigin: input.targetOrigin,
-      returnPath: input.returnPath,
+      returnPath,
       createdAt: Date.now(),
     });
     if (!stored) {
@@ -266,7 +273,7 @@ export async function startAuthHandoff(input: {
       authOrigin: input.authOrigin,
       targetOrigin: input.targetOrigin,
       transactionId,
-      returnPath: input.returnPath,
+      returnPath,
     });
     const navigate = input.navigate ?? ((to: string) => window.location.assign(to));
     navigate(url);

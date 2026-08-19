@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HANDOFF_AUTH_PATH,
   HANDOFF_FRAGMENT_KEY,
+  HANDOFF_PARAM_RETURN,
   buildAuthOriginUrl,
   clearHandoffFragment,
   consumeHandoffFailure,
@@ -259,6 +260,20 @@ describe('startAuthHandoff', () => {
     const published = new URL(navigate.mock.calls[0][0] as string).searchParams.get('txn');
     const { transactionIdFor } = await import('./handoffTransaction');
     expect(published).toBe(await transactionIdFor(stored!.verifier));
+  });
+
+  it.each([
+    ['an over-long path', `/${'a'.repeat(600)}`],
+    ['an off-origin path', '//evil.example/steal'],
+  ])('falls back to the safe root before storing or navigating for %s', async (_label, returnPath) => {
+    const navigate = vi.fn();
+    expect(
+      await startAuthHandoff({ authOrigin: CENTRAL, targetOrigin: ORIGIN, returnPath, navigate }),
+    ).toBe(true);
+
+    expect(readHandoffTransaction(Date.now())?.returnPath).toBe('/');
+    const url = new URL(navigate.mock.calls[0][0] as string);
+    expect(url.searchParams.get(HANDOFF_PARAM_RETURN)).toBe('/');
   });
 
   // Everything that can fail happens BEFORE the navigation. Discovering

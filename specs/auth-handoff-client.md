@@ -75,7 +75,7 @@ The published transaction id is `base64url(SHA-256(verifier))`, computed with We
 
 `startAuthHandoff`, from the Sign in tap. Generate the verifier, compute the digest, store it, confirm it reads back, and only then navigate to `<authOrigin>/auth/handoff?target=<entry origin>&txn=<digest>&return=<path>`.
 
-**Everything that can fail happens before the navigation, and that ordering is the point.** Discovering unavailable storage afterwards means discovering it once a code has been minted and spent. `returnPath` is the player's current location, so the handoff does not also lose their place.
+**Everything that can fail happens before the navigation, and that ordering is the point.** Discovering unavailable storage afterwards means discovering it once a code has been minted and spent. `returnPath` is the player's current location, so the handoff does not also lose their place. The start leg applies the same same-origin, control-character, fragment, and 512-character boundary as the central-origin parser before it stores or sends the path; an invalid current URL falls back to `/`, so sign-in remains reachable without sending the player through a guaranteed remote rejection loop.
 
 Only the digest travels. The verifier appears nowhere in the URL, and neither does any token.
 
@@ -175,6 +175,7 @@ All three are pinned by a parity test that imports both sides, the same shape `s
 - **Given** a `navigate` that throws, **then** the page reports the mint failure rather than sitting on the spinner with its deadline already cleared. (Test: navigate-throws.)
 - **Given** a failed handoff start, **then** the module failure channel is drained so a later successful sign-in cannot inherit a stale error. (Test: start-failure-drained.)
 - **Given** a `returnPath` that resolves off the target origin by any means—backslash, backslash-slash, or a literal control character—**then** the request is refused; and given a percent-encoded sequence that stays on-origin, it is still accepted. (Test: return-path-resolves-on-origin.)
+- **Given** the Event-origin start leg an invalid or over-512-character current path, **then** it stores and sends `/` instead, before navigation; a valid deep link is preserved. (Test: start-return-path-fallback.)
 - **Given** any central-origin failure, **then** the first accurate message is the one that persists—the deadline cannot later overwrite it with a generic one. (Test: first-failure-sticks.)
 
 ## Test coverage
