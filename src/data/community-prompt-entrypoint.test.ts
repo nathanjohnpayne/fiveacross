@@ -174,6 +174,29 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual(persisted);
   });
 
+  it('preserves a newer tab append when a stale tab persists a multi-entry refresh (#909, Codex P2)', () => {
+    const staleTab = Array.from({ length: 20 }, (_, i) => ({
+      id: `id-${i}`,
+      text: `original-${i}`,
+      submittedAt: i,
+    }));
+    const concurrentAppend = { id: 'new-tab-id', text: 'new tab', submittedAt: 20 };
+    localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify([...staleTab, concurrentAppend]));
+    const activeMine = staleTab.map((tracked) => item({ id: tracked.id, text: `refreshed-${tracked.id}` }));
+    const write = vi.spyOn(localStorage, 'setItem');
+
+    const persisted = refreshAndPersistLastKnownStatuses('ev-1', 'u1', staleTab, activeMine, [], 0);
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(persisted.map(({ id }) => id)).toEqual([
+      ...Array.from({ length: 19 }, (_, i) => `id-${i + 1}`),
+      'new-tab-id',
+    ]);
+    expect(persisted[0].lastKnownText).toBe('refreshed-id-1');
+    expect(persisted.at(-1)).toEqual(concurrentAppend);
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual(persisted);
+  });
+
   it('scopes tracking per Event AND per uid — no cross-Event or cross-account bleed', () => {
     trackSuggestion('ev-1', 'u1', { id: 'a', text: 'x', submittedAt: 1 });
     expect(loadTrackedSuggestions('ev-2', 'u1')).toEqual([]);

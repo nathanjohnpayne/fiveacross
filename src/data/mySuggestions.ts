@@ -431,10 +431,12 @@ export function refreshLastKnownStatuses(
 
 /** Refresh ItemPool's complete tracked snapshot and persist it in one write.
  * Keeping refresh plus persistence behind this seam prevents a caller from
- * replaying individual entries from one stale oversized snapshot: the batch
- * is normalized and capped once, and the exact persisted value is returned
- * for in-memory state. A no-op refresh preserves the input reference and does
- * not write. */
+ * replaying individual entries from one stale oversized snapshot. Before the
+ * write, changed last-known fields are merged by id into the latest persisted
+ * ordering so another tab's newly appended entry is not overwritten. The
+ * merged batch is normalized and capped once, and the exact persisted value
+ * is returned for in-memory state. A no-op refresh preserves the input
+ * reference and does not write. */
 export function refreshAndPersistLastKnownStatuses(
   eventId: string,
   uid: string,
@@ -445,5 +447,25 @@ export function refreshAndPersistLastKnownStatuses(
 ): readonly TrackedSuggestion[] {
   const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
   if (refreshed === tracked) return tracked;
-  return persistTrackedSuggestions(eventId, uid, refreshed);
+
+  const changedById = new Map<string, TrackedSuggestion>();
+  refreshed.forEach((entry, index) => {
+    if (entry !== tracked[index] && !changedById.has(entry.id)) {
+      changedById.set(entry.id, entry);
+    }
+  });
+
+  const latest = loadTrackedSuggestions(eventId, uid);
+  const mergeBase = latest.length > 0 ? latest : refreshed;
+  const merged = mergeBase.map((entry) => {
+    const changed = changedById.get(entry.id);
+    if (!changed) return entry;
+    return {
+      ...entry,
+      lastKnownStatus: changed.lastKnownStatus,
+      lastKnownDayIndex: changed.lastKnownDayIndex,
+      lastKnownText: changed.lastKnownText,
+    };
+  });
+  return persistTrackedSuggestions(eventId, uid, merged);
 }

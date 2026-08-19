@@ -86,7 +86,7 @@ One more fallback gap, round 10 (Codex P2, PR #845): the fallback TEXT had the s
 
 ### Persisted tracker normalization (#909)
 
-Every tracker write stable-deduplicates by id: the first occurrence keeps its array position and later copies are discarded, then the 20-entry cap is applied by array position without sorting or trusting `submittedAt`. For a single-entry write, an existing id is replaced at its first occurrence's position; a genuinely new id is appended before normalization and capping. A multi-entry status refresh persists its complete normalized/capped snapshot in one write, so entries evicted by that cap cannot be re-appended as apparently new by a later write from the same stale refresh pass.
+Every tracker write stable-deduplicates by id: the first occurrence keeps its array position and later copies are discarded, then the 20-entry cap is applied by array position without sorting or trusting `submittedAt`. For a single-entry write, an existing id is replaced at its first occurrence's position; a genuinely new id is appended before normalization and capping. A multi-entry status refresh merges only its changed last-known fields into the latest persisted snapshot, preserving a newer append from another tab, then persists the complete normalized/capped result in one write. This prevents both a newly appended entry from being overwritten by a stale tab and entries evicted by the cap from being re-appended as apparently new by a later write from the same stale refresh pass.
 
 ## Acceptance criteria
 
