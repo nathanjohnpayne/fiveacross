@@ -2064,6 +2064,40 @@ describe('settleAdminAlertsForArchivedEvent', () => {
     });
   });
 
+  it('discards an archived frozen claim atomically when recipient revalidation releases it', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      { 'events/med-2026/adminAlerts': [pending({ batchId: 'a1__1' })] },
+      {
+        'events/med-2026': { ...EVENT, status: 'archived' },
+        'events/med-2026/adminAlertBatches/a1__1': {
+          to: ['former-admin@example.com'],
+          subject: 'Admin · frozen before archive',
+          html: '<p>frozen</p>',
+          text: 'frozen',
+          from: 'Five Across <alerts@example.com>',
+          alertCount: 1,
+        },
+      },
+    );
+
+    expect(
+      await settleAdminAlertsForArchivedEvent(db, 'med-2026', {
+        now: () => NOW,
+        send: send as never,
+        getAdminUids: async () => [],
+        adminNotifyEmail: '',
+      }),
+    ).toEqual({ discarded: 1, preserved: 0 });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts')[0]).toEqual({
+      id: 'a1',
+      discardedAt: NOW,
+      expiresAt: new Date(NOW + TOMBSTONE_TTL_MS),
+    });
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+  });
+
   it('does not send when archive tombstones the claim before its freeze commits', async () => {
     const send = vi.fn(async () => true);
     const db = fakeDb(

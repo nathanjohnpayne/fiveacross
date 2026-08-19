@@ -1158,8 +1158,9 @@ export async function sendAdminDigestForEvent(
     const authorized = await resolveAdminEmails(eventId, deps);
     if (!sameRecipients(authorized, frozen.to)) {
       console.log(`sendAdminDigestForEvent: recipients changed under batch ${batchId}; re-batching`);
-      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
+      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id), now);
       if (release === 'released') return { sent: 0, retired: 0, reason: 'rebatched' };
+      if (release === 'discarded') return { sent: 0, retired: 0, reason: 'inactive-event' };
       // Another invocation settled or re-batched this work first; do not let a
       // stale replay overwrite its newer claim. A failed transaction likewise
       // leaves the original frozen batch intact for a later safe retry.
@@ -1173,8 +1174,9 @@ export async function sendAdminDigestForEvent(
     // that has already been used, which is the 409 that strands a batch forever.
     if (await frozenAbuseSourceMissing(db, eventId, page)) {
       console.log(`sendAdminDigestForEvent: an abuse source was deleted under batch ${batchId}; re-batching`);
-      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
+      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id), now);
       if (release === 'released') return { sent: 0, retired: 0, reason: 'rebatched' };
+      if (release === 'discarded') return { sent: 0, retired: 0, reason: 'inactive-event' };
       return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
     }
     const verification = await verifyFrozenClaim(db, eventId, batchId, page.map((doc) => doc.id));
@@ -1635,20 +1637,23 @@ export function sameRecipients(a: readonly string[], b: readonly string[]): bool
 }
 
 /**
- * Abandon a frozen batch: drop its request and release its rows back to the
- * pending pool, atomically. `batchId: null` rather than a field delete because
- * the claim check is `typeof batchId === 'string'`, so a null reads as
- * unclaimed — and expressing it as a value keeps this module free of
- * `firebase-admin`'s `FieldValue`.
+ * Abandon a frozen batch atomically. An active Event releases the rows back to
+ * the pending pool; an archived Event replaces them with discard tombstones.
+ * Reading the Event in the same transaction makes reactivation and discard
+ * serialize, so exactly one lifecycle state wins. `batchId: null` rather than
+ * a field delete keeps the active release free of `firebase-admin`'s
+ * `FieldValue`.
  */
 async function releaseBatch(
   db: AdminAlertFirestore,
   eventId: string,
   batchId: string,
   ids: readonly string[],
-): Promise<'released' | 'stale' | 'failed'> {
+  now: number,
+): Promise<'released' | 'discarded' | 'stale' | 'failed'> {
   try {
     const released = await db.runTransaction(async (tx) => {
+      const event = (await tx.get(db.doc(`events/${eventId}`))).data();
       const refs = ids.map((id) => db.doc(`events/${eventId}/adminAlerts/${id}`));
       const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
       const generations: number[] = [];
@@ -1665,18 +1670,27 @@ async function releaseBatch(
             : 0,
         );
       }
-      const nextGeneration = Math.max(0, ...generations) + 1;
-      for (const ref of refs) {
-        tx.set(ref, { batchId: null, requeueGeneration: nextGeneration }, { merge: true });
+      if (event?.status === 'archived') {
+        for (const ref of refs) {
+          tx.set(ref, {
+            discardedAt: now,
+            expiresAt: new Date(now + TOMBSTONE_TTL_MS),
+          });
+        }
+      } else {
+        const nextGeneration = Math.max(0, ...generations) + 1;
+        for (const ref of refs) {
+          tx.set(ref, { batchId: null, requeueGeneration: nextGeneration }, { merge: true });
+        }
       }
       tx.delete(db.doc(batchPath(eventId, batchId)));
-      return true;
+      return event?.status === 'archived' ? ('discarded' as const) : ('released' as const);
     });
     if (!released) {
       console.log(`sendAdminDigestForEvent: batch ${batchId} changed before it could be released`, eventId);
       return 'stale';
     }
-    return 'released';
+    return released;
   } catch (err) {
     console.error('sendAdminDigestForEvent: releasing the batch failed (it stays claimed)', eventId, err);
     return 'failed';
@@ -1779,7 +1793,12 @@ export async function settleAdminAlertsForArchivedEvent(
     });
     return { discarded, preserved };
   });
-  if (result.preserved > 0) await sendAdminDigestForEvent(db, eventId, deps);
+  if (result.preserved > 0) {
+    const replay = await sendAdminDigestForEvent(db, eventId, deps);
+    if (replay.reason === 'inactive-event') {
+      return { discarded: result.discarded + result.preserved, preserved: 0 };
+    }
+  }
   return result;
 }
 
