@@ -13,7 +13,7 @@ import { AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './
 import {
   recordAdminAlerts,
   recordBugReportAlerts,
-  runAdminAlertSweep,
+  runAdminAlertCycle,
   settleAdminAlertsForArchivedEvent,
   shouldSettleAdminAlertsOnArchive,
   type AdminAlertFirestore,
@@ -820,7 +820,7 @@ export const adminAlertDigest = onSchedule(
     secrets: [RESEND_API_KEY],
     timeoutSeconds: 300,
   },
-  () => runAdminAlertSweep(db as unknown as AdminAlertFirestore),
+  () => runAdminAlertCycle(db as unknown as AdminAlertFirestore),
 );
 
 /**

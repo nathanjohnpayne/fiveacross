@@ -9,11 +9,13 @@ import {
   type RateState,
   type ValidBugReport,
 } from './bugReportCore';
-import { isAlreadyExists } from './firestoreErrors';
+import { firestoreErrorCodeForLog, isAlreadyExists } from './firestoreErrors';
 
 const REPORT_ID_DOMAIN = 'bug-report-v1\0';
 const REQUEST_HASH_DOMAIN = 'bug-report-request-v1\0';
 const CURRENT_REQUEST_HASH_VERSION = 1 as const;
+export const BUG_REPORT_ESCALATION_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
+export const BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS = 24 * 60 * 60 * 1_000;
 
 export function deriveBugReportId(uid: string, submissionId: string): string {
   return createHash('sha256').update(REPORT_ID_DOMAIN).update(uid).update('\0').update(submissionId).digest('hex');
@@ -192,6 +194,31 @@ function reportDocument(
   };
 }
 
+function pendingEscalationDocument(
+  report: ValidBugReport,
+  uid: string,
+  reporterHash: string,
+  nowMs: number,
+  timestamp: (ms: number) => unknown,
+): Record<string, unknown> {
+  const deadlineMs = nowMs + BUG_REPORT_ESCALATION_RETRY_WINDOW_MS;
+  return {
+    state: 'pending',
+    eventId: report.eventId,
+    reporterUid: uid,
+    reporterHash,
+    createdAt: timestamp(nowMs),
+    nextAttemptAt: timestamp(nowMs),
+    attemptCount: 0,
+    deadlineAt: timestamp(deadlineMs),
+    expiresAt: timestamp(deadlineMs + BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS),
+  };
+}
+
+function escalationLookupUnknown(report: ValidBugReport, escalation: AbuseEscalation): boolean {
+  return report.kind === 'abuse' && (escalation.member === null || escalation.eventActive === null);
+}
+
 async function submitLegacyBugReport(
   uid: string,
   report: ValidBugReport,
@@ -214,7 +241,19 @@ async function submitLegacyBugReport(
     });
   }
   try {
-    await reportRef.create(reportDocument(report, reporterHash, storagePath, escalation, deps.serverTimestamp()));
+    const finalDocument = reportDocument(report, reporterHash, storagePath, escalation, deps.serverTimestamp());
+    if (escalationLookupUnknown(report, escalation)) {
+      const escalationRef = deps.db.doc(`bugReportEscalations/${reportRef.id}`);
+      await deps.db.runTransaction(async (transaction) => {
+        transaction.create(reportRef, finalDocument);
+        transaction.create(
+          escalationRef,
+          pendingEscalationDocument(report, uid, reporterHash, nowMs, deps.timestamp),
+        );
+      });
+    } else {
+      await reportRef.create(finalDocument);
+    }
   } catch (error) {
     if (file) await file.delete({ ignoreNotFound: true }).catch(() => undefined);
     throw error;
@@ -387,6 +426,12 @@ export async function submitValidatedBugReport(
         throw new HttpsError('aborted', 'Submission ownership changed. Retry to read the stored outcome.');
       }
       transaction.set(reportRef, finalDocument);
+      if (escalationLookupUnknown(report, escalation)) {
+        transaction.create(
+          deps.db.doc(`bugReportEscalations/${reportId}`),
+          pendingEscalationDocument(report, uid, reporterHash, nowMs, deps.timestamp),
+        );
+      }
     });
     return receiptFrom(finalDocument, reportId);
   } catch (error) {
@@ -407,10 +452,9 @@ export interface ReporterLookupFirestore {
   doc(path: string): { get(): Promise<{ exists?: boolean; data(): Record<string, unknown> | undefined }> };
 }
 
-/** How many times the escalation lookup is tried before giving up. A transient
- *  Firestore blip is recorded as a confirmed non-member and permanently
- *  suppresses the alert, so the cheapest defence is simply not to believe the
- *  first failure (Phase 4b P2). */
+/** How many times the escalation lookup is tried before it becomes durable
+ *  UNKNOWN work. Back-to-back retries still resolve the cheapest transient
+ *  blips without waiting for the scheduled sweep. */
 export const ESCALATION_LOOKUP_ATTEMPTS = 3;
 
 /** Both halves of the question "will this abuse report actually reach an admin?".
@@ -497,7 +541,7 @@ export async function resolveAbuseEscalation(
   console.error(
     `submitBugReport: escalation check failed after ${Math.max(1, attempts)} attempt(s); recording as unknown`,
     eventId,
-    lastError,
+    { code: firestoreErrorCodeForLog(lastError) },
   );
   return { member: null, eventActive: null };
 }
