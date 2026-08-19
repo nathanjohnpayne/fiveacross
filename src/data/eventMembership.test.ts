@@ -5,6 +5,7 @@ import {
   MEMBERSHIP_SCHEMA_VERSION,
   admits,
   adminsMissingMembership,
+  mayAdministerMembership,
   isActiveMembershipData,
   membershipEnforcementFor,
   membershipPath,
@@ -431,28 +432,20 @@ describe('Decision D-A — the transitional Admin bypass #804 ships and a follow
     ).toEqual({ admitted: false, outcome: 'denied-revoked' });
   });
 
-  it('is NOT passed on the invitation-callable path — D-A is scoped to the two rules surfaces', () => {
-    // Scoping, not omission (specs/event-membership.md § The role model). The
-    // bypass exists to stop a backfill miss locking an Admin OUT of their own
-    // Event on surfaces where the alternative is an unrecoverable permission
-    // error. Failing to mint an invitation is a deferred action, not an outage,
-    // and its remedy is the same server-side grant Rollout step 2 performs.
-    // Extending it there would re-open round 7's P1: a UID added to the
-    // client-writable `admins` array could mint invitations while holding no
-    // admission — durably, since those memberships survive the flip.
-    //
-    // #803 calls admits() WITHOUT the flag, so the strict conjunction is what
-    // it gets. This pins that the default is in fact strict.
-    const asTheCallableCallsIt = {
-      uid: ALICE,
-      enforcement: 'enforced' as const,
-      membership: null,
-      isAdmin: true,
-    };
-    expect(admits(asTheCallableCallsIt)).toEqual({
-      admitted: false,
-      outcome: 'denied-not-a-member',
-    });
+  it('is not passed on the invitation-callable path — but admits() is the WRONG predicate there anyway', () => {
+    // Phase 4b P1, round 4. An earlier version of this test asserted the
+    // callable was safe because it calls admits() without the flag — and proved
+    // it with `enforcement: 'enforced'`, which is the one posture the callable
+    // never runs in. Rollout step 3 enables it while every Event is still 'off'.
+    // In THAT posture admits() short-circuits to `admitted-unenforced` before
+    // membership is inspected, so it authorizes a caller with no membership at
+    // all. The scoping claim was right; the predicate behind it was not.
+    expect(
+      admits({ uid: ALICE, enforcement: 'off', membership: null, isAdmin: true }),
+    ).toEqual({ admitted: true, outcome: 'admitted-unenforced' });
+    // Which is correct for ACCESS and unusable for GRANT authority — hence
+    // mayAdministerMembership below.
+    expect(mayAdministerMembership({ uid: ALICE, isAdmin: true, membership: null })).toBe(false);
   });
 
   it('is inert on an UNENFORCED Event, which is every Event today', () => {
@@ -479,6 +472,47 @@ describe('Decision D-A — the transitional Admin bypass #804 ships and a follow
         transitionalAdminBypass: true,
       }),
     ).toEqual({ admitted: true, outcome: 'admitted' });
+  });
+});
+
+describe('mayAdministerMembership — grant authority, which is NOT admission', () => {
+  it('refuses an Admin with no membership even while the Event is unenforced', () => {
+    // The case that matters: this is #803's exact runtime posture (Rollout
+    // step 3), and it is where a self-promoted UID would otherwise mint
+    // memberships that survive the flip to 'enforced'.
+    expect(mayAdministerMembership({ uid: ALICE, isAdmin: true, membership: null })).toBe(false);
+  });
+
+  it('refuses an Admin whose own membership was revoked', () => {
+    expect(
+      mayAdministerMembership({
+        uid: ALICE,
+        isAdmin: true,
+        membership: activeRecord({ status: 'revoked' }),
+      }),
+    ).toBe(false);
+  });
+
+  it('refuses a non-Admin who holds a perfectly good membership', () => {
+    expect(mayAdministerMembership({ uid: BOB, isAdmin: false, membership: activeRecord({ uid: BOB }) })).toBe(false);
+  });
+
+  it('refuses an unauthenticated caller outright', () => {
+    expect(mayAdministerMembership({ uid: null, isAdmin: true, membership: activeRecord() })).toBe(false);
+  });
+
+  it('allows an Admin who holds an active membership', () => {
+    expect(mayAdministerMembership({ uid: ALICE, isAdmin: true, membership: activeRecord() })).toBe(true);
+  });
+
+  it('takes no enforcement input at all, so no switch state can widen it', () => {
+    // Enforcement-blind by construction. There is no state of the switch in
+    // which minting admission without holding it is acceptable, so the input
+    // does not exist rather than being ignored.
+    expect(Object.keys({ uid: ALICE, isAdmin: true, membership: activeRecord() })).not.toContain(
+      'enforcement',
+    );
+    expect(mayAdministerMembership.length).toBe(1);
   });
 });
 

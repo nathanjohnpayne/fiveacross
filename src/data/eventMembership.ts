@@ -412,4 +412,54 @@ export function adminsMissingMembership(input: {
   return missing.sort();
 }
 
+/**
+ * May this caller ADMINISTER memberships — mint one, or revoke one?
+ *
+ * A different question from {@link admits}, and the distinction is the whole
+ * point of this function existing (Phase 4b P1, round 4).
+ *
+ * `admits()` answers ACCESS: may this caller read and write inside this Event
+ * right now. It is deliberately permissive while an Event is unenforced —
+ * `admitted-unenforced` is returned before `membership` is even inspected,
+ * because that is what a dark rollout means. That is correct for gating reads
+ * and writes, whose effects are confined to the window in which they happen.
+ *
+ * It is WRONG for authorizing a grant, because a membership OUTLIVES that
+ * window. § Rollout step 3 enables #803's invitation callable while every Event
+ * is still `'off'`, so a caller authorized by `admits()` alone needs no
+ * membership at all — and a UID added to the client-writable `EventDoc.admins`
+ * array could mint invitations whose memberships are still there, and now
+ * decisive, after the flip to `'enforced'`. A transient permissiveness would
+ * have written a permanent admission. That is round 7's P1 arriving through the
+ * one door the enforcement switch cannot close behind it.
+ *
+ * So this predicate is **enforcement-blind by construction**. It takes no
+ * enforcement input, because there is no state of the switch in which minting
+ * admission without holding it is acceptable. It requires, conjoined:
+ *
+ *  1. an authenticated caller;
+ *  2. presence in the LIVE `EventDoc.admins` roster — not `MembershipRole`,
+ *     which is grant-time and drifts both ways against the array (§ Decisions,
+ *     D8);
+ *  3. an ACTIVE membership of their own.
+ *
+ * Decision D-A's transitional bypass is deliberately absent: D-A is scoped to
+ * the two rules surfaces, and a bypass here is exactly the durable-admission
+ * hole described above. An Admin the backfill missed cannot mint invitations
+ * until they are granted a membership server-side — a deferred action with a
+ * known remedy, not an outage.
+ */
+export function mayAdministerMembership(input: {
+  /** The authenticated caller's uid. */
+  uid: string | null | undefined;
+  /** Whether the uid appears in the LIVE `EventDoc.admins` array. */
+  isAdmin: boolean;
+  /** Raw data at the CALLER's own {@link membershipPath}. */
+  membership: unknown;
+}): boolean {
+  if (typeof input.uid !== 'string' || input.uid === '') return false;
+  if (input.isAdmin !== true) return false;
+  return isActiveMembershipData(input.membership);
+}
+
 export type { AdmissionDecision, AdmissionOutcome };
