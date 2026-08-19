@@ -29,7 +29,7 @@ set -euo pipefail
 # Gate-ladder step; see worker/README.md § Deploying and attaching.
 #
 # Usage:
-#   scripts/worker-deploy.sh [--force] [-- <extra wrangler args>]
+#   scripts/worker-deploy.sh [--force]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -38,12 +38,13 @@ cd "$REPO_ROOT"
 source "$SCRIPT_DIR/lib/deploy-main-guard.sh"
 
 FORCE=false
-WRANGLER_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force) FORCE=true; shift ;;
-    --) shift; WRANGLER_ARGS=("$@"); break ;;
-    *) WRANGLER_ARGS+=("$1"); shift ;;
+    *)
+      echo "scripts/worker-deploy.sh does not accept Wrangler arguments: $1" >&2
+      exit 64
+      ;;
   esac
 done
 
@@ -59,4 +60,4 @@ echo "✅ Guards passed. Publishing the Worker (routes are NOT attached by this 
 # the toolchain would slip underneath them. `npm ci` installs exactly
 # worker/package-lock.json and fails closed if it and package.json disagree.
 npm --prefix worker ci
-npm --prefix worker run deploy -- "${WRANGLER_ARGS[@]+"${WRANGLER_ARGS[@]}"}"
+npm --prefix worker run deploy

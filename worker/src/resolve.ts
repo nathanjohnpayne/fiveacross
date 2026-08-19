@@ -164,6 +164,7 @@ export async function resolveHost(
   // cannot have written is evidence of nothing, so it revalidates.
   const age = cached === null ? -1 : deps.now() - cached.fetchedAt;
   const fresh = cached !== null && age >= 0 && age < config.cacheTtlMs;
+  const eligibleForStaleServe = cached !== null && age >= 0;
 
   if (fresh && cached !== null) {
     // Envelope shape alone only makes the value safe to inspect. It does NOT
@@ -191,7 +192,7 @@ export async function resolveHost(
     // simply gone, but it stops counting as evidence the mapping is still
     // good (specs/event-resolution.md). With no entry at all there is nothing
     // to fall back to, so this fails closed like every other unknown.
-    if (cached !== null) {
+    if (eligibleForStaleServe && cached !== null) {
       return decide(cached.record, expectedSlug, true);
     }
     return { kind: 'not-found', reason: 'lookup-unavailable' };

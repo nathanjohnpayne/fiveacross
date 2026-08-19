@@ -218,6 +218,24 @@ describe('resolveHost — the cache', () => {
     expect(cache.store.get(HOST)?.fetchedAt).toBe(staleAt);
   });
 
+  it('never stale-serves an envelope stamped in the future when revalidation fails', async () => {
+    const cache = memoryCache({
+      [HOST]: {
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000 + 60_000,
+        record: { eventId: 'future-event', status: 'active', slug: 'bodega-bay' },
+      },
+    });
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('firestore unreachable');
+    }) as unknown as ResolveDeps['fetch'];
+
+    await expect(resolveHost(HOST, 'bodega-bay', CONFIG, deps(fetchImpl, cache))).resolves.toEqual({
+      kind: 'not-found',
+      reason: 'lookup-unavailable',
+    });
+  });
+
   it('drops the entry outright when the mapping is gone, rather than letting it expire', async () => {
     const cache = memoryCache({
       [HOST]: {

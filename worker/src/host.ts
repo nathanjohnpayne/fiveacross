@@ -53,20 +53,30 @@ export type HostClass =
  * Reduce a Host header or URL hostname to the bytes the guard compares.
  *
  * Lowercased because DNS is case-insensitive and a Slug is stored lowercase;
- * a trailing root dot removed because `fiveacross.app.` is the same name; a
- * port stripped because a Host header legitimately carries one. Bracketed IPv6
- * literals keep their brackets and simply fail the Namespace suffix test,
+ * a port stripped because a Host header legitimately carries one. Bracketed
+ * IPv6 literals keep their brackets and simply fail the Namespace suffix test,
  * which is the correct outcome — an Event is never addressed by IP.
  */
-export function normalizeHost(rawHost: string): string {
+function hostWithoutPort(rawHost: string): string {
   let host = rawHost.trim();
   if (host.startsWith('[')) {
     const close = host.indexOf(']');
-    return hostnameKey(close === -1 ? host : host.slice(0, close + 1));
+    return close === -1 ? host : host.slice(0, close + 1);
   }
   const colon = host.indexOf(':');
   if (colon !== -1) host = host.slice(0, colon);
-  return hostnameKey(host);
+  return host;
+}
+
+export function normalizeHost(rawHost: string): string {
+  return hostnameKey(hostWithoutPort(rawHost));
+}
+
+/** A DNS root dot is a different serialized web origin, even though it names
+ * the same DNS resource. The router refuses it before lookup so the app never
+ * mounts somewhere its exact-origin auth helper cannot safely complete. */
+export function hasTrailingRootDot(rawHost: string): boolean {
+  return hostWithoutPort(rawHost).endsWith('.');
 }
 
 /**
@@ -80,6 +90,10 @@ export function normalizeHost(rawHost: string): string {
  */
 export function classifyHost(rawHost: string, namespaces: readonly string[] = NAMESPACES): HostClass {
   const host = normalizeHost(rawHost);
+
+  if (hasTrailingRootDot(rawHost)) {
+    return { kind: 'rejected', host, reason: 'out-of-namespace' };
+  }
 
   for (const namespace of namespaces) {
     if (host === namespace) {

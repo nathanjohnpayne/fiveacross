@@ -1,5 +1,4 @@
 import { firebaseAuthOriginRedirectUrl } from './canonical-redirect';
-import { hostnameKey } from './hostnameKey';
 import { isLocalDevHost } from './local-host';
 
 // Exact hostnames only — never a prefix or suffix match. Every entry here must
@@ -70,8 +69,7 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
 
 /** Keep production OAuth helper storage on the same origin as the app. */
 export function resolveAuthDomain(configuredAuthDomain: string, hostname: string): string {
-  const host = hostnameKey(hostname);
-  return FIRST_PARTY_AUTH_HOSTS.has(host) ? host : configuredAuthDomain;
+  return FIRST_PARTY_AUTH_HOSTS.has(hostname) ? hostname : configuredAuthDomain;
 }
 
 /**
@@ -102,8 +100,7 @@ export function resolveAuthDomain(configuredAuthDomain: string, hostname: string
  * a phone in a rental house is unrecoverable by the player and silent to us.
  */
 export function isAuthConfiguredForHost(configuredAuthDomain: string, hostname: string): boolean {
-  const host = hostnameKey(hostname);
-  return resolveAuthDomain(configuredAuthDomain, host) === host;
+  return resolveAuthDomain(configuredAuthDomain, hostname) === hostname;
 }
 
 /**
@@ -132,10 +129,9 @@ export function isAuthConfiguredForHost(configuredAuthDomain: string, hostname: 
  *    exists to report (Codex P2 round 5 on #576).
  */
 export function isSignInReachableOnHost(configuredAuthDomain: string, hostname: string): boolean {
-  const host = hostnameKey(hostname);
-  if (isAuthConfiguredForHost(configuredAuthDomain, host)) return true;
-  if (isLocalDevHost(host)) return true;
+  if (isAuthConfiguredForHost(configuredAuthDomain, hostname)) return true;
+  if (isLocalDevHost(hostname)) return true;
   // Only the hostname decides the handoff; path/search/hash merely shape the
   // target URL, which is discarded here.
-  return firebaseAuthOriginRedirectUrl({ hostname: host, pathname: '/', search: '', hash: '' }) !== null;
+  return firebaseAuthOriginRedirectUrl({ hostname, pathname: '/', search: '', hash: '' }) !== null;
 }

@@ -38,6 +38,10 @@ export function cloudflareCache(cache: Cache): HostnameCache {
   const fenceKeyFor = (host: string): Request =>
     new Request(`https://event-router.invalid/hostnames/${encodeURIComponent(host)}/fence`);
   const tails = new Map<string, Promise<void>>();
+  // Keep a per-isolate high-water mark as well as the durable Cache entry.
+  // If a fence write fails, this instance must still refuse a late, older
+  // response rather than allowing a Cache API fault to re-publish an Event.
+  const rememberedFences = new Map<string, number>();
 
   const queue = <T>(host: string, operation: () => Promise<T>): Promise<T> => {
     const prior = tails.get(host) ?? Promise.resolve();
@@ -53,9 +57,23 @@ export function cloudflareCache(cache: Cache): HostnameCache {
     return run;
   };
 
+  const rememberFence = (host: string, fenceAt: number): number => {
+    const highest = Math.max(rememberedFences.get(host) ?? fenceAt, fenceAt);
+    rememberedFences.set(host, highest);
+    return highest;
+  };
+
   const readFence = async (host: string): Promise<number | null> => {
-    const hit = await cache.match(fenceKeyFor(host));
-    if (hit === undefined) return null;
+    const remembered = rememberedFences.get(host) ?? null;
+    let hit: Response | undefined;
+    try {
+      hit = await cache.match(fenceKeyFor(host));
+    } catch {
+      // A locally remembered fence is sufficient to fail closed. Without one,
+      // the resolver will treat the cache fault as a normal miss.
+      return remembered;
+    }
+    if (hit === undefined) return remembered;
     try {
       const value: unknown = await hit.json();
       if (
@@ -64,13 +82,13 @@ export function cloudflareCache(cache: Cache): HostnameCache {
         typeof (value as { fenceAt?: unknown }).fenceAt === 'number' &&
         Number.isFinite((value as { fenceAt: number }).fenceAt)
       ) {
-        return (value as { fenceAt: number }).fenceAt;
+        return rememberFence(host, (value as { fenceAt: number }).fenceAt);
       }
     } catch {
       // An invalid fence is no fence. The resolver still treats a cache fault
       // as a miss, so corrupt cache metadata cannot become a request failure.
     }
-    return null;
+    return remembered;
   };
 
   const fenceResponse = (fenceAt: number): Response =>
@@ -84,10 +102,7 @@ export function cloudflareCache(cache: Cache): HostnameCache {
   return {
     async read(host) {
       return queue(host, async () => {
-        // A fence makes every old positive a miss until a lookup begun later
-        // has positively replaced it. Check it before the envelope so a delete
-        // racing through another request cannot leak an already-refused Event.
-        if ((await readFence(host)) !== null) return null;
+        const fenceAt = await readFence(host);
         const hit = await cache.match(keyFor(host));
         if (hit === undefined) return null;
         try {
@@ -98,7 +113,13 @@ export function cloudflareCache(cache: Cache): HostnameCache {
           // reach `decide` and throw a runtime error instead of rendering the
           // fail-closed page.
           const envelope: unknown = await hit.json();
-          return isCacheEnvelope(envelope) ? envelope : null;
+          // Fences are high-water marks, not permanent negative-cache entries:
+          // a positive read is valid only when it came from a lookup begun
+          // after the newest refusal. Keeping the fence prevents an older
+          // delayed write from erasing that ordering after a newer write wins.
+          return isCacheEnvelope(envelope) && (fenceAt === null || envelope.fetchedAt > fenceAt)
+            ? envelope
+            : null;
         } catch {
           return null;
         }
@@ -118,10 +139,6 @@ export function cloudflareCache(cache: Cache): HostnameCache {
           },
         });
         await cache.put(keyFor(host), stored);
-        // A lookup newer than the fence has supplied a positive answer. It is
-        // now safe for later reads to use that answer; keeping the fence would
-        // turn it into a permanent negative cache.
-        if (fenceAt !== null) await cache.delete(fenceKeyFor(host));
       });
     },
     async drop(host, fenceAt) {
@@ -130,8 +147,16 @@ export function cloudflareCache(cache: Cache): HostnameCache {
         // fence. A server-verified refusal does: it is a correctness barrier
         // for late positive writes from requests that began earlier.
         if (fenceAt !== undefined) {
-          const previous = await readFence(host);
-          await cache.put(fenceKeyFor(host), fenceResponse(Math.max(previous ?? fenceAt, fenceAt)));
+          // Remember before the durable operation. The primary entry still
+          // must be deleted if that operation rejects, and this isolate cannot
+          // serve an entry older than the attempted refusal in the meantime.
+          const highWater = rememberFence(host, fenceAt);
+          try {
+            const previous = await readFence(host);
+            await cache.put(fenceKeyFor(host), fenceResponse(Math.max(previous ?? highWater, highWater)));
+          } catch {
+            // The local high-water mark above is the fail-closed fallback.
+          }
         }
         await cache.delete(keyFor(host));
       });

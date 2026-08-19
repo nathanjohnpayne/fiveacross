@@ -49,8 +49,8 @@ describe('classifyHost — the serving cases', () => {
     expect(classifyHost(host)).toEqual({ kind: 'apex', host, namespace: host, slug: null });
   });
 
-  it('normalises before classifying, so case and a trailing dot still serve', () => {
-    expect(classifyHost('Bodega-Bay.FIVEACROSS.app.')).toMatchObject({
+  it('normalises case before classifying', () => {
+    expect(classifyHost('Bodega-Bay.FIVEACROSS.app')).toMatchObject({
       kind: 'event',
       slug: 'bodega-bay',
     });
@@ -72,6 +72,9 @@ describe('classifyHost — the guard', () => {
     'vacaybingo.com.attacker.test',
     'localhost',
     '[2606:4700::1]',
+    // The DNS root dot names the same resource, but serializes as a different
+    // web origin. Refuse it before the app could mount with unsafe auth state.
+    'bodega-bay.fiveacross.app.',
   ])('refuses %s as out of namespace', (host) => {
     expect(classifyHost(host)).toMatchObject({ kind: 'rejected', reason: 'out-of-namespace' });
   });
