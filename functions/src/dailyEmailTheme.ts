@@ -72,6 +72,15 @@ export const EMAIL_THEME_TOKENS: Record<string, EmailThemeTokens> = {
   marquee: { label: 'Marquee', emoji: '✨', bg: '#120d08', panel: '#1d1610', ink: '#f7f0e1', dim: '#b5a88e', primary: '#e8b64c', secondary: '#e2695a', accent: '#ffd98a' },
   'confetti-hour': { label: 'Confetti Hour', emoji: '🎊', bg: '#0d1020', panel: '#171b32', ink: '#f1f3fc', dim: '#aab1d6', primary: '#ff7eb6', secondary: '#5fe3cf', accent: '#ffd23f' },
   afterglow: { label: 'Afterglow', emoji: '🌙', bg: '#150f1c', panel: '#211830', ink: '#f5eef7', dim: '#b8aac6', primary: '#f09a6a', secondary: '#c583e0', accent: '#ffc98a' },
+  // Five Across platform chrome (#882) — mirrored here for the same reason
+  // every other Theme is: this table is a REGISTRY mirror, not a picker, so
+  // it stays total against `THEMES` regardless of `ThemeMeta.chrome`. The
+  // daily email is Day-scoped and no Day can ever carry this id (no picker
+  // in the app offers it), so this row is exercised only by the parity
+  // suite, not by a real send — but the parity test polices `THEMES`
+  // unconditionally, and a real send is exactly the failure mode a silent
+  // gap here would produce if that ever changed.
+  'fiveacross-slate': { label: 'Slate', emoji: '🔹', bg: '#0f1116', panel: '#161a22', ink: '#f2f4f8', dim: '#9aa3b2', primary: '#718ef4', secondary: '#647be2', accent: '#f5b840' },
 };
 
 /**

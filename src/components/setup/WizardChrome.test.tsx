@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -16,7 +17,11 @@ import type { EventDraft, SetupStep } from '../../types';
 
 function renderChrome(
   currentStep: SetupStep,
-  { onRequestCancel = vi.fn(), draft }: { onRequestCancel?: () => void; draft?: EventDraft } = {},
+  {
+    onRequestCancel = vi.fn(),
+    draft,
+    children = <div>step body</div>,
+  }: { onRequestCancel?: () => void; draft?: EventDraft; children?: ReactNode } = {},
 ) {
   render(
     <WizardChrome
@@ -29,7 +34,7 @@ function renderChrome(
       onAdvance={vi.fn()}
       onSaveNow={vi.fn()}
     >
-      <div>step body</div>
+      {children}
     </WizardChrome>,
   );
 }
@@ -102,5 +107,60 @@ describe('WizardChrome + PreviewStrip — Escape ownership (Codex P2, PR #857)',
     renderChrome('basics', { onRequestCancel });
     await user.keyboard('{Escape}');
     expect(onRequestCancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WizardChrome — Escape ignores an event a nested control already consumed (#849)', () => {
+  it('does not request cancellation when a nested control called preventDefault() on its own Escape handling', () => {
+    const onRequestCancel = vi.fn();
+    // Models a future composite control (a date picker, a menu) that
+    // handles Escape itself — closing its own popover — via
+    // `preventDefault()` alone, without also calling `stopPropagation()`.
+    // `OccasionChangeConfirm`'s existing capture-phase `stopPropagation()`
+    // is a DIFFERENT, already-covered mechanism (the describe block above);
+    // this one is the additional, defaultPrevented-based safety net #849
+    // asks for.
+    renderChrome('basics', {
+      onRequestCancel,
+      children: (
+        <input
+          aria-label="nested control"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') e.preventDefault();
+          }}
+        />
+      ),
+    });
+    const input = screen.getByLabelText('nested control');
+    input.focus();
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    expect(onRequestCancel).not.toHaveBeenCalled();
+  });
+
+  it('still requests cancellation for an Escape a nested control did NOT prevent', () => {
+    const onRequestCancel = vi.fn();
+    renderChrome('basics', {
+      onRequestCancel,
+      children: <input aria-label="inert control" />,
+    });
+    const input = screen.getByLabelText('inert control');
+    input.focus();
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    expect(onRequestCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an Escape delivered mid IME composition', () => {
+    const onRequestCancel = vi.fn();
+    renderChrome('basics', { onRequestCancel });
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    } as KeyboardEventInit);
+    document.dispatchEvent(event);
+    expect(onRequestCancel).not.toHaveBeenCalled();
   });
 });

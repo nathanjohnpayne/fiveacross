@@ -66,6 +66,14 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
     });
   });
 
+  it('rejects a trailing root dot before querying Firestore', async () => {
+    // A DNS root dot is a distinct serialized browser origin. The edge rejects
+    // it, and direct Hosting must not bypass that auth-safety boundary.
+    mocks.getDocFromServer.mockResolvedValue(snap(DOC));
+    await expect(fetchHostnameDoc('Bodega-Bay.VacayBingo.com.')).resolves.toBeNull();
+    expect(mocks.getDocFromServer).not.toHaveBeenCalled();
+  });
+
   it('reads a missing doc, a missing eventId and an unknown status all as null', async () => {
     for (const data of [null, { ...DOC, eventId: '' }, { ...DOC, status: 'weird' }, { ...DOC, status: undefined }]) {
       mocks.getDocFromServer.mockResolvedValue(snap(data));
@@ -82,6 +90,20 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
 });
 
 describe('bootstrapEventResolution — installs everything the shell needs', () => {
+  it('rejects a root-dot hostname before an env-pinned build can mount', async () => {
+    vi.stubEnv('VITE_EVENT_ID', 'bodega-bay-2026');
+    try {
+      await expect(bootstrapEventResolution('bodega-bay.fiveacross.app.')).resolves.toEqual({
+        kind: 'not-found',
+        hostname: 'bodega-bay.fiveacross.app.',
+        reason: 'missing',
+      });
+      expect(mocks.getDocFromServer).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('installs the Event id, the card-cache id AND the Edition', async () => {
     mocks.getDocFromServer.mockResolvedValue(snap(DOC));
     const r = await bootstrapEventResolution('bodega-bay.vacaybingo.com');

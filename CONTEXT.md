@@ -32,7 +32,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Community Prompt**: A Prompt a Player suggested *during* the Event, approved by an Admin, and dealt onto a later Day Card with the submitter attributed. Player-facing copy is "put it on tomorrow's card"—never "bingo moment", which would collide with **Moment** below. _Avoid_: Bingo moment, player prompt, suggestion (fine informally)
 
-**Theme**: A named look the whole app reskins into, supplied by the Edition and chosen per Day. Cosmetic only—a Theme never changes navigation or mechanics.
+**Theme**: A named look the whole app reskins into, supplied by the Edition and chosen per Day. Cosmetic only—a Theme never changes navigation or mechanics. Most Themes are pickable this way; a Theme may instead be registered **platform chrome**—reserved for surfaces that have no Day (utility states, the admin console) and never offered by a Day/`defaultTheme` picker (`ThemeMeta.chrome`, `src/theme/themes.ts`).
 
 ### Days & pools
 

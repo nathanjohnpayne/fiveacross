@@ -75,6 +75,7 @@ export function stepForIssue(issue: DraftIssue): SetupStep {
       return 'occasion';
     case 'event-unsupported-timezone':
     case 'event-invalid-date-window':
+    case 'event-invalid-slug':
       return 'basics';
     case 'pool-below-minimum':
     case 'main-prompt-spicy-not-boolean':

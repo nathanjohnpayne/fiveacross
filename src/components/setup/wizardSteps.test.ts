@@ -98,6 +98,7 @@ describe('stepForIssue (data ownership, not layout)', () => {
     ['event-occasion-edition-mismatch', 'occasion'],
     ['event-unsupported-timezone', 'basics'],
     ['event-invalid-date-window', 'basics'],
+    ['event-invalid-slug', 'basics'],
     ['pool-below-minimum', 'squares'],
     ['main-prompt-spicy-not-boolean', 'squares'],
     ['curated-prompt-is-spicy', 'squares'],

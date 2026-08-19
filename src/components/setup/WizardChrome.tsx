@@ -74,7 +74,20 @@ export default function WizardChrome({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onRequestCancel();
+      if (e.key !== 'Escape') return;
+      // Ignore an Escape a nested control already consumed (#849) — a
+      // future date picker, menu, or other composite input that calls
+      // `preventDefault()` on its own Escape handling (to stop the
+      // browser's default behavior) without ALSO calling
+      // `stopPropagation()`. `OccasionChangeConfirm` already suppresses
+      // this listener correctly, via capture-phase `stopPropagation()`
+      // (specs/event-setup-wizard.md § Step 1 · Occasion's "Escape while
+      // the confirm is open"), so this check is additive, not a
+      // replacement for that mechanism. Also ignore an IME composition
+      // keystroke (`isComposing`) — Escape can cancel character
+      // composition without being a request to leave the wizard.
+      if (e.defaultPrevented || e.isComposing) return;
+      onRequestCancel();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
