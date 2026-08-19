@@ -45,6 +45,7 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_FIREBASE_API_KEY: 'AIzaSyA-JHRrQOmxXzD2rK4FcpyYz_fRMHQdhMQ',
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+      VITE_AUTH_HANDOFF_ORIGIN: 'https://auth.fiveacross.app',
       VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
       VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
       VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
@@ -169,7 +170,7 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
       .map(([key, expectedValue]) => `${key}=${JSON.stringify(expectedValue)}`)
       .join(', ');
     throw new Error(
-      `Refusing to build ${target}: its registered Firebase web app, Event, Edition, and audience seed must match this target. ` +
+      `Refusing to build ${target}: its registered Firebase web app, auth handoff, Event, Edition, and audience seed must match this target. ` +
         `Set: ${incorrectKeys}.`,
     );
   }

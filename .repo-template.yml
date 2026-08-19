@@ -13,7 +13,8 @@ spec_test_map:
   # auth-handoff-client's coverage is module-named (the mode/strategy table, the
   # transaction store, the boundary primitives, the two callable legs, the
   # client/server parity pin, the central-origin page, the two new failure
-  # screens, and the allowlist entry for the central auth origin), so none of
+  # screens, the allowlist entry for the central auth origin, and the production
+  # target composition), so none of
   # them share the spec basename — map them all explicitly.
   auth-handoff-client:
     - src/auth/authMode.test.ts
@@ -26,6 +27,7 @@ spec_test_map:
     - src/components/signin-handoff-route.test.tsx
     - src/handoffBoot.test.ts
     - src/auth-domain.test.ts
+    - scripts/fiveacross-origin.integration.test.mjs
   # event-membership's coverage is module-named (the pure admission predicates),
   # so it does not share the spec basename — map it explicitly. The emulator
   # layer that proves the DEPLOYED rules agree with those predicates is #804's
@@ -41,9 +43,9 @@ spec_test_map:
     - src/data/occasions.test.ts
     - src/data/draftValidation.test.ts
   # event-resolution's coverage is module-named (the decision table, the
-  # Firestore seam, the Edition brand table, and the two component surfaces that
-  # render it), so none of the five share the spec basename — map them all
-  # explicitly.
+  # Firestore seam, the Edition brand table, the component surfaces that render
+  # it, and the production target/build composition), so none share the spec
+  # basename — map them all explicitly.
   event-resolution:
     - src/eventResolution.test.ts
     - src/data/hostnames.test.ts
@@ -51,6 +53,8 @@ spec_test_map:
     - src/components/signin-edition-brand.test.tsx
     - src/components/ErrorBoundary.test.tsx
     - src/auth-domain.test.ts
+    - scripts/build-target.test.mjs
+    - scripts/fiveacross-origin.integration.test.mjs
   # cells-map's pure boundary lives in src/game/cells.test.ts (module-named,
   # not spec-basename-named); the offline no-clobber proof matches by name.
   cells-map:

@@ -51,7 +51,7 @@ Selecting `same_origin` on a host works only where the OAuth helper is already s
 
 Absent or malformed in handoff mode on an unregistered host, sign-in reports `handoff-origin-unconfigured` / `handoff-origin-invalid` rather than dead-ending mid-flow. A value equal to the origin being served is also refused: a build that hands off to itself would bounce the player off themselves forever.
 
-**Both keys are documented in `.env.example` as commented lines and must stay that way.** `scripts/build-target.mjs` requires every `VITE_*` key that file *defines* to be present in each target's env file, and `.env.gaycruisebingo` / `.env.fiveacross` are untracked operator-held state—so defining either key there hard-fails every build and deploy until a human edits both. That is the client-side twin of the `functions/.env.<projectId>` trap recorded in [auth-handoff](auth-handoff.md) (#767). Both are optional with in-code defaults, so leaving them commented costs nothing.
+**Both keys are documented in `.env.example` as commented lines and must stay that way.** `scripts/build-target.mjs` requires every `VITE_*` key that file *defines* to be present in each target's env file, and `.env.gaycruisebingo` / `.env.fiveacross` are untracked operator-held state—so defining either key there would hard-fail every build target, including Gay Cruise Bingo, until a human edited both files. That is the client-side twin of the `functions/.env.<projectId>` trap recorded in [auth-handoff](auth-handoff.md) (#767). `VITE_AUTH_MODE` remains optional with the safe `handoff` default. The registered `fiveacross` target separately pins `VITE_AUTH_HANDOFF_ORIGIN=https://auth.fiveacross.app` in its trusted identity, so that target rejects an absent or different central origin while the single-origin Gay Cruise Bingo target correctly requires none.
 
 ## The transaction verifier
 
@@ -155,6 +155,7 @@ All three are pinned by a parity test that imports both sides, the same shape `s
 - **Given** `VITE_AUTH_MODE=same_origin` on an unregistered host, **when** sign-in is resolved, **then** it is `unavailable` by name and renders its own screen, never the generic auth-unconfigured one, and never silently takes the handoff. (Test: escape-hatch-loud.)
 - **Given** an unrecognised `VITE_AUTH_MODE`, **when** sign-in is resolved, **then** it is rejected rather than defaulted. (Test: mode-invalid.)
 - **Given** handoff mode and no usable central origin, **when** sign-in is resolved, **then** it is `unavailable` rather than dead-ending mid-flow. (Test: handoff-origin-missing, handoff-origin-malformed.)
+- **Given** the registered Five Across production target and a newly provisioned active wildcard hostname, **when** the real target environment and startup resolver are composed, **then** the Event resolves and sign-in selects the handoff through `https://auth.fiveacross.app` without adding the hostname to `FIRST_PARTY_AUTH_HOSTS`. (Test: production-wildcard-handoff.)
 - **Given** a sign-in start, **then** the verifier is stored and only its digest appears in the URL, and no token appears at all. (Test: start-publishes-digest-only.)
 - **Given** storage that refuses every write, **when** a handoff starts, **then** it does not navigate. (Test: start-aborts-without-storage.)
 - **Given** a client and the server, **when** both compute a transaction id for the same verifier, **then** the results are byte-identical. (Test: digest-parity.)
@@ -198,6 +199,7 @@ All in the app layer (`npm test`, jsdom—no emulator).
 - `src/components/signin-handoff-route.test.tsx`—that the Sign in button actually reads the strategy: it starts a handoff where one is needed, never falls back to direct sign-in when the route is unavailable, and surfaces a return leg that failed before the tree mounted.
 - `src/auth/handoff-parity.test.ts`—the three mirrored constants and the digest, against `functions/src/authHandoff.ts` directly.
 - `src/auth-domain.test.ts`—the central auth origin's presence in `FIRST_PARTY_AUTH_HOSTS`.
+- `scripts/fiveacross-origin.integration.test.mjs`—the production-target composition: a second active wildcard host resolves its own Event and selects the central handoff using the registered Five Across environment rather than an exact-host source edit.
 
 Mapped explicitly in `.repo-template.yml` `spec_test_map`, because the coverage is module-named rather than spec-basename-named.
 

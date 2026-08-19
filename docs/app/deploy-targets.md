@@ -12,6 +12,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
 | Static Edition identity | `gcb` from `VITE_EDITION` | trusted `vacay` fallback; runtime Edition comes from the hostname document |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
+| Baked `VITE_AUTH_HANDOFF_ORIGIN` | unset | `https://auth.fiveacross.app` |
 | Baked `VITE_FIREBASE_MEASUREMENT_ID` | `G-42N7WYDYT5` | `G-42N7WYDYT5` |
 | Baked `VITE_POSTHOG_HOST` | blank (explicit) | blank (explicit) |
 | Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
@@ -33,7 +34,7 @@ Static browser/PWA identity is a separate constraint. The trusted target registr
 
 ## Target environment files
 
-`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event mode, Edition input and adult-content seed before it builds. The Five Across file must explicitly set `VITE_EVENT_ID=`. The wrapper removes ambient `VITE_*` values, supplies the target registry's build-only static fallback, and disables Vite's subsequent root env-file load, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event mode, Edition input and adult-content seed before it builds. The Five Across file must explicitly set `VITE_EVENT_ID=` and `VITE_AUTH_HANDOFF_ORIGIN=https://auth.fiveacross.app`; the registered target rejects an absent or different central origin so a wildcard build cannot silently ship without its sign-in route. The wrapper removes ambient `VITE_*` values, supplies the target registry's build-only static fallback, and disables Vite's subsequent root env-file load, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
