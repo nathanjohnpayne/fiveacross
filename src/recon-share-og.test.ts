@@ -27,6 +27,7 @@ const rootReadme = read('../README.md');
 const appReadme = read('../docs/app/README.md');
 const deployGuide = read('../docs/app/phase-1-deploy.md');
 const multiEventSpec = read('../specs/x-multi-event-schema.md');
+const wireframesHtml = read('../plans/daily-cards-wireframes.html');
 
 describe('recon: cloud-run/og-renderer is gone (#39, ADR 0005)', () => {
   it('cloud-run/ does not exist', () => {
@@ -274,6 +275,54 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
         expect(code, `${edition} byline`).not.toContain(brand.wordmarkByline);
       }
     }
+  });
+
+  describe('wireframe artboards mirror the generated composition (#884)', () => {
+    const artboard = (id: string): string => {
+      const match = wireframesHtml.match(
+        new RegExp(`<div class="unit" id="${id}">([\\s\\S]*?)(?=\\n\\s*<p class="ogmeta">)`),
+      );
+      if (!match) throw new Error(`missing wireframe artboard ${id}`);
+      return match[1];
+    };
+
+    const boardPattern = (markup: string): string[] => {
+      const cells = [...markup.matchAll(/<div class="ogsq([^"]*)">[^<]*<\/div>/g)].map((match) => {
+        const classes = match[1].trim().split(/\s+/);
+        if (classes.includes('freec')) return 'F';
+        return classes.includes('on') ? 'x' : '.';
+      });
+      expect(cells).toHaveLength(25);
+      return Array.from({ length: 5 }, (_, row) => cells.slice(row * 5, row * 5 + 5).join(''));
+    };
+
+    it('draws the GCB eyebrow, lockup, rule, caption, and renderer pattern', () => {
+      const gcb = artboard('fx-og-gcb');
+      expect(gcb).toContain('<div class="ogeyebrow"><span>🚢</span> ONE SAILING AT A TIME</div>');
+      expect(gcb).toContain('<div class="ogby">BY FIVE ACROSS</div>');
+      expect(gcb).toContain('<div class="ogrule"></div>');
+      expect(gcb).toContain('<div class="ogcaption">BINGO</div>');
+      expect(boardPattern(gcb)).toEqual(['x..x.', '.x..x', 'xxFxx', '.x...', 'x..x.']);
+    });
+
+    it('draws Vacay as a framed passport with its stamp and renderer pattern', () => {
+      const vacay = artboard('fx-og-vacay');
+      expect(vacay).toContain('class="ogc ogc-vacay"');
+      expect(vacay).toContain('<div class="ogeyebrow"><span>🧳</span> ONE TRIP AT A TIME</div>');
+      expect(vacay).toContain('<div class="ogstamp"><span>🧳</span>TAKE THE<br>DETOUR</div>');
+      expect(vacay).toContain('<div class="ogcaption">BINGO</div>');
+      expect(boardPattern(vacay)).toEqual(['.x..x', 'x..x.', 'xxFxx', '..x..', 'x...x']);
+    });
+
+    it('draws Five Across as a one-line set wordmark with only the middle row marked', () => {
+      const fiveAcross = artboard('fx-og-fa');
+      expect(fiveAcross).toContain('<div class="ogeyebrow ogeyebrow-glyph"><span>✳</span> THE PLATFORM</div>');
+      expect(fiveAcross).toContain('<div class="ogmark ogmark-set"><span>FIVE</span> <b>ACROSS</b></div>');
+      expect(fiveAcross).toContain('<div class="ogsq freec">✳</div>');
+      expect(fiveAcross).toContain('<div class="ogcaption">BINGO</div>');
+      expect(fiveAcross).not.toContain('Packed room, no bars?');
+      expect(boardPattern(fiveAcross)).toEqual(['.....', '.....', 'xxFxx', '.....', '.....']);
+    });
   });
 });
 

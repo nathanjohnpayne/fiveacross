@@ -679,7 +679,7 @@
   .bcard .v em{color:var(--dim);font-style:normal}
   .bcard .mark{font-size:15px}
   .bcard .rule{height:1px;background:var(--border);margin:1px 0}
-  /* OG asset embeds (§11) — the rendered 2400×1260 PNGs, shown at doc scale */
+  /* OG asset embeds (§11) — the rendered 1200×630 PNGs, shown at doc scale */
   .ogimg{width:393px;height:auto;display:block;border-radius:12px;border:2px solid #2a2a2e}
 
 
@@ -741,29 +741,73 @@
   .btable .inv{color:#77777f}
 
   /* ---------- share + OG artboards (share stage) ---------- */
-  /* OG / link-unfurl artboard (issue #587 wording, per-Edition artwork ticket):
-     drawn at 1/8 scale — 300×158 here represents the shipped 2400×1260 PNG.
-     Landscape, not the 600×750 share card: the unfurl is a preview strip in a
-     chat row, so the wordmark and one marked board are the whole picture.
-     Same theme tokens as .shc, so the palette proof carries across. */
+  /* OG / link-unfurl artboards, redrawn from render-og-editions.mjs (#884).
+     300×158 is exactly one quarter of the shipped 1200×630 canvas. These are
+     vector annotations of the generated composition, not alternate artwork:
+     the geometry, pattern, ornaments and copy hierarchy all follow ART. */
   .ogc{width:300px;height:158px;border-radius:12px;overflow:hidden;box-sizing:border-box;
-    display:flex;align-items:stretch;gap:14px;padding:15px 17px;color:var(--ink);
-    border:2px solid var(--primary);background:
-    radial-gradient(85% 120% at 6% -22%,color-mix(in srgb,var(--primary) 40%,transparent),transparent 62%),
-    radial-gradient(70% 110% at 108% 118%,color-mix(in srgb,var(--secondary) 26%,transparent),transparent 58%),
-    var(--bg)}
-  .ogc .ogl{display:flex;flex-direction:column;gap:5px;flex:1;min-width:0}
-  .ogc .ogmark{font-family:'Bebas Neue','Arial Narrow',sans-serif;font-size:29px;line-height:.86;
-    letter-spacing:.02em;color:var(--ink);text-shadow:0 0 14px var(--primary)}
-  .ogc .ogby{font-size:6.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
-  .ogc .ogdesc{font-size:8.5px;line-height:1.4;color:var(--ink);opacity:.92}
-  .ogc .ogdom{margin-top:auto;font-size:7px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
-  .ogc .oggrid{display:grid;grid-template-columns:repeat(5,1fr);gap:3px;width:104px;
-    align-content:center;flex:0 0 auto}
-  .ogc .ogsq{aspect-ratio:1/1;border-radius:3px;border:1px solid var(--border);
-    background:color-mix(in srgb,var(--ink) 8%,var(--cell))}
+    position:relative;color:var(--ink);font-family:'Helvetica Neue',Arial,sans-serif}
+  .ogc-gcb{--ink:#f6ecff;--dim:#b9a9d6;--primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;
+    --og-cell:#181424;--og-bar:#36283c;--og-onbar:rgba(20,10,30,.45);background:
+    radial-gradient(205px 155px at 4% 2%,rgba(255,45,149,.22),transparent 66%),
+    radial-gradient(195px 150px at 100% 100%,rgba(0,230,255,.18),transparent 64%),#07060d}
+  .ogc-vacay{--ink:#e6eef2;--dim:#6b7d87;--primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;
+    --og-cell:#1b2a3a;--og-bar:#2e4759;--og-onbar:rgba(10,25,35,.40);background:
+    radial-gradient(205px 155px at 96% 6%,rgba(46,127,168,.20),transparent 66%),
+    radial-gradient(190px 150px at 4% 96%,rgba(143,208,195,.13),transparent 64%),#0a141c}
+  .ogc-vacay::before{content:"";position:absolute;inset:8.5px;border:1px dashed rgba(150,196,208,.36);border-radius:2px}
+  .ogc-fa{--ink:#f2f4f8;--dim:#98a1b0;--primary:#3f66f0;--secondary:#2c4bd8;--accent:#f5c451;
+    --og-cell:#191c25;--og-bar:#2b303c;--og-onbar:rgba(255,255,255,.55);background:
+    repeating-linear-gradient(90deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
+    repeating-linear-gradient(0deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
+    radial-gradient(225px 160px at 78% 30%,rgba(63,102,240,.10),transparent 70%),#0f1116}
+  .ogc .ogl{position:absolute;left:19.5px;top:21px;display:flex;flex-direction:column;align-items:flex-start}
+  .ogc-vacay .ogl{left:20.5px;top:27.5px}
+  .ogc-fa .ogl{left:20px;top:44.25px}
+  .ogc .ogeyebrow{font-size:4.25px;font-weight:700;letter-spacing:.20em;color:var(--dim);white-space:nowrap}
+  .ogc .ogeyebrow span{font-size:6px;letter-spacing:0;margin-right:3.5px}
+  .ogc .ogeyebrow-glyph span{font-size:5.25px;color:var(--primary)}
+  .ogc .ogmark{margin-top:5.5px;font-family:'Anton','Bebas Neue','Arial Narrow',sans-serif;font-size:23.25px;
+    line-height:1.032;letter-spacing:.05em;color:var(--ink);text-shadow:0 0 10.5px rgba(255,45,149,.28)}
+  .ogc-vacay .ogmark{margin-top:3px;font-size:22.5px;line-height:1.044;text-shadow:none}
+  .ogc .ogmark b{font-weight:400;background:linear-gradient(95deg,var(--primary),var(--secondary));
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .ogc .ogmark-set{margin-top:6px;font-family:'Helvetica Neue',Arial,sans-serif;font-size:17.75px;
+    line-height:1;letter-spacing:.14em;text-shadow:none;white-space:nowrap}
+  .ogc .ogmark-set span{font-weight:200}
+  .ogc .ogmark-set b{font-weight:700;background:none;-webkit-text-fill-color:var(--ink)}
+  .ogc .ogby{margin-top:6px;font-size:4px;font-weight:600;letter-spacing:.185em;text-transform:uppercase;color:var(--dim)}
+  .ogc-vacay .ogby{margin-top:4.75px}
+  .ogc .ogrule{width:26px;height:1px;margin-top:7.5px;border-radius:1px;background:linear-gradient(90deg,var(--primary),var(--secondary))}
+  .ogc-vacay .ogrule{width:25px;margin-top:7px}
+  .ogc-fa .ogrule{width:18.25px;margin-top:7.75px;background:var(--primary)}
+  .ogc .ogdesc{margin-top:6px;font-size:6.75px;line-height:1.34;color:var(--ink);white-space:nowrap}
+  .ogc-vacay .ogdesc{font-size:6.5px}
+  .ogc-fa .ogdesc{margin-top:6.75px}
+  .ogc .ogdom{margin-top:8.5px;font-size:4px;font-weight:700;letter-spacing:.215em;text-transform:uppercase;color:var(--dim)}
+  .ogc-vacay .ogdom{margin-top:8.25px}
+  .ogc-fa .ogdom{margin-top:10.25px}
+  .ogc .ogdom::before{content:"";display:inline-block;width:2px;height:2px;border-radius:50%;background:var(--accent);margin-right:3px;vertical-align:middle}
+  .ogc .ogboardwrap{position:absolute;left:180.5px;top:23.5px;width:99.75px;text-align:center}
+  .ogc-vacay .ogboardwrap{left:192.5px;top:37.5px;width:87.5px;transform:rotate(-2deg)}
+  .ogc-fa .ogboardwrap{left:177px;top:22.5px;width:103px}
+  .ogc .oggrid{display:grid;grid-template-columns:repeat(5,1fr);gap:2.25px;padding:3.75px;
+    border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:6.5px}
+  .ogc-vacay .oggrid{gap:2.5px;padding:3.75px;border-color:rgba(143,208,195,.16);background:rgba(9,22,32,.82);border-radius:5.5px}
+  .ogc-fa .oggrid{gap:2.5px;padding:4px;border-color:rgba(255,255,255,.10);border-radius:5px}
+  .ogc .ogsq{aspect-ratio:1/1;border-radius:3px;border:1px solid rgba(255,255,255,.07);background:var(--og-cell);position:relative}
+  .ogc .ogsq::before,.ogc .ogsq::after{content:"";position:absolute;left:20%;height:1.5px;border-radius:1px;background:var(--og-bar)}
+  .ogc .ogsq::before{top:38%;width:58%}.ogc .ogsq::after{top:57%;width:43%}
   .ogc .ogsq.on{background:linear-gradient(145deg,var(--primary),var(--secondary));border-color:transparent}
-  .ogc .ogsq.freec{background:color-mix(in srgb,var(--accent) 32%,var(--cell));border-color:var(--accent)}
+  .ogc .ogsq.on::before,.ogc .ogsq.on::after{background:var(--og-onbar)}
+  .ogc .ogsq.freec{display:flex;align-items:center;justify-content:center;background:var(--accent);border-color:var(--accent);
+    color:#171410;font-family:'Oswald','Arial Narrow',sans-serif;font-size:5.25px;font-weight:700;letter-spacing:.04em}
+  .ogc .ogsq.freec::before,.ogc .ogsq.freec::after{display:none}
+  .ogc .ogcaption{margin-top:5.5px;font-size:4.25px;font-weight:700;letter-spacing:.34em;color:var(--accent)}
+  .ogc .ogstamp{position:absolute;z-index:2;left:257px;top:14px;width:26.5px;height:31.5px;border:1px dashed var(--accent);
+    border-radius:2px;background:rgba(10,20,28,.70);display:flex;flex-direction:column;align-items:center;justify-content:center;
+    color:var(--accent);font-family:'Oswald','Arial Narrow',sans-serif;font-size:3px;font-weight:700;line-height:1.4;letter-spacing:.12em;text-align:center}
+  .ogc .ogstamp span{font-family:initial;font-size:9px;line-height:1;margin-bottom:2px}
   /* Meta-tag readout under each OG artboard — the wording #587 injects. */
   .ogmeta{margin:8px 4px 0;font-size:11px;line-height:1.5;color:#77777f;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -883,7 +927,7 @@
 <p class="sub" style="border-left:3px solid var(--accent);padding-left:10px"><b>Known deltas—where this document is deliberately ahead of the app.</b> Every one is tracked, so a reviewer can tell a <i>decision</i> from a <i>mistake</i> without re-deriving it. If you find a divergence that is not on this list, it is a bug in the document, not a proposal.
 <br>· <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/882">#882</a> — <code>fiveacross-slate</code>, the platform palette these frames wear on Edition-less surfaces. Not a registered <code>ThemeId</code>; the shipped wardrobe is ✨ Marquee / 🎊 Confetti Hour / 🌙 Afterglow (#617).
 <br>· <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/883">#883</a> — DECIDED (won't-adopt, signed off): the Admin console stays Edition-branded, mounted in the Edition shell at <code>/more/admin</code> and scoped to one Event. <a href="#sec-fa-admin">sec-fa-admin</a> keeps drawing the declined Five Across <i>platform</i>-surface alternative for the record, not as a live proposal; <code>lexicon.placePlural</code> stays unconsumed either way.
-<br>· <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/884">#884</a> — the OG artboards are pre-#609 schematics; <code>scripts/og/render-og-editions.mjs</code> is the source of truth for the shipped composition.
+<br>· <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/884">#884</a> — resolved: the OG artboards now annotate the composition and patterns in <code>scripts/og/render-og-editions.mjs</code>; the generated PNGs remain pixel truth.
 <br>· <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/885">#885</a> — DECIDED (won't-adopt, signed off): "— no theme" does not become a first-class Day option. <code>DayDef.theme</code> stays a required registered <code>ThemeId</code>; an occasion-neutral Event picks from its Edition's registered Themes instead.
 <br>· <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/785">#785</a> / <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/786">#786</a> / <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/545">#545</a> — the organizer-setup wizard, exploratory in full and marked so in its own section header.</p>
 
@@ -3804,7 +3848,7 @@
 </div>
 
 <h2 id="sec-og">Link unfurls—the rendered OG assets</h2>
-<p class="sub">The surface nobody taps and everybody sees. Crawlers do not run JS, so an unfurl cannot be resolved from <code>hostnames/{host}</code> at request time—and the fix this section once documented as a live bug has since shipped in three pieces: #587 bakes each Edition's meta block into <code>index.html</code> at build time, #607 moved all three share surfaces from <code>canonicalOrigin()</code> to <code>shareOrigin()</code> so a copied link carries the Edition's own host, and the per-Edition artwork landed as the #609 composition (via #642) with #697 adding its generator (<code>scripts/og/render-og-editions.mjs</code>). Below are the <b>rendered 1200×630 PNGs</b> committed at <code>plans/og-images/</code>—byte-identical mirrors of the shipped <code>public/og-*.png</code>, both written by one generator run—embedded at doc scale, followed by the wireframe artboards the composition was designed from. Residual gap: a hostname-resolved multi-Event bundle keeps the default Edition's baked block until the #546 edge Worker rewrites it per hostname.</p>
+<p class="sub">The surface nobody taps and everybody sees. Crawlers do not run JS, so an unfurl cannot be resolved from <code>hostnames/{host}</code> at request time—and the fix this section once documented as a live bug has since shipped in three pieces: #587 bakes each Edition's meta block into <code>index.html</code> at build time, #607 moved all three share surfaces from <code>canonicalOrigin()</code> to <code>shareOrigin()</code> so a copied link carries the Edition's own host, and the per-Edition artwork landed as the #609 composition (via #642) with #697 adding its generator (<code>scripts/og/render-og-editions.mjs</code>). Below are the <b>rendered 1200×630 PNGs</b> committed at <code>plans/og-images/</code>—byte-identical mirrors of the shipped <code>public/og-*.png</code>, both written by one generator run—embedded at doc scale, followed by annotated vector artboards of the same generated composition. Residual gap: a hostname-resolved multi-Event bundle keeps the default Edition's baked block until the #546 edge Worker rewrites it per hostname.</p>
 <div class="frames">
 
   <div class="unit" id="fx-og-png-gcb">
@@ -3828,46 +3872,57 @@
 </div>
 
 <h3 id="sec-og-wireframes">The artboards</h3>
-<p class="sub"><b>5 · OG / link-unfurl image</b>—the surface nobody taps and everybody sees. 1200×630, drawn here at 1/4. Crawlers do not run JS, so this cannot be resolved from <code>hostnames/{host}</code> at runtime: single-Event builds bake it via <code>VITE_EDITION</code> (#587—the meta wording below is what its build-time tokens inject, quoted from the lexicon), multi-Event bundles wait on the #546 edge Worker. <b>These three artboards are the pre-#609 schematics the shipped artwork was designed from (tracked in #884)</b>—kept for the meta blocks and the register rationale, not as pixel truth. The shipped composition (rendered by <code>scripts/og/render-og-editions.mjs</code>, the source of truth) adds what the schematics lack: an eyebrow line over each wordmark (<code>ONE SAILING AT A TIME</code> / <code>ONE TRIP AT A TIME</code> / <code>THE PLATFORM</code>), Vacay's dashed passport frame with the <code>TAKE THE DETOUR</code> stamp, and Five Across's board marked only across the middle row with the ✳ share mark in the free square. Where a schematic and the render disagree, the render wins.</p>
+<p class="sub"><b>5 · OG / link-unfurl image</b>—the surface nobody taps and everybody sees. 1200×630, drawn here at 1/4. Crawlers do not run JS, so this cannot be resolved from <code>hostnames/{host}</code> at runtime: single-Event builds bake it via <code>VITE_EDITION</code> (#587—the meta wording below is what its build-time tokens inject, quoted from the lexicon), multi-Event bundles wait on the #546 edge Worker. These annotated vector artboards follow the shipped #609 composition as rebuilt in <code>scripts/og/render-og-editions.mjs</code>: the eyebrow and share mark, wordmark treatment, endorsement, rule, <code>appDescription</code>, brand domain, board pattern, BINGO caption, and Edition-specific ornament all match the generator's <code>ART</code> table. The committed PNGs above remain pixel truth; these frames explain their composition.</p>
 <div class="frames">
 
   <div class="unit" id="fx-og-gcb">
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
-    <div class="ogc" data-theme="neon-playground">
+    <div class="ogc ogc-gcb" data-theme="neon-playground">
       <div class="ogl">
-        <div class="ogmark">GAY CRUISE<br>BINGO</div>
-        <div class="ogby">by Five Across</div>
+        <div class="ogeyebrow"><span>🚢</span> ONE SAILING AT A TIME</div>
+        <div class="ogmark">GAY CRUISE<br><b>BINGO</b></div>
+        <div class="ogby">BY FIVE ACROSS</div>
+        <div class="ogrule"></div>
         <div class="ogdesc">Live multiplayer bingo for the high seas.</div>
         <div class="ogdom">gaycruisebingo.com</div>
       </div>
-      <div class="oggrid">
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div>
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq freec"></div><div class="ogsq on"></div><div class="ogsq"></div>
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div>
+      <div class="ogboardwrap">
+        <div class="oggrid">
+          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
+          <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
+          <div class="ogsq on"></div><div class="ogsq on"></div><div class="ogsq freec">FREE</div><div class="ogsq on"></div><div class="ogsq on"></div>
+          <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
+          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
+        </div>
+        <div class="ogcaption">BINGO</div>
       </div>
     </div>
     <p class="ogmeta"><b>og:site_name</b> Gay Cruise Bingo<br><b>og:title</b> Gay Cruise Bingo<br><b>og:description</b> Sign in, get your card, mark it if you see it. <i>(Edition-invariant—the one untokenised tag, identical on all three; #587)</i><br><b>meta description</b> Live multiplayer bingo for the high seas. Trieste to Barcelona, July 2026.<br><b>og:image:alt</b> Gay Cruise Bingo—a marked-up live multiplayer bingo card for the July 2026 sailing, Trieste to Barcelona</p>
-    <p class="cap"><b>The flagship unfurl—endorsed</b>Bebas wordmark stacked over the description line, the marked board as the picture, the default <code>neon-playground</code> palette. The drawn line is <code>appDescription</code> ("Live multiplayer bingo for the high seas.")—the artwork's own copy—while the <code>og:description</code> META tag stays the Edition-invariant tagline; the two are different strings on purpose. #688 gives GCB the <code>by Five Across</code> line here too, in exactly the slot <a href="#fx-og-vacay"><code>fx-og-vacay</code></a> uses—wordmark, endorsement, rule, description—so the two Editions unfurl as one family. <b>This artboard is a pre-#609 schematic; the shipped asset is generated (tracked in #884).</b> <code>public/og-gcb.png</code> (mirrored byte-identical at <code>plans/og-images/gay-cruise-bingo-og.png</code>) is rendered from <code>scripts/og/og-edition.html</code> by <code>scripts/og/render-og-editions.mjs</code>, which reads its wordmark, endorsement line, description and share mark straight from <code>src/editions.ts</code>—so a copy change is a brand-table edit plus a re-render, not a pixel edit. The runbook is <code>docs/app/og-artwork.md</code>. Before #697 there was no generator and this caption told you to expect one; that is what changed. All three Editions' artwork ships: this one from the legacy project's always-healthy <code>gaycruisebingo.web.app</code> host (the apex TLS-resets for link crawlers—#340), Vacay's and Five Across's from <code>fiveacross.web.app</code> (ADR 0008).</p>
+    <p class="cap"><b>The flagship unfurl—endorsed</b>Anton wordmark stacked over the description line, the marked board as the picture, the default <code>neon-playground</code> palette. The drawn line is <code>appDescription</code> ("Live multiplayer bingo for the high seas.")—the artwork's own copy—while the <code>og:description</code> META tag stays the Edition-invariant tagline; the two are different strings on purpose. #688 gives GCB the <code>BY FIVE ACROSS</code> line here too, in exactly the slot <a href="#fx-og-vacay"><code>fx-og-vacay</code></a> uses—eyebrow, wordmark, endorsement, rule, description—so the two Editions unfurl as one family. <code>public/og-gcb.png</code> (mirrored byte-identical at <code>plans/og-images/gay-cruise-bingo-og.png</code>) is rendered from <code>scripts/og/og-edition.html</code> by <code>scripts/og/render-og-editions.mjs</code>, which reads its wordmark, endorsement line, description and share mark straight from <code>src/editions.ts</code>—so a copy change is a brand-table edit plus a re-render, not a pixel edit. The runbook is <code>docs/app/og-artwork.md</code>. All three Editions' artwork ships: this one from the legacy project's always-healthy <code>gaycruisebingo.web.app</code> host (the apex TLS-resets for link crawlers—#340), Vacay's and Five Across's from <code>fiveacross.web.app</code> (ADR 0008).</p>
   </div>
 
   <div class="unit" id="fx-og-vacay">
     <span class="brand-chip brand-vacay">🧳 Vacay Bingo</span>
-    <div class="ogc" data-theme="side-quests">
+    <div class="ogc ogc-vacay" data-theme="side-quests">
       <div class="ogl">
-        <div class="ogmark">VACAY<br>BINGO</div>
-        <div class="ogby">by Five Across</div>
+        <div class="ogeyebrow"><span>🧳</span> ONE TRIP AT A TIME</div>
+        <div class="ogmark">VACAY<br><b>BINGO</b></div>
+        <div class="ogby">BY FIVE ACROSS</div>
+        <div class="ogrule"></div>
         <div class="ogdesc">Live multiplayer bingo for the trip.</div>
         <div class="ogdom">vacaybingo.com</div>
       </div>
-      <div class="oggrid">
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div>
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq freec"></div><div class="ogsq"></div><div class="ogsq on"></div>
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
+      <div class="ogboardwrap">
+        <div class="oggrid">
+          <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
+          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
+          <div class="ogsq on"></div><div class="ogsq on"></div><div class="ogsq freec">FREE</div><div class="ogsq on"></div><div class="ogsq on"></div>
+          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div>
+          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
+        </div>
+        <div class="ogcaption">BINGO</div>
       </div>
+      <div class="ogstamp"><span>🧳</span>TAKE THE<br>DETOUR</div>
     </div>
     <p class="ogmeta"><b>og:site_name</b> Vacay Bingo<br><b>og:title</b> Vacay Bingo<br><b>og:description</b> Sign in, get your card, mark it if you see it. <i>(Edition-invariant—the one untokenised tag, identical on all three; #587)</i><br><b>meta description</b> Live multiplayer bingo for the trip.<br><b>og:image:alt</b> Vacay Bingo—a marked-up live multiplayer bingo card for the trip</p>
     <p class="cap"><b>The endorsed unfurl—one identity, plus its parent</b>The <code>BY FIVE ACROSS</code> small-caps line, in the slot <a href="#fx-og-gcb"><code>fx-og-gcb</code></a> now mirrors since #688: the one-identity rule says a Vacay player never sees two competing brands, and the endorsement is a signature, not a second lockup. Only <a href="#fx-og-fa"><code>fx-og-fa</code></a> goes without, being the platform itself. Both Editions' rasters carry it, and both come off the same generator (<code>scripts/og/render-og-editions.mjs</code>). Pacific blue and sea-glass; deliberately non-tropical. The <code>og:url</code> is the one tag still Event-scoped (<code>bodega-bay.vacaybingo.com</code>) until the #546 Worker owns it per hostname—the artwork itself names the brand's apex, <code>vacaybingo.com</code>.</p>
@@ -3875,22 +3930,27 @@
 
   <div class="unit" id="fx-og-fa">
     <span class="brand-chip brand-fa">✳ Five Across</span>
-    <div class="ogc" data-theme="fiveacross-slate">
+    <div class="ogc ogc-fa" data-theme="fiveacross-slate">
       <div class="ogl">
-        <div class="title fa-title" style="font-size:23px;line-height:1.15;white-space:normal">FIVE<br><b>ACROSS</b></div>
-        <div class="ogdesc" style="margin-top:3px">Live multiplayer bingo for your group.<br>Packed room, no bars? Your card keeps working offline.</div>
-        <div class="ogdom">fiveacross.app ✳️</div>
+        <div class="ogeyebrow ogeyebrow-glyph"><span>✳</span> THE PLATFORM</div>
+        <div class="ogmark ogmark-set"><span>FIVE</span> <b>ACROSS</b></div>
+        <div class="ogrule"></div>
+        <div class="ogdesc">Live multiplayer bingo for your group.</div>
+        <div class="ogdom">fiveacross.app</div>
       </div>
-      <div class="oggrid">
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
-        <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq freec"></div><div class="ogsq on"></div><div class="ogsq"></div>
-        <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div>
-        <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
+      <div class="ogboardwrap">
+        <div class="oggrid">
+          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
+          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
+          <div class="ogsq on"></div><div class="ogsq on"></div><div class="ogsq freec">✳</div><div class="ogsq on"></div><div class="ogsq on"></div>
+          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
+          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
+        </div>
+        <div class="ogcaption">BINGO</div>
       </div>
     </div>
     <p class="ogmeta"><b>og:site_name</b> Five Across<br><b>og:title</b> Five Across<br><b>og:description</b> Sign in, get your card, mark it if you see it. <i>(Edition-invariant—the one untokenised tag, identical on all three; #587)</i><br><b>meta description</b> Live multiplayer bingo for your group.<br><b>og:image:alt</b> Five Across—a marked-up live multiplayer bingo card</p>
-    <p class="cap"><b>Set type, not a party skin</b>The platform wordmark is the <code>.title</code> convention with the glow removed and tracking opened to <code>.12em</code>—GCB glows, Vacay is a postcard, Five Across is set type, and the restraint is the differentiation. The share mark ✳️ (U+2733) sits with the domain, never stacked with other decorative emoji. The schematic's second line pitched offline-first on the unfurl—for the general Edition it is a headline capability, not a footnote—but the shipped render sets <code>appDescription</code> alone ("Live multiplayer bingo for your group."), and the offline story lives in the app's <code>offlineNote</code> instead.</p>
+    <p class="cap"><b>Set type, not a party skin</b>The platform wordmark is one line, with glow removed and tracking opened to <code>.14em</code>—GCB glows, Vacay is a postcard, Five Across is set type, and the restraint is the differentiation. The text-presentation share mark ✳ (U+2733, no variation selector) appears in the eyebrow and free square; the domain line uses only the brand's address. The description is <code>appDescription</code> alone ("Live multiplayer bingo for your group."), while the offline story lives in the app's <code>offlineNote</code>.</p>
   </div>
 
 </div>
@@ -4031,7 +4091,7 @@
 </table>
 
 <h2 id="sec-setup">Five Across · New event setup—the organizer wizard <span class="brand-chip" style="vertical-align:middle">🧪 Exploratory</span></h2>
-<p class="sub" style="border-left:3px solid var(--dim);padding-left:10px"><b>Status: exploratory, not a parity target.</b> Except for the explicitly proposed admin-console comparison frames and pre-#609 OG artboards, the rest of this document describes surfaces that ship, and downstream tickets implement against those frames. <b>This one does not.</b> Self-service Event creation is blocked on four pieces of platform work that do not exist (below), so these five frames are a design sketch of a flow nobody can build yet—read them for shape and intent, not as a specification to match pixel-for-pixel. They will drift as the platform moves, and that is expected. <b>The durable output of designing this is <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/785">#785</a></b>, which extracts the hard contract facts any implementation must satisfy—the 24-minimum being per pool rather than per Event, <code>spicy</code> being main-pool only, a Day not being a calendar date, and the rest. Since these frames were drawn, that list has started becoming code: <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/786">#786</a>'s first ticket landed <a href="../specs/event-setup-wizard.md"><code>specs/event-setup-wizard.md</code></a> (accepted) plus the draft model (<code>EventDraft</code>, <code>src/data/eventDraft.ts</code>), the occasion matrix (<code>src/data/occasions.ts</code>—which mirrors Step 1's six rows verbatim, so their copy is now load-bearing), and the launch-gate predicates (<code>src/data/draftValidation.ts</code>). <b>Where these frames and that spec disagree, the spec wins</b>—it records each deviation instead of leaving it for a reader to spot. If you are about to build this, start with #785 and the spec; this section is the picture, they are the contract.</p>
+<p class="sub" style="border-left:3px solid var(--dim);padding-left:10px"><b>Status: exploratory, not a parity target.</b> Except for the explicitly proposed admin-console comparison frames, the rest of this document describes surfaces that ship, and downstream tickets implement against those frames. <b>This one does not.</b> Self-service Event creation is blocked on four pieces of platform work that do not exist (below), so these five frames are a design sketch of a flow nobody can build yet—read them for shape and intent, not as a specification to match pixel-for-pixel. They will drift as the platform moves, and that is expected. <b>The durable output of designing this is <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/785">#785</a></b>, which extracts the hard contract facts any implementation must satisfy—the 24-minimum being per pool rather than per Event, <code>spicy</code> being main-pool only, a Day not being a calendar date, and the rest. Since these frames were drawn, that list has started becoming code: <a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/786">#786</a>'s first ticket landed <a href="../specs/event-setup-wizard.md"><code>specs/event-setup-wizard.md</code></a> (accepted) plus the draft model (<code>EventDraft</code>, <code>src/data/eventDraft.ts</code>), the occasion matrix (<code>src/data/occasions.ts</code>—which mirrors Step 1's six rows verbatim, so their copy is now load-bearing), and the launch-gate predicates (<code>src/data/draftValidation.ts</code>). <b>Where these frames and that spec disagree, the spec wins</b>—it records each deviation instead of leaving it for a reader to spot. If you are about to build this, start with #785 and the spec; this section is the picture, they are the contract.</p>
 <p class="sub">Everything required to create an event from scratch: occasion, name, dates, URL, squares, look, and invite—in five guided steps with a live preview, targeting the PRD's under-15-minutes goal. The wizard wears the Five Across host brand (ink, cream, grids, crisp type); the event under construction previews in its own edition skin, so the one-identity rule holds for organizers too: you build with Five Across, your players see Vacay Bingo (or the occasion's edition). Occasion selection picks the edition, starter pack, and defaults; the slug claim itself needs no DNS record, riding the wildcard namespaces with <code>&lt;slug&gt;.fiveacross.app</code> as the canonical address and—<b>only when the occasion's Edition owns a distinct namespace</b>—that Edition namespace (e.g. <code>vacaybingo.com</code>) as an alternate serving host. An Edition <i>may</i> own a second namespace; it does not have to, and for a Five Across-Edition occasion (wedding, conference, custom) <code>fiveacross.app</code> is already canonical and there is no alternate to claim. <b>Self-service is blocked on platform work that does not exist yet. The list below is what is known, not a closed set</b>—each round of review against the code has turned up another, so treat it as open and re-check before scheduling this. <b>(1) Sign-in is not wildcard-capable.</b> A hostname must be registered individually in Firebase Auth's authorized domains <i>and</i> as <code>https://&lt;host&gt;/__/auth/handler</code> on the Google OAuth web client—neither accepts a pattern—so a freshly claimed slug lands on an origin where <code>isSignInReachableOnHost</code> is false and the app renders <code>auth-unconfigured</code>. Writing routing documents in a transaction does not change that; only <a href="../docs/adr/0010-centralised-auth-origin-with-handoff.md">ADR 0010</a>'s centralised auth origin makes it wildcard-safe (today's handoff covers exactly one host). Until then, provisioning includes exact-host registration plus a redeploy, which is developer work. <b>(2) There is no admission boundary.</b> Current rules give path scoping, not membership isolation, so any signed-in account reaching the hostname can enter. A wizard whose final step hands out a QR would create ostensibly group-scoped Events that are not scoped at all. <b>(3) Share and install identity are baked per bundle, not per host.</b> <code>index.html</code> stamps <code>og:title</code> / <code>og:image</code> from the build-time Edition and the PWA manifest takes <code>brand.appName</code> the same way, so until the per-host edge work covers them a new Event's link unfurls with another Event's name and artwork, and a cross-Edition install inherits the wrong app name. Crawlers run no JavaScript, so runtime repair cannot reach the unfurl—this one outlives fixing auth and admission. <b>(4) Nothing serves a new hostname yet.</b> Today's Five Across deployment is a set of <i>exact</i> Firebase Hosting custom domains, one Event each; the shared multi-Event wildcard-router build is still future work (<a href="https://github.com/nathanjohnpayne/gaycruisebingo/issues/545">#545</a>, see <code>docs/app/deploy-targets.md</code>). Writing the two Firestore hostname documents maps an address to an Event—it does not make that address route, terminate TLS, or serve the bundle. So "no DNS, no certificates, no waiting" is the end state the router buys, not today's. These are prerequisites, not caveats; Step 5 states them on the frame. Two model rules the frames hold to throughout: the creator is granted <b>Admin</b> (Host stays display metadata), and a Prompt's <b>pool</b> (main / easy / closing) is independent of its <b>spicy</b> flag, which is what the server-derived 18+ posture reads.</p>
 <div class="frames">
 
