@@ -1246,7 +1246,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-16e.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-16e.log" \
-  bash -c "cd '$REPO16E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions --except functions:default" \
+  bash -c "cd '$REPO16E' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --except functions:default" \
   >"$OUT16E" 2>"$ERR16E"
 RC16E=$?
 set -e
@@ -1283,7 +1283,7 @@ set +e
 PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-16f.log" \
 GCLOUD_LOG="$WORKDIR/gcloud-calls-16f.log" \
-  bash -c "cd '$REPO16F' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --only functions --except functions:someUnrelatedFunction" \
+  bash -c "cd '$REPO16F' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --except functions:someUnrelatedFunction" \
   >"$OUT16F" 2>"$ERR16F"
 RC16F=$?
 set -e
@@ -1434,15 +1434,20 @@ fi
 # firebase-tools 15.27.0 documents -m/--message, -p/--public, --only, and
 # --except as the complete split value-taking set. There is deliberately no
 # second named-target scanner; it forwards these arguments here unchanged. A
-# final --only hosting makes every case a real client deploy, so the exact-SA
-# readiness update proves deploy.sh did not misclassify the earlier option
-# value as Firebase's standalone --dry-run flag.
+# final --only hosting makes every case except --except a real client deploy;
+# --except remains a valid full deploy by omitting that mutually-exclusive
+# flag. The exact-SA readiness update proves deploy.sh did not misclassify the
+# earlier option value as Firebase's standalone --dry-run flag.
 # ---------------------------------------------------------------------------
 for value_option_case in \
   "18a:-m" "18b:--message" "18c:-p" "18d:--public" \
   "18e:--only" "18f:--except"; do
   case_id="${value_option_case%%:*}"
   value_option="${value_option_case#*:}"
+  trailing_scope="--only hosting"
+  if [[ "$value_option" == "--except" ]]; then
+    trailing_scope=""
+  fi
   REPO_VALUE="$WORKDIR/case${case_id}-firebase-value"
   init_fixture_repo "$REPO_VALUE"
   OUT_VALUE="$WORKDIR/case${case_id}.out"
@@ -1459,7 +1464,7 @@ for value_option_case in \
   GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
   AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
   DEPLOY_TARGET_PROJECT=fiveacross \
-    bash -c "cd '$REPO_VALUE' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo '$value_option' --dry-run --only hosting" \
+    bash -c "cd '$REPO_VALUE' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo '$value_option' --dry-run $trailing_scope" \
     >"$OUT_VALUE" 2>"$ERR_VALUE"
   RC_VALUE=$?
   set -e
@@ -1480,7 +1485,7 @@ for value_option_case in \
     fail "firebase-value ($case_id, $value_option): deploy.sh reported a dry run for an option value. stdout was:"
     cat "$OUT_VALUE" >&2
   else
-    pass "firebase-value ($case_id, $value_option): a value named --dry-run remains a real Hosting deploy and runs pre-build readiness (rc=$RC_VALUE)."
+    pass "firebase-value ($case_id, $value_option): a value named --dry-run remains a real deploy and runs pre-build readiness (rc=$RC_VALUE)."
   fi
 done
 
@@ -2162,7 +2167,7 @@ for qualified_case in \
 done
 
 # ---------------------------------------------------------------------------
-# Cases 23a-23z (#852): named Five Across readiness is owned by this canonical
+# Cases 23a-24f (#852): named Five Across readiness is owned by this canonical
 # deploy boundary, after its one argument/scope parse and source guard but
 # before BUILD_CMD or op-firebase-deploy. It runs only when Hosting or an auth-
 # handoff Function may be released. These cases execute deploy.sh itself with
@@ -2229,12 +2234,62 @@ run_readiness_scope_case 23m skipped --only storage
 run_readiness_scope_case 23n skipped --only functions:emailUnsubscribe
 run_readiness_scope_case 23o skipped --only functions:default:submitBugReport
 run_readiness_scope_case 23p skipped --except hosting,functions
-run_readiness_scope_case 23u required --only hosting --except hosting
-run_readiness_scope_case 23v required --except hosting --only hosting
-run_readiness_scope_case 23w required --only functions:mintAuthHandoff --except functions
-run_readiness_scope_case 23x required --except functions --only functions:default:exchangeAuthHandoff
-run_readiness_scope_case 23y skipped --only firestore --except hosting,functions
-run_readiness_scope_case 23z skipped --dry-run --only hosting --except hosting
+run_readiness_scope_case 24e required --only ""
+run_readiness_scope_case 24f required --except ""
+
+# Firebase validates filters before filterTargets applies its only-over-except
+# precedence. Invalid combinations must therefore fail locally before exact-SA
+# readiness, BUILD_CMD, or the Firebase deploy process can run.
+run_invalid_filter_case() {
+  local case_id="$1"
+  shift
+  local repo="$WORKDIR/case${case_id}-invalid-filter"
+  local out="$WORKDIR/case${case_id}.out"
+  local err="$WORKDIR/case${case_id}.err"
+  local gcloud_log="$WORKDIR/gcloud-calls-${case_id}.log"
+  local ofd_log="$WORKDIR/ofd-calls-${case_id}.log"
+  local build_marker="$WORKDIR/build-ran-${case_id}"
+  init_fixture_repo "$repo"
+  : >"$gcloud_log"
+  : >"$ofd_log"
+  rm -f "$build_marker"
+
+  set +e
+  (
+    cd "$repo"
+    PATH="$STUB_DIR:$PATH" \
+    OFD_LOG="$ofd_log" \
+    GCLOUD_BIN="$STUB_DIR/gcloud" \
+    GCLOUD_LOG="$gcloud_log" \
+    GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+    AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
+    DEPLOY_TARGET_PROJECT=fiveacross \
+    BUILD_CMD="touch '$build_marker'" \
+      bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross "$@"
+  ) >"$out" 2>"$err"
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    fail "invalid-filter ($case_id, $*): deploy.sh accepted a filter combination Firebase rejects."
+  elif [[ -s "$gcloud_log" || -e "$build_marker" || -s "$ofd_log" ]]; then
+    fail "invalid-filter ($case_id, $*): readiness, build, or Firebase ran before invalid filters were rejected."
+  else
+    pass "invalid-filter ($case_id, $*): local validation blocks readiness, build, and Firebase (rc=$rc)."
+  fi
+}
+
+run_invalid_filter_case 23u --only hosting --except hosting
+run_invalid_filter_case 23v --except hosting --only hosting
+run_invalid_filter_case 23w --only functions:mintAuthHandoff --except functions
+run_invalid_filter_case 23x --except functions --only functions:default:exchangeAuthHandoff
+run_invalid_filter_case 23y --only functions,functions:mintAuthHandoff
+run_invalid_filter_case 23ya --only functions:mintAuthHandoff,functions
+run_invalid_filter_case 23z --only remoteconfig:production
+run_invalid_filter_case 24a --only
+run_invalid_filter_case 24b --except
+run_invalid_filter_case 24c -m
+run_invalid_filter_case 24d -p
 
 # The source guard must fail before the readiness process can make a Cloud Run
 # update. This fixture deliberately stays on feature/deploy-test and omits

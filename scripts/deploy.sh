@@ -222,6 +222,16 @@ for arg in ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}; do
   esac
 done
 
+# Commander preserves an explicitly empty string, but firebase-tools tests
+# option truthiness before filtering. Match that behavior so `--only ''` and
+# `--except ''` retain the full deploy scope instead of suppressing readiness.
+if [[ ${#ONLY_VALUES[@]} -eq 1 && -z "${ONLY_VALUES[0]}" ]]; then
+  ONLY_VALUES=()
+fi
+if [[ ${#EXCEPT_VALUES[@]} -eq 1 && -z "${EXCEPT_VALUES[0]}" ]]; then
+  EXCEPT_VALUES=()
+fi
+
 if [[ -z "$DEPLOY_PROJECT" && -f .firebaserc ]]; then
   DEPLOY_PROJECT="$(python3 -c "import json; print(json.load(open('.firebaserc'))['projects']['default'])")"
 fi
@@ -564,6 +574,25 @@ resolve_invoker_deploy_credential() {
 }
 
 guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
+
+# Match firebase-tools' own pure-local command preflight before this wrapper
+# can make a live readiness update. In the Firebase CLI this validator runs
+# before filterTargets: `--only` + `--except`, bare + filtered Functions, and
+# colon filters on non-filterable targets are rejected rather than reaching a
+# deploy. Reuse the pinned implementation so this safety boundary cannot drift
+# into a second hand-maintained Firebase grammar.
+if [[ -n "$EXPECT_ARG" ]]; then
+  cat >&2 <<EOF
+✗ Firebase deploy option requires a value: $EXPECT_ARG.
+  NOTHING HAS BEEN BUILT OR PUBLISHED.
+EOF
+  exit 1
+fi
+echo ">> Validating Firebase deploy target filters (local)"
+if ! node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" \
+  "${ONLY_VALUES[0]-}" "${EXCEPT_VALUES[0]-}"; then
+  exit 1
+fi
 
 # Guard 4: functions/.env.<projectId> covers every param.ts-declared param
 # (#767).

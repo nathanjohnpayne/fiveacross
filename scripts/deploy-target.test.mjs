@@ -200,11 +200,12 @@ describe('deploy target selection', () => {
         return { status: 0 };
       };
 
+      const trailingScope = valueTakingOption === '--except' ? [] : ['--only', 'hosting'];
       executeDeployRequest(
         {
           target: 'fiveacross',
           wrapperArgs: [],
-          deployArgs: [valueTakingOption, '--dry-run', '--only', 'hosting'],
+          deployArgs: [valueTakingOption, '--dry-run', ...trailingScope],
         },
         readyConfig,
         {},
@@ -219,8 +220,7 @@ describe('deploy target selection', () => {
         'fiveacross',
         valueTakingOption,
         '--dry-run',
-        '--only',
-        'hosting',
+        ...trailingScope,
       ]);
       expect(calls[0][2].env.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT).toBe('fiveacross');
     },
