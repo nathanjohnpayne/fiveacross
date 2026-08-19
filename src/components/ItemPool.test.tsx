@@ -50,7 +50,7 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 // #610: ItemPool reads EVENT_ID for the explainer's event-keyed storage key.
 vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
-import ItemPool, { APPROVAL_GRACE_MS } from './ItemPool';
+import ItemPool, { APPROVAL_GRACE_MS, vacatedPendingIds } from './ItemPool';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 import { track } from '../analytics';
 
@@ -419,5 +419,216 @@ describe('the first-time 🔞 explainer (#610)', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true);
+  });
+});
+
+// #862: the grace-window computation, pulled out as a pure function so it is
+// directly unit-testable without exercising React's render/effect ordering.
+describe('vacatedPendingIds (#862)', () => {
+  it('reports an id that left pending with no active arrival yet', () => {
+    expect(vacatedPendingIds(new Set(['a', 'b']), new Set(['b']), new Set())).toEqual(['a']);
+  });
+
+  it('does not report an id that resolved straight into active', () => {
+    expect(vacatedPendingIds(new Set(['a']), new Set(), new Set(['a']))).toEqual([]);
+  });
+
+  it('does not report an id still present in pending', () => {
+    expect(vacatedPendingIds(new Set(['a']), new Set(['a']), new Set())).toEqual([]);
+  });
+
+  it('does not report an id that was never in the previous pending set', () => {
+    expect(vacatedPendingIds(new Set(), new Set(), new Set())).toEqual([]);
+  });
+
+  it('reports every id that vacated, when more than one does at once', () => {
+    expect(vacatedPendingIds(new Set(['a', 'b', 'c']), new Set(), new Set(['c']))).toEqual(['a', 'b']);
+  });
+});
+
+// #861: `add`'s async continuation captures the submitting uid up front, and
+// the Firestore write + localStorage persist stay correctly attributed to it
+// regardless of what happens to auth afterward — but the SHARED `tracked`
+// React state update must be skipped once a DIFFERENT account is current by
+// the time the write resolves, or the old account's own-submission row leaks
+// onto the new account's screen.
+describe('add() stays correctly attributed across an auth change mid-write (#861)', () => {
+  function createStorageStub(): Storage {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
+  }
+
+  let storage: Storage;
+  beforeEach(() => {
+    storage = createStorageStub();
+    vi.stubGlobal('localStorage', storage);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list, even under the most adversarial timing this harness can construct (Codex + CodeRabbit, PR #890 round 1)', async () => {
+    // `rerender()` and `resolveAdd()` are issued back-to-back with no
+    // `await` between them, inside one `act()` call — the most adversarial
+    // ordering this harness can construct. This proves the on-screen
+    // OUTCOME holds even then, via TWO independent mechanisms: the
+    // `uidRef`-guarded skip on the completion (may or may not have observed
+    // the new uid yet, depending on exactly when this continuation runs
+    // relative to React processing the pending `rerender()`), AND the
+    // render-phase `tracked`-reload-on-switch a few lines above, which
+    // OVERWRITES whatever `tracked` holds with a fresh, uid-scoped
+    // localStorage read as part of the SAME render pass that ever commits
+    // `uid: 'u2'` — so even in the one render where the completion's guard
+    // might still observe a stale ref, nothing from that stale write can
+    // survive into what actually gets painted. The two OTHER tests below
+    // (form reset and analytics suppression, which have no such second
+    // safety net — there is nothing to "reload" for a plain compose field
+    // or an analytics call) use two separately-settled `act()` calls
+    // instead, which lets the account switch fully commit before the write
+    // resolves — the achievable, realistic guarantee for mechanisms that
+    // only have the one guard to rely on.
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted by u1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    // Still pending — `addItem` has not resolved yet.
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false);
+
+    H.user = { uid: 'u2' };
+    await act(async () => {
+      rerender(<ItemPool />);
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    // u1's submission must never appear in u2's on-screen list...
+    expect(screen.queryByText('Submitted by u1')).not.toBeInTheDocument();
+    // ...but the write itself is unaffected by the guard — only the shared
+    // React state update is skipped — so it is still correctly persisted
+    // under u1's OWN localStorage key.
+    const stored: Array<{ id: string }> = JSON.parse(storage.getItem('gcb.mySuggestions.ev-1.u1') ?? '[]');
+    expect(stored.map((s) => s.id)).toContain('new-item-1');
+  });
+
+  it('also guards the text/spicy form reset, so an old account\'s completion cannot clear a new account\'s in-progress draft (CodeRabbit, PR #890 round 1)', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    const input = screen.getByPlaceholderText('Add a prompt…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Submitted by u1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+
+    // The NEW account starts typing their own submission before u1's write
+    // resolves.
+    fireEvent.change(input, { target: { value: 'u2 is mid-draft' } });
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    // u1's stale completion must not have wiped u2's in-progress text.
+    expect(input.value).toBe('u2 is mid-draft');
+  });
+
+  it('clears the compose box and spicy flag on the account switch ITSELF, even if the new account never types anything — so a stale draft can never be silently seen or submitted by them (Codex P1, PR #890 round 2)', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    const input = screen.getByPlaceholderText('Add a prompt…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Submitted by u1' } });
+    fireEvent.click(screen.getByRole('checkbox')); // u1 tags it spicy
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    // u2 signs in — and does NOT type anything before u1's write resolves.
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+
+    // The switch itself must have already cleared the box — not waiting on
+    // u1's write to resolve (which, per the guard, will now SKIP clearing
+    // it, since it is no longer u1's turn). Without this, u2 would see
+    // u1's leftover text and spicy tag and could submit it unedited.
+    expect(input.value).toBe('');
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+    expect(input.value).toBe('');
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it("suppresses the submission's analytics events when auth changed before the write resolved, rather than attributing u1's submission to u2 (Codex P2, PR #890 round 2)", async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted by u1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    expect(track).not.toHaveBeenCalledWith('add_item');
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
+  });
+
+  it('still fires the submission analytics normally when auth did NOT change', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted by u1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    expect(track).toHaveBeenCalledWith('add_item');
+    expect(track).toHaveBeenCalledWith('prompt_suggestion_submitted', expect.objectContaining({ hasTargetDay: false }));
   });
 });

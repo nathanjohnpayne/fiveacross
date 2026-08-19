@@ -132,6 +132,138 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded.at(-1)?.id).toBe('id-24');
   });
 
+  it('caps by newest SUBMISSION, not by write/refresh position — refreshing an older entry must not save it from eviction at the expense of a genuinely more recent submission (#864)', () => {
+    for (let i = 1; i <= 19; i++) {
+      trackSuggestion('ev-1', 'u1', { id: `id-${i}`, text: `t${i}`, submittedAt: i });
+    }
+    // A REFRESH of the OLDEST entry — same id, same submittedAt, only a
+    // follow-up field changing — is exactly what ItemPool's own
+    // `refreshLastKnownStatuses` effect does on a status/target/text update.
+    // Before #864, `trackSuggestion` always moved the touched entry to the
+    // newest storage slot, whether it was a fresh submission or a refresh.
+    trackSuggestion('ev-1', 'u1', { id: 'id-1', text: 't1', submittedAt: 1, lastKnownStatus: 'approved' });
+    // Two genuinely NEW, later submissions push the tracker over its cap.
+    trackSuggestion('ev-1', 'u1', { id: 'id-20', text: 't20', submittedAt: 20 });
+    trackSuggestion('ev-1', 'u1', { id: 'id-21', text: 't21', submittedAt: 21 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded).toHaveLength(20);
+    // The genuinely oldest submission is what the cap evicts...
+    expect(loaded.find((s) => s.id === 'id-1')).toBeUndefined();
+    // ...never a submission that is MORE recent than it, just because the
+    // older one happened to be refreshed most recently (the pre-#864 bug:
+    // refreshing id-1 moved it to the tail, so id-2 — genuinely newer —
+    // would have been evicted in its place).
+    expect(loaded.find((s) => s.id === 'id-2')).toBeDefined();
+    expect(loaded.find((s) => s.id === 'id-21')).toBeDefined();
+  });
+
+  it('never evicts a genuinely NEW submission merely because an existing entry carries a non-monotonic (clock-skewed) submittedAt (Codex P2, PR #890 round 1)', () => {
+    // Simulates 20 entries recorded while the device clock was skewed FAR
+    // into the future (a bad NTP sync, say), filling the tracker to its cap.
+    for (let i = 0; i < 20; i++) {
+      trackSuggestion('ev-1', 'u1', { id: `skewed-${i}`, text: `t${i}`, submittedAt: 999_000 + i });
+    }
+    // The clock then corrects BACKWARD to the real time — a genuinely NEW
+    // submission now carries a SMALLER recorded submittedAt than every
+    // existing (skewed) entry, even though it is chronologically the most
+    // recent write this device has made. The pre-round-1 sort-by-submittedAt
+    // cap would have evicted THIS entry instead of the actually-oldest one.
+    trackSuggestion('ev-1', 'u1', { id: 'genuinely-newest', text: 'just submitted', submittedAt: 500 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded.find((s) => s.id === 'genuinely-newest')).toBeDefined();
+    // The tracker is capped by WRITE order, so the entry recorded FIRST —
+    // regardless of its (skewed) timestamp — is what the cap evicts.
+    expect(loaded.find((s) => s.id === 'skewed-0')).toBeUndefined();
+  });
+
+  it('never re-sorts a legacy blob by submittedAt — array position governs the cap even for a blob a pre-round-1 build left out of order (Codex P2, PR #890 rounds 2 + 4)', () => {
+    // Models what the OLD (pre-#864-round-1) `trackSuggestion` could leave
+    // behind: `old-1` (the actual oldest submission) was refreshed at some
+    // point and moved to the array's TAIL. A one-time submittedAt-sort
+    // "repair" (round 2's own first cut) sounds like the fix, but round 4
+    // found it reintroduces the identical clock-skew loss round 1 exists to
+    // prevent, just narrowed to the migration moment — so there is
+    // deliberately NO migration (see the comment above `trackSuggestion`).
+    // Array position — the actual write/refresh order this run of the code
+    // produced — is what the cap uses, full stop; a legacy blob's own
+    // pre-existing disorder is left exactly as found.
+    const legacy = [
+      ...Array.from({ length: 19 }, (_, i) => ({ id: `id-${i + 2}`, text: `t${i + 2}`, submittedAt: i + 2 })),
+      { id: 'old-1', text: 'the actual oldest', submittedAt: 1 },
+    ];
+    localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify(legacy));
+
+    trackSuggestion('ev-1', 'u1', { id: 'id-21', text: 'newest', submittedAt: 21 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded).toHaveLength(20);
+    // The cap evicts whatever sits at array position 0 — `id-2`, the
+    // legacy blob's own first entry — NOT `old-1` (which the pre-round-1
+    // bug had already moved to the tail, and this run makes no attempt to
+    // relocate).
+    expect(loaded.find((s) => s.id === 'id-2')).toBeUndefined();
+    expect(loaded.find((s) => s.id === 'old-1')).toBeDefined();
+    expect(loaded.find((s) => s.id === 'id-21')).toBeDefined();
+  });
+
+  it('discards a persisted entry whose lastKnownStatus is not a valid SubmitterStatus, rather than letting a malformed value reach the pill label (#865)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownStatus: 'banana' }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it("discards a persisted entry whose lastKnownStatus is 'pending' — never something this module itself writes, only a malformed or cross-version blob, and accepting it could pin a rejected submission as 'pending review' forever (Codex + CodeRabbit, PR #890 round 1)", () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownStatus: 'pending' }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it('discards a persisted entry whose lastKnownText is not a string, rather than letting an object reach React as a child (#865)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownText: { evil: true } }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it('discards a persisted entry whose lastKnownDayIndex is not a number (#865)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownDayIndex: '3' }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it.each([-1, 1.5])(
+    'discards a persisted entry whose lastKnownDayIndex is %s — not a non-negative integer (Codex + CodeRabbit, PR #890 round 1)',
+    (badIndex) => {
+      localStorage.setItem(
+        'gcb.mySuggestions.ev-1.u1',
+        JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownDayIndex: badIndex }]),
+      );
+      expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+    },
+  );
+
+  it('still accepts a well-formed entry carrying valid optional fields', () => {
+    const stored = {
+      id: 'a',
+      text: 'x',
+      submittedAt: 1,
+      lastKnownStatus: 'scheduled',
+      lastKnownDayIndex: 2,
+      lastKnownText: 'edited wording',
+    };
+    localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify([stored]));
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([stored]);
+  });
+
   it('falls open to an empty list when localStorage throws (private mode)', () => {
     vi.stubGlobal('localStorage', {
       getItem: () => {
