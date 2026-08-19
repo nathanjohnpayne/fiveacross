@@ -288,6 +288,10 @@ export function parseEventDraft(value: unknown): EventDraft | null {
     typeof value.endsOn !== 'string' ||
     typeof value.timezone !== 'string' ||
     typeof value.slugCandidate !== 'string' ||
+    // Absent in drafts saved before #911; treated as UNVERIFIED rather than
+    // rejected, so an older draft re-verifies on arrival instead of failing to
+    // load. `parseEventDraft` normalises it below.
+    (value.slugVerifiedForEdition !== undefined && typeof value.slugVerifiedForEdition !== 'string') ||
     !(
       value.claimMode === 'honor' ||
       value.claimMode === 'proof_required' ||
@@ -305,7 +309,18 @@ export function parseEventDraft(value: unknown): EventDraft | null {
   ) {
     return null;
   }
-  return value as unknown as EventDraft;
+  // NORMALISED, not cast through (Phase 4b P1, PR #911). Every other field is
+  // validated in place and the object is handed back as-is, but
+  // `slugVerifiedForEdition` is absent from drafts saved before it existed, and
+  // a bare cast would type it `string` while it is `undefined` at runtime — so
+  // the gate's `=== draft.edition` comparison would be comparing against
+  // nothing. Defaulting to `''` makes an older draft read as UNVERIFIED, which
+  // is the safe answer: it re-verifies on arrival at Basics rather than being
+  // trusted on the strength of a field that predates the check.
+  const parsed = value as unknown as EventDraft;
+  return typeof (value as { slugVerifiedForEdition?: unknown }).slugVerifiedForEdition === 'string'
+    ? parsed
+    : { ...parsed, slugVerifiedForEdition: '' };
 }
 
 /** Optional seams for `createEventDraft`, so a test can pin both. */
@@ -373,6 +388,7 @@ export function createEventDraft(init: CreateEventDraftInit = {}): EventDraft {
     endsOn: '',
     timezone: init.timezone ?? deviceTimezoneSuggestion(),
     slugCandidate: '',
+    slugVerifiedForEdition: '',
     claimMode: 'honor',
     cardFormat: 'daily_cards',
     hostedBy: '',

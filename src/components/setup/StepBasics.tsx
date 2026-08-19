@@ -133,12 +133,6 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
   // edit — the request for an earlier candidate can resolve AFTER a newer
   // one has already started checking, and only the latest may ever write.
   const checkIdRef = useRef(0);
-  // Whether the CURRENT `slugCandidate` has been confirmed by a check that
-  // completed during this mount. The optimistic branch below shows a
-  // already-committed candidate as available before any network read, and
-  // unmount cancels the confirming check — so without this the step could be
-  // left "complete" on a candidate nothing verified (Phase 4b P1, PR #911).
-  const verifiedRef = useRef(false);
   // Bumped by the Retry control so the effect re-runs on the SAME text. Without
   // it a `check-failed` was a dead end (Phase 4b P2, PR #911): the effect's
   // only trigger is `slugInput`/`draft.edition`, retyping the same address
@@ -162,7 +156,9 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
 
     if (candidate === '') {
       setStatus({ kind: 'empty' });
-      if (draft.slugCandidate !== '') updateDraft((d) => ({ ...d, slugCandidate: '' }));
+      if (draft.slugCandidate !== '' || draft.slugVerifiedForEdition !== '') {
+        updateDraft((d) => ({ ...d, slugCandidate: '', slugVerifiedForEdition: '' }));
+      }
       return;
     }
 
@@ -172,7 +168,9 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // no network read (#785 acceptance: reserved labels are "rejected
       // client-side without a network read").
       setStatus({ kind: 'invalid', reason: format.reason });
-      if (draft.slugCandidate !== '') updateDraft((d) => ({ ...d, slugCandidate: '' }));
+      if (draft.slugCandidate !== '' || draft.slugVerifiedForEdition !== '') {
+        updateDraft((d) => ({ ...d, slugCandidate: '', slugVerifiedForEdition: '' }));
+      }
       return;
     }
 
@@ -184,7 +182,6 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // re-check still runs below and downgrades it the moment the world
       // has actually changed (someone else claimed it since).
       setStatus({ kind: 'available' });
-      verifiedRef.current = false; // optimistic, not yet confirmed this mount
     } else {
       // A GENUINELY NEW candidate — freshly typed, or auto-derived from an
       // edited name — fails closed immediately: its availability is
@@ -193,7 +190,9 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // never left sitting in the draft for the shared launch gate to trust
       // on the strength of nothing.
       setStatus({ kind: 'checking' });
-      if (draft.slugCandidate !== '') updateDraft((d) => ({ ...d, slugCandidate: '' }));
+      if (draft.slugCandidate !== '' || draft.slugVerifiedForEdition !== '') {
+        updateDraft((d) => ({ ...d, slugCandidate: '', slugVerifiedForEdition: '' }));
+      }
     }
 
     const timer = setTimeout(() => {
@@ -206,17 +205,30 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
         const failed = checked.find((c) => c.status === 'check-failed');
         const taken = checked.find((c) => c.status === 'taken');
         const result: SlugAvailability = failed ? 'check-failed' : taken ? 'taken' : 'available';
-        verifiedRef.current = result === 'available';
         if (failed) setStatus({ kind: 'check-failed' });
         else if (taken) setStatus({ kind: 'taken', hostname: taken.hostname });
         else setStatus({ kind: 'available' });
         if (result === 'available') {
-          updateDraft((d) => (d.slugCandidate === candidate ? d : { ...d, slugCandidate: candidate }));
+          // Records WHICH Edition this was confirmed against, so the shell's
+          // synchronous gate can tell a verified candidate from a merely
+          // present one, and can invalidate it when the Edition moves (Phase
+          // 4b P1, PR #911). Written unconditionally rather than inside the
+          // `slugCandidate` comparison: on the optimistic path the candidate is
+          // already committed and only the verification is new.
+          updateDraft((d) =>
+            d.slugCandidate === candidate && d.slugVerifiedForEdition === draft.edition
+              ? d
+              : { ...d, slugCandidate: candidate, slugVerifiedForEdition: draft.edition },
+          );
         } else {
           // Downgrades an optimistic commit the instant the background
           // re-check learns it no longer holds (taken since, or the read
           // itself failed) — never left standing on stale trust.
-          updateDraft((d) => (d.slugCandidate === '' ? d : { ...d, slugCandidate: '' }));
+          updateDraft((d) =>
+            d.slugCandidate === '' && d.slugVerifiedForEdition === ''
+              ? d
+              : { ...d, slugCandidate: '', slugVerifiedForEdition: '' },
+          );
         }
       });
     }, CHECK_DEBOUNCE_MS);
@@ -235,27 +247,15 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
       // optimistically available. Bumping the id makes the stale response fail
       // the guard it already has, rather than adding a second mechanism.
       checkIdRef.current += 1;
-      // Fail CLOSED on an optimistic candidate the confirming check never
-      // reached (Phase 4b P1, PR #911). The invalidation above closed one race
-      // and opened another: previously a late response still arrived and could
-      // downgrade a stale candidate, and cancelling it removed that safety net
-      // without replacing it. So an organizer who lands on a resumed step and
-      // clicks Continue inside the debounce window carried a `slugCandidate`
-      // nothing had verified — one that may be taken, hand-injected into an
-      // imported draft, or checked under a DIFFERENT Edition and therefore
-      // never tested against the alternate apex this one requires — straight
-      // through every later completeness gate.
-      //
-      // Clearing it is what makes "an availability check in flight fails
-      // closed" true across a step change as well as within one. The cost is
-      // narrow and self-correcting: the field is uncommitted, the shared gate
-      // reads the step incomplete, and returning to Basics re-checks and
-      // re-commits within the debounce. The optimistic affordance itself is
-      // preserved — it still shows available instantly on arrival, which is
-      // what the shell's resumed-draft tests require.
-      if (!verifiedRef.current) {
-        updateDraft((d) => (d.slugCandidate === '' ? d : { ...d, slugCandidate: '' }));
-      }
+      // NOTE: the candidate is deliberately NOT cleared here any more (Phase
+      // 4b P1 round 2, PR #911). An earlier fix cleared it on cleanup, which
+      // runs AFTER the shell's synchronous Continue gate has already let the
+      // organizer advance — so it never prevented the navigation it was meant
+      // to gate, and its only observable effect was making an
+      // already-advanced draft retroactively incomplete. `slugVerifiedForEdition`
+      // replaces it: the gate now reads verification directly and refuses an
+      // unverified candidate BEFORE the step changes, which is where the
+      // decision has to happen.
     };
     // `draft.slugCandidate` and `updateDraft` are deliberately excluded: this
     // effect WRITES the former (via the latter), so depending on it would

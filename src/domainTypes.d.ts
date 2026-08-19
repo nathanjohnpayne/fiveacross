@@ -1146,6 +1146,26 @@ export interface EventDraft {
    *  launch. Never a claim, and never renamed to a silent variant. Format and
    *  reserved-name validation are #790's shared contract, not this type's. */
   slugCandidate: string;
+  /**
+   * The Edition `slugCandidate` was last CONFIRMED available against, or `''`
+   * when it has not been confirmed at all (Phase 4b P1, PR #911).
+   *
+   * The wizard's Continue gate is pure and synchronous, so it cannot await a
+   * network read — it can only inspect what is already in the draft. Presence
+   * of `slugCandidate` alone was therefore doing two jobs: recording the
+   * organizer's choice AND standing in for "this address is claimable". Those
+   * came apart in two ways. A resumed step paints an already-committed
+   * candidate as available with no read (deliberate: it must not block
+   * Continue on a round trip), so an organizer advancing inside the debounce
+   * carried a candidate nothing had verified. And an Edition change alters
+   * WHICH hostnames a launch claims, so a candidate confirmed under one
+   * Edition says nothing about another.
+   *
+   * Storing the Edition rather than a boolean answers both with one field: the
+   * gate requires `slugVerifiedForEdition === edition`, which is false for an
+   * unverified candidate and false again the moment the Edition moves.
+   */
+  slugVerifiedForEdition: string;
   /** Required, three real values — a flow that never asks hard-codes Honor. */
   claimMode: ClaimMode;
   cardFormat: DraftCardFormat;

@@ -174,57 +174,32 @@ describe('address — a failed check is recoverable', () => {
   });
 });
 
-describe('address — an optimistically-trusted candidate is not left unverified', () => {
-  // Mirrors the real shell: the WIZARD stays mounted and holds the draft while
-  // the STEP is swapped out. Unmounting the whole tree would make the cleanup's
-  // `updateDraft` land on a dead parent and prove nothing.
-  function StepToggle({ initial, onDraft }: { initial: EventDraft; onDraft: (d: EventDraft) => void }) {
-    const [draft, setDraft] = useState(initial);
-    const [showStep, setShowStep] = useState(true);
-    useEffect(() => {
-      onDraft(draft);
-    }, [draft, onDraft]);
-    return (
-      <>
-        <button type="button" onClick={() => setShowStep(false)}>
-          leave step
-        </button>
-        {showStep && <StepBasics draft={draft} updateDraft={(u) => setDraft((d) => u(d))} />}
-      </>
-    );
-  }
-
-  function renderToggle(initial: EventDraft) {
-    let current = initial;
-    render(<StepToggle initial={initial} onDraft={(d) => { current = d; }} />);
-    return {
-      getDraft: () => current,
-      leave: () => fireEvent.click(screen.getByRole('button', { name: 'leave step' })),
-    };
-  }
-
-  it('clears the candidate when the step is left before its confirming check completes', () => {
-    // Phase 4b P1, PR #911. The optimistic branch shows an already-committed
-    // candidate as available with no network read, and leaving cancels the
-    // confirming check — so without this, an organizer who lands on a resumed
-    // step and hits Continue inside the debounce carries a `slugCandidate`
-    // nothing verified past every later completeness gate. It may be taken,
-    // hand-injected into an imported draft, or checked under a DIFFERENT
-    // Edition and so never tested against the alternate this one requires.
-    const { getDraft, leave } = renderToggle(draftWith({ slugCandidate: 'point-reyes' }));
-    expect(getDraft().slugCandidate).toBe('point-reyes');
-    leave(); // inside the debounce window: nothing has resolved
-    expect(getDraft().slugCandidate).toBe('');
+describe('address — verification is recorded so the synchronous gate can consume it', () => {
+  it('does NOT mark an optimistically-shown candidate verified until a check confirms it', () => {
+    // Phase 4b P1, PR #911. The step paints an already-committed candidate as
+    // available with no network read, deliberately — a resumed step must not
+    // block Continue on a round trip. The shell's Continue gate is pure and
+    // synchronous, so presence of `slugCandidate` was standing in for
+    // "claimable" and an organizer could advance inside the debounce carrying
+    // something nothing had checked. Verification is now its own field.
+    const { getDraft } = renderStep(draftWith({ slugCandidate: 'point-reyes', edition: 'vacay' }));
+    expect(getDraft().slugCandidate).toBe('point-reyes'); // shown, and kept
+    expect(getDraft().slugVerifiedForEdition).toBe(''); // but NOT yet verified
   });
 
-  it('KEEPS the candidate when the check confirmed it before the step was left', async () => {
-    // The other half — failing closed must not mean discarding a verified
-    // answer, or every step change would cost a fresh round trip.
+  it('records the Edition it was confirmed against once the check resolves', async () => {
     mocks.checkSlugAvailability.mockResolvedValue('available');
-    const { getDraft, leave } = renderToggle(draftWith({ slugCandidate: 'point-reyes' }));
+    const { getDraft } = renderStep(draftWith({ slugCandidate: 'point-reyes', edition: 'vacay' }));
     await settleDebounce();
-    leave();
-    expect(getDraft().slugCandidate).toBe('point-reyes');
+    expect(getDraft().slugVerifiedForEdition).toBe('vacay');
+  });
+
+  it('drops the verification when the background re-check finds the address gone', async () => {
+    mocks.checkSlugAvailability.mockResolvedValue('taken');
+    const { getDraft } = renderStep(draftWith({ slugCandidate: 'point-reyes', edition: 'vacay' }));
+    await settleDebounce();
+    expect(getDraft().slugCandidate).toBe('');
+    expect(getDraft().slugVerifiedForEdition).toBe('');
   });
 });
 
