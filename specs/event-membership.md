@@ -57,11 +57,14 @@ match /memberships/{uid} {
   // read their OWN record, or the client cannot tell them "you were removed
   // from this Event" and shows a permission error instead — and the
   // `denied-revoked` outcome this spec promises becomes unreachable.
-  allow get: if isOwner(uid) || isAdmin(eventId);
-  // The roster is Admin-only. Gating it on admission instead would let any
-  // member enumerate every other member together with `grantedBy`,
-  // `invitationId` and the revocation audit fields.
-  allow list: if isAdmin(eventId);
+  allow get: if isOwner(uid) || (admitted(eventId) && isAdmin(eventId));
+  // The roster is Admin-only AND admission-gated. Admin alone is not enough:
+  // `EventDoc.admins` is client-writable, so an Admin can promote any UID by
+  // editing the array, and that UID would otherwise list every member together
+  // with `grantedBy`, `invitationId` and the revocation audit fields without
+  // ever holding a membership. Admission alone is not enough either — that
+  // would let any member enumerate the whole roster.
+  allow list: if admitted(eventId) && isAdmin(eventId);
   allow create, update, delete: if false;
 }
 ```
@@ -72,7 +75,7 @@ Reusing `admitted(eventId)` here would have been wrong twice over: too tight for
 
 Keying it on `role` would miss the common case (Codex P1 on PR #891). `EventDoc.admins` is client-writable by any existing Admin, and `memberships` is client-writable by nobody, so an Admin who promotes a member by editing the array produces a uid that **is** an Admin while its membership still reads `role: 'member'`. A `role`-conditioned removal would leave exactly that uid in `admins` after revocation, still passing `isAdmin()`. `role` records what the grant conferred; it is not a reliable statement of current privilege, and only the array is. This is the same invariant § The role model already states — admission is a precondition for privilege — carried through to the operation that can break it, and #803's revoke callable owns it.
 
-The invariant is checkable rather than merely instructed: a revoked Admin left in `admins` is exactly an Admin with no active membership, which is what `adminsMissingMembership()` returns. It is the drift detector for both directions — an Admin never granted a membership, and an Admin whose membership was revoked without the array write — and it must be empty on any enforced Event. The alternative Codex offered, conjoining the admin branches with a live membership check, was rejected: it costs a second document read on the roster path and makes reading the admission record depend on the admission record.
+The invariant is checkable rather than merely instructed: a revoked Admin left in `admins` is exactly an Admin with no active membership, which is what `adminsMissingMembership()` returns. It is the drift detector for both directions — an Admin never granted a membership, and an Admin whose membership was revoked without the array write — and it must be empty on any enforced Event. **The admin branches are conjoined with admission, which is a reversal.** An earlier draft rejected exactly that, on the grounds that it costs a second read and makes reading the admission record depend on the admission record. Both objections were weak and the second was wrong: rules do not recurse, and the reader's own membership is a *different* document from the one being read, so there is no circularity — only one more `get()` on a path that is not batched and not hot. The atomic removal above remains necessary but is no longer the sole defence, and it never covered promotion at all (Codex P1 on PR #891): an Admin who adds a UID to `admins` after enforcement creates a privileged account with **no** membership, which a revocation-only fix cannot reach. Conjoining admission closes the promotion gap and the revocation gap together, and does it with the same rule this spec applies everywhere else.
 
 **The root cause is that `admins` is client-writable at all**, which is what lets privilege drift from the grant record. The durable fix is to route admin promotion and demotion through the same server path that writes memberships, so the array and the record move together and `role` becomes trustworthy. That is a change to the `events/{eventId}` update rule and to #803's callable surface, not something this spec settles — recorded here as the thing to fix rather than to keep compensating for. Until it lands, the array is authoritative and the removal above is keyed on it.
 
@@ -139,12 +142,31 @@ function membershipEnforced(eventId) {
            .data.get('membershipEnforcement', 'off') == 'enforced';
 }
 
-function isEventMember(eventId) {
-  // ONE access, not exists()+get(). A `get()` on a missing document ERRORS,
-  // and an error denies — which is the answer a non-member should get anyway.
-  return firestore.get(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
-           .data.status == 'active';
+// The Event document is fetched ONCE and threaded through, because the switch
+// and the existing isEventAdmin() both need it and a second fetch would be a
+// third access. Rules have no `let`, so the call site inlines the fetch and
+// passes `.data` down — the same hoist prescribed for firestore.rules' boards
+// clause, and here it is not an optimisation but the difference between
+// fitting the budget and denying every admin moderation delete.
+function admittedWith(ev, eventId) {
+  return ev.get('membershipEnforcement', 'off') != 'enforced'
+    // ONE access, not exists()+get(). A `get()` on a missing document ERRORS,
+    // and an error denies — the answer a non-member should get anyway.
+    || firestore.get(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
+         .data.status == 'active';
 }
+
+// isEventAdmin's existing body re-fetches the Event (storage.rules:7-10). #806
+// must re-express it against the threaded `ev` instead, or the delete arm goes
+// to three accesses.
+function isEventAdminWith(ev) { return request.auth.uid in ev.admins; }
+
+// Call site, e.g. the delete arm:
+//   allow delete: if signedIn() && deleteOk(
+//     firestore.get(/databases/(default)/documents/events/$(eventId)).data, eventId, uid);
+//   function deleteOk(ev, eventId, uid) {
+//     return admittedWith(ev, eventId) && (isOwner(uid) || isEventAdminWith(ev));
+//   }
 ```
 
 **`signedIn()` leads, and the TypeScript mirror must lead with it too.** An unenforced Event is open to every **signed-in** account, never to the public, so the authentication check precedes the enforcement switch rather than following it. This is where the reference implementation first drifted from the rules it mirrors: `admits()` originally answered from `enforcement` alone and would have admitted an unauthenticated caller for every Event in the dark-rollout state — which is every Event today (Codex P2 on PR #891). It now takes the caller's uid and denies its absence first. The lesson generalises: a divergence between the two is a silent authorization bug in whichever one a consumer happens to trust, which is why the parity properties below are tested rather than asserted in prose.
@@ -182,7 +204,7 @@ Predicate cost, worst case: **1 call** when the Event is unenforced (the Event d
 | `claims` read | `1304` | 1 / 1 | 4 / 2 | Fits |
 | `proofs` create; `claims` create; `markers` create+update; every bare `signedIn()` read | various | 0 / 0 | 3 / 2 | Fits |
 | **Storage** `proofs/{eventId}/{uid}/{file}` read | `storage.rules:30` | 0 accesses | **2 accesses** (switch + one membership `get`) | **At the 2-access limit** |
-| **Storage** `proofs` delete | `storage.rules:36` | 1 access | **2 accesses** | **At the limit** |
+| **Storage** `proofs` delete | `storage.rules:36` | 1 access | **3 accesses** as written; **2** once the Event fetch is threaded | **Over the limit without the hoist** |
 
 Three findings the rules tickets must not rediscover at the emulator:
 
@@ -215,7 +237,7 @@ At the conservative three admission calls per gated write, the aggregate is spen
 
 Recorded as a **blocking prerequisite of #804**: the gate cannot ship on the Mark path until the measurement is done and, if it comes back negative, until the batching changes.
 
-**3. Storage has zero headroom, which fixes where the switch lives.** Two Firestore **accesses** is the whole budget — counted as calls, not as distinct paths, which is the stricter reading and the one this spec now takes after getting it wrong once. The switch spends one and the membership check spends the other, which is why the Storage membership check is a single `get()` rather than Firestore's `exists()`-then-`get()`. A switch on any third document — a sentinel inside `memberships`, a sibling config collection — would be structurally unreadable from Storage. That is why `membershipEnforcement` is a field on `EventDoc` and not somewhere tidier, and why no future clause may add another cross-service read.
+**3. Storage has zero headroom, which fixes where the switch lives.** Two Firestore **accesses** is the whole budget — counted as calls, not as distinct paths, which is the stricter reading and the one this spec now takes after getting it wrong once. The switch spends one and the membership check spends the other, which is why the Storage membership check is a single `get()` rather than Firestore's `exists()`-then-`get()`. **And why `isEventAdmin()` cannot keep its own `get()`**: on the delete arm the switch, the membership and `isEventAdmin` would be three accesses, so #806 must thread one Event fetch through both the switch and the admin check or every admin moderation delete is denied on an enforced Event (Codex P1 on PR #891). A switch on any third document — a sentinel inside `memberships`, a sibling config collection — would be structurally unreadable from Storage. That is why `membershipEnforcement` is a field on `EventDoc` and not somewhere tidier, and why no future clause may add another cross-service read.
 
 ### The enforced-path inventory
 
