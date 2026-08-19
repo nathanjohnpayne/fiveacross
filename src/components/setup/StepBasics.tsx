@@ -206,7 +206,22 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
         }
       });
     }, CHECK_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      // Invalidate the IN-FLIGHT request too, not just the pending timer
+      // (Codex, PR #911). Clearing the timer only helps while the debounce has
+      // not fired; once it has, the promise is already running and unmount
+      // does nothing to it. Its `.then` re-reads `checkIdRef.current`, which
+      // still equals `myCheckId` after an unmount, so the guard passes and the
+      // handler commits — on a component that is gone, and worse, against an
+      // Edition that may have changed. Leaving Basics for Occasion, switching
+      // to a Vacay occasion and returning would then trust a `slugCandidate`
+      // that was never checked against the newly-required `vacaybingo.com`
+      // alternate, because re-entry treats an already-committed candidate as
+      // optimistically available. Bumping the id makes the stale response fail
+      // the guard it already has, rather than adding a second mechanism.
+      checkIdRef.current += 1;
+    };
     // `draft.slugCandidate` and `updateDraft` are deliberately excluded: this
     // effect WRITES the former (via the latter), so depending on it would
     // make every write re-trigger the effect that made it. Re-checking is
@@ -355,6 +370,23 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
           <div
             id={addressStatusId}
             data-testid="address-availability-status"
+            // A live region, but deliberately NOT `role="status"` (Codex, PR
+            // #911). This text changes asynchronously — checking → available /
+            // taken / check-failed — and `aria-describedby` alone only
+            // ASSOCIATES it with the input; it does not oblige assistive tech
+            // to announce a change while focus sits elsewhere, which is
+            // exactly where an organizer's focus is during a debounced check.
+            //
+            // `role="status"` would announce it and also collide: the wizard
+            // shell's "Saved" flash (`WizardChrome.tsx`) already carries that
+            // role, and `SetupWizard.test.tsx` queries `getByRole('status')`
+            // in the singular four times — a second one throws. The bare
+            // attributes give the same announcement behaviour the role implies
+            // without claiming the role, so the shell's query stays unambiguous
+            // and the announcement is not traded away to keep a test query
+            // working.
+            aria-live="polite"
+            aria-atomic="true"
             className={`wizard-address-status wizard-address-status--${status.kind}`}
           >
             {statusCopy(status)}

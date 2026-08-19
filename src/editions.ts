@@ -400,11 +400,22 @@ export function buildTimeEdition(
  * Edition fact instead of re-deriving it from whichever occasion happened
  * to bind that Edition.
  *
- * `gcb` is deliberately included even though no occasion in `OCCASIONS`
- * binds to it today (`gaycruisebingo.com` is Gay Cruise Bingo's own
- * apex) — the fact is true of the Edition regardless of whether the
- * wizard can currently reach it, and leaving it out would silently need a
- * second edit the day a `gcb` occasion is added.
+ * **`gcb` maps to `null`, and that is a correction rather than an omission**
+ * (Codex, PR #911). An earlier version mapped it to `gaycruisebingo.com` on
+ * the reasoning that the fact is true of the Edition regardless of whether the
+ * wizard can reach it — but it is not true: a Namespace is an apex whose
+ * WILDCARD subdomains address Events, and `gaycruisebingo.com` is Gay Cruise
+ * Bingo's own site, not a wildcard Namespace. `CONTEXT.md` § Namespace names
+ * exactly two (`fiveacross.app`, `vacaybingo.com`) and `worker/src/host.ts`'s
+ * `NAMESPACES` guard admits exactly those two, so `<slug>.gaycruisebingo.com`
+ * is refused as `out-of-namespace` before its hostname document is ever read.
+ *
+ * The cost of getting this wrong rose with this PR. While the alternate was
+ * only PREVIEWED, a wrong row printed an address that would not work. Now that
+ * availability is checked against every previewed address and the alternate is
+ * a guarantee (owner ruling, 2026-08-19), a wrong row would BLOCK a GCB
+ * occasion on an address that can never serve. Add a row here only when
+ * wildcard serving for that apex actually lands.
  */
 /**
  * The canonical Namespace every Event is reachable in, regardless of Edition
@@ -418,7 +429,6 @@ export const CANONICAL_NAMESPACE_APEX = 'fiveacross.app';
 
 const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = {
   vacay: 'vacaybingo.com',
-  gcb: 'gaycruisebingo.com',
 };
 
 /** `null` when `edition` owns no alternate Namespace — see

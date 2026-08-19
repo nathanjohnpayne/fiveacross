@@ -389,8 +389,27 @@ describe('alternateNamespaceApex — the setup wizard address step (#790)', () =
     expect(alternateNamespaceApex('vacay')).toBe('vacaybingo.com');
   });
 
-  it('names gaycruisebingo.com for gcb even though no occasion binds it today', () => {
-    expect(alternateNamespaceApex('gcb')).toBe('gaycruisebingo.com');
+  it('is null for gcb — gaycruisebingo.com is a site, not a wildcard Namespace', () => {
+    // This asserted 'gaycruisebingo.com' until Codex caught it on PR #911.
+    // `CONTEXT.md` § Namespace names exactly two apexes whose WILDCARD
+    // subdomains address Events, and `worker/src/host.ts`'s NAMESPACES guard
+    // admits exactly those two — so `<slug>.gaycruisebingo.com` is refused as
+    // out-of-namespace before its hostname document is read. The old row made
+    // the wizard advertise an address that cannot serve; now that the step
+    // CHECKS every previewed address, it would have blocked a GCB occasion
+    // outright.
+    expect(alternateNamespaceApex('gcb')).toBeNull();
+  });
+
+  it('names only apexes the router actually serves', () => {
+    // Pins the table against `worker/src/host.ts`'s NAMESPACES so a future row
+    // cannot advertise an address the edge refuses. `fiveacross.app` is the
+    // canonical Namespace and never appears as an ALTERNATE.
+    const SERVED_ALTERNATES = ['vacaybingo.com'];
+    for (const edition of ['gcb', 'vacay', 'fiveacross', 'not-a-real-edition']) {
+      const apex = alternateNamespaceApex(edition);
+      if (apex !== null) expect(SERVED_ALTERNATES).toContain(apex);
+    }
   });
 
   it('is null for an unrecognized Edition id', () => {
