@@ -74,19 +74,15 @@ export const DEPLOY_TARGETS = Object.freeze({
     // reconciliation is same-project now. What remains is purely the unproven
     // IAM grant above.
     //
-    // ⚠️  THIS SKIP NOW HIDES A REAL GAP (#548, Codex P1 round 4). The auth
-    // handoff lives in THIS project, and Domain Restricted Sharing applies
-    // here too, so a routine `npm run deploy:fiveacross` releases
-    // mintAuthHandoff and exchangeAuthHandoff and leaves both 403 — which is
-    // sign-in unavailable on every Event origin, not one degraded feature.
-    // deploy.sh prints a loud warning naming the manual repair whenever it
-    // skips a release that included the handoff, so the gap is visible rather
-    // than silent, and it is harmless only while the handoff has no caller
-    // (#549 client half and #547 central origin are both outstanding).
+    // ⚠️  THIS SKIP IS A REAL GAP (#548, Codex P1 round 4). The auth handoff
+    // lives in THIS project, and Domain Restricted Sharing applies here too.
+    // While the handoff origin is active, scripts/deploy-target.mjs refuses a
+    // Five Across deploy before build or publish instead of releasing
+    // mintAuthHandoff and exchangeAuthHandoff with both left 403.
     //
-    // TO CLOSE IT: grant the fiveacross deploy SA run.services.update on
-    // fiveacross, confirm the wrappers succeed there, then flip this to false.
-    // That is a console/IAM action, so it cannot ship in a code PR.
+    // TO CLOSE IT: complete #547 by granting the fiveacross deploy SA
+    // run.services.update on fiveacross, then flip this to false. The existing
+    // pre-publish invoker check will prove the grant before Firebase publishes.
     skipInvokerReconcile: true,
   }),
 });

@@ -82,6 +82,18 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
   };
 }
 
+function assertTargetDeployReady(target, config) {
+  const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
+  if (!handoffOrigin || !config.skipInvokerReconcile) return;
+
+  throw new Error(
+    `Refusing to deploy ${target}: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true. ` +
+      `Complete #547: grant the Five Across deploy service account run.services.update, ` +
+      `set skipInvokerReconcile to false, and let the existing pre-publish invoker check verify both handoff callables. ` +
+      `Nothing has been built or published.`,
+  );
+}
+
 function usage() {
   console.error(`Usage: npm run deploy -- <${Object.keys(DEPLOY_TARGETS).join('|')}> [Firebase deploy options]`);
   console.error(`       npm run deploy:hosting -- <${Object.keys(DEPLOY_TARGETS).join('|')}>`);
@@ -90,9 +102,12 @@ function usage() {
 
 function main() {
   let request;
+  let invocation;
   try {
     request = deployRequest(process.argv.slice(2));
-    configForTarget(request.target);
+    const config = configForTarget(request.target);
+    assertTargetDeployReady(request.target, config);
+    invocation = deployInvocation(request.target, request.deployArgs, process.env, request.wrapperArgs);
   } catch (error) {
     console.error(error.message);
     usage();
@@ -100,7 +115,6 @@ function main() {
     return;
   }
 
-  const invocation = deployInvocation(request.target, request.deployArgs, process.env, request.wrapperArgs);
   const result = spawnSync(invocation.command, invocation.args, {
     env: invocation.environment,
     stdio: 'inherit',

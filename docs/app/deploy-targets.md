@@ -17,7 +17,7 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | Baked `VITE_POSTHOG_HOST` | blank (explicit) | blank (explicit) |
 | Post-deploy synthetic | `https://gaycruisebingo.com/` | `https://bodega-bay.fiveacross.app/` |
 | Cache purge | Gay Cruise Bingo zone `8066dd2b105ad564c45bb8c898859343` | explicitly skipped (no Five Across zone configured) |
-| Cloud Run invoker reconciliation | runs (`skipInvokerReconcile: false`) | explicitly skipped (`skipInvokerReconcile: true`) |
+| Cloud Run invoker reconciliation | runs (`skipInvokerReconcile: false`) | deploy blocked pending #547 (`skipInvokerReconcile: true`) |
 | Deploy from | the main checkout (`~/GitHub/gaycruisebingo`) | the main checkout (`~/GitHub/gaycruisebingo`) |
 
 ### Which hosts to verify
@@ -50,7 +50,9 @@ Use `npm run deploy:gaycruisebingo` to deploy every configured Firebase surface.
 
 ## Deploying Five Across / Vacay
 
-From the clean, current `main` checkout:
+Five Across deployment is currently fail-closed. Because its central handoff origin is active while `skipInvokerReconcile` is still `true`, every repo-owned named Five Across deploy refuses before build or publish. Complete [#547](https://github.com/nathanjohnpayne/gaycruisebingo/issues/547) first: grant the Five Across deploy service account `run.services.update` on `fiveacross`, change `skipInvokerReconcile` to `false`, and let the existing pre-publish invoker check verify both handoff callables. This applies to hosting-only and full deploys; it cannot be bypassed with wrapper flags.
+
+After #547 is complete, run from the clean, current `main` checkout:
 
 ```bash
 npm run deploy:fiveacross:hosting

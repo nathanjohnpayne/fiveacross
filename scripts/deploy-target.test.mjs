@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deployInvocation, deployRequest } from './deploy-target.mjs';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const deployTargetScript = resolve(repoRoot, 'scripts', 'deploy-target.mjs');
 
 describe('deploy target selection', () => {
   it('requires an explicit deploy target', () => {
@@ -13,6 +19,24 @@ describe('deploy target selection', () => {
       wrapperArgs: [],
       deployArgs: ['--only', 'hosting'],
     });
+  });
+
+  it('refuses Five Across before build or publish while handoff invoker reconciliation is skipped', () => {
+    const result = spawnSync(process.execPath, [deployTargetScript, 'fiveacross'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toMatch(
+      /^Refusing to deploy fiveacross: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true\./,
+    );
+    expect(result.stderr).toContain(
+      'Complete #547: grant the Five Across deploy service account run.services.update, ' +
+        'set skipInvokerReconcile to false, and let the existing pre-publish invoker check verify both handoff callables.',
+    );
+    expect(result.stderr).toContain('Nothing has been built or published.\nUsage:');
   });
 
   it('keeps deploy-wrapper flags before Firebase options', () => {

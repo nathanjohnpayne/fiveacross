@@ -200,12 +200,13 @@ All in the app layer (`npm test`, jsdom—no emulator).
 - `src/auth/handoff-parity.test.ts`—the three mirrored constants and the digest, against `functions/src/authHandoff.ts` directly.
 - `src/auth-domain.test.ts`—the central auth origin's presence in `FIRST_PARTY_AUTH_HOSTS`.
 - `scripts/fiveacross-origin.integration.test.mjs`—the production-target composition: a second active wildcard host resolves its own Event and selects the central handoff using the registered Five Across environment rather than an exact-host source edit.
+- `scripts/deploy-target.test.mjs`—the repo-owned Five Across deploy refuses before build or publish while handoff invoker reconciliation remains skipped.
 
 Mapped explicitly in `.repo-template.yml` `spec_test_map`, because the coverage is module-named rather than spec-basename-named.
 
 ## Not in scope
 
 - **Provisioning `auth.fiveacross.app` (#547).** Firebase Auth authorized domains and the Google OAuth web client are console-only. Until that lands, the `FIRST_PARTY_AUTH_HOSTS` entry pins an `authDomain` Google will reject, so the handoff cannot carry real traffic.
-- **The `fiveacross` invoker reconciliation.** `skipInvokerReconcile: true` (`scripts/build-target.mjs`) leaves both callables 403ing on that project. Flipping it needs `run.services.update` granted to the `fiveacross` deploy service account—an IAM action no code change can make. Recorded in [auth-handoff](auth-handoff.md).
+- **The `fiveacross` invoker reconciliation.** While `skipInvokerReconcile: true`, the repo-owned deploy path refuses before build or publish rather than leaving both callables 403ing on that project. Completing #547 requires `run.services.update` for the `fiveacross` deploy service account and a reviewed flip to `false`; the existing pre-publish check then verifies both callable policies. Recorded in [auth-handoff](auth-handoff.md).
 - **Enabling `AUTH_HANDOFF_APP_CHECK`.** The client already initialises App Check when `VITE_RECAPTCHA_SITE_KEY` is set, so attestation rides along automatically; turning the server param on is a deploy-time decision that also needs the key present in the untracked `functions/.env.<projectId>` files.
 - **The Firestore TTL policy on `authHandoffs.expiresAt`.** Server-side, and already recorded in [auth-handoff](auth-handoff.md).
