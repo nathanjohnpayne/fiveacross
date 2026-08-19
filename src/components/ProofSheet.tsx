@@ -143,15 +143,19 @@ export default function ProofSheet(props: Props) {
   // is open on a community Square — never a live subscription (see
   // `fetchDisplayName`'s own doc comment). Lives in Prompt detail, not on the
   // card tile, per the acceptance list's "not crowding the card tile".
-  const [suggestedByName, setSuggestedByName] = useState<string | null>(null);
+  //
+  // Stores the uid the name was resolved FOR, not just the name (#863,
+  // Codex + CodeRabbit PR #890 round 1): clearing state at the START of a
+  // passive effect is not enough on its own — the render that COMMITS a
+  // changed `cell.suggestedBy` happens before that effect runs, and (in a
+  // real browser) can PAINT before it runs too, so a bare "clear it in the
+  // effect" can still show the previous suggester's name for a Square it no
+  // longer belongs to. Gating the RENDER itself on `resolvedFor ===
+  // cell.suggestedBy` is correct independent of effect timing entirely: the
+  // stale pair simply stops matching the instant `cell.suggestedBy`
+  // changes, with no window where the wrong name can be displayed.
+  const [resolved, setResolved] = useState<{ uid: string; name: string } | null>(null);
   useEffect(() => {
-    // Cleared at the START of every change (#863), not only when there is no
-    // suggester at all. Without this, `cell.suggestedBy` changing from one
-    // non-empty uid to a DIFFERENT one while the sheet stays mounted would
-    // keep showing the PREVIOUS uid's already-resolved name until the new
-    // fetch resolves — transiently attributing the new Square's prompt to
-    // the prior player.
-    setSuggestedByName(null);
     // Gated on `communityPrompt`, not just `suggestedBy` (#863), matching
     // this read's documented contract (specs/community-prompt-targeting.md
     // § Attribution: "fired only while the sheet is open on a community
@@ -159,14 +163,16 @@ export default function ProofSheet(props: Props) {
     if (!cell.communityPrompt || !cell.suggestedBy) {
       return;
     }
+    const suggestedBy = cell.suggestedBy;
     let cancelled = false;
-    fetchDisplayName(cell.suggestedBy).then((name) => {
-      if (!cancelled) setSuggestedByName(name);
+    fetchDisplayName(suggestedBy).then((name) => {
+      if (!cancelled) setResolved({ uid: suggestedBy, name });
     });
     return () => {
       cancelled = true;
     };
   }, [cell.communityPrompt, cell.suggestedBy]);
+  const suggestedByName = resolved && resolved.uid === cell.suggestedBy ? resolved.name : null;
 
   // Modal focus management, the same contract every other sheet carries
   // (ProfileEditor, AcceptableUse, More, FeedWhoListSheet, AdminSheet): move

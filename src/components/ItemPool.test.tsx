@@ -471,7 +471,7 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     vi.unstubAllGlobals();
   });
 
-  it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list, but still persists it correctly under the OLD uid', async () => {
+  it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list — even when the write resolves in the SAME batch as the account switch, before any effect gets a separate turn to settle first (Codex + CodeRabbit, PR #890 round 1)', async () => {
     let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
     H.addItem.mockReturnValue(
       new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
@@ -488,13 +488,19 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     // Still pending — `addItem` has not resolved yet.
     expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false);
 
-    // Auth switches to a DIFFERENT account while the write is still pending
-    // (sign-out/sign-in as someone else on a shared device).
+    // Auth switches to a DIFFERENT account, and the write resolves inside
+    // the SAME `act()` batch — round 1's finding: a plain `useEffect`-based
+    // `uidRef` update is a PASSIVE effect and would not yet have run by the
+    // time a promise `.then()` continuation queued in the same tick checks
+    // it, letting the stale splice through anyway even though the earlier,
+    // two-separately-settled-`act()`-calls version of this test could not
+    // see that (it let the ref update fully settle before ever resolving
+    // the promise). `useLayoutEffect` closes the window instead: it runs
+    // SYNCHRONOUSLY as part of the very commit that changed `uid`, strictly
+    // before `resolveAdd` below is even called.
     H.user = { uid: 'u2' };
-    await act(async () => rerender(<ItemPool />));
-
-    // The write resolves AFTER the switch.
     await act(async () => {
+      rerender(<ItemPool />);
       resolveAdd({ id: 'new-item-1' });
     });
 
@@ -505,5 +511,34 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     // under u1's OWN localStorage key.
     const stored: Array<{ id: string }> = JSON.parse(storage.getItem('gcb.mySuggestions.ev-1.u1') ?? '[]');
     expect(stored.map((s) => s.id)).toContain('new-item-1');
+  });
+
+  it('also guards the text/spicy form reset, so an old account\'s completion cannot clear a new account\'s in-progress draft (CodeRabbit, PR #890 round 1)', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    const input = screen.getByPlaceholderText('Add a prompt…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Submitted by u1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+
+    // The NEW account starts typing their own submission before u1's write
+    // resolves.
+    fireEvent.change(input, { target: { value: 'u2 is mid-draft' } });
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    // u1's stale completion must not have wiped u2's in-progress text.
+    expect(input.value).toBe('u2 is mid-draft');
   });
 });

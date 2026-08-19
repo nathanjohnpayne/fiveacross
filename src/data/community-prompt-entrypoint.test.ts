@@ -158,10 +158,38 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded.find((s) => s.id === 'id-21')).toBeDefined();
   });
 
+  it('never evicts a genuinely NEW submission merely because an existing entry carries a non-monotonic (clock-skewed) submittedAt (Codex P2, PR #890 round 1)', () => {
+    // Simulates 20 entries recorded while the device clock was skewed FAR
+    // into the future (a bad NTP sync, say), filling the tracker to its cap.
+    for (let i = 0; i < 20; i++) {
+      trackSuggestion('ev-1', 'u1', { id: `skewed-${i}`, text: `t${i}`, submittedAt: 999_000 + i });
+    }
+    // The clock then corrects BACKWARD to the real time — a genuinely NEW
+    // submission now carries a SMALLER recorded submittedAt than every
+    // existing (skewed) entry, even though it is chronologically the most
+    // recent write this device has made. The pre-round-1 sort-by-submittedAt
+    // cap would have evicted THIS entry instead of the actually-oldest one.
+    trackSuggestion('ev-1', 'u1', { id: 'genuinely-newest', text: 'just submitted', submittedAt: 500 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded.find((s) => s.id === 'genuinely-newest')).toBeDefined();
+    // The tracker is capped by WRITE order, so the entry recorded FIRST —
+    // regardless of its (skewed) timestamp — is what the cap evicts.
+    expect(loaded.find((s) => s.id === 'skewed-0')).toBeUndefined();
+  });
+
   it('discards a persisted entry whose lastKnownStatus is not a valid SubmitterStatus, rather than letting a malformed value reach the pill label (#865)', () => {
     localStorage.setItem(
       'gcb.mySuggestions.ev-1.u1',
       JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownStatus: 'banana' }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it("discards a persisted entry whose lastKnownStatus is 'pending' — never something this module itself writes, only a malformed or cross-version blob, and accepting it could pin a rejected submission as 'pending review' forever (Codex + CodeRabbit, PR #890 round 1)", () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownStatus: 'pending' }]),
     );
     expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
   });
@@ -181,6 +209,17 @@ describe('mySuggestions local tracker (#559)', () => {
     );
     expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
   });
+
+  it.each([-1, 1.5])(
+    'discards a persisted entry whose lastKnownDayIndex is %s — not a non-negative integer (Codex + CodeRabbit, PR #890 round 1)',
+    (badIndex) => {
+      localStorage.setItem(
+        'gcb.mySuggestions.ev-1.u1',
+        JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownDayIndex: badIndex }]),
+      );
+      expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+    },
+  );
 
   it('still accepts a well-formed entry carrying valid optional fields', () => {
     const stored = {

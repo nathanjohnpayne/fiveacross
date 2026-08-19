@@ -154,7 +154,16 @@ export default function ItemPool() {
   // without needing to skip the (correctly-attributed) Firestore write or
   // localStorage persist.
   const uidRef = useRef(uid);
-  useEffect(() => {
+  // `useLayoutEffect`, not `useEffect` (Codex + CodeRabbit, PR #890 round 1):
+  // a REGULAR effect leaves `uidRef.current` holding the OLD uid until after
+  // the new-account render has committed and (in a real browser) painted —
+  // if the pending `addItem` promise resolves in exactly that window, the
+  // guard below still reads the stale uid and lets the splice through
+  // anyway, the same class of bug #862 already fixed for the grace window.
+  // A layout effect runs synchronously as part of the SAME commit that
+  // changed `uid`, so there is no window at all in which a resolving
+  // promise can observe a stale ref.
+  useLayoutEffect(() => {
     uidRef.current = uid;
   }, [uid]);
   const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
@@ -378,8 +387,16 @@ export default function ItemPool() {
           setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
         }
       }
-      setText('');
-      setSpicy(false);
+      // Clearing the form is ALSO guarded (CodeRabbit, PR #890 round 1): the
+      // OLD account's completion clearing `text`/`spicy` unconditionally
+      // would erase whatever the NEW account already started typing after
+      // the switch — the same leak #861 describes, just for the compose
+      // fields instead of the tracked-submissions list. Only the account
+      // that actually submitted gets to clear its own form.
+      if (uidRef.current === submittingUid) {
+        setText('');
+        setSpicy(false);
+      }
     } catch (e) {
       console.error(e);
     }

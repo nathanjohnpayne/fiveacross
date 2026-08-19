@@ -65,15 +65,23 @@ function storageKey(eventId: string, uid: string): string {
   return `gcb.mySuggestions.${eventId}.${uid}`;
 }
 
-/** The full set of values `TrackedSuggestion['lastKnownStatus']` may hold —
- *  `SubmitterStatus` itself, not `MySubmissionStatus`: this field is never
- *  stamped `'not_selected'` (there is nothing to "last know" about a
- *  submission that was never observed active), but validating against the
- *  field's own declared TYPE, not the narrower runtime convention, is what
- *  keeps this check from drifting the moment `SubmitterStatus` grows a
- *  value (#865). */
-const VALID_LAST_KNOWN_STATUSES: ReadonlySet<string> = new Set<SubmitterStatus>([
-  'pending',
+/**
+ * The full set of values `TrackedSuggestion['lastKnownStatus']` may hold —
+ * deliberately NARROWER than `SubmitterStatus`'s own three values (Codex +
+ * CodeRabbit, PR #890 round 1): this field's own contract, stated on
+ * `TrackedSuggestion` above, is that it is "never stored here" as
+ * `'pending'` — only a genuinely resolved (`'scheduled' | 'approved'`)
+ * state is ever WRITTEN by `refreshLastKnownStatuses`. A persisted
+ * `lastKnownStatus: 'pending'` is therefore never something this module
+ * itself produced — only a malformed or cross-version blob — and accepting
+ * it would let `deriveMySubmissions`' fallback (`t.lastKnownStatus ??
+ * 'not_selected'`) report "pending review" for a submission that may
+ * actually be long since rejected, with no live query ever arriving to
+ * correct it (a rejected row is unreadable by its own submitter, so nothing
+ * would ever un-stick it). Validating against the runtime WRITE contract,
+ * not the wider read TYPE, is what catches that.
+ */
+const VALID_LAST_KNOWN_STATUSES: ReadonlySet<string> = new Set<Exclude<SubmitterStatus, 'pending'>>([
   'scheduled',
   'approved',
 ]);
@@ -108,7 +116,17 @@ function isTrackedSuggestion(v: unknown): v is TrackedSuggestion {
   if (obj.lastKnownStatus !== undefined && !VALID_LAST_KNOWN_STATUSES.has(obj.lastKnownStatus as string)) {
     return false;
   }
-  if (obj.lastKnownDayIndex !== undefined && typeof obj.lastKnownDayIndex !== 'number') {
+  // A non-negative INTEGER, not merely a number (Codex + CodeRabbit, PR
+  // #890 round 1): this field mirrors `targetDayIndex`, and `isUsableTarget`
+  // (communityPrompts.ts) is the shared contract for what a real Day index
+  // can be — a negative, fractional, or non-finite value is never one,
+  // matching the same bound `isUsableTarget` itself enforces.
+  if (
+    obj.lastKnownDayIndex !== undefined &&
+    (typeof obj.lastKnownDayIndex !== 'number' ||
+      !Number.isInteger(obj.lastKnownDayIndex) ||
+      obj.lastKnownDayIndex < 0)
+  ) {
     return false;
   }
   if (obj.lastKnownText !== undefined && typeof obj.lastKnownText !== 'string') {
@@ -140,22 +158,32 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
  * double-invoke — never duplicates the entry); silently drops on a storage
  * error, same fallback as the read.
  *
- * Capped by SUBMISSION order (`submittedAt`), not by array/write position
- * (#864): a naive remove-then-append would move a REFRESHED entry to the
- * newest storage slot even though nothing new was submitted, so a later
- * `TRACKED_LIMIT`-exceeding cap could evict a genuinely more recent
- * submission while keeping the older one a refresh happened to touch last —
- * contradicting the documented "keep the newest by submission" cap and
- * losing that more recent submission's own follow-up tracking. Sorting by
- * `submittedAt` before capping makes the evicted entry always the oldest
- * SUBMISSION, regardless of which entry was most recently refreshed.
+ * Capped by WRITE order, not by a client-reported `submittedAt` (#864, then
+ * Codex P2 on PR #890 round 1): the FIRST cut of this fix sorted by
+ * `submittedAt` before capping, reasoning that a naive remove-then-append
+ * moved a REFRESHED entry to the newest storage slot even though nothing
+ * new was submitted — true, but `submittedAt` is a CLIENT clock reading,
+ * not a monotonic sequence: a device clock correction, or an existing
+ * well-typed persisted row carrying a bogus far-future value, can make a
+ * genuinely brand-new submission sort BELOW older entries and be the one
+ * `slice(-TRACKED_LIMIT)` evicts — the opposite of "keep the newest". An
+ * existing id is instead replaced IN PLACE, at its current array position,
+ * so a REFRESH never moves anything; only a genuinely NEW id is appended,
+ * and only the append path is ever capped — by array position, which is
+ * monotonic by construction (this function's own call order) regardless of
+ * what the clock says.
  */
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
   try {
-    const existing = loadTrackedSuggestions(eventId, uid).filter((s) => s.id !== suggestion.id);
-    const next = [...existing, suggestion]
-      .sort((a, b) => a.submittedAt - b.submittedAt)
-      .slice(-TRACKED_LIMIT);
+    const existing = loadTrackedSuggestions(eventId, uid);
+    const index = existing.findIndex((s) => s.id === suggestion.id);
+    let next: TrackedSuggestion[];
+    if (index === -1) {
+      next = [...existing, suggestion].slice(-TRACKED_LIMIT);
+    } else {
+      next = existing.slice();
+      next[index] = suggestion;
+    }
     localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next));
   } catch {
     /* nothing to persist */
