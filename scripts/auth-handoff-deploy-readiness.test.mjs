@@ -16,7 +16,13 @@ afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function makeFixture({ credential, opCredential, failService = '', describeValue = 'false' }) {
+async function makeFixture({
+  credential,
+  opCredential,
+  failService = '',
+  describeValue = 'false',
+  activationFails = false,
+}) {
   const root = await mkdtemp(join(tmpdir(), 'auth-handoff-readiness-'));
   fixtures.push(root);
   const log = join(root, 'gcloud.log');
@@ -32,7 +38,10 @@ async function makeFixture({ credential, opCredential, failService = '', describ
 set -euo pipefail
 printf '%s\\n' "$*" >> "$GCLOUD_LOG"
 case " $* " in
-  *" auth activate-service-account "*) exit 0 ;;
+  *" auth activate-service-account "*)
+    if [[ "\${ACTIVATION_FAILS:-false}" == "true" ]]; then exit 8; fi
+    exit 0
+    ;;
   *" run services describe "*) printf '%s\\n' "$DESCRIBE_VALUE"; exit 0 ;;
   *" run services update "*)
     if [[ -n "\${BLOCK_FILE:-}" && " $* " == *" mintauthhandoff "* ]]; then
@@ -75,6 +84,7 @@ fi
     opCredentialPath,
     failService,
     describeValue,
+    activationFails,
   };
 }
 
@@ -92,6 +102,7 @@ function runReadiness(fixture, overrides = {}) {
       OP_BLOCK_FILE: '',
       FAIL_SERVICE: fixture.failService,
       DESCRIBE_VALUE: fixture.describeValue,
+      ACTIVATION_FAILS: String(fixture.activationFails),
       OP_CREDENTIAL_PATH: fixture.opCredentialPath,
       ...overrides,
     },
@@ -153,6 +164,24 @@ describe('Five Across auth-handoff deploy readiness', () => {
 
     expect(result.status, result.stderr).toBe(0);
     const calls = await readFile(fixture.log, 'utf8');
+    expect(calls).not.toContain('run services update');
+  });
+
+  it('fails closed instead of falling back to ambient gcloud when the exact deploy-SA key cannot activate', async () => {
+    const fixture = await makeFixture({
+      credential: { type: 'service_account', client_email: expectedServiceAccount },
+      activationFails: true,
+    });
+
+    const result = runReadiness(fixture, {
+      GOOGLE_APPLICATION_CREDENTIALS: fixture.credentialPath,
+      AUTH_HANDOFF_PROJECT: 'fiveacross',
+    });
+
+    expect(result.status).not.toBe(0);
+    const calls = await readFile(fixture.log, 'utf8');
+    expect(calls).toContain('auth activate-service-account');
+    expect(calls).not.toContain('run services describe');
     expect(calls).not.toContain('run services update');
   });
 

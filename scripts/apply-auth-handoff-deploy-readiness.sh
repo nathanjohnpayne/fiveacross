@@ -52,6 +52,7 @@ PY
 
 SOURCE_CREDENTIAL="${GOOGLE_APPLICATION_CREDENTIALS:-}"
 IMPERSONATE_SERVICE_ACCOUNT="$EXPECTED_SERVICE_ACCOUNT"
+REQUIRE_DIRECT_KEY_ACTIVATION=false
 
 if [[ -n "$SOURCE_CREDENTIAL" && ! -f "$SOURCE_CREDENTIAL" ]]; then
   echo "FAIL: GOOGLE_APPLICATION_CREDENTIALS points to a missing file: $SOURCE_CREDENTIAL" >&2
@@ -63,6 +64,7 @@ if credential_is_exact_deployer "$SOURCE_CREDENTIAL"; then
   # The operation already runs directly as the selected deploy SA. Asking that
   # account to impersonate itself would add an unnecessary tokenCreator grant.
   IMPERSONATE_SERVICE_ACCOUNT=""
+  REQUIRE_DIRECT_KEY_ACTIVATION=true
 elif [[ -z "$SOURCE_CREDENTIAL" ]]; then
   # Reuse the canonical Firebase deploy credential primitive before falling
   # back to the keyless gcloud source chain. Five Across is normally keyless,
@@ -76,6 +78,7 @@ elif [[ -z "$SOURCE_CREDENTIAL" ]]; then
     fi
     SOURCE_CREDENTIAL="$OWNED_CREDENTIAL"
     IMPERSONATE_SERVICE_ACCOUNT=""
+    REQUIRE_DIRECT_KEY_ACTIVATION=true
   fi
 fi
 
@@ -90,11 +93,13 @@ if [[ -n "$SOURCE_CREDENTIAL" ]]; then
   "${COMMON_ENV[@]}" \
     "AUTH_HANDOFF_PROJECT=$PROJECT" \
     "GCLOUD_IMPERSONATE_SERVICE_ACCOUNT=$IMPERSONATE_SERVICE_ACCOUNT" \
+    "GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION=$REQUIRE_DIRECT_KEY_ACTIVATION" \
     "GOOGLE_APPLICATION_CREDENTIALS=$SOURCE_CREDENTIAL" \
     "$SCRIPT_DIR/set-auth-handoff-invoker.sh" --prove-update
 else
   "${COMMON_ENV[@]}" -u GOOGLE_APPLICATION_CREDENTIALS \
     "AUTH_HANDOFF_PROJECT=$PROJECT" \
     "GCLOUD_IMPERSONATE_SERVICE_ACCOUNT=$IMPERSONATE_SERVICE_ACCOUNT" \
+    "GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION=$REQUIRE_DIRECT_KEY_ACTIVATION" \
     "$SCRIPT_DIR/set-auth-handoff-invoker.sh" --prove-update
 fi

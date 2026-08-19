@@ -68,6 +68,9 @@ set -euo pipefail
 #                Exact service account every gcloud operation impersonates.
 #                Used by the pre-build handoff readiness wrapper; unset for
 #                ordinary reconciliation and direct service-account keys.
+#   GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION
+#                When true, a service-account key that cannot activate is a
+#                terminal credential failure instead of falling back to ADC.
 #
 # CREDENTIALS (#768 r4 — this used to abort routine deploys)
 #
@@ -121,6 +124,7 @@ ALLOW_MISSING=false
 PROVE_UPDATE=false
 GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
 GCLOUD_IMPERSONATE_SERVICE_ACCOUNT="${GCLOUD_IMPERSONATE_SERVICE_ACCOUNT:-}"
+GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION="${GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION:-false}"
 INVOKER_ANNOTATION='run.googleapis.com/invoker-iam-disabled'
 # `gcloud run services describe` has two observed missing-service diagnostics:
 # the structured `NOT_FOUND` status and `Cannot find service [<name>]`. Match
@@ -216,6 +220,12 @@ resolve_credential() {
     )
     CREDENTIAL_MODE="the deploy service-account key from GOOGLE_APPLICATION_CREDENTIALS (isolated gcloud config)"
     return 0
+  fi
+
+  if [[ "$GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION" == "true" ]]; then
+    echo "FAIL: the required service-account key could not be activated; refusing ambient gcloud fallback." >&2
+    sed 's/^/     /' "$ACTIVATE_ERR" >&2
+    return 1
   fi
 
   # Activation failed (malformed key, gcloud too old, revoked key). Fall back
