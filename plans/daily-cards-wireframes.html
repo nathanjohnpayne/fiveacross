@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Five Across—tri-brand wireframes (Daily Cards)</title>
+<!-- The OG artboards use the same checked display faces as og-edition.html.
+     Other frames retain their documented fallbacks; these two faces are
+     loaded here because #884 claims composition parity with the renderer. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Oswald:wght@300;400;500;600;700&display=block" rel="stylesheet">
 <style>
   /* lucide sizing—official lucide-static SVGs inlined below (self-contained, no CDN);
      each svg's data-lucide attribute names the icon for lucide-react in the real build */
@@ -748,16 +754,21 @@
   .ogc{width:300px;height:158px;border-radius:12px;overflow:hidden;box-sizing:border-box;
     position:relative;color:var(--ink);font-family:'Helvetica Neue',Arial,sans-serif}
   .ogc-gcb{--ink:#f6ecff;--dim:#b9a9d6;--primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;
-    --og-cell:#181424;--og-bar:#36283c;--og-onbar:rgba(20,10,30,.45);background:
+    --og-cell:#181424;--og-bar:#36283c;--og-onbar:rgba(20,10,30,.45);--og-onglow:rgba(255,45,149,.30);
+    --og-short:.69;--og-long:1;--og-cell-radius:3.25px;--og-freeink:#1a1206;
+    --og-boardshadow:0 0 17.5px rgba(255,45,149,.10);background:
     radial-gradient(205px 155px at 4% 2%,rgba(255,45,149,.22),transparent 66%),
     radial-gradient(195px 150px at 100% 100%,rgba(0,230,255,.18),transparent 64%),#07060d}
   .ogc-vacay{--ink:#e6eef2;--dim:#6b7d87;--primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;
-    --og-cell:#1b2a3a;--og-bar:#2e4759;--og-onbar:rgba(10,25,35,.40);background:
+    --og-cell:#1b2a3a;--og-bar:#2e4759;--og-onbar:rgba(10,25,35,.40);--og-onglow:rgba(46,127,168,.20);
+    --og-short:.69;--og-long:1;--og-cell-radius:3px;--og-freeink:#1b1005;
+    --og-boardshadow:0 5.5px 12px rgba(0,0,0,.45);background:
     radial-gradient(205px 155px at 96% 6%,rgba(46,127,168,.20),transparent 66%),
     radial-gradient(190px 150px at 4% 96%,rgba(143,208,195,.13),transparent 64%),#0a141c}
   .ogc-vacay::before{content:"";position:absolute;inset:8.5px;border:1px dashed rgba(150,196,208,.36);border-radius:2px}
   .ogc-fa{--ink:#f2f4f8;--dim:#98a1b0;--primary:#3f66f0;--secondary:#2c4bd8;--accent:#f5c451;
-    --og-cell:#191c25;--og-bar:#2b303c;--og-onbar:rgba(255,255,255,.55);background:
+    --og-cell:#191c25;--og-bar:#2b303c;--og-onbar:rgba(255,255,255,.55);--og-onglow:transparent;
+    --og-short:.62;--og-long:.78;--og-cell-radius:2.5px;--og-freeink:#171410;--og-boardshadow:none;background:
     repeating-linear-gradient(90deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
     repeating-linear-gradient(0deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
     radial-gradient(225px 160px at 78% 30%,rgba(63,102,240,.10),transparent 70%),#0f1116}
@@ -792,16 +803,24 @@
   .ogc-vacay .ogboardwrap{left:192.5px;top:37.5px;width:87.5px;transform:rotate(-2deg)}
   .ogc-fa .ogboardwrap{left:177px;top:22.5px;width:103px}
   .ogc .oggrid{display:grid;grid-template-columns:repeat(5,1fr);gap:2.25px;padding:3.75px;
-    border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:6.5px}
+    border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:6.5px;box-shadow:var(--og-boardshadow)}
   .ogc-vacay .oggrid{gap:2.5px;padding:3.75px;border-color:rgba(143,208,195,.16);background:rgba(9,22,32,.82);border-radius:5.5px}
   .ogc-fa .oggrid{gap:2.5px;padding:4px;border-color:rgba(255,255,255,.10);border-radius:5px}
-  .ogc .ogsq{aspect-ratio:1/1;border-radius:3px;border:1px solid rgba(255,255,255,.07);background:var(--og-cell);position:relative}
-  .ogc .ogsq::before,.ogc .ogsq::after{content:"";position:absolute;left:20%;height:1.5px;border-radius:1px;background:var(--og-bar)}
-  .ogc .ogsq::before{top:38%;width:58%}.ogc .ogsq::after{top:57%;width:43%}
-  .ogc .ogsq.on{background:linear-gradient(145deg,var(--primary),var(--secondary));border-color:transparent}
+  .ogc .ogsq{--bar-one:var(--og-long);--bar-two:var(--og-short);aspect-ratio:1/1;border-radius:var(--og-cell-radius);
+    border:1px solid rgba(255,255,255,.07);background:var(--og-cell);position:relative}
+  .ogc .ogsq[data-bars^='s']{--bar-one:var(--og-short)}
+  .ogc .ogsq[data-bars^='l']{--bar-one:var(--og-long)}
+  .ogc .ogsq[data-bars$='s']{--bar-two:var(--og-short)}
+  .ogc .ogsq[data-bars$='l']{--bar-two:var(--og-long)}
+  .ogc .ogsq::before,.ogc .ogsq::after{content:"";position:absolute;left:20%;width:58%;height:1.5px;
+    border-radius:1px;background:var(--og-bar);transform-origin:left center}
+  .ogc .ogsq::before{top:38%;transform:scaleX(var(--bar-one))}
+  .ogc .ogsq::after{top:57%;transform:scaleX(var(--bar-two))}
+  .ogc .ogsq.on{background:linear-gradient(145deg,var(--primary),var(--secondary));border-color:transparent;
+    box-shadow:0 0 5.5px var(--og-onglow)}
   .ogc .ogsq.on::before,.ogc .ogsq.on::after{background:var(--og-onbar)}
   .ogc .ogsq.freec{display:flex;align-items:center;justify-content:center;background:var(--accent);border-color:var(--accent);
-    color:#171410;font-family:'Oswald','Arial Narrow',sans-serif;font-size:5.25px;font-weight:700;letter-spacing:.04em}
+    color:var(--og-freeink);font-family:'Oswald','Arial Narrow',sans-serif;font-size:5.25px;font-weight:700;letter-spacing:.04em}
   .ogc .ogsq.freec::before,.ogc .ogsq.freec::after{display:none}
   .ogc .ogcaption{margin-top:5.5px;font-size:4.25px;font-weight:700;letter-spacing:.34em;color:var(--accent)}
   .ogc .ogstamp{position:absolute;z-index:2;left:257px;top:14px;width:26.5px;height:31.5px;border:1px dashed var(--accent);
@@ -3872,7 +3891,7 @@
 </div>
 
 <h3 id="sec-og-wireframes">The artboards</h3>
-<p class="sub"><b>5 · OG / link-unfurl image</b>—the surface nobody taps and everybody sees. 1200×630, drawn here at 1/4. Crawlers do not run JS, so this cannot be resolved from <code>hostnames/{host}</code> at runtime: single-Event builds bake it via <code>VITE_EDITION</code> (#587—the meta wording below is what its build-time tokens inject, quoted from the lexicon), multi-Event bundles wait on the #546 edge Worker. These annotated vector artboards follow the shipped #609 composition as rebuilt in <code>scripts/og/render-og-editions.mjs</code>: the eyebrow and share mark, wordmark treatment, endorsement, rule, <code>appDescription</code>, brand domain, board pattern, BINGO caption, and Edition-specific ornament all match the generator's <code>ART</code> table. The committed PNGs above remain pixel truth; these frames explain their composition.</p>
+<p class="sub"><b>5 · OG / link-unfurl image</b>—the surface nobody taps and everybody sees. 1200×630, drawn here at 1/4. Crawlers do not run JS, so this cannot be resolved from <code>hostnames/{host}</code> at runtime: single-Event builds bake it via <code>VITE_EDITION</code> (#587—the meta wording below is what its build-time tokens inject, quoted from the lexicon), multi-Event bundles wait on the #546 edge Worker. These annotated vector artboards follow the shipped #609 composition as rebuilt in <code>scripts/og/render-og-editions.mjs</code>: the eyebrow and share mark, wordmark treatment, endorsement, rule, <code>appDescription</code>, brand domain, board pattern, BINGO caption, and Edition-specific ornament all match the generator and its shared <code>og-edition-art.mjs</code> manifest. The committed PNGs above remain pixel truth; these frames explain their composition.</p>
 <div class="frames">
 
   <div class="unit" id="fx-og-gcb">
@@ -3888,11 +3907,11 @@
       </div>
       <div class="ogboardwrap">
         <div class="oggrid">
-          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
-          <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
-          <div class="ogsq on"></div><div class="ogsq on"></div><div class="ogsq freec">FREE</div><div class="ogsq on"></div><div class="ogsq on"></div>
-          <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
-          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
+          <div class="ogsq on" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq on" data-bars="ss"></div><div class="ogsq" data-bars="ll"></div>
+          <div class="ogsq" data-bars="sl"></div><div class="ogsq on" data-bars="ls"></div><div class="ogsq" data-bars="ss"></div><div class="ogsq" data-bars="ll"></div><div class="ogsq on" data-bars="sl"></div>
+          <div class="ogsq on" data-bars="ls"></div><div class="ogsq on" data-bars="sl"></div><div class="ogsq freec" data-bars="..">FREE</div><div class="ogsq on" data-bars="ll"></div><div class="ogsq on" data-bars="ss"></div>
+          <div class="ogsq" data-bars="ll"></div><div class="ogsq on" data-bars="ss"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div>
+          <div class="ogsq on" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="ss"></div><div class="ogsq on" data-bars="ll"></div><div class="ogsq" data-bars="sl"></div>
         </div>
         <div class="ogcaption">BINGO</div>
       </div>
@@ -3914,11 +3933,11 @@
       </div>
       <div class="ogboardwrap">
         <div class="oggrid">
-          <div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
-          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div>
-          <div class="ogsq on"></div><div class="ogsq on"></div><div class="ogsq freec">FREE</div><div class="ogsq on"></div><div class="ogsq on"></div>
-          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div>
-          <div class="ogsq on"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq on"></div>
+          <div class="ogsq" data-bars="sl"></div><div class="ogsq on" data-bars="ll"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="ss"></div><div class="ogsq on" data-bars="ls"></div>
+          <div class="ogsq on" data-bars="ll"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ss"></div><div class="ogsq on" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div>
+          <div class="ogsq on" data-bars="ls"></div><div class="ogsq on" data-bars="ss"></div><div class="ogsq freec" data-bars="..">FREE</div><div class="ogsq on" data-bars="sl"></div><div class="ogsq on" data-bars="ll"></div>
+          <div class="ogsq" data-bars="ss"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq on" data-bars="ll"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div>
+          <div class="ogsq on" data-bars="sl"></div><div class="ogsq" data-bars="ll"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="ss"></div><div class="ogsq on" data-bars="ls"></div>
         </div>
         <div class="ogcaption">BINGO</div>
       </div>
@@ -3940,11 +3959,11 @@
       </div>
       <div class="ogboardwrap">
         <div class="oggrid">
-          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
-          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
-          <div class="ogsq on"></div><div class="ogsq on"></div><div class="ogsq freec">✳</div><div class="ogsq on"></div><div class="ogsq on"></div>
-          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
-          <div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div><div class="ogsq"></div>
+          <div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div>
+          <div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div>
+          <div class="ogsq on" data-bars="ll"></div><div class="ogsq on" data-bars="ll"></div><div class="ogsq freec" data-bars="..">✳</div><div class="ogsq on" data-bars="ll"></div><div class="ogsq on" data-bars="ll"></div>
+          <div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div>
+          <div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div><div class="ogsq" data-bars="ls"></div><div class="ogsq" data-bars="sl"></div>
         </div>
         <div class="ogcaption">BINGO</div>
       </div>
