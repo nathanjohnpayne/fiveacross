@@ -121,6 +121,13 @@ MSG
   exit 1
 }
 
+# Install the reviewed Worker toolchain before ANY Wrangler command. A
+# route-bearing deploy verifies production secrets before publishing, so
+# deferring this until the deploy step would make that prerequisite check run
+# through npm's unpinned fallback in a clean checkout with no node_modules.
+# `npm ci`, never `npm install`: the lockfile is part of the reviewed deploy.
+npm --prefix worker ci
+
 if [[ "$ROUTE_BEARING" == "true" ]]; then
   cat >&2 <<'MSG'
 ⚠️  worker/wrangler.toml has ROUTES CONFIGURED.
@@ -134,14 +141,6 @@ else
   echo "✅ Guards passed. Publishing the Worker (no routes configured, so this changes nothing the public sees)." >&2
 fi
 
-# `npm ci`, never `npm install`, and the difference is the whole point of the
-# guards above. `npm install` would re-resolve wrangler's caret range against
-# the registry at deploy time, so an operator could start from the required
-# clean, reviewed origin/main commit and still publish a bundle built by a
-# toolchain version nobody reviewed — the guards would verify the source and
-# the toolchain would slip underneath them. `npm ci` installs exactly
-# worker/package-lock.json and fails closed if it and package.json disagree.
-npm --prefix worker ci
 npm --prefix worker run deploy
 
 # Always verify after publishing too: a first deploy has no Worker to inspect
