@@ -514,9 +514,18 @@ describe('mayAdministerMembership — grant authority, which is NOT admission', 
     // and asserted `mayAdministerMembership.length === 1` — which holds for any
     // single-options-object signature. Adding an optional `enforcement` field
     // would have left both assertions green, so it pinned nothing at all.
-    // @ts-expect-error — `enforcement` is not part of the options type, and the
-    // excess-property check is what makes that a compile error rather than a
-    // convention. If this stops erroring, the invariant has been lost.
+    // `enforcement` is not part of the options type, and the excess-property
+    // check is what makes that a compile error rather than a convention. If the
+    // directive below ever reports TS2578 "unused", the invariant has been lost.
+    //
+    // The directive sits immediately above the call deliberately. It DOES bind
+    // through intervening comment lines — TypeScript applies it to the next line
+    // of CODE, not the next physical line, verified both ways: with the excess
+    // property present tsc passes, and with it removed tsc reports TS2578
+    // against the directive. But nothing about that is obvious to a reader, and
+    // a negative assertion whose mechanism is unobvious is one edit away from
+    // being silently disarmed (Phase 4b, round 7).
+    // @ts-expect-error
     mayAdministerMembership({ uid: ALICE, isAdmin: true, membership: activeRecord(), enforcement: 'off' });
 
     // ...and the supported shape still compiles and answers.
