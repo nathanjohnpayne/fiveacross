@@ -47,11 +47,15 @@ describe('SignIn — the gate wears the resolved Edition', () => {
     expect(screen.queryByText(/at sea/i)).toBeNull();
   });
 
-  it('brands the deal-failure retry panel too — it reuses the same shell', () => {
+  it('brands the deal-failure retry panel too — it reuses the same shell, with no offline-note claim about a card that was never dealt', () => {
+    // Codex P2, PR #896 round 4: no card exists yet on this screen, so
+    // brand.offlineNote's "your card keeps working offline" would be a false
+    // claim here specifically — this panel carries no offline note at all.
     setActiveEdition('vacay');
     render(<DealError message="Could not deal your card." onRetry={vi.fn()} retrying={false} />);
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('VACAY BINGO');
     expect(screen.queryByText(/at sea/i)).toBeNull();
+    expect(screen.queryByText(/keeps working offline/i)).toBeNull();
   });
 
   // The uptime synthetic (#142, tests/synthetic/app-mounts.spec.ts) waits for

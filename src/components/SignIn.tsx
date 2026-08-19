@@ -133,6 +133,13 @@ export default function SignIn() {
 // Retry surface shown when a signed-in Player's Board couldn't be dealt (see
 // App.tsx / AuthContext): a Player-worded reason plus a Retry that re-invokes
 // `joinAndDeal` in place, instead of dropping the Player onto a blank Board.
+//
+// Deliberately carries NO `offlineNote` (Codex P2, PR #896 round 4): that
+// field promises a CARD keeps working offline, and this panel exists
+// precisely because no card was dealt yet — reusing it here would tell a
+// first-time Player whose deal just failed that something is "working
+// offline" when nothing has been dealt to work. `message` plus Retry is the
+// whole of what this screen has to say.
 export function DealError({
   message,
   onRetry,
@@ -163,7 +170,6 @@ export function DealError({
       <button className="btn primary block" disabled={retrying} onClick={onRetry}>
         {retrying ? 'Dealing…' : 'Retry'}
       </button>
-      <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
     </div>
   );
 }

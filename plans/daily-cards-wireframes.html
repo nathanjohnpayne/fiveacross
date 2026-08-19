@@ -3154,7 +3154,7 @@
         <p style="font-size:10.5px">Packed room, no bars? Your card keeps working offline&mdash;marks sync when you reconnect.</p>
       </div>
     </div>
-    <p class="cap"><b>Crash panel (ErrorBoundary) — and its DealError sibling</b>The app's only error boundary, and deliberately the most brand-exposed surface in the app: it touches NOTHING from the running app's state, so it renders the Edition wordmark, one reassurance, one recovery action, and the Edition's <code>offlineNote</code>. Two per-brand strings, both overrides: the <b>wordmark</b> (GAY CRUISE BINGO / VACAY BINGO / FIVE ACROSS—per-Edition via <code>editionBrand()</code>; #602, shipped) and the <b>offline line</b>. Same shape, same three deltas, on the DealError panel (“we couldn't deal your card” + <b>Retry</b>), which is reserved for a genuine first-timer with nothing cached.</p>
+    <p class="cap"><b>Crash panel (ErrorBoundary) — and its DealError sibling</b>The app's only error boundary, and deliberately the most brand-exposed surface in the app: it touches NOTHING from the running app's state, so it renders the Edition wordmark, one reassurance, one recovery action, and (#881) the Edition's <code>crashFallbackNote</code>—the total-failure fallback, falling back to the routine <code>offlineNote</code> for an Edition with no printed-card tradition of its own. Two per-brand strings, both overrides: the <b>wordmark</b> (GAY CRUISE BINGO / VACAY BINGO / FIVE ACROSS—per-Edition via <code>editionBrand()</code>; #602, shipped) and the <b>crash-fallback line</b>. The DealError panel (“we couldn't deal your card” + <b>Retry</b>, reserved for a genuine first-timer with nothing cached) shares the wordmark override but carries NO offline footnote at all (#881, Codex round 4): no card was dealt yet on that screen, so a promise about a card working offline has nothing to refer to.</p>
   </div>
 
   <div class="unit" id="fx-util-offline-card-fa">
@@ -3379,15 +3379,28 @@
       <td>GAY CRUISE BINGO<br><span class="inv">glow, 15px, 300/800</span></td>
       <td>VACAY BINGO<br><span class="inv">weathered red, no glow</span></td>
       <td>FIVE ACROSS<br><span class="inv">no glow, .12em</span></td>
-      <td>override (#602) — wordmark only: <span class="inv">no endorsement byline on ANY Edition here. The recovery panels draw the wordmark and the offline note and nothing else, because their contract is to depend on as little as possible. The byline belongs to the two full-lockup surfaces (gate + in-app header). This row carried a <code>+ BY FIVE ACROSS</code> note on Vacay from #647 that the code never matched; corrected in #688 rather than propagated.</span></td>
+      <td>override (#602) — wordmark only: <span class="inv">no endorsement byline on ANY Edition here. The byline belongs to the two full-lockup surfaces (gate + in-app header); the two minimal recovery panels go without it, and (#881) no longer share one offline message either — see the two rows below. This row carried a <code>+ BY FIVE ACROSS</code> note on Vacay from #647 that the code never matched; corrected in #688 rather than propagated.</span></td>
     </tr>
     <tr>
-      <td>Crash panel<br>+ DealError</td><td><code>fx-util-crash-fa</code></td>
-      <td>Offline footnote <code>offlineNote</code></td>
-      <td>Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.</td>
+      <td>Crash panel</td><td><code>fx-util-crash-fa</code></td>
+      <td>Total-failure fallback <code>crashFallbackNote</code></td>
+      <td>If the app won't recover, the printed cards and PDF still work.</td>
+      <td colspan="2" class="inv">Falls back to the routine <code>offlineNote</code> below — Vacay and Five Across have no printed-card tradition of their own to point to (#881).</td>
+      <td>override (gcb), fallback (vacay/fa)</td>
+    </tr>
+    <tr>
+      <td>Crash panel<br><span class="inv">(fallback only)</span></td><td><code>fx-util-crash-fa</code></td>
+      <td>Routine dead-zone note <code>offlineNote</code></td>
+      <td>Lost signal at sea? Your card keeps working offline—marks sync when you reconnect. <span class="inv">gcb sets crashFallbackNote, so the crash panel never falls back to this — shown for completeness.</span></td>
       <td>Patchy signal? Your card keeps working offline—marks sync when you reconnect. <span class="inv">(shipped, #647—the override this doc once flagged to #608 landed in <code>src/editions.ts</code>)</span></td>
       <td>Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.</td>
-      <td>override</td>
+      <td>fallback</td>
+    </tr>
+    <tr>
+      <td>DealError</td><td><code>fx-util-crash-fa</code></td>
+      <td>Offline footnote</td>
+      <td colspan="3" class="inv">None (#881, Codex round 4). No card was dealt yet on this screen, so a promise about a card working offline has nothing to refer to — the panel carries only the wordmark, the failure message, and Retry.</td>
+      <td>removed</td>
     </tr>
     <tr>
       <td>Crash panel<br>+ DealError</td><td><code>fx-util-crash-fa</code></td>
