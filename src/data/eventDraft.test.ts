@@ -386,6 +386,31 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     await expect(store.discard('draft-1')).resolves.toBe(false);
   });
 
+  it('does not confirm discard when removal no-ops and the raw verification read throws (#901)', async () => {
+    const backing = fakeStorage();
+    backing.setItem('gcb:event-draft:draft-1', JSON.stringify(draft()));
+    let removalAttempted = false;
+    const deceptive: Storage = {
+      get length() {
+        return backing.length;
+      },
+      key: (index) => backing.key(index),
+      getItem: (key) => {
+        if (removalAttempted) throw new Error('read access revoked');
+        return backing.getItem(key);
+      },
+      setItem: (key, value) => backing.setItem(key, value),
+      removeItem: () => {
+        removalAttempted = true;
+      },
+      clear: () => backing.clear(),
+    };
+
+    const store = createLocalDraftStore(deceptive, () => NOW);
+    await expect(store.discard('draft-1')).resolves.toBe(false);
+    expect(backing.getItem('gcb:event-draft:draft-1')).not.toBeNull();
+  });
+
   it('re-stamps the schema version on save, so a hand-edited blob cannot persist a stale one', async () => {
     const store = createLocalDraftStore(fakeStorage(), () => NOW);
     const saved = await store.save({ ...draft(), v: 99 });

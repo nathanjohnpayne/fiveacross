@@ -5,9 +5,9 @@ import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } fro
 import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
 import {
   loadTrackedSuggestions,
+  refreshAndPersistLastKnownStatuses,
   trackSuggestion,
   deriveMySubmissions,
-  refreshLastKnownStatuses,
   type MySubmissionStatus,
   type TrackedSuggestion,
 } from '../data/mySuggestions';
@@ -230,15 +230,14 @@ export default function ItemPool() {
   // hard-hiding it after approval, which is unreadable to the submitter same
   // as a rejection) keeps reporting that last-known state instead of
   // flashing/settling into a false "not selected" — see
-  // `deriveMySubmissions`'s own doc comment. `refreshLastKnownStatuses`
-  // returns the SAME array reference when nothing changed, so this only
-  // writes when a tracked entry's observed status genuinely moved.
+  // `deriveMySubmissions`'s own doc comment. The batch seam returns the SAME
+  // array reference when nothing changed, so this only writes when a tracked
+  // entry's observed status genuinely moved; when several move together it
+  // persists one normalized/capped snapshot rather than replaying stale rows.
   useEffect(() => {
-    const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
-    if (refreshed === tracked || !uid) return;
-    for (let i = 0; i < refreshed.length; i++) {
-      if (refreshed[i] !== tracked[i]) trackSuggestion(EVENT_ID, uid, refreshed[i]);
-    }
+    if (!uid) return;
+    const refreshed = refreshAndPersistLastKnownStatuses(EVENT_ID, uid, tracked, activeMine, days, now);
+    if (refreshed === tracked) return;
     setTracked([...refreshed]);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days ?? []` (a fresh [] literal each render); this effect's own `setTracked` is what re-evaluates it on every genuine change to `tracked`/`activeMine`/`now`, matching the established pattern elsewhere in this file.
   }, [tracked, activeMine, now, uid]);
