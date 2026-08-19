@@ -341,7 +341,10 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     expect(await store.load('a')).toBeNull();
     expect(await store.load('b')).not.toBeNull();
 
-    await expect(store.discard('a')).resolves.toBeUndefined();
+    // Discarding an already-gone draft still reports CONFIRMED (#848): the
+    // underlying `removeItem` on an absent key does not throw, so there is
+    // nothing left ambiguous about it.
+    await expect(store.discard('a')).resolves.toBe(true);
   });
 
   it('reads a miss for an unknown or empty draft id', async () => {
@@ -375,7 +378,12 @@ describe('createLocalDraftStore — create, resume, discard', () => {
     await expect(store.save(draft())).resolves.toMatchObject({ draftId: 'draft-1' });
     expect(await store.load('draft-1')).toBeNull();
     expect(await store.list()).toEqual([]);
-    await expect(store.discard('draft-1')).resolves.toBeUndefined();
+    // `removeItem` itself throws here — `discard()` reports that as
+    // UNCONFIRMED, `false`, rather than silently swallowing it (#848): a
+    // caller cannot tell this apart from a successful removal by re-reading
+    // afterward, since `getItem` throws too and `load()` maps that to the
+    // SAME `null` a genuinely absent key would produce.
+    await expect(store.discard('draft-1')).resolves.toBe(false);
   });
 
   it('re-stamps the schema version on save, so a hand-edited blob cannot persist a stale one', async () => {

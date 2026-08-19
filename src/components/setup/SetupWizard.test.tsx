@@ -403,6 +403,58 @@ describe('Cancel', () => {
     expect(await store.load('seeded-draft')).not.toBeNull();
   });
 
+  it('does not navigate away when storage becomes fully restricted — removeItem AND the verification read both fail (#848)', async () => {
+    // The gap #848 describes, distinct from the FrozenStorage case above:
+    // there, `removeItem` silently no-ops but `getItem` still honestly
+    // reports the undeleted draft, so the OLD load()-only verification
+    // already caught it. Here `removeItem` THROWS — and so does `getItem` —
+    // so a load()-only verification would swallow BOTH into `null` and
+    // misread that as "confirmed gone", even though the draft never left
+    // storage and would reappear the moment access returns.
+    class RestrictedStorage implements Storage {
+      get length(): number {
+        throw new Error('restricted');
+      }
+      clear() {
+        throw new Error('restricted');
+      }
+      getItem(): string | null {
+        throw new Error('restricted');
+      }
+      key(): string | null {
+        throw new Error('restricted');
+      }
+      removeItem() {
+        throw new Error('restricted');
+      }
+      setItem() {
+        throw new Error('restricted');
+      }
+    }
+    const workingStorage = new MemoryStorage();
+    vi.stubGlobal('localStorage', workingStorage);
+    await seedDraft(); // empty — the no-ceremony path
+    const user = userEvent.setup();
+    renderApp(setupStepPath('seeded-draft', 'occasion'));
+    await screen.findByTestId('wizard-step-occasion');
+
+    // Storage becomes fully restricted only NOW — after the mount's own
+    // load already succeeded — so both discard()'s removeItem AND
+    // verifiedDiscard's readback throw.
+    vi.stubGlobal('localStorage', new RestrictedStorage());
+
+    await user.click(screen.getByText('✕ Cancel'));
+
+    await screen.findByRole('alert');
+    expect(screen.getByText(/couldn't discard/i)).toBeInTheDocument();
+    // The OLD code read the restricted store's throw-swallowed `null` as
+    // confirmation and navigated away anyway — this is what it got wrong.
+    expect(screen.queryByTestId('fallback-page')).not.toBeInTheDocument();
+    // The ORIGINAL storage still holds the draft — restricted access never
+    // actually removed it.
+    expect(workingStorage.getItem('gcb:event-draft:seeded-draft')).not.toBeNull();
+  });
+
   it('Escape requests Cancel from any step, not only Step 1', async () => {
     const user = userEvent.setup();
     await seedDraft({ step: 'basics', occasion: 'weekend-away', edition: 'vacay' });
@@ -529,6 +581,41 @@ describe('storage failure (Codex P1, PR #840)', () => {
     await screen.findByTestId('wizard-step-occasion');
     await user.click(screen.getByRole('button', { name: 'Save draft (local)' }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/couldn't save/i));
+  });
+
+  it('"Save draft (local)" reports failure on a silent write EVEN WHEN updatedAt happens to match the stale blob (#847)', async () => {
+    // A fixed clock throughout: `save()` stamps `updatedAt` from `Date.now()`,
+    // so pinning it means the STALE (pre-freeze) blob and any LATER save
+    // both stamp the exact SAME `updatedAt` — the collision an
+    // updatedAt-only comparison cannot tell apart from a genuine write, and
+    // the premise this test is pinning against regressing.
+    const FIXED_NOW = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(FIXED_NOW);
+    try {
+      const workingStorage = new MemoryStorage();
+      vi.stubGlobal('localStorage', workingStorage);
+      await seedDraft(); // stamps updatedAt = FIXED_NOW
+      // Freeze AFTER seeding, same shape as the test above: reads keep
+      // returning the pre-freeze snapshot, writes silently no-op.
+      vi.stubGlobal('localStorage', new FrozenStorage(workingStorage));
+      const user = userEvent.setup();
+      renderApp(setupStepPath('seeded-draft', 'occasion'));
+      await screen.findByTestId('wizard-step-occasion');
+
+      // An in-memory edit that never actually persists — picking an
+      // occasion updates REACT STATE immediately regardless of whether the
+      // storage write underneath it took effect. `applyOccasionDefaults`
+      // changes `occasion`/`edition`/`cardFormat`/`claimMode`/`defaultTheme`/
+      // `settings` all at once, so the persisted (stale) blob and the
+      // in-memory draft now disagree on plenty of fields — everything an
+      // updatedAt-only check would miss.
+      await user.click(screen.getByRole('button', { name: /^Weekend away/ }));
+
+      await user.click(screen.getByRole('button', { name: 'Save draft (local)' }));
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/couldn't save/i));
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
 

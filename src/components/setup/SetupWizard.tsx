@@ -68,11 +68,50 @@ async function verifiedSave(store: EventDraftStore, draft: EventDraft): Promise<
   const readBack = await store.load(saved.draftId);
   // A non-null read is not automatically success: a write that silently
   // failed against an ALREADY-EXISTING key can leave the OLD blob readable —
-  // present, but stale. `save` always re-stamps `updatedAt` from its clock,
-  // so comparing it is enough to tell "this write actually landed" from
-  // "something readable happens to still be sitting there".
-  if (!readBack || readBack.updatedAt !== saved.updatedAt) return null;
+  // present, but stale. Comparing only `updatedAt` (#847) is not enough to
+  // tell that apart: two saves inside the same clock tick — or, more
+  // generally, any clock whose precision is coarser than the interval
+  // between them — can share a timestamp, so a FAILED write that left the
+  // OLD blob in place could read back with an `updatedAt` that happens to
+  // equal `saved`'s by coincidence, reporting a silent failure as "Saved".
+  //
+  // The fix is a FULL deep-equal against `saved` — every field, including
+  // the ones `save` itself restamps (`v`, `updatedAt`), not a subset that
+  // excludes them. Excluding them is tempting (they're "expected to
+  // differ" from whatever was there before) but wrong: on a genuinely
+  // SUCCESSFUL write, `readBack` is `saved` read back through
+  // `JSON.stringify`/`JSON.parse`, so it matches `saved` on EVERY field,
+  // restamped ones included — there is no reason to expect them to
+  // disagree, and no round-trip precision lost for the plain numbers/
+  // strings a draft carries. Excluding them would in fact reopen a related
+  // gap: a stale blob whose OTHER fields happen to be byte-identical to
+  // `saved` (a genuine no-op re-save — nothing in the draft actually
+  // changed since the last successful save) still needs its timestamp
+  // checked, because content alone cannot tell "this old blob" from "the
+  // write that was just attempted" when both would look the same either
+  // way. Only a stale blob that coincidentally matches `saved` on
+  // EVERY SINGLE field, restamped ones included, can still slip through —
+  // and at that point it is provably indistinguishable from a genuine
+  // success by any means, not merely unlikely to occur.
+  if (!readBack || !deepEqual(readBack, saved)) return null;
   return readBack;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => deepEqual(item, b[i]));
+  }
+  const aObj = a as Record<string, unknown>;
+  const bObj = b as Record<string, unknown>;
+  const aKeys = Object.keys(aObj);
+  const bKeys = Object.keys(bObj);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every(
+    (key) => Object.prototype.hasOwnProperty.call(bObj, key) && deepEqual(aObj[key], bObj[key]),
+  );
 }
 
 /**
@@ -81,12 +120,25 @@ async function verifiedSave(store: EventDraftStore, draft: EventDraft): Promise<
  * `EventDraftStore.discard` is best-effort in the same way `save` is
  * (specs/event-setup-wizard.md § "Draft lifecycle" — "Discard" carries no
  * soft-delete, but the underlying `removeItem` can still throw against
- * write-restricted storage and be swallowed). Leaving without checking would
- * make Cancel LOOK like it worked while the "discarded" draft stays in
- * `list()` and can resurface in a future resume UI (Codex P2, PR #840).
+ * write-restricted storage). Leaving without checking would make Cancel LOOK
+ * like it worked while the "discarded" draft stays in `list()` and can
+ * resurface in a future resume UI (Codex P2, PR #840).
+ *
+ * The `load()` readback alone is not sufficient (#848): `load()` maps EVERY
+ * miss to `null` — an absent key and a FAILED read both read back the same
+ * way. If storage becomes restricted enough that `discard`'s own
+ * `removeItem` throws, the verification `load()` immediately after is very
+ * likely to fail the same way, for the same reason — and a `null` from a
+ * failed read would be misread as "confirmed gone" even though the draft
+ * never actually left storage and can reappear the moment access returns.
+ * Checking `discard`'s own return value first closes that gap: it is the
+ * one signal that distinguishes "the removal itself could not even be
+ * attempted" from "the removal ran cleanly", which no amount of re-reading
+ * afterward can recover once lost.
  */
 async function verifiedDiscard(store: EventDraftStore, draftId: string): Promise<boolean> {
-  await store.discard(draftId);
+  const removed = await store.discard(draftId);
+  if (!removed) return false;
   return (await store.load(draftId)) === null;
 }
 

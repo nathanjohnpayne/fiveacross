@@ -111,11 +111,25 @@ export interface EventDraftStore {
   load(draftId: string): Promise<EventDraft | null>;
   /** Persist, stamping `updatedAt`. Returns the stored draft. */
   save(draft: EventDraft): Promise<EventDraft>;
-  /** Remove one draft. Discarding something that is already gone succeeds.
-   *  Unlike `load`, an empty `draftId` is NOT a guaranteed no-op here: it is
-   *  a valid identifier `unreadable()` can report (the degenerate
-   *  exact-prefix key), and this method must be able to reach it. */
-  discard(draftId: string): Promise<void>;
+  /**
+   * Remove one draft. Discarding something that is already gone succeeds.
+   * Unlike `load`, an empty `draftId` is NOT a guaranteed no-op here: it is
+   * a valid identifier `unreadable()` can report (the degenerate
+   * exact-prefix key), and this method must be able to reach it.
+   *
+   * Returns whether the removal could be CONFIRMED (#848): `true` when
+   * there was no storage to remove from (nothing was ever persisted, so
+   * there is nothing to confirm) or the underlying removal did not throw;
+   * `false` when the removal attempt itself failed (a write-restricted
+   * Storage — a stricter privacy mode, a security-partitioned context).
+   * A caller cannot treat a subsequent `load()` readback as proof of
+   * removal on a `false` result: the SAME restriction that broke the
+   * removal typically also breaks the read that would otherwise confirm
+   * it, and `load()` maps a failed read to `null` exactly the same way it
+   * maps a genuinely absent key to `null` — indistinguishable from the
+   * caller's side without this signal.
+   */
+  discard(draftId: string): Promise<boolean>;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -542,7 +556,7 @@ export function createLocalDraftStore(
       return stamped;
     },
 
-    async discard(draftId: string): Promise<void> {
+    async discard(draftId: string): Promise<boolean> {
       const ls = store(storage);
       // NOT `!draftId`: an empty string is a legitimate `discard()` argument,
       // not a guaranteed miss the way it is for `load()`. `unreadable()` can
@@ -553,11 +567,20 @@ export function createLocalDraftStore(
       // here would make that one advertised id permanently un-discardable,
       // silently defeating the very cleanup path it was named for (Codex P2,
       // #814 round 2 review).
-      if (!ls) return;
+      // No storage at all means nothing was ever persisted anywhere on this
+      // device — there is nothing to remove, and nothing left unconfirmed.
+      if (!ls) return true;
       try {
         ls.removeItem(KEY_PREFIX + draftId);
+        return true;
       } catch {
-        /* nothing to do — a draft that cannot be removed is already unreadable */
+        // The removal itself could not be attempted (#848) — a
+        // write-restricted Storage. Report this as UNCONFIRMED rather than
+        // swallowing it silently: a caller that treats a subsequent
+        // `load()` readback as proof would be fooled by the same
+        // restriction breaking that read too (`load()` maps a failed read
+        // to `null`, indistinguishable from a genuinely absent key).
+        return false;
       }
     },
   };
