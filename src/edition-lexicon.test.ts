@@ -145,7 +145,10 @@ describe('Gay Cruise Bingo is byte-identical to what shipped', () => {
   it.each([
     ['wordmark', 'GAY CRUISE BINGO'],
     ['tagline', 'Sign in, get your card, mark it if you see it.'],
-    ['offlineNote', 'Lost signal at sea? The printed cards and PDF still work.'],
+    // #881: the ONE deliberate exception to "byte-identical" in this table —
+    // the old copy promised printed cards and a PDF the app has never
+    // shipped. Every other row above is still a live regression pin.
+    ['offlineNote', 'Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.'],
     ['documentTitle', 'Gay Cruise Bingo'],
     ['appName', 'Gay Cruise Bingo'],
     ['appShortName', 'Gay Bingo'],

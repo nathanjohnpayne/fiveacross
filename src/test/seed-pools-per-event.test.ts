@@ -303,9 +303,12 @@ describe('bodega-bay-2026 — Event payload pins', () => {
       expect(day.port).toBe(day.place);
       expect(typeof day.portEmoji).toBe('string');
     }
-    // The one deliberate divergence: Nathan set the wrap-up chip's legacy
-    // emoji to 👋 live; the neutral field keeps the Theme table's 🌫️.
-    expect(EVENT_SEED.days.map((d) => d.portEmoji === d.placeEmoji)).toEqual([true, true, true, false]);
+    // #881: placeEmoji/portEmoji now agree on every Day. Days 0/1/3 used to
+    // duplicate their Theme's own glyph (or, for the wrap-up, diverge from
+    // the hand-corrected legacy field); all three now carry the de-duplicated
+    // glyph on BOTH fields, so there's no longer a deliberate divergence to
+    // pin here.
+    expect(EVENT_SEED.days.map((d) => d.portEmoji === d.placeEmoji)).toEqual([true, true, true, true]);
     expect(EVENT_SEED.days[3].portEmoji).toBe('👋');
     expect(EVENT_SEED.sailStart).toBe(EVENT_SEED.startsOn);
     expect(EVENT_SEED.sailEnd).toBe(EVENT_SEED.endsOn);

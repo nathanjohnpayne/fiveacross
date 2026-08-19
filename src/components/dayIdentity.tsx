@@ -22,9 +22,9 @@ import { defaultViewedIndex } from './DaySwitcher';
  * boundary could never surface the pre-cruise countdown.
  *
  * States, per the spec:
- *   pre-cruise  → "Sails Jul 15" / the embark Day's theme line
- *   during      → "🇭🇷 Split"    / "🏋️ Get Sporty" (today's unlocked Day)
- *   post-cruise → "Barcelona"   / "👋 Until next year"
+ *   pre-cruise  → "⚓ Sails Jul 15" / the embark Day's theme line
+ *   during      → "🇭🇷 Split"       / "🏋️ Get Sporty" (today's unlocked Day)
+ *   post-cruise → "Barcelona"      / "👋 Until next year"
  *
  * The pre-event VERB is Edition brand copy, not Event data (#602): "Sails" on
  * the cruise Edition, "Starts" on a house event — `EditionBrand.preEventVerb`.
@@ -101,7 +101,11 @@ export function headerDayIdentity(
   if (today < first.date) {
     const start = shortDate(first.date);
     return {
-      place: start ? `${editionBrand().preEventVerb} ${start}` : `${first.placeEmoji} ${first.place}`.trim(),
+      // #881: the place line carried no glyph pre-cruise, against a theme
+      // line that always has one (`themeLine` below) — ⚓ closes that gap.
+      // Fixed, not Edition-scoped: unlike `preEventVerb` this isn't brand
+      // voice, just "there's a date coming."
+      place: start ? `⚓ ${editionBrand().preEventVerb} ${start}` : `${first.placeEmoji} ${first.place}`.trim(),
       theme: themeLine(first.theme),
     };
   }

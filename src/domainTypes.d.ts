@@ -57,6 +57,14 @@ export interface EditionBrand {
    *  than a boolean so editions.test.ts's every-field-is-a-nonempty-string
    *  exhaustiveness sweep covers it like any other brand field. */
   signinCardVariant?: 'postcard';
+  /** A fixed per-Edition stamp glyph for the gate's Event-preview corner
+   *  (#881: "postage on every gate" — 🏳️‍🌈 on gcb, 💒 on fiveacross). Distinct
+   *  from `signinCardVariant: 'postcard'`, which is vacay's OWN postage and
+   *  stays dynamic — it stamps whichever Day the preview is currently
+   *  showing (`previewDayEmoji`), not a fixed brand mark. When set, this
+   *  glyph wins over the dynamic one (`EventPostcard.tsx`) and must never
+   *  repeat an emoji already drawn elsewhere on that gate screen. */
+  signinStampGlyph?: string;
   offlineNote: string;
   documentTitle: string;
   appName: string;

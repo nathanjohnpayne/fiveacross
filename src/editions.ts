@@ -44,7 +44,16 @@ const BRANDS: Record<string, EditionBrand> = {
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Sails',
     tagline: 'Sign in, get your card, mark it if you see it.',
-    offlineNote: 'Lost signal at sea? The printed cards and PDF still work.',
+    // The Join-frame voice chip and the gate's fixed postage mark (#881: "a
+    // treatment only one brand receives reads as an accident" — vacay had
+    // both, gcb and fiveacross had neither). The rainbow flag doesn't repeat
+    // anything else the gcb Join frame draws.
+    signinTaglineChip: 'What happens at sea. Goes on the card.',
+    signinStampGlyph: '🏳️‍🌈',
+    // #881: the old copy promised artefacts (printed cards, a PDF) the app
+    // does not ship. All three Editions now state the same offline mechanic
+    // in the same words, varying only the opener.
+    offlineNote: 'Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.',
     // Verbatim the strings index.html and the manifest hardcoded before #586,
     // so a `gcb` build is byte-identical to the shipped deployment.
     documentTitle: 'Gay Cruise Bingo',
@@ -98,9 +107,11 @@ const BRANDS: Record<string, EditionBrand> = {
     preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',
     // The Join-frame voice pieces (#647, wireframes § "Join—the postcard, not
-    // the casino"). Only vacay's frame draws them: the tagline chip replaces
-    // the plain tagline on the signed-out gate, the invite note sits under the
-    // CTA, and the Event card wears the postcard's dashed stamp corner.
+    // the casino"). The tagline chip replaces the plain tagline on the
+    // signed-out gate — gcb and fiveacross carry their own chip too (#881);
+    // the invite note and the postcard's dashed-stamp treatment stay
+    // vacay-only, since its postage is the current Day's own emoji rather
+    // than a fixed brand mark (see `signinStampGlyph` for the fixed kind).
     signinTaglineChip: 'Take the detour. For the story.',
     signinInviteNote:
       'Prompts are invitations, not chores. Take the fun detour, share the story if you want—five across earns a BINGO.',
@@ -168,6 +179,11 @@ const BRANDS: Record<string, EditionBrand> = {
     // framing its default Theme (✨ Marquee, #617) already speaks.
     preEventVerb: 'Opens',
     tagline: 'Sign in, get your card, mark it if you see it.',
+    // Same Join-frame voice-chip-plus-postage treatment as gcb (#881). The
+    // wedding-bell mark matches the sample Event on this Edition's own Join
+    // frame (Kim & Jo's Wedding) without repeating anything else drawn there.
+    signinTaglineChip: 'Bring everyone. Into the game.',
+    signinStampGlyph: '💒',
     offlineNote: 'Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.',
     // Title case for the tab and the home-screen label, as above. "Five Across"
     // is 11 characters, so it survives Android's short_name truncation whole.
