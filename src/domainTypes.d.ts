@@ -311,11 +311,11 @@ export interface EventDoc {
    * (`src/data/eventMembership.ts`), which is the only place the default lives.
    *
    * WHY IT LIVES ON THIS DOCUMENT rather than beside the memberships it gates:
-   * `storage.rules` may access at most TWO Firestore documents per evaluation,
-   * and the membership record itself is one of them. A switch on any third
-   * document would be unreadable from Storage, so the only reachable home is a
-   * document the Storage predicate already fetches — this one, which
-   * `isEventAdmin()` (`storage.rules:7-10`) already reads.
+   * `storage.rules` may make at most TWO Firestore ACCESSES per evaluation
+   * (calls, not distinct paths), and the membership check itself spends one.
+   * A switch on any third document would be unreadable from Storage, so the
+   * only reachable home is a document the Storage predicate already fetches —
+   * this one, which `isEventAdmin()` (`storage.rules:7-10`) already reads.
    *
    * NOT CLIENT-WRITABLE, and that is not yet true: the `events/{eventId}`
    * update rule has no key whitelist, so until #804 adds an immutability

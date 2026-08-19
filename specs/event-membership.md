@@ -43,7 +43,7 @@ That is a constraint, not a convenience. `storage.rules` can only reach Firestor
 
 `src/data/eventMembership.ts` exports `membershipPath()` and `membershipRulesPath()` so the client, the seeds and the two rules transcriptions all derive that string from one place.
 
-**The Functions cannot import that module, and must mirror it instead** (Codex P2 on PR #891). `functions/tsconfig.json` sets `rootDir: "src"`, so a runtime import from `../../src/**` fails with TS6059 — verified against the Functions compiler, not assumed. The two existing cross-tree imports (`functions/src/dailyEmailContent.ts:19`, `functions/src/finaleContent.ts:26`) work only because they are `import type` from a declaration-only `.d.ts`, which emits nothing, so they are not a precedent for runtime code. The repo already has the right pattern for this: `functions/src/scoringVocab.ts` mirrors `src/game/scoring.ts`, and `tests/functions/finale-parity.test.ts` feeds one fixture to both sides and fails if either moves alone — because, as that mirror's own header puts it, a mirror without a parity test is how the podium implementations diverged in the first place. **That precedent is not automatically the right answer here, and this spec does not mandate it** (Codex P1 on PR #891). A hand-maintained mirror is a second implementation, which `docs/agents/code-modification-rules.md` prohibits outright and which contradicts this spec's own claim that admission has exactly one answer. The stakes also differ from the precedent: drift in `scoringVocab` mis-ranks a podium, whereas drift here is an authorization bug, and a fixture-based parity test only ever covers the cases someone thought to enumerate.
+**The Functions cannot import that module as written** (Codex P2 on PR #891). `functions/tsconfig.json` sets `rootDir: "src"`, so a runtime import from `../../src/**` fails with TS6059 — verified against the Functions compiler, not assumed. The two existing cross-tree imports (`functions/src/dailyEmailContent.ts:19`, `functions/src/finaleContent.ts:26`) work only because they are `import type` from a declaration-only `.d.ts`, which emits nothing, so they are not a precedent for runtime code. The repo does have a pattern for this shape of problem: `functions/src/scoringVocab.ts` mirrors `src/game/scoring.ts`, pinned by `tests/functions/finale-parity.test.ts`, which feeds one fixture to both sides and fails if either moves alone — because, as that mirror's own header puts it, a mirror without a parity test is how the podium implementations diverged in the first place. **That precedent is not automatically the right answer here, and this spec does not mandate it** (Codex P1 on PR #891). A hand-maintained mirror is a second implementation, which `docs/agents/code-modification-rules.md` prohibits outright and which contradicts this spec's own claim that admission has exactly one answer. The stakes also differ from the precedent: drift in `scoringVocab` mis-ranks a podium, whereas drift here is an authorization bug, and a fixture-based parity test only ever covers the cases someone thought to enumerate.
 
 So the requirement #803 inherits is **one implementation, not two kept in step**: a build arrangement both projects can consume — a TypeScript project reference, a local workspace package, or a `rootDir` that spans the shared module — or, failing that, a mirror **generated** from this module rather than written by hand, so drift is impossible instead of merely detectable. A hand-written copy plus fixtures is the fallback of last resort and needs its own justification at the time. Choosing between those is #803's call, made against its own constraints; what this spec fixes is that TS6059 is real, that the two existing `../../src/` imports are type-only and are not a precedent for runtime code, and that duplicating the predicate is the outcome to avoid rather than the plan. Until #803 lands there is no second copy, so nothing can drift yet.
 
@@ -68,9 +68,13 @@ match /memberships/{uid} {
 
 Reusing `admitted(eventId)` here would have been wrong twice over: too tight for the member reading their own revocation, and far too loose for the member reading everyone else's. **The admission predicate gates Event CONTENT; it does not gate the admission record itself.**
 
-**Which makes `isAdmin()` load-bearing here, so revoking an Admin MUST be a two-part atomic write.** `isAdmin()` reads `EventDoc.admins` and knows nothing about membership, so a revocation implemented as a bare status flip would leave a revoked Admin still passing both branches above — able to read every membership record and list the whole roster, audit fields included, after being removed from the Event (Codex P1 on PR #891). **Revoking a membership whose `role` is `admin` therefore removes the uid from `EventDoc.admins` in the same transaction that flips `status`.** This is the same invariant § The role model already states — admission is a precondition for privilege — carried through to the operation that can break it, and #803's revoke callable owns it.
+**Which makes `isAdmin()` load-bearing here, so revoking an Admin MUST be a two-part atomic write.** `isAdmin()` reads `EventDoc.admins` and knows nothing about membership, so a revocation implemented as a bare status flip would leave a revoked Admin still passing both branches above — able to read every membership record and list the whole roster, audit fields included, after being removed from the Event (Codex P1 on PR #891). **Revoking a membership therefore removes the uid from `EventDoc.admins`, if it is there, in the same transaction that flips `status` — keyed on the ARRAY, never on the record's `role`.**
+
+Keying it on `role` would miss the common case (Codex P1 on PR #891). `EventDoc.admins` is client-writable by any existing Admin, and `memberships` is client-writable by nobody, so an Admin who promotes a member by editing the array produces a uid that **is** an Admin while its membership still reads `role: 'member'`. A `role`-conditioned removal would leave exactly that uid in `admins` after revocation, still passing `isAdmin()`. `role` records what the grant conferred; it is not a reliable statement of current privilege, and only the array is. This is the same invariant § The role model already states — admission is a precondition for privilege — carried through to the operation that can break it, and #803's revoke callable owns it.
 
 The invariant is checkable rather than merely instructed: a revoked Admin left in `admins` is exactly an Admin with no active membership, which is what `adminsMissingMembership()` returns. It is the drift detector for both directions — an Admin never granted a membership, and an Admin whose membership was revoked without the array write — and it must be empty on any enforced Event. The alternative Codex offered, conjoining the admin branches with a live membership check, was rejected: it costs a second document read on the roster path and makes reading the admission record depend on the admission record.
+
+**The root cause is that `admins` is client-writable at all**, which is what lets privilege drift from the grant record. The durable fix is to route admin promotion and demotion through the same server path that writes memberships, so the array and the record move together and `role` becomes trustworthy. That is a change to the `events/{eventId}` update rule and to #803's callable surface, not something this spec settles — recorded here as the thing to fix rather than to keep compensating for. Until it lands, the array is authoritative and the removal above is keyed on it.
 
 Creation cannot be a client transaction, for the same reason Event creation cannot be one (#785 § Contract facts) and for the same reason a handoff code cannot be (#548): the record's whole value is that the party it authorizes did not write it. Grants therefore arrive by exactly three Admin-SDK paths, and #803 owns the first:
 
@@ -127,7 +131,7 @@ function admitted(eventId) {
 }
 ```
 
-**Storage** (`storage.rules`, ticket #806) — the identical decision, two documents:
+**Storage** (`storage.rules`, ticket #806) — the same decision, but **not the same shape**. Its budget is two Firestore accesses per evaluation, and this spec previously read that as "two documents" and then spent three calls on them (Codex P1 on PR #891). The membership side therefore collapses to a **single** `firestore.get()`:
 
 ```
 function membershipEnforced(eventId) {
@@ -136,13 +140,16 @@ function membershipEnforced(eventId) {
 }
 
 function isEventMember(eventId) {
-  return firestore.exists(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
-    && firestore.get(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
-         .data.status == 'active';
+  // ONE access, not exists()+get(). A `get()` on a missing document ERRORS,
+  // and an error denies — which is the answer a non-member should get anyway.
+  return firestore.get(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
+           .data.status == 'active';
 }
 ```
 
 **`signedIn()` leads, and the TypeScript mirror must lead with it too.** An unenforced Event is open to every **signed-in** account, never to the public, so the authentication check precedes the enforcement switch rather than following it. This is where the reference implementation first drifted from the rules it mirrors: `admits()` originally answered from `enforcement` alone and would have admitted an unauthenticated caller for every Event in the dark-rollout state — which is every Event today (Codex P2 on PR #891). It now takes the caller's uid and denies its absence first. The lesson generalises: a divergence between the two is a silent authorization bug in whichever one a consumer happens to trust, which is why the parity properties below are tested rather than asserted in prose.
+
+**The two files deliberately differ, and the difference is the budget.** Firestore uses `exists()` then `get()` — two calls on one document — because a clean `false` composes and an error does not. Storage cannot afford the second call: the switch already spends one of its two, so the membership check gets exactly one and relies on error-to-deny. That is safe there because the Storage arms conjoin admission with `isOwner`/`isEventAdmin` rather than falling through to them, so an error and a `false` reach the same verdict. **Anyone tempted to unify the two forms should unify them toward the Firestore shape and re-check the Storage budget first, not the other way round.**
 
 Three properties are load-bearing and must survive any rewrite.
 
@@ -174,8 +181,8 @@ Predicate cost, worst case: **1 call** when the Event is unenforced (the Event d
 | `hearts` create | `1419-1456` | 1 / 1 | 4 / 2 | Fits |
 | `claims` read | `1304` | 1 / 1 | 4 / 2 | Fits |
 | `proofs` create; `claims` create; `markers` create+update; every bare `signedIn()` read | various | 0 / 0 | 3 / 2 | Fits |
-| **Storage** `proofs/{eventId}/{uid}/{file}` read | `storage.rules:30` | 0 documents | **2 documents** | **At the 2-document limit** |
-| **Storage** `proofs` delete | `storage.rules:36` | 1 document | **2 documents** | **At the limit** |
+| **Storage** `proofs/{eventId}/{uid}/{file}` read | `storage.rules:30` | 0 accesses | **2 accesses** (switch + one membership `get`) | **At the 2-access limit** |
+| **Storage** `proofs` delete | `storage.rules:36` | 1 access | **2 accesses** | **At the limit** |
 
 Three findings the rules tickets must not rediscover at the emulator:
 
@@ -201,15 +208,14 @@ This is a prescription, not a measurement: #804 must confirm it at the emulator,
 
 At the conservative three admission calls per gated write, the aggregate is spent after **six** operations: a Mark with four echoes costs 21 before a single existing rule access, and a repair sweep costs far more. **Enforcement as specced would reject valid Echo Marks and repairs** — silently, as a permission error on a fire-and-forget batch, which is the failure shape hardest to attribute.
 
-The multiplier is the per-write predicate cost, so making it cheap stops being an optimisation and becomes a precondition. Three levers, for #804 to choose between **on evidence**:
+**A cheaper predicate does not solve this, and an earlier draft wrongly offered one as an independent remedy** (Codex P1 on PR #891). Two reasons it cannot work. The floor is not one call but **two** — collapsing `isEventMember` to a bare `exists()` still leaves the enforcement-switch lookup, so every gated write costs at least two. And even at one call per write, a full-card repair of 25 operations spends 25 against a limit of 20 before any existing rule access. **No per-write cost makes the largest documented batch fit.** Reducing the predicate lowers the multiplier and widens the ceiling on `setMark`; it does not lift it, and it must not be recorded as an alternative to the two things that do:
 
-- **Measure cross-operation caching first.** Every operation in the batch reads the *same* Event document for the switch and, for echoes, the same membership document. If Firestore's "some document access calls may be cached" collapses those across a batch, the aggregate cost is near-constant and the problem evaporates; if it does not, no arrangement of a three-call predicate fits. This single measurement decides the shape of the whole gate on the Mark path and must be the first thing #804 puts in the emulator.
-- **Shrink the predicate to one call** by making revocation delete the membership document and moving the audit trail to a log collection rules never read, reducing `isEventMember` to a bare `exists()`. That trades away the in-place audit this spec chose in § The document shape, and the trade should be made explicitly if the measurement forces it.
-- **Split the batch** so gated writes do not aggregate — a client change in #807's lane rather than a rules one.
+- **Prove cross-operation caching, first and in the emulator.** Every operation in the batch reads the *same* Event document for the switch, and every echoed board the same membership document. If Firestore's "some document access calls may be cached" collapses those across a batch, the aggregate is near-constant and the problem dissolves; if it does not, the arithmetic above stands unchanged. This single measurement decides the shape of the gate on the whole Mark path and is the first thing #804 must settle — everything else here is contingent on its answer.
+- **Split or cap the batch** so the gated operations in any one commit stay inside the aggregate. At a two-call predicate that means at most ten gated writes per batch, which `setMark` satisfies up to seven echoes but which a full-card `reconcileEchoes` repair does not — so **repair batching has to change regardless of the caching answer**, unless caching proves out. That is a client change in #807's lane rather than a rules one, which makes it a cross-ticket dependency and not something #804 can absorb alone.
 
-Recorded as a **blocking prerequisite of #804**, not a caveat: the gate cannot ship on the Mark path until one of these lands.
+Recorded as a **blocking prerequisite of #804**: the gate cannot ship on the Mark path until the measurement is done and, if it comes back negative, until the batching changes.
 
-**3. Storage has zero headroom, which fixes where the switch lives.** Two documents is the whole budget, the membership record is one of them, and the Event document is the other. A switch on any third document — a sentinel inside `memberships`, a sibling config collection — would be structurally unreadable from Storage. That is why `membershipEnforcement` is a field on `EventDoc` and not somewhere tidier, and why no future clause may add a third cross-service read.
+**3. Storage has zero headroom, which fixes where the switch lives.** Two Firestore **accesses** is the whole budget — counted as calls, not as distinct paths, which is the stricter reading and the one this spec now takes after getting it wrong once. The switch spends one and the membership check spends the other, which is why the Storage membership check is a single `get()` rather than Firestore's `exists()`-then-`get()`. A switch on any third document — a sentinel inside `memberships`, a sibling config collection — would be structurally unreadable from Storage. That is why `membershipEnforcement` is a field on `EventDoc` and not somewhere tidier, and why no future clause may add another cross-service read.
 
 ### The enforced-path inventory
 
@@ -279,7 +285,7 @@ Epic #801 surfaced nine. Four are answered here because the code forces them, on
 
 - **D1 — the membership record is a sibling roster, not a promoted `players/{uid}`.** Promoting the Player row fails on three counts. It is written by the client inside a `runTransaction` on the join path (`src/data/api.ts:401-460`) and concurrently by the lazy Day-Card deal, a race the code already documents and guards; a server-owned create cannot participate in that client transaction, so promotion means either moving every stat write server-side or a create/update field-split whose per-field rules are the delicate part. It conflates a record that must never be rewritten (a grant and its provenance) with one rewritten on every Mark. And it makes revocation destructive of Leaderboard history, which ADR 0001 and ADR 0002 forbid. **The losing option's merit is real and worth recording:** `CONTEXT.md` already defines Player as *"A User's membership and stats within one Event"*, so the sibling roster does leave two documents describing one relationship. This spec resolves that by narrowing the vocabulary rather than the data — after this lands, `players/{uid}` is a **stats row**, not an admission, and a Player row with no Membership is exactly the pre-enforcement state that #805 backfills. Both nouns are in `CONTEXT.md` § People.
 - **D8 (partial) — Admin does not imply admission**, and `EventDoc.admins` is not a second membership system. Reasoning in § The role model. The *product* half of D8 (may a Host invite?) is still open below.
-- **The switch lives on `EventDoc`** — forced by Storage's two-document ceiling (§ budget, finding 3).
+- **The switch lives on `EventDoc`** — forced by Storage's two-access ceiling (§ budget, finding 3).
 - **`schemaVersion` gates the parse and not the authorization answer** — forced by the deploy-ordering hazard of putting a rules deploy in lockstep with a data migration.
 
 **Answered by the owner.**
