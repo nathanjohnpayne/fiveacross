@@ -61,9 +61,10 @@ export const DEPLOY_TARGETS = Object.freeze({
     staticFallbackEdition: 'vacay',
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
-    // Opted out because this target's deploy credential — the fiveacross
-    // Firebase-vault SA key — is not known to hold run.services.update on this
-    // project, and Step 1.6 ABORTS BEFORE PUBLISHING on a PERMISSION_DENIED.
+    // Opted out because the exact fiveacross firebase-deployer SA — reached
+    // directly or by keyless impersonation — is not known to hold
+    // run.services.update on this project, and the readiness apply ABORTS
+    // BEFORE BUILDING on a PERMISSION_DENIED.
     // Enabling it on an unverified assumption would therefore not degrade to a
     // warning; it would break every Five Across deploy outright.
     //
@@ -81,10 +82,10 @@ export const DEPLOY_TARGETS = Object.freeze({
     // mintAuthHandoff and exchangeAuthHandoff with both left 403.
     //
     // TO CLOSE IT: complete #547 by granting the fiveacross deploy SA
-    // run.services.update on fiveacross, successfully apply
-    // set-auth-handoff-invoker.sh to both callables, then flip this to false.
-    // Once false, deploy-target.mjs re-applies that idempotent pair before it
-    // constructs any hosting-only or full build/deploy invocation.
+    // run.services.update on fiveacross, successfully run the exact-SA
+    // readiness apply (which forces updates on both callables), then flip this
+    // to false. Once false, deploy-target.mjs repeats that permission proof
+    // before it constructs any hosting-only or full build/deploy invocation.
     skipInvokerReconcile: true,
   }),
 });

@@ -9,7 +9,7 @@ import { deployInvocation, deployRequest, executeDeployRequest } from './deploy-
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const deployTargetScript = resolve(repoRoot, 'scripts', 'deploy-target.mjs');
 const deployScript = resolve(repoRoot, 'scripts', 'deploy.sh');
-const authHandoffInvokerScript = resolve(repoRoot, 'scripts', 'set-auth-handoff-invoker.sh');
+const authHandoffReadinessScript = resolve(repoRoot, 'scripts', 'apply-auth-handoff-deploy-readiness.sh');
 
 describe('deploy target selection', () => {
   it('requires an explicit deploy target', () => {
@@ -36,8 +36,9 @@ describe('deploy target selection', () => {
       /^Refusing to deploy fiveacross: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true\./,
     );
     expect(result.stderr).toContain(
-      'Complete #547: grant the Five Across deploy service account run.services.update, ' +
-        'successfully apply AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh to both callables, ' +
+      'Complete #547: grant firebase-deployer@fiveacross.iam.gserviceaccount.com run.services.update, ' +
+        'successfully run AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh --prove-update ' +
+        'under that exact identity for both callables, ' +
         'then set skipInvokerReconcile to false.',
     );
     expect(result.stderr).toContain('Nothing has been built or published.\nUsage:');
@@ -67,7 +68,7 @@ describe('deploy target selection', () => {
     expect(result.status).toBe(0);
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual([
-      authHandoffInvokerScript,
+      authHandoffReadinessScript,
       [],
       {
         env: { KEEP_ME: 'yes', AUTH_HANDOFF_PROJECT: 'fiveacross' },
@@ -102,7 +103,7 @@ describe('deploy target selection', () => {
     );
 
     expect(calls).toHaveLength(2);
-    expect(calls[0][0]).toBe(authHandoffInvokerScript);
+    expect(calls[0][0]).toBe(authHandoffReadinessScript);
     expect(calls[1][0]).toBe(deployScript);
     expect(calls[1][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross']);
   });
@@ -122,9 +123,9 @@ describe('deploy target selection', () => {
         {},
         spawn,
       ),
-    ).toThrow('both auth-handoff callables must be reachable');
+    ).toThrow('both auth-handoff callables must accept the forced idempotent update');
     expect(calls).toHaveLength(1);
-    expect(calls[0][0]).toBe(authHandoffInvokerScript);
+    expect(calls[0][0]).toBe(authHandoffReadinessScript);
   });
 
   it('keeps Gay Cruise Bingo on its unchanged single deploy spawn', () => {

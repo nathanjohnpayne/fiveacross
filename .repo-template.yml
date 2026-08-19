@@ -29,6 +29,7 @@ spec_test_map:
     - src/auth-domain.test.ts
     - scripts/fiveacross-origin.integration.test.mjs
     - scripts/deploy-target.test.mjs
+    - scripts/auth-handoff-deploy-readiness.test.mjs
   # event-membership's coverage is module-named (the pure admission predicates),
   # so it does not share the spec basename — map it explicitly. The emulator
   # layer that proves the DEPLOYED rules agree with those predicates is #804's

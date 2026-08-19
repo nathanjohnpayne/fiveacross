@@ -4,9 +4,16 @@
 # the returned temporary file and must remove it when its credential lifetime
 # ends.
 
-firebase_materialize_vault_sa_key() {
+firebase_materialize_vault_sa_key() (
   local project="${1:-}"
   local tmpfile=""
+
+  cleanup_interrupted_materialization() {
+    [[ -n "$tmpfile" ]] && rm -f "$tmpfile"
+  }
+  trap 'cleanup_interrupted_materialization; exit 129' HUP
+  trap 'cleanup_interrupted_materialization; exit 130' INT
+  trap 'cleanup_interrupted_materialization; exit 143' TERM
 
   if [[ -z "$project" ]] || ! command -v op >/dev/null 2>&1; then
     return 1
@@ -24,4 +31,4 @@ firebase_materialize_vault_sa_key() {
 
   rm -f "$tmpfile"
   return 1
-}
+)

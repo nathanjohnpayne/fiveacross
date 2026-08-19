@@ -5,7 +5,7 @@ import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEPLOY_SCRIPT = resolve(SCRIPT_DIR, 'deploy.sh');
-const AUTH_HANDOFF_INVOKER_SCRIPT = resolve(SCRIPT_DIR, 'set-auth-handoff-invoker.sh');
+const AUTH_HANDOFF_READINESS_SCRIPT = resolve(SCRIPT_DIR, 'apply-auth-handoff-deploy-readiness.sh');
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
@@ -101,8 +101,9 @@ function assertTargetDeployReady(target, config) {
 
   throw new Error(
     `Refusing to deploy ${target}: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true. ` +
-      `Complete #547: grant the Five Across deploy service account run.services.update, ` +
-      `successfully apply AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh to both callables, ` +
+      `Complete #547: grant firebase-deployer@fiveacross.iam.gserviceaccount.com run.services.update, ` +
+      `successfully run AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh --prove-update ` +
+      `under that exact identity for both callables, ` +
       `then set skipInvokerReconcile to false. ` +
       `Nothing has been built or published.`,
   );
@@ -125,17 +126,17 @@ export function executeDeployRequest(
     delete readinessEnvironment.AUTH_HANDOFF_EXCHANGE_SERVICE;
     readinessEnvironment.AUTH_HANDOFF_PROJECT = config.firebaseProject;
 
-    const readiness = spawn(AUTH_HANDOFF_INVOKER_SCRIPT, [], {
+    const readiness = spawn(AUTH_HANDOFF_READINESS_SCRIPT, [], {
       env: readinessEnvironment,
       stdio: 'inherit',
     });
     if (readiness.error || readiness.status !== 0) {
       const cause = readiness.error ? ` (${readiness.error.message})` : '';
       throw new Error(
-        `Refusing to deploy ${request.target}: the pre-build auth-handoff invoker readiness apply failed${cause}; ` +
-          `both auth-handoff callables must be reachable before the client build can ship. ` +
-          `Complete #547 with AUTH_HANDOFF_PROJECT=${config.firebaseProject} ` +
-          `scripts/set-auth-handoff-invoker.sh. Nothing has been built or published.`,
+        `Refusing to deploy ${request.target}: the exact deploy-SA pre-build auth-handoff readiness proof ` +
+          `failed${cause}; both auth-handoff callables must accept the forced idempotent update before the ` +
+          `client build can ship. Complete #547, then rerun this named deploy. ` +
+          `Nothing has been built or published.`,
       );
     }
   }
