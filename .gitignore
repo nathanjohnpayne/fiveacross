@@ -74,3 +74,8 @@ tmp/
 # Local Functions secret stubs (scripts/test-e2e.sh creates and cleans its own;
 # a pre-existing one is user-owned and must never be committed).
 functions/.secret.local
+
+# Cloudflare Worker local dev secrets (worker/README.md § 2 rehearsal). Holds a
+# real Firebase web api key; never committed.
+.dev.vars
+worker/.dev.vars

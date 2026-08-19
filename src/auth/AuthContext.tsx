@@ -1578,7 +1578,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         handoffSignedOutWebApp();
         return;
       }
-      const sameOriginHandler = auth.config?.authDomain === window.location.hostname;
+      const sameOriginHandler =
+        auth.config?.authDomain !== undefined &&
+        auth.config.authDomain === window.location.hostname;
       if (sameOriginHandler && shouldRedirectSignIn(window.navigator, isStandaloneApp())) {
         // One top-level redirect keeps the browser on a single origin so the
         // helper's sessionStorage survives the Google round-trip — the flow the
