@@ -95,6 +95,8 @@ The fragment is cleared first, unconditionally, with `history.replaceState`—no
 
 **Nothing here retries.** The code is single-use and spent by the time anything can fail, so a retry could only fail again.
 
+**Both network steps are bounded by `HANDOFF_EXCHANGE_TIMEOUT_MS` (15s), and that bound guards a blank screen rather than a slow one.** `main.tsx` awaits this leg before it renders anything, so an exchange that never settles renders *nothing at all*—the 2026-07-24 incident shape the whole bootstrap path is written to avoid. Captive and shipboard wifi produce exactly that: `navigator.onLine` true and a request that hangs forever. Timing out costs the player one re-sign-in; not timing out costs them the app.
+
 ## Failure states
 
 Every failure is named, and none of them falls back to the other mode.
@@ -134,6 +136,7 @@ All three are pinned by a parity test that imports both sides, the same shape `s
 - **Given** a return with a valid code and a matching verifier, **when** the handoff completes, **then** the custom token signs the player in and the verifier is deleted. (Test: complete-happy, verifier-cleared-on-success.)
 - **Given** a return whose verifier is missing or whose origin does not match, **when** the handoff completes, **then** it fails by name without sending the verifier anywhere. (Test: transaction-missing, origin-mismatch.)
 - **Given** a rejected exchange or a rejected custom token, **when** the handoff completes, **then** it fails by name, retries nothing, and leaves no verifier behind. (Test: exchange-rejected, sign-in-failed.)
+- **Given** an exchange or a sign-in that never settles, **when** the handoff completes, **then** it gives up inside the bound and lets the app mount signed out, rather than holding the render forever. (Test: exchange-hangs, sign-in-hangs.)
 - **Given** a code presented in a query string rather than a fragment, **when** the return leg reads it, **then** it is ignored. (Test: fragment-only.)
 
 ## Test coverage

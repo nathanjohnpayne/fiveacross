@@ -15,6 +15,45 @@ import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
 import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTransaction';
 
 /**
+ * How long the return leg may take before it gives up, in milliseconds.
+ *
+ * A BOUND, not a preference, and it protects against a blank screen rather than
+ * a slow one. `main.tsx` awaits this before it renders anything, because the
+ * session has to exist before `onAuthStateChanged` first settles — so an
+ * exchange that never settles renders NOTHING AT ALL, which is the 2026-07-24
+ * incident shape the whole bootstrap path is written to avoid. Captive and
+ * shipboard wifi produce exactly that: `navigator.onLine` true and a request
+ * that hangs forever.
+ *
+ * Fifteen seconds is generous against a slow phone on bad wifi and far inside
+ * the patience of someone staring at a blank page. Timing out costs the player
+ * one re-sign-in; not timing out costs them the app.
+ */
+export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
+
+/**
+ * `work`, or a rejection once `ms` has passed.
+ *
+ * A rejection rather than a resolved sentinel, so a timeout lands in the same
+ * `catch` as every other failure and cannot be mistaken for a successful
+ * exchange by a caller that forgot to check.
+ */
+function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('handoff-timeout')), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+/**
  * LEG 2 — mint, at the central auth origin, for a caller that has just signed in.
  *
  * Returns the server-built `handoffUrl` verbatim. This function deliberately
@@ -52,6 +91,8 @@ export async function completeAuthHandoff(input: {
   code: string;
   origin: string;
   now?: number;
+  /** Overridable so tests do not have to wait out the real bound. */
+  timeoutMs?: number;
 }): Promise<boolean> {
   const transaction = readHandoffTransaction(input.now ?? Date.now());
   if (transaction === null) {
@@ -75,11 +116,14 @@ export async function completeAuthHandoff(input: {
       { code: string; transactionVerifier: string; origin: string },
       { customToken: string }
     >(functions, 'exchangeAuthHandoff');
-    const result = await callable({
-      code: input.code,
-      transactionVerifier: transaction.verifier,
-      origin: input.origin,
-    });
+    const result = await bounded(
+      callable({
+        code: input.code,
+        transactionVerifier: transaction.verifier,
+        origin: input.origin,
+      }),
+      input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS,
+    );
     customToken = result.data.customToken;
   } catch {
     forgetHandoffTransaction();
@@ -93,7 +137,7 @@ export async function completeAuthHandoff(input: {
   }
 
   try {
-    await signInWithCustomToken(auth, customToken);
+    await bounded(signInWithCustomToken(auth, customToken), input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS);
     return true;
   } catch {
     recordHandoffFailure('sign-in-failed');

@@ -17,7 +17,7 @@ vi.mock('firebase/auth', () => ({ signInWithCustomToken: mocks.signInWithCustomT
 vi.mock('../firebase', () => ({ auth: {}, functions: {} }));
 
 import { HANDOFF_FRAGMENT_KEY, consumeHandoffFailure } from './handoffClient';
-import { completeAuthHandoff, mintAuthHandoff } from './handoffExchange';
+import { HANDOFF_EXCHANGE_TIMEOUT_MS, completeAuthHandoff, mintAuthHandoff } from './handoffExchange';
 import {
   HANDOFF_TRANSACTION_KEY,
   rememberHandoffTransaction,
@@ -181,5 +181,44 @@ describe('completeAuthHandoff', () => {
     await completeAuthHandoff({ code: CODE, origin: ORIGIN });
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(false);
     expect(exchange).toHaveBeenCalledTimes(1);
+  });
+});
+
+// `main.tsx` awaits the return leg BEFORE it renders anything, so an exchange
+// that never settles renders nothing at all — the blank-screen shape the whole
+// bootstrap path is written to avoid. Captive and shipboard wifi produce exactly
+// that: `navigator.onLine` true and a request that hangs forever.
+describe('completeAuthHandoff is bounded against a hung network', () => {
+  function armTransaction() {
+    rememberHandoffTransaction({
+      verifier: 'V'.repeat(43),
+      targetOrigin: ORIGIN,
+      returnPath: '/board',
+      createdAt: Date.now(),
+    });
+  }
+
+  it('gives up on an exchange that never settles, rather than hanging the mount', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: () => new Promise(() => {}) });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    expect(consumeHandoffFailure()).toEqual({ reason: 'exchange-rejected' });
+    // Still cleared: a verifier whose code is spent must not outlive the attempt
+    // just because the network stalled.
+    expect(readHandoffTransaction(Date.now())).toBeNull();
+  });
+
+  it('gives up on a sign-in that never settles', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.signInWithCustomToken.mockImplementation(() => new Promise(() => {}));
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
+  it('leaves room for a slow phone on bad wifi rather than a snappy default', () => {
+    expect(HANDOFF_EXCHANGE_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
   });
 });
