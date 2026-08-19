@@ -126,7 +126,9 @@ MSG
 # deferring this until the deploy step would make that prerequisite check run
 # through npm's unpinned fallback in a clean checkout with no node_modules.
 # `npm ci`, never `npm install`: the lockfile is part of the reviewed deploy.
-npm --prefix worker ci
+# Wrangler is a devDependency, so force its inclusion even when the operator's
+# shell carries NODE_ENV=production or NPM_CONFIG_OMIT=dev.
+npm --prefix worker ci --include=dev
 
 if [[ "$ROUTE_BEARING" == "true" ]]; then
   cat >&2 <<'MSG'

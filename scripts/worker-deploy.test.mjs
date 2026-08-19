@@ -18,6 +18,7 @@ function runWithStubbedNpm({
   secretListJson = null,
   secretListFails = false,
   routeBearing = false,
+  extraEnv = {},
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'worker-deploy-'));
   const bin = join(dir, 'bin');
@@ -70,6 +71,7 @@ exec /usr/bin/grep "$@"
       PATH: `${bin}:${process.env.PATH}`,
       DEPLOY_ALLOW_DIRTY: '1',
       NPM_CALL_LOG: npmCallLog,
+      ...extraEnv,
     },
   });
   return {
@@ -129,10 +131,11 @@ describe('worker deploy guard — route-bearing deploys', () => {
     const result = runWithStubbedNpm({
       routeBearing: true,
       secretListJson: '[{"name":"FIREBASE_API_KEY","type":"secret_text"}]',
+      extraEnv: { NPM_CONFIG_OMIT: 'dev', NODE_ENV: 'production' },
     });
     expect(result.status).toBe(0);
     expect(result.npmCalls.slice(0, 2)).toEqual([
-      '--prefix worker ci',
+      '--prefix worker ci --include=dev',
       '--prefix worker exec -- wrangler secret list --format json',
     ]);
   });
