@@ -160,7 +160,7 @@ export default function Leaderboard() {
   if (loading) return <LoadingState label="Tallying the leaderboard…" />;
   if (!players.length) return <div className="center muted">No players yet. Be the first.</div>;
 
-  // Cruise-wide First to BINGO is the earliest bingo across the MAIN-GAME Days —
+  // Event-wide First to BINGO is the earliest bingo across non-tutorial Days —
   // a ceremonial, self-reported honour (ADR 0001), not a rank. Tutorial Days
   // (embark/farewell) are EXCLUDED from this headline honor (daily-cards-spec §
   // "Resolved decisions" #2): the embark card is trivially easy and live before
@@ -420,9 +420,9 @@ export default function Leaderboard() {
         {ceremonialDays.size > 0
           ? `Every Day Card counts here—except ${ceremonialDays.size === 1 ? 'the wrap-up, which is' : 'the wrap-up Days, which are'} pure ceremony. `
           : 'Every Day Card counts here. '}
-        ⭐ marks the
-        {editionLexicon().occasionWide} First to BINGO—main days only. Proof chips show every kind of
-        proof a player has used. Tap a proof chip for the receipts in the Feed.
+        {`⭐ marks the ${editionLexicon().occasionWide} First to BINGO${tutorialDays.size > 0 ? '—tutorial Days excluded.' : '.'} `}
+        Proof chips show every kind of proof a player has used. Tap a proof chip for the receipts in
+        the Feed.
       </p>
       <div className="lb-actions">
         <button
