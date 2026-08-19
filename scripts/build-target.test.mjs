@@ -25,7 +25,7 @@ const FIVEACROSS_TARGET_ENV = {
   VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
   VITE_FIREBASE_MEASUREMENT_ID: 'G-42N7WYDYT5',
   VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY,
-  VITE_EVENT_ID: 'bodega-bay-2026',
+  VITE_EVENT_ID: '',
   VITE_EDITION: 'vacay',
   VITE_ADULT_CONTENT: 'false',
   VITE_POSTHOG_KEY: 'shared-production-posthog-key',
@@ -72,12 +72,13 @@ describe('build target selection', () => {
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
       VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY,
-      VITE_EVENT_ID: 'bodega-bay-2026',
+      VITE_EVENT_ID: '',
       VITE_EDITION: 'vacay',
       VITE_ADULT_CONTENT: 'false',
       VITE_RECAPTCHA_SITE_KEY: '',
       NODE_ENV: 'production',
       DEPLOY_TARGET_BUILD: '1',
+      DEPLOY_TARGET_STATIC_EDITION: 'vacay',
     });
     expect(environment.VITE_FUTURE_VALUE).toBeUndefined();
   });
@@ -115,19 +116,40 @@ describe('build target selection', () => {
     ).toThrow('Missing: VITE_EVENT_ID');
   });
 
-  it('rejects a copied target file with the other Event or Edition', () => {
+  it('rejects a Five Across target file that pins any Event', () => {
     expect(() =>
       buildEnvironment(
         'fiveacross',
         {
           ...FIVEACROSS_TARGET_ENV,
-          VITE_EVENT_ID: 'med-2026',
-          VITE_EDITION: '',
+          VITE_EVENT_ID: 'bodega-bay-2026',
         },
         {},
         REQUIRED_VITE_KEYS,
       ),
-    ).toThrow('VITE_EVENT_ID="bodega-bay-2026", VITE_EDITION="vacay"');
+    ).toThrow('VITE_EVENT_ID=""');
+  });
+
+  it('takes the shared target static fallback from trusted registry metadata', () => {
+    const environment = buildEnvironment(
+      'fiveacross',
+      FIVEACROSS_TARGET_ENV,
+      { DEPLOY_TARGET_STATIC_EDITION: 'gcb' },
+      REQUIRED_VITE_KEYS,
+    );
+
+    expect(environment.DEPLOY_TARGET_STATIC_EDITION).toBe('vacay');
+  });
+
+  it('does not let a target without a static fallback inherit one', () => {
+    const environment = buildEnvironment(
+      'gaycruisebingo',
+      GAY_CRUISE_BINGO_TARGET_ENV,
+      { DEPLOY_TARGET_STATIC_EDITION: 'vacay' },
+      REQUIRED_VITE_KEYS,
+    );
+
+    expect(environment.DEPLOY_TARGET_STATIC_EDITION).toBe('');
   });
 
   it('requires Gay Cruise Bingo to name its Edition explicitly', () => {
@@ -228,6 +250,14 @@ describe('build target selection', () => {
         skipInvokerReconcile: false,
       }),
     ).toThrow('cloudflareZoneId');
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: true,
+        skipInvokerReconcile: true,
+        staticFallbackEdition: '',
+      }),
+    ).toThrow('staticFallbackEdition');
   });
 
   it('requires every registered target to state its invoker-reconciliation choice (#768)', () => {
