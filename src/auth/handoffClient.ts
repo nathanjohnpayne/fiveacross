@@ -219,6 +219,10 @@ export function parseHandoffRequest(search: string): HandoffRequest | null {
  */
 function isSameOriginPath(path: string, targetOrigin: string): boolean {
   if (!path.startsWith('/')) return false;
+  // The server requires a path beginning with exactly one slash. A
+  // protocol-relative path can resolve back to the same host and still violate
+  // that wire contract, so origin equality alone is not sufficient (#912).
+  if (path.startsWith('//') || path.startsWith('/\\')) return false;
   // Control characters are stripped or normalised by URL parsing rather than
   // rejected, so they have to go before the resolve rather than after.
   if (/[\u0000-\u001f\u007f]/.test(path)) return false;
@@ -250,12 +254,19 @@ export async function startAuthHandoff(input: {
   navigate?: (url: string) => void;
 }): Promise<boolean> {
   try {
+    // Apply the same boundary the central origin will enforce before leaving
+    // this page. A long or otherwise invalid current URL must not send the
+    // player into a guaranteed rejection-and-retry loop; root is the safe,
+    // same-origin fallback and preserves the sign-in itself (#912).
+    const returnPath = isSameOriginPath(input.returnPath, input.targetOrigin)
+      ? input.returnPath
+      : '/';
     const verifier = createVerifier();
     const transactionId = await transactionIdFor(verifier);
     const stored = rememberHandoffTransaction({
       verifier,
       targetOrigin: input.targetOrigin,
-      returnPath: input.returnPath,
+      returnPath,
       createdAt: Date.now(),
     });
     if (!stored) {
@@ -266,7 +277,7 @@ export async function startAuthHandoff(input: {
       authOrigin: input.authOrigin,
       targetOrigin: input.targetOrigin,
       transactionId,
-      returnPath: input.returnPath,
+      returnPath,
     });
     const navigate = input.navigate ?? ((to: string) => window.location.assign(to));
     navigate(url);
