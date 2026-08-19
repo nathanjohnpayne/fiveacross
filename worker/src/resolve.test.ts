@@ -133,6 +133,33 @@ describe('resolveHost — fail closed', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it.each([401, 403])(
+    'reports a Firestore refusal (%s) as lookup-forbidden, not as an unavailable dependency',
+    async (status) => {
+      // App Check enforcement on Cloud Firestore is the expected cause: this
+      // Worker reads unauthenticated with only the web api key. The two
+      // reasons demand opposite responses — an unavailable lookup usually
+      // self-heals, a refused one never does and takes every uncached host
+      // down as the cache drains — so an operator must be able to tell them
+      // apart from outside.
+      const cache = memoryCache();
+      const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, status), cache));
+      expect(result).toEqual({ kind: 'not-found', reason: 'lookup-forbidden' });
+    },
+  );
+
+  it('still prefers a stale servable entry over reporting a refusal', async () => {
+    const cache = memoryCache({
+      [HOST]: {
+        version: CACHE_VERSION,
+        fetchedAt: 1_000_000 - CONFIG.cacheTtlMs - 1,
+        record: { eventId: 'bodega-bay-2026', status: 'active', slug: 'bodega-bay' },
+      },
+    });
+    const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 403), cache));
+    expect(result).toEqual({ kind: 'serve', eventId: 'bodega-bay-2026', stale: true });
+  });
+
   it('treats a Firestore 5xx as unavailable rather than as an absent document', async () => {
     const cache = memoryCache();
     const result = await resolveHost(HOST, 'bodega-bay', CONFIG, deps(respondWith({}, 503), cache));

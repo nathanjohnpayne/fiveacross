@@ -41,11 +41,28 @@ export type NotFoundReason =
   | 'slug-missing'
   /** The lookup itself could not be completed and no cached answer existed.
    *  The only reason that is about US rather than about the address. */
-  | 'lookup-unavailable';
+  | 'lookup-unavailable'
+  /** The lookup completed and Firestore REFUSED it — 401/403. Distinguished
+   *  from `lookup-unavailable` because the two demand opposite responses: an
+   *  unavailable lookup is usually transient and self-heals, whereas a refused
+   *  one is a standing configuration fact that will never self-heal and takes
+   *  every uncached host down the moment the cache drains. App Check
+   *  enforcement on Cloud Firestore (docs/app/phase-1-deploy.md § 2) is the
+   *  expected cause: this Worker reads as an unauthenticated caller carrying
+   *  only the web API key, which enforced Firestore rejects regardless of the
+   *  public `allow get` rule. Seeing this reason on every host means the
+   *  project enforces App Check and the router cannot serve until that is
+   *  resolved — not that Firestore is down. */
+  | 'lookup-forbidden';
 
 export type Resolution =
   | { kind: 'serve'; eventId: string; stale: boolean }
   | { kind: 'not-found'; reason: NotFoundReason };
+
+/** Firestore answered, and the answer was "no". Its own class so the resolver
+ *  can report a refusal distinctly from an unreachable dependency without
+ *  string-matching a message. */
+export class LookupRefusedError extends Error {}
 
 /** Bumped whenever `CacheEnvelope`'s shape changes, so an envelope written by
  *  an older Worker version reads as a MISS rather than being coerced —
@@ -186,7 +203,7 @@ export async function resolveHost(
   const lookupStartedAt = deps.now();
   try {
     record = await fetchHostnameRecord(host, config, deps);
-  } catch {
+  } catch (error) {
     // Revalidation failed. A stale-but-servable entry still serves and is NOT
     // restamped — an expired mapping beats a dead app when the network is
     // simply gone, but it stops counting as evidence the mapping is still
@@ -195,7 +212,10 @@ export async function resolveHost(
     if (eligibleForStaleServe && cached !== null) {
       return decide(cached.record, expectedSlug, true);
     }
-    return { kind: 'not-found', reason: 'lookup-unavailable' };
+    return {
+      kind: 'not-found',
+      reason: error instanceof LookupRefusedError ? 'lookup-forbidden' : 'lookup-unavailable',
+    };
   }
 
   if (record === null) {
@@ -308,6 +328,9 @@ export async function fetchHostnameRecord(
   });
 
   if (response.status === 404) return null;
+  if (response.status === 401 || response.status === 403) {
+    throw new LookupRefusedError(`event-router: hostnames lookup refused (${response.status})`);
+  }
   if (!response.ok) {
     throw new Error(`event-router: hostnames lookup returned ${response.status}`);
   }
