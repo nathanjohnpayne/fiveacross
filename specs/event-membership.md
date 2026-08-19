@@ -187,8 +187,8 @@ function admittedWith(ev, eventId) {
     // AFTER the get(), `|| isEventAdminWith(ev)` is unreachable in precisely the
     // case D-A exists for — an Admin the backfill missed, who therefore has no
     // membership document at all. Placed here it also short-circuits before the
-    // access is spent, so the bypass costs nothing against the two-document
-    // ceiling. Storage would otherwise deny a caller that firestore.rules,
+    // access is spent, so the bypass costs nothing against the two-ACCESS
+    // ceiling (calls, not documents — see § the rules-evaluation budget). Storage would otherwise deny a caller that firestore.rules,
     // admits() and the Functions all admit.
     || isEventAdminWith(ev)
     // ONE access, not exists()+get(). A `get()` on a missing document ERRORS,
