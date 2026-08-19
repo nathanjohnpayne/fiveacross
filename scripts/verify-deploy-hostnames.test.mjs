@@ -1,9 +1,13 @@
 // @vitest-environment node
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { GoogleAuth, Impersonated } from 'google-auth-library';
 import { describe, expect, it, vi } from 'vitest';
 import { BODEGA_EVENT_ID, BODEGA_PREVIEW_HOSTS } from './provision-bodega-preview.mjs';
-import { verifyBodegaHostnameDocuments } from './verify-deploy-hostnames.mjs';
+import {
+  getApplicationDefaultAccessToken,
+  verifyBodegaHostnameDocuments,
+} from './verify-deploy-hostnames.mjs';
 
 const routingDocument = (host) => ({
   name: `projects/fiveacross/databases/(default)/documents/hostnames/${host}`,
@@ -14,6 +18,37 @@ const routingDocument = (host) => ({
 });
 
 describe('Five Across deploy hostname verification', () => {
+  it('obtains the deploy token through an impersonation-aware Google Auth client', async () => {
+    const getAccessToken = vi.fn(async () => 'impersonated-access-token');
+    const createAuth = vi.fn(() => ({ getAccessToken }));
+
+    await expect(getApplicationDefaultAccessToken(createAuth)).resolves.toBe(
+      'impersonated-access-token',
+    );
+    expect(createAuth).toHaveBeenCalledWith({
+      scopes: ['https://www.googleapis.com/auth/datastore'],
+    });
+    expect(getAccessToken).toHaveBeenCalledOnce();
+  });
+
+  it('uses a Google Auth version that recognizes the wrapper impersonation credential shape', () => {
+    const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/datastore'] });
+    const client = auth.fromJSON({
+      type: 'impersonated_service_account',
+      service_account_impersonation_url:
+        'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/firebase-deployer@fiveacross.iam.gserviceaccount.com:generateAccessToken',
+      source_credentials: {
+        type: 'authorized_user',
+        client_id: 'fixture-client-id',
+        client_secret: 'fixture-client-secret',
+        refresh_token: 'fixture-refresh-token',
+      },
+    });
+
+    expect(client).toBeInstanceOf(Impersonated);
+  });
+
+
   it('fails closed when the command is not running under the explicit Five Across project', () => {
     const result = spawnSync(process.execPath, [resolve('scripts/verify-deploy-hostnames.mjs')], {
       encoding: 'utf8',

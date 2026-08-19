@@ -1,4 +1,4 @@
-import { applicationDefault } from 'firebase-admin/app';
+import { GoogleAuth } from 'google-auth-library';
 import { pathToFileURL } from 'node:url';
 import {
   BODEGA_EVENT_ID,
@@ -7,11 +7,22 @@ import {
 } from './provision-bodega-preview.mjs';
 
 const fieldMask = '?mask.fieldPaths=eventId&mask.fieldPaths=status';
+const datastoreScopes = Object.freeze(['https://www.googleapis.com/auth/datastore']);
 
 function assertFiveAcrossProject(projectId) {
   if (projectId !== BODEGA_PROJECT_ID) {
     throw new Error(`Five Across project must be ${BODEGA_PROJECT_ID}.`);
   }
+}
+
+export async function getApplicationDefaultAccessToken(
+  createAuth = (options) => new GoogleAuth(options),
+) {
+  const accessToken = await createAuth({ scopes: [...datastoreScopes] }).getAccessToken();
+  if (typeof accessToken !== 'string' || accessToken.length === 0) {
+    throw new Error('Application Default Credentials returned no access token.');
+  }
+  return accessToken;
 }
 
 export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fetchImpl = fetch }) {
@@ -66,12 +77,8 @@ async function main() {
 
     let accessToken;
     try {
-      const token = await applicationDefault().getAccessToken();
-      accessToken = token?.access_token;
+      accessToken = await getApplicationDefaultAccessToken();
     } catch {
-      throw new Error('Unable to obtain the Five Across deploy access token.');
-    }
-    if (typeof accessToken !== 'string' || accessToken.length === 0) {
       throw new Error('Unable to obtain the Five Across deploy access token.');
     }
 

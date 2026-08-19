@@ -417,7 +417,11 @@ export CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true
 # Credentials. Run with an isolated configstore so stale `firebase login`
 # state cannot override the service account key we just materialized.
 if $VERIFY_FIVEACROSS_HOSTNAMES; then
-  VERIFIER_SCRIPT="$(cd "$SCRIPT_DIR/.." && pwd)/verify-deploy-hostnames.mjs"
+  VERIFIER_SCRIPT="$PWD/scripts/verify-deploy-hostnames.mjs"
+  if [[ ! -f "$VERIFIER_SCRIPT" ]]; then
+    echo "Error: Five Across hostname verifier not found at $VERIFIER_SCRIPT. Run this mode from the repository root." >&2
+    exit 1
+  fi
   node "$VERIFIER_SCRIPT"
   exit 0
 fi

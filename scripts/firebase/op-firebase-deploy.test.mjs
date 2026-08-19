@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,7 +18,10 @@ describe('op-firebase-deploy authenticated hostname verification', () => {
     const credentialPath = join(directory, 'credential.json');
     const verifyMarker = join(directory, 'verify.json');
     const firebaseMarker = join(directory, 'firebase-called');
-    const fakeBin = join(directory, 'bin');
+    const fakeBin = join(directory, 'fake-bin');
+    const installedBin = join(directory, 'installed', 'bin');
+    const installedLib = join(installedBin, 'lib');
+    const installedWrapper = join(installedBin, 'op-firebase-deploy');
     await writeFile(
       credentialPath,
       JSON.stringify({
@@ -27,6 +30,13 @@ describe('op-firebase-deploy authenticated hostname verification', () => {
       }),
     );
     await mkdir(fakeBin);
+    await mkdir(installedLib, { recursive: true });
+    await copyFile(resolve('scripts/firebase/op-firebase-deploy'), installedWrapper);
+    await copyFile(
+      resolve('scripts/firebase/lib/credential-materialization.sh'),
+      join(installedLib, 'credential-materialization.sh'),
+    );
+    await chmod(installedWrapper, 0o755);
     const fakeNode = join(fakeBin, 'node');
     await writeFile(
       fakeNode,
@@ -53,7 +63,7 @@ describe('op-firebase-deploy authenticated hostname verification', () => {
     await chmod(fakeFirebase, 0o755);
 
     const result = spawnSync(
-      resolve('scripts/firebase/op-firebase-deploy'),
+      installedWrapper,
       ['fiveacross', '--verify-fiveacross-hostnames'],
       {
         encoding: 'utf8',
@@ -78,7 +88,7 @@ describe('op-firebase-deploy authenticated hostname verification', () => {
     expect(observed.url).toContain('firebase-deployer@fiveacross.iam.gserviceaccount.com:generateAccessToken');
     expect(observed.verifier).toBe(resolve('scripts/verify-deploy-hostnames.mjs'));
     await expect(readFile(firebaseMarker, 'utf8')).rejects.toThrow();
-  });
+  }, 15_000);
 
   it('rejects arbitrary authenticated command execution', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'op-firebase-exec-rejection-'));

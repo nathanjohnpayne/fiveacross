@@ -531,7 +531,7 @@ op-firebase-deploy <project-id> --only functions
 op-firebase-deploy fiveacross --verify-fiveacross-hostnames
 ```
 
-`--verify-fiveacross-hostnames` is an internal predeploy seam for the one read-only Five Across hostname-document check. It requires the explicit project ID before the flag, rejects Firebase deploy options and commands, exports the same temporary project-scoped Application Default Credential, runs only the repository's fixed verifier, and exits without invoking `firebase deploy`. The Five Across target uses it before building; routine publishing still goes through the named target command above.
+`--verify-fiveacross-hostnames` is an internal predeploy seam for the one read-only Five Across hostname-document check. Run it from the repository root. It requires the explicit project ID before the flag, rejects Firebase deploy options and commands, exports the same temporary project-scoped Application Default Credential, runs only `scripts/verify-deploy-hostnames.mjs`, and exits without invoking `firebase deploy`. The Five Across target uses it before building; routine publishing still goes through the named target command above.
 
 `op-firebase-deploy`:
 1. Auto-detects the Firebase project from `.firebaserc`.
