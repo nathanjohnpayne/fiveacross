@@ -5,23 +5,15 @@ import process from 'node:process';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { FieldPath, getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
-import { configForTarget } from './build-target.mjs';
+import { bugReportFirebaseConfig } from './bug-report-target.mjs';
 import { archiveReport, exportReports, normalizeSubmittedAt, recordDisposition } from './bug-reports-lib.mjs';
 import { prunePendingBugReports } from './bug-report-prune-lib.mjs';
 import { createBugReportPruneStore } from './bug-report-prune-store.mjs';
 
 const root = path.resolve('.github/bug-reports');
 
-function firebaseConfig(target) {
-  const targetConfig = configForTarget(target);
-  return {
-    projectId: targetConfig.firebaseProject,
-    storageBucket: targetConfig.identity.VITE_FIREBASE_STORAGE_BUCKET,
-  };
-}
-
 async function pull(target) {
-  const config = firebaseConfig(target);
+  const config = bugReportFirebaseConfig(target);
   const app = getApps()[0] ?? initializeApp({ credential: applicationDefault(), ...config });
   const reports = [];
   let cursor = null;
@@ -46,7 +38,7 @@ async function pull(target) {
 }
 
 async function prunePending(target, apply) {
-  const config = firebaseConfig(target);
+  const config = bugReportFirebaseConfig(target);
   const app = getApps()[0] ?? initializeApp({ credential: applicationDefault(), ...config });
   const db = getFirestore(app);
   const bucket = getStorage(app).bucket(config.storageBucket);
