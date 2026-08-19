@@ -27,6 +27,7 @@ import { THEMES, themesForEdition } from '../theme/themes';
 // firebase as `import type` only, which erases at build.
 import { normalizeTimezone } from './converters';
 import { occasionById } from './occasions';
+import { validateSlug } from '../slug';
 // The SAME bound `parseEventDraft` enforces on the stored blob, so the
 // in-memory gate and the persistence gate cannot drift apart.
 import { MAX_PROMPT_TEXT } from './eventDraft';
@@ -71,6 +72,7 @@ export type DraftIssueCode =
   | 'event-unsupported-timezone'
   | 'event-invalid-date-window'
   | 'event-occasion-edition-mismatch'
+  | 'event-invalid-slug'
   | 'setting-out-of-range'
   | 'curated-prompt-is-spicy'
   | 'prompt-text-out-of-bounds';
@@ -572,10 +574,10 @@ export function dayCompletenessIssues(draft: EventDraft): DraftIssue[] {
   return issues;
 }
 
-/** The Event-level fields a launched `EventDoc` requires. `slugCandidate` is
- *  checked for presence only: its format and the reserved-name list are the
- *  shared contract #790 introduces, and duplicating a weaker version of them
- *  here would be a second answer to a question that needs one. */
+/** The Event-level fields a launched `EventDoc` requires. The address check
+ *  delegates to `src/slug.ts`, the same contract the edge Worker applies
+ *  before a hostname reaches Firestore. The wizard's shared launch gate is
+ *  therefore not allowed to create an Event that the router will reject. */
 export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
   const issues: DraftIssue[] = [];
   const required: [keyof EventDraft, string][] = [
@@ -591,6 +593,21 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
         code: 'event-missing-field',
         field: String(field),
         message: `This Event still needs ${label}.`,
+      });
+    }
+  }
+  // A blank address has already received the clearer missing-field error
+  // above. Once it is present, validate the stored bytes strictly: the Basics
+  // form is the typing surface that calls `normalizeSlug`, whereas accepting a
+  // different spelling here would let a resumed/imported draft claim an
+  // address the edge refuses. `validateSlug` is the sole list/grammar owner.
+  if (draft.slugCandidate.trim() !== '') {
+    const slug = validateSlug(draft.slugCandidate);
+    if (!slug.ok) {
+      issues.push({
+        code: 'event-invalid-slug',
+        field: 'slugCandidate',
+        message: `"${draft.slugCandidate}" cannot be used as an Event address (${slug.reason}). Choose a lowercase DNS-safe address that is not reserved.`,
       });
     }
   }

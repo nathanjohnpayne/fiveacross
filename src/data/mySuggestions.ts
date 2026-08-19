@@ -65,14 +65,108 @@ function storageKey(eventId: string, uid: string): string {
   return `gcb.mySuggestions.${eventId}.${uid}`;
 }
 
+/**
+ * NO migration repairs a legacy blob's order, and this is a deliberate
+ * choice, not an oversight (Codex P2, PR #890 rounds 2 AND 4).
+ *
+ * Round 2 found the gap: a blob written by the pre-round-1
+ * remove-and-append `trackSuggestion` can have a REFRESHED old entry
+ * sitting at the array's tail, so treating array position as submission
+ * order would perpetuate that blob's own disorder indefinitely.
+ *
+ * A one-time `submittedAt`-sort repair (round 2's own first cut at a fix)
+ * sounded like the answer, but round 4 found it reintroduces the EXACT
+ * clock-skew loss round 1 exists to prevent, just narrowed to the one
+ * migration moment instead of every write: `submittedAt` is a CLIENT clock
+ * reading, not a monotonic sequence, so a legacy blob whose true newest
+ * entry happens to carry a SMALLER timestamp than older entries (a clock
+ * correction mid-cruise, say) would have that genuinely-newest entry sorted
+ * to the FRONT by the repair — and the very next write could then evict it
+ * immediately, the identical failure mode by a different route.
+ *
+ * There is no third option: `submittedAt` is the ONLY per-entry signal a
+ * legacy blob carries, and it is untrustworthy for ordering BOTH before and
+ * after any one-time transform of it — no amount of "just this once"
+ * scoping changes that, since the transform still has to trust the same
+ * unreliable field to decide anything. Attempting a repair therefore risks
+ * being WRONG in the same direction it is trying to fix, while doing
+ * nothing costs only a possible one-entry, one-time mis-ordering within a
+ * PURELY LOCAL, ADVISORY, non-authoritative cache (this module's own
+ * header comment) for a Player who happens to be upgrading across exactly
+ * the pre-round-1 build boundary. Leaving it alone is the honest call: the
+ * array-position cap this file uses today is correct for every entry
+ * written under it, self-heals within `TRACKED_LIMIT` submissions either
+ * way, and never needs to trust a timestamp to do so.
+ */
+
+/**
+ * The full set of values `TrackedSuggestion['lastKnownStatus']` may hold —
+ * deliberately NARROWER than `SubmitterStatus`'s own three values (Codex +
+ * CodeRabbit, PR #890 round 1): this field's own contract, stated on
+ * `TrackedSuggestion` above, is that it is "never stored here" as
+ * `'pending'` — only a genuinely resolved (`'scheduled' | 'approved'`)
+ * state is ever WRITTEN by `refreshLastKnownStatuses`. A persisted
+ * `lastKnownStatus: 'pending'` is therefore never something this module
+ * itself produced — only a malformed or cross-version blob — and accepting
+ * it would let `deriveMySubmissions`' fallback (`t.lastKnownStatus ??
+ * 'not_selected'`) report "pending review" for a submission that may
+ * actually be long since rejected, with no live query ever arriving to
+ * correct it (a rejected row is unreadable by its own submitter, so nothing
+ * would ever un-stick it). Validating against the runtime WRITE contract,
+ * not the wider read TYPE, is what catches that.
+ */
+const VALID_LAST_KNOWN_STATUSES: ReadonlySet<string> = new Set<Exclude<SubmitterStatus, 'pending'>>([
+  'scheduled',
+  'approved',
+]);
+
+/**
+ * A persisted blob only ever reaches this module through `JSON.parse` — an
+ * untrusted, hand-editable, cross-version localStorage read — so every
+ * field (not just the three required ones) must be validated before the
+ * whole object is cast to `TrackedSuggestion` and trusted downstream (#865).
+ * Without validating the three OPTIONAL fields, a malformed persisted value
+ * — an object-valued `lastKnownText`, say — passes this guard untouched,
+ * `deriveMySubmissions` renders it directly (`t.lastKnownText ?? t.text`),
+ * and React crashes the whole ItemPool panel on "objects are not valid as a
+ * React child"; a malformed `lastKnownStatus` similarly produces an
+ * undefined pill label (`SUBMISSION_STATUS_LABEL[s.status]` has no entry for
+ * a value outside the union). A malformed entry is discarded WHOLESALE
+ * (`loadTrackedSuggestions` already `.filter(isTrackedSuggestion)`s) rather
+ * than sanitized field-by-field — simpler, and losing one device-local
+ * tracking row is harmless (the live pending/active queries are still the
+ * authoritative source; this module only adds the local follow-up).
+ */
 function isTrackedSuggestion(v: unknown): v is TrackedSuggestion {
-  return (
-    !!v &&
-    typeof v === 'object' &&
-    typeof (v as { id?: unknown }).id === 'string' &&
-    typeof (v as { text?: unknown }).text === 'string' &&
-    typeof (v as { submittedAt?: unknown }).submittedAt === 'number'
-  );
+  if (!v || typeof v !== 'object') return false;
+  const obj = v as Record<string, unknown>;
+  if (
+    typeof obj.id !== 'string' ||
+    typeof obj.text !== 'string' ||
+    typeof obj.submittedAt !== 'number'
+  ) {
+    return false;
+  }
+  if (obj.lastKnownStatus !== undefined && !VALID_LAST_KNOWN_STATUSES.has(obj.lastKnownStatus as string)) {
+    return false;
+  }
+  // A non-negative INTEGER, not merely a number (Codex + CodeRabbit, PR
+  // #890 round 1): this field mirrors `targetDayIndex`, and `isUsableTarget`
+  // (communityPrompts.ts) is the shared contract for what a real Day index
+  // can be — a negative, fractional, or non-finite value is never one,
+  // matching the same bound `isUsableTarget` itself enforces.
+  if (
+    obj.lastKnownDayIndex !== undefined &&
+    (typeof obj.lastKnownDayIndex !== 'number' ||
+      !Number.isInteger(obj.lastKnownDayIndex) ||
+      obj.lastKnownDayIndex < 0)
+  ) {
+    return false;
+  }
+  if (obj.lastKnownText !== undefined && typeof obj.lastKnownText !== 'string') {
+    return false;
+  }
+  return true;
 }
 
 /** This device's tracked suggestions for `uid` on `eventId`, oldest first.
@@ -90,13 +184,47 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
   }
 }
 
-/** Record a fresh submission from THIS device. Idempotent on `id` (a retried
- *  call — e.g. React StrictMode's double-invoke — never duplicates the
- *  entry); silently drops on a storage error, same fallback as the read. */
+/**
+ * Record a fresh submission from THIS device — or refresh an existing
+ * tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/`lastKnownText`
+ * (`refreshLastKnownStatuses`' caller, `ItemPool.tsx`, calls this for BOTH).
+ * Idempotent on `id` (a retried call — e.g. React StrictMode's
+ * double-invoke — never duplicates the entry); silently drops on a storage
+ * error, same fallback as the read.
+ *
+ * Capped by WRITE order, not by a client-reported `submittedAt` (#864, then
+ * Codex P2 on PR #890 round 1): the FIRST cut of this fix sorted by
+ * `submittedAt` before capping, reasoning that a naive remove-then-append
+ * moved a REFRESHED entry to the newest storage slot even though nothing
+ * new was submitted — true, but `submittedAt` is a CLIENT clock reading,
+ * not a monotonic sequence: a device clock correction, or an existing
+ * well-typed persisted row carrying a bogus far-future value, can make a
+ * genuinely brand-new submission sort BELOW older entries and be the one
+ * `slice(-TRACKED_LIMIT)` evicts — the opposite of "keep the newest". An
+ * existing id is instead replaced IN PLACE, at its current array position,
+ * so a REFRESH never moves anything; only a genuinely NEW id is appended,
+ * and only the append path is ever capped — by array position, which is
+ * monotonic by construction (this function's own call order) regardless of
+ * what the clock says.
+ *
+ * Array position is only a faithful proxy for submission order GOING
+ * FORWARD — a blob a pre-round-1 build already wrote may have a REFRESHED
+ * entry sitting out of order, and this function deliberately does NOT
+ * attempt to repair that (see the comment above `TRACKED_LIMIT`'s cap
+ * discussion for why: the only available repair signal, `submittedAt`, is
+ * exactly as untrustworthy for a one-time fix as it is for an ongoing one).
+ */
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
   try {
-    const existing = loadTrackedSuggestions(eventId, uid).filter((s) => s.id !== suggestion.id);
-    const next = [...existing, suggestion].slice(-TRACKED_LIMIT);
+    const existing = loadTrackedSuggestions(eventId, uid);
+    const index = existing.findIndex((s) => s.id === suggestion.id);
+    let next: TrackedSuggestion[];
+    if (index === -1) {
+      next = [...existing, suggestion].slice(-TRACKED_LIMIT);
+    } else {
+      next = existing.slice();
+      next[index] = suggestion;
+    }
     localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next));
   } catch {
     /* nothing to persist */

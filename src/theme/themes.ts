@@ -20,6 +20,20 @@ export interface ThemeMeta {
   // the spec table — do not paraphrase. #206 adds the two new tutorial-theme
   // entries (welcome-aboard / so-long-farewell) with their own descriptions.
   description: string;
+  /**
+   * Present and `true` only for a Theme reserved as PLATFORM CHROME — a look
+   * for surfaces that have no Day (utility states, the admin console, email,
+   * gallery/share surfaces outside a Day context), never a Day a player can
+   * wear (#882). Absent (falsy) for every ordinary Theme.
+   *
+   * `THEMES` and the contrast suites stay complete either way — a chrome
+   * Theme is registered, contrast-audited, and `THEME_EDITIONS`-bound to its
+   * Edition exactly like an ordinary Theme. Only `themesForEdition` (the
+   * PICKER, not the registry) reads this flag, filtering chrome Themes out
+   * of every Day/defaultTheme picker. See specs/w1-themes.md § Registry vs.
+   * picker.
+   */
+  chrome?: true;
 }
 
 // The complete Theme REGISTRY, across every Edition. Descriptions track
@@ -28,7 +42,9 @@ export interface ThemeMeta {
 //
 // This list is NOT what any picker renders — see `themesForEdition` (#555). It
 // must stay complete because `Leaderboard`, `dayIdentity`, `DaySwitcher` and
-// `Board` look Themes up BY ID here, and the contrast suites iterate it.
+// `Board` look Themes up BY ID here, and the contrast suites iterate it. A
+// Theme may additionally be flagged `chrome: true` (#882) — still complete,
+// still audited, just never returned by `themesForEdition`'s picker.
 export const THEMES: ThemeMeta[] = [
   {
     id: 'neon-playground',
@@ -193,6 +209,21 @@ export const THEMES: ThemeMeta[] = [
     description:
       'The slow, happy wind-down. Dusk violet, ember orange, and one warm last light.',
   },
+  // Five Across platform chrome (#882), not an occasion Theme: slate + one
+  // signal-cobalt hue for surfaces that have no Day — utility states, the
+  // admin console, email, the gallery and share surfaces outside a Day
+  // context. `chrome: true` keeps it out of every Day/defaultTheme picker
+  // (themesForEdition) while it stays registered, contrast-audited, and
+  // bound to the fiveacross Edition (THEME_EDITIONS) exactly like the trio
+  // above — see specs/w1-themes.md § Registry vs. picker for the split.
+  {
+    id: 'fiveacross-slate',
+    label: 'Slate',
+    emoji: '🔹',
+    description:
+      'Platform chrome, not a party — near-black slate and one signal-cobalt hue for surfaces no Day owns.',
+    chrome: true,
+  },
 ];
 
 const GCB: readonly string[] = [DEFAULT_EDITION];
@@ -215,6 +246,15 @@ const FIVEACROSS: readonly string[] = ['fiveacross'];
  * error — add a ThemeId without declaring its Editions and this object stops
  * type-checking. There is deliberately no "shared" escape hatch: if a Theme
  * ever genuinely belongs to both, it lists both.
+ *
+ * A platform-chrome Theme (`ThemeMeta.chrome`, #882) still needs an entry
+ * here — the map is total — and lists the Edition it is brand-affiliated
+ * with, exactly like an ordinary Theme. That entry alone does NOT make it
+ * pickable: `themesForEdition` separately filters every chrome Theme out of
+ * its picker output regardless of what it lists here. This map answers
+ * "which Edition does this Theme belong to," not "is this Theme pickable" —
+ * the two questions coincide for every ordinary Theme, which is the only
+ * reason this doc comment used to conflate them.
  */
 const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
   // Gay Cruise Bingo party Themes — Atlantis signature nights, cruise-specific
@@ -243,6 +283,11 @@ const THEME_EDITIONS: Record<ThemeId, readonly string[]> = {
   marquee: FIVEACROSS,
   'confetti-hour': FIVEACROSS,
   afterglow: FIVEACROSS,
+  // Five Across platform chrome (#882) — bound to the same Edition as the
+  // trio above; `chrome: true` on its THEMES entry is what actually keeps it
+  // out of themesForEdition's picker output, not this map (this map is pure
+  // Edition affiliation, unrelated to pickability).
+  'fiveacross-slate': FIVEACROSS,
 };
 
 /**
@@ -295,6 +340,11 @@ export function defaultThemeForEdition(edition: string = activeEdition()): Theme
  * Bodega Themes would have offered 🐦 The Birds as a Mediterranean cruise's
  * `defaultTheme` (Codex on #577).
  *
+ * Also excludes platform-chrome Themes (`ThemeMeta.chrome`, #882) regardless
+ * of Edition: a chrome Theme is registered and Edition-bound like any other,
+ * but dresses surfaces that have no Day, so no Day/defaultTheme picker may
+ * ever offer it.
+ *
  * An unknown Edition falls back to `gcb` rather than to an empty list: an
  * Edition string that nothing recognises should degrade to the legacy
  * experience, not to a picker with nothing in it.
@@ -303,7 +353,11 @@ export function themesForEdition(edition?: string | null): ThemeMeta[] {
   const ed = edition || activeEdition();
   const known = THEMES.some((t) => THEME_EDITIONS[t.id].includes(ed));
   const scope = known ? ed : DEFAULT_EDITION;
-  return THEMES.filter((t) => THEME_EDITIONS[t.id].includes(scope));
+  // `!t.chrome` excludes platform-chrome Themes (#882) from every picker —
+  // registered, contrast-audited and Edition-bound like any other Theme, but
+  // never a Day a player or organizer can pick. See the ThemeMeta.chrome doc
+  // comment and specs/w1-themes.md § Registry vs. picker.
+  return THEMES.filter((t) => !t.chrome && THEME_EDITIONS[t.id].includes(scope));
 }
 
 /**
@@ -316,6 +370,10 @@ export function themesForEdition(edition?: string | null): ThemeMeta[] {
  * stored as something else — narrowing what may be picked must not misreport
  * what is set. The off-Edition entry leads the list so it is visible rather
  * than buried.
+ *
+ * A platform-chrome Theme (#882) hand-set as `keep` is handled the same
+ * way: `themesForEdition` never returns it, so it is always prepended as if
+ * off-Edition, even on the Edition it is `THEME_EDITIONS`-bound to.
  */
 export function themesForEditionIncluding(
   keep?: ThemeId | null,

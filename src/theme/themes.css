@@ -393,3 +393,40 @@
   --shadow: rgba(197, 131, 224, 0.4);
   --on-gradient: #000;
 }
+
+/* Five Across platform chrome (#882) — registered, not an occasion Theme:
+   ThemeMeta.chrome flags it out of every Day/defaultTheme picker
+   (themesForEdition), so it dresses surfaces that have no Day — utility
+   states, the admin console, email, the gallery and share surfaces outside a
+   Day context — never a Day a player or organizer can pick.
+
+   Palette lifted from plans/daily-cards-wireframes.html's own
+   [data-theme='fiveacross-slate'] block (the wireframe's PROPOSED platform
+   palette this ticket registers): --bg/--panel/--ink/--dim/--accent/--cell/
+   --border are the wireframe's values verbatim. --primary/--secondary are
+   BRIGHTENED from the wireframe's #3f66f0/#2c4bd8 — same hue and saturation,
+   more luminance — because the raw values only cleared one of the two roles
+   this token pair plays: --primary is also .row .rank's literal text color
+   on --panel (3.63:1 at the wireframe value, under the 4.5:1 floor), and no
+   luminance clears that floor AND a WHITE --on-gradient at once against this
+   --panel — the two required ranges don't overlap (checked: text-on-panel
+   needs primary luminance >=0.221, white-on-gradient needs <=0.183).
+   --on-gradient therefore also flips from the wireframe's #fff to #000,
+   matching every other dark-ground Theme in this file: the wireframe assumed
+   --primary/--secondary were too dark for black text, which was true at the
+   original luminance and false after brightening. --shadow has no wireframe
+   source (the static mockup never renders a box-shadow glow); added at the
+   sibling convention, --primary at 0.4 alpha. */
+[data-theme='fiveacross-slate'] {
+  --bg: #0f1116;
+  --panel: #161a22;
+  --ink: #f2f4f8;
+  --dim: #9aa3b2;
+  --primary: #718ef4;
+  --secondary: #647be2;
+  --accent: #f5b840;
+  --cell: #161a22;
+  --border: rgba(96, 130, 255, 0.32);
+  --shadow: rgba(113, 142, 244, 0.4);
+  --on-gradient: #000;
+}

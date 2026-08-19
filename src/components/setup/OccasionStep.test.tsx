@@ -118,6 +118,28 @@ describe('OccasionStep', () => {
     expect(row('Wedding')).toHaveAttribute('aria-pressed', 'false');
   });
 
+  it('an UNSET occasion customized ONLY in a settings field outside the explicitly-checked list still confirms first — proves the check is structural, not itemized (#860)', async () => {
+    // Simulates `EventDraftSettings` growing a field AFTER this check was
+    // written — the exact scenario #860 flags: a hand-enumerated
+    // field-by-field comparison would silently stop covering a NEW field,
+    // reading a draft customized only there as still "fresh" and
+    // committing over it with no confirmation. `settingsEqual` compares
+    // every key `Object.keys` actually finds, so it needs no edit when a
+    // field is added — this cast is how a real TypeScript type can express
+    // "one extra property the current type doesn't declare" for the test.
+    const user = userEvent.setup();
+    const draft = {
+      ...createEventDraft({ now: NOW }),
+      settings: { ...createEventDraft({ now: NOW }).settings, futureSetting: true },
+    } as unknown as EventDraft;
+    renderHarness(draft);
+
+    await user.click(row('Weekend away'));
+
+    await screen.findByRole('alertdialog', { name: /apply.*weekend away/i });
+    expect(row('Weekend away')).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('the confirm names EVERY field applyOccasionDefaults can overwrite, including card format', async () => {
     const user = userEvent.setup();
     const draft = applyOccasionDefaults(createEventDraft({ now: NOW }), occasionById('weekend-away')!);
