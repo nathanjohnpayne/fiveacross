@@ -126,13 +126,15 @@ export async function completeAuthHandoff(input: {
     );
     customToken = result.data.customToken;
   } catch {
-    forgetHandoffTransaction();
+    // The clearing lives in `finally` alone, not here as well: one unconditional
+    // place to delete the verifier is easier to prove exhaustive than two that
+    // have to agree.
     recordHandoffFailure('exchange-rejected');
     return false;
   } finally {
     // Before the sign-in below, not after: the verifier has done its only job
     // the moment the exchange returns, and the code it was paired with is spent
-    // either way.
+    // either way — success, rejection, and timeout alike.
     forgetHandoffTransaction();
   }
 
