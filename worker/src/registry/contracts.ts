@@ -1,4 +1,5 @@
 import { classifyHost, normalizeHost } from '../host';
+import { validateSlug } from '../../../src/slug';
 
 export const SYNC_PATH = '/__internal/hostname-replicas/v1';
 export const SYNC_MAX_BYTES = 2_048;
@@ -102,11 +103,7 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
 
   if (value.kind === 'tombstone') {
     if (!hasExactKeys(value, TOMBSTONE_KEYS)) throw new Error('invalid tombstone fields');
-    if (
-      classifyHost(host).kind === 'rejected' &&
-      !isSyntheticRegistryHost(host) &&
-      !isRegistryRootHost(host)
-    ) {
+    if (classifyHost(host).kind === 'rejected' && !isSyntheticRegistryHost(host) && !isRegistryRootHost(host)) {
       throw new Error('invalid tombstone host');
     }
     return { kind: 'tombstone' };
@@ -130,20 +127,25 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
     }
     const classified = classifyHost(host);
     const syntheticSlug = SYNTHETIC_EVENT.test(host) ? host.split('.')[0] : null;
-    if (
-      (syntheticSlug === null && (classified.kind !== 'event' || classified.slug !== slug)) ||
-      (syntheticSlug !== null && syntheticSlug !== slug)
-    ) {
-      throw new Error('route slug must match the canonical host label');
+    const rootClass = ROOT_HOSTS.get(host);
+    if (syntheticSlug !== null) {
+      if (syntheticSlug !== slug || pathNamespace !== null) {
+        throw new Error('route slug must match the canonical host label');
+      }
+    } else if (classified.kind === 'event') {
+      if (classified.slug !== slug || pathNamespace !== null) {
+        throw new Error('route slug must match the canonical host label');
+      }
+    } else if (rootClass === undefined || !validateSlug(slug).ok || rootClass.pathNamespace !== pathNamespace) {
+      throw new Error('route host class or pathNamespace is invalid');
     }
-    if (pathNamespace !== null) throw new Error('pathNamespace is invalid on an Event subdomain');
     return {
       kind: 'route',
       eventId,
       status: value.status as 'active' | 'disabled' | 'archived',
       slug,
       edition: edition as RegistryEdition,
-      pathNamespace: null,
+      pathNamespace: pathNamespace as PathNamespace,
     };
   }
 
@@ -218,15 +220,7 @@ export function canonicalProjectionBytes(payload: RouterReplicaDesired): Uint8Ar
           desired.pathNamespace,
         ]
       : desired.kind === 'root'
-        ? [
-            1,
-            payload.revision,
-            payload.host,
-            'root',
-            desired.root,
-            desired.edition,
-            desired.pathNamespace,
-          ]
+        ? [1, payload.revision, payload.host, 'root', desired.root, desired.edition, desired.pathNamespace]
         : [1, payload.revision, payload.host, 'tombstone'];
   return new TextEncoder().encode(JSON.stringify(tuple));
 }

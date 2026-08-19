@@ -1,6 +1,6 @@
 import type { CommittedReplica, RegistryState } from './contracts';
 import type { RecoveryRecord } from './recovery';
-import { registryLookup, type RegistryLookup } from './state';
+import { registryLookup } from './state';
 
 const NON_NEGATIVE_DECIMAL = /^(?:0|[1-9]\d*)$/;
 export const AUDIT_PAGE_SIZE = 100;
@@ -11,7 +11,7 @@ export type RegistryAuditPage = {
   highestAuthenticatedPublisherEpoch: string;
   highestQuarantinedPublisherEpoch: string;
   recoveryLock: RegistryState['recoveryLock'];
-  lookup: RegistryLookup;
+  lookup: { kind: 'unknown-host' } | { kind: 'unavailable' } | { kind: 'committed'; revision: string };
   records: RecoveryRecord[];
   nextAfter: string | null;
 };
@@ -35,16 +35,20 @@ export function createAuditPage(
   }
   const hasMore = recordsAfterCursor.length > AUDIT_PAGE_SIZE;
   const records = recordsAfterCursor.slice(0, AUDIT_PAGE_SIZE);
+  const lookup = registryLookup(state);
   return {
     committed:
       state.committed === null
         ? null
-        : { revision: state.committed.revision, digest: state.committed.digest },
+        : {
+            revision: state.committed.revision,
+            digest: state.committed.digest,
+          },
     minimumPublisherEpoch: state.minimumPublisherEpoch,
     highestAuthenticatedPublisherEpoch: state.highestAuthenticatedPublisherEpoch,
     highestQuarantinedPublisherEpoch: state.highestQuarantinedPublisherEpoch,
     recoveryLock: state.recoveryLock,
-    lookup: registryLookup(state),
+    lookup: lookup.kind === 'committed' ? { kind: 'committed', revision: lookup.revision } : lookup,
     records,
     nextAfter: hasMore ? (records.at(-1)?.sequence ?? null) : null,
   };

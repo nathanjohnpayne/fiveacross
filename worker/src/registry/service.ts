@@ -5,16 +5,8 @@ import {
   parseSyncRequest,
   type RouterReplicaDesired,
 } from './contracts';
-import {
-  validateVerificationRecords,
-  verifyPinnedSignature,
-  type VerificationRecord,
-} from './keys';
-import {
-  JwksUnavailableError,
-  verifyGoogleOidc,
-  type JwksResolver,
-} from './oidc';
+import { validateVerificationRecords, verifyPinnedSignature, type VerificationRecord } from './keys';
+import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { SyncResponse } from './state';
 import type { RegistryAuditPage } from './audit';
 import type { ProbeAttestation, ProbeChallenge, ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
@@ -38,10 +30,9 @@ const SYNC_RESULTS = new Set([
 
 export type HostRegistryStub = {
   sync(payload: RouterReplicaDesired, publisherEpoch: string): Promise<SyncResponse>;
-  audit(afterRecoverySequence?: string): Promise<
-    | { ok: true; page: RegistryAuditPage }
-    | { ok: false; error: 'invalid-cursor' }
-  >;
+  audit(
+    afterRecoverySequence?: string,
+  ): Promise<{ ok: true; page: RegistryAuditPage } | { ok: false; error: 'invalid-cursor' }>;
   recover(
     request: RecoveryRequest,
     context: {
@@ -51,19 +42,21 @@ export type HostRegistryStub = {
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
     },
-  ): Promise<{ sequence: string; action: RecoveryRecord['action'] }>;
+  ): Promise<
+    { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }
+  >;
   issueProbeChallenge(
     request: { host: string; phase: ProbePhase; expectedStateDigest: string },
     principal: ProbePrincipal,
     now: number,
     nonce: string,
-  ): Promise<ProbeChallenge>;
+  ): Promise<{ ok: true; challenge: ProbeChallenge } | { ok: false; error: 'probe-refused' }>;
   attestProbe(
     observation: ProbeObservation,
     principal: ProbePrincipal,
     now: number,
     attestationId: string,
-  ): Promise<ProbeAttestation>;
+  ): Promise<{ ok: true; attestation: ProbeAttestation } | { ok: false; error: 'probe-refused' }>;
 };
 
 export type HostRegistryNamespace = {
@@ -78,9 +71,7 @@ export type RegistryServiceConfig = {
   audience: string;
   verificationRecords: readonly VerificationRecord[];
   auditSubject?: string;
-  roleAudiences?: Partial<
-    Record<'audit' | 'recovery' | 'source-attestor' | 'regional-probe', string>
-  >;
+  roleAudiences?: Partial<Record<'audit' | 'recovery' | 'source-attestor' | 'regional-probe', string>>;
 };
 
 export type RegistryServiceDeps = {
@@ -100,9 +91,7 @@ function json(status: number, body: Record<string, unknown>): Response {
 
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function bearerToken(request: Request): string | null {
@@ -152,9 +141,11 @@ async function syncResponse(
     return json(400, { error: 'invalid-request' });
   }
 
-  const authHeader = request.headers.get('authorization') ?? '';
   try {
-    const rateKey = `sync:${await sha256Hex(authHeader)}`;
+    const clientIp = request.headers.get('cf-connecting-ip');
+    const rateIdentity =
+      clientIp !== null && /^[0-9A-Fa-f:.]{2,45}$/.test(clientIp) ? clientIp.toLowerCase() : 'unidentified-client';
+    const rateKey = `sync:${rateIdentity}`;
     if (!(await deps.rateLimiter.limit({ key: rateKey })).success) {
       return json(429, { error: 'rate-limited' });
     }
@@ -204,9 +195,7 @@ async function syncResponse(
   }
   const record = records.find(
     (candidate) =>
-      candidate.role === 'publisher' &&
-      candidate.epochOrSlot === epoch &&
-      candidate.keyVersion === keyVersion,
+      candidate.role === 'publisher' && candidate.epochOrSlot === epoch && candidate.keyVersion === keyVersion,
   );
   if (record === undefined) return json(401, { error: 'unauthorized' });
 
@@ -220,14 +209,7 @@ async function syncResponse(
   }
 
   const exactSignatureInput = new TextEncoder().encode(
-    [
-      'v1',
-      'POST',
-      SYNC_PATH,
-      issuedAtRaw,
-      epoch,
-      await sha256Hex(body),
-    ].join('\n'),
+    ['v1', 'POST', SYNC_PATH, issuedAtRaw, epoch, await sha256Hex(body)].join('\n'),
   );
   if (!(await verifyPinnedSignature(record, exactSignatureInput, signature))) {
     return json(401, { error: 'unauthorized' });

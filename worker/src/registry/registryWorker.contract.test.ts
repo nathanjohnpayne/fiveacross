@@ -25,21 +25,18 @@ describe('registry Worker capability/configuration contract', () => {
 
   it('commits recovery state and its sequence-addressed history record in one transaction', async () => {
     const source = await readFile(SOURCE, 'utf8');
-    const recover = source.slice(
-      source.indexOf('async recover('),
-      source.indexOf('async issueProbeChallenge('),
-    );
+    const recover = source.slice(source.indexOf('async recover('), source.indexOf('async issueProbeChallenge('));
     expect(recover).toContain('this.ctx.storage.transaction');
     expect(recover).toContain('transaction.put(STATE_KEY, result.state)');
-    expect(recover).toContain(
-      'transaction.put(decimalKey(HISTORY_PREFIX, result.record.sequence), result.record)',
+    expect(recover).toMatch(
+      /transaction\.put\(\s*decimalKey\(HISTORY_PREFIX, result\.record\.sequence\),\s*result\.record,?\s*\)/,
     );
     expect(recover).toContain('transaction.delete(keys)');
   });
 
   it('owns one SQLite-backed per-host namespace, fixed placement, rate limiting, and no KV', async () => {
     const [source, config] = await Promise.all([readFile(SOURCE, 'utf8'), readFile(CONFIG, 'utf8')]);
-    expect(source).toContain("locationHint: REGISTRY_LOCATION_HINT");
+    expect(source).toContain('locationHint: REGISTRY_LOCATION_HINT');
     expect(config).toContain('new_sqlite_classes = ["HostRegistryObject"]');
     expect(config).toContain('[[ratelimits]]');
     expect(config).not.toMatch(/\[\[kv_namespaces\]\]/);

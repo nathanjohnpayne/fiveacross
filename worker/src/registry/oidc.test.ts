@@ -15,13 +15,17 @@ const POLICY = {
 };
 
 function base64url(value: string | ArrayBuffer): string {
-  return Buffer.from(typeof value === 'string' ? value : value)
-    .toString('base64url');
+  return Buffer.from(typeof value === 'string' ? value : value).toString('base64url');
 }
 
 async function keyFixture(kid = 'kid-1') {
   const pair = (await crypto.subtle.generateKey(
-    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
     true,
     ['sign', 'verify'],
   )) as CryptoKeyPair;
@@ -34,7 +38,14 @@ async function tokenFor(
   payloadOverrides: Record<string, unknown> = {},
   headerOverrides: Record<string, unknown> = {},
 ) {
-  const header = base64url(JSON.stringify({ alg: 'RS256', kid: fixture.kid, typ: 'JWT', ...headerOverrides }));
+  const header = base64url(
+    JSON.stringify({
+      alg: 'RS256',
+      kid: fixture.kid,
+      typ: 'JWT',
+      ...headerOverrides,
+    }),
+  );
   const payload = base64url(
     JSON.stringify({
       iss: GOOGLE_OIDC_ISSUER,
@@ -60,7 +71,9 @@ describe('Google OIDC verification', () => {
     const cache = new GoogleJwksCache({
       fetch: vi.fn(async (url) => {
         expect(url).toBe(GOOGLE_OIDC_JWKS_URL);
-        return new Response(JSON.stringify({ keys: [fixture.jwk] }), { status: 200 });
+        return new Response(JSON.stringify({ keys: [fixture.jwk] }), {
+          status: 200,
+        });
       }),
       now: () => NOW,
     });
@@ -94,9 +107,9 @@ describe('Google OIDC verification', () => {
       fetch: async () => new Response(JSON.stringify({ keys: [fixture.jwk] })),
       now: () => NOW,
     });
-    await expect(
-      verifyGoogleOidc(await tokenFor(fixture, {}, { alg: 'none' }), POLICY, cache, NOW),
-    ).rejects.toThrow('OIDC token rejected');
+    await expect(verifyGoogleOidc(await tokenFor(fixture, {}, { alg: 'none' }), POLICY, cache, NOW)).rejects.toThrow(
+      'OIDC token rejected',
+    );
   });
 
   it('single-flights refresh and rate-limits unknown-kid refreshes to five minutes', async () => {
@@ -120,5 +133,29 @@ describe('Google OIDC verification', () => {
       now: () => NOW,
     });
     await expect(cache.resolve('kid')).rejects.toBeInstanceOf(JwksUnavailableError);
+    await expect(cache.resolve('kid')).rejects.toBeInstanceOf(JwksUnavailableError);
+  });
+
+  it('expires known keys and removes a provider-revoked kid on refresh', async () => {
+    let now = NOW;
+    const first = await keyFixture('kid-1');
+    const replacement = await keyFixture('kid-2');
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ keys: [first.jwk] }), {
+          headers: { 'cache-control': 'public, max-age=60' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ keys: [replacement.jwk] }), {
+          headers: { 'cache-control': 'public, max-age=60' },
+        }),
+      );
+    const cache = new GoogleJwksCache({ fetch, now: () => now });
+    await expect(cache.resolve('kid-1')).resolves.not.toBeNull();
+    now += 60_001;
+    await expect(cache.resolve('kid-1')).resolves.toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

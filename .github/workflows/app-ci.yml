@@ -47,6 +47,11 @@ jobs:
       - name: Verify isolated registry publisher dependency boundary
         run: npm run check:no-admin --prefix router-publisher
 
+      # Miniflare stays in the Worker's separately installed dependency tree;
+      # the root suite imports it only for the registry's real-workerd test.
+      - name: Install isolated Event router dependencies
+        run: npm ci --prefix worker
+
       - name: Typecheck
         run: npm run typecheck
 

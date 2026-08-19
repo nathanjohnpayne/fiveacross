@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import { createAuditPage } from './audit';
-import { initialRegistryState } from './state';
+import { applyPublisherSync, initialRegistryState } from './state';
+import type { RouterReplicaDesired } from './contracts';
 import type { RecoveryRecord } from './recovery';
 
 function record(sequence: number): RecoveryRecord {
@@ -28,7 +29,11 @@ describe('point audit pagination', () => {
       recoverySequence: '102',
       highestAuthenticatedPublisherEpoch: '7',
     };
-    const first = createAuditPage(state, Array.from({ length: 101 }, (_, index) => record(index + 1)), '0');
+    const first = createAuditPage(
+      state,
+      Array.from({ length: 101 }, (_, index) => record(index + 1)),
+      '0',
+    );
     expect(first.records).toHaveLength(100);
     expect(first.nextAfter).toBe('100');
     expect(first).toMatchObject({
@@ -41,6 +46,27 @@ describe('point audit pagination', () => {
     const last = createAuditPage(state, [record(101), record(102)], '100');
     expect(last.records.map((entry) => entry.sequence)).toEqual(['101', '102']);
     expect(last.nextAfter).toBeNull();
+  });
+
+  it('reports a committed lookup outcome without exposing the desired route payload', async () => {
+    const payload: RouterReplicaDesired = {
+      schemaVersion: 1,
+      revision: '1',
+      host: 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+      desired: {
+        kind: 'route',
+        eventId: 'private-event-id',
+        status: 'active',
+        slug: 'r2-abcdefghijklmnopqrstuvwxyz',
+        edition: 'fiveacross',
+        pathNamespace: null,
+      },
+      updatedAt: '2026-08-19T12:34:56.000Z',
+    };
+    const applied = await applyPublisherSync(initialRegistryState(), payload, '1');
+    const page = createAuditPage(applied.state, [], '0');
+    expect(page.lookup).toEqual({ kind: 'committed', revision: '1' });
+    expect(JSON.stringify(page)).not.toContain('private-event-id');
   });
 
   it.each(['-1', '01', 'not-a-number', '103'])('rejects malformed or unknown-ahead cursor %s', (cursor) => {

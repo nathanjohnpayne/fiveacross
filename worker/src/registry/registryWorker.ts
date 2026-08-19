@@ -13,11 +13,7 @@ import {
   REGISTRY_VERIFICATION_RECORDS,
 } from './verificationRecords';
 import { GoogleJwksCache } from './oidc';
-import {
-  handleRegistryFetch,
-  type HostRegistryNamespace,
-  type RegistryRateLimiter,
-} from './service';
+import { handleRegistryFetch, type HostRegistryNamespace, type RegistryRateLimiter } from './service';
 import { applyPublisherSync, initialRegistryState, registryLookup, type RegistryLookup } from './state';
 import { AUDIT_PAGE_SIZE, createAuditPage, type RegistryAuditPage } from './audit';
 import { applyRecovery, type RecoveryRecord, type RecoveryRequest } from './recovery';
@@ -25,6 +21,8 @@ import {
   acceptProbeAttestation,
   issueProbeChallenge,
   matchProbeAttestations,
+  ProbeRefusedError,
+  type CanonicalProbeExpectation,
   type ProbeAttestation,
   type ProbeChallenge,
   type ProbeObservation,
@@ -38,12 +36,50 @@ const HISTORY_PREFIX = 'recovery/';
 const CHALLENGE_PREFIX = 'probe/challenge/';
 const ATTESTATION_PREFIX = 'probe/attestation/';
 
+class RegistryStorageError extends Error {
+  constructor(readonly storageCause: unknown) {
+    super('registry storage unavailable');
+    this.name = 'RegistryStorageError';
+  }
+}
+
 function decimalKey(prefix: string, value: string): string {
   return `${prefix}${value.length.toString().padStart(6, '0')}:${value}`;
 }
 
 function opaqueKey(prefix: string, value: string): string {
   return `${prefix}${encodeURIComponent(value)}`;
+}
+
+function canonicalProbeExpectation(
+  committed: NonNullable<Awaited<ReturnType<typeof parseStoredRegistryState>>['committed']>,
+): CanonicalProbeExpectation {
+  const desired = committed.payload.desired;
+  if (desired.kind === 'tombstone') {
+    return {
+      stateDigest: committed.digest,
+      status: 404,
+      reason: 'unknown-host',
+      revision: committed.revision,
+      servesOrigin: false,
+    };
+  }
+  if (desired.kind === 'route' && desired.status !== 'active') {
+    return {
+      stateDigest: committed.digest,
+      status: 404,
+      reason: 'inactive',
+      revision: committed.revision,
+      servesOrigin: false,
+    };
+  }
+  return {
+    stateDigest: committed.digest,
+    status: 200,
+    reason: null,
+    revision: committed.revision,
+    servesOrigin: true,
+  };
 }
 
 export interface RegistryWorkerEnv {
@@ -73,10 +109,9 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
     }
   }
 
-  async audit(afterRecoverySequence = '0'): Promise<
-    | { ok: true; page: RegistryAuditPage }
-    | { ok: false; error: 'invalid-cursor' }
-  > {
+  async audit(
+    afterRecoverySequence = '0',
+  ): Promise<{ ok: true; page: RegistryAuditPage } | { ok: false; error: 'invalid-cursor' }> {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
       const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
@@ -107,56 +142,85 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
     },
-  ): Promise<{ sequence: string; action: RecoveryRecord['action'] }> {
+  ): Promise<
+    { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }
+  > {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
       const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
-      const result = await applyRecovery(state, request, {
-        ...context,
-        consumeAttestations: async (ids, phase) => {
-          const keys = ids.map((id) => opaqueKey(ATTESTATION_PREFIX, id));
-          const storedAttestations = await transaction.get<ProbeAttestation>(keys);
-          const attestations = keys.map((key) => storedAttestations.get(key));
-          if (attestations.some((attestation) => attestation === undefined)) {
-            throw new Error('probe attestation is missing or already consumed');
-          }
-          const providerRequests =
-            request.action.kind === 'clear-lock'
-              ? request.action.providerRequests
-              : request.action.kind === 'acquire-lock' || request.action.kind === 'abort-lock'
-                ? request.action.wafEvidence.providerRequests
-                : [];
-          matchProbeAttestations(
-            attestations as ProbeAttestation[],
-            ids,
-            providerRequests,
-            phase === 'blocked' ? 'blocked-before-worker' : 'canonical-after-unblock',
-          );
-          for (const attestation of attestations as ProbeAttestation[]) {
-            if (phase === 'blocked') {
-              const expectedDigest =
-                request.action.kind === 'acquire-lock' || request.action.kind === 'abort-lock'
-                  ? request.action.wafEvidence.providerRule.customResponseBodyDigest
-                  : null;
-              if (
-                attestation.observation.phase !== 'blocked-before-worker' ||
-                attestation.observation.observedBlockBodyDigest !== expectedDigest
-              ) {
-                throw new Error('blocked probe does not match the active WAF response');
-              }
-            } else if (
-              attestation.observation.phase !== 'canonical-after-unblock' ||
-              attestation.observation.observedRevision !== request.sourceAudit.revision
-            ) {
-              throw new Error('canonical probe does not match the committed source revision');
+      let result: Awaited<ReturnType<typeof applyRecovery>>;
+      try {
+        result = await applyRecovery(state, request, {
+          ...context,
+          consumeAttestations: async (ids, phase) => {
+            const keys = ids.map((id) => opaqueKey(ATTESTATION_PREFIX, id));
+            let storedAttestations: Map<string, ProbeAttestation>;
+            try {
+              storedAttestations = await transaction.get<ProbeAttestation>(keys);
+            } catch (error) {
+              throw new RegistryStorageError(error);
             }
-          }
-          await transaction.delete(keys);
-        },
-      });
+            const attestations = keys.map((key) => storedAttestations.get(key));
+            if (attestations.some((attestation) => attestation === undefined)) {
+              throw new ProbeRefusedError('probe attestation is missing or already consumed');
+            }
+            const providerRequests =
+              request.action.kind === 'clear-lock'
+                ? request.action.providerRequests
+                : request.action.kind === 'acquire-lock' || request.action.kind === 'abort-lock'
+                  ? request.action.wafEvidence.providerRequests
+                  : [];
+            matchProbeAttestations(
+              attestations as ProbeAttestation[],
+              ids,
+              providerRequests,
+              phase === 'blocked' ? 'blocked-before-worker' : 'canonical-after-unblock',
+              {
+                stateDigest: state.committed?.digest ?? '',
+                now: context.now,
+                canonical:
+                  phase === 'canonical' && state.committed !== null
+                    ? canonicalProbeExpectation(state.committed)
+                    : undefined,
+              },
+            );
+            for (const attestation of attestations as ProbeAttestation[]) {
+              if (phase === 'blocked') {
+                const expectedDigest =
+                  request.action.kind === 'acquire-lock' || request.action.kind === 'abort-lock'
+                    ? request.action.wafEvidence.providerRule.customResponseBodyDigest
+                    : null;
+                if (
+                  attestation.observation.phase !== 'blocked-before-worker' ||
+                  attestation.observation.observedBlockBodyDigest !== expectedDigest
+                ) {
+                  throw new ProbeRefusedError('blocked probe does not match the active WAF response');
+                }
+              } else if (
+                attestation.observation.phase !== 'canonical-after-unblock' ||
+                attestation.observation.observedRevision !== request.sourceAudit.revision
+              ) {
+                throw new ProbeRefusedError('canonical probe does not match the committed source revision');
+              }
+            }
+            try {
+              await transaction.delete(keys);
+            } catch (error) {
+              throw new RegistryStorageError(error);
+            }
+          },
+        });
+      } catch (error) {
+        if (error instanceof RegistryStorageError) throw error.storageCause;
+        return { ok: false as const, error: 'recovery-refused' as const };
+      }
       await transaction.put(STATE_KEY, result.state);
       await transaction.put(decimalKey(HISTORY_PREFIX, result.record.sequence), result.record);
-      return { sequence: result.record.sequence, action: result.record.action };
+      return {
+        ok: true as const,
+        sequence: result.record.sequence,
+        action: result.record.action,
+      };
     });
   }
 
@@ -165,13 +229,25 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
     principal: ProbePrincipal,
     now: number,
     nonce: string,
-  ): Promise<ProbeChallenge> {
-    const challenge = issueProbeChallenge(request, principal, now, nonce);
+  ): Promise<{ ok: true; challenge: ProbeChallenge } | { ok: false; error: 'probe-refused' }> {
     const key = opaqueKey(CHALLENGE_PREFIX, nonce);
     return this.ctx.storage.transaction(async (transaction) => {
-      if ((await transaction.get(key)) !== undefined) throw new Error('probe challenge collision');
+      const stored = await transaction.get<unknown>(STATE_KEY);
+      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      if (state.committed === null || request.expectedStateDigest !== state.committed.digest) {
+        return { ok: false as const, error: 'probe-refused' as const };
+      }
+      let challenge: ProbeChallenge;
+      try {
+        challenge = issueProbeChallenge(request, principal, now, nonce);
+      } catch {
+        return { ok: false as const, error: 'probe-refused' as const };
+      }
+      if ((await transaction.get(key)) !== undefined) {
+        return { ok: false as const, error: 'probe-refused' as const };
+      }
       await transaction.put(key, challenge);
-      return challenge;
+      return { ok: true as const, challenge };
     });
   }
 
@@ -180,19 +256,26 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
     principal: ProbePrincipal,
     now: number,
     attestationId: string,
-  ): Promise<ProbeAttestation> {
+  ): Promise<{ ok: true; attestation: ProbeAttestation } | { ok: false; error: 'probe-refused' }> {
     const challengeKey = opaqueKey(CHALLENGE_PREFIX, observation.probeNonce);
     const attestationKey = opaqueKey(ATTESTATION_PREFIX, attestationId);
     return this.ctx.storage.transaction(async (transaction) => {
       const challenge = await transaction.get<ProbeChallenge>(challengeKey);
-      if (challenge === undefined) throw new Error('probe challenge missing or already consumed');
-      if ((await transaction.get(attestationKey)) !== undefined) {
-        throw new Error('probe attestation collision');
+      if (challenge === undefined) {
+        return { ok: false as const, error: 'probe-refused' as const };
       }
-      const accepted = acceptProbeAttestation(challenge, observation, principal, now, attestationId);
+      if ((await transaction.get(attestationKey)) !== undefined) {
+        return { ok: false as const, error: 'probe-refused' as const };
+      }
+      let accepted: ReturnType<typeof acceptProbeAttestation>;
+      try {
+        accepted = acceptProbeAttestation(challenge, observation, principal, now, attestationId);
+      } catch {
+        return { ok: false as const, error: 'probe-refused' as const };
+      }
       await transaction.delete(challengeKey);
       await transaction.put(attestationKey, accepted.attestation);
-      return accepted.attestation;
+      return { ok: true as const, attestation: accepted.attestation };
     });
   }
 }
@@ -207,9 +290,7 @@ export class RegistryLookupEntrypoint extends WorkerEntrypoint<RegistryWorkerEnv
     const classified = classifyHost(rawHost);
     if (
       host !== rawHost ||
-      (classified.kind === 'rejected' &&
-        !isSyntheticRegistryHost(rawHost) &&
-        !isRegistryRootHost(rawHost))
+      (classified.kind === 'rejected' && !isSyntheticRegistryHost(rawHost) && !isRegistryRootHost(rawHost))
     ) {
       return { kind: 'unknown-host' };
     }

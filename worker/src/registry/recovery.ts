@@ -103,8 +103,16 @@ export type AccessDecisionReadback = {
 
 type PublisherControlEvidence = {
   observedAt: string;
-  quarantinedRuntime: { subject: string; functionRevision: string; responseDigest: string };
-  replacementRuntime: { subject: string; functionRevision: string; responseDigest: string };
+  quarantinedRuntime: {
+    subject: string;
+    functionRevision: string;
+    responseDigest: string;
+  };
+  replacementRuntime: {
+    subject: string;
+    functionRevision: string;
+    responseDigest: string;
+  };
   activeEpochMappings: Array<{
     epoch: string;
     subject: string;
@@ -114,11 +122,7 @@ type PublisherControlEvidence = {
   }>;
   keyAccess: [KeyAccessReadback, KeyAccessReadback];
   serviceAccountAccess: [ServiceAccountAccessReadback, ServiceAccountAccessReadback];
-  quarantinedAccessDecisions: [
-    AccessDecisionReadback,
-    AccessDecisionReadback,
-    AccessDecisionReadback,
-  ];
+  quarantinedAccessDecisions: [AccessDecisionReadback, AccessDecisionReadback, AccessDecisionReadback];
   attestorSub: string;
   attestorKeyVersion: string;
   attestorKeyFingerprint: string;
@@ -143,7 +147,11 @@ export type RecoveryRequest = {
   sourceAudit: SourceAudit;
   action:
     | { kind: 'acquire-lock'; wafEvidence: WafEvidence }
-    | { kind: 'apply'; lockId: string; publisherReplacement: PublisherReplacement }
+    | {
+        kind: 'apply';
+        lockId: string;
+        publisherReplacement: PublisherReplacement;
+      }
     | {
         kind: 'clear-lock';
         lockId: string;
@@ -211,10 +219,7 @@ function committedRef(committed: CommittedReplica | null): CommittedRef {
 function sameCommitted(left: CommittedRef, right: CommittedRef): boolean {
   return (
     left === right ||
-    (left !== null &&
-      right !== null &&
-      left.revision === right.revision &&
-      left.digest === right.digest)
+    (left !== null && right !== null && left.revision === right.revision && left.digest === right.digest)
   );
 }
 
@@ -348,11 +353,7 @@ async function validateWafEvidence(host: string, evidence: WafEvidence, now: num
   validateProviderRequests(host, evidence.providerRequests, true, now, evidence);
 }
 
-function validateReplacement(
-  state: RegistryState,
-  replacement: NonNullable<PublisherReplacement>,
-  now: number,
-): void {
+function validateReplacement(state: RegistryState, replacement: NonNullable<PublisherReplacement>, now: number): void {
   if (
     !POSITIVE_DECIMAL.test(replacement.quarantinedEpochCeiling) ||
     !POSITIVE_DECIMAL.test(replacement.nextPublisherEpoch) ||
@@ -376,9 +377,17 @@ function validateReplacement(
   if (control.activeEpochMappings.length === 0 || control.activeEpochMappings.length > 16) {
     throw new Error('active epoch mappings are empty or oversized');
   }
-  const mapping = control.activeEpochMappings.find(
-    (candidate) => candidate.epoch === replacement.nextPublisherEpoch,
-  );
+  if (
+    control.quarantinedRuntime.subject.length === 0 ||
+    control.quarantinedRuntime.subject === replacement.replacementSubject ||
+    control.quarantinedRuntime.functionRevision.length === 0 ||
+    !SHA256_HEX.test(control.quarantinedRuntime.responseDigest) ||
+    control.replacementRuntime.functionRevision.length === 0 ||
+    !SHA256_HEX.test(control.replacementRuntime.responseDigest)
+  ) {
+    throw new Error('publisher runtime readback is malformed or not distinct');
+  }
+  const mapping = control.activeEpochMappings.find((candidate) => candidate.epoch === replacement.nextPublisherEpoch);
   if (
     mapping === undefined ||
     mapping.subject !== replacement.replacementSubject ||
@@ -391,23 +400,20 @@ function validateReplacement(
   for (const active of control.activeEpochMappings) {
     if (
       !POSITIVE_DECIMAL.test(active.epoch) ||
+      active.subject.length === 0 ||
+      active.keyVersion.length === 0 ||
       !SHA256_HEX.test(active.spkiSha256) ||
       active.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256'
     ) {
       throw new Error('active epoch mapping malformed');
     }
-    if (
-      active.subject === control.quarantinedRuntime.subject &&
-      BigInt(active.epoch) > ceiling
-    ) {
+    if (active.subject === control.quarantinedRuntime.subject && BigInt(active.epoch) > ceiling) {
       throw new Error('quarantined epoch ceiling misses an active mapping');
     }
   }
   if (
     control.quarantinedAccessDecisions.length !== 3 ||
-    control.quarantinedAccessDecisions.some(
-      (decision) => decision.overallAccessState !== 'CANNOT_ACCESS',
-    )
+    control.quarantinedAccessDecisions.some((decision) => decision.overallAccessState !== 'CANNOT_ACCESS')
   ) {
     throw new Error('all publisher quarantine decisions must be CANNOT_ACCESS');
   }
@@ -423,6 +429,48 @@ function validateReplacement(
     control.quarantinedRuntime.subject,
     `serviceAccount:${control.quarantinedRuntime.subject}`,
   ]);
+  const keyResource = (keyVersion: string) => keyVersion.replace(/\/cryptoKeyVersions\/[1-9]\d*$/, '');
+  const replacementKeyResource = keyResource(replacement.replacementKeyVersion);
+  if (replacementKeyResource === replacement.replacementKeyVersion) {
+    throw new Error('replacement key version resource is malformed');
+  }
+  const quarantinedKeyResources = new Set(
+    control.activeEpochMappings
+      .filter((active) => active.subject === control.quarantinedRuntime.subject)
+      .map((active) => keyResource(active.keyVersion)),
+  );
+  if (quarantinedKeyResources.size !== 1) {
+    throw new Error('quarantined key readback is missing or ambiguous');
+  }
+  const expectedKeyResources = new Set([replacementKeyResource, ...quarantinedKeyResources]);
+  if (
+    expectedKeyResources.size !== 2 ||
+    new Set(control.keyAccess.map((readback) => readback.cryptoKey)).size !== 2 ||
+    control.keyAccess.some((readback) => !expectedKeyResources.has(readback.cryptoKey))
+  ) {
+    throw new Error('publisher key readbacks do not match the quarantined and replacement resources');
+  }
+  const quarantinedMappings = control.activeEpochMappings.filter(
+    (active) => active.subject === control.quarantinedRuntime.subject,
+  );
+  if (
+    quarantinedMappings.some((active) => {
+      const readback = control.keyAccess.find((candidate) => candidate.cryptoKey === keyResource(active.keyVersion));
+      return !readback?.enabledVersions.some(
+        (version) => version.keyVersion === active.keyVersion && version.spkiSha256 === active.spkiSha256,
+      );
+    })
+  ) {
+    throw new Error('quarantined key version readback does not match its active mapping');
+  }
+  const serviceAccountSubjects = new Set(control.serviceAccountAccess.map((readback) => readback.subject));
+  if (
+    serviceAccountSubjects.size !== 2 ||
+    !serviceAccountSubjects.has(control.quarantinedRuntime.subject) ||
+    !serviceAccountSubjects.has(replacement.replacementSubject)
+  ) {
+    throw new Error('publisher service-account readbacks do not match both runtimes');
+  }
   let replacementSigningGrant = false;
   for (const readback of control.keyAccess) {
     if (
@@ -431,14 +479,20 @@ function validateReplacement(
       readback.signMembers.some((member) => broadMember(member) || oldPrincipals.has(member)) ||
       !SHA256_HEX.test(readback.responseDigest) ||
       readback.enabledVersions.some(
-        (version) =>
-          version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256' ||
-          !SHA256_HEX.test(version.spkiSha256),
+        (version) => version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256' || !SHA256_HEX.test(version.spkiSha256),
       )
     ) {
       throw new Error('replacement key policy does not quarantine the old publisher');
     }
-    if (readback.signMembers.includes(`serviceAccount:${replacement.replacementSubject}`)) {
+    if (
+      readback.cryptoKey === replacementKeyResource &&
+      readback.enabledVersions.some(
+        (version) =>
+          version.keyVersion === replacement.replacementKeyVersion &&
+          version.spkiSha256 === replacement.replacementKeyFingerprint,
+      ) &&
+      readback.signMembers.includes(`serviceAccount:${replacement.replacementSubject}`)
+    ) {
       replacementSigningGrant = true;
     }
   }
@@ -461,6 +515,10 @@ function validateReplacement(
     control.quarantinedAccessDecisions.some(
       (decision) =>
         decision.principal !== control.quarantinedRuntime.subject ||
+        decision.fullResourceName !==
+          (decision.permission === 'cloudkms.cryptoKeyVersions.useToSign'
+            ? replacement.replacementKeyVersion
+            : replacement.replacementSubject) ||
         !SHA256_HEX.test(decision.responseDigest) ||
         !Number.isFinite(Date.parse(decision.requestTime)),
     )
@@ -531,10 +589,7 @@ export async function applyRecovery(
       const sourceRevision = BigInt(ledgerPayload.revision);
       const currentRevision = state.committed === null ? 0n : BigInt(state.committed.revision);
       if (sourceRevision < currentRevision) throw new Error('source-behind');
-      if (
-        state.committed?.payload.desired.kind === 'tombstone' &&
-        ledgerPayload.desired.kind !== 'tombstone'
-      ) {
+      if (state.committed?.payload.desired.kind === 'tombstone' && ledgerPayload.desired.kind !== 'tombstone') {
         throw new Error('tombstone-final');
       }
       const digest = await projectionDigest(ledgerPayload);
@@ -572,10 +627,19 @@ export async function applyRecovery(
       nextState = {
         ...epochState,
         recoverySequence: sequence,
-        committed: { revision: ledgerPayload.revision, digest, payload: ledgerPayload },
+        committed: {
+          revision: ledgerPayload.revision,
+          digest,
+          payload: ledgerPayload,
+        },
       };
     } else if (request.action.kind === 'clear-lock') {
-      if (!sameCommitted(before, { revision: ledgerPayload.revision, digest: request.sourceAudit.digest })) {
+      if (
+        !sameCommitted(before, {
+          revision: ledgerPayload.revision,
+          digest: request.sourceAudit.digest,
+        })
+      ) {
         throw new Error('fresh source must equal committed state before clear');
       }
       if (new Set(request.action.probeAttestationIds).size !== 3) {
@@ -591,7 +655,12 @@ export async function applyRecovery(
       await context.consumeAttestations?.(request.action.probeAttestationIds, 'canonical');
       nextState = { ...state, recoverySequence: sequence, recoveryLock: null };
     } else {
-      if (!sameCommitted(before, { revision: ledgerPayload.revision, digest: request.sourceAudit.digest })) {
+      if (
+        !sameCommitted(before, {
+          revision: ledgerPayload.revision,
+          digest: request.sourceAudit.digest,
+        })
+      ) {
         throw new Error('fresh source must equal committed state before abort');
       }
       await validateWafEvidence(request.host, request.action.wafEvidence, context.now);

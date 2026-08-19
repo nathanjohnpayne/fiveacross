@@ -1,14 +1,7 @@
 import { normalizeHost } from '../host';
 import { REGISTRY_LOCATION_HINT, parseSyncRequest } from './contracts';
-import {
-  ControlAuthUnavailableError,
-  authenticatePinnedRole,
-  type PinnedRoleRequest,
-} from './controlAuth';
-import {
-  verificationRecordMappingDigest,
-  type VerificationRecord,
-} from './keys';
+import { ControlAuthUnavailableError, authenticatePinnedRole, type PinnedRoleRequest } from './controlAuth';
+import { verificationRecordMappingDigest, type VerificationRecord } from './keys';
 import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
 import type { RecoveryRequest, SourceAudit } from './recovery';
@@ -34,7 +27,10 @@ export type ControlServiceDeps = {
 };
 
 function json(status: number, body: Record<string, unknown>): Response {
-  return Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
+  return Response.json(body, {
+    status,
+    headers: { 'cache-control': 'no-store' },
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,15 +64,21 @@ function canonicalJson(value: unknown): string {
 
 async function readExactJson(request: Request, maximum: number): Promise<{ body: string; value: unknown }> {
   if (request.headers.get('content-type') !== 'application/json') {
-    throw new Response(JSON.stringify({ error: 'unsupported-media-type' }), { status: 415 });
+    throw new Response(JSON.stringify({ error: 'unsupported-media-type' }), {
+      status: 415,
+    });
   }
   const declared = request.headers.get('content-length');
   if (declared !== null && /^\d+$/.test(declared) && BigInt(declared) > BigInt(maximum)) {
-    throw new Response(JSON.stringify({ error: 'request-too-large' }), { status: 413 });
+    throw new Response(JSON.stringify({ error: 'request-too-large' }), {
+      status: 413,
+    });
   }
   const bytes = await request.arrayBuffer();
   if (bytes.byteLength > maximum) {
-    throw new Response(JSON.stringify({ error: 'request-too-large' }), { status: 413 });
+    throw new Response(JSON.stringify({ error: 'request-too-large' }), {
+      status: 413,
+    });
   }
   let body: string;
   let value: unknown;
@@ -84,7 +86,9 @@ async function readExactJson(request: Request, maximum: number): Promise<{ body:
     body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
     value = JSON.parse(body);
   } catch {
-    throw new Response(JSON.stringify({ error: 'invalid-request' }), { status: 400 });
+    throw new Response(JSON.stringify({ error: 'invalid-request' }), {
+      status: 400,
+    });
   }
   return { body, value };
 }
@@ -135,7 +139,11 @@ async function authenticateRequest(
       exactBytes,
       audience: roleAudience(config, role),
     },
-    { now: deps.now(), jwks: deps.jwks, verificationRecords: config.verificationRecords },
+    {
+      now: deps.now(),
+      jwks: deps.jwks,
+      verificationRecords: config.verificationRecords,
+    },
   );
 }
 
@@ -163,13 +171,14 @@ async function authenticateAudit(
   }
 }
 
-function findSourceRecord(
+export function findSourceRecord(
   audit: SourceAudit,
   records: readonly VerificationRecord[],
 ): VerificationRecord | undefined {
   return records.find(
     (record) =>
       record.role === 'source-attestor' &&
+      record.subject === audit.attestorSub &&
       record.keyVersion === audit.attestorKeyVersion &&
       record.spkiSha256 === audit.attestorKeyFingerprint,
   );
@@ -220,7 +229,11 @@ async function authenticateSourceAttestation(
       exactBytes: sourceBytes,
       audience: roleAudience(config, 'source-attestor'),
     },
-    { now: deps.now(), jwks: deps.jwks, verificationRecords: config.verificationRecords },
+    {
+      now: deps.now(),
+      jwks: deps.jwks,
+      verificationRecords: config.verificationRecords,
+    },
   );
 
   if (recovery.action.kind === 'apply' && recovery.action.publisherReplacement !== null) {
@@ -252,7 +265,11 @@ async function authenticateSourceAttestation(
         ),
         audience: roleAudience(config, 'source-attestor'),
       },
-      { now: deps.now(), jwks: deps.jwks, verificationRecords: config.verificationRecords },
+      {
+        now: deps.now(),
+        jwks: deps.jwks,
+        verificationRecords: config.verificationRecords,
+      },
     );
   }
 }
@@ -314,7 +331,10 @@ function parseRecovery(value: unknown): RecoveryRequest {
 
 async function enforceRateLimit(request: Request, role: string, deps: ControlServiceDeps): Promise<Response | null> {
   try {
-    const key = `${role}:${await sha256Hex(request.headers.get('authorization') ?? '')}`;
+    const clientIp = request.headers.get('cf-connecting-ip');
+    const rateIdentity =
+      clientIp !== null && /^[0-9A-Fa-f:.]{2,45}$/.test(clientIp) ? clientIp.toLowerCase() : 'unidentified-client';
+    const key = `${role}:${rateIdentity}`;
     if (!(await deps.rateLimiter.limit({ key })).success) return json(429, { error: 'rate-limited' });
     return null;
   } catch {
@@ -349,9 +369,7 @@ async function auditResponse(
   if (limited !== null) return limited;
   await authenticateAudit(request, config, deps);
   try {
-    const result = await deps.hostRegistry
-      .getByName(host, { locationHint: REGISTRY_LOCATION_HINT })
-      .audit(after);
+    const result = await deps.hostRegistry.getByName(host, { locationHint: REGISTRY_LOCATION_HINT }).audit(after);
     if (!result.ok) return json(400, { error: 'invalid-audit-cursor' });
     return json(200, result.page as unknown as Record<string, unknown>);
   } catch {
@@ -370,7 +388,13 @@ async function recoveryResponse(
     parsed = await readExactJson(request, RECOVERY_MAX_BYTES);
   } catch (response) {
     return response instanceof Response
-      ? new Response(response.body, { status: response.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+      ? new Response(response.body, {
+          status: response.status,
+          headers: {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+          },
+        })
       : json(400, { error: 'invalid-request' });
   }
   const limited = await enforceRateLimit(request, 'recovery', deps);
@@ -390,15 +414,13 @@ async function recoveryResponse(
         now: deps.now(),
         operatorSub: recoveryRecord.subject,
         lockId: deps.randomId(),
-        publisherIntegrityProven:
-          recovery.action.kind === 'apply' && recovery.action.publisherReplacement === null,
-        activeRegistryConfigDigest: await verificationRecordMappingDigest(
-          config.verificationRecords,
-        ),
+        publisherIntegrityProven: recovery.action.kind === 'apply' && recovery.action.publisherReplacement === null,
+        activeRegistryConfigDigest: await verificationRecordMappingDigest(config.verificationRecords),
       });
-    return json(200, result as unknown as Record<string, unknown>);
+    if (!result.ok) return json(409, { error: 'recovery-refused' });
+    return json(200, { sequence: result.sequence, action: result.action });
   } catch {
-    return json(409, { error: 'recovery-refused' });
+    return json(503, { error: 'recovery-unavailable' });
   }
 }
 
@@ -414,12 +436,22 @@ async function probeResponse(
     parsed = await readExactJson(request, RECOVERY_MAX_BYTES);
   } catch (response) {
     return response instanceof Response
-      ? new Response(response.body, { status: response.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } })
+      ? new Response(response.body, {
+          status: response.status,
+          headers: {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+          },
+        })
       : json(400, { error: 'invalid-request' });
   }
   const limited = await enforceRateLimit(request, `probe-${kind}`, deps);
   if (limited !== null) return limited;
   if (!isRecord(parsed.value) || parsed.value.schemaVersion !== 1 || typeof parsed.value.host !== 'string') {
+    return json(400, { error: 'invalid-request' });
+  }
+  const host = parsed.value.host;
+  if (host !== normalizeHost(host) || host.endsWith('.')) {
     return json(400, { error: 'invalid-request' });
   }
   const record = await authenticateRequest(request, 'regional-probe', parsed.body, config, deps);
@@ -429,9 +461,10 @@ async function probeResponse(
     keyFingerprint: record.spkiSha256,
     region: record.epochOrSlot,
   };
-  const host = parsed.value.host;
   try {
-    const stub = deps.hostRegistry.getByName(host, { locationHint: REGISTRY_LOCATION_HINT });
+    const stub = deps.hostRegistry.getByName(host, {
+      locationHint: REGISTRY_LOCATION_HINT,
+    });
     if (kind === 'challenge') {
       if (
         !hasExactKeys(parsed.value, ['schemaVersion', 'host', 'phase', 'expectedStateDigest']) ||
@@ -441,7 +474,7 @@ async function probeResponse(
       ) {
         return json(400, { error: 'invalid-request' });
       }
-      const challenge = await stub.issueProbeChallenge(
+      const result = await stub.issueProbeChallenge(
         {
           host,
           phase: parsed.value.phase as ProbePhase,
@@ -451,20 +484,22 @@ async function probeResponse(
         deps.now(),
         deps.randomId(),
       );
-      return json(200, challenge as unknown as Record<string, unknown>);
+      if (!result.ok) return json(409, { error: 'probe-refused' });
+      return json(200, result.challenge as unknown as Record<string, unknown>);
     }
     if (!hasExactKeys(parsed.value, ['schemaVersion', 'host', 'observation']) || !isRecord(parsed.value.observation)) {
       return json(400, { error: 'invalid-request' });
     }
-    const attestation = await stub.attestProbe(
+    const result = await stub.attestProbe(
       parsed.value.observation as ProbeObservation,
       principal,
       deps.now(),
       deps.randomId(),
     );
-    return json(200, { attestationId: attestation.id });
+    if (!result.ok) return json(409, { error: 'probe-refused' });
+    return json(200, { attestationId: result.attestation.id });
   } catch {
-    return json(409, { error: 'probe-refused' });
+    return json(503, { error: 'probe-unavailable' });
   }
 }
 

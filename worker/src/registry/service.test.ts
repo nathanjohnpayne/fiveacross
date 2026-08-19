@@ -9,8 +9,7 @@ import type { VerificationRecord } from './keys';
 const NOW = Date.parse('2026-08-19T13:00:00.000Z');
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const AUDIENCE = `https://fiveacross-registry.example.workers.dev${SYNC_PATH}`;
-const KEY_VERSION =
-  'projects/fiveacross/locations/us/keyRings/event-router/cryptoKeys/publisher/cryptoKeyVersions/1';
+const KEY_VERSION = 'projects/fiveacross/locations/us/keyRings/event-router/cryptoKeys/publisher/cryptoKeyVersions/1';
 
 const PAYLOAD: RouterReplicaDesired = {
   schemaVersion: 1,
@@ -32,22 +31,40 @@ function base64url(value: string | ArrayBuffer): string {
 }
 
 function pem(spki: ArrayBuffer): string {
-  const body = Buffer.from(spki).toString('base64').match(/.{1,64}/g)?.join('\n');
+  const body = Buffer.from(spki)
+    .toString('base64')
+    .match(/.{1,64}/g)
+    ?.join('\n');
   return `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----\n`;
 }
 
 async function fixture() {
   const oidc = (await crypto.subtle.generateKey(
-    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
     true,
     ['sign', 'verify'],
   )) as CryptoKeyPair;
   const publisher = (await crypto.subtle.generateKey(
-    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
     true,
     ['sign', 'verify'],
   )) as CryptoKeyPair;
-  const oidcJwk = { ...(await crypto.subtle.exportKey('jwk', oidc.publicKey)), kid: 'kid-1', alg: 'RS256', use: 'sig' };
+  const oidcJwk = {
+    ...(await crypto.subtle.exportKey('jwk', oidc.publicKey)),
+    kid: 'kid-1',
+    alg: 'RS256',
+    use: 'sig',
+  };
   const publisherSpki = (await crypto.subtle.exportKey('spki', publisher.publicKey)) as ArrayBuffer;
   const publisherPem = pem(publisherSpki);
   const record: VerificationRecord = {
@@ -65,7 +82,13 @@ async function fixture() {
   });
   const header = base64url(JSON.stringify({ alg: 'RS256', kid: 'kid-1', typ: 'JWT' }));
   const claims = base64url(
-    JSON.stringify({ iss: 'https://accounts.google.com', aud: AUDIENCE, sub: '1001', iat: NOW / 1_000 - 10, exp: NOW / 1_000 + 300 }),
+    JSON.stringify({
+      iss: 'https://accounts.google.com',
+      aud: AUDIENCE,
+      sub: '1001',
+      iat: NOW / 1_000 - 10,
+      exp: NOW / 1_000 + 300,
+    }),
   );
   const jwtInput = `${header}.${claims}`;
   const jwtSignature = await crypto.subtle.sign(
@@ -73,12 +96,25 @@ async function fixture() {
     oidc.privateKey,
     new TextEncoder().encode(jwtInput),
   );
-  return { publisher, record, cache, token: `${jwtInput}.${base64url(jwtSignature)}` };
+  return {
+    publisher,
+    record,
+    cache,
+    token: `${jwtInput}.${base64url(jwtSignature)}`,
+  };
 }
 
 async function signedRequest(
   data: Awaited<ReturnType<typeof fixture>>,
-  overrides: { body?: string; epoch?: string; keyVersion?: string; issuedAt?: number; signature?: string; token?: string } = {},
+  overrides: {
+    body?: string;
+    epoch?: string;
+    keyVersion?: string;
+    issuedAt?: number;
+    signature?: string;
+    token?: string;
+    clientIp?: string;
+  } = {},
 ) {
   const body = overrides.body ?? JSON.stringify(PAYLOAD);
   const epoch = overrides.epoch ?? '1';
@@ -103,13 +139,17 @@ async function signedRequest(
       'x-registry-publisher-epoch': epoch,
       'x-registry-issued-at': String(issuedAt),
       'x-registry-body-signature': signature,
+      'cf-connecting-ip': overrides.clientIp ?? '2001:db8::1',
     },
     body,
   });
 }
 
 function harness(data: Awaited<ReturnType<typeof fixture>>) {
-  const sync = vi.fn(async () => ({ status: 200 as const, result: 'applied' as const }));
+  const sync = vi.fn(async () => ({
+    status: 200 as const,
+    result: 'applied' as const,
+  }));
   const getByName = vi.fn(() => ({
     sync,
     audit: vi.fn(),
@@ -118,7 +158,10 @@ function harness(data: Awaited<ReturnType<typeof fixture>>) {
     attestProbe: vi.fn(),
   }));
   const limit = vi.fn(async () => ({ success: true }));
-  const config: RegistryServiceConfig = { audience: AUDIENCE, verificationRecords: [data.record] };
+  const config: RegistryServiceConfig = {
+    audience: AUDIENCE,
+    verificationRecords: [data.record],
+  };
   const deps: RegistryServiceDeps = {
     now: () => NOW,
     jwks: data.cache,
@@ -135,7 +178,9 @@ describe('registry default fetch sync endpoint', () => {
     const response = await handleRegistryFetch(await signedRequest(data), test.config, test.deps);
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ result: 'applied' });
-    expect(test.getByName).toHaveBeenCalledExactlyOnceWith(HOST, { locationHint: 'wnam' });
+    expect(test.getByName).toHaveBeenCalledExactlyOnceWith(HOST, {
+      locationHint: 'wnam',
+    });
     expect(test.sync).toHaveBeenCalledExactlyOnceWith(PAYLOAD, '1');
   });
 
@@ -147,11 +192,7 @@ describe('registry default fetch sync endpoint', () => {
   ])('returns generic 401 and performs no DO work for %s', async (_label, overrides) => {
     const data = await fixture();
     const test = harness(data);
-    const response = await handleRegistryFetch(
-      await signedRequest(data, overrides),
-      test.config,
-      test.deps,
-    );
+    const response = await handleRegistryFetch(await signedRequest(data, overrides), test.config, test.deps);
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: 'unauthorized' });
     expect(test.getByName).not.toHaveBeenCalled();
@@ -166,14 +207,38 @@ describe('registry default fetch sync endpoint', () => {
     });
     const response = await handleRegistryFetch(await signedRequest(data), test.config, test.deps);
     expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({ error: 'identity-verification-unavailable' });
+    await expect(response.json()).resolves.toEqual({
+      error: 'identity-verification-unavailable',
+    });
   });
 
   it.each([
     ['wrong method', new Request(AUDIENCE, { method: 'GET' }), 405],
-    ['wrong path', new Request('https://fiveacross-registry.example.workers.dev/not-sync', { method: 'POST' }), 404],
-    ['wrong content type', new Request(AUDIENCE, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }), 415],
-    ['oversized body', new Request(AUDIENCE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'x'.repeat(2_049) }), 413],
+    [
+      'wrong path',
+      new Request('https://fiveacross-registry.example.workers.dev/not-sync', {
+        method: 'POST',
+      }),
+      404,
+    ],
+    [
+      'wrong content type',
+      new Request(AUDIENCE, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: '{}',
+      }),
+      415,
+    ],
+    [
+      'oversized body',
+      new Request(AUDIENCE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: 'x'.repeat(2_049),
+      }),
+      413,
+    ],
   ])('rejects %s before token or storage work', async (_label, request, status) => {
     const data = await fixture();
     const test = harness(data);
@@ -189,6 +254,23 @@ describe('registry default fetch sync endpoint', () => {
     const response = await handleRegistryFetch(await signedRequest(data), test.config, test.deps);
     expect(response.status).toBe(429);
     expect(test.getByName).not.toHaveBeenCalled();
+  });
+
+  it('uses the Cloudflare client IP rather than attacker-rotatable credentials as the rate key', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const first = await signedRequest(data, {
+      token: 'garbage.one.token',
+      clientIp: '203.0.113.9',
+    });
+    const second = await signedRequest(data, {
+      token: 'different.bad.token',
+      clientIp: '203.0.113.9',
+    });
+    await handleRegistryFetch(first, test.config, test.deps);
+    await handleRegistryFetch(second, test.config, test.deps);
+    expect(test.limit).toHaveBeenNthCalledWith(1, { key: 'sync:203.0.113.9' });
+    expect(test.limit).toHaveBeenNthCalledWith(2, { key: 'sync:203.0.113.9' });
   });
 
   it('returns a closed 400 for invalid UTF-8 before identity or DO work', async () => {

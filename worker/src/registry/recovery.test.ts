@@ -114,9 +114,7 @@ async function request(
   return {
     schemaVersion: 1,
     host: HOST,
-    expectedCommitted: state.committed
-      ? { revision: state.committed.revision, digest: state.committed.digest }
-      : null,
+    expectedCommitted: state.committed ? { revision: state.committed.revision, digest: state.committed.digest } : null,
     sourceAudit: await source,
     action,
     incidentUrl: 'https://example.com/incidents/registry-1',
@@ -136,24 +134,39 @@ describe('source-attested recovery', () => {
     await expect(
       validateSourceAudit(
         HOST,
-        { ...valid, canonicalProjection: { ...valid.canonicalProjection, desired: payload('1', 'poisoned').desired } },
+        {
+          ...valid,
+          canonicalProjection: {
+            ...valid.canonicalProjection,
+            desired: payload('1', 'poisoned').desired,
+          },
+        },
         NOW,
       ),
     ).rejects.toThrow('source and ledger differ');
-    await expect(
-      validateSourceAudit(HOST, { ...valid, observedAt: '2026-08-19T12:20:00.000Z' }, NOW),
-    ).rejects.toThrow('source audit is stale');
+    await expect(validateSourceAudit(HOST, { ...valid, observedAt: '2026-08-19T12:20:00.000Z' }, NOW)).rejects.toThrow(
+      'source audit is stale',
+    );
   });
 
   it('acquires an exact-host durable lock only with three distinct blocked provider records', async () => {
     const state = await committedState();
     const result = await applyRecovery(
       state,
-      await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+      await request(state, {
+        kind: 'acquire-lock',
+        wafEvidence: await wafEvidence(),
+      }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
     );
-    expect(result.state.recoveryLock).toMatchObject({ lockId: 'lock-1', operatorSub: 'recovery-operator' });
-    expect(result.record).toMatchObject({ sequence: '1', action: 'acquire-lock' });
+    expect(result.state.recoveryLock).toMatchObject({
+      lockId: 'lock-1',
+      operatorSub: 'recovery-operator',
+    });
+    expect(result.record).toMatchObject({
+      sequence: '1',
+      action: 'acquire-lock',
+    });
 
     const evidence = await wafEvidence();
     evidence.providerRequests[2].edgeColoCode = evidence.providerRequests[0].edgeColoCode;
@@ -170,7 +183,10 @@ describe('source-attested recovery', () => {
     const state = await committedState();
     const acquired = await applyRecovery(
       state,
-      await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+      await request(state, {
+        kind: 'acquire-lock',
+        wafEvidence: await wafEvidence(),
+      }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
     );
     const repairedAudit = sourceAudit('1', 'canonical-repair');
@@ -185,7 +201,12 @@ describe('source-attested recovery', () => {
     const jump = await applyRecovery(
       acquired.state,
       await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: null }, sourceAudit('4')),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused', publisherIntegrityProven: true },
+      {
+        now: NOW,
+        operatorSub: 'recovery-operator',
+        lockId: 'unused',
+        publisherIntegrityProven: true,
+      },
     );
     expect(jump.state.committed?.revision).toBe('4');
     expect(jump.record.skippedRevisionRange).toEqual({ from: '2', to: '3' });
@@ -195,16 +216,27 @@ describe('source-attested recovery', () => {
       applyRecovery(
         jump.state,
         await request(jump.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: null }, sourceAudit('3')),
-        { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused', publisherIntegrityProven: true },
+        {
+          now: NOW,
+          operatorSub: 'recovery-operator',
+          lockId: 'unused',
+          publisherIntegrityProven: true,
+        },
       ),
     ).rejects.toThrow('source-behind');
   });
 
   it('fences every quarantined epoch before activating a direct-only replacement', async () => {
-    const base = { ...(await committedState()), highestAuthenticatedPublisherEpoch: '7' };
+    const base = {
+      ...(await committedState()),
+      highestAuthenticatedPublisherEpoch: '7',
+    };
     const acquired = await applyRecovery(
       base,
-      await request(base, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+      await request(base, {
+        kind: 'acquire-lock',
+        wafEvidence: await wafEvidence(),
+      }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
     );
     const replacement: NonNullable<PublisherReplacement> = {
@@ -216,33 +248,99 @@ describe('source-attested recovery', () => {
       registryConfigDigest: 'f'.repeat(64),
       controlEvidence: {
         observedAt: '2026-08-19T12:34:50.000Z',
-        quarantinedRuntime: { subject: 'old-subject', functionRevision: 'old-1', responseDigest: '1'.repeat(64) },
-        replacementRuntime: { subject: 'replacement-subject', functionRevision: 'new-1', responseDigest: '2'.repeat(64) },
-        activeEpochMappings: [{ epoch: '8', subject: 'replacement-subject', keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1', algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const, spkiSha256: 'e'.repeat(64) }],
+        quarantinedRuntime: {
+          subject: 'old-subject',
+          functionRevision: 'old-1',
+          responseDigest: '1'.repeat(64),
+        },
+        replacementRuntime: {
+          subject: 'replacement-subject',
+          functionRevision: 'new-1',
+          responseDigest: '2'.repeat(64),
+        },
+        activeEpochMappings: [
+          {
+            epoch: '7',
+            subject: 'old-subject',
+            keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/old/cryptoKeyVersions/1',
+            algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const,
+            spkiSha256: '9'.repeat(64),
+          },
+          {
+            epoch: '8',
+            subject: 'replacement-subject',
+            keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
+            algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const,
+            spkiSha256: 'e'.repeat(64),
+          },
+        ],
         keyAccess: [
           {
-            cryptoKey: 'old-key',
+            cryptoKey: 'projects/p/locations/l/keyRings/r/cryptoKeys/old',
             policyEtag: 'old-etag',
             signMembers: [],
-            enabledVersions: [{ keyVersion: 'old-key/1', algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const, spkiSha256: '9'.repeat(64) }],
+            enabledVersions: [
+              {
+                keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/old/cryptoKeyVersions/1',
+                algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const,
+                spkiSha256: '9'.repeat(64),
+              },
+            ],
             responseDigest: '3'.repeat(64),
           },
           {
-            cryptoKey: 'replacement-key',
+            cryptoKey: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement',
             policyEtag: 'new-etag',
             signMembers: ['serviceAccount:replacement-subject'],
-            enabledVersions: [{ keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1', algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const, spkiSha256: 'e'.repeat(64) }],
+            enabledVersions: [
+              {
+                keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
+                algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const,
+                spkiSha256: 'e'.repeat(64),
+              },
+            ],
             responseDigest: '4'.repeat(64),
           },
         ],
         serviceAccountAccess: [
-          { subject: 'old-subject', policyEtag: 'old-sa-etag', tokenCreatorMembers: [], responseDigest: '5'.repeat(64) },
-          { subject: 'replacement-subject', policyEtag: 'new-sa-etag', tokenCreatorMembers: [], responseDigest: '6'.repeat(64) },
+          {
+            subject: 'old-subject',
+            policyEtag: 'old-sa-etag',
+            tokenCreatorMembers: [],
+            responseDigest: '5'.repeat(64),
+          },
+          {
+            subject: 'replacement-subject',
+            policyEtag: 'new-sa-etag',
+            tokenCreatorMembers: [],
+            responseDigest: '6'.repeat(64),
+          },
         ],
         quarantinedAccessDecisions: [
-          { principal: 'old-subject', fullResourceName: 'replacement-key/1', permission: 'cloudkms.cryptoKeyVersions.useToSign' as const, requestTime: '2026-08-19T12:34:50.000Z', overallAccessState: 'CANNOT_ACCESS' as const, responseDigest: '7'.repeat(64) },
-          { principal: 'old-subject', fullResourceName: 'replacement-subject', permission: 'iam.serviceAccounts.getOpenIdToken' as const, requestTime: '2026-08-19T12:34:50.000Z', overallAccessState: 'CANNOT_ACCESS' as const, responseDigest: '8'.repeat(64) },
-          { principal: 'old-subject', fullResourceName: 'replacement-subject', permission: 'iam.serviceAccounts.getAccessToken' as const, requestTime: '2026-08-19T12:34:50.000Z', overallAccessState: 'CANNOT_ACCESS' as const, responseDigest: '9'.repeat(64) },
+          {
+            principal: 'old-subject',
+            fullResourceName: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
+            permission: 'cloudkms.cryptoKeyVersions.useToSign' as const,
+            requestTime: '2026-08-19T12:34:50.000Z',
+            overallAccessState: 'CANNOT_ACCESS' as const,
+            responseDigest: '7'.repeat(64),
+          },
+          {
+            principal: 'old-subject',
+            fullResourceName: 'replacement-subject',
+            permission: 'iam.serviceAccounts.getOpenIdToken' as const,
+            requestTime: '2026-08-19T12:34:50.000Z',
+            overallAccessState: 'CANNOT_ACCESS' as const,
+            responseDigest: '8'.repeat(64),
+          },
+          {
+            principal: 'old-subject',
+            fullResourceName: 'replacement-subject',
+            permission: 'iam.serviceAccounts.getAccessToken' as const,
+            requestTime: '2026-08-19T12:34:50.000Z',
+            overallAccessState: 'CANNOT_ACCESS' as const,
+            responseDigest: '9'.repeat(64),
+          },
         ],
         attestorSub: 'source-attestor-sub',
         attestorKeyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1',
@@ -253,8 +351,17 @@ describe('source-attested recovery', () => {
     };
     const applied = await applyRecovery(
       acquired.state,
-      await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: replacement }, sourceAudit('2')),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused', activeRegistryConfigDigest: 'f'.repeat(64) },
+      await request(
+        acquired.state,
+        { kind: 'apply', lockId: 'lock-1', publisherReplacement: replacement },
+        sourceAudit('2'),
+      ),
+      {
+        now: NOW,
+        operatorSub: 'recovery-operator',
+        lockId: 'unused',
+        activeRegistryConfigDigest: 'f'.repeat(64),
+      },
     );
     expect(applied.state.minimumPublisherEpoch).toBe('8');
     expect(applied.state.highestQuarantinedPublisherEpoch).toBe('7');
@@ -264,17 +371,101 @@ describe('source-attested recovery', () => {
     await expect(
       applyRecovery(
         acquired.state,
-        await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: invalid }, sourceAudit('2')),
-        { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused', activeRegistryConfigDigest: 'f'.repeat(64) },
+        await request(
+          acquired.state,
+          { kind: 'apply', lockId: 'lock-1', publisherReplacement: invalid },
+          sourceAudit('2'),
+        ),
+        {
+          now: NOW,
+          operatorSub: 'recovery-operator',
+          lockId: 'unused',
+          activeRegistryConfigDigest: 'f'.repeat(64),
+        },
       ),
     ).rejects.toThrow('CANNOT_ACCESS');
+
+    const unrelatedResources = structuredClone(replacement);
+    unrelatedResources.controlEvidence.keyAccess[1] = structuredClone(unrelatedResources.controlEvidence.keyAccess[0]);
+    unrelatedResources.controlEvidence.quarantinedAccessDecisions[0].fullResourceName =
+      'projects/p/locations/l/keyRings/r/cryptoKeys/unrelated/cryptoKeyVersions/1';
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(
+          acquired.state,
+          {
+            kind: 'apply',
+            lockId: 'lock-1',
+            publisherReplacement: unrelatedResources,
+          },
+          sourceAudit('2'),
+        ),
+        {
+          now: NOW,
+          operatorSub: 'recovery-operator',
+          lockId: 'unused',
+          activeRegistryConfigDigest: 'f'.repeat(64),
+        },
+      ),
+    ).rejects.toThrow(/resource|readback/);
+
+    const irrelevantDecision = structuredClone(replacement);
+    irrelevantDecision.controlEvidence.quarantinedAccessDecisions[0].fullResourceName =
+      'projects/p/locations/l/keyRings/r/cryptoKeys/unrelated/cryptoKeyVersions/1';
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(
+          acquired.state,
+          {
+            kind: 'apply',
+            lockId: 'lock-1',
+            publisherReplacement: irrelevantDecision,
+          },
+          sourceAudit('2'),
+        ),
+        {
+          now: NOW,
+          operatorSub: 'recovery-operator',
+          lockId: 'unused',
+          activeRegistryConfigDigest: 'f'.repeat(64),
+        },
+      ),
+    ).rejects.toThrow('quarantine decisions');
+
+    const wrongQuarantinedVersion = structuredClone(replacement);
+    wrongQuarantinedVersion.controlEvidence.keyAccess[0].enabledVersions[0].spkiSha256 = '8'.repeat(64);
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(
+          acquired.state,
+          {
+            kind: 'apply',
+            lockId: 'lock-1',
+            publisherReplacement: wrongQuarantinedVersion,
+          },
+          sourceAudit('2'),
+        ),
+        {
+          now: NOW,
+          operatorSub: 'recovery-operator',
+          lockId: 'unused',
+          activeRegistryConfigDigest: 'f'.repeat(64),
+        },
+      ),
+    ).rejects.toThrow('quarantined key version readback');
   });
 
   it('clears only after fresh source equals committed and three canonical records match', async () => {
     const state = await committedState();
     const acquired = await applyRecovery(
       state,
-      await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+      await request(state, {
+        kind: 'acquire-lock',
+        wafEvidence: await wafEvidence(),
+      }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
     );
     const clear = await applyRecovery(
@@ -296,12 +487,19 @@ describe('source-attested recovery', () => {
     const state = await committedState();
     const acquired = await applyRecovery(
       state,
-      await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+      await request(state, {
+        kind: 'acquire-lock',
+        wafEvidence: await wafEvidence(),
+      }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
     );
     const aborted = await applyRecovery(
       acquired.state,
-      await request(acquired.state, { kind: 'abort-lock', lockId: 'lock-1', wafEvidence: await wafEvidence() }),
+      await request(acquired.state, {
+        kind: 'abort-lock',
+        lockId: 'lock-1',
+        wafEvidence: await wafEvidence(),
+      }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused' },
     );
     expect(aborted.state.committed).toEqual(state.committed);

@@ -42,7 +42,10 @@ describe('per-host contiguous publisher state', () => {
   it('accepts revision 1 into an uninitialized object', async () => {
     const result = await applyPublisherSync(initialRegistryState(), desired('1'), '1');
     expect(result.response).toEqual({ status: 200, result: 'applied' });
-    expect(result.state.committed).toMatchObject({ revision: '1', payload: desired('1') });
+    expect(result.state.committed).toMatchObject({
+      revision: '1',
+      payload: desired('1'),
+    });
     expect(result.state.highestAuthenticatedPublisherEpoch).toBe('1');
   });
 
@@ -58,7 +61,10 @@ describe('per-host contiguous publisher state', () => {
     expect(stale.response).toEqual({ status: 200, result: 'ignored-stale' });
 
     const conflict = await applyPublisherSync(stale.state, desired('2', 'poisoned'), '4');
-    expect(conflict.response).toEqual({ status: 409, result: 'revision-conflict' });
+    expect(conflict.response).toEqual({
+      status: 409,
+      result: 'revision-conflict',
+    });
     expect(conflict.state.committed).toEqual(successor.state.committed);
     expect(conflict.state.highestAuthenticatedPublisherEpoch).toBe('4');
 
@@ -79,26 +85,40 @@ describe('per-host contiguous publisher state', () => {
   it('fences epochs below the recovery floor before applying a payload', async () => {
     const state = { ...initialRegistryState(), minimumPublisherEpoch: '8' };
     const result = await applyPublisherSync(state, desired('1'), '7');
-    expect(result.response).toEqual({ status: 401, result: 'publisher-epoch-rejected' });
+    expect(result.response).toEqual({
+      status: 401,
+      result: 'publisher-epoch-rejected',
+    });
     expect(result.state).toEqual(state);
   });
 
   it('makes a tombstone permanent', async () => {
-    const tombstone = { ...desired('1'), desired: { kind: 'tombstone' } as const };
+    const tombstone = {
+      ...desired('1'),
+      desired: { kind: 'tombstone' } as const,
+    };
     const first = await applyPublisherSync(initialRegistryState(), tombstone, '1');
     const result = await applyPublisherSync(first.state, desired('2'), '1');
     expect(result.response).toEqual({ status: 409, result: 'tombstone-final' });
-    expect(result.state.committed?.payload.desired).toEqual({ kind: 'tombstone' });
+    expect(result.state.committed?.payload.desired).toEqual({
+      kind: 'tombstone',
+    });
   });
 
-  it('returns only point lookup state and fails closed while recovery is locked', async () => {
+  it('keeps the committed lookup readable while the lock fences publisher mutation', async () => {
     const first = await applyPublisherSync(initialRegistryState(), desired('1'), '1');
     expect(registryLookup(first.state)).toEqual({
       kind: 'committed',
       revision: '1',
       desired: desired('1').desired,
     });
-    expect(registryLookup(locked(first.state))).toEqual({ kind: 'unavailable' });
-    expect(registryLookup(initialRegistryState())).toEqual({ kind: 'unknown-host' });
+    expect(registryLookup(locked(first.state))).toEqual({
+      kind: 'committed',
+      revision: '1',
+      desired: desired('1').desired,
+    });
+    expect(registryLookup(initialRegistryState())).toEqual({
+      kind: 'unknown-host',
+    });
   });
 });

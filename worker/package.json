@@ -10,6 +10,12 @@
     "versions:upload": "wrangler versions upload"
   },
   "devDependencies": {
+    "miniflare": "4.20260730.0",
     "wrangler": "^4.123.0"
+  },
+  "overrides": {
+    "miniflare": {
+      "undici": "7.29.0"
+    }
   }
 }
