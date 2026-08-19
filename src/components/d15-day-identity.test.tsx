@@ -17,20 +17,23 @@ afterEach(() => setActiveEdition(DEFAULT_EDITION));
 const cest = (y: number, m: number, d: number, h = 12, min = 0) => Date.UTC(y, m - 1, d, h - 2, min);
 
 describe('headerDayIdentity — the header is a "where are we" instrument', () => {
-  it('pre-cruise reads "Sails Jul 15" / the embark theme line', () => {
+  it('pre-cruise reads "⚓ Sails Jul 15" / the embark theme line', () => {
     expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
-      place: 'Sails Jul 15',
+      place: '⚓ Sails Jul 15',
       theme: '🛳️ Welcome Aboard',
     });
   });
 
-  it('the pre-event verb is Edition brand copy: "Starts" on Vacay, not "Sails" (#602)', () => {
+  it('the pre-event verb AND glyph are Edition brand copy: "Starts"/🧳 on Vacay, not "Sails"/⚓ (#602, #881)', () => {
     // The regression: a house event's header counted down with nautical copy.
-    // "Sails" is `EditionBrand.preEventVerb` on the cruise Edition only; the
-    // date and theme resolution are Edition-independent.
+    // "Sails" is `EditionBrand.preEventVerb` on the cruise Edition only, and
+    // (Codex P2, PR #896 round 1) so is the glyph in front of it — an anchor
+    // is cruise-specific decoration, so vacay carries its own
+    // `preEventGlyph` rather than gcb's ⚓. Date and theme resolution stay
+    // Edition-independent.
     setActiveEdition('vacay');
     expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
-      place: 'Starts Jul 15',
+      place: '🧳 Starts Jul 15',
       theme: '🛳️ Welcome Aboard',
     });
   });
@@ -90,9 +93,9 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
 
   it('resolves the pre-cruise boundary in the EVENT timezone, not UTC', () => {
     // 2026-07-14T22:30Z is already 00:30 on Jul 15 (embark day) in Europe/Rome,
-    // so the header has crossed from the pre-cruise "Sails Jul 15" copy into the
-    // embark identity (Trieste). A UTC-based resolver would still read Jul 14
-    // and show "Sails Jul 15". (The mid-cruise pick is now pure `unlockAt` vs
+    // so the header has crossed from the pre-cruise "⚓ Sails Jul 15" copy into
+    // the embark identity (Trieste). A UTC-based resolver would still read
+    // Jul 14 and show "⚓ Sails Jul 15". (The mid-cruise pick is now pure `unlockAt` vs
     // `now` epoch math, so it needs no timezone; only this calendar boundary
     // does.)
     expect(headerDayIdentity(EVENT, Date.UTC(2026, 6, 14, 22, 30))).toEqual({

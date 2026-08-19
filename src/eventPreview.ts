@@ -215,6 +215,26 @@ export function previewDayEmoji(
 }
 
 /**
+ * The previewed Day's emoji, UNFILTERED — or `null`. Codex P2, PR #896 round
+ * 3: `previewDayEmoji` above is deliberately the wrong function for detecting
+ * whether a FIXED brand postage mark (EventPostcard.tsx's `signinStampGlyph`)
+ * coincidentally matches the Day's own glyph. Its single-glyph filter exists
+ * for the STAMP BOX's layout safety, not for equality comparison, and on a
+ * Segmenter-less browser it degrades a legitimate multi-codepoint glyph (a
+ * flag, a ZWJ family) to `null` — so comparing a fixed mark against the
+ * FILTERED value would silently miss exactly the coincidence it exists to
+ * catch. This raw accessor is the same value the Day LINE itself already
+ * renders (`previewDayLine` below, via the same `previewDay` selection), so
+ * comparing against it can never disagree with what is actually on screen.
+ */
+export function previewDayRawEmoji(
+  days: EventPreviewDay[] | undefined,
+  now: number = Date.now(),
+): string | null {
+  return previewDay(days, now)?.day.emoji ?? null;
+}
+
+/**
  * The postcard's middle line: "Aug 7–9 · hosted by Kim · 🐦 Day 1: …".
  * Whichever fragments exist, joined the way the wireframe joins them; `null`
  * when none do, so the card can skip the line entirely.

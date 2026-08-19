@@ -5,6 +5,7 @@ import {
   coerceEventPreview,
   previewDayEmoji,
   previewDayLine,
+  previewDayRawEmoji,
   previewMetaLine,
   type EventPreview,
 } from './eventPreview';
@@ -245,6 +246,64 @@ describe('previewDayEmoji — the stamp postage, or nothing', () => {
     // Only the STAMP has a layout constraint. A multi-glyph value still leads
     // the line rather than being silently dropped from the card entirely.
     expect(previewDayLine(dayWith('🐦🐦🐦'), localNoon(2026, 8, 6))).toBe('🐦🐦🐦 Day 1: Day');
+  });
+
+  // Codex P2, PR #896 round 3: EventPostcard.tsx used previewDayEmoji's
+  // FILTERED value to detect a fixed brand mark coincidentally matching the
+  // Day's own emoji — so on a Segmenter-less browser, a genuine multi-
+  // codepoint match (a ZWJ flag) degraded to null and the duplicate slipped
+  // through undetected. previewDayRawEmoji exists specifically so that
+  // comparison uses the SAME unfiltered value the Day line itself renders.
+  describe('previewDayRawEmoji — the same value the Day LINE renders, never filtered', () => {
+    it('is the previewed Day’s own emoji, same Day selection as previewDayEmoji', () => {
+      expect(previewDayRawEmoji(PREVIEW.days, localNoon(2026, 8, 6))).toBe('🐦');
+      expect(previewDayRawEmoji(PREVIEW.days, localNoon(2026, 8, 7))).toBe('🐦');
+    });
+
+    it('is null on a Day the seed gave no emoji, once the trip is over, or with no schedule', () => {
+      expect(previewDayRawEmoji(PREVIEW.days, localNoon(2026, 8, 8))).toBeNull();
+      expect(previewDayRawEmoji(PREVIEW.days, localNoon(2026, 8, 10))).toBeNull();
+      expect(previewDayRawEmoji(undefined)).toBeNull();
+      expect(previewDayRawEmoji([])).toBeNull();
+    });
+
+    it('passes through a value previewDayEmoji would decline as not-a-single-glyph', () => {
+      // The stamp box's layout constraint does not apply here — this accessor
+      // is for equality comparison, not rendering into a fixed-size box.
+      expect(previewDayRawEmoji(dayWith('🐦🐦🐦'), localNoon(2026, 8, 6))).toBe('🐦🐦🐦');
+      expect(previewDayRawEmoji(dayWith('The Birds Have Entered the Chat'), localNoon(2026, 8, 6))).toBe(
+        'The Birds Have Entered the Chat',
+      );
+    });
+
+    describe('without Intl.Segmenter (the literal round-3 regression case)', () => {
+      type IntlWithOptionalSegmenter = { Segmenter?: unknown };
+      const intlWithOptionalSegmenter = Intl as unknown as IntlWithOptionalSegmenter;
+      let originalSegmenter: unknown;
+
+      beforeEach(() => {
+        originalSegmenter = intlWithOptionalSegmenter.Segmenter;
+        delete intlWithOptionalSegmenter.Segmenter;
+      });
+
+      afterEach(() => {
+        intlWithOptionalSegmenter.Segmenter = originalSegmenter;
+      });
+
+      it.each([
+        ['a flag (two code points, one glyph)', '🇮🇹'],
+        ['a skin-toned emoji', '👋🏽'],
+        ['a ZWJ family sequence', '👨‍👩‍👧‍👦'],
+        ['a ZWJ rainbow flag', '🏳️‍🌈'],
+      ])(
+        'still returns the genuine multi-codepoint glyph verbatim, unlike previewDayEmoji: %s',
+        (_label, emoji) => {
+          expect(previewDayRawEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBe(emoji);
+          // The contrast this whole function exists for.
+          expect(previewDayEmoji(dayWith(emoji), localNoon(2026, 8, 6))).toBeNull();
+        },
+      );
+    });
   });
 });
 

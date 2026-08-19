@@ -143,6 +143,14 @@ export default function SignIn() {
           heading's textContent is asserted brand-for-brand by
           signin-edition-brand.test.tsx and must stay exactly the wordmark. */}
       {brand.wordmarkByline && <span className="brand-byline">{brand.wordmarkByline}</span>}
+      {/* The ADDITIVE voice chip (#881, gcb/fiveacross Join frames) — drawn
+          ABOVE the tagline line below, never instead of it (that is
+          `signinTaglineChip`'s job, vacay-only). Gated on the re-prompt
+          posture too: the age-confirmation line takes this whole slot on a
+          re-prompt, so a brand voice chip has no business sitting above it. */}
+      {brand.signinVoiceChip && !(reprompt && adult) && (
+        <p className="signin-voice-chip">{brand.signinVoiceChip}</p>
+      )}
       <p className={brand.signinTaglineChip && !(reprompt && adult) ? 'signin-tagline-chip' : 'muted'}>
         {/* The re-prompt line makes an age claim of its own, so it is gated on
             the posture too — belt and braces. AuthProvider already refuses to
@@ -206,6 +214,13 @@ export default function SignIn() {
 // Retry surface shown when a signed-in Player's Board couldn't be dealt (see
 // App.tsx / AuthContext): a Player-worded reason plus a Retry that re-invokes
 // `joinAndDeal` in place, instead of dropping the Player onto a blank Board.
+//
+// Deliberately carries NO `offlineNote` (Codex P2, PR #896 round 4): that
+// field promises a CARD keeps working offline, and this panel exists
+// precisely because no card was dealt yet — reusing it here would tell a
+// first-time Player whose deal just failed that something is "working
+// offline" when nothing has been dealt to work. `message` plus Retry is the
+// whole of what this screen has to say.
 export function DealError({
   message,
   onRetry,
@@ -236,7 +251,6 @@ export function DealError({
       <button className="btn primary block" disabled={retrying} onClick={onRetry}>
         {retrying ? 'Dealing…' : 'Retry'}
       </button>
-      <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
     </div>
   );
 }
