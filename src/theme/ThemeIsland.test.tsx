@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -6,6 +6,7 @@ import { render, screen } from '@testing-library/react';
 import ThemeIsland from './ThemeIsland';
 import { ThemeProvider } from './ThemeContext';
 import { parseThemeBlocks } from './contrast';
+import { setActiveEdition } from './themes';
 
 // Regression coverage for #795 (specs/event-setup-wizard.md § "Live preview
 // strip"): the scoped Theme island is new, reusable src/theme/ work, and the
@@ -22,6 +23,8 @@ const themeDir = dirname(fileURLToPath(import.meta.url));
 const themeBlocks = parseThemeBlocks(readFileSync(join(themeDir, 'themes.css'), 'utf-8'));
 
 describe('ThemeIsland', () => {
+  afterEach(() => setActiveEdition('gcb'));
+
   it('sets data-theme on its OWN node, not on document.documentElement', () => {
     delete document.documentElement.dataset.theme;
     render(<ThemeIsland theme="marquee" data-testid="island" />);
@@ -31,6 +34,7 @@ describe('ThemeIsland', () => {
   });
 
   it('never touches the app-global theme set by ThemeProvider, even when the island wears a DIFFERENT theme', () => {
+    setActiveEdition('fiveacross');
     render(
       <ThemeProvider defaultTheme="marquee">
         <ThemeIsland theme="the-birds" data-testid="island" />

@@ -271,6 +271,27 @@ describe('ThemeContext — Auto: match the day (specs/d15-more-menu.md § Theme)
     expect(screen.getByTestId('theme')).toHaveTextContent('neon-playground');
   });
 
+  it.each([
+    ['unknown default', 'retired-theme-id', null],
+    ['off-Edition default', 'the-birds', null],
+    ['chrome default', 'fiveacross-slate', null],
+    ['unknown Day Theme', 'neon-playground', 'retired-theme-id'],
+    ['off-Edition Day Theme', 'neon-playground', 'the-birds'],
+    ['chrome Day Theme', 'neon-playground', 'fiveacross-slate'],
+  ])('falls back safely when given an %s', (_case, defaultTheme, autoThemeId) => {
+    render(
+      <ThemeProvider
+        defaultTheme={defaultTheme as never}
+        autoThemeId={autoThemeId as never}
+      >
+        <ThemePreferenceProbe />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId('theme')).toHaveTextContent('neon-playground');
+    expect(document.documentElement.dataset.theme).toBe('neon-playground');
+  });
+
   it('re-resolves auto live as autoThemeId arrives/changes from Firestore', () => {
     const { rerender } = render(
       <ThemeProvider defaultTheme="neon-playground" autoThemeId={null}>

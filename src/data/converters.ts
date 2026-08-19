@@ -2,6 +2,7 @@ import { cellsFromData, cellsToMap } from '../game/cells';
 import { normalizePool } from '../game/pool';
 import { scoringForDay } from '../game/scoring';
 import { standingsFreezeAtFor } from '../game/logic';
+import { normalizeEventTheme } from '../theme/themes';
 import type {
   FirestoreDataConverter,
   QueryDocumentSnapshot,
@@ -87,6 +88,7 @@ export function migrateDayFields(raw: unknown): DayDef {
     placeEmoji:
       typeof portEmoji === 'string' ? portEmoji : typeof day.placeEmoji === 'string' ? day.placeEmoji : '',
     pool: migratePool(day.pool),
+    theme: normalizeEventTheme(day.theme),
     // The Scoring Policy (ADR 0011) resolves on read the same way the pool
     // does. Docs written before the field existed — every Day of both live
     // Events — carry no key, and `scoringForDay` derives them from the closing
@@ -164,6 +166,7 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
     const days = Array.isArray(data.days) ? data.days.map(migrateDayFields) : [];
     return {
       ...data,
+      defaultTheme: normalizeEventTheme(data.defaultTheme),
       claimMode: migrateClaimMode(data.claimMode),
       // Event docs seeded/written before #113 carry no `bannedUids`; default a
       // missing (or malformed non-array) field to [] so consumers read the
