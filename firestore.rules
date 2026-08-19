@@ -912,9 +912,6 @@ service cloud.firestore {
         // gates above already use), every entry's theme change must be on a
         // still-future Day. See `daysThemeLockOk` above.
         && (!('days' in request.resource.data)
-            || (resource != null
-                && 'days' in resource.data
-                && request.resource.data.days == resource.data.days)
             // A changed existing schedule validates each changed Day inside
             // `daysThemeLockOk`, sharing one ten-way traversal with its shape
             // and lock checks. Running a second unroll here pushes the valid
