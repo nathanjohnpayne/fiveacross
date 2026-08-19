@@ -137,17 +137,12 @@ function deepEqual(a: unknown, b: unknown): boolean {
  * like it worked while the "discarded" draft stays in `list()` and can
  * resurface in a future resume UI (Codex P2, PR #840).
  *
- * The `load()` readback alone is not sufficient (#848): `load()` maps EVERY
- * miss to `null` — an absent key and a FAILED read both read back the same
- * way. If storage becomes restricted enough that `discard`'s own
- * `removeItem` throws, the verification `load()` immediately after is very
- * likely to fail the same way, for the same reason — and a `null` from a
- * failed read would be misread as "confirmed gone" even though the draft
- * never actually left storage and can reappear the moment access returns.
- * Checking `discard`'s own return value first closes that gap: it is the
- * one signal that distinguishes "the removal itself could not even be
- * attempted" from "the removal ran cleanly", which no amount of re-reading
- * afterward can recover once lost.
+ * The `load()` readback alone is not sufficient (#848, #901): `load()` maps
+ * an absent key, a failed read, and a malformed blob to the same `null`.
+ * `discard` therefore performs the load-bearing raw key check itself and
+ * returns false unless it observes actual absence. The parsed readback here
+ * remains a defense for alternate store implementations, but it is never
+ * allowed to upgrade an unconfirmed discard into success.
  */
 async function verifiedDiscard(store: EventDraftStore, draftId: string): Promise<boolean> {
   const removed = await store.discard(draftId);
