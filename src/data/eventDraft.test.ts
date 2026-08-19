@@ -682,3 +682,45 @@ describe('newDraftId calls randomUUID through its receiver (#787 Phase 4b)', () 
     }
   });
 });
+
+describe('discard() distinguishes "no storage at all" from "storage exists but is inaccessible" (Codex P2, PR #894 round 1)', () => {
+  it('reports UNCONFIRMED when merely REFERENCING the global localStorage throws — not the trivial "true" a never-had-storage device gets', async () => {
+    // Models access being revoked mid-session (a stricter privacy mode
+    // toggled, a security-partitioned context) — distinct from an
+    // environment that never had `localStorage` at all: something MAY
+    // already be persisted from before, and this call cannot tell either
+    // way, so `discard()` must not claim confirmation.
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      get() {
+        throw new Error('storage access revoked');
+      },
+      configurable: true,
+    });
+    try {
+      // No explicit `storage` argument — this exercises the module's OWN
+      // global-`localStorage` fallback, not an injected fake.
+      const store = createLocalDraftStore(undefined, () => NOW);
+      await expect(store.discard('some-id')).resolves.toBe(false);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(globalThis, 'localStorage', descriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, 'localStorage');
+      }
+    }
+  });
+
+  it('still reports CONFIRMED when there genuinely is no localStorage at all (nothing was ever persisted)', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Reflect.deleteProperty(globalThis, 'localStorage');
+    try {
+      const store = createLocalDraftStore(undefined, () => NOW);
+      await expect(store.discard('some-id')).resolves.toBe(true);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(globalThis, 'localStorage', descriptor);
+      }
+    }
+  });
+});

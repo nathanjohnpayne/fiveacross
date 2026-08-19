@@ -63,7 +63,13 @@ export default function SetupWizard() {
  * "Saved" (the header button) — so both verify via a real read-back instead
  * of trusting the write (Codex P1, PR #840).
  */
-async function verifiedSave(store: EventDraftStore, draft: EventDraft): Promise<EventDraft | null> {
+/** Exported for direct unit testing (Codex P2, PR #894 round 1) — the
+ *  `spicy: undefined`-vs-absent-key scenario it must NOT mistake for a
+ *  failed write is awkward to reach through the full store's real
+ *  JSON-round-tripping (which normalizes the two on the very first load,
+ *  before any explicit save can observe the discrepancy), but trivial to
+ *  construct directly against a hand-built `EventDraftStore`. */
+export async function verifiedSave(store: EventDraftStore, draft: EventDraft): Promise<EventDraft | null> {
   const saved = await store.save(draft);
   const readBack = await store.load(saved.draftId);
   // A non-null read is not automatically success: a write that silently
@@ -106,12 +112,19 @@ function deepEqual(a: unknown, b: unknown): boolean {
   }
   const aObj = a as Record<string, unknown>;
   const bObj = b as Record<string, unknown>;
-  const aKeys = Object.keys(aObj);
-  const bKeys = Object.keys(bObj);
-  if (aKeys.length !== bKeys.length) return false;
-  return aKeys.every(
-    (key) => Object.prototype.hasOwnProperty.call(bObj, key) && deepEqual(aObj[key], bObj[key]),
-  );
+  // The UNION of both objects' keys, not each side's own key COUNT (Codex
+  // P2, PR #894 round 1): a key present with an explicit `undefined` value
+  // and an ABSENT key must compare equal here. `JSON.stringify` drops the
+  // former on the way to storage, so a genuinely successful save's readback
+  // can legitimately have FEWER keys than the in-memory object it was saved
+  // from — the documented `{ text, spicy: undefined }` curated-Prompt
+  // contract (`isCuratedPrompt`'s own doc comment in eventDraft.ts: "Treating
+  // `spicy: undefined` as equivalent to an absent key makes the two readings
+  // identical"). Comparing key COUNTS would report that as a save failure.
+  // Reading a MISSING key as `undefined` via plain property access is what
+  // makes the two cases naturally compare equal without special-casing them.
+  const keys = new Set([...Object.keys(aObj), ...Object.keys(bObj)]);
+  return [...keys].every((key) => deepEqual(aObj[key], bObj[key]));
 }
 
 /**

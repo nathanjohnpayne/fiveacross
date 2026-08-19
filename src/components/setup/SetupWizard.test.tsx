@@ -4,8 +4,8 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { EventDraft } from '../../types';
-import { createEventDraft, createLocalDraftStore } from '../../data/eventDraft';
-import SetupWizard from './SetupWizard';
+import { createEventDraft, createLocalDraftStore, type EventDraftStore } from '../../data/eventDraft';
+import SetupWizard, { verifiedSave } from './SetupWizard';
 import { setupStepPath } from './route';
 
 // Covers specs/event-setup-wizard.md § "Shell & navigation" — #788's route,
@@ -616,6 +616,64 @@ describe('storage failure (Codex P1, PR #840)', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe('verifiedSave (Codex P2, PR #894 round 1)', () => {
+  // A hand-built store, not `createLocalDraftStore` — the scenario below
+  // needs `save()` to return an object that still carries an EXPLICIT
+  // `spicy: undefined` key while `load()` returns one where the key is
+  // absent, which the real store's round trip normalizes away on the very
+  // first load, before an explicit save could ever observe the divergence.
+  function storeReturning(saved: EventDraft, readBack: EventDraft | null): EventDraftStore {
+    return {
+      list: vi.fn(),
+      unreadable: vi.fn(),
+      discard: vi.fn(),
+      save: async () => saved,
+      load: async () => readBack,
+    };
+  }
+
+  it("does not mistake a curated Prompt's spicy: undefined for a failed write, when the readback correctly omits the key entirely", async () => {
+    const draft = createEventDraft({ now: 0 });
+    const saved: EventDraft = {
+      ...draft,
+      updatedAt: 500,
+      prompts: {
+        ...draft.prompts,
+        // The documented curated-Prompt shape: `spicy` present, `undefined`
+        // (eventDraft.ts's `isCuratedPrompt` doc comment) — this is what a
+        // freshly-constructed in-memory draft can legitimately carry.
+        easy: [{ text: 'Karaoke on the pool deck', spicy: undefined }],
+      },
+    };
+    const readBack: EventDraft = {
+      ...draft,
+      updatedAt: 500,
+      // `JSON.stringify` drops an explicitly-undefined property entirely —
+      // this is what a GENUINELY successful write reads back as.
+      prompts: { ...draft.prompts, easy: [{ text: 'Karaoke on the pool deck' } as (typeof draft.prompts.easy)[number]] },
+    };
+
+    const result = await verifiedSave(storeReturning(saved, readBack), draft);
+    expect(result).not.toBeNull();
+  });
+
+  it('still reports failure for a GENUINE content mismatch, not just a coincidentally-matching timestamp (#847)', async () => {
+    const draft = createEventDraft({ now: 0 });
+    const saved: EventDraft = { ...draft, updatedAt: 500, name: 'A Wedding in Point Reyes' };
+    // The readback disagrees on `name` — a stale blob — even though its
+    // `updatedAt` happens to match what `save()` just stamped.
+    const readBack: EventDraft = { ...draft, updatedAt: 500, name: 'a stale, unrelated name' };
+
+    expect(await verifiedSave(storeReturning(saved, readBack), draft)).toBeNull();
+  });
+
+  it('reports failure when the readback is null', async () => {
+    const draft = createEventDraft({ now: 0 });
+    const saved: EventDraft = { ...draft, updatedAt: 500 };
+    expect(await verifiedSave(storeReturning(saved, null), draft)).toBeNull();
   });
 });
 

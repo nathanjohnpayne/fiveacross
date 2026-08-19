@@ -557,7 +557,27 @@ export function createLocalDraftStore(
     },
 
     async discard(draftId: string): Promise<boolean> {
-      const ls = store(storage);
+      // Unlike every other method here, `discard()`'s return value makes a
+      // POSITIVE claim about what happened, so it cannot reuse `store()`'s
+      // shared "any throw collapses to null" behavior the way `load`/
+      // `save`/`list` safely do (#848 round 2, Codex P2): that would
+      // conflate "no storage was ever configured" (nothing was ever
+      // persisted, so there is nothing to confirm — `true`) with "storage
+      // EXISTED and merely REFERENCING it now throws" — access can be
+      // revoked mid-session, and something MAY already be persisted from
+      // before that happened. This call cannot tell the two apart, so it
+      // must report UNCONFIRMED for the second one rather than the trivial
+      // `true` a shared null-collapsing check would give it.
+      let ls: Storage | null;
+      if (storage) {
+        ls = storage;
+      } else {
+        try {
+          ls = typeof localStorage !== 'undefined' ? localStorage : null;
+        } catch {
+          return false;
+        }
+      }
       // NOT `!draftId`: an empty string is a legitimate `discard()` argument,
       // not a guaranteed miss the way it is for `load()`. `unreadable()` can
       // report `''` as a hidden entry's suffix — the degenerate exact-prefix
