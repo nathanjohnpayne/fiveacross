@@ -55,11 +55,10 @@ describe('deploy target selection', () => {
   it('keeps Five Across project, build, synthetic, and cache choices together', () => {
     const invocation = deployInvocation('fiveacross', ['--only', 'firestore:rules'], { NODE_ENV: 'production' });
 
-    // fiveacross also auto-skips the (gaycruisebingo-only) Cloud Run invoker
-    // reconciliation (#768) — that project's deploy credential is not
-    // provisioned with IAM access to a gaycruisebingo Cloud Run service, so
-    // running it unconditionally there would fail on a permissions error
-    // rather than a no-op. See scripts/build-target.mjs's fiveacross entry.
+    // fiveacross still plans to skip same-project Cloud Run invoker
+    // reconciliation until #547 grants its deploy service account
+    // run.services.update on fiveacross. The public CLI guard above refuses
+    // before this plan is spawned while the handoff origin is active.
     expect(invocation.args).toEqual([
       '--skip-cf-purge',
       '--skip-invoker',
