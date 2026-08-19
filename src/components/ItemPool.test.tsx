@@ -609,6 +609,30 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
   });
 
+  it('suppresses a pending submission\'s analytics after ItemPool unmounts (#908)', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { unmount } = render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted before navigation' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    unmount();
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    expect(track).not.toHaveBeenCalledWith('add_item');
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
+  });
+
   it('still fires the submission analytics normally when auth did NOT change', async () => {
     let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
     H.addItem.mockReturnValue(
