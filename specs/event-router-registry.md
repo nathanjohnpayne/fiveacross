@@ -94,9 +94,33 @@ If the KV write fails, the high-water state does not advance and the Function re
 
 ### Audit and recovery wire
 
-The audit command obtains the authoritative hostname set by listing `hostnames` and `routerReplicas` with the existing interactive, Admin-authorized operator credential. It never asks Cloudflare to list. For each known host it calls `GET /__internal/hostname-replicas/v1/<percent-encoded-host>` with a short-lived ID token impersonating a dedicated keyless audit service account. The registry pins that account's `sub` and an audit-only audience. The exact response is `{schemaVersion:1,host,durable:null|{revision,digest},kv:null|{revision,digest}}`; it exposes no payload, list, or mutation. Pagination exists only on the Firestore source list. Audit-token theft permits guessed point reads of public metadata, not enumeration or mutation.
+The audit command obtains the authoritative hostname set by listing `hostnames` and `routerReplicas` with the existing interactive, Admin-authorized operator credential. It never asks Cloudflare to list. For each known host it calls `GET /__internal/hostname-replicas/v1/<percent-encoded-host>?afterRecoverySequence=<cursor>` with a short-lived ID token impersonating a dedicated keyless audit service account. The registry pins that account's `sub` and an audit-only audience. The cursor is optional on the first call (equivalent to `0`) and otherwise is the canonical non-negative decimal `nextAfter` from the preceding response; malformed or unknown-ahead cursors return `400`. The exact response is:
 
-Repair uses a different human-impersonated recovery service account, audience, and Cloud KMS signing key; the publisher has neither. `POST /__internal/hostname-replicas/v1/recover` carries `{schemaVersion:1,host,expected:{revision,digest},replacement:<RouterReplicaDesired>,incidentUrl,reason}` and the same signed-request envelope. The registry compares `expected` to current DO state, requires a nonempty HTTPS incident URL and reason, writes the replacement to KV, resets DO state to that exact revision/digest, and appends the before/after/operator/key-version record to durable recovery history before returning. A mismatch returns `409` without writing. Recovery may move a poisoned high-water mark backward only to the Firestore ledger revision proven by the operator's just-recorded audit; it is break-glass, never the reconciler's normal apply path. Recovery history is included in audit output and Cloudflare logs and is never deletable through either endpoint.
+```ts
+type ReplicaAuditResponse = {
+  schemaVersion: 1;
+  host: string;
+  durable: null | { revision: string; digest: string };
+  kv: null | { revision: string; digest: string };
+  recoveryPage: {
+    records: Array<{
+      sequence: string; // per-host positive decimal, append-only
+      occurredAt: string; // RFC 3339
+      before: { revision: string; digest: string };
+      after: { revision: string; digest: string };
+      operatorSub: string;
+      keyVersion: string;
+      incidentUrl: string;
+      reason: string;
+    }>;
+    nextAfter: string | null;
+  };
+};
+```
+
+Each page contains at most 100 recovery records ordered by sequence. `nextAfter` is the last returned sequence only when more records exist; the command follows it to `null` and includes every record in its audit output. The endpoint exposes no route payload, list, or mutation. Pagination over hostnames exists only on the Firestore source list; recovery pagination remains inside one already-named host. Audit-token theft permits guessed point reads of public metadata and that host's break-glass evidence, not enumeration or mutation.
+
+Repair uses a different human-impersonated recovery service account, audience, and Cloud KMS signing key; the publisher has neither. `POST /__internal/hostname-replicas/v1/recover` carries `{schemaVersion:1,host,expected:{revision,digest},replacement:<RouterReplicaDesired>,incidentUrl,reason}` and the same signed-request envelope. The registry compares `expected` to current DO state, requires a nonempty HTTPS incident URL and reason, writes the replacement to KV, then atomically resets DO state and appends the next recovery-sequence record before returning. If that DO transaction fails, retry rewrites the same KV value and attempts the unchanged comparison again; state and history never diverge. A mismatch returns `409` without writing. Recovery may move a poisoned high-water mark backward only to the Firestore ledger revision proven by the operator's just-recorded audit; it is break-glass, never the reconciler's normal apply path. Recovery history is returned only through the authenticated, bounded audit page above, is also emitted to Cloudflare logs, and is never deletable through either endpoint.
 
 ## Provisioning, mutation, and deletion
 
@@ -174,7 +198,7 @@ All platform seams are injected. Tests require no live Google/Cloudflare account
 - Publisher fakes proving metadata token audience, exact endpoint/body digest/KMS signing request, non-2xx/invalid-body throw, idempotent retry, stolen-token replay without mutation, and no Admin SDK dependency.
 - Firestore emulator tests proving all client access to `routerReplicas` is denied and the trusted transaction helper keeps source/projection atomic across provision, status, repoint, and delete.
 - Registry/public-router contract tests proving only `lookup(host)` crosses the service binding, the public router has no KV/list capability, and the registry's `fetch` surface exposes no public point-get/list route. Router tests also prove no Firebase fetch or Cache API envelope, every failure-table row, auth bypass ordering, revision header, and namespace-before-binding ordering.
-- Reconciler dry-run/apply/audit fixtures for source-list pagination, point-read auth, missing, drifted, tombstoned, poisoned/conflicting, recovered, and already-correct records.
+- Reconciler dry-run/apply/audit fixtures for source-list pagination, point-read auth, zero/one/multiple bounded recovery-history pages, invalid/ahead cursors, missing, drifted, tombstoned, poisoned/conflicting, recovered, and already-correct records.
 - Remote integration tests against an unrouted preview, followed by the exact R2 and Gate 3 probes. Tests must assert App Check enforcement stays enabled; disabling it is never test setup.
 
 Acceptance for #888's implementation is all tests above, R0–R3 evidence, removal of the Worker Firestore code/bindings/deploy checks, updated `specs/event-router.md` and `worker/README.md`, and the route block still commented. Route attachment remains #529's separate human Gate 3 action.
