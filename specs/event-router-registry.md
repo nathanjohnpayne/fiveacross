@@ -32,7 +32,7 @@ trusted hostname writer
        replica publisher Function      dedicated service identity + KMS signer
                     │ Google OIDC ID token + signed request bytes
                     ▼
-       private registry service ─────► per-host Durable Object ──► Workers KV
+       registry service (private lookup) ─► per-host Durable Object ─► Workers KV
 
 public request ─► Event router / Namespace + Slug guard
                     │
