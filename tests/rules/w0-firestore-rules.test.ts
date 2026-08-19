@@ -313,6 +313,9 @@ describe('firestore.rules — honor-system invariants', () => {
   it('keeps bug reports and rate-limit state server-only', async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), 'bugReports/report_123'), { description: 'private' });
+      await setDoc(doc(ctx.firestore(), 'bugReportEscalations/report_123'), {
+        state: 'pending', reporterUid: ALICE, eventId: EVENT,
+      });
     });
     await assertFails(getDoc(doc(db(ALICE), 'bugReports/report_123')));
     await assertFails(setDoc(doc(db(ALICE), 'bugReports/forged'), { description: 'forged' }));
@@ -324,5 +327,11 @@ describe('firestore.rules — honor-system invariants', () => {
     await assertFails(updateDoc(doc(db(ALICE), 'bugReports/report_123'), { kind: 'bug' }));
     await assertFails(getDoc(doc(db(ALICE), `bugReportRateLimits/${ALICE}`)));
     await assertFails(setDoc(doc(db(ALICE), `bugReportRateLimits/${ALICE}`), { submissionMs: [NOW()] }));
+    await assertFails(getDoc(doc(db(ALICE), 'bugReportEscalations/report_123')));
+    await assertFails(setDoc(doc(db(ALICE), 'bugReportEscalations/forged'), {
+      state: 'pending', reporterUid: ALICE, eventId: EVENT,
+    }));
+    await assertFails(updateDoc(doc(db(ADMIN), 'bugReportEscalations/report_123'), { state: 'terminal' }));
+    await assertFails(deleteDoc(doc(db(ADMIN), 'bugReportEscalations/report_123')));
   });
 });

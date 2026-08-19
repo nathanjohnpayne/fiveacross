@@ -39,7 +39,12 @@
  */
 import { resolveAdminEmails, type ResolveDeps } from './notify';
 import { resolveEmailFrom, resolveEventOrigin } from './dailyEmail';
-import { isAlreadyExists } from './firestoreErrors';
+import { firestoreErrorCodeForLog, isAlreadyExists } from './firestoreErrors';
+import {
+  BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS,
+  BUG_REPORT_ESCALATION_RETRY_WINDOW_MS,
+  deriveReporterHash,
+} from './bugReports';
 import {
   buildAdminDigestModel,
   renderAdminDigestHtml,
@@ -67,6 +72,7 @@ interface AlertDocRef {
 }
 interface AlertQuery {
   where(field: string, op: string, value: unknown): AlertQuery;
+  orderBy(field: string): AlertQuery;
   limit(count: number): AlertQuery;
   get(): Promise<{ docs: AlertSnapshot[] }>;
 }
@@ -167,6 +173,17 @@ export interface AdminAlertDraft {
   status: string;
   visionFlag: string | null;
   reportCount: number;
+}
+
+/** The one queue-row constructor shared by every producer. Its expiry is a
+ *  Date because Firestore TTL ignores numeric fields. */
+export function pendingAdminAlertRow(draft: AdminAlertDraft, now: number): Record<string, unknown> {
+  return {
+    ...draft,
+    createdAt: now,
+    sentAt: null,
+    expiresAt: new Date(now + PENDING_TTL_MS),
+  };
 }
 
 /** How long a Prompt's words may run in a digest row before they are clipped.
@@ -357,10 +374,6 @@ export async function enqueueAdminAlerts(
 ): Promise<number> {
   if (drafts.length === 0) return 0;
   const createdAt = (deps.now ?? Date.now)();
-  // A Date, NOT epoch millis: Firestore's TTL service only considers a
-  // timestamp-typed field, so a number would leave the documented policy
-  // configured and reaping nothing (the same trap `finishBatch` documents).
-  const expiresAt = new Date(createdAt + PENDING_TTL_MS);
   try {
     return await db.runTransaction(async (tx) => {
       // The Event read and deterministic queue writes serialize with archive.
@@ -379,7 +392,7 @@ export async function enqueueAdminAlerts(
         // Redelivery, a delivered tombstone, and a discard tombstone all keep
         // the deterministic id. Never overwrite any of them.
         if (existing[index].data() !== undefined) return;
-        tx.set(ref, { ...draft, createdAt, sentAt: null, expiresAt });
+        tx.set(ref, pendingAdminAlertRow(draft, createdAt));
         written++;
       });
       return written;
@@ -475,12 +488,55 @@ export interface BugReportDoc {
    *  actually belong to the Event they named? Written only on abuse reports, so
    *  its presence means "checked" rather than "defaulted". */
   reporterInEvent?: boolean;
+  escalationLookupFailed?: boolean;
+  escalationEligible?: boolean;
   status?: string;
   intakeState?: string;
   submissionId?: string;
   reporterHash?: string;
   requestHashVersion?: number;
   requestHash?: string;
+}
+
+const BUG_REPORT_COORDINATION_KEYS: Array<keyof BugReportDoc> = [
+  'submissionId',
+  'reporterHash',
+  'requestHashVersion',
+  'requestHash',
+];
+const BUG_REPORT_IDEMPOTENCY_KEYS: Array<keyof BugReportDoc> = [
+  'submissionId',
+  'requestHashVersion',
+  'requestHash',
+];
+
+function validCompleteBugReportCoordination(reportId: string, report: BugReportDoc): boolean {
+  return (
+    report.intakeState === 'complete' &&
+    /^[a-f0-9]{64}$/.test(reportId) &&
+    typeof report.submissionId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(report.submissionId) &&
+    typeof report.reporterHash === 'string' && /^[a-f0-9]{20}$/.test(report.reporterHash) &&
+    report.requestHashVersion === 1 &&
+    typeof report.requestHash === 'string' && /^[a-f0-9]{64}$/.test(report.requestHash)
+  );
+}
+
+function validLegacyBugReportCoordination(report: BugReportDoc): boolean {
+  return report.intakeState === undefined && BUG_REPORT_IDEMPOTENCY_KEYS.every((key) => report[key] === undefined);
+}
+
+/** Validate and sanitize the report-derived portion of an abuse queue row. */
+export function abuseAlertDraft(reportId: string, report: BugReportDoc | undefined): AdminAlertDraft | null {
+  if (!report || report.kind !== 'abuse') return null;
+  return {
+    kind: 'abuse-reported',
+    collection: 'bugReports',
+    docId: reportId,
+    label: clipLabel(report.description, reportId),
+    status: typeof report.status === 'string' && report.status ? report.status : 'new',
+    visionFlag: null,
+    reportCount: 0,
+  };
 }
 
 /** The intake contract's own `eventId` shape (`bugReportContract.cjs`), restated
@@ -519,31 +575,14 @@ export function abuseAlertsForWrite(
   after: BugReportDoc | undefined,
 ): AdminAlertDraft[] {
   if (!after) return [];
-  const coordinationKeys: Array<keyof BugReportDoc> = [
-    'submissionId',
-    'reporterHash',
-    'requestHashVersion',
-    'requestHash',
-  ];
-  const idempotencyKeys: Array<keyof BugReportDoc> = [
-    'submissionId',
-    'requestHashVersion',
-    'requestHash',
-  ];
   const hasIntakeState = before?.intakeState !== undefined || after.intakeState !== undefined;
   if (hasIntakeState) {
     if (!before || before.intakeState !== 'pending' || after.intakeState !== 'complete') return [];
-    if (!/^[a-f0-9]{64}$/.test(reportId)) return [];
-    if (coordinationKeys.some((key) => before[key] === undefined || before[key] !== after[key])) return [];
-    if (
-      typeof after.submissionId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(after.submissionId) ||
-      typeof after.reporterHash !== 'string' || !/^[a-f0-9]{20}$/.test(after.reporterHash) ||
-      after.requestHashVersion !== 1 ||
-      typeof after.requestHash !== 'string' || !/^[a-f0-9]{64}$/.test(after.requestHash)
-    ) return [];
+    if (BUG_REPORT_COORDINATION_KEYS.some((key) => before[key] === undefined || before[key] !== after[key])) return [];
+    if (!validCompleteBugReportCoordination(reportId, after)) return [];
   } else if (before) {
     return [];
-  } else if (idempotencyKeys.some((key) => after[key] !== undefined)) {
+  } else if (!validLegacyBugReportCoordination(after)) {
     // The only state-less shape is a report written by the legacy intake,
     // which predates idempotency fields but already carries reporterHash. A
     // partially migrated idempotency row must not borrow that compatibility
@@ -552,20 +591,8 @@ export function abuseAlertsForWrite(
   }
   if (after.kind !== 'abuse') return [];
   if (after.reporterInEvent !== true) return [];
-  return [
-    {
-      kind: 'abuse-reported',
-      collection: 'bugReports',
-      docId: reportId,
-      // The reporter's description, through the same `flattenLabel` barrier a
-      // Prompt's words go through: it is user-submitted text bound for a
-      // plain-text email part whose structure IS its punctuation.
-      label: clipLabel(after.description, reportId),
-      status: typeof after.status === 'string' && after.status ? after.status : 'new',
-      visionFlag: null,
-      reportCount: 0,
-    },
-  ];
+  const draft = abuseAlertDraft(reportId, after);
+  return draft ? [draft] : [];
 }
 
 /**
@@ -669,6 +696,237 @@ export async function recordBugReportAlerts(
     ...deps,
     rethrowWriteErrors: true,
   });
+}
+
+// --- Durable abuse escalation ---------------------------------------------------
+
+export const MAX_ABUSE_ESCALATIONS_PER_SWEEP = 50;
+const ABUSE_ESCALATION_BACKOFF_BASE_MS = 5 * 60 * 1_000;
+const ABUSE_ESCALATION_BACKOFF_MAX_MS = 6 * 60 * 60 * 1_000;
+
+export type AbuseEscalationOutcome =
+  | 'queued'
+  | 'source-invalid'
+  | 'alert-conflict'
+  | 'event-missing'
+  | 'event-inactive'
+  | 'not-member'
+  | 'retry-window-expired';
+
+export interface AbuseEscalationSweepDeps {
+  now?: () => number;
+}
+
+function firestoreTimeMs(value: unknown): number | null {
+  if (value instanceof Date) return value.getTime();
+  const toMillis = (value as { toMillis?: unknown } | null)?.toMillis;
+  if (typeof toMillis !== 'function') return null;
+  const millis = toMillis.call(value);
+  return typeof millis === 'number' && Number.isFinite(millis) ? millis : null;
+}
+
+function terminalEscalation(outcome: AbuseEscalationOutcome, now: number): Record<string, unknown> {
+  return {
+    state: 'terminal',
+    outcome,
+    resolvedAt: new Date(now),
+    expiresAt: new Date(now + TOMBSTONE_TTL_MS),
+  };
+}
+
+function validPendingEscalation(task: Record<string, unknown>): {
+  eventId: string;
+  reporterUid: string;
+  reporterHash: string;
+  attemptCount: number;
+  deadlineAt: number;
+} | null {
+  const eventId = typeof task.eventId === 'string' ? task.eventId : '';
+  const reporterUid = typeof task.reporterUid === 'string' ? task.reporterUid : '';
+  const createdAt = firestoreTimeMs(task.createdAt);
+  const deadlineAt = firestoreTimeMs(task.deadlineAt);
+  const expiresAt = firestoreTimeMs(task.expiresAt);
+  if (
+    task.state !== 'pending' ||
+    !EVENT_ID_SHAPE.test(eventId) ||
+    !reporterUid || reporterUid.length > 128 ||
+    typeof task.reporterHash !== 'string' || !/^[a-f0-9]{20}$/.test(task.reporterHash) ||
+    !Number.isSafeInteger(task.attemptCount) || (task.attemptCount as number) < 0 ||
+    createdAt === null ||
+    firestoreTimeMs(task.nextAttemptAt) === null ||
+    deadlineAt === null ||
+    expiresAt === null ||
+    deadlineAt !== createdAt + BUG_REPORT_ESCALATION_RETRY_WINDOW_MS ||
+    expiresAt !== deadlineAt + BUG_REPORT_ESCALATION_PENDING_TTL_MARGIN_MS
+  ) return null;
+  return {
+    eventId,
+    reporterUid,
+    reporterHash: task.reporterHash,
+    attemptCount: task.attemptCount as number,
+    deadlineAt,
+  };
+}
+
+function reportMatchesEscalation(
+  reportId: string,
+  report: BugReportDoc | undefined,
+  task: ReturnType<typeof validPendingEscalation>,
+): report is BugReportDoc {
+  if (!report || !task) return false;
+  return (
+    report.kind === 'abuse' &&
+    report.escalationLookupFailed === true &&
+    report.reporterInEvent === undefined &&
+    report.escalationEligible === false &&
+    (
+      validLegacyBugReportCoordination(report) ||
+      validCompleteBugReportCoordination(reportId, report)
+    ) &&
+    report.eventId === task.eventId &&
+    report.reporterHash === task.reporterHash &&
+    deriveReporterHash(task.reporterUid) === task.reporterHash
+  );
+}
+
+async function resolveAbuseEscalationTask(
+  db: AdminAlertFirestore,
+  reportId: string,
+  clock: () => number,
+): Promise<void> {
+  const taskRef = db.doc(`bugReportEscalations/${reportId}`);
+  await db.runTransaction(async (tx) => {
+    const task = (await tx.get(taskRef)).data();
+    if (!task || task.state !== 'pending') return;
+    // Read the clock inside the transaction attempt. A task can cross its
+    // seven-day deadline while waiting behind the due query or an earlier row,
+    // and Firestore can replay this callback after contention.
+    const now = clock();
+    const nextAttemptAt = firestoreTimeMs(task.nextAttemptAt);
+    if (nextAttemptAt !== null && nextAttemptAt > now) return;
+
+    const parsed = validPendingEscalation(task);
+    if (!parsed) {
+      tx.set(taskRef, terminalEscalation('source-invalid', now));
+      return;
+    }
+    if (now >= parsed.deadlineAt) {
+      tx.set(taskRef, terminalEscalation('retry-window-expired', now));
+      return;
+    }
+
+    const reportRef = db.doc(`bugReports/${reportId}`);
+    const report = (await tx.get(reportRef)).data() as BugReportDoc | undefined;
+    if (!reportMatchesEscalation(reportId, report, parsed)) {
+      tx.set(taskRef, terminalEscalation('source-invalid', now));
+      return;
+    }
+    const draft = abuseAlertDraft(reportId, report);
+    if (!draft) {
+      tx.set(taskRef, terminalEscalation('source-invalid', now));
+      return;
+    }
+
+    const alertRef = db.doc(
+      `events/${parsed.eventId}/adminAlerts/${alertDocId(`bug-report-escalation-${reportId}`, draft.kind)}`,
+    );
+    const eventRef = db.doc(`events/${parsed.eventId}`);
+    const [alert, eventSnapshot] = await Promise.all([tx.get(alertRef), tx.get(eventRef)]);
+    if (alert.data() !== undefined) {
+      tx.set(taskRef, terminalEscalation('alert-conflict', now));
+      return;
+    }
+    const event = eventSnapshot.data();
+    if (!event) {
+      tx.set(taskRef, terminalEscalation('event-missing', now));
+      return;
+    }
+    if (event.status !== 'active') {
+      tx.set(taskRef, terminalEscalation('event-inactive', now));
+      return;
+    }
+
+    const isAdmin = Array.isArray(event.admins) && event.admins.includes(parsed.reporterUid);
+    const isPlayer = isAdmin
+      ? false
+      : (await tx.get(db.doc(`events/${parsed.eventId}/players/${parsed.reporterUid}`))).data() !== undefined;
+    if (!isAdmin && !isPlayer) {
+      tx.set(taskRef, terminalEscalation('not-member', now));
+      return;
+    }
+
+    tx.set(alertRef, pendingAdminAlertRow(draft, now));
+    tx.set(taskRef, terminalEscalation('queued', now));
+  });
+}
+
+async function rescheduleAbuseEscalationTask(
+  db: AdminAlertFirestore,
+  reportId: string,
+  observed: Record<string, unknown>,
+  clock: () => number,
+): Promise<void> {
+  const taskRef = db.doc(`bugReportEscalations/${reportId}`);
+  const observedAttempt = observed.attemptCount;
+  const observedNext = firestoreTimeMs(observed.nextAttemptAt);
+  await db.runTransaction(async (tx) => {
+    const current = (await tx.get(taskRef)).data();
+    if (
+      !current || current.state !== 'pending' ||
+      current.attemptCount !== observedAttempt ||
+      firestoreTimeMs(current.nextAttemptAt) !== observedNext
+    ) return;
+    const now = clock();
+    const parsed = validPendingEscalation(current);
+    if (!parsed) {
+      tx.set(taskRef, terminalEscalation('source-invalid', now));
+      return;
+    }
+    if (now >= parsed.deadlineAt) {
+      tx.set(taskRef, terminalEscalation('retry-window-expired', now));
+      return;
+    }
+    const newAttemptCount = parsed.attemptCount + 1;
+    const delay = Math.min(
+      ABUSE_ESCALATION_BACKOFF_BASE_MS * 2 ** Math.min(newAttemptCount - 1, 16),
+      ABUSE_ESCALATION_BACKOFF_MAX_MS,
+    );
+    tx.set(taskRef, {
+      ...current,
+      attemptCount: newAttemptCount,
+      nextAttemptAt: new Date(Math.min(now + delay, parsed.deadlineAt)),
+    });
+  });
+}
+
+/** Re-evaluate due UNKNOWN abuse reports without allowing one row to sink the page. */
+export async function runAbuseEscalationSweep(
+  db: AdminAlertFirestore,
+  deps: AbuseEscalationSweepDeps = {},
+): Promise<void> {
+  const clock = deps.now ?? Date.now;
+  const queryNow = clock();
+  const due = await db.collection('bugReportEscalations')
+    .where('nextAttemptAt', '<=', new Date(queryNow))
+    .orderBy('nextAttemptAt')
+    .limit(MAX_ABUSE_ESCALATIONS_PER_SWEEP)
+    .get();
+  for (const task of due.docs) {
+    try {
+      await resolveAbuseEscalationTask(db, task.id, clock);
+    } catch (err) {
+      // Firestore errors may echo a Player document path. Log only the status
+      // code so the task's raw reporter uid never escapes this server-only row.
+      console.error('runAbuseEscalationSweep: task failed', task.id, { code: firestoreErrorCodeForLog(err) });
+      try {
+        await rescheduleAbuseEscalationTask(db, task.id, task.data() ?? {}, clock);
+      } catch (rescheduleError) {
+        console.error('runAbuseEscalationSweep: reschedule failed', task.id, {
+          code: firestoreErrorCodeForLog(rescheduleError),
+        });
+      }
+    }
+  }
 }
 
 // --- Consuming (the digest sweep) ------------------------------------------------
@@ -1857,4 +2115,22 @@ export async function runAdminAlertSweep(
       console.error('runAdminAlertSweep: archived event failed', ev.id, err);
     }
   }
+}
+
+/** One scheduler invocation, with the durable-retry and digest legs isolated. */
+export async function runAdminAlertCycle(
+  db: AdminAlertFirestore,
+  deps: AdminDigestDeps & AbuseEscalationSweepDeps = {},
+): Promise<void> {
+  // Both legs share a scheduler timeout but not a liveness dependency. Run
+  // them concurrently so a slow relationship lookup cannot consume the whole
+  // invocation before ordinary moderation alerts begin draining.
+  await Promise.all([
+    runAbuseEscalationSweep(db, deps).catch((err) => {
+      console.error('runAdminAlertCycle: abuse escalation sweep failed', err);
+    }),
+    runAdminAlertSweep(db, deps).catch((err) => {
+      console.error('runAdminAlertCycle: admin digest sweep failed', err);
+    }),
+  ]);
 }

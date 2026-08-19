@@ -620,6 +620,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Durable abuse-lookup retry work (#859). A pending row temporarily holds
+    // the reporter's raw Firebase uid and an Event address; clients must never
+    // read it, and even an Event admin must not be able to forge delivery work.
+    // Functions use the Admin SDK and bypass these rules.
+    match /bugReportEscalations/{reportId} {
+      allow read, write: if false;
+    }
+
     // Centralised-auth handoff codes (ADR 0010, specs/auth-handoff.md, #548).
     //
     // Keyed by the SHA-256 of the code, not the code itself, so the stored
