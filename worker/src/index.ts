@@ -20,10 +20,6 @@ export type { RouterEnv as Env };
  *  Kept long precisely so a Firestore outage does not become an outage here. */
 const CACHE_RETENTION_SECONDS = 86_400;
 
-type FenceRead =
-  | { kind: 'readable'; fenceAt: number | null }
-  | { kind: 'unreadable' };
-
 /**
  * Cloudflare's `caches.default` behind the narrow `HostnameCache` seam.
  *
@@ -31,174 +27,82 @@ type FenceRead =
  * entry can never be confused with a cached ORIGIN response for a real
  * address — the two live in the same store.
  *
- * Every operation for one hostname is sequenced. That is not a throughput
- * preference: a refusal writes a short-lived fence, so a slower overlapping
- * lookup that observed the older active document cannot put it back after the
- * newer lookup has deactivated it.
+ * DELIBERATELY STATELESS, and the history matters because the obvious
+ * "improvement" here has already been tried and reverted.
+ *
+ * Two overlapping lookups can finish out of order, so a positive write from a
+ * lookup that began earlier can land after a later lookup refused the host and
+ * deleted the entry — repopulating a mapping that is disabled or gone. Earlier
+ * revisions of this file tried to fence that with a durable high-water mark:
+ * a refusal wrote a `fenceAt` alongside the entry, reads and writes compared
+ * against it, and a per-isolate map plus a per-host promise queue backed it up.
+ *
+ * It cannot work on these primitives, and Phase 4b review demonstrated why in
+ * two independent ways. The fence update is read / `Math.max` / write across
+ * separate Cache API operations with no compare-and-set, so two concurrent
+ * drops can both read the old value and the older one can overwrite the newer,
+ * regressing the very high-water mark the design claims to maintain. And the
+ * ordering token was `deps.now()` at each lookup's start, which orders REQUESTS
+ * rather than the document states they observed — a lookup starting later can
+ * still read an older document — so even an atomic fence would be ordering the
+ * wrong thing. Making it correct needs a compare-and-set store or a
+ * server-issued document generation, neither of which the Cache API offers.
+ *
+ * So the race is accepted rather than half-defended, and the exposure is the
+ * reason that is a proportionate call rather than a shrug. Its worst case is
+ * that a disabled Event keeps serving for about one `cacheTtlMs` — five
+ * minutes by default — after which revalidation corrects it. That is the same
+ * staleness the TTL already grants by existing: a cached active entry serves
+ * for up to five minutes after an Event is disabled whether or not any race
+ * occurs. And the application accepts far more of it by design: the client
+ * caches the identical mapping in `localStorage` for TWELVE HOURS
+ * (specs/event-resolution.md), so a browser that has already resolved a host
+ * outlives this window by two orders of magnitude regardless of what the edge
+ * does. A takedown that genuinely cannot wait needs a cache purge and does not
+ * become safe by adding an unsound fence here.
+ *
+ * A correct fence therefore needs a real coordination primitive — Durable
+ * Objects or KV with a compare-and-set — and belongs in a change that can
+ * justify that dependency, not smuggled into the router as cache bookkeeping.
  */
 export function cloudflareCache(cache: Cache): HostnameCache {
   const keyFor = (host: string): Request =>
     new Request(`https://event-router.invalid/hostnames/${encodeURIComponent(host)}`);
-  const fenceKeyFor = (host: string): Request =>
-    new Request(`https://event-router.invalid/hostnames/${encodeURIComponent(host)}/fence`);
-  const tails = new Map<string, Promise<void>>();
-  // Keep a per-isolate high-water mark as well as the durable Cache entry.
-  // If a fence write fails, this instance must still refuse a late, older
-  // response rather than allowing a Cache API fault to re-publish an Event.
-  const rememberedFences = new Map<string, number>();
-
-  const queue = <T>(host: string, operation: () => Promise<T>): Promise<T> => {
-    const prior = tails.get(host) ?? Promise.resolve();
-    const run = prior.catch(() => undefined).then(operation);
-    const settled = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    tails.set(host, settled);
-    void settled.finally(() => {
-      if (tails.get(host) === settled) tails.delete(host);
-    });
-    return run;
-  };
-
-  const rememberFence = (host: string, fenceAt: number): number => {
-    const highest = Math.max(rememberedFences.get(host) ?? fenceAt, fenceAt);
-    rememberedFences.set(host, highest);
-    return highest;
-  };
-
-  const readFence = async (host: string): Promise<FenceRead> => {
-    const remembered = rememberedFences.get(host) ?? null;
-    let hit: Response | undefined;
-    try {
-      hit = await cache.match(fenceKeyFor(host));
-    } catch {
-      // A fence is the ordering proof, not a hint. Even a locally remembered
-      // fence cannot prove another isolate has not persisted a newer one, so
-      // an unreadable fence makes the whole cache operation fail closed.
-      return { kind: 'unreadable' };
-    }
-    if (hit === undefined) return { kind: 'readable', fenceAt: remembered };
-    try {
-      const value: unknown = await hit.json();
-      if (
-        typeof value === 'object' &&
-        value !== null &&
-        typeof (value as { fenceAt?: unknown }).fenceAt === 'number' &&
-        Number.isFinite((value as { fenceAt: number }).fenceAt)
-      ) {
-        return { kind: 'readable', fenceAt: rememberFence(host, (value as { fenceAt: number }).fenceAt) };
-      }
-    } catch {
-      // Fall through to the fail-closed unreadable result below.
-    }
-    // An invalid fence is no more trustworthy than an unavailable one. It
-    // must never be interpreted as permission to re-use a primary response.
-    return { kind: 'unreadable' };
-  };
-
-  const fenceResponse = (fenceAt: number): Response =>
-    new Response(JSON.stringify({ fenceAt }), {
-      headers: {
-        'content-type': 'application/json',
-        'cache-control': `max-age=${CACHE_RETENTION_SECONDS}`,
-      },
-    });
 
   return {
     async read(host) {
-      return queue(host, async () => {
-        const fenceBeforeRead = await readFence(host);
-        if (fenceBeforeRead.kind === 'unreadable') return null;
-        const hit = await cache.match(keyFor(host));
-        if (hit === undefined) return null;
-        try {
-          // A shape-drifted or older-version envelope reads as a MISS rather
-          // than being coerced, matching the client cache's rule. The predicate
-          // checks every field the resolver dereferences, not just the version:
-          // a current-version envelope with a partial `record` would otherwise
-          // reach `decide` and throw a runtime error instead of rendering the
-          // fail-closed page.
-          const envelope: unknown = await hit.json();
-          // The fence and primary match are separate Cache operations. A
-          // refusal can land between them in another isolate, so re-read the
-          // barrier before serving; otherwise this request could return an old
-          // envelope the newer refusal has already removed.
-          const fenceAfterRead = await readFence(host);
-          if (fenceAfterRead.kind === 'unreadable') return null;
-          // Fences are high-water marks, not permanent negative-cache entries:
-          // a positive read is valid only when it came from a lookup begun
-          // after the newest refusal. Keeping the fence prevents an older
-          // delayed write from erasing that ordering after a newer write wins.
-          return isCacheEnvelope(envelope) &&
-            (fenceAfterRead.fenceAt === null || envelope.fetchedAt > fenceAfterRead.fenceAt)
-            ? envelope
-            : null;
-        } catch {
-          return null;
-        }
-      });
+      const hit = await cache.match(keyFor(host));
+      if (hit === undefined) return null;
+      try {
+        // A shape-drifted or older-version envelope reads as a MISS rather
+        // than being coerced, matching the client cache's rule. The predicate
+        // checks every field the resolver dereferences, not just the version:
+        // a current-version envelope with a partial `record` would otherwise
+        // reach `decide` and throw a runtime error instead of rendering the
+        // fail-closed page.
+        const envelope: unknown = await hit.json();
+        return isCacheEnvelope(envelope) ? envelope : null;
+      } catch {
+        return null;
+      }
     },
     async write(host, envelope) {
-      return queue(host, async () => {
-        const fence = await readFence(host);
-        // An unreadable fence makes a positive answer unsafe to publish: it
-        // could have begun before an unseen refusal in another isolate.
-        if (fence.kind === 'unreadable') return;
-        const { fenceAt } = fence;
-        // The drop has observed a lookup that started later than this one, so
-        // this positive is known stale even if its delayed Firestore response
-        // arrived last. Do not let it undo the refusal.
-        if (fenceAt !== null && envelope.fetchedAt <= fenceAt) return;
-        const stored = new Response(JSON.stringify(envelope), {
-          headers: {
-            'content-type': 'application/json',
-            'cache-control': `max-age=${CACHE_RETENTION_SECONDS}`,
-          },
-        });
-        await cache.put(keyFor(host), stored);
+      const stored = new Response(JSON.stringify(envelope), {
+        headers: {
+          'content-type': 'application/json',
+          'cache-control': `max-age=${CACHE_RETENTION_SECONDS}`,
+        },
       });
+      await cache.put(keyFor(host), stored);
     },
-    async drop(host, fenceAt) {
-      return queue(host, async () => {
-        // A plain cleanup (for a semantically invalid cache hit) needs no
-        // fence. A server-verified refusal does: it is a correctness barrier
-        // for late positive writes from requests that began earlier.
-        if (fenceAt !== undefined) {
-          // Remember before the durable operation. The primary entry still
-          // must be deleted if that operation rejects, and this isolate cannot
-          // serve an entry older than the attempted refusal in the meantime.
-          const highWater = rememberFence(host, fenceAt);
-          const previous = await readFence(host);
-          if (previous.kind === 'readable') {
-            try {
-              await cache.put(fenceKeyFor(host), fenceResponse(Math.max(previous.fenceAt ?? highWater, highWater)));
-            } catch {
-              // The local high-water mark above is the fail-closed fallback.
-            }
-          }
-          // If the current durable fence cannot be read, do not risk replacing
-          // an unseen newer high-water mark with this older refusal. The
-          // primary deletion below still runs, and this isolate remembers its
-          // own fence until Cache reads are trustworthy again.
-        }
-        await cache.delete(keyFor(host));
-      });
+    async drop(host) {
+      // Awaited rather than handed to `waitUntil`: `resolveHost` awaits `drop`
+      // so a mapping revalidated away is gone before the refusal is returned.
+      // A write only benefits the NEXT request and could lag; a deletion is a
+      // correctness barrier for requests already in flight.
+      await cache.delete(keyFor(host));
     },
   };
-}
-
-// One adapter per isolate, not per request. Its per-host tails and local
-// high-water marks only protect concurrency inside this isolate; the durable
-// fence above remains the cross-isolate barrier. Recreating it in `fetch`
-// would silently discard both local protections after every request.
-let requestCacheAdapter: { cache: Cache; adapter: HostnameCache } | null = null;
-
-export function cacheForWorkerRequests(cache: Cache): HostnameCache {
-  if (requestCacheAdapter?.cache !== cache) {
-    requestCacheAdapter = { cache, adapter: cloudflareCache(cache) };
-  }
-  return requestCacheAdapter.adapter;
 }
 
 export default {
@@ -210,7 +114,7 @@ export default {
       // receiver; workerd does not require it, but a bare `fetch: fetch` is the
       // kind of detail that breaks silently if that ever changes.
       fetch: (input, init) => fetch(input, init),
-      cache: cacheForWorkerRequests(caches.default),
+      cache: cloudflareCache(caches.default),
       now: () => Date.now(),
     };
 
