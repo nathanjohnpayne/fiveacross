@@ -361,6 +361,24 @@ export function themesForEdition(edition?: string | null): ThemeMeta[] {
 }
 
 /**
+ * Normalize an operator-authored Event/Day Theme at its read boundary.
+ *
+ * Persisted Event configuration is stricter than a Player preference: it must
+ * name a registered, non-chrome Theme that belongs to the active Edition.
+ * Unknown/retired ids, another Edition's Theme, and platform chrome all fall
+ * back to the Edition's defined default instead of producing an unstyled app.
+ */
+export function normalizeEventTheme(
+  value: unknown,
+  edition: string = activeEdition(),
+): ThemeId {
+  const fallback = defaultThemeForEdition(edition);
+  return typeof value === 'string' && themesForEdition(edition).some((theme) => theme.id === value)
+    ? (value as ThemeId)
+    : fallback;
+}
+
+/**
  * `themesForEdition`, plus `keep` when that Theme is already SET but sits
  * outside this Edition.
  *
