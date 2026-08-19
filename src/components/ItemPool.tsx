@@ -174,8 +174,14 @@ export default function ItemPool() {
   // actually renders for the new account; the ref's remaining job (skipping
   // a stale `setTracked`/`setText`/analytics call from an old completion)
   // is a belt-and-suspenders layer on top of that, not the sole guarantee.
+  // Cleanup invalidates the ref before this instance disappears (#908), so a
+  // pending continuation cannot pass the same-uid guard after navigation or
+  // an authenticated-tree remount and emit under a later ambient identity.
   useLayoutEffect(() => {
     uidRef.current = uid;
+    return () => {
+      uidRef.current = undefined;
+    };
   }, [uid]);
   const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
   // Loaded on the uid TRANSITION itself, DURING RENDER — not in a passive
