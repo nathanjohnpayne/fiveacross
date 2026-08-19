@@ -183,24 +183,33 @@ export function readMembership(raw: unknown): MembershipDoc | null {
     return null;
   }
 
-  const parsed: MembershipDoc = {
+  const base = {
     schemaVersion: MEMBERSHIP_SCHEMA_VERSION,
     eventId: d.eventId,
     uid: d.uid,
     role: d.role,
-    status: d.status,
     grantedAt: d.grantedAt,
     grantedBy: d.grantedBy,
     invitationId: d.invitationId,
-  };
-  if (d.status === 'revoked') {
-    parsed.revokedAt = d.revokedAt as number;
-    parsed.revokedBy = d.revokedBy as string;
-  }
-  return parsed;
+  } as const;
+
+  return d.status === 'revoked'
+    ? { ...base, status: 'revoked', revokedAt: d.revokedAt as number, revokedBy: d.revokedBy as string }
+    : { ...base, status: 'active' };
 }
 
-/** Does a held role satisfy a required one? Total over the role lattice. */
+/**
+ * Does a held role satisfy a required one? Total over the role lattice.
+ *
+ * FOR REASONING ABOUT A GRANT, NEVER FOR AUTHORIZING AN ACTION (Codex P2 on
+ * PR #891). `role` records what the grant conferred at grant time, and
+ * `EventDoc.admins` is client-writable, so the two drift in both directions: an
+ * array-edit promotion leaves `role: 'member'` on a real Admin, and an
+ * array-edit demotion leaves `role: 'admin'` on someone who is no longer one.
+ * Using this to decide whether a caller may issue an invitation would therefore
+ * both admit demoted Admins and deny promoted ones. Anything deciding what a
+ * caller may DO reads the live roster instead.
+ */
 export function membershipRoleSatisfies(
   held: MembershipRole,
   required: MembershipRole,

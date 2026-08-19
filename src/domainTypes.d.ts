@@ -1231,9 +1231,83 @@ export type MembershipStatus = 'active' | 'revoked';
 /** The per-Event enforcement posture. See `EventDoc.membershipEnforcement`. */
 export type MembershipEnforcement = 'off' | 'enforced';
 
+/** The fields every membership carries, whatever its status. Split out so the
+ *  union below can make the revocation audit fields structurally required on
+ *  a revoked record and structurally absent on an active one. */
+export interface MembershipBase {
+  /** `MEMBERSHIP_SCHEMA_VERSION` at write time. Gates the parse, never the
+   *  authorization decision — see `src/data/eventMembership.ts`. */
+  schemaVersion: number;
+  /**
+   * The granting Event. Denormalised from the path on purpose: the Functions
+   * and the export paths read these documents detached from their location, and
+   * a future "which Events am I in?" lookup (#807's Event switching) needs a
+   * collectionGroup query, which can filter on a FIELD but not on the document
+   * id.
+   *
+   * That query is deliberately NOT enabled here. A `{path=**}/memberships/{uid}`
+   * read rule would be a new cross-Event read surface of exactly the kind this
+   * epic exists to close — the same shape as the `{path=**}/markers/{markerUid}`
+   * rule (`firestore.rules:1770-1772`) that already leaks other Events' markers.
+   * Whoever enables it must bind it to `resource.data.uid == request.auth.uid`.
+   */
+  eventId: string;
+  /** The admitted User. Authoritative copy is the document id; this is the
+   *  queryable one, for the reason `eventId` is denormalised. */
+  uid: string;
+  /**
+   * What the grant CONFERRED, at grant time. Not a statement of current
+   * privilege and never an authorization input: `EventDoc.admins` is
+   * client-writable, so an array-edit promotion leaves `role: 'member'` on a
+   * real Admin and an array-edit demotion leaves `role: 'admin'` on someone who
+   * is no longer one. Anything deciding what a caller may DO reads the live
+   * roster (Codex P2 on PR #891).
+   */
+  role: MembershipRole;
+  /** ms epoch, stamped server-side. */
+  grantedAt: number;
+  /** The uid of the granting Admin, or a `system:` sentinel for grants with no
+   *  human author — `system:provisioner` for the launch provisioner's grant to
+   *  an Event's creator (#793), `system:backfill` for #805's migration of the
+   *  two live cohorts. Never empty: "we do not know who granted this" is a fact
+   *  worth recording explicitly rather than by omission. */
+  grantedBy: string;
+  /** The invitation this grant was redeemed from, or `null` for grants that
+   *  had no invitation (provisioner, backfill). Present so a revocation can
+   *  answer "how did this person get in?" and so an invitation cannot be
+   *  silently reused (#803, rhyming with #548's single-use discipline). */
+  invitationId: string | null;
+}
+
+/** An admitting record. Carries NO revocation fields — the `never` types make
+ *  a stale `revokedAt` a compile error rather than something only
+ *  `readMembership` catches at runtime. */
+export interface ActiveMembership extends MembershipBase {
+  status: 'active';
+  revokedAt?: never;
+  revokedBy?: never;
+}
+
+/** A revoked record. Both audit fields are REQUIRED, so a writer cannot
+ *  persist a revocation with no author or date. */
+export interface RevokedMembership extends MembershipBase {
+  status: 'revoked';
+  /** ms epoch. */
+  revokedAt: number;
+  /** The uid of the revoking Admin, or a `system:` sentinel. */
+  revokedBy: string;
+}
+
 /**
  * A document at `events/{eventId}/memberships/{uid}` — the organizer-issued,
  * non-self-writable record that a User is admitted to an Event.
+ *
+ * A DISCRIMINATED UNION on `status`, so the type enforces exactly what
+ * `readMembership` enforces (Codex P2 on PR #891). With independent optional
+ * fields, strict TypeScript accepted a revoked record with no audit fields and
+ * an active record carrying stale ones — both of which the parser rejects, so a
+ * writer using the canonical shared contract could persist data its consumers
+ * could not read back.
  *
  * THE DOCUMENT ID IS THE UID, and that is a constraint rather than a
  * convenience: `storage.rules` can only reach Firestore through
@@ -1255,47 +1329,7 @@ export type MembershipEnforcement = 'off' | 'enforced';
  * miss rather than coercing it (the convention `src/eventResolution.ts` uses
  * for its cache envelope, ADR 0009).
  */
-export interface MembershipDoc {
-  /** `MEMBERSHIP_SCHEMA_VERSION` at write time. Gates the parse, never the
-   *  authorization decision — see `src/data/eventMembership.ts`. */
-  schemaVersion: number;
-  /**
-   * The granting Event. Denormalised from the path on purpose: the Functions
-   * and the export paths read these documents detached from their location, and
-   * a future "which Events am I in?" lookup (#807's Event switching) needs a
-   * collectionGroup query, which can filter on a FIELD but not on the document
-   * id.
-   *
-   * That query is deliberately NOT enabled here. A `{path=**}/memberships/{uid}`
-   * read rule would be a new cross-Event read surface of exactly the kind this
-   * epic exists to close — the same shape as the `{path=**}/markers/{markerUid}`
-   * rule (`firestore.rules:1770-1772`) that already leaks other Events' markers.
-   * Whoever enables it must bind it to `resource.data.uid == request.auth.uid`.
-   */
-  eventId: string;
-  /** The admitted User. Authoritative copy is the document id; this is the
-   *  queryable one, for the reason `eventId` is denormalised. */
-  uid: string;
-  role: MembershipRole;
-  status: MembershipStatus;
-  /** ms epoch, stamped server-side. */
-  grantedAt: number;
-  /** The uid of the granting Admin, or a `system:` sentinel for grants with no
-   *  human author — `system:provisioner` for the launch provisioner's grant to
-   *  an Event's creator (#793), `system:backfill` for #805's migration of the
-   *  two live cohorts. Never empty: "we do not know who granted this" is a fact
-   *  worth recording explicitly rather than by omission. */
-  grantedBy: string;
-  /** The invitation this grant was redeemed from, or `null` for grants that
-   *  had no invitation (provisioner, backfill). Present so a revocation can
-   *  answer "how did this person get in?" and so an invitation cannot be
-   *  silently reused (#803, rhyming with #548's single-use discipline). */
-  invitationId: string | null;
-  /** ms epoch. Absent while `status` is `'active'`. */
-  revokedAt?: number;
-  /** The uid of the revoking Admin, or a `system:` sentinel. */
-  revokedBy?: string;
-}
+export type MembershipDoc = ActiveMembership | RevokedMembership;
 
 /**
  * Why the admission predicate answered the way it did.
