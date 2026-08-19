@@ -528,14 +528,17 @@ op-firebase-deploy <project-id> # full deploy
 op-firebase-deploy <project-id> --only hosting
 op-firebase-deploy <project-id> --only firestore:rules
 op-firebase-deploy <project-id> --only functions
+op-firebase-deploy fiveacross --verify-fiveacross-hostnames
 ```
+
+`--verify-fiveacross-hostnames` is an internal predeploy seam for the one read-only Five Across hostname-document check. Run it from the repository root. It requires the explicit project ID before the flag, rejects Firebase deploy options and commands, exports the same temporary project-scoped Application Default Credential, runs only `scripts/verify-deploy-hostnames.mjs`, and exits without invoking `firebase deploy`. The Five Across target uses it before building; routine publishing still goes through the named target command above.
 
 `op-firebase-deploy`:
 1. Auto-detects the Firebase project from `.firebaserc`.
 2. Reads source credentials per [Deploy credential precedence (canonical)](#deploy-credential-precedence-canonical) above. Logs the selected source on stderr (`[op-firebase-deploy] source credential: ...`) so deploy auth debugging is no longer opaque.
 3. If the source credential is a `service_account` key matching the target `firebase-deployer@{project-id}.iam.gserviceaccount.com`, uses it directly (no impersonation wrapper needed — faster, no `serviceAccountTokenCreator` required).
 4. Otherwise, unwraps nested impersonated credentials if needed, stamps the target project into `quota_project_id`, and writes a temporary `impersonated_service_account` credential file.
-5. Runs `firebase deploy --non-interactive` with an isolated Firebase CLI configstore, so stale `firebase login` user tokens cannot override the selected Application Default Credential.
+5. Runs the fixed `--verify-fiveacross-hostnames` check and exits, or runs `firebase deploy --non-interactive` with an isolated Firebase CLI configstore, so stale `firebase login` user tokens cannot override the selected Application Default Credential.
 6. Cleans up the temp credentials and Firebase CLI configstore on exit.
 
 No browser prompt is needed for routine use once a valid credential exists in the resolution chain and the 1Password CLI is unlocked.

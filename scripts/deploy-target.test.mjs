@@ -204,7 +204,8 @@ describe('deploy target selection', () => {
       cwd: repoRoot,
       env: {
         KEEP_ME: 'yes',
-        BUILD_CMD: 'npm run build:fiveacross',
+        BUILD_CMD:
+          'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross',
         DEPLOY_TARGET_PROJECT: 'fiveacross',
         AUTH_HANDOFF_DEPLOY_READINESS_PROJECT: 'fiveacross',
       },
@@ -413,7 +414,8 @@ describe('deploy target selection', () => {
     ]);
     expect(invocation.environment).toMatchObject({
       NODE_ENV: 'production',
-      BUILD_CMD: 'npm run build:fiveacross',
+      BUILD_CMD:
+        'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross',
       CF_ZONE_ID: '',
       SYNTHETIC_URL: 'https://bodega-bay.fiveacross.app/',
     });

@@ -16,6 +16,7 @@ set -euo pipefail
 #   op-firebase-deploy my-project   # explicit project ID
 #   op-firebase-deploy --only hosting
 #   op-firebase-deploy my-project --only functions
+#   op-firebase-deploy fiveacross --verify-fiveacross-hostnames
 
 SA_NAME="${FIREBASE_DEPLOY_SA_NAME:-firebase-deployer}"
 DEFAULT_ADC_FILE="${HOME}/.config/gcloud/application_default_credentials.json"
@@ -30,9 +31,12 @@ source "$SCRIPT_DIR/lib/credential-materialization.sh"
 
 PROJECT=""
 EXTRA_ARGS=()
+VERIFY_FIVEACROSS_HOSTNAMES=false
 EXPECT_VALUE=false
 
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  shift
   if $EXPECT_VALUE; then
     EXTRA_ARGS+=("$arg")
     EXPECT_VALUE=false
@@ -40,6 +44,21 @@ for arg in "$@"; do
     EXTRA_ARGS+=("$arg")
     EXPECT_VALUE=true
   elif [[ "$arg" == --* ]]; then
+    if [[ "$arg" == "--exec" ]]; then
+      echo "Error: Unknown option: --exec. Arbitrary authenticated command execution is not supported." >&2
+      exit 1
+    elif [[ "$arg" == "--verify-fiveacross-hostnames" ]]; then
+      if [[ -z "$PROJECT" ]]; then
+        echo "Error: --verify-fiveacross-hostnames requires an explicit project ID before it." >&2
+        exit 1
+      fi
+      if [[ ${#EXTRA_ARGS[@]} -gt 0 || $# -gt 0 ]]; then
+        echo "Error: --verify-fiveacross-hostnames cannot be combined with Firebase deploy options or commands." >&2
+        exit 1
+      fi
+      VERIFY_FIVEACROSS_HOSTNAMES=true
+      break
+    fi
     EXTRA_ARGS+=("$arg")
   elif [[ -z "$PROJECT" ]]; then
     PROJECT="$arg"
@@ -397,5 +416,15 @@ export CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true
 # Firebase CLI checks its configstore user token before Application Default
 # Credentials. Run with an isolated configstore so stale `firebase login`
 # state cannot override the service account key we just materialized.
+if $VERIFY_FIVEACROSS_HOSTNAMES; then
+  VERIFIER_SCRIPT="$PWD/scripts/verify-deploy-hostnames.mjs"
+  if [[ ! -f "$VERIFIER_SCRIPT" ]]; then
+    echo "Error: Five Across hostname verifier not found at $VERIFIER_SCRIPT. Run this mode from the repository root." >&2
+    exit 1
+  fi
+  node "$VERIFIER_SCRIPT"
+  exit 0
+fi
+
 XDG_CONFIG_HOME="$FIREBASE_CONFIG_TMPDIR" \
   firebase deploy --project "$PROJECT" --non-interactive ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

@@ -65,7 +65,10 @@ function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wra
 
   const environment = {
     ...inheritedEnv,
-    BUILD_CMD: `npm run build:${target}`,
+    BUILD_CMD:
+      target === 'fiveacross'
+        ? 'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross'
+        : `npm run build:${target}`,
   };
   environment.CF_ZONE_ID = config.cloudflareZoneId ?? '';
   environment.SYNTHETIC_URL = config.syntheticUrl;
