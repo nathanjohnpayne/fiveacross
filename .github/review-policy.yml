@@ -710,10 +710,11 @@ phase_4b_automation:
   # Reset to the manual-handoff default by the bootstrap mirror
   # (#628): a new repo opts in to local reviewer-CLI automation
   # explicitly, after validating plan-logins on its own machine.
-  # Revalidated 2026-08-18 for gaycruisebingo:
-  # collect-enablement-evidence.sh reported READY (codex-cli 0.147.0
-  # auth_mode=chatgpt; Claude Code 2.1.234 apiProvider=firstParty; no API-key
-  # env vars set), and the Phase 4b automation package passed all 238 tests.
+  # Live revalidation of the codex -> Claude direction is recorded in the
+  # exact-head review history on
+  # https://github.com/nathanjohnpayne/gaycruisebingo/pull/923. GitHub's
+  # reviewer identity and commit anchors are the durable evidence; do not copy
+  # transient CLI versions or test counts into this policy comment.
   enabled: true
 
   # Execution model. 'local' = the authoring agent's session shells out to
