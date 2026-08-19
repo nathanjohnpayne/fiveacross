@@ -203,13 +203,51 @@ describe('ADR 0011 — standingsFreezeAt is admin/Function-writable only', () =>
           timezone: 'Europe/Rome',
           days: [
             { index: 0, unlockAt: PAST(), theme: 'neon-playground' },
-            { index: 1, unlockAt: PAST(), theme: 'get-sporty' },
+            { index: 1, unlockAt: PAST(), theme: 'get-sporty', pool: 'closing' },
           ],
         },
       );
     });
     await assertFails(
       updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: NOW() + 3600_000 }),
+    );
+  });
+
+  it('DENIES adding a freeze after an early ceremonial Day has settled the derived boundary', async () => {
+    const now = NOW();
+    const days = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      unlockAt: index <= 2 ? now - (3 - index) * 3600_000 : now + index * 3600_000,
+      theme: `theme-${index}`,
+      scoring: index === 2 ? 'ceremonial' : 'competitive',
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+    });
+
+    // The derived freeze is Day 2's past unlock, even though seven later
+    // competitive Days remain in the future. Adding an explicit future freeze
+    // would make refreshed clients resume standings that cached clients keep
+    // frozen at the already-settled derived boundary.
+    await assertFails(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: now + 12 * 3600_000 }),
+    );
+  });
+
+  it('still ALLOWS adding a freeze before a last-Day ceremonial boundary on a full ten-Day schedule', async () => {
+    const now = NOW();
+    const days = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      unlockAt: now + (index + 1) * 3600_000,
+      theme: `theme-${index}`,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days });
+    });
+
+    await assertSucceeds(
+      updateDoc(doc(db(ADMIN), `events/${EVENT}`), { standingsFreezeAt: now + 12 * 3600_000 }),
     );
   });
 
