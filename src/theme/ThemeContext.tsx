@@ -4,11 +4,23 @@ import { THEMES } from './themes';
 
 const KEY = 'gcb.theme';
 const DEFAULT: ThemeId = 'neon-playground';
-const VALID_THEMES = new Set<string>(THEMES.map((t) => t.id));
+// Excludes `chrome`-flagged Themes (#882, Codex P2 on #893) — this set gates
+// what may become the ACTIVE applied theme (a saved localStorage pick, or an
+// adopted Firestore playerTheme), not merely "is this id registered somewhere".
+// `themesForEdition` already keeps a chrome Theme out of every picker's
+// CHIPS, but neither localStorage nor a player's own Firestore doc goes
+// through a picker — both are self-writable (ADR 0001's client-authoritative
+// posture), so a stray `localStorage.setItem('gcb.theme', 'fiveacross-slate')`
+// or a hand-written `players/{uid}.theme` would otherwise still validate as a
+// "currently-known theme id" and get applied, contradicting the #882 contract
+// that a chrome Theme is never player-wearable. THEMES itself stays complete
+// (id->emoji/label lookups elsewhere are unaffected); only this gate narrows.
+const PICKABLE_THEME_IDS = new Set<string>(THEMES.filter((t) => !t.chrome).map((t) => t.id));
 
-/** Type guard: only a currently-known theme id is a valid ThemeId. */
+/** Type guard: only a currently-known, PICKABLE (non-chrome) theme id may
+ *  become the active applied ThemeId — see `PICKABLE_THEME_IDS` above. */
 function isThemeId(value: string | null | undefined): value is ThemeId {
-  return value != null && VALID_THEMES.has(value);
+  return value != null && PICKABLE_THEME_IDS.has(value);
 }
 
 /** The locally-saved theme (localStorage) if it's still a valid id, else null. */
