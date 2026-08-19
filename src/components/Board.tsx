@@ -4,6 +4,9 @@ import { getDoc } from 'firebase/firestore';
 import { useAuth } from '../auth/AuthContext';
 import { useBoard, useDayBoard, useDayMeta, useMyPlayer, useEventDoc, useItems, useTally, useLeaderboard, useDoubts, useMyProofs, useProofsForItemText, useDayMetasStatus, isBanned } from '../hooks/useData';
 import { setMark, dealDayCard, reconcileEchoes, resolveDisplayName, RESHUFFLE_ALLOWANCE } from '../data/api';
+import { requestOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
+import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
+import TomorrowsCardInvite from './TomorrowsCardInvite';
 import { saveCardSnapshot, loadCardSnapshot } from '../data/cardCache';
 import { dayBoardRef } from '../data/paths';
 import { raiseDoubt, openDoubts, doubtStatusFor } from '../data/doubts';
@@ -31,7 +34,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, playerRowRootLag } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -56,7 +59,7 @@ import DaySwitcher, { defaultViewedIndex } from './DaySwitcher';
 import TutorialBanner, { TutorialTag } from './TutorialBanner';
 import { formatUnlockAt, unlockCaption } from '../unlockCopy';
 import FarewellPodium from './FarewellPodium';
-import { farewellPinIndex } from '../data/finale';
+import { finalePinIndex, finaleDayIndex } from '../data/finale';
 import { pinDayFirstBingo, enqueueHeldHonorPin, takeHeldHonorPins, dropHeldHonorPins } from '../data/dayMeta';
 import CoachOverlay, { isCoachOverlayDismissed } from './CoachOverlay';
 import LaunchIntro, { isLaunchIntroDismissed } from './LaunchIntro';
@@ -572,11 +575,19 @@ function firstCompletedLineAt(cells: Cell[]): number | null {
  * pressed value cannot carry.
  */
 function squareLabel(c: Cell): string {
+  // "New from the group" affordance (#559): a screen-reader parity note for
+  // the visual `.cell.community` accent ring (Board's tile className below)
+  // — carried through every marked-state branch rather than a single early
+  // return, so a community Square's label stays complete no matter which
+  // state it's in.
+  const community = !c.free && c.communityPrompt ? '—new from the group' : '';
   if (c.free) return `${c.text}—free space, already marked`;
-  if (!c.marked) return `${c.text}—not marked`;
+  if (!c.marked) return `${c.text}${community}—not marked`;
   // The app's own vocabulary for this state (ProofSheet: "Goes pending until an
   // admin confirms.").
-  return c.status === 'pending' ? `${c.text}—marked, pending admin confirmation` : `${c.text}—marked`;
+  return c.status === 'pending'
+    ? `${c.text}${community}—marked, pending admin confirmation`
+    : `${c.text}${community}—marked`;
 }
 
 /**
@@ -832,24 +843,27 @@ export default function Board() {
   // player who leaves the Card tab open across an `unlockAt` rollover (e.g.
   // the 8:00 ship-time unlock) would stay stuck on `LockedDayPreview` until
   // a reload or unrelated interaction (Codex P2, PR #230). `now` stands in
-  // for `Date.now()` everywhere a lock check reads the clock, and this timer
-  // bumps it exactly when the EARLIEST still-locked Day's `unlockAt` in the
-  // whole schedule passes — not just the viewed Day, so switching to an
-  // already-elapsed chip never needs its own reschedule. Depends on
-  // `event?.days` (not the `days` local below, which is a fresh `[]`
-  // literal on every render while unmigrated) so it doesn't re-schedule on
-  // every unrelated render.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const schedule = event?.days ?? [];
-    const nextUnlock = schedule
-      .map((d) => d.unlockAt)
-      .filter((t) => t > Date.now())
-      .sort((a, b) => a - b)[0];
-    if (nextUnlock == null) return;
-    const timer = setTimeout(() => setNow(Date.now()), nextUnlock - Date.now());
-    return () => clearTimeout(timer);
-  }, [event?.days, now]);
+  // for `Date.now()` everywhere a lock check reads the clock. Shared with
+  // ProofFeed.tsx/ItemPool.tsx's identical need (Codex P2, PR #845 round 5 —
+  // extracted after the same unclamped-timer overflow bug, round 4 P1, was
+  // independently discovered in all three hand-copies of this pattern); see
+  // `useNextUnlockClock`'s own doc comment for the clamp and the `event?.days`
+  // (not the `days` local below, a fresh `[]` literal while unmigrated) choice.
+  //
+  // The Event's CONFIGURED Standings Freeze is a boundary in its own right (ADR
+  // 0011, Codex P1 on PR #841). It used to be redundant — the freeze WAS a Day's
+  // `unlockAt`, so the unlock timers already covered it — but an Event that
+  // plays competitively until a stated check-out freeze has a boundary that
+  // coincides with no Day unlock at all. Without it, an open (or offline) Card
+  // tab never re-evaluates `statsFrozen` when the freeze arrives, and a
+  // post-freeze tap keeps writing root totals until some unrelated render
+  // happens to land. `standingsFreezeAt` resolves to a ceremonial Day's unlock
+  // when nothing is configured, so on both live Events this adds a boundary the
+  // list already had and nothing changes. Folded into the shared hook as its
+  // `extraBoundary` (PR #841/#845 merge) rather than a second hand-rolled
+  // timer, so this Board-only boundary gets the same 32-bit clamp for free.
+  const scheduledFreezeAt = standingsFreezeAtFor(event);
+  const now = useNextUnlockClock(event?.days, scheduledFreezeAt);
   // Lazy per-Day dealing (#246, daily-cards-spec § "Unlock mechanics"): on opening
   // an UNLOCKED Day whose snapshot is stamped (`dayDealState === 'ready'`) that has
   // no Day Card for this Player yet, deal it from that Day's frozen snapshot
@@ -1731,11 +1745,18 @@ export default function Board() {
   // never override a Player's own later chip tap (adjust-during-render, mirroring
   // `edgeStateUid` above). Once the cruise has ended (`frozenAt` set + farewell
   // Day unlocked) the farewell Day — podium included — is pinned as the default
-  // view (#217, `farewellPinIndex`); before the freeze it falls back to today's Day.
+  // view (#217, `finalePinIndex`); before the freeze it falls back to today's Day.
   if (!viewedIndexInitialized.current && hasDays) {
     viewedIndexInitialized.current = true;
     const initNow = Date.now();
-    setViewedIndex(farewellPinIndex(days, event?.frozenAt, initNow) ?? defaultViewedIndex(days, initNow));
+    // The pin and the podium's mount gate MUST resolve the same boundary
+    // (Phase 4b P1): the mount reads `scheduledFreezeAt`, so a pin that
+    // re-derived its own would send a returning Player to a Day that renders no
+    // podium — the exact split `finaleDayIndex` was introduced to remove.
+    setViewedIndex(
+      finalePinIndex(days, event?.frozenAt, initNow, event?.standingsFreezeAt) ??
+        defaultViewedIndex(days, initNow),
+    );
   }
   const viewedDay = hasDays ? (days[viewedIndex] ?? days[0]) : undefined;
   // The viewed Day's deal state (#246), folding the schedule + clock + the
@@ -1861,6 +1882,17 @@ export default function Board() {
   const daySwitcher = hasDays ? (
     <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} />
   ) : null;
+  // "Put it on tomorrow's card" entry point (#559), computed once alongside
+  // `daySwitcher` and included everywhere `daySwitcher` itself is (every
+  // early-return branch below, plus the main dealt-card return) — CodeRabbit
+  // P1 finding: the earlier single instantiation lived ONLY inside the dealt-
+  // card return, so it vanished on every other Board state (locked/waking
+  // preview, deal error, thin pool, cached fallback, the "Dealing…" spinner)
+  // even though a later eligible Day could still be open. Hidden on its own
+  // (`TomorrowsCardInvite`'s own `targetableDays` check) whenever there is
+  // genuinely nothing to invite a suggestion for. Deliberately does NOT call
+  // `useNavigate` itself — see the doc comment where it renders below.
+  const promptInvite = <TomorrowsCardInvite days={days} now={now} onOpen={requestOpenSuggestPanel} />;
   // The tutorial (embark/farewell) Day indexes, threaded to the Mark/proof write
   // paths so the persisted cruise-wide `firstBingoAt` excludes them (spec §
   // "Resolved decisions" #2). `undefined` for legacy events excludes nothing.
@@ -1895,6 +1927,7 @@ export default function Board() {
     return (
       <>
         {daySwitcher}
+        {promptInvite}
         <LockedDayPreview
           day={viewedDay}
           timezone={event?.timezone}
@@ -1913,6 +1946,7 @@ export default function Board() {
       return (
         <>
           {daySwitcher}
+          {promptInvite}
           <div className="center muted" role="alert">
             <p>We couldn’t deal this day’s card.</p>
             <p>Check your connection, then retry.</p>
@@ -1970,6 +2004,7 @@ export default function Board() {
       return (
         <>
           {daySwitcher}
+          {promptInvite}
           <div className="center muted" role="alert">
             <p>Not enough prompts to deal a full card yet.</p>
             <p>
@@ -1991,6 +2026,7 @@ export default function Board() {
         return (
           <>
             {daySwitcher}
+            {promptInvite}
             <CachedCardFallback
               snapshot={snapshot}
               onRetry={() => {
@@ -2010,6 +2046,7 @@ export default function Board() {
     return (
       <>
         {daySwitcher}
+        {promptInvite}
         <LoadingState label="Dealing your card…" />
       </>
     );
@@ -2447,16 +2484,24 @@ export default function Board() {
           />
         )}
         {/* The farewell podium (#217, daily-cards-spec § "Farewell view"):
-            shown on the farewell Day once the standings freeze (`frozenAt`
+            shown on the FINALE Day once the standings freeze (`frozenAt`
             set), ABOVE the goodbye banner below — this ticket owns the
             podium and its stacking order; the goodbye copy is
-            TutorialBanner's. `buildPodium` freezes out the farewell Day's
-            own marks, so a post-freeze goodbye tap never moves the podium.
+            TutorialBanner's. `buildPodium` freezes out every ceremonial
+            Day's own marks, so a post-freeze goodbye tap never moves the
+            podium.
+
+            The mount gate reads `finaleDayIndex` — the SAME resolver the
+            default-view pin uses (ADR 0011) — rather than re-inferring the
+            Day from `viewedDay.pool === 'closing'`. Those two disagreed for
+            any Event whose ceremonial Day is on another pool, or which has
+            none at all: the pin sent a returning Player to a Day that then
+            rendered no podium and no share action (Codex P1, PR #841).
             The roster is ban-filtered first (Leaderboard.tsx parity): the
             podium is a public leaderboard-like surface, so a banned Player
             must never surface as champion, First to BINGO, or a daily
             honor (Codex #244). */}
-        {viewedDay?.pool === 'closing' && event?.frozenAt != null && (
+        {hasDays && viewedIndex === finaleDayIndex(days, scheduledFreezeAt) && event?.frozenAt != null && (
           <FarewellPodium
             players={players.filter((p) => !isBanned(p.uid, event?.bannedUids ?? []))}
             days={days}
@@ -2470,6 +2515,11 @@ export default function Board() {
           />
         )}
         {viewedDay && <TutorialBanner day={viewedDay} event={event} />}
+        {/* "Put it on tomorrow's card" entry point (#559) — the SAME
+            `promptInvite` every early-return branch above also renders (see
+            its doc comment near `daySwitcher`), so the entry point is exactly
+            as persistent as the Day switcher itself. */}
+        {promptInvite}
         {/* Keyed + gated like the grid below (Codex P3 on #421 round 3): the
             header letters cascade once per board identity — replaying for a
             genuinely new card (Day switch, reshuffle) and mounting landed on
@@ -2507,7 +2557,15 @@ export default function Board() {
               (c.status === 'pending' ? ' pending' : '') +
               (wins.has(c.index) ? ' win' : '') +
               (stamped.has(c.index) ? ' just-marked' : '') +
-              (c.free && freePulse > 0 ? (freePulse % 2 ? ' free-pulse-a' : ' free-pulse-b') : '')
+              (c.free && freePulse > 0 ? (freePulse % 2 ? ' free-pulse-a' : ' free-pulse-b') : '') +
+              // "New from the group" (#559): a Community Prompt Square, flagged
+              // at deal time (Cell.communityPrompt). A TILE-level modifier
+              // rather than a corner glyph — every corner (✓ top-right, echo
+              // ⟲/Doubt top-left, proof ＋ bottom-left, tally bottom-right) is
+              // already spoken for, and a Square can carry several of those at
+              // once; the accent ring below composes with all of them instead
+              // of contending for the same pixel.
+              (!c.free && c.communityPrompt ? ' community' : '')
             }
             // The motion pass's per-Square inputs (specs/motion-polish.md):
             // the deal cascade's column/row delay, and — on a winning line —

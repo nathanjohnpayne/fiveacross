@@ -107,10 +107,39 @@ export type AdminAlertKind =
   /** Somebody reported this content — `reportCount` rose on this write. */
   | 'content-reported'
   /** The server moved this content into a moderation state (flagged/hidden). */
-  | 'moderation';
+  | 'moderation'
+  /** A reporter filed a bug report and marked it `abuse` (#670). Unlike the
+   *  three above this is not a state a document is IN — it is a submission that
+   *  happened — which is why it needs its own liveness rule and its own digest
+   *  module rather than joining "Reported & hidden". */
+  | 'abuse-reported';
 
-/** The two collections an alert can be about. */
-export type AlertedCollection = 'items' | 'proofs';
+/** The collections that live UNDER an Event, at `events/{eventId}/{collection}`.
+ *  Everything the moderation producers touch, and the only paths the digest can
+ *  re-read a row's live state from. */
+export type EventScopedCollection = 'items' | 'proofs';
+
+/** Every collection an alert can be about. `bugReports` is the odd one: a
+ *  TOP-LEVEL collection carrying an `eventId` FIELD, so an alert about it is
+ *  scoped to an Event without living inside one. */
+export type AlertedCollection = EventScopedCollection | 'bugReports';
+
+const EVENT_SCOPED: readonly AlertedCollection[] = ['items', 'proofs'];
+
+/** Whether this collection can be re-read at `events/{eventId}/{collection}/{id}`.
+ *  The digest asks before it spends a read — and before it lets `currentRowFor`
+ *  interpret an absent document as "deleted since it was queued". */
+export function isEventScoped(collection: AlertedCollection): collection is EventScopedCollection {
+  return EVENT_SCOPED.includes(collection);
+}
+
+/** Where a row's live document ACTUALLY lives, which is the whole reason this
+ *  function exists rather than an inline template: an Event-scoped collection
+ *  nests under the Event, and `bugReports` is top-level. Reading a top-level
+ *  report at the nested path would find nothing and read as "deleted". */
+export function livePathFor(eventId: string, collection: AlertedCollection, docId: string): string {
+  return isEventScoped(collection) ? `events/${eventId}/${collection}/${docId}` : `${collection}/${docId}`;
+}
 
 /** The subset of a Prompt/Proof doc the producers read. Everything is optional
  *  because this reads RAW Firestore snapshots with no converter. */
@@ -166,10 +195,23 @@ export function flattenLabel(value: string): string {
   return value.replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function labelFor(collection: AlertedCollection, docId: string, doc: AlertableDoc): string {
-  const trimmed = flattenLabel((collection === 'items' ? doc.text : doc.itemText) ?? '');
-  if (!trimmed) return docId;
+/** Flatten, clip, and fall back — the one place a row's human subject line is
+ *  derived, whatever kind of document it came from.
+ *
+ *  `unknown`, not `string | undefined`, because every caller feeds it a field
+ *  read straight off a RAW Firestore snapshot with no converter. A hand-written,
+ *  migrated or admin-written document can hold a number or an object there, and
+ *  handing that to `flattenLabel`'s `.replace` throws — which, on the retryable
+ *  abuse trigger, means one malformed document redelivered forever (Phase 4b
+ *  P2). A non-string is simply not a label, so it takes the fallback. */
+function clipLabel(text: unknown, fallback: string): string {
+  const trimmed = flattenLabel(typeof text === 'string' ? text : '');
+  if (!trimmed) return fallback;
   return trimmed.length > LABEL_MAX ? `${trimmed.slice(0, LABEL_MAX - 1)}…` : trimmed;
+}
+
+function labelFor(collection: EventScopedCollection, docId: string, doc: AlertableDoc): string {
+  return clipLabel(collection === 'items' ? doc.text : doc.itemText, docId);
 }
 
 const MODERATION_STATES = ['flagged', 'hidden'];
@@ -200,7 +242,7 @@ const MODERATION_STATES = ['flagged', 'hidden'];
  * A DELETE (`after` undefined) earns nothing: there is nothing left to review.
  */
 export function alertsForWrite(
-  collection: AlertedCollection,
+  collection: EventScopedCollection,
   docId: string,
   before: AlertableDoc | undefined,
   after: AlertableDoc | undefined,
@@ -237,6 +279,23 @@ export function alertsForWrite(
 export interface EnqueueDeps {
   /** Injectable clock, so a test can assert `createdAt` without freezing time. */
   now?: () => number;
+  /**
+   * Let a write failure ESCAPE instead of being logged and swallowed.
+   *
+   * Off by default, because the moderation producers ride a hot content-write
+   * path and ADR 0001 says a queue failure must never fail the write that
+   * triggered it — and their triggers are not retryable, so throwing would only
+   * trade a log line for a louder log line.
+   *
+   * `notifyAbuseBugReport` opts IN, because its situation is the opposite on
+   * both counts: it writes nothing but the queue row, so there is no other write
+   * to protect, and it is declared `retry: true`. Swallowing there converts a
+   * transient Firestore blip into a permanently lost report of harm, while
+   * throwing hands the platform something it can retry — safely, because the
+   * alert ids are deterministic, so a retry that lands after a successful write
+   * is an ALREADY_EXISTS no-op rather than a duplicate.
+   */
+  rethrowWriteErrors?: boolean;
 }
 
 /**
@@ -259,10 +318,11 @@ export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
 }
 
 /**
- * Append this write's alerts to the Event's queue. Best-effort and NEVER throws
- * (ADR 0001): a queue write failing must not fail the moderation write that
- * triggered it, exactly as the #101 notifier's mail failure never did. Returns
- * how many alerts it wrote.
+ * Append this write's alerts to the Event's queue. Best-effort by default and
+ * NEVER throws (ADR 0001): a queue write failing must not fail the moderation
+ * write that triggered it, exactly as the #101 notifier's mail failure never
+ * did. Returns how many alerts it wrote. A caller whose trigger is retryable can
+ * opt into propagation with `rethrowWriteErrors`.
  *
  * `create` rather than `set`, and a deterministic id rather than a random one,
  * so a redelivered trigger is a no-op. `set` would be wrong in the one case
@@ -273,6 +333,20 @@ export function alertDocId(transitionId: string, kind: AdminAlertKind): string {
  * sweep finds work with `where('sentAt', '==', null)` and Firestore's equality
  * filter matches a stored null but not a missing field — an alert without the
  * field would sit in the collection forever, invisible to the drain.
+ *
+ * EVERY ROW CARRIES AN `expiresAt` FROM THE MOMENT IT IS WRITTEN, not only once
+ * it is tombstoned. A queue row holds a COPY of user content — a pending
+ * Prompt's words, a hidden Proof's text, an abuse reporter's description — and
+ * until this existed that copy had exactly one exit: being drained. A row whose
+ * Event is archived before the next sweep is never visited again
+ * (`runAdminAlertSweep` queries `status == 'active'`), so the copy outlived the
+ * source it described, the retention sweep that deletes that source, and any
+ * decision anyone made about it. `PENDING_TTL_MS` is generous enough that no
+ * ordinary backlog is ever reaped — orders of magnitude past the five-minute
+ * sweep, and comfortably inside the source-report retention window — so it only
+ * ever collects rows that were genuinely stranded. `finishBatch` REPLACES the
+ * document on drain, so a delivered row's shorter tombstone expiry supersedes
+ * this one rather than competing with it.
  */
 export async function enqueueAdminAlerts(
   db: AdminAlertFirestore,
@@ -283,23 +357,65 @@ export async function enqueueAdminAlerts(
 ): Promise<number> {
   if (drafts.length === 0) return 0;
   const createdAt = (deps.now ?? Date.now)();
+  // A Date, NOT epoch millis: Firestore's TTL service only considers a
+  // timestamp-typed field, so a number would leave the documented policy
+  // configured and reaping nothing (the same trap `finishBatch` documents).
+  const expiresAt = new Date(createdAt + PENDING_TTL_MS);
   let written = 0;
   for (const draft of drafts) {
     const id = alertDocId(transitionId, draft.kind);
     try {
       await db
         .doc(`events/${eventId}/adminAlerts/${id}`)
-        .create({ ...draft, createdAt, sentAt: null });
+        .create({ ...draft, createdAt, sentAt: null, expiresAt });
       written++;
     } catch (err) {
       // ALREADY_EXISTS is the redelivery path and is a SUCCESS: the alert this
-      // call would have written is already queued. Anything else is a real
-      // failure, logged and swallowed.
+      // call would have written is already queued.
       if (isAlreadyExists(err)) continue;
       console.error('enqueueAdminAlerts: write failed', eventId, draft.kind, draft.docId, err);
+      // Only a failure a retry could actually fix escapes. A permanent one is
+      // logged and acknowledged, because redelivering it forever helps nobody.
+      if (deps.rethrowWriteErrors && isRetryableFirestoreError(err)) throw err;
     }
   }
   return written;
+}
+
+/**
+ * Is this failure worth retrying, or will it fail identically forever?
+ *
+ * A retryable trigger that rethrows EVERYTHING turns a permanent misconfiguration
+ * — a service account without Firestore access, an invalid argument — into an
+ * Eventarc redelivery loop that can never succeed, burning quota and burying the
+ * real error in noise (Phase 4b P2). These are the gRPC statuses that mean "the
+ * request itself is wrong", so retrying is pointless:
+ *
+ *   3 INVALID_ARGUMENT · 5 NOT_FOUND · 6 ALREADY_EXISTS · 7 PERMISSION_DENIED ·
+ *   9 FAILED_PRECONDITION · 11 OUT_OF_RANGE · 12 UNIMPLEMENTED · 16 UNAUTHENTICATED
+ *
+ * Everything else — UNAVAILABLE, DEADLINE_EXCEEDED, ABORTED, INTERNAL, and any
+ * code this does not recognise — is treated as retryable. The default leans that
+ * way deliberately: retrying something permanent wastes invocations, while
+ * acknowledging something transient silently loses a report of harm.
+ */
+const PERMANENT_STATUS_CODES = new Set([3, 5, 6, 7, 9, 11, 12, 16]);
+const PERMANENT_STATUS_NAMES = new Set([
+  'invalid-argument',
+  'not-found',
+  'already-exists',
+  'permission-denied',
+  'failed-precondition',
+  'out-of-range',
+  'unimplemented',
+  'unauthenticated',
+]);
+
+export function isRetryableFirestoreError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'number') return !PERMANENT_STATUS_CODES.has(code);
+  if (typeof code === 'string') return !PERMANENT_STATUS_NAMES.has(code.toLowerCase());
+  return true;
 }
 
 /** Firestore surfaces ALREADY_EXISTS as gRPC status 6; the emulator and some
@@ -316,7 +432,7 @@ function isAlreadyExists(err: unknown): boolean {
  *  which makes a redelivered trigger idempotent rather than duplicative. */
 export async function recordAdminAlerts(
   db: AdminAlertFirestore,
-  collection: AlertedCollection,
+  collection: EventScopedCollection,
   eventId: string,
   docId: string,
   transitionId: string,
@@ -336,6 +452,188 @@ export async function recordAdminAlerts(
     console.error('recordAdminAlerts failed', eventId, collection, docId, err);
     return 0;
   }
+}
+
+// --- Producing: abuse-marked bug reports (#670) ----------------------------------
+
+/** The subset of a `bugReports/{reportId}` document the abuse producer reads.
+ *  Everything is optional because this reads a RAW Firestore snapshot with no
+ *  converter — and because a report written before #670 has no `kind` at all. */
+export interface BugReportDoc {
+  /** `'abuse'` or `'bug'`, normalised at intake by `bugReportContract.cjs`. */
+  kind?: string;
+  /** The reporter's own words — the only human-readable label a report has. */
+  description?: string;
+  /** The Event the report was filed from. `bugReports` is TOP-LEVEL, so this
+   *  field is the ONLY link between a report and an Event's alert queue — and it
+   *  is CLIENT-SUPPLIED, which is why `reporterInEvent` exists. */
+  eventId?: string;
+  /** Server-resolved at intake (`reporterBelongsToEvent`): did this reporter
+   *  actually belong to the Event they named? Written only on abuse reports, so
+   *  its presence means "checked" rather than "defaulted". */
+  reporterInEvent?: boolean;
+  status?: string;
+}
+
+/** The intake contract's own `eventId` shape (`bugReportContract.cjs`), restated
+ *  here because this reads STORED documents rather than a live payload: a report
+ *  written by hand, by a migration, or by an older contract has not been through
+ *  that validator, and an id with a `/` in it would silently reparent the queue
+ *  write. */
+const EVENT_ID_SHAPE = /^[A-Za-z0-9_-]{1,100}$/;
+
+/**
+ * Pure: the alerts one `bugReports/{reportId}` write earns.
+ *
+ * ONE SIGNAL, and it is a TRANSITION rather than a state: the report is
+ * CURRENTLY marked `abuse` and was not before. In practice every abuse report is
+ * a create — the callable writes the document once and `firestore.rules` denies
+ * clients both directions — so the `before` half is not load-bearing today. It
+ * is still the right predicate: it is what keeps a future operator triage write
+ * (a `status` change on an already-abuse report) from re-alerting, and it makes
+ * the function say what it means rather than relying on a collection's current
+ * immutability to be true forever.
+ *
+ * A plain `bug` earns nothing, which is the entire point of the field — the
+ * inbox is where bugs are answered, and mailing an admin about each one would
+ * make the digest useless for the reports that need eyes now.
+ *
+ * A DELETE (`after` undefined) earns nothing, matching `alertsForWrite`.
+ *
+ * AND THE REPORTER HAS TO BELONG TO THE EVENT. `eventId` is client-supplied, so
+ * without this an authenticated player could name any Event in the project and
+ * route arbitrary text into ITS admins' digest — the rate limit caps how much,
+ * not who it reaches. `reporterInEvent` is resolved at intake by
+ * `reporterBelongsToEvent` (the only point in the flow that still has the uid;
+ * by the time this runs the document carries an unresolvable `reporterHash`),
+ * and it is compared STRICTLY to `true`: an absent field, a `'true'` string, or
+ * a hand-written document that never went through intake all fail closed.
+ */
+export function abuseAlertsForWrite(
+  reportId: string,
+  before: BugReportDoc | undefined,
+  after: BugReportDoc | undefined,
+): AdminAlertDraft[] {
+  if (!after) return [];
+  if (after.kind !== 'abuse' || before?.kind === 'abuse') return [];
+  if (after.reporterInEvent !== true) return [];
+  return [
+    {
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: reportId,
+      // The reporter's description, through the same `flattenLabel` barrier a
+      // Prompt's words go through: it is user-submitted text bound for a
+      // plain-text email part whose structure IS its punctuation.
+      label: clipLabel(after.description, reportId),
+      status: typeof after.status === 'string' && after.status ? after.status : 'new',
+      visionFlag: null,
+      reportCount: 0,
+    },
+  ];
+}
+
+/**
+ * The Event an abuse report belongs to, or `null` when there is none to trust.
+ *
+ * `bugReports` is a TOP-LEVEL collection with an `eventId` field, while the
+ * queue is `events/{eventId}/adminAlerts` — so the Event is READ OFF THE
+ * DOCUMENT and never guessed. A report with no usable `eventId` is not filed
+ * against some default Event, because "some default Event" would put a
+ * stranger's abuse report in front of the wrong Event's admins.
+ */
+export function bugReportEventId(after: BugReportDoc | undefined): string | null {
+  const eventId = typeof after?.eventId === 'string' ? after.eventId.trim() : '';
+  return EVENT_ID_SHAPE.test(eventId) ? eventId : null;
+}
+
+/**
+ * The whole abuse producer in one call — the shape `index.ts`'s
+ * `notifyAbuseBugReport` trigger uses.
+ *
+ * NOT best-effort, unlike `recordAdminAlerts`, and the difference is deliberate.
+ * That one guards a moderation write (ADR 0001: the queue must never fail the
+ * content write that triggered it). This trigger writes nothing else — enqueuing
+ * IS its whole job — so there is no other write to protect, and swallowing a
+ * transient failure just loses the alert forever.
+ *
+ * THE EVENT MUST EXIST AND BE ACTIVE, and that read is not defensive
+ * boilerplate. The sweep (`runAdminAlertSweep`) finds work with
+ * `where('status', '==', 'active')`, so this precondition is written to match
+ * the drain's precondition EXACTLY. A queue row under an `eventId` that resolves
+ * to no Event — or to an archived one that may never be reactivated — would
+ * never be visited, never drained and never tombstoned: an orphaned copy of a
+ * report's text sitting in Firestore forever, which is precisely the retention
+ * outcome the tombstone design exists to avoid. One read per ABUSE report (never
+ * per bug: the predicate above runs first) is a cheap price for that.
+ *
+ * The archived case is genuinely reachable in a way it is not for the moderation
+ * producers: those fire on writes to an Event's own content, which stops when
+ * the Event does, while a player can open the app and file a report against an
+ * Event long after it was archived. The report still lands in the inbox; nobody
+ * is mailed about an Event that is over.
+ *
+ * A read that FAILS is treated as unresolvable rather than assumed-present. The
+ * asymmetry with `currentRowFor`'s fail-open is deliberate: there, failing open
+ * keeps an alert the admins should see; here, failing open would MINT one at a
+ * path that may not exist. The report itself is already durably stored and
+ * pullable through `npm run bugs:pull` either way, so the lost thing is a digest
+ * row, not the report.
+ */
+export async function recordBugReportAlerts(
+  db: AdminAlertFirestore,
+  reportId: string,
+  transitionId: string,
+  before: BugReportDoc | undefined,
+  after: BugReportDoc | undefined,
+  deps: EnqueueDeps = {},
+): Promise<number> {
+  // EVERY EARLY RETURN BELOW IS A PERMANENT ANSWER, and every THROW is a
+  // transient one. That split is the whole contract with `notifyAbuseBugReport`,
+  // which is declared `retry: true` (Phase 4b P1).
+  //
+  // Returning 0 tells the platform "handled, do not retry", and it is correct
+  // for the cases below because retrying changes nothing about them: the write
+  // was not an abuse transition, the document names no usable Event, or it names
+  // one that does not exist or is not active. Those are properties of the data.
+  //
+  // A failed READ or a failed WRITE is the opposite: nothing about the report is
+  // wrong, Firestore was briefly unavailable, and the previous version of this
+  // function swallowed exactly that into a silent, permanent loss of a report of
+  // harm. Those now escape so the platform retries them, which is safe because
+  // the alert id is derived from the CloudEvent id — a retry that lands after a
+  // write already succeeded hits ALREADY_EXISTS and is a no-op, never a
+  // duplicate row.
+  const drafts = abuseAlertsForWrite(reportId, before, after);
+  if (drafts.length === 0) return 0;
+  const eventId = bugReportEventId(after);
+  if (!eventId) {
+    console.error('recordBugReportAlerts: abuse report carries no usable eventId', reportId);
+    return 0;
+  }
+  // A read failure PROPAGATES when a retry could fix it, and is acknowledged
+  // when it could not — a permission error on this path will fail identically on
+  // every redelivery, so looping on it only buries the real cause.
+  let event: Record<string, unknown> | undefined;
+  try {
+    event = (await db.doc(`events/${eventId}`).get()).data();
+  } catch (err) {
+    if (isRetryableFirestoreError(err)) throw err;
+    console.error('recordBugReportAlerts: permanent event-read failure; not retrying', eventId, reportId, err);
+    return 0;
+  }
+  if (!event) {
+    console.error('recordBugReportAlerts: abuse report names an unresolvable event', eventId, reportId);
+    return 0;
+  }
+  if (event.status !== 'active') {
+    console.log('recordBugReportAlerts: abuse report names a non-active event; not queueing', eventId, reportId);
+    return 0;
+  }
+  return await enqueueAdminAlerts(db, eventId, drafts, transitionId, {
+    ...deps,
+    rethrowWriteErrors: true,
+  });
 }
 
 // --- Consuming (the digest sweep) ------------------------------------------------
@@ -366,6 +664,13 @@ export interface FrozenDigest {
 }
 
 const batchPath = (eventId: string, batchId: string) => `events/${eventId}/adminAlertBatches/${batchId}`;
+
+/** The frozen request's own retention bound. It holds the fully rendered email —
+ *  the densest copy of user content in the system — so it is written with an
+ *  `expiresAt` of `PENDING_TTL_MS` from the freeze, which is never earlier than
+ *  any row it claims; see the freeze site in `sendAdminDigestForEvent` for why
+ *  an unbounded deadline orphans and a shorter one can duplicate a delivered
+ *  digest. Needs its own collection-group TTL policy (docs/app/phase-1-deploy.md). */
 
 /** Read back a frozen request, or `null` when there is none / it is unusable.
  *  A partial document is treated as absent: re-rendering is recoverable, while
@@ -428,6 +733,50 @@ export const MAX_ATOMIC_WRITES = 450;
  * this module states a timestamp without importing `firebase-admin`.
  */
 export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long an UNDRAINED queue row may live before the same TTL policy reaps it.
+ *
+ * The tombstone TTL above protects the id, not the payload — by the time it
+ * applies, the content is already gone. This one protects the payload, and it
+ * exists because until now a queued row had exactly one exit: being drained. The
+ * sweep only visits `status == 'active'` Events, so a row whose Event is
+ * archived before the next sweep is never looked at again, and its COPY of user
+ * content — a pending Prompt's words, a hidden Proof's text, a reporter's abuse
+ * description — outlives the source it describes, the retention sweep that
+ * deletes that source, and every decision anyone made about it. Nothing else in
+ * the system would ever collect it.
+ *
+ * Thirty days is chosen to be uninteresting: the drain runs every five minutes,
+ * an undeliverable backlog is meant to clear as soon as a recipient exists, and
+ * the source reports themselves are retained ninety days. Anything still sitting
+ * here after a month is stranded rather than pending, and holding a copy of
+ * somebody's report indefinitely is the worse failure.
+ */
+export const PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Extra life given to a FROZEN request on top of its rows' own deadline.
+ *
+ * A later `expiresAt` is not by itself an ordering guarantee. Firestore's TTL
+ * deletion is asynchronous and best-effort, promises no ordering between two
+ * documents, and here the two live in DIFFERENT collection groups under separate
+ * policies — so a batch frozen shortly after its rows were enqueued has a
+ * deadline only minutes later and can genuinely be deleted first (Phase 4b P1).
+ *
+ * That specific ordering is the dangerous one: a freeze deleted while its
+ * claimed rows survive sends the next sweep down the missing-freeze rebuild
+ * path, which re-renders and re-sends — and past Resend's 24-hour window that is
+ * a second copy of a digest that may already have been delivered.
+ *
+ * A week of slack is far beyond the sub-day latency Firestore's TTL actually
+ * exhibits, so the race stops being reachable rather than merely unlikely. The
+ * cost is that the frozen bytes are the one thing in this queue retained past
+ * `PENDING_TTL_MS`, and that is the right trade: keeping a rendered email a few
+ * days longer is a bounded, self-collecting cost, while deleting it early is a
+ * duplicate delivery.
+ */
+export const FROZEN_TTL_MARGIN_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * How long an alert must sit still before it is eligible to be drained.
@@ -533,8 +882,10 @@ function toRecord(snap: AlertSnapshot): AdminAlertRecord | null {
   if (!data) return null;
   const kind = data.kind;
   const collection = data.collection;
-  if (kind !== 'item-created' && kind !== 'content-reported' && kind !== 'moderation') return null;
-  if (collection !== 'items' && collection !== 'proofs') return null;
+  if (kind !== 'item-created' && kind !== 'content-reported' && kind !== 'moderation' && kind !== 'abuse-reported') {
+    return null;
+  }
+  if (collection !== 'items' && collection !== 'proofs' && collection !== 'bugReports') return null;
   const docId = typeof data.docId === 'string' ? data.docId : '';
   if (!docId) return null;
   return {
@@ -581,6 +932,24 @@ export function currentRowFor(
   live: AlertableDoc | undefined,
   readFailed: boolean,
 ): AdminAlertRecord | null {
+  // AN ABUSE REPORT IS EXEMPT FROM THE MODERATION RULES, BUT NOT FROM EXISTENCE.
+  //
+  // It is a RECORD OF A SUBMISSION rather than a state a document is in, and
+  // `bugReports/{id}` carries no `status`/`reportCount` vocabulary for the rules
+  // below to read — so applying them would score every abuse row "resolved" and
+  // drop it the moment it was drained: queued, claimed, tombstoned, never mailed
+  // (#670). Nothing an admin does makes it stop being true, either; a report was
+  // filed, and it stays filed.
+  //
+  // Deletion is the one thing that does end it, and the delay can be long: a
+  // digest that cannot resolve a recipient leaves its alerts pending
+  // indefinitely, and the documented 90-day retention sweep
+  // (`docs/app/bug-reports.md`) can remove the source report in the meantime.
+  // Mailing the copied description and a dead report id AFTER the private source
+  // was deliberately deleted is exactly the retention promise this queue's
+  // tombstones exist to keep, so an absent report retires the row. A FAILED read
+  // still fails open, like every other kind.
+  if (alert.kind === 'abuse-reported') return readFailed || live ? alert : null;
   if (readFailed) return alert; // fail-open: keep the stored facts rather than lose the alert
   if (!live) return null; // deleted since it was queued — nothing left to review
   const status = typeof live.status === 'string' ? live.status : 'unknown';
@@ -642,6 +1011,46 @@ export function currentRowFor(
  * the id survives to keep failing `create`, and a Firestore TTL policy on
  * `expiresAt` reaps it after the redelivery window.
  */
+/**
+ * Does this claimed page carry an abuse row whose source report is GONE?
+ *
+ * The frozen-replay path deliberately re-derives nothing, because any difference
+ * at all would 409 against the key the batch has already used. The roster was
+ * the first exception (see `sendAdminDigestForEvent`), and a deleted bug report
+ * is the second, for the same underlying reason: a freeze is written BEFORE the
+ * send, so a crash or a rejected send leaves bytes that may never have been
+ * delivered — and a batch that keeps failing is retried every sweep for as long
+ * as it keeps failing, which is easily long enough for the 90-day retention
+ * sweep to remove a report the frozen bytes quote.
+ *
+ * Scoped to abuse rows on purpose. A deleted Prompt or Proof is ordinary
+ * moderation churn, and replaying a stale row about one is the trade #638 made
+ * knowingly; a deleted bug report is a deliberate act of retention on private
+ * evidence, and mailing it afterwards is the one thing the tombstone design
+ * promises not to do.
+ *
+ * A FAILED read is not a deletion, matching `currentRowFor`'s fail-open.
+ */
+async function frozenAbuseSourceMissing(
+  db: AdminAlertFirestore,
+  eventId: string,
+  page: readonly AlertSnapshot[],
+): Promise<boolean> {
+  for (const snapshot of page) {
+    const data = snapshot.data();
+    if (data?.kind !== 'abuse-reported') continue;
+    const docId = typeof data.docId === 'string' ? data.docId : '';
+    if (!docId) continue;
+    try {
+      const live = await db.doc(livePathFor(eventId, 'bugReports', docId)).get();
+      if (live.data() === undefined) return true;
+    } catch (err) {
+      console.error('sendAdminDigestForEvent: frozen abuse source re-read failed', eventId, docId, err);
+    }
+  }
+  return false;
+}
+
 export async function sendAdminDigestForEvent(
   db: AdminAlertFirestore,
   eventId: string,
@@ -694,6 +1103,18 @@ export async function sendAdminDigestForEvent(
       // leaves the original frozen batch intact for a later safe retry.
       return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
     }
+    // THE SECOND THING A FROZEN REQUEST MUST NOT SIMPLY TRUST: that the bug
+    // report it quotes still exists (#670). Same escape hatch as the roster
+    // above, and for the same reason — abandon rather than replay, so the rows
+    // re-batch from scratch and `currentRowFor` retires the deleted one on the
+    // way past. Re-rendering here instead would change the bytes under a key
+    // that has already been used, which is the 409 that strands a batch forever.
+    if (await frozenAbuseSourceMissing(db, eventId, page)) {
+      console.log(`sendAdminDigestForEvent: an abuse source was deleted under batch ${batchId}; re-batching`);
+      const release = await releaseBatch(db, eventId, batchId, page.map((d) => d.id));
+      if (release === 'released') return { sent: 0, retired: 0, reason: 'rebatched' };
+      return { sent: 0, retired: 0, reason: release === 'stale' ? 'claim-lost' : 'claim-failed' };
+    }
     const replayed = await (deps.send ?? (await import('./email')).sendEmail)({
       to: frozen.to,
       subject: frozen.subject,
@@ -711,6 +1132,37 @@ export async function sendAdminDigestForEvent(
       now,
     );
     return { sent: frozen.alertCount, retired: 0 };
+  }
+
+  // A MISSING FREEZE ON PAST-DUE ROWS IS NOT A REBUILD, it is a retirement.
+  //
+  // The rebuild path exists for one legitimate case: the claim commits before
+  // the freeze is written, so a crash in between leaves claimed rows with no
+  // frozen document and — correctly, because no freeze means nothing was sent —
+  // the batch is rebuilt. That case is SECONDS old.
+  //
+  // Rows that are already past their own retention deadline are the opposite
+  // shape. A batch that keeps failing to send HAS a freeze (it is written before
+  // the send), so an old claim with no freeze means the freeze existed and was
+  // reaped — and rebuilding then re-sends bytes that may already have been
+  // delivered, well outside Resend's 24-hour window, which is the one thing the
+  // frozen-request design exists to prevent (Phase 4b P1). The margin above
+  // makes this unreachable in practice; this is the second line, and it errs
+  // toward silence only for rows whose retention window has already closed.
+  if (!frozen && page.length > 0) {
+    const stale = page.every((doc) => {
+      const createdAt = doc.data()?.createdAt;
+      return typeof createdAt === 'number' && createdAt > 0 && createdAt + PENDING_TTL_MS <= now;
+    });
+    if (stale) {
+      console.error(
+        `sendAdminDigestForEvent: claimed rows are past due with no frozen request; retiring rather than risking a duplicate`,
+        eventId,
+        batchId,
+      );
+      await finishBatch(db, eventId, batchId, page.map((d) => d.id), now);
+      return { sent: 0, retired: page.length, reason: 'nothing-current' };
+    }
   }
 
   // Unreadable rows are RETIRED, not merely skipped. Skipping them leaves them
@@ -733,10 +1185,19 @@ export async function sendAdminDigestForEvent(
 
   // Re-read each piece of content ONCE, however many alerts point at it, then
   // render every row from what the document says now.
+  // EVERY collection is re-read, at ITS OWN path — `livePathFor` is what keeps a
+  // top-level `bugReports/{id}` from being looked up under the Event, where it
+  // would read as absent and therefore as "deleted since it was queued". The map
+  // key stays `{collection}/{docId}`, which is already unique across both
+  // shapes. An abuse row consumes only the doc's PRESENCE (`currentRowFor` reads
+  // no moderation field from it), so the `AlertableDoc` cast is a convenience
+  // there rather than a claim about the document's shape.
   const live = new Map<string, { doc: AlertableDoc | undefined; failed: boolean }>();
   for (const key of new Set(alerts.map((a) => `${a.collection}/${a.docId}`))) {
+    const [collection, docId] = [key.slice(0, key.indexOf('/')) as AlertedCollection, key.slice(key.indexOf('/') + 1)];
     try {
-      live.set(key, { doc: (await db.doc(`events/${eventId}/${key}`).get()).data() as AlertableDoc | undefined, failed: false });
+      const path = livePathFor(eventId, collection, docId);
+      live.set(key, { doc: (await db.doc(path).get()).data() as AlertableDoc | undefined, failed: false });
     } catch (err) {
       console.error('sendAdminDigestForEvent: content re-read failed', eventId, key, err);
       live.set(key, { doc: undefined, failed: true });
@@ -801,9 +1262,47 @@ export async function sendAdminDigestForEvent(
   // and the surviving freeze might not be the request Resend actually accepted.
   // With `create` exactly one render wins; the loser discards its own bytes and
   // replays the winner's, so one batch id can only ever name one request.
+  //
+  // IT CARRIES ITS OWN `expiresAt`. This document holds the FULLY RENDERED email
+  // — every pending Prompt's words and every abuse description in the batch — so
+  // it is the single densest copy of user content in the system, and until this
+  // existed it had no expiry at all: repeated delivery failures keep a frozen
+  // batch alive indefinitely, the pending TTL reaps the claimed rows underneath
+  // it, and no later sweep can discover the batch to replay, release or delete
+  // it — an orphaned copy of the text with nothing left pointing at it
+  // (Phase 4b P1).
+  //
+  // THE FREEZE MUST OUTLIVE EVERY ROW IT CLAIMS, with room to spare. The rows
+  // were created at or before this moment and carry the same span, so
+  // `PENDING_TTL_MS` from now is already never earlier than any of theirs — but
+  // "not earlier" is not enough on its own, because TTL deletion is asynchronous
+  // and unordered across two collection groups, and a batch frozen minutes after
+  // its rows would be racing them. `FROZEN_TTL_MARGIN_MS` turns that race into a
+  // week of slack.
+  //
+  // Both directions here are hazards, and two earlier attempts each fell into
+  // one of them (Phase 4b P1, twice). If the freeze expires EARLY relative to
+  // its claimed rows, the next sweep finds claimed rows with no frozen document
+  // and takes the missing-freeze rebuild path — re-rendering and re-sending
+  // under a key that may still be live (a 409 that strands the batch) or one
+  // whose 24-hour Resend window has closed (a second copy of a digest that was
+  // already delivered, if the original send landed but its response or clean-up
+  // was lost). Inheriting the earliest row's deadline caused the first; a fixed
+  // week caused the second, because rows live thirty days.
+  //
+  // Outliving the rows is the safe direction, and it is bounded: the document
+  // reaps itself on its own deadline whether or not anything ever finds it
+  // again. It is the one thing here retained past `PENDING_TTL_MS`, by the
+  // margin, and that is deliberate — see `FROZEN_TTL_MARGIN_MS`.
+  //
+  // This needs its OWN TTL policy. Firestore TTL is scoped to a collection
+  // group, so the `adminAlerts` policy does not reach `adminAlertBatches`;
+  // without the second policy this field is inert and the rendered email
+  // persists (docs/app/phase-1-deploy.md § 1a).
+  const batchExpiresAt = new Date(now + PENDING_TTL_MS + FROZEN_TTL_MARGIN_MS);
   let outbound = payload;
   try {
-    await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now });
+    await db.doc(batchPath(eventId, batchId)).create({ ...payload, createdAt: now, expiresAt: batchExpiresAt });
   } catch (err) {
     if (!isAlreadyExists(err)) {
       console.error('sendAdminDigestForEvent: freezing the outbound request failed (nothing sent)', eventId, err);

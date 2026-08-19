@@ -924,6 +924,12 @@ export function e2eParamValues(projectId) {
     ADMIN_NOTIFY_EMAIL: '',
     APP_BASE_URL: 'http://127.0.0.1:4173',
     BUG_REPORT_APP_CHECK: 'false',
+    // Off for the same reason as BUG_REPORT_APP_CHECK above (#548): the
+    // emulator issues no App Check tokens, so enforcing attestation here would
+    // fail every handoff mint and exchange the e2e run makes. Present rather
+    // than omitted because the emulator prompts for any declared param its
+    // dotenv files do not name — and blocks on that prompt forever.
+    AUTH_HANDOFF_APP_CHECK: 'false',
     EMAIL_UNSUBSCRIBE_URL: `http://127.0.0.1:${FUNCTIONS_EMULATOR_PORT}/${projectId}/us-central1/emailUnsubscribe`,
   };
 }

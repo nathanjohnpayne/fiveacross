@@ -24,6 +24,10 @@ const H = vi.hoisted(() => ({
 }));
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
+// #559: ReviewQueue (mounted via Admin) now imports `track`, reaching
+// `../analytics` — mocked directly so the real module's own `../firebase`
+// (analyticsReady) dependency never has to be satisfied here.
+vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('firebase/firestore', () => {
   const makeRef = (kind: string, args: unknown[]) => {
     const ref: Record<string, unknown> = { kind, args };

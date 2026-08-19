@@ -21,6 +21,10 @@ import { resolvedCanonicalHost } from './canonicalHost';
  * #30) are catalogued and type-checked here so each ticket can add its one
  * call site as a one-line `track(...)` addition; this ticket (#38) does not
  * build either flow.
+ * `prompt_suggestion_submitted` (components/ItemPool.tsx),
+ * `prompt_suggestion_approved` (components/admin/ReviewQueue.tsx), and
+ * `community_prompt_dealt` (data/api.ts) are the Community Prompt entry-point
+ * trio (#559) — see each event's own comment below for params and posture.
  * `mark_square` does NOT live only in Board.tsx (#721 fixed this stale claim,
  * which the spec repeated at specs/w4-honor-pledge.md): it fires from every
  * path that transitions a Square to `marked: true`, `source`-tagged so the
@@ -117,6 +121,33 @@ export const GA4_EVENTS = [
   // server-observed rows and Board's listener delivers them at-least-once
   // across reloads/devices; PostHog reconciliation groups by `transitionId`.
   'echo_mark',
+  // Community Prompt entry point, submitter states, and attribution (#559, on
+  // #557's Day-targeting model — specs/community-prompt-targeting.md). Every
+  // param is a count/id/uid/boolean; NONE carries Prompt text, per this
+  // catalog's sanitization policy (specs/posthog-analytics.md § "Payload
+  // hygiene") and the #33 catalog convention.
+  //
+  // A Player submitted a suggestion ("put it on tomorrow's card"). Params:
+  // `hasTargetDay` (whether a Day could still be named at submission),
+  // `dayIndex` (the resolved/explicit target, omitted when untargeted).
+  // Fired alongside the existing generic `add_item` — this is the
+  // Community-Prompt-specific companion event this ticket's dashboards read,
+  // not a replacement. Call site: components/ItemPool.tsx.
+  'prompt_suggestion_submitted',
+  // An Admin approved a submission out of the Approvals queue. Params:
+  // `outcome` (the `ApprovalPlacement.outcome` #557 already computes: 'placed'
+  // | 'untargeted' | 'retained' — never the no-op 'stale'/'missing' verdicts,
+  // which approved nothing), `dayIndex` (the Day it landed on, or absent for
+  // 'untargeted'/'retained'). Fired once per approved row, including each row
+  // of a bulk approve. Call site: components/admin/ReviewQueue.tsx.
+  'prompt_suggestion_approved',
+  // A freshly-DEALT Board was observed to carry one or more Community Prompt
+  // Squares — client-observed, like `most_loved_photo_frozen`, and aggregate
+  // rather than per-Square (no durable-outbox dedupe need: every call site
+  // fires once, only after its own transaction commits a genuinely new deal).
+  // Params: `dayIndex`, `count` (Community Prompt Squares on this card).
+  // Call site: data/api.ts (joinAndDeal, dealDayCard, reshuffleBoard).
+  'community_prompt_dealt',
 ] as const;
 
 export type GA4EventName = (typeof GA4_EVENTS)[number];

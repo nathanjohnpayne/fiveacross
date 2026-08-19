@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react';
 import type { ItemDoc } from '../types';
 
 // specs/d15-approvals.md, component layer (RTL-jsdom). Drives the REAL ItemPool
@@ -14,6 +14,11 @@ const H = vi.hoisted(() => ({
   user: { uid: 'u1' } as { uid: string } | null,
   items: [] as ItemDoc[],
   myPending: [] as ItemDoc[],
+  myActive: [] as ItemDoc[],
+  // Undefined by default (no schedule) — this file's existing assertions
+  // predate #559 and don't exercise scheduled/approved/not-selected states.
+  // Overridden per-test where the ticking-clock timer needs a real schedule.
+  event: undefined as { days?: { index: number; unlockAt: number }[] } | undefined,
   addItem: vi.fn(),
   reportItem: vi.fn(),
 }));
@@ -25,7 +30,15 @@ vi.mock('../hooks/useData', () => ({
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   useItems: () => ({ items: H.items, loading: false }),
-  useMyPendingItems: () => ({ items: H.myPending, loading: false }),
+  useMyPendingItems: () => ({ items: H.myPending, loading: false, hasServerData: true }),
+  // #559 round 2 (Codex P2, PR #845): ItemPool's own unfiltered "my active
+  // submissions" query — deliberately SEPARATE from `H.items` (the public
+  // pool), mirroring `useMyActiveItems`'s own doc comment.
+  useMyActiveItems: () => ({ items: H.myActive, loading: false, hasServerData: true }),
+  // #559: ItemPool now reads the Day schedule for its submitter-state pills
+  // AND its ticking-clock timer (round 4). `H.event` defaults to no
+  // schedule; overridden per-test for the clamp regression below.
+  useEventDoc: () => ({ data: H.event }),
 }));
 vi.mock('../data/api', () => ({
   addItem: (...a: unknown[]) => H.addItem(...a),
@@ -37,8 +50,9 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 // #610: ItemPool reads EVENT_ID for the explainer's event-keyed storage key.
 vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
-import ItemPool from './ItemPool';
+import ItemPool, { APPROVAL_GRACE_MS } from './ItemPool';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
+import { track } from '../analytics';
 
 const item = (id: string, over: Partial<ItemDoc> = {}): ItemDoc =>
   ({
@@ -59,6 +73,8 @@ beforeEach(() => {
   H.user = { uid: 'u1' };
   H.items = [];
   H.myPending = [];
+  H.myActive = [];
+  H.event = undefined;
 });
 
 describe('ItemPool submission (specs/d15-approvals.md)', () => {
@@ -69,6 +85,24 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false);
+  });
+
+  // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
+  // prove a call site actually FIRES an event with sane params — this pins
+  // the real `add()` handler's `prompt_suggestion_submitted` emission, no
+  // Prompt text in the payload, `hasTargetDay` reflecting the write's own
+  // (mocked, here undefined-resolving) result rather than a guess.
+  it('fires prompt_suggestion_submitted with no Prompt text, alongside the existing add_item', async () => {
+    render(<ItemPool />);
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'A new prompt' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(track).toHaveBeenCalledWith('add_item'));
+    expect(track).toHaveBeenCalledWith('prompt_suggestion_submitted', { hasTargetDay: false });
+    for (const call of (track as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('A new prompt');
+    }
   });
 
   it('a half-typed suggestion holds back the automatic post-deploy reload', async () => {
@@ -120,6 +154,163 @@ describe("A submitter's own pending item (specs/d15-approvals.md)", () => {
     H.myPending = [item('pending-1', { text: 'Just submitted', status: 'pending' })];
     render(<ItemPool />);
     expect(screen.getByText('Just submitted')).toBeInTheDocument();
+  });
+
+  // #559, Codex P2 on PR #845: once a locally-tracked submission is approved,
+  // it lands in BOTH `useItems`' active pool AND the local tracker's own
+  // resolved status list — rendering `items` unfiltered duplicated the row.
+  // This jsdom project ships no localStorage of its own (same stub every
+  // other localStorage-dependent test in this file / CoachOverlay.test /
+  // reshuffle-intro.test uses) — stubbed and torn down within the test since
+  // no other test in this describe block needs it.
+  it('never renders an approved own-submission twice — once as a plain pool row and once with its status pill', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage);
+    try {
+      const mine = item('mine-1', { status: 'active', text: 'My approved prompt' });
+      // Present in BOTH the public pool AND the submitter-scoped active
+      // query (#559 round 2) — exactly the normal case for an approved
+      // submission that hasn't been presentationally hidden.
+      H.items = [mine];
+      H.myActive = [mine];
+      localStorage.setItem(
+        'gcb.mySuggestions.ev-1.u1',
+        JSON.stringify([{ id: 'mine-1', text: 'My approved prompt', submittedAt: 1 }]),
+      );
+      render(<ItemPool />);
+      expect(screen.getAllByText('My approved prompt')).toHaveLength(1);
+      const row = screen.getByText('My approved prompt').closest('.row') as HTMLElement;
+      expect(row.querySelector('.pill')?.textContent).toMatch(/approved/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // #559, Codex P2, PR #845 rounds 8 + 9: `useMyPendingItems`/`useMyActiveItems`
+  // are independent listeners, so an admin's approval can land the
+  // pending-removal snapshot before the active-addition snapshot — for a
+  // submission this device has NEVER before seen active (round 7's
+  // `lastKnownStatus` cache still unset), that overlap used to read
+  // "not selected" the instant the pending listener fired. `APPROVAL_GRACE_MS`
+  // covers it with a REAL timer (round 9 — a plain ref-diff, the round-8 cut,
+  // relied on some LATER unrelated render to notice the window had passed,
+  // which a genuinely rejected submission — no active arrival ever coming —
+  // might never get), and genuinely ages out to `not_selected` once that
+  // timer fires with nothing having resolved — pinning both halves against
+  // ItemPool's real render cycle, not just the pure `deriveMySubmissions`
+  // unit above.
+  describe('the pending→active approval-race grace window (#559, Codex P2, PR #845 rounds 8 + 9)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function seedTrackedMine() {
+      const store = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      } as unknown as Storage);
+      localStorage.setItem(
+        'gcb.mySuggestions.ev-1.u1',
+        JSON.stringify([{ id: 'mine-1', text: 'About to be approved', submittedAt: 1 }]),
+      );
+    }
+
+    it('keeps reporting "pending" through the grace window, then ages out to "not selected" once it elapses with no active arrival', async () => {
+      seedTrackedMine();
+      try {
+        H.myPending = [item('mine-1', { text: 'About to be approved', status: 'pending' })];
+        const { rerender } = render(<ItemPool />);
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // The pending listener's removal snapshot lands; the active
+        // listener's addition has NOT arrived (and, in this test, never
+        // will) — a genuine rejection.
+        H.myPending = [];
+        await act(async () => rerender(<ItemPool />));
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // Still within the window, and still nothing active — stays graced.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(APPROVAL_GRACE_MS - 1);
+        });
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // The window elapses with no active arrival — the timer itself (not
+        // some unrelated render) is what resolves this to "not selected".
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1);
+        });
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/not selected/i);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('resolves EARLY, before the grace window elapses, the moment the active listener catches up', async () => {
+      seedTrackedMine();
+      try {
+        H.myPending = [item('mine-1', { text: 'About to be approved', status: 'pending' })];
+        const { rerender } = render(<ItemPool />);
+        H.myPending = [];
+        await act(async () => rerender(<ItemPool />));
+        expect(screen.getByText('About to be approved').closest('.row')).toHaveTextContent(/pending review/i);
+
+        // Still well within the window when the active listener's own
+        // snapshot lands — resolves immediately, not on the timer. No Day
+        // schedule is configured here (H.event is undefined by default), so
+        // an untargeted active row derives to 'approved' — the point under
+        // test is EARLY resolution to the live document's real status, not
+        // the specific status itself (that split is `submitterStatus`'s own
+        // contract, covered elsewhere).
+        H.myActive = [item('mine-1', { text: 'About to be approved', status: 'active' })];
+        await act(async () => rerender(<ItemPool />));
+        let row = screen.getByText('About to be approved').closest('.row') as HTMLElement;
+        expect(row).toHaveTextContent(/approved/i);
+        expect(row).not.toHaveTextContent(/pending review/i);
+
+        // Advancing the rest of the way past the (already-cleared) window is
+        // a no-op — the early resolution stands.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(APPROVAL_GRACE_MS);
+        });
+        row = screen.getByText('About to be approved').closest('.row') as HTMLElement;
+        expect(row).toHaveTextContent(/approved/i);
+        expect(row).not.toHaveTextContent(/pending review/i);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
+  // #559, Codex P1, PR #845 round 4: an unclamped `setTimeout(..., nextUnlock
+  // - Date.now())` overflows the 32-bit signed int delay browsers accept once
+  // the next unlock is more than ~24.9 days out — which they clamp to ~0ms,
+  // firing near-instantly, recomputing the SAME far-off target, and re-arming
+  // an equally near-instant timer forever. This pins the fix: the delay
+  // handed to `setTimeout` never exceeds the clamp, even for a schedule whose
+  // next unlock is 30 days away.
+  it('clamps its ticking-clock timer to the 32-bit setTimeout max for a Day more than ~24.9 days out', () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      H.event = { days: [{ index: 0, unlockAt: Date.now() + 30 * 24 * 60 * 60 * 1000 }] };
+      render(<ItemPool />);
+      const delays = setTimeoutSpy.mock.calls.map((call) => call[1]).filter((d): d is number => typeof d === 'number');
+      expect(delays.length).toBeGreaterThan(0);
+      for (const d of delays) {
+        expect(d).toBeLessThanOrEqual(2_147_483_647);
+      }
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
   });
 });
 

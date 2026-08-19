@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router';
 import { Play, Pause, Heart } from 'lucide-react';
 import { useFeed, useEventDoc, useMyDayBoards, useAllDoubts, useAllHearts, useMyPlayer } from '../hooks/useData';
 import { requestOpenSquare } from '../hooks/useOpenSquare';
+import { requestOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
+import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
+import TomorrowsCardInvite from './TomorrowsCardInvite';
 import { useAuth } from '../auth/AuthContext';
 import { reportProof, deleteProof } from '../data/proofs';
 import { resolveDisplayName } from '../data/api';
@@ -934,6 +937,14 @@ export default function ProofFeed() {
   // (#211/#216). Read-only; absent while loading or on a pre-days[] event, in
   // which case dayChipLabel falls back to a bare "Day N".
   const { data: event } = useEventDoc();
+  // "Put it on tomorrow's card" (#559) reads a clock for its eligibility
+  // check, and without a live tick that check only re-evaluates on some
+  // OTHER render — a Feed left open past the last targetable Day's
+  // `unlockAt` would keep showing the invitation and opening a flow with
+  // nothing left to target (CodeRabbit Minor, #845). Shared with
+  // Board.tsx/ItemPool.tsx's identical need — see `useNextUnlockClock`'s own
+  // doc comment (Codex P2, PR #845 round 5).
+  const now = useNextUnlockClock(event?.days);
   // ONE flat Doubts subscription for the whole Feed (#262): the doubts
   // collection is event-flat, so a single unfiltered read powers every proof
   // card's "👀 cleared N doubts" pill. Ban semantics ride useAllDoubts.
@@ -1088,6 +1099,12 @@ export default function ProofFeed() {
   if (!entries.length)
     return (
       <>
+        {/* "Put it on tomorrow's card" entry point (#559) — a quiet or brand-
+            new Event's Feed has nothing to scroll, but that is exactly when a
+            first suggestion matters most; the SAME early-return trap Codex/
+            CodeRabbit flagged on Board.tsx's locked-Day branches applies here
+            (Codex P2, CodeRabbit Major #845). */}
+        <TomorrowsCardInvite days={event?.days ?? []} now={now} onOpen={requestOpenSuggestPanel} />
         <div className="center muted">Nothing in the feed yet. Somebody do something.</div>
         {whoListSheet}
       </>
@@ -1124,6 +1141,16 @@ export default function ProofFeed() {
 
   return (
     <div className="list">
+      {/* "Put it on tomorrow's card" entry point (#559) — the SAME component
+          Board.tsx mounts on the Card, hidden once no later eligible Day
+          remains. `now` is this component's own ticking clock (declared
+          above, alongside `event`) — not a fresh `Date.now()` per render —
+          so a Feed left open across the last targetable Day's `unlockAt`
+          re-evaluates and hides the invitation on its own (CodeRabbit Minor,
+          #845). `onOpen` only signals the intent — `SuggestPanelBridge.tsx`
+          (App.tsx) does the actual navigation, the SAME split Board.tsx
+          uses, so this isn't a special case. */}
+      <TomorrowsCardInvite days={event?.days ?? []} now={now} onOpen={requestOpenSuggestPanel} />
       {/* The Hearts cue (#534/#561, specs/feed-hearts.md): a quiet standing
           invitation while Hearts still count toward the Most-Loved Photo
           freeze — no streaks, no badges, no notification pressure, and it

@@ -18,7 +18,7 @@
  * tutorial-exclusion rule ever changes, change it here too.
  */
 
-import { normalizePool } from './poolVocab';
+import { isCeremonialDay } from './scoringVocab';
 // Declaration-only shared contract (the daily-engagement-email precedent): the
 // separately-rooted Functions compiler can consume `src/domainTypes.d.ts`
 // without emitting an app file, so both the client mirror
@@ -37,7 +37,7 @@ export interface FinaleDayStat {
 /** The subset of a `PlayerDoc` the finale content reads. `bingoCount` /
  *  `squaresMarked` / `firstBingoAt` are the cruise-wide root AGGREGATES
  *  (`src/game/logic.ts` `aggregatePlayerStats`); `dayStats` is the per-Day
- *  breakdown the podium re-aggregates to exclude the ceremonial farewell Day. */
+ *  breakdown the podium re-aggregates to exclude the ceremonial Days. */
 export interface FinalePlayer {
   uid: string;
   displayName: string;
@@ -48,12 +48,17 @@ export interface FinalePlayer {
 }
 
 /** The subset of a `DayDef` the finale content reads. A Day is Tutorial only
- *  when its `tutorial` flag is set; pool identity and Tutorial framing are
- *  independent. */
+ *  when its `tutorial` flag is set, and ceremonial only per its stated Scoring
+ *  Policy; pool identity, Tutorial framing and Scoring Policy are three
+ *  independent facts (ADR 0011). */
 export interface FinaleDay {
   index: number;
   tutorial?: boolean;
   pool?: string; // 'main' | 'embark' | 'farewell'
+  /** `'competitive' | 'ceremonial'`, absent on every doc written before ADR
+   *  0011. Typed loosely because this side reads RAW Firestore maps; resolve it
+   *  through `scoringForDay` (scoringVocab.ts), never by direct comparison. */
+  scoring?: string;
 }
 
 /** One Day's pinned First to BINGO honor doc (`DayMetaDoc.firstBingo`), read from
@@ -106,12 +111,23 @@ export function tutorialDayIndexes(days: readonly FinaleDay[] | undefined): Set<
   return s;
 }
 
-/** The farewell Day's `index`, or `-1` when the schedule has none (a non-Phase-1.5
- *  event). The farewell Day unlocks AT the freeze, so its marks are all post-freeze
- *  and must never move the frozen standings — the podium excludes this Day. */
-export function farewellDayIndex(days: readonly FinaleDay[] | undefined): number {
-  const f = (days ?? []).find((d) => normalizePool(d.pool) === 'closing');
-  return f ? f.index : -1;
+/** The CEREMONIAL Day indexes — the Days whose Scoring Policy is `ceremonial`
+ *  (ADR 0011). Their marks never move the standings, so the podium excludes
+ *  them; on the cruise shape that Day unlocks AT the freeze, so its marks are
+ *  all post-freeze anyway.
+ *
+ *  MUST stay identical to `ceremonialDayIndexSet` in `src/game/logic.ts`, and
+ *  `tests/functions/finale-parity.test.ts` pins the two against one fixture
+ *  schedule. This replaced a `farewellDayIndex` that resolved the FIRST
+ *  closing-pool Day and excluded that one index: a set keyed on stated scoring
+ *  keeps a competitive final morning in the standings, and stops a second
+ *  ceremonial Day from silently counting. */
+export function ceremonialDayIndexes(days: readonly FinaleDay[] | undefined): Set<number> {
+  const s = new Set<number>();
+  for (const d of days ?? []) {
+    if (isCeremonialDay(d)) s.add(d.index);
+  }
+  return s;
 }
 
 /** A Player's EFFECTIVE Event-wide First to BINGO: the earliest `firstBingoAt`
@@ -135,23 +151,36 @@ function effectiveFirstBingoAt(
   return player.firstBingoAt;
 }
 
-/** A Player's standings row for the podium, re-aggregated to EXCLUDE the farewell
- *  Day (the ceremonial-freeze rule). When the Player has no `dayStats` breakdown
- *  (a legacy roster) the root totals stand — there is nothing to exclude. */
+/** A Player's standings row for the podium, re-aggregated to EXCLUDE every
+ *  CEREMONIAL Day (ADR 0011). When the Player has no `dayStats` breakdown (a
+ *  legacy roster), or the schedule has no ceremonial Day at all, the root totals
+ *  stand — there is nothing to exclude, and re-summing the buckets anyway would
+ *  rewrite a legacy/hybrid row whose roots and buckets disagree.
+ *
+ *  Byte-identical to `podiumStandingRow` in `src/data/finale.ts`, including that
+ *  empty-set passthrough — the parity test compares the two builders' output. */
 function podiumStandingRow(
   player: FinalePlayer,
-  farewellIndex: number,
+  ceremonial: ReadonlySet<number>,
   isTutorialDay: (dayIndex: number) => boolean,
+  withinFreeze: (at: number | null) => number | null = (at) => at,
 ): FinalePlayer {
-  const firstBingoAt = effectiveFirstBingoAt(player, isTutorialDay);
+  // RANKING first-bingo: Tutorial OR ceremonial (ADR 0011), mirroring
+  // `rankingExcludedDay` in `src/game/logic.ts`. `compareFinalePlayers` breaks
+  // ties on this timestamp, so a ceremonial Mark must not decide the podium
+  // while its bingos and squares are excluded. The First to BINGO HONOUR below
+  // keeps its own tutorial-only value.
+  const firstBingoAt = withinFreeze(
+    effectiveFirstBingoAt(player, (i: number) => isTutorialDay(i) || ceremonial.has(i)),
+  );
   const dayStats = player.dayStats;
-  if (!dayStats || farewellIndex < 0) {
+  if (!dayStats || ceremonial.size === 0) {
     return { ...player, firstBingoAt };
   }
   let bingoCount = 0;
   let squaresMarked = 0;
   for (const [key, stat] of Object.entries(dayStats)) {
-    if (Number(key) === farewellIndex) continue;
+    if (ceremonial.has(Number(key))) continue;
     bingoCount += stat.bingoCount;
     squaresMarked += stat.squaresMarked;
   }
@@ -232,32 +261,46 @@ function spokenHour(unlockAt: number, timeZone: string): string {
 }
 
 /**
- * "standings freeze at 8 a.m" — the Event's ACTUAL closing-Day unlock,
- * formatted in the Event's timezone (#800). Both rendering paths that quote
- * the freeze time used to hardcode this as the literal "8 a.m." regardless of
- * the schedule; this is the one place that now derives it from
- * `farewellUnlockAt`, so an Event whose closing Day unlocks at, say, 11:00
- * announces "11 a.m.", not a copy-pasted 8. `runFinaleBeats`
+ * "standings freeze at 8 a.m" — the Event's ACTUAL Standings Freeze, formatted
+ * in the Event's timezone (#800). Both rendering paths that quote the freeze
+ * time used to hardcode this as the literal "8 a.m." regardless of the
+ * schedule; this is the one place that now derives it, so an Event that freezes
+ * at, say, 11:00 announces "11 a.m.", not a copy-pasted 8. `runFinaleBeats`
  * (`functions/src/unlockDay.ts`) computes this once and writes it into the
  * `last_call` Moment's payload; `src/lastCallCopy.ts`'s client reconstruction
  * reads that same persisted string rather than reformatting the instant
  * itself, so the two rendering paths cannot drift apart.
+ *
+ * WHICH INSTANT (#800 landed before ADR 0011, #551, and the answer changed).
+ * The argument is the RESOLVED Standings Freeze — `times.standingsFreezeAt`,
+ * which is the configured `EventDoc.standingsFreezeAt` when the doc carries a
+ * usable one and the first ceremonial Day's `unlockAt` otherwise. It was
+ * originally the closing Day's unlock, and for both live Events those are the
+ * same instant to the millisecond (Bodega pins `standingsFreezeAt ==
+ * days[3].unlockAt`), so no shipped copy changes. It matters for the shape ADR
+ * 0011 exists for: an Event whose final morning plays competitively until an
+ * 11:00 check-out has NO closing-Day unlock that equals its freeze, and the
+ * copy must quote the freeze the standings actually observe — otherwise this
+ * function would confidently announce the wrong deadline, which is exactly the
+ * bug #800 closed, one layer up. The parameter is named for the concept rather
+ * than the Day for that reason; the exported name is kept as-is so #800's own
+ * tests and call sites are untouched.
  *
  * `timeZone` is passed through `normalizeTimezone` first (#800 Codex P2): a
  * missing/malformed value resolves to `DEFAULT_TIMEZONE` ('Europe/Rome'), the
  * SAME legacy default `eventConverter` applies client-side, not UTC — a raw
  * Firestore Event doc read here (bypassing the converter) must still land on
  * the zone the client would resolve to. Falls back to `DEFAULT_FREEZE_PHRASE`
- * when `farewellUnlockAt` is missing/non-finite or formatting still throws,
- * so a malformed schedule degrades to the historical literal rather than
- * crashing the finale beat.
+ * when the instant is missing/non-finite or formatting still throws, so a
+ * malformed schedule degrades to the historical literal rather than crashing
+ * the finale beat.
  */
-export function freezePhraseForUnlock(farewellUnlockAt: number | undefined, timeZone: string | undefined): string {
-  if (typeof farewellUnlockAt !== 'number' || !Number.isFinite(farewellUnlockAt)) {
+export function freezePhraseForUnlock(freezeAt: number | undefined, timeZone: string | undefined): string {
+  if (typeof freezeAt !== 'number' || !Number.isFinite(freezeAt)) {
     return DEFAULT_FREEZE_PHRASE;
   }
   try {
-    return `standings freeze at ${spokenHour(farewellUnlockAt, normalizeTimezone(timeZone))}`;
+    return `standings freeze at ${spokenHour(freezeAt, normalizeTimezone(timeZone))}`;
   } catch {
     return DEFAULT_FREEZE_PHRASE;
   }
@@ -324,7 +367,7 @@ export interface PodiumHonor {
   at: number;
 }
 export interface PodiumPayload {
-  /** Top of the frozen standings (farewell Day excluded); `null` on an empty board. */
+  /** Top of the frozen standings (ceremonial Days excluded); `null` on an empty board. */
   champion: PodiumChampion | null;
   /** Event-wide First to BINGO across non-Tutorial Days; `null` when none qualifies. */
   firstBingo: PodiumFirstBingo | null;
@@ -335,7 +378,7 @@ export interface PodiumPayload {
 /**
  * Build the podium payload posted at the 08:00 Day 10 freeze:
  *
- *   - champion: the top of the standings re-aggregated to EXCLUDE the farewell Day
+ *   - champion: the top of the standings re-aggregated to EXCLUDE every ceremonial Day
  *     (its marks are all post-freeze and ceremonial), `null` when nobody has played;
  *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
  *     identity alone never decides the headline honor;
@@ -346,13 +389,24 @@ export function buildPodiumPayload(
   players: readonly FinalePlayer[],
   days: readonly FinaleDay[] | undefined,
   dayHonors: readonly FinaleDayHonorDoc[] = [],
+  freezeAt?: number | null,
 ): PodiumPayload {
+  // The podium is "as of the freeze", not live. The scheduler builds this AT
+  // the freeze, so its own input is already frozen and the cutoff is a no-op
+  // here — it exists so this stays byte-identical to `buildPodium`
+  // (src/data/finale.ts), which reads the LIVE roster and genuinely needs it
+  // (Phase 4b P1). The parity test feeds both the same post-freeze data.
+  // INCLUSIVE at the freeze instant, mirroring the client (Phase 4b P2):
+  // `standingsFrozen` is `now >= freezeAt` and the last-call window is
+  // half-open `[lastCallAt, freezeAt)`, so that millisecond is already frozen.
+  const withinFreeze = (at: number | null): number | null =>
+    at != null && freezeAt != null && at >= freezeAt ? null : at;
   const tutorial = tutorialDayIndexes(days);
   const isTutorialDay = (i: number): boolean => tutorial.has(i);
-  const farewellIndex = farewellDayIndex(days);
+  const ceremonial = ceremonialDayIndexes(days);
 
   const standings = players
-    .map((p) => podiumStandingRow(p, farewellIndex, isTutorialDay))
+    .map((p) => podiumStandingRow(p, ceremonial, isTutorialDay, withinFreeze))
     .sort(compareFinalePlayers);
   const top = standings[0];
   const champion: PodiumChampion | null =
@@ -367,7 +421,7 @@ export function buildPodiumPayload(
 
   let firstBingo: PodiumFirstBingo | null = null;
   for (const p of players) {
-    const at = effectiveFirstBingoAt(p, isTutorialDay);
+    const at = withinFreeze(effectiveFirstBingoAt(p, isTutorialDay));
     if (at == null) continue;
     if (!firstBingo || at < firstBingo.at) {
       firstBingo = { uid: p.uid, displayName: p.displayName, at };

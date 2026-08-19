@@ -32,8 +32,9 @@ set -euo pipefail
 #     than allowed to abort at `set -e`, because Firebase reports the
 #     org-policy rejection of the `allUsers` invoker binding as a partial
 #     FAILURE — the exact case the reconciliation below exists to repair.
-#   - Reconciles the Cloud Run invoker config for submitBugReport and
-#     emailUnsubscribe (#768; see docs/app/bug-reports.md § Repeat-deploy
+#   - Reconciles the Cloud Run invoker config for submitBugReport,
+#     emailUnsubscribe, and the two auth-handoff callables (#768, #548;
+#     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
 #     this deploy could have RELEASED Functions, on success or failure; the
 #     deploy's own exit status is honoured afterwards either way. Skipped —
@@ -160,6 +161,10 @@ FUNCTIONS_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+# Both handoff callables share ONE selection flag: they are two halves of one
+# sign-in flow, always released together, and either left 403ing breaks
+# authentication outright (#548). See scripts/set-auth-handoff-invoker.sh.
+AUTH_HANDOFF_INVOKER_SELECTED=true
 # An endpoint selected by an exact `functions:<endpoint>` (or the whole
 # `functions` scope) MUST exist after a successful Functions deploy, so its
 # post-publish reconciliation stays strict. An unfamiliar `functions:<name>`
@@ -168,6 +173,15 @@ EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
 # named so a valid scoped first deploy is not failed by an absent service.
 BUG_REPORT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+# Which half of the pair must still EXIST after publish, when only one was
+# named. Empty means both must (the ordinary full-deploy case);
+# AUTH_HANDOFF_INVOKER_CONSERVATIVE=true means neither has to. Kept separate
+# from the conservative bit because "the partner may be absent" and "the
+# function I just deployed may be absent" are different claims, and collapsing
+# them lets a scoped deploy finish green without reconciling what it released
+# (#548, Codex P2 round 4).
+AUTH_HANDOFF_STRICT_HALF=""
 ONLY_VALUES=()
 EXCEPT_VALUES=()
 DEPLOY_PROJECT="${DEPLOY_TARGET_PROJECT:-}"
@@ -208,8 +222,15 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
   FUNCTIONS_ATTEMPTED=false
   BUG_REPORT_INVOKER_SELECTED=false
   EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+  AUTH_HANDOFF_INVOKER_SELECTED=false
   BUG_REPORT_INVOKER_CONSERVATIVE=false
   EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+  AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+  AUTH_HANDOFF_STRICT_HALF=""
+  # Which HALVES of the handoff pair this scope actually names. Parse-local:
+  # only the strictness decision below reads them.
+  AUTH_HANDOFF_MINT_NAMED=false
+  AUTH_HANDOFF_EXCHANGE_NAMED=false
   for only_value in "${ONLY_VALUES[@]}"; do
     IFS=',' read -r -a only_selectors <<< "$only_value"
     for selector in "${only_selectors[@]}"; do
@@ -218,8 +239,12 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           FUNCTIONS_ATTEMPTED=true
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_MINT_NAMED=true
+          AUTH_HANDOFF_EXCHANGE_NAMED=true
           BUG_REPORT_INVOKER_CONSERVATIVE=false
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
           ;;
         functions:submitBugReport)
           FUNCTIONS_ATTEMPTED=true
@@ -230,6 +255,48 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           FUNCTIONS_ATTEMPTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+          ;;
+        # Either handoff endpoint selects BOTH services: naming one half of
+        # the sign-in flow releases a function whose partner must stay
+        # reachable for that flow to work at all. Which HALVES were named is
+        # tracked so the strictness can be decided after the whole scope is
+        # parsed — see the reconciliation below the loop.
+        # `functions:default` names this repo's ONE Firebase codebase with no
+        # endpoint filter, so it releases everything exactly like the bare
+        # `functions` scope above and must be just as strict (#548, Codex P2
+        # round 6). It previously fell through to the unfamiliar-selector arm
+        # and went conservative, which could report success over a released
+        # service that was missing. The `--except` side already treats
+        # `functions:default` as the whole codebase; this makes `--only` agree.
+        # If this repo ever gains NAMED codebases, give each its own arm here
+        # rather than widening this one.
+        functions:default)
+          FUNCTIONS_ATTEMPTED=true
+          BUG_REPORT_INVOKER_SELECTED=true
+          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_MINT_NAMED=true
+          AUTH_HANDOFF_EXCHANGE_NAMED=true
+          BUG_REPORT_INVOKER_CONSERVATIVE=false
+          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+          ;;
+        # BOTH spellings Firebase accepts for a scoped function deploy:
+        # `functions:<fn>` and the codebase-qualified `functions:<codebase>:<fn>`
+        # (`firebase deploy --help`). Matching only the short form sent the
+        # qualified one into the `functions:*` arm below, where it was treated
+        # as an unfamiliar group and both halves went lenient — so the service
+        # the operator explicitly scoped could go missing unnoticed (#548,
+        # Codex P2 round 5).
+        functions:mintAuthHandoff|functions:*:mintAuthHandoff)
+          FUNCTIONS_ATTEMPTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_MINT_NAMED=true
+          ;;
+        functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
+          FUNCTIONS_ATTEMPTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
+          AUTH_HANDOFF_EXCHANGE_NAMED=true
           ;;
         # A selector after `functions:` is not necessarily a single exported
         # function. Firebase also accepts codebase and function-group selectors
@@ -247,12 +314,51 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
           if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" != "true" ]]; then
             EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=true
           fi
+          if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" != "true" ]]; then
+            AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
+          fi
           BUG_REPORT_INVOKER_SELECTED=true
           EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
+          AUTH_HANDOFF_INVOKER_SELECTED=true
           ;;
       esac
     done
   done
+  # A scope that named only ONE half of the pair keeps THAT half strict and
+  # tolerates only its partner being absent (#548, Codex P2 rounds 3 and 4).
+  # Firebase's `--only functions:<name>` is a scoped deploy:
+  # `--only functions:mintAuthHandoff` does not create exchangeAuthHandoff, so
+  # on a first scoped deploy the partner genuinely does not exist and demanding
+  # it would fail a correct deploy. The half that WAS deployed is a different
+  # matter — if it is missing afterwards, that is the 403 this mechanism exists
+  # to catch, so it must still fail loud. Naming both halves, or the whole
+  # `functions` scope, releases both and leaves both strict.
+  #
+  # AN EXPLICIT NAME ALWAYS BEATS THE CONSERVATIVE INFERENCE (CodeRabbit, round
+  # 5). The `functions:*` arm sets the conservative bit as a GUESS that an
+  # unfamiliar group or codebase MIGHT contain a handoff endpoint; naming a half
+  # outright is a FACT that it was released. A combined scope such as
+  #
+  #   --only functions:someGroup,functions:mintAuthHandoff
+  #
+  # hit the guess first, and the guess then outranked the fact — so the half the
+  # deploy definitely released was tolerated as missing, reopening for combined
+  # scopes exactly the hole the per-half split closed for simple ones. Clearing
+  # the bit here is what makes the ORDER of selectors within one `--only`
+  # irrelevant.
+  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+    if [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" && "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" ]]; then
+      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+      AUTH_HANDOFF_STRICT_HALF=""
+    elif [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" ]]; then
+      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+      AUTH_HANDOFF_STRICT_HALF="mint"
+    elif [[ "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" ]]; then
+      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
+      AUTH_HANDOFF_STRICT_HALF="exchange"
+    fi
+    # Neither half named: the conservative bit stands, and both stay lenient.
+  fi
 fi
 
 # `--except` removes whole Functions releases or one known invoker service.
@@ -271,8 +377,10 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         FUNCTIONS_ATTEMPTED=false
         BUG_REPORT_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
+        AUTH_HANDOFF_INVOKER_SELECTED=false
         BUG_REPORT_INVOKER_CONSERVATIVE=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
         ;;
       functions:submitBugReport)
         BUG_REPORT_INVOKER_SELECTED=false
@@ -282,18 +390,53 @@ for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
         EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
         EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
         ;;
+      # ENDPOINT-QUALIFIED `--except` IS NOT A FUNCTION FILTER, and this arm is
+      # a deliberate, documented NO-OP rather than a missing case (#548, Codex
+      # P2 round 5).
+      #
+      # Firebase implements `--except` by subtracting exact TOP-LEVEL target
+      # names (`firebase-tools/lib/filterTargets.js`); per-function filtering is
+      # documented for `--only` alone. So `--except functions:mintAuthHandoff`
+      # subtracts nothing from `functions` — the COMPLETE Functions target is
+      # still released, including the endpoint the operator believed they had
+      # excluded. An earlier version of this arm relaxed the excluded half to
+      # "may be absent", which would have swallowed a NOT_FOUND on a service
+      # Firebase was actually asked to deploy. Both halves stay strict.
+      functions:mintAuthHandoff|functions:*:mintAuthHandoff|\
+      functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
+        :
+        ;;
+      # `--except functions:default` EXCLUDES NOTHING, so this is a documented
+      # no-op (#548, Codex P2 round 10). This REVERSES the conclusion recorded
+      # here under #767, which held that excluding this repo's one codebase
+      # excludes Functions entirely. The vendored source settles it —
+      # `node_modules/firebase-tools/lib/filterTargets.js`:
+      #
+      #     if (options.only) {
+      #       targets = intersection(targets, options.only.split(",")
+      #                   .map((opt) => opt.split(":")[0]));
+      #     } else if (options.except) {
+      #       targets = difference(targets, options.except.split(","));
+      #     }
+      #
+      # `--only` splits on `:` and keeps the first segment, which is why
+      # `--only functions:default` DOES select the `functions` target. `--except`
+      # does not split at all, so it computes difference(targets,
+      # ["functions:default"]) — and "functions:default" is not equal to
+      # "functions", so nothing is removed. Firebase still releases Functions,
+      # resets the invoker annotations, and the previous arm then skipped the
+      # reconciliation that repairs them, leaving all three endpoints 403.
+      #
+      # This is the same reasoning already applied to the endpoint-qualified
+      # `--except` arm above; the two spellings differ only in which label
+      # follows the colon, so they cannot correctly behave differently.
+      #
+      # FUNCTIONS_ATTEMPTED deliberately stays true. #767 set it false to stop
+      # Guard 4 demanding a complete functions/.env.<projectId> for "a deploy
+      # that never touches Functions params" — but such a deploy DOES touch
+      # them, so the guard was right and the premise was wrong.
       functions:default)
-        # This repo's one Firebase codebase IS `default` (#767 — Codex P2):
-        # excluding it excludes Functions entirely, exactly like the plain
-        # `functions)` case above. Leaving FUNCTIONS_ATTEMPTED=true here
-        # (the pre-existing gap) made Guard 4 below demand a complete
-        # functions/.env.<projectId> for a deploy that never touches
-        # Functions params at all.
-        FUNCTIONS_ATTEMPTED=false
-        BUG_REPORT_INVOKER_SELECTED=false
-        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
-        BUG_REPORT_INVOKER_CONSERVATIVE=false
-        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
+        :
         ;;
     esac
   done
@@ -318,14 +461,39 @@ done
 INVOKER_ENV=(env
   -u BUG_REPORT_PROJECT -u BUG_REPORT_REGION -u BUG_REPORT_SERVICE
   -u EMAIL_UNSUBSCRIBE_PROJECT -u EMAIL_UNSUBSCRIBE_REGION -u EMAIL_UNSUBSCRIBE_SERVICE
+  -u AUTH_HANDOFF_PROJECT -u AUTH_HANDOFF_REGION
+  -u AUTH_HANDOFF_MINT_SERVICE -u AUTH_HANDOFF_EXCHANGE_SERVICE
 )
-if [[ -n "${DEPLOY_TARGET_PROJECT:-}" ]]; then
+# DEPLOY_TARGET_PROJECT is set only by scripts/deploy-target.mjs. The documented
+# `scripts/deploy.sh -- <project> ...` entry point is invoked directly, so it
+# leaves that unset while DEPLOY_PROJECT has already resolved (from the
+# positional argument, or .firebaserc) far above. Falling back to it keeps EVERY
+# invocation project-explicit rather than only the wrapped ones (#548, Codex P2
+# round 8).
+#
+# This is not cosmetic for the handoff. Its wrapper's own default project is
+# `fiveacross`, unlike the two siblings' `gaycruisebingo`, so an unpinned bare
+# deploy of gaycruisebingo would reconcile FIVE ACROSS — either aborting the
+# preflight on cross-project permissions, or "succeeding" against the wrong
+# project while the callables it just deployed stay 403. The same fallback is
+# applied to the siblings, where a bare `-- fiveacross` deploy had the mirror
+# image of the bug and was benign only because their default happened to match
+# the commoner target.
+INVOKER_PIN_PROJECT="${DEPLOY_TARGET_PROJECT:-${DEPLOY_PROJECT:-}}"
+if [[ -n "$INVOKER_PIN_PROJECT" ]]; then
   INVOKER_ENV+=(
-    BUG_REPORT_PROJECT="$DEPLOY_TARGET_PROJECT"
-    EMAIL_UNSUBSCRIBE_PROJECT="$DEPLOY_TARGET_PROJECT"
+    BUG_REPORT_PROJECT="$INVOKER_PIN_PROJECT"
+    EMAIL_UNSUBSCRIBE_PROJECT="$INVOKER_PIN_PROJECT"
+    AUTH_HANDOFF_PROJECT="$INVOKER_PIN_PROJECT"
   )
 fi
 run_invoker() { "${INVOKER_ENV[@]}" "$@"; }
+
+# The project a MANUAL repair must name, for the failure guidance below. Same
+# value deploy.sh pins automatically; printed because a human re-running a bare
+# wrapper would otherwise inherit that wrapper's own default project, which is
+# only ever one of this repo's two primaries (#548, Codex P2 round 3).
+INVOKER_REPAIR_PROJECT="${INVOKER_PIN_PROJECT:-<project-id>}"
 
 # A post-deploy `--allow-missing` is normally wrong: an endpoint explicitly
 # selected for Functions release must exist once Firebase returns. The one
@@ -345,12 +513,31 @@ run_postdeploy_invoker() {
   fi
 }
 
+# The handoff pair needs a third state the two-way flag above cannot express:
+# ONE named half strict, its partner allowed to be absent. See
+# AUTH_HANDOFF_STRICT_HALF.
+run_postdeploy_handoff_invoker() {
+  local script="$SCRIPT_DIR/set-auth-handoff-invoker.sh"
+  if [[ "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" == "true" ]]; then
+    run_invoker "$script" --allow-missing
+  elif [[ "$AUTH_HANDOFF_STRICT_HALF" == "mint" ]]; then
+    run_invoker "$script" --allow-missing-half exchange
+  elif [[ "$AUTH_HANDOFF_STRICT_HALF" == "exchange" ]]; then
+    run_invoker "$script" --allow-missing-half mint
+  else
+    run_invoker "$script"
+  fi
+}
+
 INVOKER_SCRIPTS=()
 if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-bug-report-invoker.sh")
 fi
 if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-email-unsubscribe-invoker.sh")
+fi
+if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-auth-handoff-invoker.sh")
 fi
 
 resolve_invoker_deploy_credential() {
@@ -672,10 +859,38 @@ RECONCILE_STATUS=0
 RECONCILE_RAN=false
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (--skip-invoker)"
+  # A skipped reconciliation is normally harmless — the annotation is only reset
+  # by a Functions RELEASE. When this deploy could have released the auth
+  # handoff, it is not harmless, and it must not be silent (#548, Codex P1
+  # round 4). `scripts/deploy-target.mjs` auto-injects --skip-invoker for the
+  # fiveacross target, which is exactly the project the handoff lives in, so the
+  # routine `npm run deploy:fiveacross` path lands here every time.
+  if [[ "$FUNCTIONS_ATTEMPTED" == "true" && "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+    cat >&2 <<EOF
+
+⚠️  The auth-handoff callables were RELEASED but NOT reconciled (--skip-invoker).
+
+    Domain Restricted Sharing rejects the \`allUsers\` invoker binding Firebase
+    adds, so mintAuthHandoff and exchangeAuthHandoff are very likely returning
+    403 right now. Unlike the other reconciled endpoints, a 403 here is not one
+    broken feature — it is sign-in unavailable on every Event origin that uses
+    the handoff.
+
+    This is a KNOWN GAP, not a transient failure: enabling the reconciliation
+    for this target needs run.services.update on the target project for its
+    deploy credential (see skipInvokerReconcile in scripts/build-target.mjs).
+    Until that is provisioned, repair by hand after every Functions deploy:
+
+      AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
+
+    Harmless today only while the handoff has no caller — the client half
+    (#549) and the central origin (#547) are both still outstanding.
+EOF
+  fi
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
   echo ">> Invoker reconciliation skipped (this deploy does not release Functions, so the invoker annotation cannot have been reset)"
 elif [[ ${#INVOKER_SCRIPTS[@]} -eq 0 ]]; then
-  echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport or emailUnsubscribe)"
+  echo ">> Invoker reconciliation skipped (the selected Function scope does not include submitBugReport, emailUnsubscribe, or the auth-handoff callables)"
 elif [[ "$FIREBASE_DRY_RUN" == "true" ]]; then
   echo ">> Invoker reconciliation skipped (Firebase --dry-run: nothing was deployed, so nothing could have been released — mutating the invoker config here would be the exact footgun a dry run exists to rule out)"
 else
@@ -710,11 +925,16 @@ EOF
     run_postdeploy_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" \
       "$EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
   fi
+  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_handoff_invoker || RECONCILE_STATUS=$?
+  fi
   if [[ "$RECONCILE_STATUS" -ne 0 ]]; then
     cat >&2 <<EOF
 
 ✗ The Cloud Run invoker reconciliation FAILED and the deploy is already live.
-  submitBugReport and/or emailUnsubscribe may be returning 403 right now.
+  submitBugReport, emailUnsubscribe, and/or the auth-handoff callables may be
+  returning 403 right now — and a 403 on the handoff pair means sign-in is down
+  on every Event origin, not just one feature.
 
   The read-only check before publishing passed, so this is not a plain
   "no credential" case. Most likely, in order:
@@ -726,10 +946,15 @@ EOF
     • The org policy also blocks the annotation (it should not — that is a
       service setting, not an IAM binding — but read the gcloud error above).
 
-  Re-run by hand once fixed; both are idempotent, so a re-run is safe:
+  Re-run by hand once fixed; all are idempotent, so a re-run is safe. The
+  project is pinned explicitly because each wrapper's own default is only ONE
+  of this repo's two Firebase primaries — a bare re-run can therefore repair
+  the OTHER project and report success while the services that are actually
+  403ing stay broken:
 
-    scripts/set-bug-report-invoker.sh
-    scripts/set-email-unsubscribe-invoker.sh
+    BUG_REPORT_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-bug-report-invoker.sh
+    EMAIL_UNSUBSCRIBE_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-email-unsubscribe-invoker.sh
+    AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
 EOF
   fi
 fi

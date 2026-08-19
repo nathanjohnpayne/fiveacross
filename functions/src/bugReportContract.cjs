@@ -15,6 +15,41 @@ function crc32(buffer) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
+/**
+ * What a report CLAIMS to be. Two values, chosen by the reporter, and the only
+ * thing separating "the board froze" from "somebody posted something abusive":
+ * an `abuse` report earns an admin alert (#670, specs/admin-notification-emails.md
+ * § Abuse reports), while a `bug` is inbox work an operator pulls when they get
+ * to it. Nothing else in the payload distinguishes the two — the description is
+ * free text — which is why this field had to exist before the alert could.
+ */
+const REPORT_KINDS = ['bug', 'abuse'];
+
+/**
+ * NORMALISE, don't validate — and that asymmetry with every other field here is
+ * the whole point.
+ *
+ * ABSENT is `bug`. Every client already in the wild sends no `kind` at all, and
+ * an installed PWA holding a stale precached bundle can be weeks behind a deploy
+ * (specs/app-update-reload-prompt.md), so rejecting an absent field would break
+ * bug reporting for exactly the players most likely to have something to report.
+ *
+ * UNKNOWN is `bug` for the mirror-image reason. The value arrives from a client
+ * the server does not control and cannot force to upgrade, so a future Edition
+ * introducing a third kind would otherwise start failing every submission
+ * against a server that has not been redeployed yet. Degrading to the
+ * LEAST-PRIVILEGED interpretation keeps the report — the description is the
+ * substance — and merely declines to escalate it: the failure mode of rejecting
+ * is a lost report, while the failure mode of normalising is a report that lands
+ * in the inbox instead of the digest.
+ *
+ * The direction is safe because `abuse` is the only value that DOES anything.
+ * Normalisation can never invent an escalation, only decline one.
+ */
+function normalizeReportKind(value) {
+  return typeof value === 'string' && REPORT_KINDS.includes(value) ? value : 'bug';
+}
+
 function boundedString(value, label, max, min = 0) {
   if (typeof value !== 'string') throw new Error(`${label} must be text.`);
   const trimmed = value.trim();
@@ -38,6 +73,7 @@ function validateClientReportFields(input) {
   if (!/^[A-Za-z0-9_-]+$/.test(eventId)) throw new Error('Event ID is invalid.');
   return {
     schemaVersion: 1,
+    kind: normalizeReportKind(input.kind),
     description: boundedString(input.description, 'Description', 4000, 1),
     captureError: input.captureError == null ? null : boundedString(input.captureError, 'Capture error', 200),
     route,
@@ -88,4 +124,10 @@ function validatePngBytes(value) {
   return value;
 }
 
-module.exports = { SCREENSHOT_MAX_BYTES, validateClientReportFields, validatePngBytes };
+module.exports = {
+  REPORT_KINDS,
+  SCREENSHOT_MAX_BYTES,
+  normalizeReportKind,
+  validateClientReportFields,
+  validatePngBytes,
+};

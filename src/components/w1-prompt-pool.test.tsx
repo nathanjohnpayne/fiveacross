@@ -42,7 +42,14 @@ vi.mock('../hooks/useData', () => ({
   // suite (src/components/ItemPool.test.tsx). Empty here so it is a no-op
   // for every assertion in THIS file, which only exercises the pre-existing
   // active-pool + throttle behavior.
-  useMyPendingItems: () => ({ items: [], loading: false }),
+  useMyPendingItems: () => ({ items: [], loading: false, hasServerData: true }),
+  // #559 round 2: ItemPool's own unfiltered "my active submissions" query —
+  // empty/no-op here too, for the same reason as useMyPendingItems above.
+  useMyActiveItems: () => ({ items: [], loading: false, hasServerData: true }),
+  // #559: ItemPool now reads the Day schedule for its submitter-state pills.
+  // No schedule here — a no-op for this file's pre-existing add/throttle
+  // assertions, which don't exercise the new states.
+  useEventDoc: () => ({ data: undefined }),
 }));
 
 import ItemPool from './ItemPool';

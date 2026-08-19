@@ -403,7 +403,16 @@ service cloud.firestore {
         && ('unlockAt' in newDay) == ('unlockAt' in oldDay)
         && (!('unlockAt' in newDay) || newDay.unlockAt == oldDay.unlockAt)
         && ('tonight' in newDay) == ('tonight' in oldDay)
-        && (!('tonight' in newDay) || newDay.tonight == oldDay.tonight);
+        && (!('tonight' in newDay) || newDay.tonight == oldDay.tonight)
+        // `scoring` (ADR 0011) joins the lock: flipping an already-played Day
+        // between competitive and ceremonial re-interprets the podium
+        // immediately, while every Player's denormalized root totals keep the
+        // OLD policy until that Player happens to fold another Mark — mixed
+        // standings across one roster, with no way to tell which rows are which
+        // (Codex P2, PR #841). A still-future Day stays fully editable, exactly
+        // like its theme and schedule.
+        && ('scoring' in newDay) == ('scoring' in oldDay)
+        && (!('scoring' in newDay) || newDay.scoring == oldDay.scoring);
     }
     // `tonight` is legacy-tolerant but strict once present. Fixtures and docs
     // seeded before the field existed may still omit it; a write to a Day that
@@ -438,6 +447,56 @@ service cloud.firestore {
     // raised alongside its own EventDoc. A size mismatch between the incoming
     // and existing arrays is rejected outright (`days[]` length is fixed at
     // seed — this ticket builds no row add/remove editor).
+    // Every present `scoring` is one of the two stated policies (ADR 0011).
+    // Unrolled like `daysThemeLockOk` below, and applied on CREATE too, which
+    // that function deliberately skips (a create has no prior array to lock
+    // against). Absent is always valid: no doc written before ADR 0011 carries
+    // the field, and `scoringForDay` resolves absence from the pool.
+    //
+    // Needed because a typo'd value fails SILENTLY, and then STICKS.
+    // `scoringForDay` treats anything it does not recognise as absent and falls
+    // back to the pool derivation — a deliberate, tested direction, since
+    // reading a malformed value as `ceremonial` would drop a competitive Day's
+    // real play out of the standings. So `scoring: 'ceremoniall'` is a
+    // successful write that quietly does nothing, and once that Day unlocks the
+    // lock below makes it permanent: the organiser can never correct it.
+    //
+    // Deferred once on an unmeasured expression-budget worry, then MEASURED: a
+    // legitimate admin edit on a FOUR-Day schedule (Bodega Bay, the largest
+    // Event that evaluates within Firestore's 1000-expression cap today) still
+    // succeeds with this check in place. It is pinned by a test, alongside the
+    // ten-Day case that fails WITHOUT this check on origin/main and belongs to
+    // issue #850.
+    function dayScoringValid(day) {
+      return !('scoring' in day)
+        || day.scoring == 'competitive'
+        || day.scoring == 'ceremonial';
+    }
+    function daysScoringValid(days) {
+      return (days.size() < 1  || dayScoringValid(days[0]))
+        && (days.size() < 2  || dayScoringValid(days[1]))
+        && (days.size() < 3  || dayScoringValid(days[2]))
+        && (days.size() < 4  || dayScoringValid(days[3]))
+        && (days.size() < 5  || dayScoringValid(days[4]))
+        && (days.size() < 6  || dayScoringValid(days[5]))
+        && (days.size() < 7  || dayScoringValid(days[6]))
+        && (days.size() < 8  || dayScoringValid(days[7]))
+        && (days.size() < 9  || dayScoringValid(days[8]))
+        && (days.size() < 10 || dayScoringValid(days[9]));
+    }
+
+    // Has the finale BEGUN? The last-call beat writes at the deterministic id
+    // `moments/last_call` (the Feed only surfaces a finale Moment when its id
+    // equals its kind), so its existence is a cheap, exact signal that the
+    // boundary has been announced to players.
+    //
+    // Once it exists, the finale's clock is settled: that Moment persists the
+    // freeze phrase it announced and is deduped on every later scheduler run,
+    // so nothing that could move the freeze may still change (Phase 4b P1).
+    function finaleAnnounced(eventId) {
+      return exists(/databases/$(database)/documents/events/$(eventId)/moments/last_call);
+    }
+
     function daysThemeLockOk(newDays, oldDays) {
       return newDays.size() == oldDays.size()
         && (newDays.size() < 1  || dayThemeChangeOk(newDays[0], oldDays[0]))
@@ -460,6 +519,42 @@ service cloud.firestore {
     }
 
     match /bugReportRateLimits/{uid} {
+      allow read, write: if false;
+    }
+
+    // Centralised-auth handoff codes (ADR 0010, specs/auth-handoff.md, #548).
+    //
+    // Keyed by the SHA-256 of the code, not the code itself, so the stored
+    // document is not a redeemable credential even to a reader who obtains it.
+    //
+    // DENIED TO EVERY CLIENT, in both directions, and each direction closes a
+    // different account takeover:
+    //
+    //   READS. A document here is the live authorization to become its `uid`.
+    //   The code is single-use and short-lived, but neither property helps if a
+    //   client can enumerate unconsumed documents and redeem one first — that is
+    //   a sign-in as somebody else, which is the strongest thing this schema has
+    //   to protect. Note the deny covers `get` as well as `list`: unlike
+    //   `hostnames/{host}` above, where a caller can only `get` an address it
+    //   already knows, the document id here IS the secret being guarded.
+    //
+    //   WRITES. A client that could create a document could mint itself a code
+    //   bound to another player's uid, skipping Google sign-in altogether. A
+    //   client that could update one could clear `consumedAt` and replay a code
+    //   it had already spent, or push `expiresAt` forward and keep a stolen code
+    //   alive indefinitely. Single-use and expiry are only real while the
+    //   document backing them is unwritable.
+    //
+    // The Admin SDK bypasses rules, so the two Cloud Functions in
+    // `functions/src/authHandoff.ts` are the collection's ONLY writers, and the
+    // consume is a transaction there rather than a rules condition — rules
+    // cannot express "read this, then write it, atomically."
+    //
+    // A deny-all block reads like it could be deleted as redundant with
+    // Firestore's default deny. It cannot: `tests/rules/auth-handoff.test.ts` is
+    // what turns "we meant to deny it" into a failing test if a later edit
+    // widens it, deliberately or by a wildcard.
+    match /authHandoffs/{codeHash} {
       allow read, write: if false;
     }
 
@@ -673,7 +768,36 @@ service cloud.firestore {
       // a truthy string cannot smuggle the posture on (the function's own read is
       // a strict `=== true` besides). Optional: the field's absence means "derive
       // from the pool alone", which is the majority case and every Event today.
+      //
+      // `standingsFreezeAt` (ADR 0011) is the CONFIGURED Standings Freeze — the
+      // moment competitive scoring stops. Writable only through this
+      // already-admin-gated event doc, exactly like the `frozenAt` stamp beside
+      // it, so no new write path is opened and no Player can move their own
+      // Event's freeze. When the write NAMES the field it must be a NUMBER, the
+      // same shape check `reportHideThreshold` and `forceAdult` carry: a string
+      // instant would sail past every `typeof === 'number'` guard on the read
+      // side as "not configured" and silently fall back to the schedule
+      // derivation, which is the confusing failure rather than the loud one.
+      // It must also be POSITIVE, for the same reason one layer down: both
+      // `standingsFreezeAtFor` and `finaleTimes` deliberately ignore a
+      // non-positive or non-finite instant (0 is the schedule's "always
+      // unlocked" sentinel elsewhere in this contract), so accepting one here
+      // would hand an admin a SUCCESSFUL write for a freeze that every reader
+      // silently discards — falling back to a ceremonial Day, or skipping the
+      // finale entirely, with nothing anywhere saying so (Codex P2, PR #841).
+      // `> 0` also rejects NaN, which compares false against every bound. The
+      // UPPER bound is what rejects positive `Infinity`, which is a Firestore
+      // number and passes `> 0` while both readers discard it via
+      // `Number.isFinite` (Codex P2, PR #841). Rules have no `isFinite`, so the
+      // bound stands in for it: 4102444800000 is 2100-01-01T00:00:00Z, far
+      // beyond any real Event and finite by construction.
+      // Optional: absent means "derive from the first ceremonial Day", which is
+      // both live Events.
       allow create, update: if isAdmin(eventId)
+        && (!('standingsFreezeAt' in request.resource.data)
+            || (request.resource.data.standingsFreezeAt is number
+                && request.resource.data.standingsFreezeAt > 0
+                && request.resource.data.standingsFreezeAt < 4102444800000))
         && (!('settings' in request.resource.data)
             || request.resource.data.settings.reportHideThreshold is number)
         && (!('settings' in request.resource.data)
@@ -690,9 +814,106 @@ service cloud.firestore {
         // gates above already use), every entry's theme change must be on a
         // still-future Day. See `daysThemeLockOk` above.
         && (!('days' in request.resource.data)
+            || daysScoringValid(request.resource.data.days))
+        && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
-            || daysThemeLockOk(request.resource.data.days, resource.data.days));
+            || daysThemeLockOk(request.resource.data.days, resource.data.days))
+        // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
+        // P2 on PR #841). Between the cutoff and the scheduler's `frozenAt`
+        // stamp — precisely the window the client-side stale-cache belt exists
+        // to cover, and the window a scheduler outage widens — moving or
+        // removing it splits the roster: clients holding the old cutoff have
+        // stopped folding stats while refreshed ones follow the new one and
+        // resume, and the scheduler would then stamp the replacement. Presence
+        // AND value are held, so removal is rejected too (removal falls back to
+        // the ceremonial-Day derivation, which is just as much a change).
+        && (resource == null
+            || !('standingsFreezeAt' in resource.data)
+            || request.time.toMillis() < resource.data.standingsFreezeAt
+            || ('standingsFreezeAt' in request.resource.data
+                && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt))
+        // …and no write may CREATE a settled boundary either (Phase 4b P1). The
+        // clause above only bites once an explicit value has passed, so on its
+        // own an admin could still set a freeze in the PAST — instantly frozen
+        // for a refreshed client, still live for a cached one — or delete a
+        // future one and drop back to a ceremonial-Day derivation that has
+        // already elapsed. Any write that CHANGES the field must therefore land
+        // it strictly in the future, and deletion is refused outright.
+        //
+        // RESIDUAL, and it needs the derived boundary rather than the stored
+        // one: on a legacy Event carrying no explicit freeze, whose ceremonial
+        // Day has already unlocked, adding a future freeze passes both clauses
+        // and un-freezes refreshed clients while cached ones stay frozen.
+        // Closing it means resolving the ceremonial Day's unlock inside the
+        // rule — a ten-way unroll on a rule that already exceeds Firestore's
+        // 1000-expression cap at ten Days (issue #850). It is deliberately left
+        // to that fix rather than deepening a live bug; the scheduler stamps
+        // `frozenAt` within one sweep, which bounds the window in practice.
+        // Applies to CREATE as well (Phase 4b P2): the other boundary clauses
+        // short-circuit on `resource == null`, which let an Event be created
+        // already carrying a past freeze — instantly frozen, and in violation
+        // of the "only ever written into the future" invariant the rest of
+        // these clauses maintain.
+        && (!('standingsFreezeAt' in request.resource.data)
+            || (resource != null
+                && 'standingsFreezeAt' in resource.data
+                && request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt)
+            || request.resource.data.standingsFreezeAt > request.time.toMillis())
+        && (resource == null
+            || !('standingsFreezeAt' in resource.data)
+            || 'standingsFreezeAt' in request.resource.data)
+        // ADDING an explicit freeze to a doc that had none is the remaining way
+        // to cross a settled boundary (Phase 4b P2): the derived cutoff may
+        // ALREADY have elapsed, and an explicit value takes precedence in
+        // `standingsFreezeAtFor`, so refreshed clients un-freeze while cached
+        // ones stay frozen until `frozenAt` is stamped.
+        //
+        // Guarded here by the LAST Day's unlock, which is O(1). That catches the
+        // real legacy shape — both live Events put their ceremonial Day last, so
+        // the last unlock IS the derived boundary — and it is deliberately an
+        // over-approximation rather than the exact test: resolving the first
+        // ceremonial Day's unlock needs a ten-way unroll on a rule that already
+        // exceeds Firestore's 1000-expression cap at ten Days (#850). It does
+        // NOT catch a schedule whose ceremonial Day sits EARLY with competitive
+        // Days after it; that case rides #850's fix, and the PR body records the
+        // reasoning. An Event that has not finished can still be given a freeze,
+        // which is the legitimate configuration this must not block.
+        && (resource == null
+            || 'standingsFreezeAt' in resource.data
+            || !('standingsFreezeAt' in request.resource.data)
+            || !('days' in resource.data)
+            || resource.data.days.size() < 1
+            || request.time.toMillis()
+                 < resource.data.days[resource.data.days.size() - 1].unlockAt)
+        // ONCE THE FINALE HAS BEEN ANNOUNCED, its clock is immutable (Phase 4b
+        // P1). The `last_call` Moment persists the freeze phrase it announced
+        // and is deduped on every later scheduler run, so a freeze moved after
+        // it posts leaves a permanently wrong deadline on the Feed — and can
+        // move the Day the podium is filed under. Worse, `scoring` was locked
+        // only from a Day's own unlock, while last-call posts BEFORE that: an
+        // admin could flip the sole future ceremonial Day to competitive after
+        // the announcement, at which point `finaleTimes` returns null and the
+        // announced freeze simply never happens — no freeze, no podium, and the
+        // already-posted Moment still promising one.
+        //
+        // Both are closed by freezing the whole boundary: after the
+        // announcement neither `standingsFreezeAt` nor `days` may change. That
+        // is broader than strictly required (it also pins Tonight and theme
+        // edits for the last few hours of an Event) and deliberately so — it is
+        // ONE O(1) array comparison instead of a per-Day unroll on a rule
+        // already past Firestore's expression cap (#850), and "the schedule is
+        // settled once the finale is announced" is a rule that can be stated in
+        // one sentence.
+        && (resource == null
+            || !finaleAnnounced(eventId)
+            || (('standingsFreezeAt' in request.resource.data)
+                  == ('standingsFreezeAt' in resource.data)
+                && (!('standingsFreezeAt' in request.resource.data)
+                    || request.resource.data.standingsFreezeAt == resource.data.standingsFreezeAt)
+                && ('days' in request.resource.data) == ('days' in resource.data)
+                && (!('days' in request.resource.data)
+                    || request.resource.data.days == resource.data.days)));
       allow delete: if isAdmin(eventId);
 
       // Community-editable prompt pool.

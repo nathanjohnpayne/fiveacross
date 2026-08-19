@@ -107,7 +107,10 @@ describe('eventConverter (Phase 1.5 days/timezone defaults)', () => {
     const present = eventConverter.fromFirestore(
       snapshotOf({ ...legacyEvent, days: [day], timezone: 'America/Los_Angeles' }),
     );
-    expect(present.days).toEqual([day]);
+    // Every authored field passes through untouched; the converter ADDS the
+    // ADR 0011 read-resolution (`scoring`) the same way it already resolves
+    // `place`/`pool`. A main Day with no stated policy is competitive.
+    expect(present.days).toEqual([{ ...day, scoring: 'competitive' }]);
     expect(present.timezone).toBe('America/Los_Angeles');
   });
 

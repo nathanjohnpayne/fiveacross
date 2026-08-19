@@ -5,6 +5,7 @@ import SignIn, { DealError } from './components/SignIn';
 import CachedCardFallback from './components/CachedCardFallback';
 import { loadCardSnapshot } from './data/cardCache';
 import Nav from './components/Nav';
+import SuggestPanelBridge from './components/SuggestPanelBridge';
 import Board from './components/Board';
 import NoticeBanner from './components/NoticeBanner';
 import Leaderboard from './components/Leaderboard';
@@ -121,6 +122,10 @@ export default function App() {
             (reconnects wedged listeners, picks up a fresh deploy). */}
         <PullToRefresh />
         <Nav />
+        {/* Card/Feed → More "Suggest a square" navigation bridge (#559) — see
+            SuggestPanelBridge.tsx for why it's mounted here rather than
+            inside Board.tsx. Renders nothing. */}
+        <SuggestPanelBridge />
         {/* Keyed per top-level section so switching tabs replays the page-in
             rise (index.css `.route-view`); the wrapper is a plain block, so
             layout inside is unchanged. */}

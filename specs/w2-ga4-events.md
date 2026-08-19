@@ -12,7 +12,7 @@ status: accepted
 `GA4_EVENTS` enumerates every catalogued event name in one place, and `track()`'s `name` parameter is typed to that union so a call site can only pass a catalogued name.
 
 - **Given** the exported `GA4_EVENTS` catalog **when** read **then** it contains the 12 PRD events plus the operational `login_failed` (added later by #163, defined below), in order—`login`, `login_failed`, `join_event`, `add_item`, `report_item`, `mark_square`, `attach_proof`, `demand_proof`, `bingo`, `blackout`, `theme_change`, `share_click`, `install_pwa`—with no duplicate names. (Test: "enumerates the 12 PRD events plus the operational login_failed (#163)".)
-- Later tickets added further catalogued events, each documented at its own call site and in the catalog test's enumeration: `text_size_change` (#215, inserted after `theme_change`—so the bullet above is the original 12+1 SET, not a positional prefix of today's array), then `reshuffle_card` (#378, `specs/reshuffle.md`), `heart_post` (`specs/feed-hearts.md`), `most_loved_photo_frozen` (#560, `specs/most-loved-photo.md`), the operational `mark_rejected` (#387, above), and `unmark_square` + `echo_mark` (#721, below) appended at the end, in that order. The catalog test in `src/w2-ga4-events.test.tsx` remains the canonical in-order enumeration.
+- Later tickets added further catalogued events, each documented at its own call site and in the catalog test's enumeration: `text_size_change` (#215, inserted after `theme_change`—so the bullet above is the original 12+1 SET, not a positional prefix of today's array), then `reshuffle_card` (#378, `specs/reshuffle.md`), `heart_post` (`specs/feed-hearts.md`), `most_loved_photo_frozen` (#560, `specs/most-loved-photo.md`), the operational `mark_rejected` (#387, above), `unmark_square` + `echo_mark` (#721, below), and the Community Prompt entry-point trio `prompt_suggestion_submitted` + `prompt_suggestion_approved` + `community_prompt_dealt` (#559, below) appended at the end, in that order. The catalog test in `src/w2-ga4-events.test.tsx` remains the canonical in-order enumeration.
 
 ## `mark_rejected`—operational mark-batch-rejection event (#387, post-w2)
 
@@ -71,6 +71,16 @@ A lightweight, dismissible disclosure—not a full consent-management platform a
 - **Given** a device that has not dismissed the notice **when** `ConsentNotice` renders **then** it shows disclosure text mentioning both the 18+ audience and analytics. (Test: "renders the 18+ analytics disclosure on first visit".)
 - **Given** the notice is showing **when** the Player dismisses it **then** it stops rendering and the dismissal is persisted to `localStorage` so it does not reappear. (Test: "dismisses on click and persists the dismissal to localStorage".)
 - **Given** a device that already dismissed the notice **when** `ConsentNotice` mounts again **then** it does not render. (Test: "does not render on a later mount once dismissed".) Separately, if `localStorage` is unavailable (private browsing, quota, etc.), dismissing still hides the notice for the current session rather than throwing, because both `isDismissed()` and `dismiss()` wrap their storage access in `try`/`catch` (verified by reading the implementation, not a dedicated test for the storage-unavailable case).
+
+## `prompt_suggestion_submitted`, `prompt_suggestion_approved`, `community_prompt_dealt`—the Community Prompt entry-point trio (#559, post-w2)
+
+Three catalogued events for the Community Prompt entry point built on #557's Day-targeting model, appended to `GA4_EVENTS` alongside `text_size_change` / `reshuffle_card` / `heart_post` / `most_loved_photo_frozen` / `mark_rejected` / `unmark_square` / `echo_mark` in the "later tickets" bullet above. Full contract, params, and call sites live in `specs/community-prompt-targeting.md` § "Entry point, submitter states, and attribution (#559)"—summarized here only to keep this canonical catalog spec current with `GA4_EVENTS`' actual membership (Codex P2, PR #845):
+
+- **`prompt_suggestion_submitted`**—`components/ItemPool.tsx`, on a successful `addItem`. Params: `hasTargetDay`, `dayIndex` (the target the write actually committed, when usable).
+- **`prompt_suggestion_approved`**—`components/admin/ReviewQueue.tsx`, once per `ApprovalPlacement` whose `outcome` is not `'stale'`/`'missing'`. Params: `outcome`, `dayIndex` (when placed).
+- **`community_prompt_dealt`**—`data/api.ts`, fired once per genuinely new deal (after each of the three deal transactions commits). Params: `dayIndex`, `count` (Community Prompt Squares on that card).
+
+None carries Prompt text—counts, ids, uids, and booleans only, per `specs/posthog-analytics.md` § "Payload hygiene".
 
 ## Out of scope
 
