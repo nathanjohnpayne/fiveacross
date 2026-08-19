@@ -157,6 +157,25 @@ export function readMembership(raw: unknown): MembershipDoc | null {
   if (typeof d.grantedBy !== 'string' || d.grantedBy === '') return null;
   if (!(d.invitationId === null || typeof d.invitationId === 'string')) return null;
 
+  // Revocation is a PAIR, and its consistency with `status` is part of the
+  // shape (Codex P2 on PR #891). A revoked record without usable audit fields
+  // has lost the provenance the record exists to carry; an active record still
+  // carrying them is a half-applied write. Either way the document is
+  // internally inconsistent, and coercing it — silently dropping the unusable
+  // half, or retaining a stale one beside `status: 'active'` — hands consumers
+  // a "parsed" revocation with no author or date. Read both as a MISS.
+  //
+  // This is a PARSE decision, never an authorization one: `admits` reads
+  // `status` and nothing else, so an inconsistent revoked record still denies
+  // and an inconsistent active one still admits, exactly as the rules would.
+  // Strictness here can only change what a consumer may READ, never who gets in.
+  const revokedAtOk = typeof d.revokedAt === 'number' && Number.isFinite(d.revokedAt);
+  const revokedByOk = typeof d.revokedBy === 'string' && d.revokedBy !== '';
+  if (d.status === 'revoked' && !(revokedAtOk && revokedByOk)) return null;
+  if (d.status === 'active' && (d.revokedAt !== undefined || d.revokedBy !== undefined)) {
+    return null;
+  }
+
   const parsed: MembershipDoc = {
     schemaVersion: MEMBERSHIP_SCHEMA_VERSION,
     eventId: d.eventId,
@@ -167,11 +186,9 @@ export function readMembership(raw: unknown): MembershipDoc | null {
     grantedBy: d.grantedBy,
     invitationId: d.invitationId,
   };
-  if (typeof d.revokedAt === 'number' && Number.isFinite(d.revokedAt)) {
-    parsed.revokedAt = d.revokedAt;
-  }
-  if (typeof d.revokedBy === 'string' && d.revokedBy !== '') {
-    parsed.revokedBy = d.revokedBy;
+  if (d.status === 'revoked') {
+    parsed.revokedAt = d.revokedAt as number;
+    parsed.revokedBy = d.revokedBy as string;
   }
   return parsed;
 }
@@ -233,6 +250,23 @@ export function membershipEnforcementFor(
  * than left as an accidental omission that a later reader might "fix".
  */
 export function admits(input: {
+  /**
+   * The authenticated caller's uid, or `null`/`undefined` when there is no
+   * authenticated identity.
+   *
+   * REQUIRED, and checked FIRST — before the enforcement switch (Codex P2 on
+   * PR #891). The reference predicate's leading clause is `signedIn()`, so a
+   * version of this function that answered from `enforcement` alone would
+   * admit an UNAUTHENTICATED caller for every Event in the dark-rollout state,
+   * which is every Event today. That is not what an unenforced Event means:
+   * unenforced is open to any signed-in account, never to the public.
+   *
+   * Deliberately NOT compared against the membership record's own `uid`. The
+   * document path encodes the uid, so the caller has already selected the
+   * right record by construction, and rules perform no such comparison —
+   * adding one here would be a divergence in the other direction.
+   */
+  uid: string | null | undefined;
   /** Resolved from the Event document by {@link membershipEnforcementFor}. */
   enforcement: MembershipEnforcement;
   /** Raw data at {@link membershipPath}; `null`/`undefined` when absent. */
@@ -240,8 +274,11 @@ export function admits(input: {
   /** Whether the uid appears in `EventDoc.bannedUids`. Does not affect admission. */
   isBanned?: boolean;
 }): AdmissionDecision {
-  const { enforcement, membership } = input;
+  const { uid, enforcement, membership } = input;
 
+  if (typeof uid !== 'string' || uid === '') {
+    return { admitted: false, outcome: 'denied-not-signed-in' };
+  }
   if (enforcement !== 'enforced') {
     return { admitted: true, outcome: 'admitted-unenforced' };
   }

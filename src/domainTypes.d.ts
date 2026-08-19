@@ -1309,6 +1309,10 @@ export interface MembershipDoc {
 export type AdmissionOutcome =
   | 'admitted'
   | 'admitted-unenforced'
+  /** No authenticated identity. Denies FIRST, before the enforcement switch is
+   *  consulted, mirroring the reference predicate's leading `signedIn()` — an
+   *  unenforced Event is open to every signed-in account, not to the public. */
+  | 'denied-not-signed-in'
   | 'denied-not-a-member'
   | 'denied-revoked'
   /** A record exists but its `status` is neither `'active'` nor `'revoked'` —

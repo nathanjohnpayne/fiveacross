@@ -124,11 +124,49 @@ describe('readMembership — the versioned parse', () => {
     expect(readMembership(activeRecord({ invitationId: null }))?.invitationId).toBeNull();
   });
 
-  it('drops revocation fields that are present but unusable, rather than coercing them', () => {
-    const parsed = readMembership({ ...activeRecord(), revokedAt: 'yesterday', revokedBy: '' });
-    expect(parsed).not.toBeNull();
-    expect(parsed?.revokedAt).toBeUndefined();
-    expect(parsed?.revokedBy).toBeUndefined();
+  it('rejects a revoked record whose audit fields are missing or unusable', () => {
+    // Codex P2 on PR #891. Silently dropping the unusable half handed consumers
+    // a "parsed" revocation with no author and no date — exactly the provenance
+    // the record exists to carry.
+    expect(readMembership(activeRecord({ status: 'revoked' }))).toBeNull();
+    expect(readMembership({ ...activeRecord(), status: 'revoked', revokedAt: 1 })).toBeNull();
+    expect(
+      readMembership({ ...activeRecord(), status: 'revoked', revokedBy: 'admin-uid' }),
+    ).toBeNull();
+    expect(
+      readMembership({
+        ...activeRecord(),
+        status: 'revoked',
+        revokedAt: 'yesterday',
+        revokedBy: 'a',
+      }),
+    ).toBeNull();
+    expect(
+      readMembership({ ...activeRecord(), status: 'revoked', revokedAt: 1, revokedBy: '' }),
+    ).toBeNull();
+  });
+
+  it('rejects an ACTIVE record still carrying revocation fields', () => {
+    // A half-applied write, in the other direction.
+    expect(readMembership({ ...activeRecord(), revokedAt: 1_700_000_100_000 })).toBeNull();
+    expect(readMembership({ ...activeRecord(), revokedBy: 'admin-uid' })).toBeNull();
+  });
+
+  it('rejecting an inconsistent record is a PARSE decision, never an authorization one', () => {
+    // Strictness in the parse must not change who gets in, or the reference
+    // stops mirroring the rules. An inconsistent revoked record still denies;
+    // an inconsistent active one still admits, exactly as `status` alone says.
+    const badRevoked = activeRecord({ status: 'revoked' });
+    expect(readMembership(badRevoked)).toBeNull();
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: badRevoked }).outcome).toBe(
+      'denied-revoked',
+    );
+
+    const badActive = { ...activeRecord(), revokedAt: 1_700_000_100_000 };
+    expect(readMembership(badActive)).toBeNull();
+    expect(
+      admits({ uid: ALICE, enforcement: 'enforced', membership: badActive }).admitted,
+    ).toBe(true);
   });
 });
 
@@ -141,7 +179,7 @@ describe('the parse and the authorization answer are deliberately different ques
     const drifted = activeRecord({ schemaVersion: MEMBERSHIP_SCHEMA_VERSION + 1 });
     expect(readMembership(drifted)).toBeNull();
     expect(isActiveMembershipData(drifted)).toBe(true);
-    expect(admits({ enforcement: 'enforced', membership: drifted }).admitted).toBe(true);
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: drifted }).admitted).toBe(true);
   });
 });
 
@@ -180,21 +218,21 @@ describe('membershipEnforcementFor — the per-Event switch', () => {
 
 describe('admits — the one decision', () => {
   it('admits everyone while the Event is unenforced, and says so', () => {
-    expect(admits({ enforcement: 'off', membership: null })).toEqual({
+    expect(admits({ uid: ALICE, enforcement: 'off', membership: null })).toEqual({
       admitted: true,
       outcome: 'admitted-unenforced',
     });
   });
 
   it('admits an active member on an enforced Event', () => {
-    expect(admits({ enforcement: 'enforced', membership: activeRecord() })).toEqual({
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: activeRecord() })).toEqual({
       admitted: true,
       outcome: 'admitted',
     });
   });
 
   it('denies a UID with no record at all', () => {
-    expect(admits({ enforcement: 'enforced', membership: null })).toEqual({
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: null })).toEqual({
       admitted: false,
       outcome: 'denied-not-a-member',
     });
@@ -203,14 +241,14 @@ describe('admits — the one decision', () => {
   it('distinguishes REVOKED from never-a-member', () => {
     // The client says different things for each, so the difference must survive
     // the predicate rather than collapse into a boolean.
-    expect(admits({ enforcement: 'enforced', membership: activeRecord({ status: 'revoked' }) })).toEqual(
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: activeRecord({ status: 'revoked' }) })).toEqual(
       { admitted: false, outcome: 'denied-revoked' },
     );
   });
 
   it('denies an unreadable record', () => {
     expect(
-      admits({ enforcement: 'enforced', membership: { ...activeRecord(), status: 'pending' } }),
+      admits({ uid: ALICE, enforcement: 'enforced', membership: { ...activeRecord(), status: 'pending' } }),
     ).toEqual({ admitted: false, outcome: 'denied-unreadable' });
   });
 
@@ -227,7 +265,7 @@ describe('admits — the one decision', () => {
       firstBingoAt: null,
       reshufflesUsed: 0,
     };
-    expect(admits({ enforcement: 'enforced', membership: forgedPlayerRow }).admitted).toBe(false);
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: forgedPlayerRow }).admitted).toBe(false);
   });
 
   it('a BANNED member is still admitted — ban and admission are different questions', () => {
@@ -236,14 +274,36 @@ describe('admits — the one decision', () => {
     // revocation". A banned Player is still in the room. Putting them OUT of
     // the room is revocation, which is the record's own status.
     expect(
-      admits({ enforcement: 'enforced', membership: activeRecord(), isBanned: true }),
+      admits({ uid: ALICE, enforcement: 'enforced', membership: activeRecord(), isBanned: true }),
     ).toEqual({ admitted: true, outcome: 'admitted' });
   });
 
   it('a banned NON-member is denied for not being a member, not for the ban', () => {
-    expect(admits({ enforcement: 'enforced', membership: null, isBanned: true }).outcome).toBe(
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: null, isBanned: true }).outcome).toBe(
       'denied-not-a-member',
     );
+  });
+
+  it('denies an UNAUTHENTICATED caller first, even while the Event is unenforced', () => {
+    // Codex P2 on PR #891. The reference predicate leads with signedIn(), so
+    // answering from `enforcement` alone would admit the public to every Event
+    // in the dark-rollout state — which is every Event today. Unenforced means
+    // open to any signed-in account, not open to everyone.
+    expect(admits({ uid: null, enforcement: 'off', membership: null })).toEqual({
+      admitted: false,
+      outcome: 'denied-not-signed-in',
+    });
+    expect(admits({ uid: undefined, enforcement: 'off', membership: null }).admitted).toBe(false);
+    expect(admits({ uid: '', enforcement: 'off', membership: null }).outcome).toBe(
+      'denied-not-signed-in',
+    );
+  });
+
+  it('denies an unauthenticated caller holding an otherwise valid record', () => {
+    expect(admits({ uid: null, enforcement: 'enforced', membership: activeRecord() })).toEqual({
+      admitted: false,
+      outcome: 'denied-not-signed-in',
+    });
   });
 
   it('does not admit an Admin who holds no membership', () => {
@@ -252,7 +312,7 @@ describe('admits — the one decision', () => {
     // requires an Admin to hold both, rather than letting either imply the other.
     // A disjunction here would make a raw `admins` array write a way to grant
     // admission, bypassing the audited invitation path entirely (#803).
-    expect(admits({ enforcement: 'enforced', membership: null }).admitted).toBe(false);
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: null }).admitted).toBe(false);
   });
 });
 
