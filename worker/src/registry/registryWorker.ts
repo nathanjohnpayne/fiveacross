@@ -2,12 +2,13 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { classifyHost, normalizeHost } from '../host';
 import {
   REGISTRY_LOCATION_HINT,
+  isRegistryRootHost,
   isSyntheticRegistryHost,
-  type RegistryState,
   type RouterReplicaDesired,
 } from './contracts';
 import {
   REGISTRY_ROLE_AUDIENCES,
+  REGISTRY_AUDIT_SUBJECT,
   REGISTRY_SYNC_AUDIENCE,
   REGISTRY_VERIFICATION_RECORDS,
 } from './verificationRecords';
@@ -30,6 +31,7 @@ import {
   type ProbePhase,
   type ProbePrincipal,
 } from './probe';
+import { parseStoredRegistryState } from './storedState';
 
 const STATE_KEY = 'registry-state';
 const HISTORY_PREFIX = 'recovery/';
@@ -50,27 +52,12 @@ export interface RegistryWorkerEnv {
   REGISTRY_VERSION?: string;
 }
 
-function isRegistryState(value: unknown): value is RegistryState {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const state = value as Partial<RegistryState>;
-  return (
-    (state.committed === null || typeof state.committed === 'object') &&
-    typeof state.minimumPublisherEpoch === 'string' &&
-    typeof state.highestAuthenticatedPublisherEpoch === 'string' &&
-    typeof state.highestQuarantinedPublisherEpoch === 'string' &&
-    (state.recoveryLock === null || typeof state.recoveryLock === 'object') &&
-    typeof state.recoverySequence === 'string'
-  );
-}
-
 export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   async sync(payload: RouterReplicaDesired, publisherEpoch: string) {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      if (stored !== undefined && !isRegistryState(stored)) {
-        throw new Error('registry state malformed');
-      }
-      const result = await applyPublisherSync(stored ?? initialRegistryState(), payload, publisherEpoch);
+      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      const result = await applyPublisherSync(state, payload, publisherEpoch);
       await transaction.put(STATE_KEY, result.state);
       return result.response;
     });
@@ -79,25 +66,35 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   async lookup(): Promise<RegistryLookup> {
     const stored = await this.ctx.storage.get<unknown>(STATE_KEY);
     if (stored === undefined) return { kind: 'unknown-host' };
-    if (!isRegistryState(stored)) return { kind: 'unavailable' };
     try {
-      return registryLookup(stored);
+      return registryLookup(await parseStoredRegistryState(stored));
     } catch {
       return { kind: 'unavailable' };
     }
   }
 
-  async audit(afterRecoverySequence = '0'): Promise<RegistryAuditPage> {
+  async audit(afterRecoverySequence = '0'): Promise<
+    | { ok: true; page: RegistryAuditPage }
+    | { ok: false; error: 'invalid-cursor' }
+  > {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      const state = stored === undefined ? initialRegistryState() : stored;
-      if (!isRegistryState(state)) throw new Error('registry state malformed');
+      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      if (
+        !/^(?:0|[1-9]\d*)$/.test(afterRecoverySequence) ||
+        BigInt(afterRecoverySequence) > BigInt(state.recoverySequence)
+      ) {
+        return { ok: false as const, error: 'invalid-cursor' as const };
+      }
       const records = await transaction.list<RecoveryRecord>({
         prefix: HISTORY_PREFIX,
         startAfter: decimalKey(HISTORY_PREFIX, afterRecoverySequence),
         limit: AUDIT_PAGE_SIZE + 1,
       });
-      return createAuditPage(state, [...records.values()], afterRecoverySequence);
+      return {
+        ok: true as const,
+        page: createAuditPage(state, [...records.values()], afterRecoverySequence),
+      };
     });
   }
 
@@ -108,12 +105,12 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       operatorSub: string;
       lockId: string;
       publisherIntegrityProven?: boolean;
+      activeRegistryConfigDigest?: string;
     },
   ): Promise<{ sequence: string; action: RecoveryRecord['action'] }> {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      const state = stored === undefined ? initialRegistryState() : stored;
-      if (!isRegistryState(state)) throw new Error('registry state malformed');
+      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
       const result = await applyRecovery(state, request, {
         ...context,
         consumeAttestations: async (ids, phase) => {
@@ -135,6 +132,25 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
             providerRequests,
             phase === 'blocked' ? 'blocked-before-worker' : 'canonical-after-unblock',
           );
+          for (const attestation of attestations as ProbeAttestation[]) {
+            if (phase === 'blocked') {
+              const expectedDigest =
+                request.action.kind === 'acquire-lock' || request.action.kind === 'abort-lock'
+                  ? request.action.wafEvidence.providerRule.customResponseBodyDigest
+                  : null;
+              if (
+                attestation.observation.phase !== 'blocked-before-worker' ||
+                attestation.observation.observedBlockBodyDigest !== expectedDigest
+              ) {
+                throw new Error('blocked probe does not match the active WAF response');
+              }
+            } else if (
+              attestation.observation.phase !== 'canonical-after-unblock' ||
+              attestation.observation.observedRevision !== request.sourceAudit.revision
+            ) {
+              throw new Error('canonical probe does not match the committed source revision');
+            }
+          }
           await transaction.delete(keys);
         },
       });
@@ -191,7 +207,9 @@ export class RegistryLookupEntrypoint extends WorkerEntrypoint<RegistryWorkerEnv
     const classified = classifyHost(rawHost);
     if (
       host !== rawHost ||
-      (classified.kind === 'rejected' && !isSyntheticRegistryHost(rawHost))
+      (classified.kind === 'rejected' &&
+        !isSyntheticRegistryHost(rawHost) &&
+        !isRegistryRootHost(rawHost))
     ) {
       return { kind: 'unknown-host' };
     }
@@ -223,6 +241,7 @@ export default {
       request,
       {
         audience: REGISTRY_SYNC_AUDIENCE,
+        auditSubject: REGISTRY_AUDIT_SUBJECT,
         roleAudiences: REGISTRY_ROLE_AUDIENCES,
         verificationRecords: REGISTRY_VERIFICATION_RECORDS,
       },

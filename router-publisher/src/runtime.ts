@@ -20,6 +20,98 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
+}
+
+function isRegistryHost(host: string): boolean {
+  if (
+    [
+      'fiveacross.app',
+      'vacaybingo.com',
+      'gaycruisebingo.com',
+      'fiveacross.vercel.app',
+      'vacaybingo.vercel.app',
+      'gaycruisebingo.vercel.app',
+    ].includes(host) ||
+    /^(?:r2-[a-z2-7]{26}|r2-root-[a-z2-7]{20})\.(?:fiveacross\.app|vacaybingo\.com)$/.test(
+      host,
+    )
+  ) {
+    return true;
+  }
+  const match = /^([a-z0-9-]+)\.(fiveacross\.app|vacaybingo\.com)$/.exec(host);
+  if (match === null) return false;
+  const label = match[1];
+  return (
+    label.length >= 3 &&
+    label.length <= 63 &&
+    !label.startsWith('-') &&
+    !label.endsWith('-') &&
+    !label.startsWith('r2-') &&
+    !new Set(['admin', 'api', 'auth', 'd', 'play', 'status', 'www']).has(label) &&
+    !(label.length >= 4 && label[2] === '-' && label[3] === '-')
+  );
+}
+
+function validDesired(host: string, value: Record<string, unknown>): boolean {
+  if (value.kind === 'tombstone') return hasExactKeys(value, ['kind']) && isRegistryHost(host);
+  if (!['gcb', 'vacay', 'fiveacross'].includes(String(value.edition))) return false;
+  if (
+    value.pathNamespace !== null &&
+    value.pathNamespace !== 'fiveacross.app' &&
+    value.pathNamespace !== 'vacaybingo.com'
+  ) {
+    return false;
+  }
+  if (value.kind === 'route') {
+    return (
+      hasExactKeys(value, ['kind', 'eventId', 'status', 'slug', 'edition', 'pathNamespace']) &&
+      typeof value.eventId === 'string' &&
+      value.eventId.length > 0 &&
+      typeof value.slug === 'string' &&
+      value.slug === host.split('.')[0] &&
+      isRegistryHost(host) &&
+      ['active', 'disabled', 'archived'].includes(String(value.status)) &&
+      value.pathNamespace === null
+    );
+  }
+  if (value.kind === 'root') {
+    const syntheticRoot = /^r2-root-[a-z2-7]{20}\.(?:fiveacross\.app|vacaybingo\.com)$/.test(host);
+    const rootClasses = new Map([
+      ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
+      ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
+      ['gaycruisebingo.com', ['gcb', null]],
+      ['fiveacross.vercel.app', ['fiveacross', 'fiveacross.app']],
+      ['vacaybingo.vercel.app', ['vacay', 'vacaybingo.com']],
+      ['gaycruisebingo.vercel.app', ['gcb', null]],
+    ]);
+    const rootClass = rootClasses.get(host);
+    return (
+      hasExactKeys(value, ['kind', 'root', 'edition', 'pathNamespace']) &&
+      (value.root === 'doorway' || value.root === 'not-found') &&
+      (syntheticRoot || rootClass !== undefined) &&
+      (syntheticRoot
+        ? value.pathNamespace === null
+        : value.edition === rootClass?.[0] && value.pathNamespace === rootClass?.[1])
+    );
+  }
+  return false;
+}
+
+export function crc32c(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0x82f63b78 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function decodeSignature(value: unknown): Uint8Array {
   if (typeof value !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
     throw new PublisherRuntimeError();
@@ -85,13 +177,26 @@ export function createPublisherRuntimeDeps(
               authorization: `Bearer ${tokenBody.access_token}`,
               'content-type': 'application/json',
             },
-            body: JSON.stringify({ digest: { sha256: Buffer.from(digest).toString('base64') } }),
+            body: JSON.stringify({
+              digest: { sha256: Buffer.from(digest).toString('base64') },
+              digestCrc32c: String(crc32c(digest)),
+            }),
           },
         );
         if (!response.ok) throw new PublisherRuntimeError();
         const body: unknown = await response.json();
         if (!isRecord(body)) throw new PublisherRuntimeError();
-        return decodeSignature(body.signature);
+        const signature = decodeSignature(body.signature);
+        if (
+          body.name !== keyVersion ||
+          body.verifiedDigestCrc32c !== true ||
+          typeof body.signatureCrc32c !== 'string' ||
+          !/^(?:0|[1-9]\d*)$/.test(body.signatureCrc32c) ||
+          BigInt(body.signatureCrc32c) !== BigInt(crc32c(signature))
+        ) {
+          throw new PublisherRuntimeError();
+        }
+        return signature;
       } catch {
         throw new PublisherRuntimeError();
       }
@@ -103,6 +208,7 @@ export function createPublisherRuntimeDeps(
 export function replicaPayloadFromEvent(host: string, data: unknown): RouterReplicaDesired {
   if (!isRecord(data)) throw new Error('invalid router replica event');
   if (
+    !hasExactKeys(data, ['schemaVersion', 'revision', 'host', 'desired', 'updatedAt']) ||
     data.schemaVersion !== 1 ||
     typeof data.revision !== 'string' ||
     !/^[1-9]\d*$/.test(data.revision) ||
@@ -125,6 +231,15 @@ export function replicaPayloadFromEvent(host: string, data: unknown): RouterRepl
     }
     updatedAt = value.toISOString();
   } else {
+    throw new Error('invalid router replica event');
+  }
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(updatedAt) ||
+    !Number.isFinite(Date.parse(updatedAt)) ||
+    host !== host.toLowerCase() ||
+    host.endsWith('.') ||
+    !validDesired(host, data.desired)
+  ) {
     throw new Error('invalid router replica event');
   }
   return { ...data, updatedAt } as RouterReplicaDesired;

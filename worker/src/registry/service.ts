@@ -38,10 +38,19 @@ const SYNC_RESULTS = new Set([
 
 export type HostRegistryStub = {
   sync(payload: RouterReplicaDesired, publisherEpoch: string): Promise<SyncResponse>;
-  audit(afterRecoverySequence?: string): Promise<RegistryAuditPage>;
+  audit(afterRecoverySequence?: string): Promise<
+    | { ok: true; page: RegistryAuditPage }
+    | { ok: false; error: 'invalid-cursor' }
+  >;
   recover(
     request: RecoveryRequest,
-    context: { now: number; operatorSub: string; lockId: string; publisherIntegrityProven?: boolean },
+    context: {
+      now: number;
+      operatorSub: string;
+      lockId: string;
+      publisherIntegrityProven?: boolean;
+      activeRegistryConfigDigest?: string;
+    },
   ): Promise<{ sequence: string; action: RecoveryRecord['action'] }>;
   issueProbeChallenge(
     request: { host: string; phase: ProbePhase; expectedStateDigest: string },
@@ -68,6 +77,7 @@ export type RegistryRateLimiter = {
 export type RegistryServiceConfig = {
   audience: string;
   verificationRecords: readonly VerificationRecord[];
+  auditSubject?: string;
   roleAudiences?: Partial<
     Record<'audit' | 'recovery' | 'source-attestor' | 'regional-probe', string>
   >;
@@ -135,7 +145,12 @@ async function syncResponse(
     return json(400, { error: 'invalid-request' });
   }
   if (bytes.byteLength > SYNC_MAX_BYTES) return json(413, { error: 'request-too-large' });
-  const body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+  let body: string;
+  try {
+    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return json(400, { error: 'invalid-request' });
+  }
 
   const authHeader = request.headers.get('authorization') ?? '';
   try {

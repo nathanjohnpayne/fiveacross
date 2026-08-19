@@ -1,6 +1,5 @@
 export type VerificationRole =
   | 'publisher'
-  | 'audit'
   | 'recovery'
   | 'source-attestor'
   | 'regional-probe';
@@ -65,6 +64,7 @@ export async function validateVerificationRecords(
   const slots = new Set<string>();
   const versions = new Set<string>();
   const fingerprints = new Set<string>();
+  const subjectRoles = new Map<string, VerificationRole>();
 
   for (const record of records) {
     if (record.subject.length === 0 || record.keyVersion.length === 0 || record.epochOrSlot.length === 0) {
@@ -77,9 +77,14 @@ export async function validateVerificationRecords(
     if (slots.has(slot)) throw new Error('duplicate role/epoch/slot mapping');
     if (versions.has(record.keyVersion)) throw new Error('duplicate key version mapping');
     if (fingerprints.has(record.spkiSha256)) throw new Error('duplicate fingerprint mapping');
+    const subjectRole = subjectRoles.get(record.subject);
+    if (subjectRole !== undefined && subjectRole !== record.role) {
+      throw new Error('cross-role subject reuse is forbidden');
+    }
     slots.add(slot);
     versions.add(record.keyVersion);
     fingerprints.add(record.spkiSha256);
+    subjectRoles.set(record.subject, record.role);
   }
 
   await Promise.all(records.map((record) => importPinnedVerificationKey(record)));
@@ -99,4 +104,26 @@ export async function verifyPinnedSignature(
     return false;
   }
   return crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, exactBytes);
+}
+
+export async function verificationRecordMappingDigest(
+  records: readonly VerificationRecord[],
+): Promise<string> {
+  const projection = [...records]
+    .map((record) => [
+      record.role,
+      record.subject,
+      record.epochOrSlot,
+      record.keyVersion,
+      record.algorithm,
+      record.spkiSha256,
+    ])
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(JSON.stringify(projection)),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }

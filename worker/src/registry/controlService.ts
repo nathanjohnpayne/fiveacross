@@ -5,8 +5,11 @@ import {
   authenticatePinnedRole,
   type PinnedRoleRequest,
 } from './controlAuth';
-import type { VerificationRecord, VerificationRole } from './keys';
-import type { JwksResolver } from './oidc';
+import {
+  verificationRecordMappingDigest,
+  type VerificationRecord,
+} from './keys';
+import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
 import type { RecoveryRequest, SourceAudit } from './recovery';
 import type { HostRegistryNamespace, RegistryRateLimiter, RegistryServiceConfig } from './service';
@@ -96,7 +99,7 @@ function roleAudience(config: RegistryServiceConfig, role: ControlRole): string 
 
 async function authenticateRequest(
   request: Request,
-  role: Exclude<ControlRole, 'source-attestor'>,
+  role: 'recovery' | 'regional-probe',
   body: string,
   config: RegistryServiceConfig,
   deps: ControlServiceDeps,
@@ -134,6 +137,30 @@ async function authenticateRequest(
     },
     { now: deps.now(), jwks: deps.jwks, verificationRecords: config.verificationRecords },
   );
+}
+
+async function authenticateAudit(
+  request: Request,
+  config: RegistryServiceConfig,
+  deps: ControlServiceDeps,
+): Promise<void> {
+  const token = bearer(request.headers.get('authorization'));
+  if (token === null || config.auditSubject === undefined || config.auditSubject.length === 0) {
+    throw new Error('unauthorized');
+  }
+  try {
+    await verifyGoogleOidc(
+      token,
+      { audience: roleAudience(config, 'audit'), subject: config.auditSubject },
+      deps.jwks,
+      deps.now(),
+    );
+  } catch (error) {
+    if (error instanceof JwksUnavailableError) {
+      throw new ControlAuthUnavailableError('identity verification unavailable');
+    }
+    throw new Error('unauthorized');
+  }
 }
 
 function findSourceRecord(
@@ -205,6 +232,7 @@ async function authenticateSourceAttestation(
     ) {
       throw new Error('unauthorized');
     }
+    const { attestationSignature: _attestationSignature, ...unsignedControl } = control;
     await authenticatePinnedRole(
       {
         role: 'source-attestor',
@@ -219,7 +247,7 @@ async function authenticateSourceAttestation(
             'publisher-quarantine',
             control.observedAt,
             control.attestationIssuedAt,
-            await sha256Hex(canonicalJson(control)),
+            await sha256Hex(canonicalJson(unsignedControl)),
           ].join('\n'),
         ),
         audience: roleAudience(config, 'source-attestor'),
@@ -319,14 +347,15 @@ async function auditResponse(
   }
   const limited = await enforceRateLimit(request, 'audit', deps);
   if (limited !== null) return limited;
-  await authenticateRequest(request, 'audit', '', config, deps);
+  await authenticateAudit(request, config, deps);
   try {
-    const page = await deps.hostRegistry
+    const result = await deps.hostRegistry
       .getByName(host, { locationHint: REGISTRY_LOCATION_HINT })
       .audit(after);
-    return json(200, page as unknown as Record<string, unknown>);
+    if (!result.ok) return json(400, { error: 'invalid-audit-cursor' });
+    return json(200, result.page as unknown as Record<string, unknown>);
   } catch {
-    return json(400, { error: 'invalid-audit-cursor' });
+    return json(503, { error: 'audit-unavailable' });
   }
 }
 
@@ -361,6 +390,11 @@ async function recoveryResponse(
         now: deps.now(),
         operatorSub: recoveryRecord.subject,
         lockId: deps.randomId(),
+        publisherIntegrityProven:
+          recovery.action.kind === 'apply' && recovery.action.publisherReplacement === null,
+        activeRegistryConfigDigest: await verificationRecordMappingDigest(
+          config.verificationRecords,
+        ),
       });
     return json(200, result as unknown as Record<string, unknown>);
   } catch {

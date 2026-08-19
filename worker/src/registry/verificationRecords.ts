@@ -24,3 +24,7 @@ export const REGISTRY_ROLE_AUDIENCES = {
   'source-attestor': `${REGISTRY_ORIGIN}/__internal/hostname-replicas/v1/source-attestor`,
   'regional-probe': `${REGISTRY_ORIGIN}/__internal/hostname-replicas/v1/regional-probe`,
 } as const;
+
+// Provisioning replaces this fail-closed placeholder with the dedicated audit
+// service account's numeric Google subject before any private audit is run.
+export const REGISTRY_AUDIT_SUBJECT = '';

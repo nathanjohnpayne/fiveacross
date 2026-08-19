@@ -1,7 +1,7 @@
 import { createHash, createPublicKey } from 'node:crypto';
 
 const REQUIRED_ALGORITHM = 'RSA_SIGN_PKCS1_2048_SHA256';
-const ROLES = new Set(['publisher', 'audit', 'recovery', 'source-attestor', 'regional-probe']);
+const ROLES = new Set(['publisher', 'recovery', 'source-attestor', 'regional-probe']);
 
 const CRC32C_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -90,11 +90,17 @@ export function mergeImmutableVerificationRecords(existing, incoming) {
   const result = [...merged.values()];
   const keyVersions = new Set();
   const fingerprints = new Set();
+  const subjectRoles = new Map();
   for (const record of result) {
     if (keyVersions.has(record.keyVersion)) throw new Error('duplicate key version mapping');
     if (fingerprints.has(record.spkiSha256)) throw new Error('duplicate fingerprint mapping');
+    const subjectRole = subjectRoles.get(record.subject);
+    if (subjectRole !== undefined && subjectRole !== record.role) {
+      throw new Error('cross-role subject reuse is forbidden');
+    }
     keyVersions.add(record.keyVersion);
     fingerprints.add(record.spkiSha256);
+    subjectRoles.set(record.subject, record.role);
   }
   return result;
 }

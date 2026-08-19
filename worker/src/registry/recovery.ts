@@ -70,6 +70,37 @@ export type WafEvidence = {
   providerRequests: [ProviderRequestEvidence, ProviderRequestEvidence, ProviderRequestEvidence];
 };
 
+export type KeyAccessReadback = {
+  cryptoKey: string;
+  policyEtag: string;
+  signMembers: string[];
+  enabledVersions: Array<{
+    keyVersion: string;
+    algorithm: 'RSA_SIGN_PKCS1_2048_SHA256';
+    spkiSha256: string;
+  }>;
+  responseDigest: string;
+};
+
+export type ServiceAccountAccessReadback = {
+  subject: string;
+  policyEtag: string;
+  tokenCreatorMembers: string[];
+  responseDigest: string;
+};
+
+export type AccessDecisionReadback = {
+  principal: string;
+  fullResourceName: string;
+  permission:
+    | 'cloudkms.cryptoKeyVersions.useToSign'
+    | 'iam.serviceAccounts.getOpenIdToken'
+    | 'iam.serviceAccounts.getAccessToken';
+  requestTime: string;
+  overallAccessState: 'CANNOT_ACCESS';
+  responseDigest: string;
+};
+
 type PublisherControlEvidence = {
   observedAt: string;
   quarantinedRuntime: { subject: string; functionRevision: string; responseDigest: string };
@@ -81,9 +112,13 @@ type PublisherControlEvidence = {
     algorithm: 'RSA_SIGN_PKCS1_2048_SHA256';
     spkiSha256: string;
   }>;
-  keyAccess: unknown[];
-  serviceAccountAccess: unknown[];
-  quarantinedAccessDecisions: Array<{ overallAccessState: 'CANNOT_ACCESS' }>;
+  keyAccess: [KeyAccessReadback, KeyAccessReadback];
+  serviceAccountAccess: [ServiceAccountAccessReadback, ServiceAccountAccessReadback];
+  quarantinedAccessDecisions: [
+    AccessDecisionReadback,
+    AccessDecisionReadback,
+    AccessDecisionReadback,
+  ];
   attestorSub: string;
   attestorKeyVersion: string;
   attestorKeyFingerprint: string;
@@ -141,6 +176,7 @@ export type RecoveryContext = {
   operatorSub: string;
   lockId: string;
   publisherIntegrityProven?: boolean;
+  activeRegistryConfigDigest?: string;
   consumeAttestations?: (ids: readonly string[], phase: 'blocked' | 'canonical') => Promise<void>;
 };
 
@@ -329,14 +365,17 @@ function validateReplacement(
   if (
     ceiling < BigInt(state.highestAuthenticatedPublisherEpoch) ||
     ceiling < BigInt(state.highestQuarantinedPublisherEpoch) ||
-    BigInt(replacement.nextPublisherEpoch) <= ceiling
+    BigInt(replacement.nextPublisherEpoch) <= ceiling ||
+    BigInt(replacement.nextPublisherEpoch) < BigInt(state.minimumPublisherEpoch)
   ) {
     throw new Error('publisher replacement does not fence quarantined epochs');
   }
   const control = replacement.controlEvidence;
   requireFresh(control.observedAt, now, MAX_SOURCE_AGE_MS, 'publisher control evidence');
   requireFresh(control.attestationIssuedAt, now, MAX_ATTESTATION_AGE_MS, 'publisher control attestation');
-  if (control.activeEpochMappings.length > 16) throw new Error('too many active epoch mappings');
+  if (control.activeEpochMappings.length === 0 || control.activeEpochMappings.length > 16) {
+    throw new Error('active epoch mappings are empty or oversized');
+  }
   const mapping = control.activeEpochMappings.find(
     (candidate) => candidate.epoch === replacement.nextPublisherEpoch,
   );
@@ -349,6 +388,21 @@ function validateReplacement(
   ) {
     throw new Error('replacement runtime and active mapping differ');
   }
+  for (const active of control.activeEpochMappings) {
+    if (
+      !POSITIVE_DECIMAL.test(active.epoch) ||
+      !SHA256_HEX.test(active.spkiSha256) ||
+      active.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256'
+    ) {
+      throw new Error('active epoch mapping malformed');
+    }
+    if (
+      active.subject === control.quarantinedRuntime.subject &&
+      BigInt(active.epoch) > ceiling
+    ) {
+      throw new Error('quarantined epoch ceiling misses an active mapping');
+    }
+  }
   if (
     control.quarantinedAccessDecisions.length !== 3 ||
     control.quarantinedAccessDecisions.some(
@@ -357,8 +411,61 @@ function validateReplacement(
   ) {
     throw new Error('all publisher quarantine decisions must be CANNOT_ACCESS');
   }
-  if (control.keyAccess.length > 16 || control.serviceAccountAccess.length > 16) {
-    throw new Error('publisher control evidence is oversized');
+  if (control.keyAccess.length !== 2 || control.serviceAccountAccess.length !== 2) {
+    throw new Error('publisher control evidence must include both key and service-account readbacks');
+  }
+  const broadMember = (member: string) =>
+    member === 'allUsers' ||
+    member === 'allAuthenticatedUsers' ||
+    member.startsWith('group:') ||
+    member.startsWith('domain:');
+  const oldPrincipals = new Set([
+    control.quarantinedRuntime.subject,
+    `serviceAccount:${control.quarantinedRuntime.subject}`,
+  ]);
+  let replacementSigningGrant = false;
+  for (const readback of control.keyAccess) {
+    if (
+      readback.signMembers.length > 16 ||
+      readback.enabledVersions.length > 16 ||
+      readback.signMembers.some((member) => broadMember(member) || oldPrincipals.has(member)) ||
+      !SHA256_HEX.test(readback.responseDigest) ||
+      readback.enabledVersions.some(
+        (version) =>
+          version.algorithm !== 'RSA_SIGN_PKCS1_2048_SHA256' ||
+          !SHA256_HEX.test(version.spkiSha256),
+      )
+    ) {
+      throw new Error('replacement key policy does not quarantine the old publisher');
+    }
+    if (readback.signMembers.includes(`serviceAccount:${replacement.replacementSubject}`)) {
+      replacementSigningGrant = true;
+    }
+  }
+  if (!replacementSigningGrant) throw new Error('replacement subject lacks a direct signing grant');
+  for (const readback of control.serviceAccountAccess) {
+    if (
+      readback.tokenCreatorMembers.length > 16 ||
+      readback.tokenCreatorMembers.some((member) => broadMember(member) || oldPrincipals.has(member)) ||
+      !SHA256_HEX.test(readback.responseDigest)
+    ) {
+      throw new Error('replacement service-account policy does not quarantine the old publisher');
+    }
+  }
+  const permissions = new Set(control.quarantinedAccessDecisions.map((decision) => decision.permission));
+  if (
+    permissions.size !== 3 ||
+    !permissions.has('cloudkms.cryptoKeyVersions.useToSign') ||
+    !permissions.has('iam.serviceAccounts.getOpenIdToken') ||
+    !permissions.has('iam.serviceAccounts.getAccessToken') ||
+    control.quarantinedAccessDecisions.some(
+      (decision) =>
+        decision.principal !== control.quarantinedRuntime.subject ||
+        !SHA256_HEX.test(decision.responseDigest) ||
+        !Number.isFinite(Date.parse(decision.requestTime)),
+    )
+  ) {
+    throw new Error('publisher quarantine decisions are incomplete');
   }
   if (
     control.attestorSub.length === 0 ||
@@ -424,6 +531,12 @@ export async function applyRecovery(
       const sourceRevision = BigInt(ledgerPayload.revision);
       const currentRevision = state.committed === null ? 0n : BigInt(state.committed.revision);
       if (sourceRevision < currentRevision) throw new Error('source-behind');
+      if (
+        state.committed?.payload.desired.kind === 'tombstone' &&
+        ledgerPayload.desired.kind !== 'tombstone'
+      ) {
+        throw new Error('tombstone-final');
+      }
       const digest = await projectionDigest(ledgerPayload);
       const equalRepair = sourceRevision === currentRevision && state.committed?.digest !== digest;
       if ((equalRepair || context.publisherIntegrityProven !== true) && request.action.publisherReplacement === null) {
@@ -432,6 +545,20 @@ export async function applyRecovery(
       let epochState = state;
       if (request.action.publisherReplacement !== null) {
         validateReplacement(state, request.action.publisherReplacement, context.now);
+        if (
+          context.activeRegistryConfigDigest !== undefined &&
+          request.action.publisherReplacement.registryConfigDigest !== context.activeRegistryConfigDigest
+        ) {
+          throw new Error('publisher replacement registry mapping digest mismatch');
+        }
+        const control = request.action.publisherReplacement.controlEvidence;
+        if (
+          control.attestorSub !== request.sourceAudit.attestorSub ||
+          control.attestorKeyVersion !== request.sourceAudit.attestorKeyVersion ||
+          control.attestorKeyFingerprint !== request.sourceAudit.attestorKeyFingerprint
+        ) {
+          throw new Error('publisher control evidence uses the wrong source attestor');
+        }
         epochState = {
           ...state,
           highestQuarantinedPublisherEpoch: maxDecimal(
@@ -453,6 +580,12 @@ export async function applyRecovery(
       }
       if (new Set(request.action.probeAttestationIds).size !== 3) {
         throw new Error('probe attestations must be distinct');
+      }
+      if (
+        BigInt(state.highestQuarantinedPublisherEpoch) > 0n &&
+        BigInt(state.highestAuthenticatedPublisherEpoch) < BigInt(state.minimumPublisherEpoch)
+      ) {
+        throw new Error('replacement publisher epoch has not authenticated');
       }
       validateProviderRequests(request.host, request.action.providerRequests, false, context.now);
       await context.consumeAttestations?.(request.action.probeAttestationIds, 'canonical');

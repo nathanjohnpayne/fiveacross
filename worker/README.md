@@ -20,6 +20,11 @@ It is **not an authorization layer**. The application still verifies membership 
 | `src/resolve.ts` | The `hostnames/{host}` lookup, its cache, and the fail-closed decision table. |
 | `src/notFound.ts` | The rendered Event-not-found page. |
 | `../src/slug.ts` | The Slug contract, shared with the Event-setup wizard's address step. One list, never two. |
+| `src/registry/` | The separately deployed private registry control plane: signed sync/recovery, per-host Durable Object state, named lookup-only entrypoint, and synthetic-only harness adapter. |
+| `wrangler.registry.toml` | Registry-owned Durable Object, rate limiter, observability, and workers.dev control endpoint; it has no Namespace route or KV. |
+| `wrangler.registry-harness.toml` | Unrouted synthetic harness bound explicitly to `RegistryLookupEntrypoint`; it cannot reach the registry's default `fetch`. |
+
+The registry configurations are intentionally separate from the public router's `wrangler.toml`. Building or dry-running them does not attach a wildcard, apex, real-Event, or synthetic exact route. Ticket #970 leaves their immutable identity/public-key records fail-closed until reviewed provisioning and performs no deployment; later rehearsal tickets may consume only the bounded synthetic manifest described by the registry spec.
 
 Everything with a decision in it is free of Cloudflare types and takes its platform seams (`fetch`, `cache`, `now`) as injected arguments — the convention [`specs/event-resolution.md`](../specs/event-resolution.md) sets for the client resolver, for the same reason: it lets the whole decision table be proved by the repo's ordinary `npm test`, with no workerd, no emulator and no network.
 

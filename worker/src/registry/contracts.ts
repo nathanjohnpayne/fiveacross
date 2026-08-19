@@ -66,9 +66,21 @@ const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)$/;
 const SYNTHETIC_EVENT = /^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/;
+const ROOT_HOSTS = new Map<string, { edition: RegistryEdition; pathNamespace: PathNamespace }>([
+  ['fiveacross.app', { edition: 'fiveacross', pathNamespace: 'fiveacross.app' }],
+  ['vacaybingo.com', { edition: 'vacay', pathNamespace: 'vacaybingo.com' }],
+  ['gaycruisebingo.com', { edition: 'gcb', pathNamespace: null }],
+  ['fiveacross.vercel.app', { edition: 'fiveacross', pathNamespace: 'fiveacross.app' }],
+  ['vacaybingo.vercel.app', { edition: 'vacay', pathNamespace: 'vacaybingo.com' }],
+  ['gaycruisebingo.vercel.app', { edition: 'gcb', pathNamespace: null }],
+]);
 
 export function isSyntheticRegistryHost(host: string): boolean {
   return SYNTHETIC_EVENT.test(host) || SYNTHETIC_ROOT.test(host);
+}
+
+export function isRegistryRootHost(host: string): boolean {
+  return ROOT_HOSTS.has(host) || SYNTHETIC_ROOT.test(host);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -90,6 +102,13 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
 
   if (value.kind === 'tombstone') {
     if (!hasExactKeys(value, TOMBSTONE_KEYS)) throw new Error('invalid tombstone fields');
+    if (
+      classifyHost(host).kind === 'rejected' &&
+      !isSyntheticRegistryHost(host) &&
+      !isRegistryRootHost(host)
+    ) {
+      throw new Error('invalid tombstone host');
+    }
     return { kind: 'tombstone' };
   }
 
@@ -131,13 +150,13 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
   if (value.kind === 'root') {
     if (!hasExactKeys(value, ROOT_KEYS)) throw new Error('invalid root fields');
     if (value.root !== 'doorway' && value.root !== 'not-found') throw new Error('invalid root marker');
-    const isNamespaceApex = host === 'fiveacross.app' || host === 'vacaybingo.com';
-    if (!isNamespaceApex && !SYNTHETIC_ROOT.test(host)) throw new Error('invalid root shape');
-    if (SYNTHETIC_ROOT.test(host) && pathNamespace !== null) {
-      throw new Error('synthetic root pathNamespace must be null');
-    }
-    if (pathNamespace !== null && pathNamespace !== host) {
-      throw new Error('root pathNamespace must match its Namespace apex');
+    const syntheticRoot = SYNTHETIC_ROOT.test(host);
+    const rootClass = ROOT_HOSTS.get(host);
+    if (!syntheticRoot && rootClass === undefined) throw new Error('invalid root shape');
+    if (syntheticRoot) {
+      if (pathNamespace !== null) throw new Error('synthetic root pathNamespace must be null');
+    } else if (rootClass?.pathNamespace !== pathNamespace || rootClass.edition !== edition) {
+      throw new Error('root edition/pathNamespace must match its host class');
     }
     return {
       kind: 'root',

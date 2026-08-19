@@ -51,6 +51,10 @@ describe('registry sync request contract', () => {
       { ...route(), desired: { ...route().desired, pathNamespace: 'fiveacross.app' } },
     ],
     ['invalid timestamp', route({ updatedAt: 'not-a-time' })],
+    [
+      'foreign tombstone host',
+      route({ host: 'example.com', desired: { kind: 'tombstone' } }),
+    ],
   ])('rejects %s before storage', (_label, payload) => {
     expect(() => parseSyncRequest(JSON.stringify(payload), 'application/json')).toThrow();
   });
@@ -80,6 +84,28 @@ describe('registry sync request contract', () => {
     expect(() => parseSyncRequest(JSON.stringify(ordinaryRoot), 'application/json')).toThrow(
       'root shape',
     );
+  });
+
+  it('pins Namespace apex and brand-mirror root capability to the host class', () => {
+    const mirror = route({
+      host: 'fiveacross.vercel.app',
+      desired: {
+        kind: 'root',
+        root: 'not-found',
+        edition: 'fiveacross',
+        pathNamespace: 'fiveacross.app',
+      },
+    });
+    expect(parseSyncRequest(JSON.stringify(mirror), 'application/json')).toEqual(mirror);
+    expect(() =>
+      parseSyncRequest(
+        JSON.stringify({
+          ...mirror,
+          desired: { ...mirror.desired, pathNamespace: 'vacaybingo.com' },
+        }),
+        'application/json',
+      ),
+    ).toThrow('host class');
   });
 });
 

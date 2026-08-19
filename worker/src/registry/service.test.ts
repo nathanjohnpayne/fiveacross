@@ -190,4 +190,20 @@ describe('registry default fetch sync endpoint', () => {
     expect(response.status).toBe(429);
     expect(test.getByName).not.toHaveBeenCalled();
   });
+
+  it('returns a closed 400 for invalid UTF-8 before identity or DO work', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const response = await handleRegistryFetch(
+      new Request(AUDIENCE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: Uint8Array.from([0xc3, 0x28]),
+      }),
+      test.config,
+      test.deps,
+    );
+    expect(response.status).toBe(400);
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
 });

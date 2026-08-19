@@ -5,6 +5,7 @@ import {
   applyRecovery,
   validateSourceAudit,
   type ProviderRequestEvidence,
+  type PublisherReplacement,
   type RecoveryRequest,
   type SourceAudit,
   type WafEvidence,
@@ -206,7 +207,7 @@ describe('source-attested recovery', () => {
       await request(base, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
       { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
     );
-    const replacement = {
+    const replacement: NonNullable<PublisherReplacement> = {
       quarantinedEpochCeiling: '7',
       nextPublisherEpoch: '8',
       replacementSubject: 'replacement-subject',
@@ -218,15 +219,33 @@ describe('source-attested recovery', () => {
         quarantinedRuntime: { subject: 'old-subject', functionRevision: 'old-1', responseDigest: '1'.repeat(64) },
         replacementRuntime: { subject: 'replacement-subject', functionRevision: 'new-1', responseDigest: '2'.repeat(64) },
         activeEpochMappings: [{ epoch: '8', subject: 'replacement-subject', keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1', algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const, spkiSha256: 'e'.repeat(64) }],
-        keyAccess: [],
-        serviceAccountAccess: [],
+        keyAccess: [
+          {
+            cryptoKey: 'old-key',
+            policyEtag: 'old-etag',
+            signMembers: [],
+            enabledVersions: [{ keyVersion: 'old-key/1', algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const, spkiSha256: '9'.repeat(64) }],
+            responseDigest: '3'.repeat(64),
+          },
+          {
+            cryptoKey: 'replacement-key',
+            policyEtag: 'new-etag',
+            signMembers: ['serviceAccount:replacement-subject'],
+            enabledVersions: [{ keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1', algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const, spkiSha256: 'e'.repeat(64) }],
+            responseDigest: '4'.repeat(64),
+          },
+        ],
+        serviceAccountAccess: [
+          { subject: 'old-subject', policyEtag: 'old-sa-etag', tokenCreatorMembers: [], responseDigest: '5'.repeat(64) },
+          { subject: 'replacement-subject', policyEtag: 'new-sa-etag', tokenCreatorMembers: [], responseDigest: '6'.repeat(64) },
+        ],
         quarantinedAccessDecisions: [
-          { overallAccessState: 'CANNOT_ACCESS' as const },
-          { overallAccessState: 'CANNOT_ACCESS' as const },
-          { overallAccessState: 'CANNOT_ACCESS' as const },
+          { principal: 'old-subject', fullResourceName: 'replacement-key/1', permission: 'cloudkms.cryptoKeyVersions.useToSign' as const, requestTime: '2026-08-19T12:34:50.000Z', overallAccessState: 'CANNOT_ACCESS' as const, responseDigest: '7'.repeat(64) },
+          { principal: 'old-subject', fullResourceName: 'replacement-subject', permission: 'iam.serviceAccounts.getOpenIdToken' as const, requestTime: '2026-08-19T12:34:50.000Z', overallAccessState: 'CANNOT_ACCESS' as const, responseDigest: '8'.repeat(64) },
+          { principal: 'old-subject', fullResourceName: 'replacement-subject', permission: 'iam.serviceAccounts.getAccessToken' as const, requestTime: '2026-08-19T12:34:50.000Z', overallAccessState: 'CANNOT_ACCESS' as const, responseDigest: '9'.repeat(64) },
         ],
         attestorSub: 'source-attestor-sub',
-        attestorKeyVersion: 'source-key/1',
+        attestorKeyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1',
         attestorKeyFingerprint: 'c'.repeat(64),
         attestationIssuedAt: '2026-08-19T12:34:50.000Z',
         attestationSignature: 'signed-control-evidence',
@@ -235,7 +254,7 @@ describe('source-attested recovery', () => {
     const applied = await applyRecovery(
       acquired.state,
       await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: replacement }, sourceAudit('2')),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused' },
+      { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused', activeRegistryConfigDigest: 'f'.repeat(64) },
     );
     expect(applied.state.minimumPublisherEpoch).toBe('8');
     expect(applied.state.highestQuarantinedPublisherEpoch).toBe('7');
@@ -246,7 +265,7 @@ describe('source-attested recovery', () => {
       applyRecovery(
         acquired.state,
         await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: invalid }, sourceAudit('2')),
-        { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused' },
+        { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused', activeRegistryConfigDigest: 'f'.repeat(64) },
       ),
     ).rejects.toThrow('CANNOT_ACCESS');
   });

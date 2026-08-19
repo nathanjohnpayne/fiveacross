@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  crc32c,
   createPublisherRuntimeDeps,
   replicaPayloadFromEvent,
 } from '../../router-publisher/src/runtime';
@@ -20,7 +21,13 @@ describe('keyless publisher runtime adapter', () => {
         return Response.json({ access_token: 'metadata-access-token', expires_in: 300, token_type: 'Bearer' });
       }
       if (url.startsWith('https://cloudkms.googleapis.com/v1/')) {
-        return Response.json({ signature: Buffer.from([1, 2, 3]).toString('base64') });
+        const signature = Uint8Array.from([1, 2, 3]);
+        return Response.json({
+          name: KEY_VERSION,
+          signature: Buffer.from(signature).toString('base64'),
+          signatureCrc32c: String(crc32c(signature)),
+          verifiedDigestCrc32c: true,
+        });
       }
       throw new Error(`unexpected URL ${url}`);
     });
@@ -48,8 +55,32 @@ describe('keyless publisher runtime adapter', () => {
       {
         method: 'POST',
         headers: { authorization: 'Bearer metadata-access-token', 'content-type': 'application/json' },
-        body: JSON.stringify({ digest: { sha256: Buffer.from(digest).toString('base64') } }),
+        body: JSON.stringify({
+          digest: { sha256: Buffer.from(digest).toString('base64') },
+          digestCrc32c: String(crc32c(digest)),
+        }),
       },
+    );
+  });
+
+  it('fails closed when KMS does not verify the digest CRC or returns a corrupt signature', async () => {
+    const digest = Uint8Array.from({ length: 32 }, (_unused, index) => index);
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/token')) {
+        return Response.json({ access_token: 'token', expires_in: 300, token_type: 'Bearer' });
+      }
+      const signature = Uint8Array.from([1, 2, 3]);
+      return Response.json({
+        name: KEY_VERSION,
+        signature: Buffer.from(signature).toString('base64'),
+        signatureCrc32c: String(crc32c(signature) + 1),
+        verifiedDigestCrc32c: false,
+      });
+    });
+    const deps = createPublisherRuntimeDeps(fetch, () => 1);
+    await expect(deps.signDigest({ keyVersion: KEY_VERSION, digest })).rejects.toThrow(
+      'publisher runtime unavailable',
     );
   });
 
@@ -78,6 +109,36 @@ describe('keyless publisher runtime adapter', () => {
     ['host mismatch', 'other.fiveacross.app', {}],
     ['deleted/missing after data', 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app', null],
     ['non-canonical revision', 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app', { schemaVersion: 1, revision: '01' }],
+    [
+      'extra field',
+      'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+      {
+        schemaVersion: 1,
+        revision: '1',
+        host: 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+        desired: { kind: 'tombstone' },
+        updatedAt: '2026-08-19T13:00:00.000Z',
+        injected: true,
+      },
+    ],
+    [
+      'poisoned route slug',
+      'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+      {
+        schemaVersion: 1,
+        revision: '1',
+        host: 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+        desired: {
+          kind: 'route',
+          eventId: 'synthetic',
+          status: 'disabled',
+          slug: 'other',
+          edition: 'fiveacross',
+          pathNamespace: null,
+        },
+        updatedAt: '2026-08-19T13:00:00.000Z',
+      },
+    ],
   ])('fails closed on %s', (_label, host, data) => {
     expect(() => replicaPayloadFromEvent(host, data)).toThrow('invalid router replica event');
   });

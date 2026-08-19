@@ -77,6 +77,20 @@ describe('immutable pinned verification records', () => {
     );
   });
 
+  it('rejects one workload subject reused across security roles', async () => {
+    const publisher = await fixtureRecord();
+    const recovery = await fixtureRecord({
+      role: 'recovery',
+      epochOrSlot: 'primary',
+      subject: publisher.record.subject,
+      keyVersion:
+        'projects/p/locations/global/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+    });
+    await expect(validateVerificationRecords([publisher.record, recovery.record])).rejects.toThrow(
+      'cross-role subject',
+    );
+  });
+
   it('verifies exact bytes and refuses altered or cross-role signatures', async () => {
     const publisher = await fixtureRecord();
     const recovery = await fixtureRecord({ role: 'recovery', epochOrSlot: 'primary', subject: '2002' });
