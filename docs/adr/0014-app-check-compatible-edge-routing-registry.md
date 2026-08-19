@@ -11,7 +11,7 @@ The Event router currently point-gets the world-readable `hostnames/{host}` docu
 
 Giving the Worker a Google service-account credential is not a narrow substitute. Firestore's REST API treats a Google OAuth token as an IAM request which bypasses Security Rules ([Firestore REST authentication](https://firebase.google.com/docs/firestore/use-rest-api)). The permission needed for a point read is `datastore.entities.get`, and Firestore IAM is granted at database/project scope rather than at the `hostnames` collection or a field projection ([Firestore IAM](https://cloud.google.com/firestore/docs/security/iam)). A leaked edge credential could therefore read any known document path in the production database, not only the small public edge projection.
 
-The router is a namespace guard and availability layer, not an authorization layer (ADR 0009). Its decision needs only the already-public routing projection; Gate 3's per-host manifest also needs the public `edition`. The app still resolves the Event independently and every protected data read keeps its own App Check, authentication, and rules boundary.
+The router is a namespace guard and availability layer, not an authorization layer (ADR 0009). Its decision needs only the already-public routing projection; Gate 3's per-host manifest also needs the public `edition`, and the accepted path-addressing design needs the public root/path-capability fields. The app still resolves the Event independently and every protected data read keeps its own App Check, authentication, and rules boundary.
 
 ## Decision
 
@@ -27,7 +27,7 @@ Workers KV is selected behind the private registry service because this is a glo
 
 - The public Worker receives no credential capable of reading Firestore and no App Check bypass. Its service binding can point-get a guessed hostname but cannot enumerate the KV namespace.
 - The publisher service account has no Firestore data-plane role. Its trigger receives the desired state in the event payload; its only additional permission is asymmetric signing on one dedicated Cloud KMS CryptoKey. Cloud KMS cannot grant IAM on an individual CryptoKeyVersion, so the registry separately allowlists the selected version and the key keeps only the current rotation set enabled.
-- The replica contains only fields already exposed by a public, non-listable Firestore point read and consumed at the edge: `eventId`, `status`, `slug`, and `edition`. It does not copy `canonicalHost`, `preview`, `adultContent`, membership, Event data, or a hostname catalogue.
+- The replica contains only fields already exposed by a public, non-listable Firestore point read and consumed at the edge: the Event route fields, `edition`, and the accepted `root` / `pathNamespace` host capability. It does not copy `canonicalHost`, `preview`, `adultContent`, `apexPath`, membership, Event data, or a hostname catalogue.
 - The sync endpoint cannot list or read Firestore, mutate Cloudflare configuration, attach routes, or choose an origin. It can submit only the next schema-validated, identity- and KMS-signed hostname revision.
 - A compromised public router can already decide what its wildcard traffic receives, but its point-read binding cannot turn the non-listable hostname registry into a directory. Compromise of the separately deployed registry service is a larger edge-control incident and can enumerate/alter the public projection, but still grants no Firebase data or Cloudflare account-management credential.
 
