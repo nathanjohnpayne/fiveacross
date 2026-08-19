@@ -50,7 +50,89 @@ done
 
 guard_deploy_main_checkout "scripts/worker-deploy.sh" "$FORCE"
 
-echo "✅ Guards passed. Publishing the Worker (routes are NOT attached by this step)." >&2
+REQUIRED_SECRET="FIREBASE_API_KEY"
+
+# Is this a ROUTE-BEARING deploy? The cutover procedure uncomments `routes` in
+# worker/wrangler.toml and redeploys through this same script, so "publishing
+# changes nothing the public sees" is true for an ordinary deploy and FALSE for
+# that one. Saying it unconditionally would reassure an operator at the exact
+# moment they are changing live traffic. Matches an uncommented `routes` key
+# only; the shipped file keeps the block commented out.
+if grep -Eq '^[[:space:]]*routes[[:space:]]*=' worker/wrangler.toml; then
+  ROUTE_BEARING=true
+else
+  ROUTE_BEARING=false
+fi
+
+# Verify the required secret binding on the DEPLOYED Worker.
+#
+# Nothing else in the cutover ladder does. `wrangler dev --remote` uploads the
+# local checkout into a temporary preview with its own `.dev.vars`, so it can
+# pass while production has no binding at all; and the workers.dev URL is
+# refused as `out-of-namespace` before configuration is consulted, so it cannot
+# report the binding either.
+#
+# Secrets live on the Worker rather than in this bundle, so this is answerable
+# BEFORE publishing as well as after — which is what lets a route-bearing
+# deploy check its prerequisites while nothing has changed yet.
+#
+# `wrangler secret list` returns names and types only, never values.
+verify_required_secret() {
+  local when="$1" secrets
+  echo "🔎 Verifying the deployed Worker's ${REQUIRED_SECRET} binding (${when})…" >&2
+
+  if ! secrets="$(npm --prefix worker exec -- wrangler secret list --format json 2>/dev/null)"; then
+    # Inability to inspect is NOT a pass. The README presents this as
+    # verification of the deployed artifact, so exiting 0 here would let
+    # automation record an unverified deploy as a verified one.
+    cat >&2 <<MSG
+
+❌ Could not list the deployed Worker's secrets, so ${REQUIRED_SECRET} could not be verified.
+
+This is a FAILED verification, not a skipped one. Check \`wrangler\` auth and the
+Worker's existence, then re-run. To inspect by hand:
+
+    npm --prefix worker exec -- wrangler secret list
+
+MSG
+    exit 75
+  fi
+
+  # EXACT name comparison. An unanchored substring match would accept
+  # `OLD_FIREBASE_API_KEY` or `FIREBASE_API_KEY_BACKUP` and report a green
+  # verification while the real binding is absent — a false pass that, after
+  # routes are attached, means every uncached hostname fails closed.
+  if printf '%s' "$secrets" | jq -e --arg name "$REQUIRED_SECRET" \
+      'if type=="array" then any(.[]; .name == $name) else false end' >/dev/null 2>&1; then
+    echo "✅ ${REQUIRED_SECRET} is bound on the deployed Worker." >&2
+    return 0
+  fi
+
+  cat >&2 <<MSG
+
+❌ ${REQUIRED_SECRET} is NOT bound on the deployed Worker.
+
+Every hostname will fail closed with \`x-event-router-reason: lookup-forbidden\`
+or \`lookup-unavailable\`. Bind it before attaching any route:
+
+    npm --prefix worker exec -- wrangler secret put ${REQUIRED_SECRET}
+
+MSG
+  exit 1
+}
+
+if [[ "$ROUTE_BEARING" == "true" ]]; then
+  cat >&2 <<'MSG'
+⚠️  worker/wrangler.toml has ROUTES CONFIGURED.
+
+This deploy ATTACHES those routes and CHANGES LIVE TRAFFIC. Verifying
+prerequisites before publishing rather than after.
+MSG
+  # Before publishing, while nothing has changed yet.
+  verify_required_secret "pre-publish"
+else
+  echo "✅ Guards passed. Publishing the Worker (no routes configured, so this changes nothing the public sees)." >&2
+fi
 
 # `npm ci`, never `npm install`, and the difference is the whole point of the
 # guards above. `npm install` would re-resolve wrangler's caret range against
@@ -62,35 +144,6 @@ echo "✅ Guards passed. Publishing the Worker (routes are NOT attached by this 
 npm --prefix worker ci
 npm --prefix worker run deploy
 
-# Verify the production secret binding on the DEPLOYED Worker.
-#
-# Nothing else in the cutover ladder does. `wrangler dev --remote` uploads the
-# local checkout into a temporary preview with its own `.dev.vars`, so it can
-# pass while production has no `FIREBASE_API_KEY` at all; and the workers.dev
-# URL is refused as `out-of-namespace` before configuration is ever consulted,
-# so it cannot report the binding either. Without this check the first evidence
-# of a missing secret would be every hostname failing closed AFTER the wildcard
-# routes were attached.
-#
-# `wrangler secret list` returns names and types only — never values — so this
-# is safe to run and safe to print.
-echo "🔎 Verifying the deployed Worker's FIREBASE_API_KEY binding…" >&2
-if SECRETS="$(npm --prefix worker exec -- wrangler secret list 2>/dev/null)"; then
-  if printf '%s' "$SECRETS" | grep -q 'FIREBASE_API_KEY'; then
-    echo "✅ FIREBASE_API_KEY is bound on the deployed Worker." >&2
-  else
-    cat >&2 <<'MSG'
-
-❌ The Worker deployed, but FIREBASE_API_KEY is NOT bound on it.
-
-Every hostname will fail closed with `x-event-router-reason: lookup-forbidden`
-or `lookup-unavailable`. Bind it before attaching any route:
-
-    npm --prefix worker exec -- wrangler secret put FIREBASE_API_KEY
-
-MSG
-    exit 1
-  fi
-else
-  echo "⚠️  Could not list the deployed Worker's secrets; verify FIREBASE_API_KEY by hand before attaching routes." >&2
-fi
+# Always verify after publishing too: a first deploy has no Worker to inspect
+# beforehand, so the pre-publish check above cannot be the only one.
+verify_required_secret "post-publish"
