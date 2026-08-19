@@ -25,13 +25,14 @@
  * not a precedent for runtime code.
  *
  * The repo's established answer for runtime logic the Functions also need is a
- * LOCAL MIRROR plus a parity test — `functions/src/scoringVocab.ts` mirrors
- * `src/game/scoring.ts`, and `tests/functions/finale-parity.test.ts` feeds one
- * fixture to both and fails if either side moves alone, because (in that
- * mirror's own words) a mirror without a parity test is how the podium
- * implementations diverged in the first place. #803 adds
- * `functions/src/membershipVocab.ts` on exactly that pattern when the first
- * callable needs these predicates. Until then there is no second copy to drift.
+ * LOCAL MIRROR plus a parity test (`functions/src/scoringVocab.ts` mirrors
+ * `src/game/scoring.ts`, pinned by `tests/functions/finale-parity.test.ts`).
+ * That precedent is deliberately NOT adopted here: drift in a scoring mirror
+ * mis-ranks a podium, drift in this one is an authorization bug, and fixtures
+ * only cover the cases someone enumerated. #803 must arrive at ONE
+ * implementation — a shared build arrangement, or a mirror GENERATED from this
+ * file — rather than a second hand-maintained copy. See
+ * specs/event-membership.md § One document. Until then there is no second copy.
  *
  * THE INVARIANT THIS FILE PROTECTS. A membership record is one a client cannot
  * write. Today's Event "membership" fails that test: `events/{eventId}/players/{uid}`
