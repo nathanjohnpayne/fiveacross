@@ -147,7 +147,15 @@ export type ThemeId =
   // reason as the Bodega trio above.
   | 'marquee'
   | 'confetti-hour'
-  | 'afterglow';
+  | 'afterglow'
+  // Five Across platform chrome (#882). Registered like the trio above —
+  // same contrast contract, same THEME_EDITIONS binding to `fiveacross` —
+  // but flagged `ThemeMeta.chrome: true` and filtered out of
+  // `themesForEdition`'s picker output: it dresses surfaces that have no
+  // Day (utility states, the admin console, email, the gallery/share
+  // surfaces outside a Day context), not a Day a player can wear. See
+  // specs/w1-themes.md § Registry vs. picker.
+  | 'fiveacross-slate';
 
 // One Day of an Event (daily-cards-spec § "Data model"). Ordered inside
 // `EventDoc.days` (length 10 for the July sailing, 4 for Bodega Bay — the

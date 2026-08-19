@@ -1,0 +1,21 @@
+{
+  "// why": "A separate program for the edge router, on the same reasoning tsconfig.node.json gives for the Node-side config files: tsconfig.json's `include: [\"src\"]` never reaches worker/**, so without this program `npm run typecheck` would be blind to the service that fronts every request. It is deliberately a SIBLING program rather than an addition to the app's `include`, because `@cloudflare/workers-types` retypes globals (`caches`, `fetch`, `Request`) for every file in whatever program it is loaded into — the same hazard tsconfig.json's own note describes for src/sw.ts's WebWorker lib. Keeping it here means the Worker is typechecked against the runtime it actually executes on, and the app is not.",
+  "// scope": "src/slug.ts is pulled in through worker/src/host.ts's relative import and typechecked here as a consequence — it is also typechecked by the app program, which is the point: one declaration, two compilers, mirroring how functions/ consumes src/domainTypes.d.ts. wrangler.toml is not a TypeScript file and is validated by wrangler itself.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["@cloudflare/workers-types"],
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true
+  },
+  "// tests": "The specs are INCLUDED, not excluded. They run under the repo-root Vitest program (vite.config.ts `include` covers worker/**), but no program there typechecks them — tsconfig.json stops at `src` — so leaving them out here would mean the router's only test suite compiled by nothing at all. They import their helpers from 'vitest' explicitly rather than relying on globals, so this program needs no `vitest/globals` entry to read them.",
+  "include": ["src/**/*.ts"]
+}
