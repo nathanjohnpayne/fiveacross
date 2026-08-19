@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useItems, useMyPendingItems, useMyActiveItems, useEventDoc } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
@@ -47,6 +47,21 @@ const REPORT_THROTTLE_MESSAGE = 'Slow down—you can report again in a few secon
 // resolves in well under a second — without leaving a genuinely rejected
 // submission looking like it is still under review for long.
 export const APPROVAL_GRACE_MS = 5000;
+
+/**
+ * Ids present in `prevPendingIds` but absent from BOTH `currentPendingIds`
+ * and `activeIds` — a submission whose pending row just disappeared with no
+ * active arrival YET. Pulled out as a pure, exported function (#862) so the
+ * "which ids need a grace window" computation is directly unit-testable
+ * without exercising React's render/effect ordering at all.
+ */
+export function vacatedPendingIds(
+  prevPendingIds: ReadonlySet<string>,
+  currentPendingIds: ReadonlySet<string>,
+  activeIds: ReadonlySet<string>,
+): string[] {
+  return [...prevPendingIds].filter((id) => !currentPendingIds.has(id) && !activeIds.has(id));
+}
 
 // First-time 🔞 explainer (#610) — the PLAYER half of the ticket, and
 // deliberately an EXPLAINER, not a confirm. A player's tick is a request:
@@ -123,6 +138,25 @@ export default function ItemPool() {
   // call), and depending on the whole object here would re-run this effect,
   // and re-`setTracked`, on EVERY render, forever.
   const uid = user?.uid;
+  // Latest-uid ref (#861): `add`'s async continuation below closes over
+  // whichever `user` was signed in when the SUBMIT happened, which is
+  // correct for the Firestore write and for keying `trackSuggestion`'s
+  // localStorage entry — both must stay attributed to the uid that actually
+  // submitted. But `setTracked` below updates SHARED component state, and if
+  // auth changes (sign-out/sign-in as a different account on a shared
+  // device) while the write is still pending, the account-switch effect just
+  // below has already reset `tracked` to the NEW uid's own history by the
+  // time the OLD request resolves — so an unguarded `setTracked` would
+  // splice the old account's submission into the new account's on-screen
+  // list, even though it was persisted correctly under the old uid. Reading
+  // this ref (updated after every commit, so it always reflects the LATEST
+  // rendered uid) lets the continuation skip that specific state update
+  // without needing to skip the (correctly-attributed) Firestore write or
+  // localStorage persist.
+  const uidRef = useRef(uid);
+  useEffect(() => {
+    uidRef.current = uid;
+  }, [uid]);
   const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
   useEffect(() => {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
@@ -194,10 +228,23 @@ export default function ItemPool() {
   // is what guarantees the window closes on its own; the second effect below
   // clears it EARLIER, the moment the id actually resolves active, so a fast
   // approval does not have to wait out the full window.
-  useEffect(() => {
+  // `useLayoutEffect`, not `useEffect` (#862): `deriveMySubmissions` below
+  // runs during THIS component's own render, reading `graceIds` STATE — but
+  // a passive effect only runs AFTER the browser has already had a chance to
+  // paint the commit that just happened. So on the exact render where the
+  // pending listener's removal snapshot lands (with the active listener's
+  // addition not yet arrived), a passive effect would let React commit AND
+  // the browser potentially PAINT a `'not_selected'` render before this
+  // effect ever runs to add the id to `graceIds` and correct it — the exact
+  // false-rejection flash the grace window exists to prevent, arriving one
+  // render late via the effect itself. A layout effect runs SYNCHRONOUSLY
+  // after the commit but BEFORE the browser paints, so the `setGraceIds`
+  // call below still lands (and re-renders/re-commits) before anything is
+  // ever shown to the player — the correction never becomes visible.
+  useLayoutEffect(() => {
     const currentPendingIds = new Set(myPending.map((it) => it.id));
     const activeIds = new Set(activeMine.map((it) => it.id));
-    const vacated = [...prevPendingIdsRef.current].filter((id) => !currentPendingIds.has(id) && !activeIds.has(id));
+    const vacated = vacatedPendingIds(prevPendingIdsRef.current, currentPendingIds, activeIds);
     prevPendingIdsRef.current = currentPendingIds;
     if (vacated.length === 0) return;
     setGraceIds((prev) => {
@@ -282,8 +329,14 @@ export default function ItemPool() {
 
   const add = async () => {
     if (!user || !text.trim()) return;
+    // Captured now, not re-read after the `await` (#861): this closure keeps
+    // whichever `user` was signed in when the submit happened, which is
+    // correct for the Firestore write and the localStorage key below — both
+    // must stay attributed to whoever actually submitted, regardless of who
+    // is signed in by the time the write resolves.
+    const submittingUid = user.uid;
     const now = Date.now();
-    const key = `add:${user.uid}`;
+    const key = `add:${submittingUid}`;
     if (!checkItemRateLimit(key, now)) {
       setAddThrottled(true);
       if (addTimer.current) clearTimeout(addTimer.current);
@@ -295,7 +348,7 @@ export default function ItemPool() {
       return;
     }
     try {
-      const result = await addItem(user.uid, text, adult && spicy);
+      const result = await addItem(submittingUid, text, adult && spicy);
       track('add_item');
       // `prompt_suggestion_submitted` (#559): NO Prompt text in the payload —
       // just whether a Day could be named. Reports the target `addItem`
@@ -309,8 +362,21 @@ export default function ItemPool() {
       });
       if (result) {
         const submitted = { id: result.id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
-        trackSuggestion(EVENT_ID, user.uid, submitted);
-        setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
+        // Persisted under the SUBMITTING uid regardless of who is current —
+        // this write is always correct, auth change or not.
+        trackSuggestion(EVENT_ID, submittingUid, submitted);
+        // But the in-memory `tracked` STATE is shared, component-wide, and
+        // the account-switch effect above already resets it the instant
+        // `uid` changes. If auth changed while this write was in flight
+        // (`uidRef.current` no longer matches `submittingUid`), that reset
+        // has already happened for the NEW account, and splicing this
+        // submission in here would insert the OLD account's row into the
+        // NEW account's on-screen list — the exact leak #861 describes. Skip
+        // the state update in that case; the persisted write above is
+        // already correct and complete on its own.
+        if (uidRef.current === submittingUid) {
+          setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
+        }
       }
       setText('');
       setSpicy(false);

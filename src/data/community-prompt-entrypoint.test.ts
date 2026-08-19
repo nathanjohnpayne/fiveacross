@@ -132,6 +132,69 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded.at(-1)?.id).toBe('id-24');
   });
 
+  it('caps by newest SUBMISSION, not by write/refresh position — refreshing an older entry must not save it from eviction at the expense of a genuinely more recent submission (#864)', () => {
+    for (let i = 1; i <= 19; i++) {
+      trackSuggestion('ev-1', 'u1', { id: `id-${i}`, text: `t${i}`, submittedAt: i });
+    }
+    // A REFRESH of the OLDEST entry — same id, same submittedAt, only a
+    // follow-up field changing — is exactly what ItemPool's own
+    // `refreshLastKnownStatuses` effect does on a status/target/text update.
+    // Before #864, `trackSuggestion` always moved the touched entry to the
+    // newest storage slot, whether it was a fresh submission or a refresh.
+    trackSuggestion('ev-1', 'u1', { id: 'id-1', text: 't1', submittedAt: 1, lastKnownStatus: 'approved' });
+    // Two genuinely NEW, later submissions push the tracker over its cap.
+    trackSuggestion('ev-1', 'u1', { id: 'id-20', text: 't20', submittedAt: 20 });
+    trackSuggestion('ev-1', 'u1', { id: 'id-21', text: 't21', submittedAt: 21 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded).toHaveLength(20);
+    // The genuinely oldest submission is what the cap evicts...
+    expect(loaded.find((s) => s.id === 'id-1')).toBeUndefined();
+    // ...never a submission that is MORE recent than it, just because the
+    // older one happened to be refreshed most recently (the pre-#864 bug:
+    // refreshing id-1 moved it to the tail, so id-2 — genuinely newer —
+    // would have been evicted in its place).
+    expect(loaded.find((s) => s.id === 'id-2')).toBeDefined();
+    expect(loaded.find((s) => s.id === 'id-21')).toBeDefined();
+  });
+
+  it('discards a persisted entry whose lastKnownStatus is not a valid SubmitterStatus, rather than letting a malformed value reach the pill label (#865)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownStatus: 'banana' }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it('discards a persisted entry whose lastKnownText is not a string, rather than letting an object reach React as a child (#865)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownText: { evil: true } }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it('discards a persisted entry whose lastKnownDayIndex is not a number (#865)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([{ id: 'a', text: 'x', submittedAt: 1, lastKnownDayIndex: '3' }]),
+    );
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([]);
+  });
+
+  it('still accepts a well-formed entry carrying valid optional fields', () => {
+    const stored = {
+      id: 'a',
+      text: 'x',
+      submittedAt: 1,
+      lastKnownStatus: 'scheduled',
+      lastKnownDayIndex: 2,
+      lastKnownText: 'edited wording',
+    };
+    localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify([stored]));
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual([stored]);
+  });
+
   it('falls open to an empty list when localStorage throws (private mode)', () => {
     vi.stubGlobal('localStorage', {
       getItem: () => {

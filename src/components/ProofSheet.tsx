@@ -145,8 +145,18 @@ export default function ProofSheet(props: Props) {
   // card tile, per the acceptance list's "not crowding the card tile".
   const [suggestedByName, setSuggestedByName] = useState<string | null>(null);
   useEffect(() => {
-    if (!cell.suggestedBy) {
-      setSuggestedByName(null);
+    // Cleared at the START of every change (#863), not only when there is no
+    // suggester at all. Without this, `cell.suggestedBy` changing from one
+    // non-empty uid to a DIFFERENT one while the sheet stays mounted would
+    // keep showing the PREVIOUS uid's already-resolved name until the new
+    // fetch resolves — transiently attributing the new Square's prompt to
+    // the prior player.
+    setSuggestedByName(null);
+    // Gated on `communityPrompt`, not just `suggestedBy` (#863), matching
+    // this read's documented contract (specs/community-prompt-targeting.md
+    // § Attribution: "fired only while the sheet is open on a community
+    // Square") in code, not only in the doc comment below.
+    if (!cell.communityPrompt || !cell.suggestedBy) {
       return;
     }
     let cancelled = false;
@@ -156,7 +166,7 @@ export default function ProofSheet(props: Props) {
     return () => {
       cancelled = true;
     };
-  }, [cell.suggestedBy]);
+  }, [cell.communityPrompt, cell.suggestedBy]);
 
   // Modal focus management, the same contract every other sheet carries
   // (ProfileEditor, AcceptableUse, More, FeedWhoListSheet, AdminSheet): move

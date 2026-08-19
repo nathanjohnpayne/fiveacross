@@ -50,7 +50,7 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 // #610: ItemPool reads EVENT_ID for the explainer's event-keyed storage key.
 vi.mock('../firebase', () => ({ EVENT_ID: 'ev-1' }));
 
-import ItemPool, { APPROVAL_GRACE_MS } from './ItemPool';
+import ItemPool, { APPROVAL_GRACE_MS, vacatedPendingIds } from './ItemPool';
 import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 import { track } from '../analytics';
 
@@ -419,5 +419,91 @@ describe('the first-time 🔞 explainer (#610)', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true);
+  });
+});
+
+// #862: the grace-window computation, pulled out as a pure function so it is
+// directly unit-testable without exercising React's render/effect ordering.
+describe('vacatedPendingIds (#862)', () => {
+  it('reports an id that left pending with no active arrival yet', () => {
+    expect(vacatedPendingIds(new Set(['a', 'b']), new Set(['b']), new Set())).toEqual(['a']);
+  });
+
+  it('does not report an id that resolved straight into active', () => {
+    expect(vacatedPendingIds(new Set(['a']), new Set(), new Set(['a']))).toEqual([]);
+  });
+
+  it('does not report an id still present in pending', () => {
+    expect(vacatedPendingIds(new Set(['a']), new Set(['a']), new Set())).toEqual([]);
+  });
+
+  it('does not report an id that was never in the previous pending set', () => {
+    expect(vacatedPendingIds(new Set(), new Set(), new Set())).toEqual([]);
+  });
+
+  it('reports every id that vacated, when more than one does at once', () => {
+    expect(vacatedPendingIds(new Set(['a', 'b', 'c']), new Set(), new Set(['c']))).toEqual(['a', 'b']);
+  });
+});
+
+// #861: `add`'s async continuation captures the submitting uid up front, and
+// the Firestore write + localStorage persist stay correctly attributed to it
+// regardless of what happens to auth afterward — but the SHARED `tracked`
+// React state update must be skipped once a DIFFERENT account is current by
+// the time the write resolves, or the old account's own-submission row leaks
+// onto the new account's screen.
+describe('add() stays correctly attributed across an auth change mid-write (#861)', () => {
+  function createStorageStub(): Storage {
+    const store = new Map<string, string>();
+    return {
+      getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
+  }
+
+  let storage: Storage;
+  beforeEach(() => {
+    storage = createStorageStub();
+    vi.stubGlobal('localStorage', storage);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list, but still persists it correctly under the OLD uid', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted by u1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    // Still pending — `addItem` has not resolved yet.
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false);
+
+    // Auth switches to a DIFFERENT account while the write is still pending
+    // (sign-out/sign-in as someone else on a shared device).
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+
+    // The write resolves AFTER the switch.
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    // u1's submission must never appear in u2's on-screen list...
+    expect(screen.queryByText('Submitted by u1')).not.toBeInTheDocument();
+    // ...but the write itself is unaffected by the guard — only the shared
+    // React state update is skipped — so it is still correctly persisted
+    // under u1's OWN localStorage key.
+    const stored: Array<{ id: string }> = JSON.parse(storage.getItem('gcb.mySuggestions.ev-1.u1') ?? '[]');
+    expect(stored.map((s) => s.id)).toContain('new-item-1');
   });
 });

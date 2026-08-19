@@ -65,14 +65,56 @@ function storageKey(eventId: string, uid: string): string {
   return `gcb.mySuggestions.${eventId}.${uid}`;
 }
 
+/** The full set of values `TrackedSuggestion['lastKnownStatus']` may hold —
+ *  `SubmitterStatus` itself, not `MySubmissionStatus`: this field is never
+ *  stamped `'not_selected'` (there is nothing to "last know" about a
+ *  submission that was never observed active), but validating against the
+ *  field's own declared TYPE, not the narrower runtime convention, is what
+ *  keeps this check from drifting the moment `SubmitterStatus` grows a
+ *  value (#865). */
+const VALID_LAST_KNOWN_STATUSES: ReadonlySet<string> = new Set<SubmitterStatus>([
+  'pending',
+  'scheduled',
+  'approved',
+]);
+
+/**
+ * A persisted blob only ever reaches this module through `JSON.parse` — an
+ * untrusted, hand-editable, cross-version localStorage read — so every
+ * field (not just the three required ones) must be validated before the
+ * whole object is cast to `TrackedSuggestion` and trusted downstream (#865).
+ * Without validating the three OPTIONAL fields, a malformed persisted value
+ * — an object-valued `lastKnownText`, say — passes this guard untouched,
+ * `deriveMySubmissions` renders it directly (`t.lastKnownText ?? t.text`),
+ * and React crashes the whole ItemPool panel on "objects are not valid as a
+ * React child"; a malformed `lastKnownStatus` similarly produces an
+ * undefined pill label (`SUBMISSION_STATUS_LABEL[s.status]` has no entry for
+ * a value outside the union). A malformed entry is discarded WHOLESALE
+ * (`loadTrackedSuggestions` already `.filter(isTrackedSuggestion)`s) rather
+ * than sanitized field-by-field — simpler, and losing one device-local
+ * tracking row is harmless (the live pending/active queries are still the
+ * authoritative source; this module only adds the local follow-up).
+ */
 function isTrackedSuggestion(v: unknown): v is TrackedSuggestion {
-  return (
-    !!v &&
-    typeof v === 'object' &&
-    typeof (v as { id?: unknown }).id === 'string' &&
-    typeof (v as { text?: unknown }).text === 'string' &&
-    typeof (v as { submittedAt?: unknown }).submittedAt === 'number'
-  );
+  if (!v || typeof v !== 'object') return false;
+  const obj = v as Record<string, unknown>;
+  if (
+    typeof obj.id !== 'string' ||
+    typeof obj.text !== 'string' ||
+    typeof obj.submittedAt !== 'number'
+  ) {
+    return false;
+  }
+  if (obj.lastKnownStatus !== undefined && !VALID_LAST_KNOWN_STATUSES.has(obj.lastKnownStatus as string)) {
+    return false;
+  }
+  if (obj.lastKnownDayIndex !== undefined && typeof obj.lastKnownDayIndex !== 'number') {
+    return false;
+  }
+  if (obj.lastKnownText !== undefined && typeof obj.lastKnownText !== 'string') {
+    return false;
+  }
+  return true;
 }
 
 /** This device's tracked suggestions for `uid` on `eventId`, oldest first.
@@ -90,13 +132,30 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
   }
 }
 
-/** Record a fresh submission from THIS device. Idempotent on `id` (a retried
- *  call — e.g. React StrictMode's double-invoke — never duplicates the
- *  entry); silently drops on a storage error, same fallback as the read. */
+/**
+ * Record a fresh submission from THIS device — or refresh an existing
+ * tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/`lastKnownText`
+ * (`refreshLastKnownStatuses`' caller, `ItemPool.tsx`, calls this for BOTH).
+ * Idempotent on `id` (a retried call — e.g. React StrictMode's
+ * double-invoke — never duplicates the entry); silently drops on a storage
+ * error, same fallback as the read.
+ *
+ * Capped by SUBMISSION order (`submittedAt`), not by array/write position
+ * (#864): a naive remove-then-append would move a REFRESHED entry to the
+ * newest storage slot even though nothing new was submitted, so a later
+ * `TRACKED_LIMIT`-exceeding cap could evict a genuinely more recent
+ * submission while keeping the older one a refresh happened to touch last —
+ * contradicting the documented "keep the newest by submission" cap and
+ * losing that more recent submission's own follow-up tracking. Sorting by
+ * `submittedAt` before capping makes the evicted entry always the oldest
+ * SUBMISSION, regardless of which entry was most recently refreshed.
+ */
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
   try {
     const existing = loadTrackedSuggestions(eventId, uid).filter((s) => s.id !== suggestion.id);
-    const next = [...existing, suggestion].slice(-TRACKED_LIMIT);
+    const next = [...existing, suggestion]
+      .sort((a, b) => a.submittedAt - b.submittedAt)
+      .slice(-TRACKED_LIMIT);
     localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next));
   } catch {
     /* nothing to persist */
