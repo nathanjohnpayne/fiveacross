@@ -292,6 +292,18 @@ describe('startAuthHandoff', () => {
     expect(navigate.mock.calls[0][0]).not.toContain(stored?.verifier);
   });
 
+  it('stores the collected acknowledgement inside the same handoff transaction', async () => {
+    await startAuthHandoff({
+      authOrigin: CENTRAL,
+      targetOrigin: ORIGIN,
+      returnPath: '/board',
+      acknowledgedAdultContent: true,
+      navigate: vi.fn(),
+    });
+
+    expect(readHandoffTransaction(Date.now())?.acknowledgedAdultContent).toBe(true);
+  });
+
   it('publishes the digest of the verifier it kept', async () => {
     const navigate = vi.fn();
     await startAuthHandoff({ authOrigin: CENTRAL, targetOrigin: ORIGIN, returnPath: '/', navigate });

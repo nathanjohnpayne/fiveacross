@@ -81,6 +81,8 @@ export interface HandoffTransactionRecord {
   targetOrigin: string;
   /** Where in the app to land on return. */
   returnPath: string;
+  /** Whether this exact sign-in tap collected the Event's 18+ acknowledgement. */
+  acknowledgedAdultContent: boolean;
   /** ms epoch, for the TTL above. */
   createdAt: number;
 }
@@ -183,8 +185,18 @@ export function rememberHandoffTransaction(record: HandoffTransactionRecord): bo
   writeStore('sessionStorage', serialized);
   writeStore('localStorage', serialized);
 
-  // Confirm THIS record came back, not merely that some record did.
-  return readHandoffTransaction(record.createdAt)?.verifier === record.verifier;
+  // Confirm the complete semantic record came back, not merely its verifier.
+  // A storage shim that retains the verifier but drops or rewrites the adult
+  // acknowledgement must not be allowed to navigate: the return leg would then
+  // lose the evidence collected by this exact tap while appearing durable.
+  const stored = readHandoffTransaction(record.createdAt);
+  return (
+    stored?.verifier === record.verifier &&
+    stored.targetOrigin === record.targetOrigin &&
+    stored.returnPath === record.returnPath &&
+    stored.acknowledgedAdultContent === record.acknowledgedAdultContent &&
+    stored.createdAt === record.createdAt
+  );
 }
 
 /**
@@ -206,7 +218,10 @@ function parseRecord(raw: string | null, now: number): HandoffTransactionRecord 
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
 
-  const { verifier, targetOrigin, returnPath, createdAt } = parsed as Record<string, unknown>;
+  const { verifier, targetOrigin, returnPath, acknowledgedAdultContent, createdAt } = parsed as Record<
+    string,
+    unknown
+  >;
   if (typeof verifier !== 'string' || !HANDOFF_TOKEN_PATTERN.test(verifier)) return null;
   if (typeof targetOrigin !== 'string' || targetOrigin.length === 0) return null;
   if (typeof returnPath !== 'string' || !returnPath.startsWith('/')) return null;
@@ -215,7 +230,16 @@ function parseRecord(raw: string | null, now: number): HandoffTransactionRecord 
   // change during the round trip), and both fail the same way.
   if (now < createdAt || now - createdAt > HANDOFF_TRANSACTION_TTL_MS) return null;
 
-  return { verifier, targetOrigin, returnPath, createdAt };
+  // Records created before #895 have no acknowledgement field. They remain
+  // usable for sign-in but can never authorize an attestation; only literal
+  // `true` is evidence that the checkbox was actually collected.
+  return {
+    verifier,
+    targetOrigin,
+    returnPath,
+    acknowledgedAdultContent: acknowledgedAdultContent === true,
+    createdAt,
+  };
 }
 
 export function readHandoffTransaction(now: number): HandoffTransactionRecord | null {

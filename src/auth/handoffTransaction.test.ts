@@ -102,6 +102,7 @@ function record(overrides: Record<string, unknown> = {}) {
     verifier: 'A'.repeat(43),
     targetOrigin: 'https://summer-camp.fiveacross.app',
     returnPath: '/board',
+    acknowledgedAdultContent: false,
     createdAt: NOW,
     ...overrides,
   };
@@ -199,6 +200,14 @@ describe('remember / read / forget', () => {
 });
 
 describe('readHandoffTransaction rejects anything it cannot trust', () => {
+  it('keeps a legacy transaction usable but never treats its absent acknowledgement as collected', () => {
+    const legacy = record();
+    delete (legacy as { acknowledgedAdultContent?: boolean }).acknowledgedAdultContent;
+    sessionStorage.setItem(HANDOFF_TRANSACTION_KEY, JSON.stringify(legacy));
+
+    expect(readHandoffTransaction(NOW)?.acknowledgedAdultContent).toBe(false);
+  });
+
   it.each([
     ['unparseable json', 'not json'],
     ['a json primitive', '"a string"'],
@@ -287,6 +296,40 @@ describe('storage hazards that are not ordinary failures', () => {
 
     const fresh = record({ verifier: 'F'.repeat(43) });
     expect(rememberHandoffTransaction(fresh)).toBe(false);
+  });
+
+  it.each([
+    [
+      'drops',
+      (stored: Record<string, unknown>) => {
+        delete stored.acknowledgedAdultContent;
+      },
+    ],
+    [
+      'flips',
+      (stored: Record<string, unknown>) => {
+        stored.acknowledgedAdultContent = false;
+      },
+    ],
+  ])('reports failure when the preferred store %s the acknowledgement', (_label, corrupt) => {
+    const preferred = memoryStorage();
+    vi.stubGlobal('sessionStorage', {
+      ...preferred,
+      get length() {
+        return preferred.length;
+      },
+      getItem: (key: string) => preferred.getItem(key),
+      key: (index: number) => preferred.key(index),
+      clear: () => preferred.clear(),
+      removeItem: (key: string) => preferred.removeItem(key),
+      setItem: (key: string, value: string) => {
+        const stored = JSON.parse(value) as Record<string, unknown>;
+        corrupt(stored);
+        preferred.setItem(key, JSON.stringify(stored));
+      },
+    } satisfies Storage);
+
+    expect(rememberHandoffTransaction(record({ acknowledgedAdultContent: true }))).toBe(false);
   });
 
   it('clears any previous transaction before storing a new one', () => {
