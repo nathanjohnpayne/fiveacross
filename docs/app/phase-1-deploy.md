@@ -65,14 +65,27 @@ Three things to check after the deploy:
 2. **A recipient resolves.** Recipients are the Event's `admins` roster (verified Firebase Auth emails only) unioned with `ADMIN_NOTIFY_EMAIL`. If neither resolves, alerts queue and nothing sends—which is logged, not lost, but it is silent from the outside. Populate `ADMIN_NOTIFY_EMAIL` per project unless the roster is known to resolve.
 3. **Smoke-test the DIGEST, not the triggers.** Report a Prompt in the app (or submit one as a non-admin, which lands `pending`), then wait for the next five-minute sweep. A queue row appearing under `events/{eventId}/adminAlerts` with no email inside two sweeps means the scheduler job or the recipient list is the problem, in that order.
 
-**TWO one-time Firestore TTL policies, and since #670 they are no longer optional housekeeping.** TTL is scoped to a COLLECTION GROUP, so each collection needs its own policy — enabling one does not reach the other:
+**THREE one-time Firestore TTL policies, and since #670/#859 they are no longer optional housekeeping.** TTL is scoped to a COLLECTION GROUP, so each collection needs its own policy — enabling one does not reach the others:
 
 ```bash
 gcloud firestore fields ttls update expiresAt \
   --collection-group=adminAlerts --enable-ttl --project <projectId>
 gcloud firestore fields ttls update expiresAt \
   --collection-group=adminAlertBatches --enable-ttl --project <projectId>
+gcloud firestore fields ttls update expiresAt \
+  --collection-group=bugReportEscalations --enable-ttl --project <projectId>
 ```
+
+Run all three commands once with `<projectId>` set to `gaycruisebingo` and once with it set to `fiveacross`. The `bugReportEscalations` policy MUST reach `ACTIVE` before deploying the #859 Functions release, because its pending row temporarily contains a raw reporter uid and the policy is the privacy backstop if the scheduler cannot terminalize it. Verify that policy in each project before release:
+
+```bash
+gcloud firestore fields ttls list \
+  --collection-group=bugReportEscalations --project <projectId> \
+  --filter='name:expiresAt AND ttlConfig.state=ACTIVE' \
+  --format='table(name,ttlConfig.state)'
+```
+
+An empty result or any state other than `ACTIVE` blocks the Functions deploy; repeat the check for both project ids. The ordinary resolver transaction remains the prompt deletion path, and Firestore TTL remains asynchronous rather than a precise deletion deadline.
 
 `adminAlerts` covers two different things now. A drained row is replaced by a payload-free tombstone (`{ sentAt, expiresAt }`) and an archived uncommitted row by a discard tombstone (`{ discardedAt, expiresAt }`). Either id keeps a delayed trigger redelivery from re-queuing the same transition, seven days out to match the redelivery window; both hold only two numbers and no user content. An UNDRAINED row also carries an `expiresAt` (30 days), and that half is a retention backstop: the archive trigger and scheduled sweep should remove an archived Event's queued copy promptly, while TTL remains the final bound if both cannot complete.
 
