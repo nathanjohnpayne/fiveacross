@@ -90,3 +90,23 @@ describe('og-edition.html wordmark stacking (#700)', () => {
     expect(spans[0].className).toBe('grad');
   });
 });
+
+describe('og-edition.html board geometry (#884)', () => {
+  it('keeps the free square at zero padding when prompt bars use an inset', () => {
+    const dom = new JSDOM(templateHtml, {
+      url: pathToFileURL(join(here, 'og-edition.html')).href,
+      runScripts: 'dangerously',
+      resources: undefined,
+    });
+    const config = baseConfig({ lead: 'GAY CRUISE', bold: 'BINGO' });
+    config.board.barInset = 13;
+
+    dom.window.__OG_RENDER__(config);
+
+    const squares = dom.window.document.querySelectorAll('.sq');
+    const freeSquare = dom.window.document.querySelector('.sq.free');
+    expect(squares[0].style.padding).toBe('0px 13px');
+    expect(freeSquare.style.padding).toBe('');
+    expect(dom.window.getComputedStyle(freeSquare).padding).toBe('0px');
+  });
+});

@@ -56,6 +56,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { transformSync } from 'esbuild';
+import { OG_EDITION_ART } from './og-edition-art.mjs';
 import { assertWithinHardCap } from './og-size-guard.mjs';
 import { scratchPathFor, screenshotOptionsFor } from './og-scratch-path.mjs';
 import { commitStaged, discardStaged } from './og-stage-commit.mjs';
@@ -96,7 +97,8 @@ if (process.platform !== 'darwin' && !allowForeign) {
 }
 
 // ---------------------------------------------------------------------------
-// Copy comes from the brand table, art direction comes from here.
+// Copy comes from the brand table. Art direction shared with the annotated
+// wireframes comes from og-edition-art.mjs; render-only geometry stays here.
 // ---------------------------------------------------------------------------
 
 /** Load `src/editions.ts` in this Node process. esbuild strips the types; the
@@ -146,17 +148,17 @@ const ART = {
       sqline: 'rgba(255,255,255,0.07)',
       barbg: '#36283c',
       onbar: 'rgba(20,10,30,0.45)',
-      onglow: 'rgba(255,45,149,0.30)',
-      ongrad: 'linear-gradient(145deg,#ff2d95,#00e6ff)',
+      onglow: OG_EDITION_ART.gcb.palette.onglow,
+      ongrad: OG_EDITION_ART.gcb.palette.onGradient,
       boardline: 'rgba(255,45,149,0.30)',
-      boardshadow: '0 0 70px rgba(255,45,149,0.10)',
-      freeink: '#1a1206',
+      boardshadow: OG_EDITION_ART.gcb.palette.boardshadow,
+      freeink: OG_EDITION_ART.gcb.palette.freeink,
     },
     background:
       'radial-gradient(820px 620px at 4% 2%, rgba(255,45,149,0.22), transparent 66%),' +
       'radial-gradient(780px 600px at 100% 100%, rgba(0,230,255,0.18), transparent 64%),' +
       '#07060d',
-    eyebrow: { text: 'ONE SAILING AT A TIME' },
+    eyebrow: OG_EDITION_ART.gcb.eyebrow,
     // Anton, tracked open. The size/tracking pair is solved against the #609
     // render rather than guessed: cap height 81px, "GAY CRUISE" 422px wide.
     wordmark: { size: 93, lineHeight: 1.032, letterSpacing: '0.05em', glow: '0 0 42px rgba(255,45,149,0.28)' },
@@ -164,7 +166,7 @@ const ART = {
     // The words are the brand table's `appDescription`; the only thing art
     // direction owns is WHERE the line breaks, so the two-line block sits
     // square under the rule instead of running past the board.
-    desc: { wrapAfterWords: 3 },
+    desc: { wrapAfterWords: OG_EDITION_ART.gcb.descriptionWrapAfterWords },
     // The endorsement row (#688) adds ~45px to a stack that used to fill the
     // frame symmetrically, so the whole lockup rides up to keep the top and
     // bottom margins even. Gaps otherwise mirror Vacay's rhythm — one family.
@@ -172,25 +174,20 @@ const ART = {
     board: {
       x: 722,
       y: 94,
-      size: 399,
-      pad: 15,
-      gap: 9,
+      size: OG_EDITION_ART.gcb.board.size,
+      pad: OG_EDITION_ART.gcb.board.pad,
+      gap: OG_EDITION_ART.gcb.board.gap,
       radius: 26,
-      cellRadius: 13,
+      cellRadius: OG_EDITION_ART.gcb.board.cellRadius,
       freeLabel: 'FREE',
-      pattern: ['x..x.', '.x..x', 'xxFxx', '.x...', 'x..x.'],
+      pattern: OG_EDITION_ART.gcb.board.pattern,
       // Prompt-rule lengths, per square, read off the #609 render: the long
       // rule fills the square's interior (~42px) and the short one runs ~69%
       // of it (~29px). `s`/`l` per rule, top then bottom.
-      barShort: 69,
-      barLong: 100,
-      bars: [
-        ['ls', 'sl', 'ls', 'ss', 'll'],
-        ['sl', 'ls', 'ss', 'll', 'sl'],
-        ['ls', 'sl', '..', 'll', 'ss'],
-        ['ll', 'ss', 'ls', 'sl', 'ls'],
-        ['sl', 'ls', 'ss', 'll', 'sl'],
-      ],
+      barShort: OG_EDITION_ART.gcb.board.barShort,
+      barLong: OG_EDITION_ART.gcb.board.barLong,
+      barInset: OG_EDITION_ART.gcb.board.barInset,
+      bars: OG_EDITION_ART.gcb.board.bars,
     },
     caption: 'BINGO',
   },
@@ -211,15 +208,15 @@ const ART = {
       sqline: 'rgba(255,255,255,0.06)',
       barbg: '#2e4759',
       onbar: 'rgba(10,25,35,0.40)',
-      onglow: 'rgba(46,127,168,0.20)',
-      ongrad: 'linear-gradient(150deg,#2e7fa8,#8fd0c3)',
+      onglow: OG_EDITION_ART.vacay.palette.onglow,
+      ongrad: OG_EDITION_ART.vacay.palette.onGradient,
       boardline: 'rgba(143,208,195,0.16)',
       boardbg: 'rgba(9,22,32,0.82)',
       // The stamp's scrim: the page ground at 0.70, so the board recedes
       // under the box instead of reading straight through it.
       stampscrim: 'rgba(10,20,28,0.70)',
-      boardshadow: '0 22px 48px rgba(0,0,0,0.45)',
-      freeink: '#1b1005',
+      boardshadow: OG_EDITION_ART.vacay.palette.boardshadow,
+      freeink: OG_EDITION_ART.vacay.palette.freeink,
     },
     background:
       'radial-gradient(820px 620px at 96% 6%, rgba(46,127,168,0.20), transparent 66%),' +
@@ -228,7 +225,7 @@ const ART = {
     // The passport frame: a dashed rule inset from the bleed, the postcard tell
     // this Edition wears wherever it can.
     frame: { inset: 34, width: 2, radius: 4, color: 'rgba(150,196,208,0.36)' },
-    eyebrow: { text: 'ONE TRIP AT A TIME' },
+    eyebrow: OG_EDITION_ART.vacay.eyebrow,
     // Cap height 79px, "VACAY" 225px wide, line pitch 94px — solved against
     // the #609 render the same way gcb's pair was.
     wordmark: { size: 90, lineHeight: 1.044, letterSpacing: '0.055em' },
@@ -251,34 +248,29 @@ const ART = {
       // through the rotation.
       x: 770,
       y: 150,
-      size: 350,
-      pad: 15,
-      gap: 10,
+      size: OG_EDITION_ART.vacay.board.size,
+      pad: OG_EDITION_ART.vacay.board.pad,
+      gap: OG_EDITION_ART.vacay.board.gap,
       radius: 22,
-      cellRadius: 12,
+      cellRadius: OG_EDITION_ART.vacay.board.cellRadius,
       // The postcard tilt. Measured off the #609 render's cell edges, not
       // chosen: a marked square's top edge rises 2 degrees to the right.
       rotate: -2,
       freeLabel: 'FREE',
-      pattern: ['.x..x', 'x..x.', 'xxFxx', '..x..', 'x...x'],
+      pattern: OG_EDITION_ART.vacay.board.pattern,
       // Same two lengths as the cruise board. Unlike gcb's, this map is CHOSEN
       // rather than measured: the board is rotated, so de-rotating to read each
       // square's rules back costs more resampling error than the numbers are
       // worth. What matters for the comparison workflow is that the variation
       // is real and STABLE — a copy-only re-render reproduces it exactly.
-      barShort: 69,
-      barLong: 100,
-      bars: [
-        ['sl', 'll', 'ls', 'ss', 'ls'],
-        ['ll', 'sl', 'ss', 'ls', 'sl'],
-        ['ls', 'ss', '..', 'sl', 'll'],
-        ['ss', 'ls', 'll', 'sl', 'ls'],
-        ['sl', 'll', 'ls', 'ss', 'ls'],
-      ],
+      barShort: OG_EDITION_ART.vacay.board.barShort,
+      barLong: OG_EDITION_ART.vacay.board.barLong,
+      barInset: OG_EDITION_ART.vacay.board.barInset,
+      bars: OG_EDITION_ART.vacay.board.bars,
     },
     // The dashed stamp box over the board's shoulder. Its glyph is the same
     // share mark as the eyebrow, which is what made #681 a one-line change.
-    stamp: { x: 1028, y: 56, w: 106, h: 126, text: 'TAKE THE DETOUR' },
+    stamp: { x: 1028, y: 56, w: 106, h: 126, text: OG_EDITION_ART.vacay.stamp.text },
     caption: 'BINGO',
   },
 
@@ -298,10 +290,11 @@ const ART = {
       sqline: 'rgba(255,255,255,0.07)',
       barbg: '#2b303c',
       onbar: 'rgba(255,255,255,0.55)',
-      onglow: 'transparent',
-      ongrad: 'linear-gradient(145deg,#3f66f0,#2c4bd8)',
+      onglow: OG_EDITION_ART.fiveacross.palette.onglow,
+      ongrad: OG_EDITION_ART.fiveacross.palette.onGradient,
       boardline: 'rgba(255,255,255,0.10)',
-      freeink: '#171410',
+      boardshadow: OG_EDITION_ART.fiveacross.palette.boardshadow,
+      freeink: OG_EDITION_ART.fiveacross.palette.freeink,
     },
     background:
       'radial-gradient(900px 640px at 78% 30%, rgba(63,102,240,0.10), transparent 70%),' +
@@ -309,7 +302,7 @@ const ART = {
     backgroundGrid:
       'repeating-linear-gradient(90deg, rgba(255,255,255,0.028) 0 1px, transparent 1px 96px),' +
       'repeating-linear-gradient(0deg, rgba(255,255,255,0.028) 0 1px, transparent 1px 96px)',
-    eyebrow: { text: 'THE PLATFORM', markStyle: 'glyph' },
+    eyebrow: OG_EDITION_ART.fiveacross.eyebrow,
     // Set, not stacked: one line, light lead and heavy second word.
     // Cap height 53px, "FIVE ACROSS" 515px wide — the platform's wordmark is
     // tracked noticeably wider than the two Editions' stacked Anton marks,
@@ -321,27 +314,22 @@ const ART = {
     board: {
       x: 708,
       y: 90,
-      size: 412,
-      pad: 16,
-      gap: 10,
+      size: OG_EDITION_ART.fiveacross.board.size,
+      pad: OG_EDITION_ART.fiveacross.board.pad,
+      gap: OG_EDITION_ART.fiveacross.board.gap,
       radius: 20,
-      cellRadius: 10,
+      cellRadius: OG_EDITION_ART.fiveacross.board.cellRadius,
       // The platform's own mark sits in the free square, the way the other
       // two Editions' spell FREE — resolved from the brand table below.
       freeLabel: null,
-      pattern: ['.....', '.....', 'xxFxx', '.....', '.....'],
+      pattern: OG_EDITION_ART.fiveacross.board.pattern,
       // The platform's board is quieter than the Editions': its rules sit
       // shorter and closer in length, which is the same restraint the set
       // wordmark and unglowing type carry.
-      barShort: 62,
-      barLong: 78,
-      bars: [
-        ['ls', 'sl', 'ls', 'sl', 'ls'],
-        ['sl', 'ls', 'sl', 'ls', 'sl'],
-        ['ll', 'll', '..', 'll', 'll'],
-        ['ls', 'sl', 'ls', 'sl', 'ls'],
-        ['sl', 'ls', 'sl', 'ls', 'sl'],
-      ],
+      barShort: OG_EDITION_ART.fiveacross.board.barShort,
+      barLong: OG_EDITION_ART.fiveacross.board.barLong,
+      barInset: OG_EDITION_ART.fiveacross.board.barInset,
+      bars: OG_EDITION_ART.fiveacross.board.bars,
     },
     caption: 'BINGO',
   },
@@ -368,9 +356,9 @@ const EXPECTED_FACES = [
   { family: 'Oswald', weight: 700 },
 ];
 
-/** Assemble the render config: art direction from ART, every word from the
- *  brand table. The mapping is deliberately total — if a field the artwork
- *  shows has a brand-table home, it reads it from there. */
+/** Assemble the render config: composition from ART/the shared manifest,
+ *  every word from the brand table. The mapping is deliberately total — if a
+ *  field the artwork shows has a brand-table home, it reads it from there. */
 function configFor(id) {
   const art = ART[id];
   const brand = editionBrand(id);

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { DAYS } from './data/seed';
 import { editionBrand } from './editions';
 import { THEMES } from './theme/themes';
+import { OG_EDITION_ART } from '../scripts/og/og-edition-art.mjs';
 
 // Reconciliation guard for ADR 0005 (issue #39), not an app unit test: it
 // asserts on the *contents* (and, for cloud-run/, the *absence*) of the repo
@@ -27,6 +28,8 @@ const rootReadme = read('../README.md');
 const appReadme = read('../docs/app/README.md');
 const deployGuide = read('../docs/app/phase-1-deploy.md');
 const multiEventSpec = read('../specs/x-multi-event-schema.md');
+const wireframesHtml = read('../plans/daily-cards-wireframes.html');
+const ogTemplateHtml = read('../scripts/og/og-edition.html');
 
 describe('recon: cloud-run/og-renderer is gone (#39, ADR 0005)', () => {
   it('cloud-run/ does not exist', () => {
@@ -217,7 +220,7 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
   ];
 
   it('ships a design source and a renderer for the per-Edition artwork', () => {
-    for (const file of ['og-edition.html', 'render-og-editions.mjs', 'compare-og.mjs']) {
+    for (const file of ['og-edition.html', 'og-edition-art.mjs', 'render-og-editions.mjs', 'compare-og.mjs']) {
       expect(existsSync(resolve(`../scripts/og/${file}`)), file).toBe(true);
     }
     // The reference share cards' brand footer has its own refresher, because
@@ -257,7 +260,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
     // literal copy of any of those strings in the renderer's CODE is the drift
     // this replaces, so it fails here. Comments are stripped first: the header
     // legitimately narrates #681's 🗺️ → 🧳 move and #688's endorsement.
-    const code = read('../scripts/og/render-og-editions.mjs')
+    const code = [
+      read('../scripts/og/render-og-editions.mjs'),
+      read('../scripts/og/og-edition-art.mjs'),
+    ].join('\n')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '');
     for (const edition of ['gcb', 'vacay', 'fiveacross']) {
@@ -274,6 +280,142 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
         expect(code, `${edition} byline`).not.toContain(brand.wordmarkByline);
       }
     }
+  });
+
+  it('makes the renderer consume the shared art-direction manifest', () => {
+    const code = read('../scripts/og/render-og-editions.mjs');
+    expect(code).toContain("import { OG_EDITION_ART } from './og-edition-art.mjs';");
+    for (const edition of ['gcb', 'vacay', 'fiveacross']) {
+      expect(code).toContain(`OG_EDITION_ART.${edition}.board.pattern`);
+      expect(code).toContain(`OG_EDITION_ART.${edition}.board.bars`);
+    }
+  });
+
+  describe('wireframe artboards mirror the generated composition (#884)', () => {
+    type Edition = keyof typeof OG_EDITION_ART;
+
+    const artboard = (id: string): string => {
+      const match = wireframesHtml.match(
+        new RegExp(`<div class="unit" id="${id}">([\\s\\S]*?)(?=\\n\\s*<p class="ogmeta">)`),
+      );
+      if (!match) throw new Error(`missing wireframe artboard ${id}`);
+      return match[1];
+    };
+
+    const boardPattern = (markup: string): string[] => {
+      const cells = [...markup.matchAll(/<div class="ogsq([^"]*)"[^>]*>[^<]*<\/div>/g)].map((match) => {
+        const classes = match[1].trim().split(/\s+/);
+        if (classes.includes('freec')) return 'F';
+        return classes.includes('on') ? 'x' : '.';
+      });
+      expect(cells).toHaveLength(25);
+      return Array.from({ length: 5 }, (_, row) => cells.slice(row * 5, row * 5 + 5).join(''));
+    };
+
+    const boardBars = (markup: string): string[][] => {
+      const cells = [...markup.matchAll(/<div class="ogsq[^"]*" data-bars="([ls.]{2})">/g)].map(
+        (match) => match[1],
+      );
+      expect(cells).toHaveLength(25);
+      return Array.from({ length: 5 }, (_, row) => cells.slice(row * 5, row * 5 + 5));
+    };
+
+    const cssVariables = (className: string): Record<string, string> => {
+      const match = wireframesHtml.match(new RegExp(`\\.ogc-${className}\\{([\\s\\S]*?)background:`));
+      if (!match) throw new Error(`missing .ogc-${className} style`);
+      return Object.fromEntries(
+        [...match[1].matchAll(/--([\w-]+):([^;]+);/g)].map((variable) => [variable[1], variable[2].trim()]),
+      );
+    };
+
+    const quarterScalePixels = (value: string): string =>
+      value.replace(/(-?\d+(?:\.\d+)?)px/g, (_match, pixels: string) => `${Number(pixels) / 4}px`);
+    const normalizeCss = (value: string): string => value.replace(/\s/g, '').replace(/0\./g, '.');
+
+    const assertBoardArt = (edition: Edition, className: string, markup: string): void => {
+      const art = OG_EDITION_ART[edition];
+      const variables = cssVariables(className);
+      expect(boardPattern(markup)).toEqual(art.board.pattern);
+      expect(boardBars(markup)).toEqual(art.board.bars);
+      expect(Number(variables['og-short']) * 100).toBe(art.board.barShort);
+      expect(Number(variables['og-long']) * 100).toBe(art.board.barLong);
+      expect(variables['og-bar-inset']).toBe(`${art.board.barInset / 4}px`);
+      const cellWidth = (art.board.size - 2 - 2 * art.board.pad - 4 * art.board.gap) / 5;
+      const barSpan = (cellWidth - 2 - 2 * art.board.barInset) / 4;
+      expect(Number.parseFloat(variables['og-bar-span'])).toBeCloseTo(barSpan, 6);
+      expect(variables['og-cell-radius']).toBe(`${art.board.cellRadius / 4}px`);
+      expect(variables['og-freeink']).toBe(art.palette.freeink);
+      expect(normalizeCss(variables['og-onglow'])).toBe(normalizeCss(art.palette.onglow));
+      expect(normalizeCss(variables['og-ongrad'])).toBe(normalizeCss(art.palette.onGradient));
+      expect(normalizeCss(variables['og-boardshadow'])).toBe(normalizeCss(quarterScalePixels(art.palette.boardshadow)));
+    };
+
+    it('loads the same checked display faces as the renderer template', () => {
+      const checkedFontStylesheet =
+        'https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@300;400;500;600;700&display=block';
+      expect(ogTemplateHtml).toContain(checkedFontStylesheet);
+      expect(wireframesHtml).toContain(checkedFontStylesheet);
+      expect(ogTemplateHtml).not.toContain('family=Anton&family=Bebas+Neue');
+      expect(wireframesHtml).not.toContain('family=Anton&family=Bebas+Neue');
+    });
+
+    it('draws the GCB eyebrow, lockup, rule, caption, and renderer pattern', () => {
+      const gcb = artboard('fx-og-gcb');
+      const brand = editionBrand('gcb');
+      expect(gcb).toContain(
+        `<div class="ogeyebrow"><span>${brand.lexicon.shareMark}</span> ${OG_EDITION_ART.gcb.eyebrow.text}</div>`,
+      );
+      expect(gcb).toContain(`<div class="ogby">${brand.wordmarkByline}</div>`);
+      const words = brand.appDescription.split(' ');
+      const wrapAt = OG_EDITION_ART.gcb.descriptionWrapAfterWords;
+      const wrappedDescription = `${words.slice(0, wrapAt).join(' ')}<br>${words.slice(wrapAt).join(' ')}`;
+      expect(gcb).toContain(`<div class="ogdesc">${wrappedDescription}</div>`);
+      expect(gcb).toContain('<div class="ogrule"></div>');
+      expect(gcb).toContain('<div class="ogcaption">BINGO</div>');
+      assertBoardArt('gcb', 'gcb', gcb);
+    });
+
+    it('draws Vacay as a framed passport with its stamp and renderer pattern', () => {
+      const vacay = artboard('fx-og-vacay');
+      expect(vacay).toContain('class="ogc ogc-vacay"');
+      const brand = editionBrand('vacay');
+      expect(vacay).toContain(
+        `<div class="ogeyebrow"><span>${brand.lexicon.shareMark}</span> ${OG_EDITION_ART.vacay.eyebrow.text}</div>`,
+      );
+      const [lead, ...rest] = brand.wordmark.split(' ');
+      expect(vacay).toContain(`<div class="ogmark">${lead}<br><b>${rest.join(' ')}</b></div>`);
+      expect(vacay).toContain(`<div class="ogby">${brand.wordmarkByline}</div>`);
+      expect(vacay).toContain(`<div class="ogdesc">${brand.appDescription}</div>`);
+      expect(vacay).toContain(
+        `<div class="ogstamp"><span>${brand.lexicon.shareMark}</span>${OG_EDITION_ART.vacay.stamp.text.replace(
+          'THE ',
+          'THE<br>',
+        )}</div>`,
+      );
+      expect(vacay).toContain('<div class="ogcaption">BINGO</div>');
+      assertBoardArt('vacay', 'vacay', vacay);
+    });
+
+    it('draws Five Across as a one-line set wordmark with only the middle row marked', () => {
+      const fiveAcross = artboard('fx-og-fa');
+      const brand = editionBrand('fiveacross');
+      const shareGlyph = brand.lexicon.shareMark.replace(/\uFE0F/g, '');
+      expect(fiveAcross).toContain(
+        `<div class="ogeyebrow ogeyebrow-glyph"><span>${shareGlyph}</span> ${OG_EDITION_ART.fiveacross.eyebrow.text}</div>`,
+      );
+      expect(fiveAcross).toContain('<div class="ogmark ogmark-set"><span>FIVE</span> <b>ACROSS</b></div>');
+      expect(fiveAcross).toContain(`<div class="ogsq freec" data-bars="..">${shareGlyph}</div>`);
+      expect(fiveAcross).toContain(`<div class="ogdesc">${brand.appDescription}</div>`);
+      expect(fiveAcross).toContain('<div class="ogcaption">BINGO</div>');
+      expect(fiveAcross).not.toContain('Packed room, no bars?');
+      assertBoardArt('fiveacross', 'fa', fiveAcross);
+    });
+
+    it('keeps the quarter-scale grid inside each renderer-sized board wrapper', () => {
+      expect(wireframesHtml).toMatch(/\.ogc \.oggrid\{[^}]*box-sizing:border-box;/);
+      expect(wireframesHtml).toMatch(/\.ogc \.ogstamp\{[^}]*box-sizing:border-box;/);
+      expect(wireframesHtml).toContain('width:var(--og-bar-span)');
+    });
   });
 });
 
