@@ -431,12 +431,17 @@ service cloud.firestore {
     // a Day has unlocked, its `theme`, `unlockAt`, and `tonight` metadata may
     // not change. A still-future Day is fully editable (theme swaps, Tonight
     // edits, AND unlockAt reschedules).
+    // Most writes change one Day but must resend the whole array. Short-circuit
+    // an identical Day before expanding its field checks so a ten-Day schedule
+    // stays below Firestore's 1000-expression cap (#850); a changed Day still
+    // passes through every shape and lock invariant below.
     // Clamping `unlockAt` too (Codex P2) closes the two-step bypass where a write
     // that changes only an unlocked Day's `unlockAt` (theme unchanged) moved the
     // lock source into the future, letting a SECOND write then change the theme.
     function dayThemeChangeOk(newDay, oldDay) {
-      return dayTonightShapeOk(newDay, oldDay)
-        && (!dayLocked(oldDay) || daySchedUnchanged(newDay, oldDay));
+      return newDay == oldDay
+        || (dayTonightShapeOk(newDay, oldDay)
+            && (!dayLocked(oldDay) || daySchedUnchanged(newDay, oldDay)));
     }
 
     // Applies dayThemeChangeOk across the whole `days` array. Firestore rules

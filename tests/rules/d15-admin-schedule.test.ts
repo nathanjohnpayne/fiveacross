@@ -259,22 +259,9 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
   });
 
-  // KNOWN FAILING — a PRE-EXISTING production bug, not a regression from #551.
-  //
-  // Firestore caps a rule at 1000 evaluated expressions. Every fixture in this
-  // file is two Days, so nothing here ever exercised the real Gay Cruise Bingo
-  // shape — and on a full TEN-Day schedule this rule does not finish: an admin
-  // editing a still-future Day's theme is DENIED by budget exhaustion. Verified
-  // against `origin/main`'s own firestore.rules, with none of #551's changes
-  // applied, so the Admin Schedule editor is already broken for the ten-Day
-  // Event in production.
-  //
-  // Skipped rather than deleted because the scenario is exactly right and the
-  // fix belongs to issue #850 (making `daysThemeLockOk` cheap enough to
-  // evaluate — the unrolled ten-way comparison is the cost). Un-skip it there.
-  // It is also the gate on adding per-Day `scoring` VALUE validation, which
-  // firestore.rules documents as deferred for this reason.
-  it.skip('still ALLOWS a legitimate edit on a full TEN-Day schedule (expression budget)', async () => {
+  // Gay Cruise Bingo's production shape: the full ten-Day schedule must stay
+  // below Firestore's 1000-expression cap when an Admin changes one future Day.
+  it('still ALLOWS a legitimate edit on a full TEN-Day schedule (expression budget)', async () => {
     const tenDays = Array.from({ length: 10 }, (_, index) => ({
       index,
       date: `2026-07-${String(15 + index).padStart(2, '0')}`,
@@ -297,11 +284,8 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
   });
 
   it('still DENIES a locked-Day edit on a full TEN-Day schedule', async () => {
-    // Retained and PASSING — but read it alongside the skipped case above: on a
-    // ten-Day schedule this rule denies everything, so this assertion currently
-    // holds for the wrong reason. It is here so that when the budget bug is
-    // fixed, the locked-Day guarantee is still pinned at ten Days rather than
-    // only at two.
+    // Paired with the allow case above so reducing expression cost never weakens
+    // the lock on a changed Day that has already opened.
     const tenDays = Array.from({ length: 10 }, (_, index) => ({
       index,
       date: `2026-07-${String(15 + index).padStart(2, '0')}`,
