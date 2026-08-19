@@ -76,7 +76,7 @@ export default function SignIn() {
         // stays true through the navigation — which is what we want: the button
         // must not re-arm while the browser is on its way out.
         //
-        // KNOWN GAP, deliberately not papered over: the 18+ acknowledgement
+        // KNOWN GAP, tracked as #895 (blocked by #836): the 18+ acknowledgement
         // collected here does not ride along. `AuthContext`'s acknowledgement
         // record is consumed by its `getRedirectResult` effect, and a handoff
         // return signs in with a custom token instead, so the record is
@@ -84,9 +84,8 @@ export default function SignIn() {
         // player meets AuthProvider's existing 18+ re-prompt and attests there —
         // and that is the direction this has to fail in: fabricating a durable,
         // cross-Event `attestedAdultAt` for a box nobody saw would be the
-        // genuinely bad outcome. Threading it properly means touching
-        // AuthContext's private acknowledgement helpers, which #765 (PR #836) is
-        // actively rewriting; it is tracked as follow-up rather than raced.
+        // genuinely bad outcome. Do not close it by relaxing the check; see #895
+        // for why the evidence has to stay transaction-scoped.
         const started = await startAuthHandoff({
           authOrigin: strategy.authOrigin,
           targetOrigin: strategy.targetOrigin,
