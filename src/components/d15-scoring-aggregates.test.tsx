@@ -141,6 +141,37 @@ describe('Leaderboard cruise-wide honors (#212)', () => {
     expect(champRow?.querySelector('.badge')).toHaveTextContent('First BINGO');
     expect(embarkerRow?.querySelector('.badge')).toBeNull();
   });
+
+  it('describes First-to-BINGO eligibility by tutorial policy, not pool identity', () => {
+    H.players = [embarker, champ];
+    H.event = event;
+    const { container } = render(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+
+    const footnote = container.querySelector('.lb-footnote');
+    expect(footnote).toHaveTextContent('First to BINGO—tutorial Days excluded.');
+    expect(footnote).not.toHaveTextContent(/main days only/i);
+  });
+
+  it('omits the eligibility exclusion when the Event has no tutorial Day', () => {
+    H.players = [embarker, champ];
+    H.event = {
+      ...event,
+      days: event.days?.map((day) => ({ ...day, tutorial: false })),
+    };
+    const { container } = render(
+      <MemoryRouter>
+        <Leaderboard />
+      </MemoryRouter>,
+    );
+
+    const footnote = container.querySelector('.lb-footnote');
+    expect(footnote).toHaveTextContent('First to BINGO.');
+    expect(footnote).not.toHaveTextContent(/tutorial Days excluded/i);
+  });
 });
 
 describe('Leaderboard honors strip prefers the PINNED day-meta honor (#264)', () => {
