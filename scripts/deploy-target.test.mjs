@@ -36,6 +36,36 @@ describe('deploy target selection', () => {
     ).rejects.toThrow(/Cannot understand what targets/);
   });
 
+  it.each(["hosting functions", "hosting\tfunctions"])(
+    "preserves Firebase's comma-only --only grammar for whitespace value %j",
+    async (only) => {
+      await expect(
+        classifyFirebaseDeployRequest(["fiveacross", "--only", only], {
+          defaultConfigPath: resolve(repoRoot, "firebase.json"),
+        }),
+      ).rejects.toThrow(/Cannot understand what targets/);
+    },
+  );
+
+  it.each(["functions hosting", "functions\thosting"])(
+    "preserves Firebase's comma-only --except grammar for whitespace value %j",
+    async (except) => {
+      const result = await classifyFirebaseDeployRequest(
+        ["fiveacross", "--except", except],
+        { defaultConfigPath: resolve(repoRoot, "firebase.json") },
+      );
+
+      expect(result).toMatchObject({
+        except,
+        functionsAttempted: true,
+        hostingAttempted: true,
+        bugReportInvokerSelected: true,
+        emailUnsubscribeInvokerSelected: true,
+        authHandoffInvokerSelected: true,
+      });
+    },
+  );
+
   it('requires an explicit deploy target', () => {
     expect(() => deployRequest([])).toThrow('A deploy target is required');
   });

@@ -103,12 +103,9 @@ function parseFirebaseOptions(args) {
 }
 
 function normalizedFilter(value) {
-  if (!value) return undefined;
-  const normalized = value
-    .split(/[\s,]+/)
-    .filter(Boolean)
-    .join(",");
-  return normalized || undefined;
+  // firebase-tools splits filter lists on commas only. Whitespace remains part
+  // of the selector and must reach its pinned validators unchanged.
+  return value || undefined;
 }
 
 function classifyInvokerScope(only, exceptTargets) {

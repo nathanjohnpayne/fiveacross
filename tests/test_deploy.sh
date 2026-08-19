@@ -2239,6 +2239,8 @@ run_readiness_scope_case 23o skipped --only functions:default:submitBugReport
 run_readiness_scope_case 23p skipped --except hosting,functions
 run_readiness_scope_case 24e required --only ""
 run_readiness_scope_case 24f required --except ""
+run_readiness_scope_case 24s required --except "functions hosting"
+run_readiness_scope_case 24t required --except $'functions\thosting'
 
 # Firebase validates filters before filterTargets applies its only-over-except
 # precedence. Invalid combinations must therefore fail locally before exact-SA
@@ -2295,6 +2297,8 @@ run_invalid_filter_case 24b --except
 run_invalid_filter_case 24c -m
 run_invalid_filter_case 24d -p
 run_invalid_filter_case 24r --only --dry-run
+run_invalid_filter_case 24u --only "hosting functions"
+run_invalid_filter_case 24v --only $'hosting\tfunctions'
 run_invalid_filter_case 24j -P other-project
 run_invalid_filter_case 24k -Pother-project
 run_invalid_filter_case 24l --project other-project
