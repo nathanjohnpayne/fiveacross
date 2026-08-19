@@ -92,9 +92,9 @@ For comparison and audit, the projection digest is SHA-256 over the UTF-8 JSON a
 
 Admission and publication use a durable pending/commit protocol because KV cannot participate in a Durable Object storage transaction:
 
-1. In one DO-storage transaction, compare the committed high-water state and create `pending:{kind:'sync',revision,digest,payload,startedAt}` for the valid successor. While a pending record exists, only an identical revision/digest may resume it. The same revision with another digest returns `409 revision-conflict`; every other mutation returns retryable `503 publication-pending`. No caller may replace or skip the pending payload.
+1. In one DO-storage transaction, compare the committed high-water state (which retains its exact KV payload) and create `pending:{operation:'sync',revision,digest,payload,startedAt}` for the valid successor. While a pending record exists, only an identical revision/digest may resume it. The same revision with another digest returns `409 revision-conflict`; every other publisher mutation returns retryable `503 publication-pending`. No publisher may replace or skip the pending payload.
 2. Write the exact pending payload to KV. A failure leaves pending durable and returns `503`; retry resumes that same write.
-3. In one DO-storage transaction, require the same pending record and predecessor, advance committed revision/digest, and clear pending. A failure leaves the fence in place; retry may rewrite the identical KV value and finalize. If another identical resumption already cleared pending and committed the same revision/digest, finalization is an idempotent success.
+3. In one DO-storage transaction, require the same pending record and predecessor, advance committed revision/digest/payload, and clear pending. A failure leaves the fence in place; retry may rewrite the identical KV value and finalize. If another identical resumption already cleared pending and committed the same revision/digest, finalization is an idempotent success.
 
 KV can therefore expose a pending value before finalization, but no conflicting payload can pass the DO fence during that interval. Audit exposes the state and an alert fires if pending is older than one minute. Firestore event retries are enabled; every non-2xx or invalid success body is thrown. A gap can heal when the missing delivery arrives; a persistent gap or conflict pages rather than guessing which payload wins.
 
@@ -109,7 +109,7 @@ type ReplicaAuditResponse = {
   durable: null | {
     committed: null | { revision: string; digest: string };
     pending: null | {
-      kind: 'sync' | 'recovery';
+      operation: 'sync' | 'recovery-apply' | 'recovery-resume' | 'recovery-abort';
       revision: string;
       digest: string;
       startedAt: string; // RFC 3339, observability only
@@ -120,8 +120,11 @@ type ReplicaAuditResponse = {
     records: Array<{
       sequence: string; // per-host positive decimal, append-only
       occurredAt: string; // RFC 3339
-      before: { revision: string; digest: string };
-      after: { revision: string; digest: string };
+      action: 'apply' | 'resume-pending' | 'abort-pending';
+      before: null | { revision: string; digest: string };
+      abandonedPending: null | { operation: 'sync' | 'recovery-apply' | 'recovery-resume' | 'recovery-abort'; revision: string; digest: string; startedAt: string };
+      after: null | { revision: string; digest: string };
+      sourceAudit: { revision: string; digest: string; observedAt: string };
       operatorSub: string;
       keyVersion: string;
       incidentUrl: string;
@@ -134,7 +137,9 @@ type ReplicaAuditResponse = {
 
 Each page contains at most 100 recovery records ordered by sequence. `nextAfter` is the last returned sequence only when more records exist; the command follows it to `null` and includes every record in its audit output. The endpoint exposes no route payload, list, or mutation. Pagination over hostnames exists only on the Firestore source list; recovery pagination remains inside one already-named host. Audit-token theft permits guessed point reads of public metadata and that host's break-glass evidence, not enumeration or mutation.
 
-Repair uses a different human-impersonated recovery service account, audience, and Cloud KMS signing key; the publisher has neither. `POST /__internal/hostname-replicas/v1/recover` carries `{schemaVersion:1,host,expected:{revision,digest},replacement:<RouterReplicaDesired>,incidentUrl,reason}` and the same signed-request envelope. The registry requires no existing pending record, compares `expected` to committed DO state, and requires a nonempty HTTPS incident URL and reason. It then uses the same protocol with `kind:'recovery'`: the pending record also contains the exact next history record, the replacement is written to KV, and one final transaction resets committed state, appends that history record, and clears pending. Only an identical signed recovery may resume; publisher syncs and other recoveries receive `503 publication-pending`. A mismatch returns `409` without writing. Recovery may move a poisoned high-water mark backward only to the Firestore ledger revision proven by the operator's just-recorded audit; it is break-glass, never the reconciler's normal apply path. Recovery history is returned only through the authenticated, bounded audit page above, is also emitted to Cloudflare logs, and is never deletable through either endpoint.
+Repair uses a different human-impersonated recovery service account, audience, and Cloud KMS signing key; the publisher has neither. `POST /__internal/hostname-replicas/v1/recover` carries `{schemaVersion:1,host,expected:{committed:null|{revision,digest},pending:null|<the exact audit pending value>},action:{kind:'apply',replacement:<RouterReplicaDesired>}|{kind:'resume-pending'}|{kind:'abort-pending'},sourceAudit:{revision,digest,observedAt},incidentUrl,reason}` and the same signed-request envelope. Every request requires an exact DO-state compare, a nonempty HTTPS incident URL/reason, and an operator-attested Firestore audit no older than five minutes (nor future); `apply` additionally requires no pending and a source digest equal to its replacement. `resume-pending`/`abort-pending` require the compared pending to be at least one minute old. Resume requires the source audit to equal pending and takes over its stored payload; abort takes over the DO's stored prior committed payload, or a KV delete when committed is null. Thus abort restores KV **before** clearing the abandoned fence; it never merely expires or deletes pending while its value may be public.
+
+Admission atomically replaces the compared pending with a recovery-owned `recovery-apply|resume|abort` record containing the output payload/delete and exact next history record. KV is written/deleted, then one transaction commits the output, appends history (including before, abandoned pending, source audit, after, operator, and key version), and clears pending. Partial failure leaves that recovery fence resumable. Its semantic fingerprint is SHA-256 over canonical JSON of the request fields plus accepted operator `sub`, excluding OIDC/KMS envelope, signature bytes, and issued-at; a freshly authenticated/signed request with the same fingerprint resumes the stored operation even after the old 60-second envelope expires. A different request must pass the stale-pending CAS again. After abort, a separate `apply` may advance/reset to the freshly audited canonical ledger. Recovery history is returned only through the authenticated, bounded audit page above, is emitted to Cloudflare logs, and is never deletable.
 
 ## Provisioning, mutation, and deletion
 
@@ -173,6 +178,7 @@ The Namespace/reserved/Slug guard runs before the service binding, so foreign an
 | another mutation while publication/recovery is pending | sync/recovery `503 publication-pending` | identical request resumes; others retry after alert/reconciliation |
 | audit/recovery caller rejected | `401` | no data/state returned; operator reauthenticates |
 | recovery compare fails | `409` | no write; repeat audit before any retry |
+| recovery takeover before pending is one minute old | `409 pending-not-stale` | wait or use the independent hostname block; never clear the fence |
 | origin fetch fails | existing generic `502 origin-unavailable` | unchanged |
 
 Every public response keeps `x-event-router`; fail-closed responses keep a closed `x-event-router-reason`. A resolved edge record also carries `x-event-router-revision`, a validated decimal string, so a probe can name what it observed. It exposes no new secret.
@@ -193,7 +199,7 @@ These gates insert a registry rung before the PRD's existing Gate 1–3 ladder. 
 
 1. **R0 — resources and IAM:** provision the private Firestore collection/rules; separate registry service; point-lookup service binding; publisher, audit, and recovery identities/audiences; distinct dedicated publisher/recovery KMS CryptoKeys; KV namespace; per-host Durable Object migration; rate-limiter; and observability. Verify from IAM policy output that the publisher has only its event/logging requirements plus use-to-sign on its publisher CryptoKey, the recovery identity can use only its recovery CryptoKey, and the audit identity has no data/signing role. Inventory every CryptoKeyVersion: at steady state exactly one publisher version is enabled and allowlisted; during a recorded rotation exactly the current and replacement are enabled and allowlisted until the bounded overlap ends. Verify none of the identities has a user-managed key/Secret Manager/Cloudflare credential, only the registry—not the public router—has KV/DO bindings, and the public Worker has no `FIREBASE_API_KEY`/`FIREBASE_PROJECT_ID` lookup binding.
 2. **R1 — backfill and shadow:** deploy publisher, registry, and replica-capable router with wildcard routes still absent. Backfill every serving `hostnames` document. Audit source → ledger → DO/KV at zero missing/mismatch/pending/conflict, then exercise active→disabled→active and tombstone synthetic records. Hold 24 hours with zero unexplained drift, no pending older than one minute, no retry older than five minutes, and no conflict.
-3. **R2 — failure rehearsal:** automated/deployed checks prove unauthorized/expired/wrong-audience sync, stolen-bearer altered-body refusal, out-of-order/gap/equal-conflict revisions, pending recovery after KV or final-commit failure, compare-and-set recovery with durable audit record, non-enumerable public binding, malformed KV, KV/JWKS/origin failures, unknown/inactive/tombstone hosts, auth passthrough, and no Firestore outbound request. Multi-region probes from at least three regions, five passes 30 seconds apart, must observe every serving host's expected revision. This is evidence, not a false global-consistency proof.
+3. **R2 — failure rehearsal:** automated/deployed checks prove unauthorized/expired/wrong-audience sync, stolen-bearer altered-body refusal, out-of-order/gap/equal-conflict revisions, pending resume/abort before and after KV or final-commit failure, stale/CAS refusal and durable recovery history, non-enumerable public binding, malformed KV, KV/JWKS/origin failures, unknown/inactive/tombstone hosts, auth passthrough, and no Firestore outbound request. Multi-region probes from at least three regions, five passes 30 seconds apart, must observe every serving host's expected revision. This is evidence, not a false global-consistency proof.
 4. **R3 — App Check invariant:** enable Firestore App Check enforcement through #44's own monitor/enforce procedure while routes remain grey. Browser resolution, adult-content watch, auth handoff, and Functions pass their enforcement checks. Re-run R2. App Check stays enforced for every later gate.
 5. **PRD Gate 1:** direct Hosting, `same_origin`, full real-host game as the PRD specifies.
 6. **PRD Gate 2:** direct Hosting, `handoff`, four-platform sign-in matrix. #547 provisioning and #852 acceptance must be complete.
@@ -209,7 +215,7 @@ All platform seams are injected. Tests require no live Google/Cloudflare account
 
 - Pure schema/hostname/revision parser tables, including decimal precision, reserved/apex cases, Edition validation, extra fields, and payload size.
 - Pure OIDC/KMS verifier with injected clock/JWKS fetch/cache/public keys: good request, issuer/audience/subject/algorithm/expiry/signature failures, altered body/path/timestamp, unknown-key refresh cooldown, rotation, unavailable JWKS, and no sensitive log serialization.
-- Durable Object storage/KV fakes proving initial 1, successor/equal/lower/gap/conflict, concurrent arrivals, pending admission, KV failure, final-commit failure after KV exposure, identical resume, conflicting/future requests while pending, tombstone non-reuse, and recovery pending plus atomic state/history finalization.
+- Durable Object storage/KV fakes proving initial 1, successor/equal/lower/gap/conflict, concurrent arrivals, pending admission, KV/final-commit failure, identical resume, conflicts while pending, tombstone non-reuse, and recovery apply/resume/abort before/after KV exposure, stale/CAS checks, prior-value restoration before clear, fresh-envelope semantic resume, and atomic history finalization.
 - Publisher fakes proving metadata token audience, exact endpoint/body digest/KMS signing request, non-2xx/invalid-body throw, idempotent retry, stolen-token replay without mutation, and no Admin SDK dependency.
 - Firestore emulator tests proving all client access to `routerReplicas` is denied and the trusted transaction helper keeps source/projection atomic across provision, status, repoint, and delete.
 - Registry/public-router contract tests proving only `lookup(host)` crosses the service binding, the public router has no KV/list capability, and the registry's `fetch` surface exposes no public point-get/list route. Router tests also prove no Firebase fetch or Cache API envelope, every failure-table row, auth bypass ordering, revision header, and namespace-before-binding ordering.
