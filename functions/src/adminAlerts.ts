@@ -525,6 +525,11 @@ export function abuseAlertsForWrite(
     'requestHashVersion',
     'requestHash',
   ];
+  const idempotencyKeys: Array<keyof BugReportDoc> = [
+    'submissionId',
+    'requestHashVersion',
+    'requestHash',
+  ];
   const hasIntakeState = before?.intakeState !== undefined || after.intakeState !== undefined;
   if (hasIntakeState) {
     if (!before || before.intakeState !== 'pending' || after.intakeState !== 'complete') return [];
@@ -538,10 +543,11 @@ export function abuseAlertsForWrite(
     ) return [];
   } else if (before) {
     return [];
-  } else if (coordinationKeys.some((key) => after[key] !== undefined)) {
+  } else if (idempotencyKeys.some((key) => after[key] !== undefined)) {
     // The only state-less shape is a report written by the legacy intake,
-    // which predates every coordination field. A partially migrated row must
-    // not borrow that compatibility path and manufacture an alert.
+    // which predates idempotency fields but already carries reporterHash. A
+    // partially migrated idempotency row must not borrow that compatibility
+    // path and manufacture an alert.
     return [];
   }
   if (after.kind !== 'abuse') return [];

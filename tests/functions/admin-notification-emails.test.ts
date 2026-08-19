@@ -2165,6 +2165,7 @@ const BUG_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc => ({
   kind: 'bug',
   description: 'The board stopped responding.',
   eventId: 'med-2026',
+  reporterHash: '0123456789abcdefabcd',
   status: 'new',
   ...over,
 });
@@ -2176,7 +2177,7 @@ const ABUSE_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc =>
 const IDEMPOTENT_REPORT_ID = 'a'.repeat(64);
 
 describe('abuseAlertsForWrite', () => {
-  it('queues exactly one abuse-reported alert for a report that BECAME abuse', () => {
+  it('queues one alert for a production-shaped legacy abuse create carrying reporterHash', () => {
     expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT())).toEqual([
       {
         kind: 'abuse-reported',
