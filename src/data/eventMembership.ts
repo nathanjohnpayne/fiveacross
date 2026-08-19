@@ -413,7 +413,8 @@ export function adminsMissingMembership(input: {
 }
 
 /**
- * May this caller ADMINISTER memberships — mint one, or revoke one?
+ * May this caller ISSUE an invitation, or REVOKE a membership — that is, act
+ * on SOMEONE ELSE'S admission?
  *
  * A different question from {@link admits}, and the distinction is the whole
  * point of this function existing (Phase 4b P1, round 4).
@@ -433,9 +434,33 @@ export function adminsMissingMembership(input: {
  * have written a permanent admission. That is round 7's P1 arriving through the
  * one door the enforcement switch cannot close behind it.
  *
+ * **It does NOT cover invitation REDEMPTION, and conflating the two was a real
+ * defect** (Phase 4b P1, round 5). An earlier version of this contract said
+ * *anything* minting a membership asks this predicate. Redemption mints a
+ * membership and is performed by the INVITEE, who by definition holds neither a
+ * membership nor a place in `admins` — so that rule rejected every first-time
+ * redemption and left only the provisioner and backfill paths. It was the same
+ * circular bootstrap § Rollout step 2 exists to break, reintroduced one level
+ * down: requiring prior admission for the act whose purpose is to create the
+ * first admission.
+ *
+ * The two authorities are therefore distinct, and only the first is this
+ * function's business:
+ *
+ *  - **Issuance and revocation** — acting on someone else's admission. Requires
+ *    standing in the Event, which is what this predicate expresses.
+ *  - **Redemption** — an invitee consuming a single-use invitation to gain
+ *    their OWN admission. Authorized by the authenticated invitee plus a valid,
+ *    unconsumed invitation bound to them, and by nothing about their prior
+ *    membership, which is precisely nil. That check belongs to #803 alongside
+ *    the invitation record itself; it is not specified here because the
+ *    invitation's shape is still open (§ Decisions, D4) and a predicate written
+ *    over an undecided type would be a guess wearing a contract's clothes.
+ *
  * So this predicate is **enforcement-blind by construction**. It takes no
- * enforcement input, because there is no state of the switch in which minting
- * admission without holding it is acceptable. It requires, conjoined:
+ * enforcement input, because there is no state of the switch in which issuing
+ * or revoking admission without holding it is acceptable. It requires,
+ * conjoined:
  *
  *  1. an authenticated caller;
  *  2. presence in the LIVE `EventDoc.admins` roster — not `MembershipRole`,

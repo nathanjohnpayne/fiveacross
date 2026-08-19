@@ -506,13 +506,21 @@ describe('mayAdministerMembership — grant authority, which is NOT admission', 
   });
 
   it('takes no enforcement input at all, so no switch state can widen it', () => {
-    // Enforcement-blind by construction. There is no state of the switch in
-    // which minting admission without holding it is acceptable, so the input
-    // does not exist rather than being ignored.
-    expect(Object.keys({ uid: ALICE, isAdmin: true, membership: activeRecord() })).not.toContain(
-      'enforcement',
-    );
-    expect(mayAdministerMembership.length).toBe(1);
+    // Enforcement-blind by construction: the input does not EXIST rather than
+    // being ignored, so no caller can pass a switch state that widens this.
+    //
+    // Pinned at the TYPE level (Phase 4b P2, round 5). The previous version of
+    // this test inspected a hand-written object that trivially omitted the key
+    // and asserted `mayAdministerMembership.length === 1` — which holds for any
+    // single-options-object signature. Adding an optional `enforcement` field
+    // would have left both assertions green, so it pinned nothing at all.
+    // @ts-expect-error — `enforcement` is not part of the options type, and the
+    // excess-property check is what makes that a compile error rather than a
+    // convention. If this stops erroring, the invariant has been lost.
+    mayAdministerMembership({ uid: ALICE, isAdmin: true, membership: activeRecord(), enforcement: 'off' });
+
+    // ...and the supported shape still compiles and answers.
+    expect(mayAdministerMembership({ uid: ALICE, isAdmin: true, membership: activeRecord() })).toBe(true);
   });
 });
 
