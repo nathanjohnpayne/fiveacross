@@ -73,6 +73,9 @@ export type DraftIssueCode =
   | 'event-invalid-date-window'
   | 'event-occasion-edition-mismatch'
   | 'event-invalid-slug'
+  /** The address is present and well-formed but has not been CONFIRMED
+   *  available for this draft's current Edition (#911). */
+  | 'event-slug-unverified'
   | 'setting-out-of-range'
   | 'curated-prompt-is-spicy'
   | 'prompt-text-out-of-bounds';
@@ -602,6 +605,23 @@ export function eventCompletenessIssues(draft: EventDraft): DraftIssue[] {
   // different spelling here would let a resumed/imported draft claim an
   // address the edge refuses. `validateSlug` is the sole list/grammar owner.
   if (draft.slugCandidate.trim() !== '') {
+    // The address must be CONFIRMED available for the Edition this draft is
+    // currently on, not merely present (Phase 4b P1, PR #911). Presence alone
+    // was doing two jobs — recording the organizer's choice and standing in
+    // for "claimable" — and they come apart twice: a resumed step paints an
+    // already-committed candidate available before any read, so an organizer
+    // advancing inside the debounce carried something unverified; and an
+    // Edition change alters which hostnames a launch claims, so a candidate
+    // confirmed under one Edition says nothing about another. This gate is
+    // pure and synchronous and cannot await a read, so the component records
+    // the verification and the gate consumes it.
+    if (draft.slugVerifiedForEdition !== draft.edition) {
+      issues.push({
+        code: 'event-slug-unverified',
+        field: 'slugCandidate',
+        message: `"${draft.slugCandidate}" has not been confirmed available yet. Open Basics and wait for the address check to finish.`,
+      });
+    }
     const slug = validateSlug(draft.slugCandidate);
     if (!slug.ok) {
       issues.push({

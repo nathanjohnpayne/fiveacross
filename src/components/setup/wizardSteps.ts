@@ -76,6 +76,10 @@ export function stepForIssue(issue: DraftIssue): SetupStep {
     case 'event-unsupported-timezone':
     case 'event-invalid-date-window':
     case 'event-invalid-slug':
+    // Routes to Basics because that is where the check runs — an unverified
+    // address is repaired by returning to the step and letting it finish, not
+    // by editing anything elsewhere (#911).
+    case 'event-slug-unverified':
       return 'basics';
     case 'pool-below-minimum':
     case 'main-prompt-spicy-not-boolean':

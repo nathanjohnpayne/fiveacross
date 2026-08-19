@@ -3,7 +3,7 @@ import { db, applyResolvedEventId } from '../firebase';
 import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
-import { setActiveEdition, applyEditionDocumentIdentity } from '../editions';
+import { setActiveEdition, applyEditionDocumentIdentity, CANONICAL_NAMESPACE_APEX } from '../editions';
 import { coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
 import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
@@ -200,6 +200,82 @@ export async function bootstrapEventResolution(
     applyResolvedEventPreview(preview);
   }
   return resolution;
+}
+
+/**
+ * Whether `hostname` (a full `<slug>.<namespace-apex>` address) is currently
+ * claimable, for the setup wizard's address step (#790).
+ *
+ * EXISTENCE, not servability. This deliberately does NOT go through
+ * `fetchHostnameDoc`: that helper runs `coerceHostnameDoc`, which returns
+ * `null` for a document whose `eventId` or `status` is missing or invalid — so
+ * routing it through there reported an EXISTING but half-written record as a
+ * free address (Codex P1, PR #911). A malformed record still occupies its
+ * label: the provisioner's transactional claim (#793) writes by document id
+ * and will refuse it, so telling the organizer it is available only moves the
+ * refusal to the end of the wizard. The question here is "is this document
+ * id in use", and `snap.exists()` is the only read that answers it.
+ *
+ * A document in ANY status — `active`, `disabled`, `archived` — means the
+ * label is spoken for; a retired mapping is not a free address just because
+ * the app would not currently route to it.
+ *
+ * `'check-failed'` covers the network case `fetchHostnameDoc` documents as a
+ * THROW (offline, an unreachable server) — the wizard step is the one place
+ * that failure must read as "unknown" rather than propagate, because the
+ * launch gate treats unknown as NOT available (fail closed, per #785/#790's
+ * acceptance criteria) rather than silently defaulting to a claim that may
+ * not be real.
+ *
+ * Advisory only, matching the wizard's own contract: a draft never holds a
+ * claimed Slug, and this check races with every other organizer on earth
+ * right up until the provisioner's transactional claim at launch (#793) —
+ * a `'available'` answer here is a good sign, never a reservation.
+ */
+export type SlugAvailability = 'available' | 'taken' | 'check-failed';
+
+export async function checkSlugAvailability(hostname: string): Promise<SlugAvailability> {
+  try {
+    if (hasTrailingRootDot(hostname)) return 'taken';
+    const snap = await getDocFromServer(doc(db, 'hostnames', hostnameKey(hostname)));
+    return snap.exists() ? 'taken' : 'available';
+  } catch {
+    return 'check-failed';
+  }
+}
+
+/** One address checked, and what it answered — so a caller can say WHICH
+ *  hostname is occupied rather than only that something is. */
+export interface CheckedHost {
+  hostname: string;
+  status: SlugAvailability;
+}
+
+/**
+ * Every address a launch would claim for `slug` under `edition`, checked.
+ *
+ * The organizer is shown BOTH hostnames as addresses they will receive
+ * (`specs/event-setup-wizard.md` § "Both hostnames preview inline"), and #793
+ * claims both **atomically** — so checking only the canonical one let a
+ * candidate whose Edition alternate was already taken pass Step 2, survive the
+ * remaining steps, and be refused at launch (self-review, PR #911; the owner
+ * ruled 2026-08-19 that the alternate is a guarantee rather than a bonus).
+ * Checking here is what makes the step's own caption — "checked live against
+ * reserved and taken addresses" — true of everything rendered above it.
+ *
+ * Reads run concurrently: they are independent point reads and the step is
+ * already behind a debounce, so serialising them would add a round trip to
+ * every keystroke that survives it for no benefit.
+ */
+export async function checkEventAddressAvailability(
+  slug: string,
+  alternateApex: string | null,
+): Promise<CheckedHost[]> {
+  const hosts = [`${slug}.${CANONICAL_NAMESPACE_APEX}`];
+  if (alternateApex !== null) hosts.push(`${slug}.${alternateApex}`);
+  return Promise.all(
+    hosts.map(async (hostname) => ({ hostname, status: await checkSlugAvailability(hostname) })),
+  );
 }
 
 /** localStorage, or null where it is unavailable (private mode, embedded

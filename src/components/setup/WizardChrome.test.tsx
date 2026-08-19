@@ -7,6 +7,32 @@ import { STEP_REGISTRY } from './stepRegistry';
 import { createEventDraft } from '../../data/eventDraft';
 import type { EventDraft, SetupStep } from '../../types';
 
+// The real STEP_REGISTRY above now includes the Basics step (#790), which
+// pulls in `../../data/hostnames` for its live address check — and that
+// module's top-level `import '../firebase'` calls `getAuth(app)` at MODULE
+// LOAD TIME, throwing `auth/invalid-api-key` in this env-var-free test run.
+// Stubbed to its one export the step actually calls, same treatment as
+// App.test.tsx and SetupWizard.test.tsx (specs/event-setup-wizard.md §
+// "Step 2 · Basics"). Resolves 'available' so a draft this suite seeds with
+// an already-answered Basics step reads as complete immediately, matching
+// StepBasics's optimistic-trust behavior for an already-committed candidate.
+vi.mock('../../data/hostnames', () => ({
+  checkSlugAvailability: vi.fn(() => Promise.resolve('available')),
+  // `StepBasics` calls this one, not `checkSlugAvailability` (CodeRabbit
+  // Major, PR #911). Omitting it left `undefined` to be invoked inside the
+  // debounced callback — harmless today only because no test here advances
+  // past the 400ms debounce and unmount clears the timer first, which is a
+  // timing accident rather than a contract. Mocking what the component
+  // actually calls removes the dependence on that accident.
+  checkEventAddressAvailability: vi.fn((slug: string, alternateApex: string | null) =>
+    Promise.resolve(
+      [`${slug}.fiveacross.app`, ...(alternateApex === null ? [] : [`${slug}.${alternateApex}`])].map(
+        (hostname) => ({ hostname, status: 'available' as const }),
+      ),
+    ),
+  ),
+}));
+
 // Covers specs/event-setup-wizard.md § "Live preview strip" (#795) mount
 // gating: the strip appears "from Step 2 on" — Basics, Squares, Look — and
 // NOT on Occasion (nothing in the draft to preview yet) or Launch (its own

@@ -10,8 +10,12 @@ import {
   buildTimeEdition,
   applyEditionDocumentIdentity,
   wordmarkSegments,
+  alternateNamespaceApex,
+  CANONICAL_NAMESPACE_APEX,
 } from './editions';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
+// The router's OWN namespace set — the source of truth this table must not drift from.
+import { NAMESPACES } from '../worker/src/host';
 
 const EDITIONS = ['gcb', 'vacay', 'fiveacross'];
 
@@ -376,5 +380,62 @@ describe('editions × themes — one setActiveEdition call drives both (#580)', 
     expect(themed.activeEdition()).toBe('vacay');
     themed.setActiveEdition(DEFAULT_EDITION);
     expect(activeEdition()).toBe(DEFAULT_EDITION);
+  });
+});
+
+describe('alternateNamespaceApex — the setup wizard address step (#790)', () => {
+  it('is null for fiveacross — it IS the canonical Namespace, so it owns no distinct alternate', () => {
+    expect(alternateNamespaceApex('fiveacross')).toBeNull();
+  });
+
+  it('names vacaybingo.com for vacay', () => {
+    expect(alternateNamespaceApex('vacay')).toBe('vacaybingo.com');
+  });
+
+  it('is null for gcb — gaycruisebingo.com is a site, not a wildcard Namespace', () => {
+    // This asserted 'gaycruisebingo.com' until Codex caught it on PR #911.
+    // `CONTEXT.md` § Namespace names exactly two apexes whose WILDCARD
+    // subdomains address Events, and `worker/src/host.ts`'s NAMESPACES guard
+    // admits exactly those two — so `<slug>.gaycruisebingo.com` is refused as
+    // out-of-namespace before its hostname document is read. The old row made
+    // the wizard advertise an address that cannot serve; now that the step
+    // CHECKS every previewed address, it would have blocked a GCB occasion
+    // outright.
+    expect(alternateNamespaceApex('gcb')).toBeNull();
+  });
+
+  it('names only apexes the router actually serves, read from the router itself', () => {
+    // Derived from `worker/src/host.ts`'s own NAMESPACES rather than a second
+    // hardcoded list (Phase 4b P3, PR #911). The first version of this test
+    // claimed to pin the table against the router and did not — it compared
+    // one literal against another, so the production table and the router
+    // could drift in opposite directions with the test still green, which is
+    // exactly the failure it was written to prevent.
+    //
+    // `fiveacross.app` is the CANONICAL Namespace and never appears as an
+    // alternate, so the servable alternates are the router's set minus it.
+    const servedAlternates = NAMESPACES.filter((ns) => ns !== CANONICAL_NAMESPACE_APEX);
+    expect(servedAlternates.length).toBeGreaterThan(0); // guard against an empty filter passing vacuously
+    for (const edition of ['gcb', 'vacay', 'fiveacross', 'not-a-real-edition']) {
+      const apex = alternateNamespaceApex(edition);
+      if (apex !== null) expect(servedAlternates).toContain(apex);
+    }
+  });
+
+  it('is null for an unrecognized Edition id', () => {
+    expect(alternateNamespaceApex('not-a-real-edition')).toBeNull();
+  });
+
+  it('is null for inherited Object.prototype keys, not a nonsense apex', () => {
+    // Phase 4b P2, PR #911: as an ordinary object literal the table returned
+    // the Function constructor for 'constructor' and a function for
+    // 'toString' — both truthy, so the `?? null` fallback never fired and an
+    // unrecognized id could produce an "apex" the wizard would preview, check
+    // and hand to the launch provisioner. Edition ids arrive from imported and
+    // hand-edited drafts, so these are reachable inputs rather than a
+    // theoretical class.
+    for (const key of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+      expect(alternateNamespaceApex(key)).toBeNull();
+    }
   });
 });

@@ -74,6 +74,7 @@ function launchableDraft(over: Partial<EventDraft> = {}): EventDraft {
     startsOn: '2026-08-07',
     endsOn: '2026-08-09',
     slugCandidate: 'point-reyes',
+    slugVerifiedForEdition: 'vacay',
     defaultTheme: 'fog-froth-farewells' as ThemeId,
     edition: 'vacay',
     prompts: {
@@ -449,6 +450,24 @@ describe('eventCompletenessIssues', () => {
       'occasion',
       'defaultTheme',
     ]);
+  });
+
+  it('refuses an address that is present but not CONFIRMED available', () => {
+    // Phase 4b P1, PR #911. This gate is pure and synchronous and cannot await
+    // a network read, so it consumes the verification the step records. A
+    // present-but-unverified candidate is exactly what a resumed step shows
+    // optimistically before its check resolves — and what an organizer would
+    // otherwise carry straight past Continue.
+    const issues = eventCompletenessIssues(launchableDraft({ slugVerifiedForEdition: '' }));
+    expect(issues.map((i) => i.code)).toContain('event-slug-unverified');
+  });
+
+  it('refuses an address confirmed against a DIFFERENT Edition', () => {
+    // An Edition change alters which hostnames a launch claims, so a candidate
+    // confirmed under one says nothing about another. Storing the Edition
+    // rather than a boolean is what makes that expressible.
+    const issues = eventCompletenessIssues(launchableDraft({ slugVerifiedForEdition: 'fiveacross' }));
+    expect(issues.map((i) => i.code)).toContain('event-slug-unverified');
   });
 
   it('requires an occasion — it is what binds the Edition', () => {

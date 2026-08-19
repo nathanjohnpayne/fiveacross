@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { EventDraft, SetupStep } from '../../types';
 import PlaceholderStep from './PlaceholderStep';
 import OccasionStep from './OccasionStep';
+import StepBasics from './StepBasics';
 import StepSquares from './StepSquares';
 import { SETUP_STEP_ORDER, STEP_LABELS } from './wizardSteps';
 
@@ -32,7 +33,10 @@ export interface StepDefinition {
  *  silently drift the moment either one is edited without the other). */
 const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>> = {
   occasion: { heading: "What's the occasion?", render: (props) => <OccasionStep {...props} /> },
-  basics: { heading: 'Name & dates', render: () => <PlaceholderStep step="basics" /> },
+  basics: {
+    heading: 'Name & dates',
+    render: ({ draft, updateDraft }) => <StepBasics draft={draft} updateDraft={updateDraft} />,
+  },
   squares: { heading: 'Squares', render: (props) => <StepSquares {...props} /> },
   look: { heading: 'Look', render: () => <PlaceholderStep step="look" /> },
   launch: { heading: 'Ready when you are', render: () => <PlaceholderStep step="launch" /> },
@@ -51,12 +55,12 @@ const STEP_CONTENT: Record<SetupStep, Pick<StepDefinition, 'heading' | 'render'>
  * never adds, removes, or reorders steps, which stays #788's shell contract
  * (reorders belong in `SETUP_STEP_ORDER` itself, and touch both the
  * classifier in `wizardSteps.ts` and every step ticket at once). Occasion
- * (#789, `OccasionStep`) and Squares (#791, `StepSquares`) have already made
- * that swap; Basics, Look and Launch (#790, #792, #794) still render
- * `PlaceholderStep` until their own tickets do the same. Keep this list
- * current when you swap an entry (Codex P2, PR #855: it previously read
- * "every render is PlaceholderStep today", which stopped being true the
- * moment the line above it changed).
+ * (#789, `OccasionStep`), Basics (#790, `StepBasics`) and Squares (#791,
+ * `StepSquares`) have already made that swap; Look and Launch (#792, #794)
+ * still render `PlaceholderStep` until their own tickets do the same. Keep
+ * this list current when you swap an entry (Codex P2, PR #855: it
+ * previously read "every render is PlaceholderStep today", which stopped
+ * being true the moment the line above it changed).
  */
 export const STEP_REGISTRY: readonly StepDefinition[] = SETUP_STEP_ORDER.map((id) => ({
   id,

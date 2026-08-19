@@ -382,6 +382,69 @@ export function buildTimeEdition(
   return envEdition || DEFAULT_EDITION;
 }
 
+/**
+ * The alternate Namespace apex an Edition owns beyond the canonical
+ * `fiveacross.app` Namespace every Event is reachable in (CONTEXT.md §
+ * Namespace: "Every Event is reachable in the Five Across namespace; an
+ * Edition may own a second one"). `null` means exactly that — no second
+ * one — which is the common case, not an omission: `fiveacross` IS the
+ * canonical Namespace, so a Five Across-Edition occasion (Wedding,
+ * Conference) has no distinct alternate to claim.
+ *
+ * This is the table `specs/event-setup-wizard.md` names as deliberately
+ * ABSENT from the occasion matrix ("the alternate is an Edition fact
+ * resolved at Steps 2 and 5, #790/#793") — the setup wizard's address step
+ * (#790) previews it, and the launch provisioner (#793) claims it
+ * atomically alongside the canonical hostname. Kept here, keyed by Edition
+ * rather than by occasion, so both consumers read the same one-row-per-
+ * Edition fact instead of re-deriving it from whichever occasion happened
+ * to bind that Edition.
+ *
+ * **`gcb` maps to `null`, and that is a correction rather than an omission**
+ * (Codex, PR #911). An earlier version mapped it to `gaycruisebingo.com` on
+ * the reasoning that the fact is true of the Edition regardless of whether the
+ * wizard can reach it — but it is not true: a Namespace is an apex whose
+ * WILDCARD subdomains address Events, and `gaycruisebingo.com` is Gay Cruise
+ * Bingo's own site, not a wildcard Namespace. `CONTEXT.md` § Namespace names
+ * exactly two (`fiveacross.app`, `vacaybingo.com`) and `worker/src/host.ts`'s
+ * `NAMESPACES` guard admits exactly those two, so `<slug>.gaycruisebingo.com`
+ * is refused as `out-of-namespace` before its hostname document is ever read.
+ *
+ * The cost of getting this wrong rose with this PR. While the alternate was
+ * only PREVIEWED, a wrong row printed an address that would not work. Now that
+ * availability is checked against every previewed address and the alternate is
+ * a guarantee (owner ruling, 2026-08-19), a wrong row would BLOCK a GCB
+ * occasion on an address that can never serve. Add a row here only when
+ * wildcard serving for that apex actually lands.
+ */
+/**
+ * The canonical Namespace every Event is reachable in, regardless of Edition
+ * (CONTEXT.md § Namespace). Lives here beside {@link alternateNamespaceApex}
+ * rather than in the wizard step that renders it, because the data layer needs
+ * the same fact to check availability and the launch provisioner (#793) needs
+ * it to claim — three consumers reading one constant instead of each carrying
+ * their own copy of a string that must never disagree.
+ */
+export const CANONICAL_NAMESPACE_APEX = 'fiveacross.app';
+
+// `null`-prototype so a lookup cannot reach Object.prototype (Phase 4b P2,
+// PR #911). As an ordinary object literal, `ALTERNATE_NAMESPACE_APEX['constructor']`
+// returned the Function constructor and `['toString']` a function — both
+// truthy, so `?? null` never fired and an unrecognized Edition id could yield
+// a nonsense "apex" that the wizard would preview, check and hand the launch
+// provisioner. Edition ids reach this table from imported and hand-edited
+// drafts, so "unrecognized" is not a hypothetical input class.
+const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = Object.assign(Object.create(null), {
+  vacay: 'vacaybingo.com',
+});
+
+/** `null` when `edition` owns no alternate Namespace — see
+ *  `ALTERNATE_NAMESPACE_APEX`. */
+export function alternateNamespaceApex(edition: string): string | null {
+  const apex = ALTERNATE_NAMESPACE_APEX[edition];
+  return typeof apex === 'string' ? apex : null;
+}
+
 /** The brand fields that are plain strings — i.e. the ones a static HTML
  *  placeholder could carry. `EditionBrand` gained a nested `lexicon` in #608, so
  *  a bare `keyof EditionBrand` would let a token be pointed at an OBJECT and
