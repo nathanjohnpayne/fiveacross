@@ -1,7 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
+import { assertNoNamedDestinationOverride } from './validate-firebase-deploy-filters.mjs';
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(SCRIPT_DIR, '..');
+const DEPLOY_SCRIPT = resolve(SCRIPT_DIR, 'deploy.sh');
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
@@ -49,11 +54,10 @@ export function deployRequest(argv) {
   };
 }
 
-export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env, wrapperArgs = []) {
+function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wrapperArgs) {
   if (wrapperArgs.includes('--skip-build')) {
     throw new Error('A named target deploy always rebuilds its selected target; --skip-build is not allowed.');
   }
-  const config = configForTarget(target);
   const args = [...wrapperArgs];
   if (config.skipCloudflarePurge && !args.includes('--skip-cf-purge')) args.push('--skip-cf-purge');
   if (config.skipInvokerReconcile && !args.includes('--skip-invoker')) args.push('--skip-invoker');
@@ -74,12 +78,74 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
   // just-reset gaycruisebingo services keep 403ing. Assigned unconditionally
   // so an inherited value is overwritten, never merged.
   environment.DEPLOY_TARGET_PROJECT = config.firebaseProject;
+  delete environment.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT;
+  delete environment.AUTH_HANDOFF_PROJECT;
+  delete environment.AUTH_HANDOFF_REGION;
+  delete environment.AUTH_HANDOFF_MINT_SERVICE;
+  delete environment.AUTH_HANDOFF_EXCHANGE_SERVICE;
+  if (config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim() && !config.skipInvokerReconcile) {
+    environment.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT = config.firebaseProject;
+  }
 
   return {
-    command: resolve(process.cwd(), 'scripts', 'deploy.sh'),
+    command: DEPLOY_SCRIPT,
     args,
     environment,
   };
+}
+
+export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env, wrapperArgs = []) {
+  return deployInvocationForConfig(
+    target,
+    configForTarget(target),
+    deployArgs,
+    inheritedEnv,
+    wrapperArgs,
+  );
+}
+
+function assertTargetDeployReady(target, config) {
+  const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
+  if (!handoffOrigin || !config.skipInvokerReconcile) return;
+
+  throw new Error(
+    `Refusing to deploy ${target}: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true. ` +
+      `Complete #547: grant firebase-deployer@fiveacross.iam.gserviceaccount.com run.services.update, ` +
+      `successfully run AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh --prove-update ` +
+      `under that exact identity for both callables, ` +
+      `then set skipInvokerReconcile to false. ` +
+      `Nothing has been built or published.`,
+  );
+}
+
+export function executeDeployRequest(
+  request,
+  config = configForTarget(request.target),
+  inheritedEnv = process.env,
+  spawn = spawnSync,
+) {
+  assertNoNamedDestinationOverride(request.deployArgs);
+  const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
+  if (handoffOrigin && request.wrapperArgs.includes('--skip-invoker')) {
+    throw new Error(
+      `Refusing to deploy ${request.target}: --skip-invoker is not allowed for a handoff-enabled target; ` +
+        `the post-Functions handoff repair cannot be skipped. Nothing has been built or published.`,
+    );
+  }
+  assertTargetDeployReady(request.target, config);
+
+  const invocation = deployInvocationForConfig(
+    request.target,
+    config,
+    request.deployArgs,
+    inheritedEnv,
+    request.wrapperArgs,
+  );
+  return spawn(invocation.command, invocation.args, {
+    cwd: REPO_ROOT,
+    env: invocation.environment,
+    stdio: 'inherit',
+  });
 }
 
 function usage() {
@@ -90,9 +156,11 @@ function usage() {
 
 function main() {
   let request;
+  let result;
   try {
     request = deployRequest(process.argv.slice(2));
-    configForTarget(request.target);
+    const config = configForTarget(request.target);
+    result = executeDeployRequest(request, config, process.env, spawnSync);
   } catch (error) {
     console.error(error.message);
     usage();
@@ -100,11 +168,6 @@ function main() {
     return;
   }
 
-  const invocation = deployInvocation(request.target, request.deployArgs, process.env, request.wrapperArgs);
-  const result = spawnSync(invocation.command, invocation.args, {
-    env: invocation.environment,
-    stdio: 'inherit',
-  });
   if (result.error) {
     console.error(result.error.message);
     process.exitCode = 1;

@@ -23,6 +23,7 @@ vi.mock('../src/canonicalHost', () => ({
 
 import { adultContentRequired, adultContentSettledAdult, resetAdultContentForTests } from '../src/adultContent';
 import { activeEdition, setActiveEdition } from '../src/editions';
+import { resolveSignInStrategy } from '../src/auth/authMode';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fiveAcrossTargetEnv = {
@@ -159,4 +160,30 @@ describe('Five Across production origin', () => {
       if (doc.adultContent) expect(adultContentSettledAdult()).toBe(true);
     },
   );
+
+  it('routes a newly provisioned wildcard host through the production central auth origin', async () => {
+    const hostname = 'reunion.fiveacross.app';
+    const resolution = await bootstrapEventResolution(hostname);
+
+    expect(resolution).toMatchObject({
+      kind: 'event',
+      eventId: 'reunion-2027',
+      edition: 'fiveacross',
+    });
+    expect(
+      resolveSignInStrategy({
+        mode: targetEnvironment.VITE_AUTH_MODE,
+        configuredAuthDomain: targetEnvironment.VITE_FIREBASE_AUTH_DOMAIN,
+        hostname,
+        handoffOrigin: targetEnvironment.VITE_AUTH_HANDOFF_ORIGIN,
+        currentOrigin: `https://${hostname}`,
+        returnPath: '/',
+      }),
+    ).toEqual({
+      kind: 'handoff',
+      authOrigin: 'https://auth.fiveacross.app',
+      targetOrigin: 'https://reunion.fiveacross.app',
+      returnPath: '/',
+    });
+  });
 });

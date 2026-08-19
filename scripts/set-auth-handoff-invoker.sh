@@ -43,6 +43,8 @@ set -euo pipefail
 # Usage:
 #   scripts/set-auth-handoff-invoker.sh                 # apply to prod (default)
 #   scripts/set-auth-handoff-invoker.sh --dry-run       # print the actions, change nothing
+#   scripts/set-auth-handoff-invoker.sh --prove-update  # force the idempotent update to prove
+#                                                       # run.services.update
 #   scripts/set-auth-handoff-invoker.sh --allow-missing # a NOT_FOUND describe is
 #                                                       # non-fatal for BOTH halves
 #   scripts/set-auth-handoff-invoker.sh --allow-missing-half exchange
@@ -83,10 +85,12 @@ EXCHANGE_SERVICE="${AUTH_HANDOFF_EXCHANGE_SERVICE:-exchangeauthhandoff}"
 DRY_RUN=false
 ALLOW_MISSING_MINT=false
 ALLOW_MISSING_EXCHANGE=false
+PROVE_UPDATE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
+    --prove-update) PROVE_UPDATE=true; shift ;;
     --allow-missing) ALLOW_MISSING_MINT=true; ALLOW_MISSING_EXCHANGE=true; shift ;;
     --allow-missing-half)
       case "${2:-}" in
@@ -120,6 +124,7 @@ for entry in "mint:$MINT_SERVICE:$ALLOW_MISSING_MINT" "exchange:$EXCHANGE_SERVIC
     --service-env-hint "AUTH_HANDOFF_$(echo "$half" | tr '[:lower:]' '[:upper:]')_SERVICE"
   )
   [[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
+  [[ "$PROVE_UPDATE" == "true" ]] && ARGS+=(--prove-update)
   [[ "$allow_missing" == "true" ]] && ARGS+=(--allow-missing)
   "$SCRIPT_DIR/set-cloud-run-invoker.sh" "${ARGS[@]}" || STATUS=$?
 done

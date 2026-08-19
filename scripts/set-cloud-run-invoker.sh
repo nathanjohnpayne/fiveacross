@@ -32,7 +32,7 @@ set -euo pipefail
 # Usage:
 #   scripts/set-cloud-run-invoker.sh --service <name> --region <region> \
 #     --project <project> [--label <text>] [--verify-hint <text>] \
-#     [--service-env-hint <text>] [--dry-run] [--allow-missing]
+#     [--service-env-hint <text>] [--dry-run] [--allow-missing] [--prove-update]
 #
 # Flags:
 #   --service            Cloud Run service name (required)
@@ -44,6 +44,8 @@ set -euo pipefail
 #   --service-env-hint    Text suggested in the "service not found" failure
 #                          message (default: "the correct service name")
 #   --dry-run             Print the action, change nothing
+#   --prove-update        Run the idempotent update even when the annotation is
+#                         already true, proving run.services.update permission.
 #   --allow-missing       Treat a NOT_FOUND on the describe call as a distinct,
 #                          non-fatal outcome (exit 0) instead of a FAIL. For a
 #                          brand-new target's first deploy, the Cloud Run
@@ -62,6 +64,13 @@ set -euo pipefail
 # Environment:
 #   GCLOUD_BIN   gcloud binary (default: gcloud; the 1Password-backed wrapper
 #                on PATH resolves credentials)
+#   GCLOUD_IMPERSONATE_SERVICE_ACCOUNT
+#                Exact service account every gcloud operation impersonates.
+#                Used by the pre-build handoff readiness wrapper; unset for
+#                ordinary reconciliation and direct service-account keys.
+#   GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION
+#                When true, a service-account key that cannot activate is a
+#                terminal credential failure instead of falling back to ADC.
 #
 # CREDENTIALS (#768 r4 — this used to abort routine deploys)
 #
@@ -112,7 +121,10 @@ VERIFY_HINT=""
 SERVICE_ENV_HINT="the correct service name"
 DRY_RUN=false
 ALLOW_MISSING=false
+PROVE_UPDATE=false
 GCLOUD_BIN="${GCLOUD_BIN:-gcloud}"
+GCLOUD_IMPERSONATE_SERVICE_ACCOUNT="${GCLOUD_IMPERSONATE_SERVICE_ACCOUNT:-}"
+GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION="${GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION:-false}"
 INVOKER_ANNOTATION='run.googleapis.com/invoker-iam-disabled'
 # `gcloud run services describe` has two observed missing-service diagnostics:
 # the structured `NOT_FOUND` status and `Cannot find service [<name>]`. Match
@@ -131,6 +143,7 @@ while [[ $# -gt 0 ]]; do
     --service-env-hint) SERVICE_ENV_HINT="${2:?--service-env-hint needs a value}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --allow-missing) ALLOW_MISSING=true; shift ;;
+    --prove-update) PROVE_UPDATE=true; shift ;;
     -h|--help) sed -n '3,103p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -156,7 +169,14 @@ trap cleanup EXIT
 # Env prefix applied to every gcloud call. Always non-empty (a bare `env`) so
 # the array expansion is safe under bash 3.2 + `set -u`.
 GCLOUD_ENV=(env)
-run_gcloud() { "${GCLOUD_ENV[@]}" "$GCLOUD_BIN" "$@"; }
+run_gcloud() {
+  if [[ -n "$GCLOUD_IMPERSONATE_SERVICE_ACCOUNT" ]]; then
+    "${GCLOUD_ENV[@]}" "$GCLOUD_BIN" \
+      "--impersonate-service-account=$GCLOUD_IMPERSONATE_SERVICE_ACCOUNT" "$@"
+  else
+    "${GCLOUD_ENV[@]}" "$GCLOUD_BIN" "$@"
+  fi
+}
 
 # A service-account key is the ONE credential type `scripts/gcloud/gcloud`
 # refuses. Detected by the JSON `type` field. `"impersonated_service_account"`
@@ -202,6 +222,12 @@ resolve_credential() {
     return 0
   fi
 
+  if [[ "$GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION" == "true" ]]; then
+    echo "FAIL: the required service-account key could not be activated; refusing ambient gcloud fallback." >&2
+    sed 's/^/     /' "$ACTIVATE_ERR" >&2
+    return 1
+  fi
+
   # Activation failed (malformed key, gcloud too old, revoked key). Fall back
   # to the wrapper's own chain — but DROP the service-account key from the
   # child environment first, or the wrapper rejects it outright and this step
@@ -219,6 +245,9 @@ resolve_credential() {
 
 echo ">> $LABEL invoker config: service=$SERVICE region=$REGION project=$PROJECT"
 resolve_credential
+if [[ -n "$GCLOUD_IMPERSONATE_SERVICE_ACCOUNT" ]]; then
+  CREDENTIAL_MODE="$CREDENTIAL_MODE; every operation impersonates $GCLOUD_IMPERSONATE_SERVICE_ACCOUNT"
+fi
 echo "   Credential: $CREDENTIAL_MODE"
 
 # Confirm the service exists before mutating anything — a wrong/renamed service
@@ -289,7 +318,7 @@ if ! current="$(run_gcloud run services describe "$SERVICE" \
   exit 1
 fi
 
-if [[ "$current" == "true" ]]; then
+if [[ "$current" == "true" && "$PROVE_UPDATE" != "true" ]]; then
   echo "   Invoker IAM check already disabled — nothing to do (idempotent)."
   exit 0
 fi
@@ -300,7 +329,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-echo "   Disabling the Cloud Run invoker IAM check (org-policy-compatible reachability)…"
+if [[ "$current" == "true" ]]; then
+  echo "   Invoker IAM check already disabled — proving update permission with an idempotent update."
+else
+  echo "   Disabling the Cloud Run invoker IAM check (org-policy-compatible reachability)…"
+fi
 run_gcloud run services update "$SERVICE" \
   --region "$REGION" --project "$PROJECT" --no-invoker-iam-check
 

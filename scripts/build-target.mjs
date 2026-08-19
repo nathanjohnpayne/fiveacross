@@ -45,6 +45,8 @@ export const DEPLOY_TARGETS = Object.freeze({
       VITE_FIREBASE_API_KEY: 'AIzaSyA-JHRrQOmxXzD2rK4FcpyYz_fRMHQdhMQ',
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+      VITE_AUTH_HANDOFF_ORIGIN: 'https://auth.fiveacross.app',
+      VITE_AUTH_MODE: 'handoff',
       VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
       VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
       VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
@@ -60,9 +62,10 @@ export const DEPLOY_TARGETS = Object.freeze({
     staticFallbackEdition: 'vacay',
     syntheticUrl: 'https://bodega-bay.fiveacross.app/',
     skipCloudflarePurge: true,
-    // Opted out because this target's deploy credential — the fiveacross
-    // Firebase-vault SA key — is not known to hold run.services.update on this
-    // project, and Step 1.6 ABORTS BEFORE PUBLISHING on a PERMISSION_DENIED.
+    // Opted out because the exact fiveacross firebase-deployer SA — reached
+    // directly or by keyless impersonation — is not known to hold
+    // run.services.update on this project, and the readiness apply ABORTS
+    // BEFORE BUILDING on a PERMISSION_DENIED.
     // Enabling it on an unverified assumption would therefore not degrade to a
     // warning; it would break every Five Across deploy outright.
     //
@@ -73,19 +76,18 @@ export const DEPLOY_TARGETS = Object.freeze({
     // reconciliation is same-project now. What remains is purely the unproven
     // IAM grant above.
     //
-    // ⚠️  THIS SKIP NOW HIDES A REAL GAP (#548, Codex P1 round 4). The auth
-    // handoff lives in THIS project, and Domain Restricted Sharing applies
-    // here too, so a routine `npm run deploy:fiveacross` releases
-    // mintAuthHandoff and exchangeAuthHandoff and leaves both 403 — which is
-    // sign-in unavailable on every Event origin, not one degraded feature.
-    // deploy.sh prints a loud warning naming the manual repair whenever it
-    // skips a release that included the handoff, so the gap is visible rather
-    // than silent, and it is harmless only while the handoff has no caller
-    // (#549 client half and #547 central origin are both outstanding).
+    // ⚠️  THIS SKIP IS A REAL GAP (#548, Codex P1 round 4). The auth handoff
+    // lives in THIS project, and Domain Restricted Sharing applies here too.
+    // While the handoff origin is active, scripts/deploy-target.mjs refuses a
+    // Five Across deploy before build or publish instead of releasing
+    // mintAuthHandoff and exchangeAuthHandoff with both left 403.
     //
-    // TO CLOSE IT: grant the fiveacross deploy SA run.services.update on
-    // fiveacross, confirm the wrappers succeed there, then flip this to false.
-    // That is a console/IAM action, so it cannot ship in a code PR.
+    // TO CLOSE IT: complete #547 by granting the fiveacross deploy SA
+    // run.services.update on fiveacross, successfully run the exact-SA
+    // readiness apply (which forces updates on both callables), then flip this
+    // to false. Once false, deploy-target.mjs pins readiness into deploy.sh;
+    // after every pre-build guard, deploy.sh repeats that permission proof
+    // before BUILD_CMD/Firebase for each Hosting or handoff-callable scope.
     skipInvokerReconcile: true,
   }),
 });
@@ -169,7 +171,7 @@ export function buildEnvironment(target, parsedTargetEnv, inheritedEnv = process
       .map(([key, expectedValue]) => `${key}=${JSON.stringify(expectedValue)}`)
       .join(', ');
     throw new Error(
-      `Refusing to build ${target}: its registered Firebase web app, Event, Edition, and audience seed must match this target. ` +
+      `Refusing to build ${target}: its registered Firebase web app, auth handoff, Event, Edition, and audience seed must match this target. ` +
         `Set: ${incorrectKeys}.`,
     );
   }

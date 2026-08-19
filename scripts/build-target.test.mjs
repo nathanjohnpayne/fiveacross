@@ -1,6 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildEnvironment,
   DEPLOY_TARGETS,
@@ -8,6 +12,9 @@ import {
   requiredViteKeys,
   validateTargetOperationalMetadata,
 } from './build-target.mjs';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const buildTargetScript = resolve(repoRoot, 'scripts', 'build-target.mjs');
 
 const REQUIRED_VITE_KEYS = [
   'VITE_FIREBASE_API_KEY',
@@ -20,6 +27,8 @@ const REQUIRED_VITE_KEYS = [
 const FIVEACROSS_TARGET_ENV = {
   VITE_FIREBASE_PROJECT_ID: 'fiveacross',
   VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+  VITE_AUTH_HANDOFF_ORIGIN: 'https://auth.fiveacross.app',
+  VITE_AUTH_MODE: 'handoff',
   VITE_FIREBASE_STORAGE_BUCKET: 'fiveacross.firebasestorage.app',
   VITE_FIREBASE_MESSAGING_SENDER_ID: '5297095641',
   VITE_FIREBASE_APP_ID: '1:5297095641:web:aff3537cf7c95dec220fc8',
@@ -71,6 +80,8 @@ describe('build target selection', () => {
     expect(environment).toMatchObject({
       VITE_FIREBASE_PROJECT_ID: 'fiveacross',
       VITE_FIREBASE_AUTH_DOMAIN: 'bodega-bay.vacaybingo.com',
+      VITE_AUTH_HANDOFF_ORIGIN: 'https://auth.fiveacross.app',
+      VITE_AUTH_MODE: 'handoff',
       VITE_FIREBASE_API_KEY: DEPLOY_TARGETS.fiveacross.identity.VITE_FIREBASE_API_KEY,
       VITE_EVENT_ID: '',
       VITE_EDITION: 'vacay',
@@ -128,6 +139,65 @@ describe('build target selection', () => {
         REQUIRED_VITE_KEYS,
       ),
     ).toThrow('VITE_EVENT_ID=""');
+  });
+
+  it('rejects a Five Across target file without the registered central auth origin', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          ...FIVEACROSS_TARGET_ENV,
+          VITE_AUTH_HANDOFF_ORIGIN: '',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_AUTH_HANDOFF_ORIGIN="https://auth.fiveacross.app"');
+  });
+
+  it('rejects a Five Across target file that overrides the production handoff mode', () => {
+    expect(() =>
+      buildEnvironment(
+        'fiveacross',
+        {
+          ...FIVEACROSS_TARGET_ENV,
+          VITE_AUTH_MODE: 'same_origin',
+        },
+        {},
+        REQUIRED_VITE_KEYS,
+      ),
+    ).toThrow('VITE_AUTH_MODE="handoff"');
+  });
+
+  it('rejects a stale same-origin escape hatch at the actual target-build CLI boundary', () => {
+    const root = mkdtempSync(join(tmpdir(), 'fiveacross-auth-mode-'));
+    try {
+      writeFileSync(join(root, '.env.example'), '');
+      writeFileSync(
+        join(root, '.env.fiveacross'),
+        Object.entries({ ...FIVEACROSS_TARGET_ENV, VITE_AUTH_MODE: 'same_origin' })
+          .map(([key, value]) => `${key}=${value}`)
+          .join('\n'),
+      );
+
+      const result = spawnSync(process.execPath, [buildTargetScript, 'fiveacross'], {
+        cwd: root,
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('VITE_AUTH_MODE="handoff"');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a Five Across target file without the explicit production handoff mode', () => {
+    const targetEnv = { ...FIVEACROSS_TARGET_ENV };
+    delete targetEnv.VITE_AUTH_MODE;
+
+    expect(() =>
+      buildEnvironment('fiveacross', targetEnv, {}, REQUIRED_VITE_KEYS),
+    ).toThrow('VITE_AUTH_MODE="handoff"');
   });
 
   it('takes the shared target static fallback from trusted registry metadata', () => {
