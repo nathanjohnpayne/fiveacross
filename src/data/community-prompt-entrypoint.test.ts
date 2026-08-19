@@ -116,6 +116,40 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded[0].text).toBe('edited text');
   });
 
+  it('normalizes duplicate ids from a persisted blob while refreshing the first occurrence in place (#909)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify([
+        { id: 'before', text: 'before', submittedAt: 1 },
+        { id: 'target', text: 'first copy', submittedAt: 2 },
+        { id: 'middle', text: 'middle', submittedAt: 3 },
+        { id: 'target', text: 'later duplicate', submittedAt: 4 },
+        { id: 'after', text: 'after', submittedAt: 5 },
+      ]),
+    );
+
+    trackSuggestion('ev-1', 'u1', { id: 'target', text: 'refreshed', submittedAt: 2 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded.map(({ id }) => id)).toEqual(['before', 'target', 'middle', 'after']);
+    expect(loaded[1]).toEqual({ id: 'target', text: 'refreshed', submittedAt: 2 });
+  });
+
+  it('caps an oversized persisted blob even when the next write only refreshes an existing id (#909)', () => {
+    localStorage.setItem(
+      'gcb.mySuggestions.ev-1.u1',
+      JSON.stringify(Array.from({ length: 22 }, (_, i) => ({ id: `id-${i}`, text: `t${i}`, submittedAt: i }))),
+    );
+
+    trackSuggestion('ev-1', 'u1', { id: 'id-10', text: 'refreshed', submittedAt: 10 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded).toHaveLength(20);
+    expect(loaded[0].id).toBe('id-2');
+    expect(loaded.at(-1)?.id).toBe('id-21');
+    expect(loaded.find(({ id }) => id === 'id-10')?.text).toBe('refreshed');
+  });
+
   it('scopes tracking per Event AND per uid — no cross-Event or cross-account bleed', () => {
     trackSuggestion('ev-1', 'u1', { id: 'a', text: 'x', submittedAt: 1 });
     expect(loadTrackedSuggestions('ev-2', 'u1')).toEqual([]);

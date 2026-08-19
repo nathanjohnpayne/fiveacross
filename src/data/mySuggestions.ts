@@ -202,10 +202,16 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
  * genuinely brand-new submission sort BELOW older entries and be the one
  * `slice(-TRACKED_LIMIT)` evicts — the opposite of "keep the newest". An
  * existing id is instead replaced IN PLACE, at its current array position,
- * so a REFRESH never moves anything; only a genuinely NEW id is appended,
- * and only the append path is ever capped — by array position, which is
- * monotonic by construction (this function's own call order) regardless of
- * what the clock says.
+ * so a REFRESH never moves anything; only a genuinely NEW id is appended.
+ * After either path the cap is applied by array position, which is monotonic
+ * by construction (this function's own call order) regardless of what the
+ * clock says.
+ *
+ * A loaded blob is also normalized on every write (#909): the first
+ * occurrence of each id keeps its position, later duplicates are removed,
+ * and an oversized hand-edited or cross-version blob is capped even when the
+ * current call is only a refresh. This repairs untrusted persisted shape
+ * without promoting an old entry or trusting its timestamp.
  *
  * Array position is only a faithful proxy for submission order GOING
  * FORWARD — a blob a pre-round-1 build already wrote may have a REFRESHED
@@ -217,15 +223,21 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
   try {
     const existing = loadTrackedSuggestions(eventId, uid);
-    const index = existing.findIndex((s) => s.id === suggestion.id);
+    const seenIds = new Set<string>();
+    const normalized = existing.filter(({ id }) => {
+      if (seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    });
+    const index = normalized.findIndex((s) => s.id === suggestion.id);
     let next: TrackedSuggestion[];
     if (index === -1) {
-      next = [...existing, suggestion].slice(-TRACKED_LIMIT);
+      next = [...normalized, suggestion];
     } else {
-      next = existing.slice();
+      next = normalized.slice();
       next[index] = suggestion;
     }
-    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next));
+    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next.slice(-TRACKED_LIMIT)));
   } catch {
     /* nothing to persist */
   }
