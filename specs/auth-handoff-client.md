@@ -124,14 +124,15 @@ Every failure is named, and none of them falls back to the other mode.
 | Where | Reason | Surfaced as |
 |---|---|---|
 | Mount gate | `same-origin-host-unregistered` | `EventNotFound reason="auth-same-origin-unavailable"` |
-| Mount gate | `auth-mode-invalid`, `handoff-origin-unconfigured`, `handoff-origin-invalid` | `EventNotFound reason="auth-handoff-misconfigured"` |
+| Mount gate | `auth-mode-invalid` | `EventNotFound reason="auth-mode-invalid"` |
+| Mount gate | `handoff-origin-unconfigured`, `handoff-origin-invalid` | `EventNotFound reason="auth-handoff-misconfigured"` |
 | Start leg | `start-failed` (no entropy, or no store would hold the verifier) | Inline message on the Sign in screen |
 | Return leg | `transaction-missing`, `origin-mismatch`, `exchange-rejected`, `sign-in-failed` | Inline message on the Sign in screen |
 | Central origin | bad request, sign-in failed, mint failed | The bounce page's own error copy |
 
 The return-leg reasons are deliberately **coarser** than the set of things that can go wrong, because the server answers every exchange rejection identically on purpose—expired, already used, wrong origin, and never-existed are one `permission-denied` so a caller cannot learn whether a guessed code was ever real. Inventing finer client-side reasons would either be a lie or would leak the distinction the server just spent effort hiding. All of them reach the player as one sentence, because the player's next move is identical in every case.
 
-The two mount-gate rows are separate reasons rather than folded into the existing `auth-unconfigured` because a different person fixes each: `auth-unconfigured` means nobody finished provisioning this address, while these two mean this build was told to sign in a way that cannot work here.
+The mount-gate rows are separate reasons rather than folded into the existing `auth-unconfigured` because a different person fixes each: `auth-unconfigured` means nobody finished provisioning this address, while the route failures mean this build was told to sign in a way that cannot work here. An invalid mode remains distinct from an invalid handoff origin so its operator note names `VITE_AUTH_MODE`, the setting that is actually at fault.
 
 ## Wire parity
 

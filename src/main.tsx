@@ -339,7 +339,9 @@ if (atCentralAuthOrigin) {
               reason={
                 signInStrategy.reason === 'same-origin-host-unregistered'
                   ? 'auth-same-origin-unavailable'
-                  : 'auth-handoff-misconfigured'
+                  : signInStrategy.reason === 'auth-mode-invalid'
+                    ? 'auth-mode-invalid'
+                    : 'auth-handoff-misconfigured'
               }
             />
             <ConsentNotice />
