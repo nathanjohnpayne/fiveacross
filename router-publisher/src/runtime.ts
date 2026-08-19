@@ -8,6 +8,20 @@ const METADATA_ROOT =
 const METADATA_HEADERS = { 'Metadata-Flavor': 'Google' } as const;
 const KMS_KEY_VERSION =
   /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
+const FIRESTORE_EVENT_TYPE = 'google.cloud.firestore.document.v1.written';
+const FIRESTORE_SOURCE =
+  '//firestore.googleapis.com/projects/fiveacross/databases/(default)';
+const FIRESTORE_DOCUMENT_PREFIX =
+  'projects/fiveacross/databases/(default)/documents/routerReplicas/';
+const FIRESTORE_SUBJECT_PREFIX = 'documents/routerReplicas/';
+const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
+  ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
+  ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
+  ['gaycruisebingo.com', ['gcb', null]],
+  ['fiveacross.vercel.app', ['fiveacross', 'fiveacross.app']],
+  ['vacaybingo.vercel.app', ['vacay', 'vacaybingo.com']],
+  ['gaycruisebingo.vercel.app', ['gcb', null]],
+]);
 
 export class PublisherRuntimeError extends Error {
   constructor() {
@@ -24,6 +38,100 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   const actual = Object.keys(value).sort();
   const sorted = [...expected].sort();
   return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
+}
+
+function stringValue(value: unknown): string {
+  if (!isRecord(value) || !hasExactKeys(value, ['stringValue'])) {
+    throw new Error('invalid router replica event');
+  }
+  if (typeof value.stringValue !== 'string') {
+    throw new Error('invalid router replica event');
+  }
+  return value.stringValue;
+}
+
+function nullableStringValue(value: unknown): string | null {
+  if (isRecord(value) && hasExactKeys(value, ['nullValue']) && value.nullValue === null) {
+    return null;
+  }
+  return stringValue(value);
+}
+
+function decodeDesired(value: unknown): Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['mapValue']) ||
+    !isRecord(value.mapValue) ||
+    !hasExactKeys(value.mapValue, ['fields']) ||
+    !isRecord(value.mapValue.fields)
+  ) {
+    throw new Error('invalid router replica event');
+  }
+  const result: Record<string, unknown> = {};
+  for (const [field, encoded] of Object.entries(value.mapValue.fields)) {
+    result[field] = field === 'pathNamespace'
+      ? nullableStringValue(encoded)
+      : stringValue(encoded);
+  }
+  return result;
+}
+
+export function replicaPayloadFromFirestoreEvent(
+  event: unknown,
+): RouterReplicaDesired {
+  if (
+    !isRecord(event) ||
+    event.specversion !== '1.0' ||
+    event.type !== FIRESTORE_EVENT_TYPE ||
+    event.source !== FIRESTORE_SOURCE ||
+    typeof event.id !== 'string' ||
+    event.id.length === 0 ||
+    typeof event.time !== 'string' ||
+    !Number.isFinite(Date.parse(event.time)) ||
+    typeof event.subject !== 'string' ||
+    !event.subject.startsWith(FIRESTORE_SUBJECT_PREFIX) ||
+    !isRecord(event.data) ||
+    !isRecord(event.data.value) ||
+    typeof event.data.value.name !== 'string' ||
+    !event.data.value.name.startsWith(FIRESTORE_DOCUMENT_PREFIX) ||
+    !isRecord(event.data.value.fields)
+  ) {
+    throw new Error('invalid router replica event');
+  }
+
+  const subjectHost = event.subject.slice(FIRESTORE_SUBJECT_PREFIX.length);
+  const documentHost = event.data.value.name.slice(FIRESTORE_DOCUMENT_PREFIX.length);
+  if (
+    subjectHost.length === 0 ||
+    subjectHost.includes('/') ||
+    subjectHost !== documentHost
+  ) {
+    throw new Error('invalid router replica event');
+  }
+  const fields = event.data.value.fields;
+  if (!hasExactKeys(fields, ['schemaVersion', 'revision', 'host', 'desired', 'updatedAt'])) {
+    throw new Error('invalid router replica event');
+  }
+  const schemaVersion = fields.schemaVersion;
+  const updatedAt = fields.updatedAt;
+  if (
+    !isRecord(schemaVersion) ||
+    !hasExactKeys(schemaVersion, ['integerValue']) ||
+    schemaVersion.integerValue !== '1' ||
+    !isRecord(updatedAt) ||
+    !hasExactKeys(updatedAt, ['timestampValue']) ||
+    typeof updatedAt.timestampValue !== 'string'
+  ) {
+    throw new Error('invalid router replica event');
+  }
+
+  return replicaPayloadFromEvent(subjectHost, {
+    schemaVersion: 1,
+    revision: stringValue(fields.revision),
+    host: stringValue(fields.host),
+    desired: decodeDesired(fields.desired),
+    updatedAt: updatedAt.timestampValue,
+  });
 }
 
 function isRegistryHost(host: string): boolean {
@@ -67,28 +175,26 @@ function validDesired(host: string, value: Record<string, unknown>): boolean {
     return false;
   }
   if (value.kind === 'route') {
+    const rootClass = ROOT_HOSTS.get(host);
+    const rootTest = /^r2-root-[a-z2-7]{20}\.(?:fiveacross\.app|vacaybingo\.com)$/.test(
+      host,
+    );
     return (
       hasExactKeys(value, ['kind', 'eventId', 'status', 'slug', 'edition', 'pathNamespace']) &&
       typeof value.eventId === 'string' &&
       value.eventId.length > 0 &&
       typeof value.slug === 'string' &&
-      value.slug === host.split('.')[0] &&
       isRegistryHost(host) &&
+      !rootTest &&
       ['active', 'disabled', 'archived'].includes(String(value.status)) &&
-      value.pathNamespace === null
+      (rootClass === undefined
+        ? value.slug === host.split('.')[0] && value.pathNamespace === null
+        : value.pathNamespace === rootClass[1])
     );
   }
   if (value.kind === 'root') {
     const syntheticRoot = /^r2-root-[a-z2-7]{20}\.(?:fiveacross\.app|vacaybingo\.com)$/.test(host);
-    const rootClasses = new Map([
-      ['fiveacross.app', ['fiveacross', 'fiveacross.app']],
-      ['vacaybingo.com', ['vacay', 'vacaybingo.com']],
-      ['gaycruisebingo.com', ['gcb', null]],
-      ['fiveacross.vercel.app', ['fiveacross', 'fiveacross.app']],
-      ['vacaybingo.vercel.app', ['vacay', 'vacaybingo.com']],
-      ['gaycruisebingo.vercel.app', ['gcb', null]],
-    ]);
-    const rootClass = rootClasses.get(host);
+    const rootClass = ROOT_HOSTS.get(host);
     return (
       hasExactKeys(value, ['kind', 'root', 'edition', 'pathNamespace']) &&
       (value.root === 'doorway' || value.root === 'not-found') &&

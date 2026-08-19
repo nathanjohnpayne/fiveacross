@@ -1,0 +1,15 @@
+{
+  "name": "publishRouterReplicaDesired",
+  "project": "fiveacross",
+  "region": "us-central1",
+  "runtime": "nodejs22",
+  "entryPoint": "publishRouterReplicaDesired",
+  "source": ".",
+  "retry": true,
+  "maxInstances": 10,
+  "timeout": "60s",
+  "serviceAccount": "event-router-replica-publisher@fiveacross.iam.gserviceaccount.com",
+  "eventType": "google.cloud.firestore.document.v1.written",
+  "database": "(default)",
+  "documentPathPattern": "routerReplicas/{host}"
+}

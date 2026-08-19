@@ -39,10 +39,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The registry publisher is deliberately a separate Firebase Functions
+      # The registry publisher is deliberately a separate Functions Framework
       # codebase so its runtime dependency graph cannot inherit firebase-admin.
       - name: Install isolated registry publisher dependencies
         run: npm ci --prefix router-publisher
+
+      - name: Verify isolated registry publisher dependency boundary
+        run: npm run check:no-admin --prefix router-publisher
 
       - name: Typecheck
         run: npm run typecheck

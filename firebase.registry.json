@@ -1,9 +1,0 @@
-{
-  "functions": [
-    {
-      "source": "router-publisher",
-      "codebase": "router-registry-publisher",
-      "predeploy": ["npm --prefix \"$RESOURCE_DIR\" run build"]
-    }
-  ]
-}

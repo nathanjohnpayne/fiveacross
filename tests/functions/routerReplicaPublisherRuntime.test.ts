@@ -1,9 +1,12 @@
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import {
   crc32c,
   createPublisherRuntimeDeps,
+  replicaPayloadFromFirestoreEvent,
   replicaPayloadFromEvent,
 } from '../../router-publisher/src/runtime';
 
@@ -11,6 +14,7 @@ const AUDIENCE =
   'https://five-across-event-registry.nathanpayne.workers.dev/__internal/hostname-replicas/v1';
 const KEY_VERSION =
   'projects/fiveacross/locations/us-central1/keyRings/event-router-registry/cryptoKeys/replica-publisher/cryptoKeyVersions/1';
+const execFileAsync = promisify(execFile);
 
 describe('keyless publisher runtime adapter', () => {
   it('obtains the exact audience token and KMS signature through metadata-bound credentials', async () => {
@@ -106,6 +110,117 @@ describe('keyless publisher runtime adapter', () => {
   });
 
   it.each([
+    ['fiveacross.app', 'fiveacross.app'],
+    ['vacaybingo.com', 'vacaybingo.com'],
+    ['fiveacross.vercel.app', 'fiveacross.app'],
+    ['vacaybingo.vercel.app', 'vacaybingo.com'],
+    ['gaycruisebingo.com', null],
+    ['gaycruisebingo.vercel.app', null],
+  ])(
+    'accepts an active flagship route on %s with its host-class path capability',
+    (host, pathNamespace) => {
+      expect(
+        replicaPayloadFromEvent(host, {
+          schemaVersion: 1,
+          revision: '1',
+          host,
+          desired: {
+            kind: 'route',
+            eventId: 'flagship-event',
+            status: 'active',
+            slug: 'flagship-event',
+            edition: 'vacay',
+            pathNamespace,
+          },
+          updatedAt: '2026-08-19T13:00:00.000Z',
+        }),
+      ).toMatchObject({ host, desired: { pathNamespace } });
+    },
+  );
+
+  it.each([
+    ['fiveacross.app', 'vacaybingo.com'],
+    ['vacaybingo.vercel.app', 'fiveacross.app'],
+    ['gaycruisebingo.com', 'fiveacross.app'],
+    ['event-name.fiveacross.app', 'fiveacross.app'],
+  ])('rejects a route on %s with path capability %s', (host, pathNamespace) => {
+    expect(() =>
+      replicaPayloadFromEvent(host, {
+        schemaVersion: 1,
+        revision: '1',
+        host,
+        desired: {
+          kind: 'route',
+          eventId: 'event',
+          status: 'active',
+          slug: host.startsWith('event-name.') ? 'event-name' : 'flagship-event',
+          edition: 'fiveacross',
+          pathNamespace,
+        },
+        updatedAt: '2026-08-19T13:00:00.000Z',
+      }),
+    ).toThrow('invalid router replica event');
+  });
+
+  it('decodes the Firestore written CloudEvent payload without a Firestore client', () => {
+    const payload = replicaPayloadFromFirestoreEvent({
+      specversion: '1.0',
+      id: 'event-id',
+      source: '//firestore.googleapis.com/projects/fiveacross/databases/(default)',
+      type: 'google.cloud.firestore.document.v1.written',
+      subject:
+        'documents/routerReplicas/r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+      time: '2026-08-19T13:00:01.000Z',
+      data: {
+        value: {
+          name: 'projects/fiveacross/databases/(default)/documents/routerReplicas/r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+          fields: {
+            schemaVersion: { integerValue: '1' },
+            revision: { stringValue: '1' },
+            host: {
+              stringValue: 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+            },
+            desired: {
+              mapValue: {
+                fields: {
+                  kind: { stringValue: 'route' },
+                  eventId: { stringValue: 'synthetic-event' },
+                  status: { stringValue: 'disabled' },
+                  slug: { stringValue: 'r2-abcdefghijklmnopqrstuvwxyz' },
+                  edition: { stringValue: 'fiveacross' },
+                  pathNamespace: { nullValue: null },
+                },
+              },
+            },
+            updatedAt: { timestampValue: '2026-08-19T13:00:00.000Z' },
+          },
+          createTime: '2026-08-19T12:59:59.000Z',
+          updateTime: '2026-08-19T13:00:00.000Z',
+        },
+        oldValue: {},
+        updateMask: {
+          fieldPaths: ['desired', 'host', 'revision', 'schemaVersion', 'updatedAt'],
+        },
+      },
+    });
+
+    expect(payload).toEqual({
+      schemaVersion: 1,
+      revision: '1',
+      host: 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app',
+      desired: {
+        kind: 'route',
+        eventId: 'synthetic-event',
+        status: 'disabled',
+        slug: 'r2-abcdefghijklmnopqrstuvwxyz',
+        edition: 'fiveacross',
+        pathNamespace: null,
+      },
+      updatedAt: '2026-08-19T13:00:00.000Z',
+    });
+  });
+
+  it.each([
     ['host mismatch', 'other.fiveacross.app', {}],
     ['deleted/missing after data', 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app', null],
     ['non-canonical revision', 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app', { schemaVersion: 1, revision: '01' }],
@@ -145,17 +260,62 @@ describe('keyless publisher runtime adapter', () => {
 
   it('is a separately deployable codebase with no Admin, Secret Manager, or downloaded-key dependency', async () => {
     const packagePath = fileURLToPath(new URL('../../router-publisher/package.json', import.meta.url));
+    const lockPath = fileURLToPath(new URL('../../router-publisher/package-lock.json', import.meta.url));
     const indexPath = fileURLToPath(new URL('../../router-publisher/src/index.ts', import.meta.url));
     const runtimePath = fileURLToPath(new URL('../../router-publisher/src/runtime.ts', import.meta.url));
-    const [packageText, index, runtime] = await Promise.all([
+    const deploymentPath = fileURLToPath(
+      new URL('../../router-publisher/deployment.json', import.meta.url),
+    );
+    const [packageText, lockText, index, runtime, deploymentText] = await Promise.all([
       readFile(packagePath, 'utf8'),
+      readFile(lockPath, 'utf8'),
       readFile(indexPath, 'utf8'),
       readFile(runtimePath, 'utf8'),
+      readFile(deploymentPath, 'utf8'),
     ]);
-    expect(packageText).not.toContain('firebase-admin');
-    expect(`${index}\n${runtime}`).not.toMatch(/firebase-admin|secretmanager|GOOGLE_APPLICATION_CREDENTIALS/);
-    expect(index).toContain('retry: true');
-    expect(index).toContain("serviceAccount: PUBLISHER_SERVICE_ACCOUNT");
-    expect(index).toContain("document: 'routerReplicas/{host}'");
+    const packageManifest = JSON.parse(packageText) as {
+      dependencies?: Record<string, string>;
+      scripts?: Record<string, string>;
+    };
+    const lock = JSON.parse(lockText) as {
+      packages: Record<string, { name?: string }>;
+    };
+    const dependencyNames = new Set([
+      ...Object.keys(packageManifest.dependencies ?? {}),
+      ...Object.values(lock.packages).flatMap((entry) =>
+        entry.name === undefined ? [] : [entry.name],
+      ),
+      ...Object.keys(lock.packages).map((path) => path.split('node_modules/').at(-1)),
+    ]);
+    expect(dependencyNames).not.toContain('firebase-admin');
+    expect(dependencyNames).not.toContain('firebase-functions');
+    expect(packageManifest.scripts?.['gcp-build']).toBe('npm run build');
+    expect(`${index}\n${runtime}`).not.toMatch(
+      /firebase-admin|firebase-functions|secretmanager|GOOGLE_APPLICATION_CREDENTIALS/,
+    );
+    expect(index).toContain("cloudEvent('publishRouterReplicaDesired'");
+    expect(JSON.parse(deploymentText)).toMatchObject({
+      retry: true,
+      serviceAccount:
+        'event-router-replica-publisher@fiveacross.iam.gserviceaccount.com',
+      eventType: 'google.cloud.firestore.document.v1.written',
+      documentPathPattern: 'routerReplicas/{host}',
+    });
+  });
+
+  it('requires a reviewed Firestore trigger location before rendering a no-deploy plan', async () => {
+    const script = fileURLToPath(
+      new URL('../../router-publisher/scripts/render-deploy.mjs', import.meta.url),
+    );
+
+    await expect(execFileAsync(process.execPath, [script])).rejects.toMatchObject({
+      stderr: expect.stringContaining('reviewed --trigger-location'),
+    });
+    const { stdout } = await execFileAsync(process.execPath, [
+      script,
+      '--trigger-location=reviewed-location',
+    ]);
+    expect(stdout).toContain('"--trigger-location=reviewed-location"');
+    expect(stdout).toContain('plan only: no deployment command was executed');
   });
 });

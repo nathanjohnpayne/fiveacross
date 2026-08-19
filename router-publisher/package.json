@@ -9,10 +9,12 @@
   "main": "lib/index.js",
   "scripts": {
     "build": "tsc",
-    "deploy": "npm run build && firebase deploy --config ../firebase.registry.json --project fiveacross --only functions:router-registry-publisher"
+    "check:no-admin": "node scripts/check-no-admin.mjs",
+    "deploy:plan": "npm run build && node scripts/render-deploy.mjs",
+    "gcp-build": "npm run build"
   },
   "dependencies": {
-    "firebase-functions": "^5.1.0"
+    "@google-cloud/functions-framework": "^5.0.5"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
