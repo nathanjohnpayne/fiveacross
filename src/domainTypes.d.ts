@@ -179,6 +179,24 @@ export interface DayDef {
   // vocabularies during the transition.
   pool: 'main' | 'easy' | 'closing';
   tutorial: boolean;    // true for the tutorial Days (GCB: Day 1 and Day 10)
+  /**
+   * This Day's Scoring Policy (ADR 0011, CONTEXT.md § Scoring Policy): whether
+   * its Marks count toward the Event standings. STATED here, never inferred
+   * from `pool` — a Day's Pool identity, its Tutorial framing and its Scoring
+   * Policy are three independent facts, and a weekend Event's final morning can
+   * be real competitive play on the closing pool.
+   *
+   * Optional in the contract because every doc written before ADR 0011 has no
+   * such key, and BOTH live Events are such docs. Never read directly: resolve
+   * through `scoringForDay` (src/game/scoring.ts, or the Functions mirror
+   * `functions/src/scoringVocab.ts`), which falls back to the closing-pool
+   * derivation the old comparisons hard-coded, so legacy Days resolve exactly
+   * as they did before. `eventConverter` fills it on read for the same reason
+   * `migrateDayFields` fills `place`/`pool`; raw-hydrated paths still resolve
+   * at comparison time, which is why the resolver — not this field — is the
+   * contract consumers hold.
+   */
+  scoring?: 'competitive' | 'ceremonial';
   unlockAt: number;     // ms epoch — 08:00 event-tz on `date`; an easy first Day may use the 0 open sentinel
   freeText?: string;    // per-day free-space override (tutorial Days)
   // The Day Snapshot: the frozen list of item ids stamped at `unlockAt` by the
@@ -240,6 +258,26 @@ export interface EventDoc {
   // the contract; `eventConverter` defaults a missing legacy field to [] so a
   // not-yet-migrated Event doc read in dev/tests never throws downstream.
   days: DayDef[];
+  /**
+   * The CONFIGURED Standings Freeze (ms epoch, ADR 0011): the moment this
+   * Event's competitive scoring stops and the podium is computed. An Event
+   * setting, not a Day one — the freeze is a property of the Event's shape,
+   * and tying it to the closing Day's `unlockAt` is what made a competitive
+   * final morning unrepresentable.
+   *
+   * Named at arm's length from `frozenAt` on purpose: this is the SCHEDULE,
+   * `frozenAt` is the STAMP recording that it happened. `freezeAt`/`frozenAt`
+   * one character apart in the same interface is a bug waiting to be written.
+   *
+   * Optional because no doc written before ADR 0011 carries it. Never read
+   * directly: resolve through `standingsFreezeAtFor` (src/game/logic.ts),
+   * which falls back to the first ceremonial Day's `unlockAt` — the instant the
+   * old derivation used — so both live Events freeze at exactly the same
+   * moment they always did. An Event with neither a stored value nor a
+   * ceremonial Day has no scheduled freeze, which is the pre-Phase-1.5
+   * "legacy events never freeze" behaviour, unchanged.
+   */
+  standingsFreezeAt?: number;
   // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
   // the standings freeze and the podium Moment posts. Absent until the finale.
   frozenAt?: number;
@@ -461,6 +499,23 @@ export interface Cell {
   // A Player can explicitly unmark an Echo on this card. Keep that choice on
   // the cell so open-time reconciliation does not add the same Echo back.
   echoOptOut?: boolean;
+  // This Square's Prompt is a Community Prompt (#559 on #557's targeting
+  // model): the picked ItemDoc carried a USABLE `targetDayIndex` at deal
+  // time. Denormalized onto the Cell — same idiom as the `echo*` fields
+  // above — so Board can paint the "new from the group" affordance on all 25
+  // Squares without re-enabling a live item-pool subscription once a Board
+  // is dealt (`useItems(!board)` stays disabled post-deal; see Board.tsx).
+  // Computed once, at deal time, by `dealBoard` (src/game/logic.ts); never
+  // recomputed later, so a Prompt that was later retained/re-approved does
+  // not retroactively relabel a card already dealt from it.
+  communityPrompt?: boolean;
+  // The Community Prompt's submitter uid (#559), denormalized alongside
+  // `communityPrompt` for the same reason. Prompt-detail attribution
+  // ("Suggested by [player]", ProofSheet.tsx) resolves this uid's display
+  // name with a single one-shot read when the sheet opens — never a live
+  // subscription. Absent on every non-community Square (organiser/seed
+  // content has no submitter to attribute).
+  suggestedBy?: string;
 }
 
 export interface BoardDoc {
@@ -812,13 +867,17 @@ export interface DayMetaDoc {
 // document, and #531 (ADR 0011 `DayDef.scoring` / `EventDoc.standingsFreezeAt`)
 // is editing this file mid-body at the same time.
 //
-// SCOPE NOTE (#787, coordinating with #531). `DayDef.scoring` and
-// `EventDoc.standingsFreezeAt` are absent from the contract above even though
-// `scripts/seed-data/bodega-bay-2026.mjs` already writes both, so `DraftDayDef`
-// carries NEITHER — stating them here would fork the Scoring Policy vocabulary
-// ahead of the ADR that owns it. This is a recorded deferral, not an oversight:
-// when #531 lands, both land on the draft too, behind a
-// `DRAFT_SCHEMA_VERSION` bump (an older stored draft then reads as a miss).
+// SCOPE NOTE (#787, updated by #551). `DayDef.scoring` and
+// `EventDoc.standingsFreezeAt` have LANDED on the contract above (ADR 0011) and
+// `scripts/seed-data/bodega-bay-2026.mjs` writes both. `DraftDayDef`/`EventDraft`
+// still carry NEITHER — what remains deferred is the wizard's AUTHORING of them,
+// not the vocabulary. An organizer therefore cannot yet state a Scoring Policy
+// or a freeze; the launch provisioner writes neither, and both fall back to the
+// read-resolution (`scoringForDay`, `standingsFreezeAtFor`), which derives them
+// from the closing pool exactly as today. Adding them to the draft needs a
+// `DRAFT_SCHEMA_VERSION` bump (an older stored draft then reads as a miss) and
+// a matching relaxation of `finaleClosingPoolIssues`, which still requires the
+// final Day to carry the closing pool.
 
 /** Which wizard step a draft was last standing on, so Resume is lossless.
  *  Named for the frames (`#frame-setup-occasion` … `#frame-setup-launch`)

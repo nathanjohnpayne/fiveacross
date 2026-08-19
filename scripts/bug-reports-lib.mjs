@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:f
 import path from 'node:path';
 import contract from '../functions/src/bugReportContract.cjs';
 
-const { validateClientReportFields, validatePngBytes } = contract;
+const { REPORT_KINDS, validateClientReportFields, validatePngBytes } = contract;
 
 const REPORT_ID = /^[A-Za-z0-9_-]{6,100}$/;
 const ISSUE_URL = /^https:\/\/github\.com\/nathanjohnpayne\/gaycruisebingo\/issues\/(\d+)$/;
@@ -139,9 +139,77 @@ function safeReport(report) {
   if (typeof report.submittedAt !== 'string' || !Number.isFinite(Date.parse(report.submittedAt))) throw new Error(`Invalid submittedAt for ${report.id}`);
   if (report.captureError != null && (typeof report.captureError !== 'string' || report.captureError.length > 200)) throw new Error(`Invalid capture error for ${report.id}`);
   if (report.status !== 'new') throw new Error(`Invalid status for ${report.id}`);
+  // FAIL CLOSED on a stored `kind` the contract does not recognize, unlike the
+  // intake path (#670 Codex P2). Normalizing an unknown value down to `bug` is
+  // right at INTAKE, where the alternative is losing a report from a client that
+  // cannot be forced to upgrade. Here the document has already been through that
+  // normalizer, so a present-but-unrecognized value means the stored report was
+  // hand-repaired, half-migrated, or written by a producer this checkout does not
+  // know — and silently exporting it as `bug` would discard triage information
+  // the operator is relying on. An ABSENT field is still the legacy default:
+  // every report stored before #670 has none.
+  if (report.kind !== undefined && !REPORT_KINDS.includes(report.kind)) {
+    throw new Error(`Invalid kind for ${report.id}`);
+  }
+  // Both escalation fields fail closed, in BOTH directions. A wrong type is
+  // malformed; an ABSENT one on an abuse report is malformed too, because every
+  // abuse report intake writes persists both — so a missing value means a
+  // half-migrated or hand-repaired record, and serializing it as `false` would
+  // make an unknown decision indistinguishable from an explicit negative (#670).
+  // `null` is not available to mean "unknown" here: it already means "not
+  // applicable", which is what a bug report exports.
+  for (const field of ['reporterInEvent', 'escalationEligible', 'escalationLookupFailed']) {
+    if (report[field] !== undefined && typeof report[field] !== 'boolean') {
+      throw new Error(`Invalid ${field} for ${report.id}`);
+    }
+  }
+  if (fields.kind === 'abuse') {
+    // Every abuse submission records whether the escalation lookup completed, so
+    // a missing verdict is a malformed record rather than an old one.
+    if (report.escalationLookupFailed === undefined) throw new Error(`Missing escalationLookupFailed for ${report.id}`);
+    if (report.escalationEligible === undefined) throw new Error(`Missing escalationEligible for ${report.id}`);
+    // `reporterInEvent` is present exactly when the lookup answered. Requiring
+    // it unconditionally would reject the unanswered case; allowing it in the
+    // unanswered case would mean an authorization decision was recorded when
+    // none was made (#670, Phase 4b P2).
+    if (!report.escalationLookupFailed && report.reporterInEvent === undefined) {
+      throw new Error(`Missing reporterInEvent for ${report.id}`);
+    }
+    if (report.escalationLookupFailed && report.reporterInEvent !== undefined) {
+      throw new Error(`Unexpected reporterInEvent for ${report.id}`);
+    }
+  }
   const metadata = {
     id: report.id,
     schemaVersion: fields.schemaVersion,
+    // From the shared contract, so a report stored before #670 (no `kind` field)
+    // exports as `bug` rather than as a hole an importer has to interpret.
+    kind: fields.kind,
+    // TWO fields, because escalation has two conditions and conflating them is
+    // how an operator ends up assuming a suppressed report reached somebody
+    // (#670). `null` on a bug report for both: nothing was checked, because
+    // there was nothing to escalate.
+    //
+    //   `reporterInEvent` — did the reporter belong to the Event they named?
+    //   This is the trigger's gate input: NECESSARY for an alert, not
+    //   sufficient. On its own it does not mean an admin heard anything.
+    //   `null` here means one of two things depending on `kind`: not applicable
+    //   (a bug report), or NOT ANSWERED (the lookup failed) — which
+    //   `escalationLookupFailed` is what distinguishes.
+    reporterInEvent:
+      fields.kind === 'abuse' && !report.escalationLookupFailed ? report.reporterInEvent === true : null,
+    //   `escalationEligible` — did the submission MEET THE CONDITIONS to be
+    //   escalated? Membership AND a live Event, the same answer the reporter's
+    //   receipt gave. Deliberately not a claim that an alert exists, let alone
+    //   that anyone read it: it is recorded before the trigger runs, that
+    //   trigger re-checks Event status, and the digest beyond it may resolve no
+    //   admin recipient. It is the closest thing the stored report can honestly
+    //   assert about whether anyone was going to hear about it.
+    escalationEligible: fields.kind === 'abuse' ? report.escalationEligible === true : null,
+    //   `escalationLookupFailed` — could the question even be asked? An
+    //   infrastructure failure must not read as a confirmed non-member: one is a
+    //   decision about the reporter, the other is the absence of one.
+    escalationLookupFailed: fields.kind === 'abuse' ? report.escalationLookupFailed === true : null,
     screenshotPath: report.screenshotPath,
     captureError: fields.captureError,
     route: fields.route,

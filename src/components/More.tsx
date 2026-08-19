@@ -21,6 +21,7 @@ import AcceptableUse from './AcceptableUse';
 import CoachOverlay from './CoachOverlay';
 import { WalkthroughContent } from './TutorialBanner';
 import { editionBrand } from '../editions';
+import { useOpenSuggestPanelIntent, clearOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
 
 /**
  * The More tab (#208, daily-cards-spec § "More menu"): profile, theme, text
@@ -49,6 +50,17 @@ export default function More() {
   const { standalone, deferred, showIOSHint, install } = useInstallPrompt();
 
   const [panel, setPanel] = useState<null | 'schedule' | 'suggest' | 'howToPlay' | 'coach'>(null);
+  // The Card/Feed "put it on tomorrow's card" entry point (#559) navigates
+  // here and hands off an intent to open THIS panel — consumed once, then
+  // cleared, so a later visit to More (no pending intent) opens on the menu
+  // as normal rather than jumping straight to Suggest every time.
+  const openSuggestIntent = useOpenSuggestPanelIntent();
+  useEffect(() => {
+    if (openSuggestIntent) {
+      setPanel('suggest');
+      clearOpenSuggestPanel();
+    }
+  }, [openSuggestIntent]);
   // The admin console is ROUTE-driven, not panel-state-driven
   // (specs/admin-console-ia.md): /more/admin[/section] renders it as an overlay
   // on top of this menu, so the browser/PWA back button walks detail → hub →

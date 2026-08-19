@@ -9,6 +9,7 @@ import type {
   ProofDoc,
 } from '../types';
 import { buildPodium, type Podium } from '../data/finale';
+import { standingsFreezeAtFor } from '../game/logic';
 import { mostLovedDisplayWinners, mostLovedFrozenEventPayload } from '../data/mostLoved';
 import { track } from '../analytics';
 import { shareOrigin } from '../canonicalHost';
@@ -358,7 +359,18 @@ interface FarewellPodiumProps {
    */
   event?: Pick<
     EventDoc,
-    'name' | 'days' | 'mostLovedPhoto' | 'bannedUids' | 'settings' | 'timezone'
+    | 'name'
+    | 'days'
+    | 'mostLovedPhoto'
+    | 'bannedUids'
+    | 'settings'
+    | 'timezone'
+    // The freeze cutoff this podium is computed AS OF (Phase 4b P1). `frozenAt`
+    // is stamped to the SCHEDULED instant, never the run clock, so the two
+    // agree once the scheduler has run and `standingsFreezeAtFor` covers the
+    // window before it.
+    | 'frozenAt'
+    | 'standingsFreezeAt'
   > | null;
 }
 
@@ -441,7 +453,12 @@ function FarewellPodiumInner({
   proofs: readonly ProofDoc[];
   proofsLoaded: boolean;
 }) {
-  const podium = buildPodium(players, days, dayMetas, dayMetasLoaded);
+  // The podium is "as of the freeze", not live: a ceremonial Day keeps
+  // recording Marks afterwards, and without this cutoff a post-freeze bingo
+  // could mint a First to BINGO the scheduler's immutable podium Moment does
+  // not have — the card and the Feed naming different winners.
+  const freezeAt = event?.frozenAt ?? standingsFreezeAtFor(event ?? null);
+  const podium = buildPodium(players, days, dayMetas, dayMetasLoaded, freezeAt);
   const dayLabel = makeDayLabel(days);
 
   // The render-time display gate (specs/most-loved-photo.md): persisted winners

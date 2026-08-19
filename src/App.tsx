@@ -5,6 +5,7 @@ import SignIn, { DealError } from './components/SignIn';
 import CachedCardFallback from './components/CachedCardFallback';
 import { loadCardSnapshot } from './data/cardCache';
 import Nav from './components/Nav';
+import SuggestPanelBridge from './components/SuggestPanelBridge';
 import Board from './components/Board';
 import NoticeBanner from './components/NoticeBanner';
 import Leaderboard from './components/Leaderboard';
@@ -15,6 +16,7 @@ import PullToRefresh from './components/PullToRefresh';
 import { TABS, FALLBACK_PATH, type TabId } from './components/tabs';
 import LoadingState from './components/LoadingState';
 import { editionBrand } from './editions';
+import SetupWizard from './components/setup/SetupWizard';
 
 export default function App() {
   const { user, loading, dealError, dealErrorReason, dealing, retryDeal, canRenderEventContent } = useAuth();
@@ -120,6 +122,10 @@ export default function App() {
             (reconnects wedged listeners, picks up a fresh deploy). */}
         <PullToRefresh />
         <Nav />
+        {/* Card/Feed → More "Suggest a square" navigation bridge (#559) — see
+            SuggestPanelBridge.tsx for why it's mounted here rather than
+            inside Board.tsx. Renders nothing. */}
+        <SuggestPanelBridge />
         {/* Keyed per top-level section so switching tabs replays the page-in
             rise (index.css `.route-view`); the wrapper is a plain block, so
             layout inside is unchanged. */}
@@ -134,6 +140,14 @@ export default function App() {
           {TABS.map((tab) => (
             <Route key={tab.id} path={tab.id === 'more' ? `${tab.path}/*` : tab.path} element={pages[tab.id]} />
           ))}
+          {/* The organizer setup wizard (#788, specs/event-setup-wizard.md): a
+              plain sibling route, NOT a tab — `./components/tabs` stays frozen
+              and the wizard's own sub-navigation (draft id + step) is parsed
+              inside SetupWizard itself, mirroring the More/admin `path="*"`
+              splat pattern above. Where the wizard is ultimately reachable
+              from is #766's call; this route only makes it mountable. Must
+              stay before the catch-all below. */}
+          <Route path="/setup/*" element={<SetupWizard />} />
           <Route path="*" element={<Navigate to={FALLBACK_PATH} replace />} />
         </Routes>
         </div>

@@ -67,7 +67,14 @@ export default function CachedCardFallback({
               // marked-but-`pending` must read as unconfirmed (faded/dashed)
               // here too, so the cached card never overstates confirmed
               // progress (Codex P2, #438).
-              (c.status === 'pending' ? ' pending' : '')
+              (c.status === 'pending' ? ' pending' : '') +
+              // "New from the group" (#559, Codex P2, PR #845 round 6): the
+              // saved snapshot's cells carry `communityPrompt` same as the
+              // live Board's (it's part of the `Cell` shape `saveCardSnapshot`
+              // persists verbatim), so the durable offline/flaky-Wi-Fi view
+              // — the one this fallback exists FOR — must not be the one
+              // place the ring silently disappears.
+              (!c.free && c.communityPrompt ? ' community' : '')
             }
             aria-label={c.free ? c.text : undefined}
           >
