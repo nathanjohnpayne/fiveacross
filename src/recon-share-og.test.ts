@@ -351,12 +351,11 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
     };
 
     it('loads the same checked display faces as the renderer template', () => {
-      const rendererFontStylesheet =
-        'https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Oswald:wght@300;400;500;600;700&display=block';
-      const wireframeFontStylesheet =
+      const checkedFontStylesheet =
         'https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@300;400;500;600;700&display=block';
-      expect(ogTemplateHtml).toContain(rendererFontStylesheet);
-      expect(wireframesHtml).toContain(wireframeFontStylesheet);
+      expect(ogTemplateHtml).toContain(checkedFontStylesheet);
+      expect(wireframesHtml).toContain(checkedFontStylesheet);
+      expect(ogTemplateHtml).not.toContain('family=Anton&family=Bebas+Neue');
       expect(wireframesHtml).not.toContain('family=Anton&family=Bebas+Neue');
     });
 
