@@ -176,10 +176,20 @@ export default defineConfig(({ command, mode }) => {
     // emulator rules layer lives in vitest.rules.config.ts and the Playwright e2e
     // layer in playwright.config.ts, so `npm test` never needs a functions
     // install, a running emulator, or a browser.
+    //
+    // `worker/**` joins this layer rather than getting a runner of its own
+    // (#545). The edge router's decision modules import nothing from
+    // `worker/package.json` — every platform seam (fetch, cache, clock) is
+    // injected, exactly as specs/event-resolution.md requires of the client
+    // resolver — so they are self-contained on ROOT deps like `src/**` is, and
+    // a separate config would buy nothing but a suite CI could forget to run.
+    // Each `worker/` spec opts into the `node` environment with its own
+    // `@vitest-environment` docblock: they exercise `Request`/`Response`, which
+    // belong to the runtime rather than to jsdom.
     test: {
       globals: true,
       environment: 'jsdom',
-      include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.mjs'],
+      include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.mjs', 'worker/**/*.test.ts'],
       setupFiles: ['./src/test/setup.ts']
     }
   };

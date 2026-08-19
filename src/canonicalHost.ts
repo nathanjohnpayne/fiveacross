@@ -1,10 +1,12 @@
 // The Event's resolved canonical hostname (#556, CONTEXT.md § Canonical
 // hostname): "the hostname analytics **report**... but not the host they
-// **ingest to**" — this module is that reported identity. A validated Alias
-// redirects to the canonical host at the edge before the app starts, so
-// `window.location` is expected to already be canonical by the time any of
-// this runs; this binding exists so analytics do not have to TRUST that —
-// they read the Firestore-resolved answer instead.
+// **ingest to**" — this module is that reported identity. `window.location` is
+// therefore expected to DISAGREE with this value routinely: #599 as amended
+// removed edge canonicalization, so every registered host serves in place and
+// the edge Event router emits no alias-to-canonical redirect at all
+// (specs/event-router.md, #545). That is exactly why this binding exists —
+// analytics read the Firestore-resolved answer rather than inferring the
+// canonical host from the origin they happen to be running on.
 //
 // ANALYTICS ONLY (#607, superseding the original #556 scope). Share links
 // deliberately do NOT consume this identity: under the amended multi-domain
