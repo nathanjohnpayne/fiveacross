@@ -278,6 +278,55 @@ describe('migrate-bodega-place-emoji: fail-closed guards', () => {
   });
 });
 
+// Codex P2, round 1. Hand edits to this Event's live glyphs are not
+// hypothetical — Day 4's `portEmoji` IS one (2026-08-05), which is exactly why
+// it disagreed with `placeEmoji`. Overwriting an unrecognised value would
+// silently revert whoever made it to a decision they had already moved past.
+describe('migrate-bodega-place-emoji: unrecognised live glyphs', () => {
+  it('refuses a live placeEmoji that is neither the target nor the superseded glyph', () => {
+    const edited = LIVE_DAYS.map((d, i) => (i === 1 ? { ...d, placeEmoji: '🦞' } : d));
+    const plan = planEmojiMigration(edited);
+    expect(plan.unrecognized).toHaveLength(1);
+    expect(plan.unrecognized[0].unrecognized).toEqual([{ field: 'placeEmoji', value: '🦞' }]);
+    expect(() => assertWritablePlan(plan, edited)).toThrow(/does not recognise/);
+  });
+
+  it('refuses an unrecognised value on the retained legacy field too', () => {
+    const edited = LIVE_DAYS.map((d, i) => (i === 3 ? { ...d, portEmoji: '🚗' } : d));
+    const plan = planEmojiMigration(edited);
+    expect(plan.unrecognized[0].unrecognized).toEqual([{ field: 'portEmoji', value: '🚗' }]);
+    expect(() => assertWritablePlan(plan, edited)).toThrow(/does not recognise/);
+  });
+
+  it('accepts the pre-migration live doc — every glyph is a superseded one', () => {
+    const plan = planEmojiMigration(LIVE_DAYS);
+    expect(plan.unrecognized).toEqual([]);
+    expect(() => assertWritablePlan(plan, LIVE_DAYS)).not.toThrow();
+  });
+
+  it('accepts the post-migration live doc — every glyph is a target', () => {
+    const applied = planEmojiMigration(LIVE_DAYS).corrected;
+    const plan = planEmojiMigration(applied);
+    expect(plan.unrecognized).toEqual([]);
+    expect(() => assertWritablePlan(plan, applied)).not.toThrow();
+  });
+
+  // A Day with no `placeEmoji` renders no glyph at all (`migrateDayFields`
+  // resolves it to ''), so writing the target repairs it rather than overwriting
+  // anybody's edit.
+  it('treats an absent placeEmoji as a repair, not an unrecognised value', () => {
+    const stripped = LIVE_DAYS.map((d, i) => {
+      if (i !== 0) return d;
+      const { placeEmoji: _dropped, ...rest } = d;
+      return rest;
+    });
+    const plan = planEmojiMigration(stripped);
+    expect(plan.unrecognized).toEqual([]);
+    expect(plan.diffs[0].changed.placeEmoji).toEqual({ from: undefined, to: '🐚' });
+    expect(() => assertWritablePlan(plan, stripped)).not.toThrow();
+  });
+});
+
 describe('migrate-bodega-place-emoji: seed cross-check', () => {
   it('classifies the real seed module as converged or pending PR #896, never a conflict', () => {
     const divergence = seedDivergence(EVENT_SEED.days);
@@ -306,5 +355,30 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
   it('treats a field the seed omits as nothing to disagree with', () => {
     const seeded = TARGET_DAYS.map((t) => ({ index: t.index, placeEmoji: t.emoji }));
     expect(seedDivergence(seeded).entries).toEqual([]);
+  });
+
+  // Codex P2, round 1. A missing FIELD is unasserted; a missing DAY means the
+  // seed no longer describes a Day this table still plans to write — a dropped
+  // or reindexed Day — and must not read as agreement.
+  it('refuses a target Day the seed no longer describes', () => {
+    const seeded = TARGET_DAYS.filter((t) => t.index !== 2).map((t) => ({
+      index: t.index,
+      placeEmoji: t.emoji,
+    }));
+    const divergence = seedDivergence(seeded);
+    expect(divergence.conflicts).toHaveLength(1);
+    expect(divergence.conflicts[0]).toMatchObject({ index: 2, field: '(day)' });
+    expect(() => assertSeedAgreement(divergence)).toThrow(/does not recognise/);
+  });
+
+  it('refuses a reindexed seed even when every glyph value is a target', () => {
+    const seeded = TARGET_DAYS.map((t) => ({ index: t.index + 10, placeEmoji: t.emoji }));
+    const divergence = seedDivergence(seeded);
+    expect(divergence.conflicts).toHaveLength(TARGET_DAYS.length);
+    expect(() => assertSeedAgreement(divergence)).toThrow();
+  });
+
+  it('refuses an empty seed rather than reporting agreement', () => {
+    expect(() => assertSeedAgreement(seedDivergence([]))).toThrow();
   });
 });

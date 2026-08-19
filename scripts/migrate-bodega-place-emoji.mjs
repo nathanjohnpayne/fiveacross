@@ -135,7 +135,7 @@ export function correctDay(liveDay, target) {
 /**
  * Diff one live Day against its correction. Returns:
  *   { index, corrected, changed:{field:{from,to}}, forbidden:[field...],
- *     misalignedFields:[field...], introducesLegacy }
+ *     misalignedFields:[field...], introducesLegacy, unrecognized:[{field,value}] }
  * - `changed` — the intended glyph edits (a subset of EMOJI_FIELDS).
  * - `forbidden` — any field the WRITE would change outside EMOJI_FIELDS. Empty
  *   by construction; a non-empty list is a coding regression and aborts the run.
@@ -146,6 +146,17 @@ export function correctDay(liveDay, target) {
  *   lacks it. Also empty by construction, and also re-asserted rather than
  *   trusted: re-adding the legacy field would reinstate the read-precedence
  *   hazard this migration exists to clear.
+ * - `unrecognized` — a PRESENT live glyph that is neither the #881 target nor
+ *   the glyph #881 supersedes. Someone edited it by hand after this table was
+ *   written, and overwriting it would silently revert their edit to a decision
+ *   they have already moved past. That is not hypothetical on this Event: Day 4's
+ *   live `portEmoji` is a hand edit (2026-08-05), which is the whole reason the
+ *   legacy field disagrees with `placeEmoji` in the first place. (Codex P2,
+ *   round 1.)
+ *
+ * A live Day MISSING `placeEmoji` is not unrecognized — the field resolves to ''
+ * through `migrateDayFields` and renders no glyph at all, so writing the target
+ * is a repair rather than an overwrite.
  */
 export function diffDay(liveDay, target) {
   const live = liveDay || {};
@@ -166,7 +177,15 @@ export function diffDay(liveDay, target) {
   const misalignedFields = ALIGNMENT_FIELDS.filter((key) => live[key] !== target[key]);
   const introducesLegacy = !(LEGACY_EMOJI_FIELD in live) && LEGACY_EMOJI_FIELD in corrected;
 
-  return { index: target.index, corrected, changed, forbidden, misalignedFields, introducesLegacy };
+  const unrecognized = [];
+  for (const field of EMOJI_FIELDS) {
+    if (!(field in live)) continue;
+    const value = live[field];
+    if (value === target.emoji || target.superseded.includes(value)) continue;
+    unrecognized.push({ field, value });
+  }
+
+  return { index: target.index, corrected, changed, forbidden, misalignedFields, introducesLegacy, unrecognized };
 }
 
 /**
@@ -183,6 +202,7 @@ export function planEmojiMigration(liveDays, targets = TARGET_DAYS) {
     diffs,
     forbidden: diffs.filter((d) => d.forbidden.length > 0),
     legacyIntroduced: diffs.filter((d) => d.introducesLegacy),
+    unrecognized: diffs.filter((d) => d.unrecognized.length > 0),
     misaligned: lengthMismatch || diffs.some((d) => d.misalignedFields.length > 0),
     lengthMismatch,
     changed: diffs.some((d) => Object.keys(d.changed).length > 0),
@@ -205,15 +225,24 @@ export function planEmojiMigration(liveDays, targets = TARGET_DAYS) {
  *   'conflict'    — neither. Somebody changed the decision, or the seed drifted
  *                   somewhere unplanned. Fatal: refuse rather than push a glyph
  *                   the seed will contradict.
- * A seed Day missing the field entirely is 'converged' by omission — the seed
- * simply does not assert that field, so there is nothing to disagree with.
+ * A seed Day missing the FIELD is 'converged' by omission — the seed simply does
+ * not assert that field, so there is nothing to disagree with. A missing DAY is
+ * a different thing entirely and is a 'conflict': the seed no longer describes a
+ * Day this table still plans to write, so either the itinerary was reindexed or
+ * a Day was dropped, and a retained migration would carry its old decision into
+ * a live or restored Event while reporting that the seed agreed. (Codex P2,
+ * round 1.)
  */
 export function seedDivergence(seedDays = EVENT_SEED.days, targets = TARGET_DAYS) {
   const entries = [];
   for (const target of targets) {
     const day = (Array.isArray(seedDays) ? seedDays : []).find((d) => d?.index === target.index);
+    if (!day) {
+      entries.push({ index: target.index, field: '(day)', value: undefined, target: target.emoji, status: 'conflict' });
+      continue;
+    }
     for (const field of EMOJI_FIELDS) {
-      if (!day || !(field in day)) continue;
+      if (!(field in day)) continue;
       const value = day[field];
       const status =
         value === target.emoji ? 'converged' : target.superseded.includes(value) ? 'pending-fix' : 'conflict';
@@ -239,6 +268,12 @@ export function formatMigrationReport(plan) {
     }
     for (const field of d.misalignedFields) {
       lines.push(`  Day ${dayNo}: ⚠️ MISALIGNED — "${field}" differs between the live Day and the #881 target`);
+    }
+    for (const { field, value } of d.unrecognized) {
+      lines.push(
+        `  Day ${dayNo}: ⛔ UNRECOGNISED live ${field}=${JSON.stringify(value)} — neither the #881 target nor the ` +
+          'glyph it supersedes; looks like a later hand edit',
+      );
     }
     for (const [field, { from, to }] of Object.entries(d.changed)) {
       lines.push(`  Day ${dayNo}: ${field}: ${JSON.stringify(from)} → ${JSON.stringify(to)}`);
@@ -275,6 +310,20 @@ export function assertWritablePlan(plan, liveDays = []) {
           ? ` (length ${liveDays.length} vs ${plan.corrected.length})`
           : ' (a Day index/date/place/theme differs)') +
         '. No write performed.',
+    );
+  }
+  // Before the by-construction invariants, because this one is about the DATA
+  // rather than about this script's own correctness: a live glyph nobody
+  // recognises is somebody's later edit, and stomping it would revert them to a
+  // decision they have already moved past.
+  if (plan.unrecognized.length > 0) {
+    const detail = plan.unrecognized
+      .flatMap((d) => d.unrecognized.map((u) => `Day ${(d.index ?? 0) + 1} ${u.field}=${JSON.stringify(u.value)}`))
+      .join('; ');
+    throw new Error(
+      `bodega-place-emoji: REFUSING — live glyph(s) this migration does not recognise: ${detail}. Neither the #881 ` +
+        'target nor the glyph it supersedes, so this looks like a hand edit made after the table was written. ' +
+        'Overwriting it would silently revert that edit. Reconcile it, or extend the target table. No write performed.',
     );
   }
   if (plan.legacyIntroduced.length > 0) {
