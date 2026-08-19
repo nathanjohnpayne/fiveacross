@@ -923,6 +923,7 @@ service cloud.firestore {
         && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
+            || request.resource.data.days == resource.data.days
             || tenDayFutureThemesOnlyOk(request.resource.data.days, resource.data.days)
             || daysThemeLockOk(request.resource.data.days, resource.data.days))
         // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
