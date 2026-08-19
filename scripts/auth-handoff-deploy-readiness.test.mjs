@@ -19,6 +19,7 @@ afterEach(async () => {
 async function makeFixture({
   credential,
   opCredential,
+  opFailure = '',
   failService = '',
   describeValue = 'false',
   activationFails = false,
@@ -61,6 +62,10 @@ exit 1
     `#!/usr/bin/env bash
 set -euo pipefail
 [[ "\${OP_MATERIALIZE:-false}" == "true" ]] || exit 1
+if [[ -n "\${OP_FAILURE:-}" ]]; then
+  printf '%s\n' "$OP_FAILURE" >&2
+  exit 1
+fi
 out=''
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "--out-file" ]]; then out="$2"; shift 2; else shift; fi
@@ -82,6 +87,7 @@ fi
     opBlockFile,
     credentialPath,
     opCredentialPath,
+    opFailure,
     failService,
     describeValue,
     activationFails,
@@ -104,6 +110,7 @@ function runReadiness(fixture, overrides = {}) {
       DESCRIBE_VALUE: fixture.describeValue,
       ACTIVATION_FAILS: String(fixture.activationFails),
       OP_CREDENTIAL_PATH: fixture.opCredentialPath,
+      OP_FAILURE: fixture.opFailure,
       ...overrides,
     },
   });
@@ -236,6 +243,67 @@ describe('Five Across auth-handoff deploy readiness', () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(await readdir(fixture.root)).not.toEqual(expect.arrayContaining([expect.stringMatching(/^firebase-sa-/)]));
+  });
+
+  it("uses the explicit keyless fallback only when the Firebase-vault item is absent", async () => {
+    const fixture = await makeFixture({
+      credential: { type: "authorized_user", client_id: "ambient" },
+      opFailure:
+        '[ERROR] "fiveacross — Firebase Deployer SA Key" isn\'t an item in the "Firebase" vault.',
+    });
+
+    const result = runReadiness(fixture, {
+      GOOGLE_APPLICATION_CREDENTIALS: "",
+      AUTH_HANDOFF_PROJECT: "fiveacross",
+      OP_MATERIALIZE: "true",
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const calls = await readFile(fixture.log, "utf8");
+    expect(calls).toContain(
+      `--impersonate-service-account=${expectedServiceAccount}`,
+    );
+  });
+
+  it("fails closed before ambient impersonation when Firebase-vault authentication fails", async () => {
+    const fixture = await makeFixture({
+      credential: { type: "authorized_user", client_id: "ambient" },
+      opFailure:
+        "[ERROR] biometric unlock authorization failed: supersecret-diagnostic",
+    });
+
+    const result = runReadiness(fixture, {
+      GOOGLE_APPLICATION_CREDENTIALS: "",
+      AUTH_HANDOFF_PROJECT: "fiveacross",
+      OP_MATERIALIZE: "true",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "could not establish that the Firebase-vault deploy key is absent",
+    );
+    expect(result.stderr).not.toContain("supersecret-diagnostic");
+    await expect(readFile(fixture.log, "utf8")).rejects.toThrow();
+  });
+
+  it("fails closed before ambient impersonation when credential temp-file setup fails", async () => {
+    const fixture = await makeFixture({
+      credential: { type: "authorized_user", client_id: "ambient" },
+    });
+
+    const result = runReadiness(fixture, {
+      GOOGLE_APPLICATION_CREDENTIALS: "",
+      AUTH_HANDOFF_PROJECT: "fiveacross",
+      OP_MATERIALIZE: "true",
+      TMPDIR: join(fixture.root, "missing-temp-directory"),
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "could not prepare Firebase-vault credential materialization",
+    );
+    expect(result.stderr).not.toContain("missing-temp-directory");
+    await expect(readFile(fixture.log, "utf8")).rejects.toThrow();
   });
 
   it('removes a materialized key when the readiness process is terminated', async () => {

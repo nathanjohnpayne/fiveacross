@@ -279,7 +279,7 @@ init_fixture_repo() {
     git config user.name "Test"
     git config commit.gpgsign false
     echo "initial" > README.md
-    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"}}' > firebase.json
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions"},"firestore":{"rules":"firestore.rules"},"storage":{"rules":"storage.rules"}}' > firebase.json
     git add README.md firebase.json
     git commit --quiet -m "initial"
   )
@@ -1434,16 +1434,17 @@ fi
 # than suppressing deploy.sh's wrapper-owned readiness and repair updates.
 #
 # firebase-tools 15.27.0 documents -m/--message, -p/--public, --only, and
-# --except as the complete split value-taking set. There is deliberately no
-# second named-target scanner; it forwards these arguments here unchanged. A
-# final --only hosting makes every case except --except a real client deploy;
-# --except remains a valid full deploy by omitting that mutually-exclusive
-# flag. The exact-SA readiness update proves deploy.sh did not misclassify the
-# earlier option value as Firebase's standalone --dry-run flag.
+# --except on the deploy command, plus the global --account/--token options, as
+# split value-taking options. There is deliberately no second named-target
+# scanner; it forwards these arguments here unchanged. A final --only hosting
+# makes every case except --except a real client deploy; --except remains a
+# valid full deploy by omitting that mutually-exclusive flag. The exact-SA
+# readiness update proves deploy.sh did not misclassify the earlier option
+# value as Firebase's standalone --dry-run flag.
 # ---------------------------------------------------------------------------
 for value_option_case in \
   "18a:-m" "18b:--message" "18c:-p" "18d:--public" \
-  "18e:--only" "18f:--except"; do
+  "18e:--only" "18f:--except" "18g:--account" "18h:--token"; do
   case_id="${value_option_case%%:*}"
   value_option="${value_option_case#*:}"
   trailing_scope="--only hosting"
@@ -2293,6 +2294,15 @@ run_invalid_filter_case 24a --only
 run_invalid_filter_case 24b --except
 run_invalid_filter_case 24c -m
 run_invalid_filter_case 24d -p
+run_invalid_filter_case 24r --only --dry-run
+run_invalid_filter_case 24j -P other-project
+run_invalid_filter_case 24k -Pother-project
+run_invalid_filter_case 24l --project other-project
+run_invalid_filter_case 24m --project=other-project
+run_invalid_filter_case 24n -c other.firebase.json
+run_invalid_filter_case 24o -cother.firebase.json
+run_invalid_filter_case 24p --config other.firebase.json
+run_invalid_filter_case 24q --config=other.firebase.json
 
 # Firebase resolves Hosting selectors against this checkout's firebase.json.
 # Excluding its only site means neither Hosting nor Functions can publish, so

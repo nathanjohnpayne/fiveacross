@@ -69,8 +69,8 @@ elif [[ -z "$SOURCE_CREDENTIAL" ]]; then
   # Reuse the canonical Firebase deploy credential primitive before falling
   # back to the keyless gcloud source chain. Five Across is normally keyless,
   # but this also supports a project key if one is provisioned later.
-  OWNED_CREDENTIAL="$(firebase_materialize_vault_sa_key "$PROJECT" || true)"
-  if [[ -n "$OWNED_CREDENTIAL" ]]; then
+  MATERIALIZATION_STATUS=0
+  if OWNED_CREDENTIAL="$(firebase_materialize_vault_sa_key "$PROJECT" --classify-absence)"; then
     if ! credential_is_exact_deployer "$OWNED_CREDENTIAL"; then
       echo "FAIL: the Firebase-vault deploy credential is not $EXPECTED_SERVICE_ACCOUNT." >&2
       echo "Nothing has been built or published." >&2
@@ -79,6 +79,12 @@ elif [[ -z "$SOURCE_CREDENTIAL" ]]; then
     SOURCE_CREDENTIAL="$OWNED_CREDENTIAL"
     IMPERSONATE_SERVICE_ACCOUNT=""
     REQUIRE_DIRECT_KEY_ACTIVATION=true
+  else
+    MATERIALIZATION_STATUS=$?
+    if [[ "$MATERIALIZATION_STATUS" -ne 1 ]]; then
+      echo "Nothing has been built or published." >&2
+      exit "$MATERIALIZATION_STATUS"
+    fi
   fi
 fi
 

@@ -5,15 +5,96 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEPLOY_TARGETS } from './build-target.mjs';
 import { deployInvocation, deployRequest, executeDeployRequest } from './deploy-target.mjs';
+import { classifyFirebaseDeployRequest } from './validate-firebase-deploy-filters.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const deployTargetScript = resolve(repoRoot, 'scripts', 'deploy-target.mjs');
 const deployScript = resolve(repoRoot, 'scripts', 'deploy.sh');
 
 describe('deploy target selection', () => {
+  it("classifies Firebase argv, Hosting config, dry-run, and readiness through one public adapter", async () => {
+    const result = await classifyFirebaseDeployRequest(
+      ["fiveacross", "--account", "--dry-run", "--only", "hosting"],
+      { defaultConfigPath: resolve(repoRoot, "firebase.json") },
+    );
+
+    expect(result).toMatchObject({
+      project: "fiveacross",
+      only: "hosting",
+      firebaseDryRun: false,
+      hostingAttempted: true,
+      functionsAttempted: false,
+      authHandoffInvokerSelected: false,
+    });
+  });
+
+  it("rejects a Firebase-invalid option value before returning any scope classification", async () => {
+    await expect(
+      classifyFirebaseDeployRequest(["fiveacross", "--only", "--dry-run"], {
+        defaultConfigPath: resolve(repoRoot, "firebase.json"),
+      }),
+    ).rejects.toThrow(/Cannot understand what targets/);
+  });
+
   it('requires an explicit deploy target', () => {
     expect(() => deployRequest([])).toThrow('A deploy target is required');
   });
+
+  it.each([
+    ["-P", "other-project"],
+    ["-Pother-project"],
+    ["--project", "other-project"],
+    ["--project=other-project"],
+    ["-c", "other.firebase.json"],
+    ["-cother.firebase.json"],
+    ["--config", "other.firebase.json"],
+    ["--config=other.firebase.json"],
+  ])(
+    "rejects named target destination override %s before spawning deploy.sh",
+    (...deployArgs) => {
+      const calls = [];
+      const spawn = (...args) => {
+        calls.push(args);
+        return { status: 0 };
+      };
+
+      expect(() =>
+        executeDeployRequest(
+          { target: "gaycruisebingo", wrapperArgs: [], deployArgs },
+          DEPLOY_TARGETS.gaycruisebingo,
+          {},
+          spawn,
+        ),
+      ).toThrow(/cannot override the pinned Firebase (project|config)/);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["-P", "other-project"],
+    ["--project=other-project"],
+    ["-cother.firebase.json"],
+    ["--config", "other.firebase.json"],
+  ])(
+    "rejects the actual named CLI destination override %s before deploy.sh",
+    (...deployArgs) => {
+      const result = spawnSync(
+        process.execPath,
+        [deployTargetScript, "gaycruisebingo", ...deployArgs],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(
+        /cannot override the pinned Firebase (project|config)/,
+      );
+      expect(result.stderr).toContain("Nothing has been built or published.");
+    },
+  );
 
   it('turns the generic hosting entry point into an explicit target deployment', () => {
     expect(deployRequest(['--hosting', 'fiveacross'])).toEqual({

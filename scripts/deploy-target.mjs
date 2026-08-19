@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
+import { assertNoNamedDestinationOverride } from './validate-firebase-deploy-filters.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..');
@@ -123,6 +124,7 @@ export function executeDeployRequest(
   inheritedEnv = process.env,
   spawn = spawnSync,
 ) {
+  assertNoNamedDestinationOverride(request.deployArgs);
   const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
   if (handoffOrigin && request.wrapperArgs.includes('--skip-invoker')) {
     throw new Error(

@@ -171,295 +171,61 @@ HOSTING_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
-# Both handoff callables share ONE selection flag: they are two halves of one
-# sign-in flow, always released together, and either left 403ing breaks
-# authentication outright (#548). See scripts/set-auth-handoff-invoker.sh.
 AUTH_HANDOFF_INVOKER_SELECTED=true
-# An endpoint selected by an exact `functions:<endpoint>` (or the whole
-# `functions` scope) MUST exist after a successful Functions deploy, so its
-# post-publish reconciliation stays strict. An unfamiliar `functions:<name>`
-# may instead be a codebase/group or a genuinely unrelated function; it selects
-# both endpoints defensively, but records that they were inferred rather than
-# named so a valid scoped first deploy is not failed by an absent service.
 BUG_REPORT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-# Which half of the pair must still EXIST after publish, when only one was
-# named. Empty means both must (the ordinary full-deploy case);
-# AUTH_HANDOFF_INVOKER_CONSERVATIVE=true means neither has to. Kept separate
-# from the conservative bit because "the partner may be absent" and "the
-# function I just deployed may be absent" are different claims, and collapsing
-# them lets a scoped deploy finish green without reconciling what it released
-# (#548, Codex P2 round 4).
 AUTH_HANDOFF_STRICT_HALF=""
-ONLY_VALUES=()
-EXCEPT_VALUES=()
-DEPLOY_PROJECT="${DEPLOY_TARGET_PROJECT:-}"
-EXPECT_ARG=""
-for arg in ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}; do
-  if [[ -n "$EXPECT_ARG" ]]; then
-    case "$EXPECT_ARG" in
-      only)   ONLY_VALUES=("$arg") ;;
-      except) EXCEPT_VALUES=("$arg") ;;
-    esac
-    EXPECT_ARG=""
-    continue
-  fi
-  case "$arg" in
-    --only)     EXPECT_ARG="only" ;;
-    --only=*)   ONLY_VALUES=("${arg#*=}") ;;
-    --except)   EXPECT_ARG="except" ;;
-    --except=*) EXCEPT_VALUES=("${arg#*=}") ;;
-    -m|--message) EXPECT_ARG="message" ;;
-    -p|--public) EXPECT_ARG="public" ;;
-    --dry-run) FIREBASE_DRY_RUN=true ;;
-    --*) ;;
+DEPLOY_PROJECT=""
+
+# Source integrity is independent of Firebase argv classification and remains
+# the first deploy guard. In particular, a stale/feature checkout must be
+# rejected even when it lacks the selected config file.
+guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
+
+# One pinned Node adapter owns Firebase argv parsing, filter validation, Hosting
+# config/site selection, and the invoker/readiness scope. Keeping those
+# decisions together prevents the wrapper from building or mutating readiness
+# for an argv shape firebase-tools will later classify differently.
+echo ">> Validating and classifying Firebase deploy request (local)"
+FIREBASE_REQUEST_CLASSIFICATION=""
+if ! FIREBASE_REQUEST_CLASSIFICATION="$(
+  FIREBASE_DEPLOY_DEFAULT_PROJECT="${DEPLOY_TARGET_PROJECT:-}" \
+  FIREBASE_DEPLOY_DEFAULT_CONFIG="$PWD/firebase.json" \
+  FIREBASE_DEPLOY_REJECT_OVERRIDES="$([[ -n "${DEPLOY_TARGET_PROJECT:-}" ]] && printf true || printf false)" \
+  FIREBASE_DEPLOY_CLASSIFIER_FORMAT=shell \
+    node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" -- \
+      ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}
+)"; then
+  exit 1
+fi
+
+CLASSIFICATION_FIELDS=0
+while IFS='=' read -r classification_key classification_value; do
+  case "$classification_key" in
+    DEPLOY_PROJECT) DEPLOY_PROJECT="$classification_value" ;;
+    FUNCTIONS_ATTEMPTED) FUNCTIONS_ATTEMPTED="$classification_value" ;;
+    HOSTING_ATTEMPTED) HOSTING_ATTEMPTED="$classification_value" ;;
+    FIREBASE_DRY_RUN) FIREBASE_DRY_RUN="$classification_value" ;;
+    BUG_REPORT_INVOKER_SELECTED) BUG_REPORT_INVOKER_SELECTED="$classification_value" ;;
+    EMAIL_UNSUBSCRIBE_INVOKER_SELECTED) EMAIL_UNSUBSCRIBE_INVOKER_SELECTED="$classification_value" ;;
+    AUTH_HANDOFF_INVOKER_SELECTED) AUTH_HANDOFF_INVOKER_SELECTED="$classification_value" ;;
+    BUG_REPORT_INVOKER_CONSERVATIVE) BUG_REPORT_INVOKER_CONSERVATIVE="$classification_value" ;;
+    EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE) EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE="$classification_value" ;;
+    AUTH_HANDOFF_INVOKER_CONSERVATIVE) AUTH_HANDOFF_INVOKER_CONSERVATIVE="$classification_value" ;;
+    AUTH_HANDOFF_STRICT_HALF) AUTH_HANDOFF_STRICT_HALF="$classification_value" ;;
     *)
-      if [[ -z "$DEPLOY_PROJECT" ]]; then
-        DEPLOY_PROJECT="$arg"
-      fi
+      echo "✗ Firebase deploy classification returned an unrecognized field. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
+      exit 1
       ;;
   esac
-done
-
-# Commander preserves an explicitly empty string, but firebase-tools tests
-# option truthiness before filtering. Match that behavior so `--only ''` and
-# `--except ''` retain the full deploy scope instead of suppressing readiness.
-if [[ ${#ONLY_VALUES[@]} -eq 1 && -z "${ONLY_VALUES[0]}" ]]; then
-  ONLY_VALUES=()
-fi
-if [[ ${#EXCEPT_VALUES[@]} -eq 1 && -z "${EXCEPT_VALUES[0]}" ]]; then
-  EXCEPT_VALUES=()
-fi
-
-if [[ -z "$DEPLOY_PROJECT" && -f .firebaserc ]]; then
-  DEPLOY_PROJECT="$(python3 -c "import json; print(json.load(open('.firebaserc'))['projects']['default'])")"
-fi
-
-# `--only` is an allowlist. It also tells us which of the two Cloud Run
-# services could have changed: an unrelated first function deployment must not
-# fail because the other service has not been created yet.
-if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
-  FUNCTIONS_ATTEMPTED=false
-  HOSTING_ATTEMPTED=false
-  BUG_REPORT_INVOKER_SELECTED=false
-  EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
-  AUTH_HANDOFF_INVOKER_SELECTED=false
-  BUG_REPORT_INVOKER_CONSERVATIVE=false
-  EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-  AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-  AUTH_HANDOFF_STRICT_HALF=""
-  # Which HALVES of the handoff pair this scope actually names. Parse-local:
-  # only the strictness decision below reads them.
-  AUTH_HANDOFF_MINT_NAMED=false
-  AUTH_HANDOFF_EXCHANGE_NAMED=false
-  for only_value in "${ONLY_VALUES[@]}"; do
-    IFS=',' read -r -a only_selectors <<< "$only_value"
-    for selector in "${only_selectors[@]}"; do
-      case "$selector" in
-        hosting|hosting:*)
-          HOSTING_ATTEMPTED=true
-          ;;
-        functions)
-          FUNCTIONS_ATTEMPTED=true
-          BUG_REPORT_INVOKER_SELECTED=true
-          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
-          AUTH_HANDOFF_INVOKER_SELECTED=true
-          AUTH_HANDOFF_MINT_NAMED=true
-          AUTH_HANDOFF_EXCHANGE_NAMED=true
-          BUG_REPORT_INVOKER_CONSERVATIVE=false
-          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-          ;;
-        # Firebase accepts both the short endpoint selector and the
-        # codebase-qualified `functions:<codebase>:<fn>` spelling. An exact
-        # endpoint name is stronger evidence than the conservative
-        # `functions:*` inference below, so clear that inference here in either
-        # selector order (#854).
-        functions:submitBugReport|functions:*:submitBugReport)
-          FUNCTIONS_ATTEMPTED=true
-          BUG_REPORT_INVOKER_SELECTED=true
-          BUG_REPORT_INVOKER_CONSERVATIVE=false
-          ;;
-        functions:emailUnsubscribe|functions:*:emailUnsubscribe)
-          FUNCTIONS_ATTEMPTED=true
-          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
-          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-          ;;
-        # Either handoff endpoint selects BOTH services: naming one half of
-        # the sign-in flow releases a function whose partner must stay
-        # reachable for that flow to work at all. Which HALVES were named is
-        # tracked so the strictness can be decided after the whole scope is
-        # parsed — see the reconciliation below the loop.
-        # `functions:default` names this repo's ONE Firebase codebase with no
-        # endpoint filter, so it releases everything exactly like the bare
-        # `functions` scope above and must be just as strict (#548, Codex P2
-        # round 6). It previously fell through to the unfamiliar-selector arm
-        # and went conservative, which could report success over a released
-        # service that was missing. This arm is intentionally asymmetric with
-        # `--except functions:default`, which Firebase treats as a no-op.
-        # If this repo ever gains NAMED codebases, give each its own arm here
-        # rather than widening this one.
-        functions:default)
-          FUNCTIONS_ATTEMPTED=true
-          BUG_REPORT_INVOKER_SELECTED=true
-          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
-          AUTH_HANDOFF_INVOKER_SELECTED=true
-          AUTH_HANDOFF_MINT_NAMED=true
-          AUTH_HANDOFF_EXCHANGE_NAMED=true
-          BUG_REPORT_INVOKER_CONSERVATIVE=false
-          EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-          AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-          ;;
-        # BOTH spellings Firebase accepts for a scoped function deploy:
-        # `functions:<fn>` and the codebase-qualified `functions:<codebase>:<fn>`
-        # (`firebase deploy --help`). Matching only the short form sent the
-        # qualified one into the `functions:*` arm below, where it was treated
-        # as an unfamiliar group and both halves went lenient — so the service
-        # the operator explicitly scoped could go missing unnoticed (#548,
-        # Codex P2 round 5).
-        functions:mintAuthHandoff|functions:*:mintAuthHandoff)
-          FUNCTIONS_ATTEMPTED=true
-          AUTH_HANDOFF_INVOKER_SELECTED=true
-          AUTH_HANDOFF_MINT_NAMED=true
-          ;;
-        functions:exchangeAuthHandoff|functions:*:exchangeAuthHandoff)
-          FUNCTIONS_ATTEMPTED=true
-          AUTH_HANDOFF_INVOKER_SELECTED=true
-          AUTH_HANDOFF_EXCHANGE_NAMED=true
-          ;;
-        # A selector after `functions:` is not necessarily a single exported
-        # function. Firebase also accepts codebase and function-group selectors
-        # in this position. We cannot prove that an unfamiliar selector excludes
-        # either protected endpoint from this wrapper, so include both
-        # conservatively. The invoker helpers are idempotent, and their
-        # pre-publish `--allow-missing` path keeps a genuinely new/unrelated
-        # function deploy from failing just because either service has not been
-        # created yet. Skipping one here risks a released endpoint remaining 403.
-        functions:*)
-          FUNCTIONS_ATTEMPTED=true
-          if [[ "$BUG_REPORT_INVOKER_SELECTED" != "true" ]]; then
-            BUG_REPORT_INVOKER_CONSERVATIVE=true
-          fi
-          if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" != "true" ]]; then
-            EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=true
-          fi
-          if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" != "true" ]]; then
-            AUTH_HANDOFF_INVOKER_CONSERVATIVE=true
-          fi
-          BUG_REPORT_INVOKER_SELECTED=true
-          EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
-          AUTH_HANDOFF_INVOKER_SELECTED=true
-          ;;
-      esac
-    done
-  done
-  # A scope that named only ONE half of the pair keeps THAT half strict and
-  # tolerates only its partner being absent (#548, Codex P2 rounds 3 and 4).
-  # Firebase's `--only functions:<name>` is a scoped deploy:
-  # `--only functions:mintAuthHandoff` does not create exchangeAuthHandoff, so
-  # on a first scoped deploy the partner genuinely does not exist and demanding
-  # it would fail a correct deploy. The half that WAS deployed is a different
-  # matter — if it is missing afterwards, that is the 403 this mechanism exists
-  # to catch, so it must still fail loud. Naming both halves, or the whole
-  # `functions` scope, releases both and leaves both strict.
-  #
-  # AN EXPLICIT NAME ALWAYS BEATS THE CONSERVATIVE INFERENCE (CodeRabbit, round
-  # 5). The `functions:*` arm sets the conservative bit as a GUESS that an
-  # unfamiliar group or codebase MIGHT contain a handoff endpoint; naming a half
-  # outright is a FACT that it was released. A combined scope such as
-  #
-  #   --only functions:someGroup,functions:mintAuthHandoff
-  #
-  # hit the guess first, and the guess then outranked the fact — so the half the
-  # deploy definitely released was tolerated as missing, reopening for combined
-  # scopes exactly the hole the per-half split closed for simple ones. Clearing
-  # the bit here is what makes the ORDER of selectors within one `--only`
-  # irrelevant.
-  if [[ "$AUTH_HANDOFF_INVOKER_SELECTED" == "true" ]]; then
-    if [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" && "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" ]]; then
-      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-      AUTH_HANDOFF_STRICT_HALF=""
-    elif [[ "$AUTH_HANDOFF_MINT_NAMED" == "true" ]]; then
-      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-      AUTH_HANDOFF_STRICT_HALF="mint"
-    elif [[ "$AUTH_HANDOFF_EXCHANGE_NAMED" == "true" ]]; then
-      AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-      AUTH_HANDOFF_STRICT_HALF="exchange"
-    fi
-    # Neither half named: the conservative bit stands, and both stay lenient.
-  fi
-fi
-
-# Firebase's vendored filterTargets uses `if (options.only) ... else if
-# (options.except)`: any `--only` makes every `--except` irrelevant, regardless
-# of argument order. Applying both here can suppress readiness/reconciliation
-# for a surface Firebase still releases, so parse exclusions only when no
-# allowlist exists.
-#
-# Without `--only`, `--except` removes exact top-level targets. Firebase does
-# not split exclusion values on `:`, so every endpoint-, group-, and codebase-
-# qualified Functions exclusion is a no-op and must leave all invoker repairs
-# selected. The reconciliation is idempotent, while skipping a released
-# endpoint can leave it 403ing.
-if [[ ${#ONLY_VALUES[@]} -eq 0 ]]; then
-  for except_value in ${EXCEPT_VALUES[@]+"${EXCEPT_VALUES[@]}"}; do
-    IFS=',' read -r -a except_selectors <<< "$except_value"
-    for selector in "${except_selectors[@]}"; do
-      case "$selector" in
-      hosting)
-        HOSTING_ATTEMPTED=false
-        ;;
-      functions)
-        FUNCTIONS_ATTEMPTED=false
-        BUG_REPORT_INVOKER_SELECTED=false
-        EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
-        AUTH_HANDOFF_INVOKER_SELECTED=false
-        BUG_REPORT_INVOKER_CONSERVATIVE=false
-        EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
-        AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
-        ;;
-      # COLON-QUALIFIED `--except` IS NOT A FUNCTION FILTER. This arm is a
-      # deliberate, documented NO-OP rather than a missing case (#548, Codex P2
-      # round 5; #852 Standards).
-      #
-      # Firebase implements `--except` by subtracting exact TOP-LEVEL target
-      # names (`firebase-tools/lib/filterTargets.js`); per-function filtering is
-      # documented for `--only` alone. So `--except functions:mintAuthHandoff`
-      # subtracts nothing from `functions` — the COMPLETE Functions target is
-      # still released, including the endpoint the operator believed they had
-      # excluded. An earlier version of this arm relaxed the excluded half to
-      # "may be absent", which would have swallowed a NOT_FOUND on a service
-      # Firebase was actually asked to deploy. Both halves stay strict.
-      # `--except functions:default` likewise EXCLUDES NOTHING. The vendored
-      # source settles all colon-qualified spellings uniformly —
-      # `node_modules/firebase-tools/lib/filterTargets.js`:
-      #
-      #     if (options.only) {
-      #       targets = intersection(targets, options.only.split(",")
-      #                   .map((opt) => opt.split(":")[0]));
-      #     } else if (options.except) {
-      #       targets = difference(targets, options.except.split(","));
-      #     }
-      #
-      # `--only` splits on `:` and keeps the first segment, which is why
-      # `--only functions:default` DOES select the `functions` target. `--except`
-      # does not split at all, so it computes difference(targets,
-      # ["functions:default"]) — and "functions:default" is not equal to
-      # "functions", so nothing is removed. Firebase still releases Functions,
-      # resets the invoker annotations, and the previous arm then skipped the
-      # reconciliation that repairs them, leaving all three endpoints 403.
-      #
-      # FUNCTIONS_ATTEMPTED deliberately stays true. #767 set it false to stop
-      # Guard 4 demanding a complete functions/.env.<projectId> for "a deploy
-      # that never touches Functions params" — but such a deploy DOES touch
-      # them, so the guard was right and the premise was wrong.
-      functions:*)
-        :
-        ;;
-      esac
-    done
-  done
+  CLASSIFICATION_FIELDS=$((CLASSIFICATION_FIELDS + 1))
+done <<EOF
+$FIREBASE_REQUEST_CLASSIFICATION
+EOF
+if [[ "$CLASSIFICATION_FIELDS" -ne 11 ]]; then
+  echo "✗ Firebase deploy classification was incomplete. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
+  exit 1
 fi
 
 # Reconciliation coordinates and readiness-only identity controls are PINNED
@@ -573,36 +339,6 @@ resolve_invoker_deploy_credential() {
     echo "   Loaded the project Firebase-vault deploy credential for the invoker check." >&2
   fi
 }
-
-guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
-
-# Match firebase-tools' own pure-local command and Hosting-config preflight
-# before this wrapper can make a live readiness update. In the Firebase CLI,
-# grammar validation runs before filterTargets; Hosting then resolves qualified
-# selectors against firebase.json. Reuse both pinned implementations so
-# `--only` + `--except`, bare + filtered Functions, unsupported colon filters,
-# and unknown Hosting sites are rejected at the same boundary. The result also
-# tells the readiness selector when a valid site-qualified exclusion removed
-# this checkout's only Hosting config.
-if [[ -n "$EXPECT_ARG" ]]; then
-  cat >&2 <<EOF
-✗ Firebase deploy option requires a value: $EXPECT_ARG.
-  NOTHING HAS BEEN BUILT OR PUBLISHED.
-EOF
-  exit 1
-fi
-echo ">> Validating Firebase deploy target filters (local)"
-FILTER_VALIDATION_RESULT=""
-if ! FILTER_VALIDATION_RESULT="$(node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" \
-  "${ONLY_VALUES[0]-}" "${EXCEPT_VALUES[0]-}" "$DEPLOY_PROJECT" "$PWD/firebase.json")"; then
-  exit 1
-fi
-if [[ "$FILTER_VALIDATION_RESULT" == "hosting-not-selected" ]]; then
-  HOSTING_ATTEMPTED=false
-elif [[ "$FILTER_VALIDATION_RESULT" != "hosting-selected" ]]; then
-  echo "✗ Firebase deploy target validation returned an unrecognized result. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
-  exit 1
-fi
 
 # Guard 4: functions/.env.<projectId> covers every param.ts-declared param
 # (#767).
