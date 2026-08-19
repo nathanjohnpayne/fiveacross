@@ -20,7 +20,22 @@ import { setupStepPath } from './route';
 // downgrades it on anything else, and this suite runs in REAL time (no
 // faked debounce), so a less generous stub would risk a flaky downgrade
 // mid-test.
-vi.mock('../../data/hostnames', () => ({ checkSlugAvailability: vi.fn(() => Promise.resolve('available')) }));
+vi.mock('../../data/hostnames', () => ({
+  checkSlugAvailability: vi.fn(() => Promise.resolve('available')),
+  // `StepBasics` calls this one, not `checkSlugAvailability` (CodeRabbit
+  // Major, PR #911). Omitting it left `undefined` to be invoked inside the
+  // debounced callback — harmless today only because no test here advances
+  // past the 400ms debounce and unmount clears the timer first, which is a
+  // timing accident rather than a contract. Mocking what the component
+  // actually calls removes the dependence on that accident.
+  checkEventAddressAvailability: vi.fn((slug: string, alternateApex: string | null) =>
+    Promise.resolve(
+      [`${slug}.fiveacross.app`, ...(alternateApex === null ? [] : [`${slug}.${alternateApex}`])].map(
+        (hostname) => ({ hostname, status: 'available' as const }),
+      ),
+    ),
+  ),
+}));
 
 // Covers specs/event-setup-wizard.md § "Shell & navigation" — #788's route,
 // five-step navigation, per-step Continue gating, deep-link/resume landing,

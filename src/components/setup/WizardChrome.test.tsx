@@ -16,7 +16,22 @@ import type { EventDraft, SetupStep } from '../../types';
 // "Step 2 · Basics"). Resolves 'available' so a draft this suite seeds with
 // an already-answered Basics step reads as complete immediately, matching
 // StepBasics's optimistic-trust behavior for an already-committed candidate.
-vi.mock('../../data/hostnames', () => ({ checkSlugAvailability: vi.fn(() => Promise.resolve('available')) }));
+vi.mock('../../data/hostnames', () => ({
+  checkSlugAvailability: vi.fn(() => Promise.resolve('available')),
+  // `StepBasics` calls this one, not `checkSlugAvailability` (CodeRabbit
+  // Major, PR #911). Omitting it left `undefined` to be invoked inside the
+  // debounced callback — harmless today only because no test here advances
+  // past the 400ms debounce and unmount clears the timer first, which is a
+  // timing accident rather than a contract. Mocking what the component
+  // actually calls removes the dependence on that accident.
+  checkEventAddressAvailability: vi.fn((slug: string, alternateApex: string | null) =>
+    Promise.resolve(
+      [`${slug}.fiveacross.app`, ...(alternateApex === null ? [] : [`${slug}.${alternateApex}`])].map(
+        (hostname) => ({ hostname, status: 'available' as const }),
+      ),
+    ),
+  ),
+}));
 
 // Covers specs/event-setup-wizard.md § "Live preview strip" (#795) mount
 // gating: the strip appears "from Step 2 on" — Basics, Squares, Look — and
