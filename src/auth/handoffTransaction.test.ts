@@ -318,3 +318,35 @@ describe('storage hazards that are not ordinary failures', () => {
     });
   });
 });
+
+// Codex P3, Phase 4b. Falling back only when the session copy is ABSENT let a
+// damaged or expired session copy mask a perfectly good local one — defeating
+// the dual-store recovery in exactly the situation it exists for.
+describe('the dual-store fallback falls through on unusable, not just absent', () => {
+  it('uses the local copy when the session copy is malformed', () => {
+    localStorage.setItem(HANDOFF_TRANSACTION_KEY, JSON.stringify(record()));
+    sessionStorage.setItem(HANDOFF_TRANSACTION_KEY, 'not json at all');
+    expect(readHandoffTransaction(NOW)).toEqual(record());
+  });
+
+  it('uses the local copy when the session copy is structurally wrong', () => {
+    localStorage.setItem(HANDOFF_TRANSACTION_KEY, JSON.stringify(record()));
+    sessionStorage.setItem(HANDOFF_TRANSACTION_KEY, JSON.stringify({ verifier: 'nope' }));
+    expect(readHandoffTransaction(NOW)).toEqual(record());
+  });
+
+  it('uses the local copy when the session copy is expired', () => {
+    localStorage.setItem(HANDOFF_TRANSACTION_KEY, JSON.stringify(record()));
+    sessionStorage.setItem(
+      HANDOFF_TRANSACTION_KEY,
+      JSON.stringify(record({ createdAt: NOW - HANDOFF_TRANSACTION_TTL_MS - 1 })),
+    );
+    expect(readHandoffTransaction(NOW)).toEqual(record());
+  });
+
+  it('still returns nothing when BOTH copies are unusable', () => {
+    localStorage.setItem(HANDOFF_TRANSACTION_KEY, 'garbage');
+    sessionStorage.setItem(HANDOFF_TRANSACTION_KEY, 'garbage');
+    expect(readHandoffTransaction(NOW)).toBeNull();
+  });
+});

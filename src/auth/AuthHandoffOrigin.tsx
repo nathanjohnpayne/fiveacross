@@ -29,6 +29,21 @@ import { auth, googleProvider } from '../firebase';
 import { parseHandoffRequest, type HandoffRequest } from './handoffClient';
 import { mintAuthHandoff } from './handoffExchange';
 
+/**
+ * How long the central-origin page may spend before it gives up, in ms (#899).
+ *
+ * The return leg already bounds its network work so captive and shipboard wifi
+ * cannot hold the mount forever; this page had no such bound, so a
+ * `getRedirectResult`, auth-state settlement, or `mintAuthHandoff` that never
+ * settles left the player on "Signing you in…" indefinitely — the same failure,
+ * on the origin whose failure takes sign-in down for every Event at once.
+ *
+ * Longer than the return leg's 15s because this page legitimately waits on a
+ * full Google round trip before it can mint, and a premature failure here sends
+ * the player back to an Event origin with nothing to show for it.
+ */
+export const HANDOFF_ORIGIN_TIMEOUT_MS = 30_000;
+
 type Phase =
   /** Working out whether a session already exists here. */
   | 'checking'
@@ -77,10 +92,13 @@ function replaceLocation(url: string): void {
 export default function AuthHandoffOrigin({
   search = window.location.search,
   navigate = replaceLocation,
+  timeoutMs = HANDOFF_ORIGIN_TIMEOUT_MS,
 }: {
   search?: string;
   /** Injected for tests, matching `startAuthHandoff`'s seam. Always a `replace`. */
   navigate?: (url: string) => void;
+  /** Overridable so tests do not have to wait out the real deadline. */
+  timeoutMs?: number;
 }) {
   const [phase, setPhase] = useState<Phase>('checking');
   const [failure, setFailure] = useState<FailureKind | null>(null);
@@ -123,6 +141,15 @@ export default function AuthHandoffOrigin({
     // throw.
     let handled = false;
     let minted = false;
+    let settled = false;
+
+    // One terminal deadline for the whole page (#899). It covers every await
+    // below — the redirect settle, the auth-state settle, and the mint — rather
+    // than bounding each, because the player-facing question is simply whether
+    // this page ever reaches an actionable state.
+    const deadline = setTimeout(() => {
+      if (!cancelled && !settled) fail('sign-in-failed');
+    }, timeoutMs);
 
     const bounce = async (req: HandoffRequest) => {
       if (minted) return;
@@ -131,6 +158,8 @@ export default function AuthHandoffOrigin({
       try {
         const handoffUrl = await mintAuthHandoff(req);
         if (cancelled) return;
+        settled = true;
+        clearTimeout(deadline);
         // VERBATIM, and `replace` rather than `assign`: the server built this
         // URL precisely so no client assembles a redirect target, and leaving
         // the central origin in history would put a spent handoff URL one Back
@@ -160,6 +189,11 @@ export default function AuthHandoffOrigin({
             void bounce(request);
             return;
           }
+          // Leaving for Google is a terminal outcome for THIS page load: the
+          // browser navigates away, and the deadline must not fire against a
+          // page that is already gone.
+          settled = true;
+          clearTimeout(deadline);
           setPhase('authenticating');
           void signInWithRedirect(auth, googleProvider).catch(() => {
             if (!cancelled) fail('sign-in-failed');
@@ -173,9 +207,10 @@ export default function AuthHandoffOrigin({
 
     return () => {
       cancelled = true;
+      clearTimeout(deadline);
       unsubscribe?.();
     };
-  }, [request, fail, navigate]);
+  }, [request, fail, navigate, timeoutMs]);
 
   const body =
     phase === 'failed' && failure !== null

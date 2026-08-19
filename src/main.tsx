@@ -206,6 +206,25 @@ const appTree = (
 );
 
 /**
+ * Capture and clear the handoff code BEFORE anything else runs (#549, #898).
+ *
+ * This sits above the central-origin check and above Event resolution because
+ * the thing it is racing is TELEMETRY, not rendering. Analytics startup and the
+ * explicit initial page view both derive the current URL from
+ * `window.location`, which still carries `#fa_handoff=<code>` until this line —
+ * so a fragment chosen precisely to keep the code out of access logs, proxies
+ * and `Referer` headers would have been copied straight into PostHog and GA4
+ * instead. PKCE means the code alone cannot authenticate anyone, but a
+ * single-use bearer credential still has no business in a telemetry pipeline.
+ *
+ * Reading and clearing here, and passing the value forward, is what makes the
+ * ordering guarantee explicit rather than incidental: no later reader of
+ * `window.location.hash` can observe it, because by then it is gone.
+ */
+const pendingHandoffCode = readHandoffCode(window.location.hash);
+if (pendingHandoffCode !== null) clearHandoffFragment();
+
+/**
  * The central auth origin short-circuit (#549, ADR 0010).
  *
  * `auth.fiveacross.app` serves this same bundle but is NOT an Event address: it
@@ -326,16 +345,12 @@ if (atCentralAuthOrigin) {
       // first settles — completing it inside the tree instead would render the
       // signed-out SignIn screen and then flip it out from under the player.
       //
-      // The fragment is cleared FIRST, unconditionally, so the code leaves the
-      // address bar whether or not the exchange goes on to succeed. Failure is
-      // recorded, never retried: the code is single-use and is spent by the time
-      // anything here can fail, so a retry could only fail again.
-      if (resolution.kind === 'event') {
-        const handoffCode = readHandoffCode(window.location.hash);
-        if (handoffCode !== null) {
-          clearHandoffFragment();
-          await completeAuthHandoff({ code: handoffCode, origin: window.location.origin });
-        }
+      // The code was read and the fragment cleared at module scope above, before
+      // analytics could observe either (#898). Failure is recorded, never
+      // retried: the code is single-use and is spent by the time anything here
+      // can fail, so a retry could only fail again.
+      if (resolution.kind === 'event' && pendingHandoffCode !== null) {
+        await completeAuthHandoff({ code: pendingHandoffCode, origin: window.location.origin });
       }
       if (resolution.kind === 'not-found') phSetAuthState(null);
       root.render(

@@ -63,6 +63,8 @@ The published transaction id is `base64url(SHA-256(verifier))`, computed with We
 
 **A write is confirmed by reading back the record that was just written, not merely a record.** An abandoned, still-in-TTL transaction is readable, so the previous one is cleared first and the confirmation compares verifiers. Otherwise a write that fails in the session-first store while succeeding in the other would navigate with the new digest while the return leg reads the old verifier—every exchange rejected as a transaction mismatch, with neither side looking broken.
 
+**Each store is parsed and validated in priority order, and absent, malformed, and expired all fall through.** Falling back only when the session copy is *absent* let a damaged or stale session copy mask a perfectly good local one, which defeats the dual-store recovery in exactly the situation it exists for.
+
 **The verifier is written to both `sessionStorage` and `localStorage`, and read session-first.** `sessionStorage` is the narrower, correct-by-default home, but "the return lands in the tab that left" is not guaranteed: an installed PWA can hand a top-level navigation to the browser rather than the app window, and iOS Safari is already documented in this repo (`SIGNIN_ADULT_ACK_KEY`, `src/auth/AuthContext.tsx`) as dropping sessionStorage across a provider round trip while localStorage survives. A lost verifier is not a security failure; it is an unrecoverable dead end, because the code it was paired with is single-use and already spent by the time the loss is discovered. Neither store is assumed to exist—both are reached through `globalThis` with optional chaining, since a browser in private mode, and this repo's own jsdom test environment, can be missing one.
 
 **The local TTL is deliberately looser than the server's, not tighter.** `HANDOFF_TRANSACTION_TTL_MS` is five minutes against the server's 120-second `HANDOFF_TTL_MS`. The server owns expiry and is the only clock that may reject a code for age; a tighter local window would discard the verifier for a code the server would still have honoured. A record stamped in the future is rejected too—the clock moved during the round trip, which makes the age unknowable rather than small.
@@ -83,6 +85,8 @@ Only the digest travels. The verifier appears nowhere in the URL, and neither do
 
 The page settles any redirect return, then asks the session directly—an existing session at this origin mints immediately and never shows Google at all. Otherwise it starts `signInWithRedirect`, and on return calls `mintAuthHandoff` and navigates to the returned `handoffUrl`.
 
+**The page carries one terminal deadline (`HANDOFF_ORIGIN_TIMEOUT_MS`, 30s) covering the redirect settle, the auth-state settle, and the mint.** The return leg already bounds its network work; without the same treatment here, an operation that never settles left the player on "Signing you in…" indefinitely—the identical failure, on the origin whose failure takes sign-in down for every Event at once. It is longer than the return leg's bound because this page legitimately waits on a full Google round trip, and both terminal outcomes—bouncing, and leaving for Google—stop the clock so it cannot fire against a page that has already gone.
+
 **A rejected `getRedirectResult` is terminal, not an ordinary first visit.** An ordinary first visit resolves `null`; a rejection means Google returned an OAuth error or the player cancelled. Swallowing it leaves the session check seeing a signed-out user and firing another redirect, bouncing the player back to Google in a loop instead of showing them the failure.
 
 **All of the page's state is effect-scoped rather than held in refs**, which is what lets React StrictMode's setup/cleanup/setup replay in development proceed. Refs survive the cleanup, so once-guards held in them made the second setup return having done nothing while the first setup's continuations were already cancelled—leaving the page on "Signing you in…" forever, on the one origin every Event depends on for sign-in, in exactly the environment it is developed in.
@@ -97,7 +101,7 @@ Query parameters are validated for shape only. Whether `targetOrigin` is a regis
 
 Run by `main.tsx` before the app mounts, when `window.location.hash` carries a code. Pre-mount because the session must exist by the time `onAuthStateChanged` first settles; completing it inside the tree would render the signed-out gate and then flip it out from under the player.
 
-The fragment is cleared first, unconditionally, with `history.replaceState`—no navigation, no new history entry. Then the stored transaction is read, the entry origin is confirmed to match, and `exchangeAuthHandoff` is called with the code, the verifier, and this origin. The returned custom token goes straight to `signInWithCustomToken`.
+The fragment is read and cleared **at module scope, before Event resolution and before any analytics start**, with `history.replaceState`—no navigation, no new history entry. That ordering is about telemetry rather than rendering: analytics startup and the explicit initial page view both derive the current URL from `window.location`, so a fragment chosen precisely to keep the code out of access logs, proxies and `Referer` headers would otherwise be copied straight into PostHog and GA4. PKCE means the code alone cannot authenticate anyone, but a single-use bearer credential still has no business in a telemetry pipeline. The captured value is passed forward, so no later reader of `window.location.hash` can observe it. Then the stored transaction is read, the entry origin is confirmed to match, and `exchangeAuthHandoff` is called with the code, the verifier, and this origin. The returned custom token goes straight to `signInWithCustomToken`.
 
 **The verifier is deleted on every terminal path, success included**, and before the sign-in rather than after: it has done its only job the moment the exchange returns, and the code it was paired with is spent either way. That also means the client cannot replay a handoff even if asked to—there is nothing left to replay it with.
 
@@ -153,6 +157,9 @@ All three are pinned by a parity test that imports both sides, the same shape `s
 - **Given** a rejected `getRedirectResult` at the central origin, **then** it is reported as a failure rather than starting another redirect to Google. (Test: redirect-rejection-terminal.)
 - **Given** a real StrictMode mount of the central-origin page, **then** the bounce still completes. (Test: strictmode-completes.)
 - **Given** a code presented in a query string rather than a fragment, **when** the return leg reads it, **then** it is ignored. (Test: fragment-only.)
+- **Given** a handoff return, **then** the fragment is cleared before analytics start, so the code never reaches telemetry. (Enforced by module ordering in `src/main.tsx`; the read/clear primitives are covered in `handoffClient.test.ts`.)
+- **Given** a session copy that is malformed or expired and a valid local copy, **when** the transaction is read, **then** the local copy is used. (Test: dual-store-fallthrough.)
+- **Given** any central-origin operation that never settles, **then** the page reaches an actionable failure rather than spinning. (Test: central-origin-deadline.)
 
 ## Test coverage
 

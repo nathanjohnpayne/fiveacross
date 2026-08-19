@@ -24,7 +24,7 @@ vi.mock('firebase/auth', () => ({
 vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
 vi.mock('./handoffExchange', () => ({ mintAuthHandoff: mocks.mintAuthHandoff }));
 
-import AuthHandoffOrigin from './AuthHandoffOrigin';
+import AuthHandoffOrigin, { HANDOFF_ORIGIN_TIMEOUT_MS } from './AuthHandoffOrigin';
 
 const TXN = 'T'.repeat(43);
 const ORIGIN = 'https://summer-camp.fiveacross.app';
@@ -176,5 +176,53 @@ describe('AuthHandoffOrigin', () => {
     expect(screen.getByText(/didn't finish/i)).toBeInTheDocument();
     expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
     expect(replace).not.toHaveBeenCalled();
+  });
+});
+
+// Codex P2, Phase 4b. The return leg bounds its network work so captive and
+// shipboard wifi cannot hold the mount forever; this page had no such bound, so
+// an operation that never settled left the player on "Signing you in…"
+// indefinitely — on the origin whose failure takes sign-in down for every Event.
+describe('the central-origin page reaches a terminal state', () => {
+  it('gives up when the redirect settle never resolves', async () => {
+    mocks.getRedirectResult.mockImplementation(() => new Promise(() => {}));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('gives up when the auth state never settles', async () => {
+    mocks.onAuthStateChanged.mockImplementation(() => vi.fn());
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+  });
+
+  it('gives up when the mint never returns', async () => {
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockImplementation(() => new Promise(() => {}));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('does not fire the deadline against a page that already bounced', async () => {
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={30} />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(`${ORIGIN}/board`));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('does not fire the deadline against a page that already left for Google', async () => {
+    withSession(null);
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={30} />);
+    await waitFor(() => expect(mocks.signInWithRedirect).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 60));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('allows a full Google round trip rather than failing eagerly', () => {
+    expect(HANDOFF_ORIGIN_TIMEOUT_MS).toBeGreaterThanOrEqual(15_000);
   });
 });

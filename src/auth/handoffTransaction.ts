@@ -183,8 +183,7 @@ export function rememberHandoffTransaction(record: HandoffTransactionRecord): bo
  * and distinguishing them would only add branches that all end in "sign in
  * again".
  */
-export function readHandoffTransaction(now: number): HandoffTransactionRecord | null {
-  const raw = readStore('sessionStorage') ?? readStore('localStorage');
+function parseRecord(raw: string | null, now: number): HandoffTransactionRecord | null {
   if (raw === null) return null;
 
   let parsed: unknown;
@@ -205,6 +204,19 @@ export function readHandoffTransaction(now: number): HandoffTransactionRecord | 
   if (now < createdAt || now - createdAt > HANDOFF_TRANSACTION_TTL_MS) return null;
 
   return { verifier, targetOrigin, returnPath, createdAt };
+}
+
+export function readHandoffTransaction(now: number): HandoffTransactionRecord | null {
+  // Each store is PARSED AND VALIDATED in priority order, not merely read
+  // (Codex P3, Phase 4b). Falling back only when the session copy is ABSENT
+  // meant a damaged or expired session copy masked a perfectly good local one —
+  // which defeats the dual-store recovery this module advertises, in precisely
+  // the situation it exists for. Absent, malformed, and expired all have to
+  // fall through, because all three mean "this store cannot produce a
+  // redemption".
+  return (
+    parseRecord(readStore('sessionStorage'), now) ?? parseRecord(readStore('localStorage'), now)
+  );
 }
 
 /** Delete the verifier from both stores. Called on EVERY terminal path, success included. */
