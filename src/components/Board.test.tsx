@@ -1303,6 +1303,11 @@ describe('Locked-Day preview', () => {
     expect(document.querySelector('.daybar-name')?.textContent).toContain('Day 1 · Get Sporty');
     // get-sporty's ThemeMeta description (src/theme/themes.ts), verbatim.
     expect(screen.getByText(/locker-room fantasy/i)).toBeInTheDocument();
+    // "Put it on tomorrow's card" (#559, Codex P2 + CodeRabbit Major on PR
+    // #845): this Day is LOCKED but still targetable, and the entry point
+    // used to live only in the dealt-card return — invisible on exactly this
+    // very common state.
+    expect(screen.getByText(/put it on tomorrow.s card/i)).toBeInTheDocument();
     expect(screen.getByText('A per-day free space override')).toBeInTheDocument();
 
     // specs/d15-icons-lucide.md: the unlock badge shows a Lucide `Lock`
@@ -2239,5 +2244,144 @@ describe('decorative Square glyphs never swallow a claim tap', () => {
     const claim = indexCss.match(/\.cell-claim\s*\{[^}]*\}/)?.[0];
     expect(claim).toBeTruthy();
     expect(claim).not.toMatch(/z-index/);
+  });
+});
+
+// ADR 0011 (Codex P1, PR #841): the Event's CONFIGURED Standings Freeze is a
+// clock boundary in its own right. It used to be redundant — the freeze WAS a
+// Day's `unlockAt`, so the unlock timers covered it — but an Event that plays
+// competitively until a stated check-out freeze has a boundary that coincides
+// with no Day unlock at all. Without a tick there, an open (or offline) Card tab
+// never re-evaluates `statsFrozen` when the freeze arrives.
+// Phase 4b P1: the default-view pin and the podium's mount gate must resolve
+// the SAME boundary. The mount reads the resolved freeze; a pin that re-derived
+// its own would send a returning Player to a Day that renders no podium — the
+// exact split `finaleDayIndex` exists to remove, reappearing because the pin's
+// freeze argument was left unpassed at the call site.
+describe('the default-view pin and the podium mount agree on the finale Day', () => {
+  const NOON = Date.parse('2026-07-18T12:00:00Z');
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOON);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('pins the Day the podium actually mounts on when a freeze is configured', () => {
+    // An EARLY ceremonial Day, later competitive Days, and an end-of-Event
+    // freeze. Deriving from the ceremonial Day would pin index 1; the freeze
+    // says the finale is index 2, and that is where the podium mounts.
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      frozenAt: NOON - 3600_000,
+      standingsFreezeAt: NOON - 60_000,
+      days: [
+        day({ index: 0, theme: 'get-sporty', unlockAt: NOON - 5 * 3600_000 }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: NOON - 4 * 3600_000, pool: 'closing', scoring: 'ceremonial' }),
+        day({ index: 2, theme: 'get-sporty', unlockAt: NOON - 2 * 3600_000 }),
+      ],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    render(<Board />);
+
+    // The pinned Day, read off the Day switcher. `finaleDayIndex` resolves the
+    // last Day open at the freeze — index 2 — and the podium's mount gate uses
+    // the same call, so pinning anywhere else means the two disagree.
+    const chips = [...document.querySelectorAll('.day-chip')];
+    const selected = chips.findIndex((c) => c.getAttribute('aria-selected') === 'true');
+    expect(selected).toBe(2);
+  });
+
+  it('still pins the ceremonial Day when the freeze is DERIVED from it', () => {
+    // The cruise shape, unchanged: the derived freeze IS that Day's unlock, so
+    // it is the last Day open at it.
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      frozenAt: NOON - 3600_000,
+      days: [
+        day({ index: 0, theme: 'get-sporty', unlockAt: NOON - 5 * 3600_000 }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: NOON - 4 * 3600_000, pool: 'closing' }),
+        day({ index: 2, theme: 'get-sporty', unlockAt: NOON - 2 * 3600_000 }),
+      ],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    render(<Board />);
+
+    const chips = [...document.querySelectorAll('.day-chip')];
+    expect(chips.findIndex((c) => c.getAttribute('aria-selected') === 'true')).toBe(1);
+  });
+});
+
+describe('the now-timer covers the configured Standings Freeze', () => {
+  const NOON = Date.parse('2026-07-18T12:00:00Z');
+  const LAST_UNLOCK = Date.parse('2026-07-18T15:00:00Z'); // the final Day opens
+  const CHECKOUT = Date.parse('2026-07-18T18:00:00Z'); // …and play runs until here
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(NOON);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Every delay Board scheduled, in ms from `now`. */
+  function scheduledDelays(): number[] {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    render(<Board />);
+    const delays = spy.mock.calls.map((c) => Number(c[1] ?? 0));
+    spy.mockRestore();
+    return delays;
+  }
+
+  it('schedules a tick at a configured freeze that no Day unlock coincides with', () => {
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      // The final Day deals the closing pool but STATES that it counts, so it
+      // is not ceremonial and its unlock is not the freeze.
+      days: [
+        day({ index: 0, theme: 'get-sporty', unlockAt: NOON - 3600_000 }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: LAST_UNLOCK, pool: 'closing', scoring: 'competitive' }),
+      ],
+      standingsFreezeAt: CHECKOUT,
+    } as unknown as EventDoc;
+    H.board = null;
+
+    const delays = scheduledDelays();
+    // The nearest boundary is still the Day-1 unlock…
+    expect(delays).toContain(LAST_UNLOCK - NOON);
+
+    // …and once that has passed, the freeze is the next one. Without the fix
+    // there is no boundary left at all and the tab never re-evaluates.
+    vi.setSystemTime(LAST_UNLOCK + 1);
+    const afterUnlock = scheduledDelays();
+    expect(afterUnlock).toContain(CHECKOUT - (LAST_UNLOCK + 1));
+  });
+
+  it('adds no new boundary when the freeze IS a Day unlock (both live Events)', () => {
+    // The ceremonial-Day shape: the resolved freeze equals that Day's unlock,
+    // so the boundary list is exactly what it always was.
+    H.event = {
+      claimMode: 'honor',
+      timezone: 'UTC',
+      days: [
+        day({ index: 0, theme: 'get-sporty', unlockAt: NOON - 3600_000 }),
+        day({ index: 1, theme: 'get-sporty', unlockAt: LAST_UNLOCK, pool: 'closing' }),
+      ],
+    } as unknown as EventDoc;
+    H.board = null;
+
+    const delays = scheduledDelays().filter((d) => d === LAST_UNLOCK - NOON);
+    expect(delays.length).toBeGreaterThan(0);
+    vi.setSystemTime(LAST_UNLOCK + 1);
+    // Nothing further to schedule once the ceremonial Day (and so the freeze)
+    // has passed.
+    expect(scheduledDelays()).not.toContain(CHECKOUT - (LAST_UNLOCK + 1));
   });
 });

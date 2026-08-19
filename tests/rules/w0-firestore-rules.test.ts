@@ -316,6 +316,12 @@ describe('firestore.rules — honor-system invariants', () => {
     });
     await assertFails(getDoc(doc(db(ALICE), 'bugReports/report_123')));
     await assertFails(setDoc(doc(db(ALICE), 'bugReports/forged'), { description: 'forged' }));
+    // `kind` is the field that decides whether an admin is mailed (#670), so a
+    // client able to write it could either mint admin alerts at will or bury a
+    // real abuse report by rewriting it down to a bug. Denied in both
+    // directions, like every other field on the document.
+    await assertFails(setDoc(doc(db(ALICE), 'bugReports/forged-abuse'), { description: 'forged', kind: 'abuse' }));
+    await assertFails(updateDoc(doc(db(ALICE), 'bugReports/report_123'), { kind: 'bug' }));
     await assertFails(getDoc(doc(db(ALICE), `bugReportRateLimits/${ALICE}`)));
     await assertFails(setDoc(doc(db(ALICE), `bugReportRateLimits/${ALICE}`), { submissionMs: [NOW()] }));
   });

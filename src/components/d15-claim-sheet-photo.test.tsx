@@ -11,9 +11,19 @@ import userEvent from '@testing-library/user-event';
 // The claim sheet's dialog semantics + focus management ride here too, since this
 // is the file that renders ProofSheet standalone — see the last describe block.
 
-const H = vi.hoisted(() => ({ attachProof: vi.fn(), uploadBytes: vi.fn(), getDownloadURL: vi.fn() }));
+const H = vi.hoisted(() => ({
+  attachProof: vi.fn(),
+  uploadBytes: vi.fn(),
+  getDownloadURL: vi.fn(),
+  // #559: ProofSheet's "Suggested by [player]" attribution (Codex P2, PR
+  // #845 round 5) resolves through a ONE-SHOT `fetchDisplayName` read, never
+  // a live subscription — mocked here rather than through '../firebase' so
+  // each test controls exactly when/whether it resolves.
+  fetchDisplayName: vi.fn(),
+}));
 
 vi.mock('../data/proofs', () => ({ attachProof: H.attachProof }));
+vi.mock('../data/api', () => ({ fetchDisplayName: H.fetchDisplayName }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../firebase', () => ({ storage: {}, EVENT_ID: 'med-2026' }));
 vi.mock('firebase/storage', () => ({
@@ -46,6 +56,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   H.attachProof.mockResolvedValue(undefined);
+  H.fetchDisplayName.mockResolvedValue('Suggester Sam');
   vi.spyOn(window, 'alert').mockImplementation(() => {});
 });
 
@@ -344,5 +355,55 @@ describe('uploadProofMedia — EXIF/GPS strip (#211)', () => {
     const raw = new Blob(['geotagged'], { type: 'image/jpeg' });
     await expect(uploadProofMedia('u1', 'P', raw, 'photo', { stripExif: true })).rejects.toThrow(/strip EXIF/i);
     expect(H.uploadBytes).not.toHaveBeenCalled();
+  });
+});
+
+// #559, Codex P2, PR #845 round 5: "Suggested by [player]" attribution in
+// Prompt detail (ProofSheet is the sheet a Square tap opens) — no component
+// test previously rendered a Community Prompt through ProofSheet or asserted
+// the async lookup only fires for a matching community cell.
+describe('ProofSheet — "Suggested by [player]" attribution (#559)', () => {
+  const communityCell = (): Cell => ({
+    index: 0,
+    itemId: 'i0',
+    text: 'Suggested a group activity',
+    free: false,
+    marked: false,
+    markedAt: null,
+    communityPrompt: true,
+    suggestedBy: 'u-suggester',
+  });
+
+  it('resolves and shows "Suggested by [player]" for a community Square', async () => {
+    render(<ProofSheet {...baseProps()} cell={communityCell()} cells={[communityCell()]} />);
+    expect(await screen.findByText(/Suggested by Suggester Sam/)).toBeInTheDocument();
+    expect(H.fetchDisplayName).toHaveBeenCalledWith('u-suggester');
+  });
+
+  it('never fetches or shows attribution for an ordinary (non-community) Square', async () => {
+    render(<ProofSheet {...baseProps()} />);
+    // Give any stray microtask a turn — there is nothing to await on
+    // deliberately, since the point is that NOTHING resolves here.
+    await Promise.resolve();
+    expect(screen.queryByText(/Suggested by/)).not.toBeInTheDocument();
+    expect(H.fetchDisplayName).not.toHaveBeenCalled();
+  });
+
+  it('never shows attribution for a Square whose communityPrompt flag is absent even if it somehow carries a suggestedBy uid', async () => {
+    const malformed: Cell = { ...communityCell(), communityPrompt: undefined };
+    render(<ProofSheet {...baseProps()} cell={malformed} cells={[malformed]} />);
+    await Promise.resolve();
+    expect(screen.queryByText(/Suggested by/)).not.toBeInTheDocument();
+  });
+
+  it('does not throw when the sheet unmounts before the lookup resolves (a stale in-flight fetch)', async () => {
+    let resolveFetch: (name: string) => void = () => {};
+    H.fetchDisplayName.mockReturnValue(new Promise<string>((resolve) => { resolveFetch = resolve; }));
+    const { unmount } = render(<ProofSheet {...baseProps()} cell={communityCell()} cells={[communityCell()]} />);
+    unmount();
+    // Resolving AFTER unmount must not throw or warn about a state update on
+    // an unmounted component — the effect's cleanup sets a `cancelled` flag.
+    expect(() => resolveFetch('Too Late Larry')).not.toThrow();
+    await Promise.resolve();
   });
 });

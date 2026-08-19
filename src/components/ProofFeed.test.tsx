@@ -462,6 +462,23 @@ describe('ProofFeed (default export) — Feed-level who-list sheet (#216 accepta
     expect(screen.getByText(/Nothing in the feed yet/)).toBeTruthy();
   });
 
+  it('shows "put it on tomorrow\'s card" even on a genuinely empty Feed, when a Day is still targetable (#559, Codex P2 + CodeRabbit Major on PR #845)', () => {
+    H.onSnapshot.mockReset();
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+    const openDayEvent = {
+      exists: () => true,
+      data: () => ({
+        days: [{ index: 0, date: '2026-07-15', place: 'Sea', theme: 't', pool: 'main', tutorial: false, unlockAt: Date.now() + 100_000 }],
+      }),
+      metadata: { fromCache: false },
+    };
+    sub.fire(emptyColSnap, emptyColSnap, emptyColSnap, openDayEvent);
+
+    expect(screen.getByText(/Nothing in the feed yet/)).toBeTruthy();
+    expect(screen.getByText(/put it on tomorrow.s card/i)).toBeInTheDocument();
+  });
+
   it('keeps re-deriving when the 60-entry merge cap evicts the open card from the feed (#385)', () => {
     H.onSnapshot.mockReset();
     const sub = captureOnNext();

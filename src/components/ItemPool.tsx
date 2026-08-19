@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { useItems, useMyPendingItems } from '../hooks/useData';
+import { useItems, useMyPendingItems, useMyActiveItems, useEventDoc } from '../hooks/useData';
 import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } from '../data/api';
+import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
+import {
+  loadTrackedSuggestions,
+  trackSuggestion,
+  deriveMySubmissions,
+  refreshLastKnownStatuses,
+  type MySubmissionStatus,
+  type TrackedSuggestion,
+} from '../data/mySuggestions';
 import { track } from '../analytics';
 import LoadingState from './LoadingState';
 import { editionBrand } from '../editions';
@@ -28,6 +37,16 @@ const APPROVAL_NOTE = "New prompts go to admin review before they join the pool�
 // `../data/api` for why this is presentational only, not a security boundary.
 const ADD_THROTTLE_MESSAGE = 'Slow down—you can add another prompt in a few seconds.';
 const REPORT_THROTTLE_MESSAGE = 'Slow down—you can report again in a few seconds.';
+
+// How long a submission that just vacated the live pending query, with no
+// active arrival yet, keeps reporting "pending" instead of falling through
+// to `deriveMySubmissions`' `not_selected` default (#559, Codex P2, PR #845
+// round 8). Generous enough to absorb realistic skew between the
+// `useMyPendingItems`/`useMyActiveItems` listeners for the SAME underlying
+// approval write — they ride the same watch stream, so in practice this
+// resolves in well under a second — without leaving a genuinely rejected
+// submission looking like it is still under review for long.
+export const APPROVAL_GRACE_MS = 5000;
 
 // First-time 🔞 explainer (#610) — the PLAYER half of the ticket, and
 // deliberately an EXPLAINER, not a confirm. A player's tick is a request:
@@ -59,6 +78,16 @@ function markExplicitTagSeen(eventId: string): void {
   }
 }
 
+// Submitter-state pill copy (#559 acceptance: "the submitter sees pending /
+// approved / scheduled / not selected"). `scheduled` names the Day so the
+// promise reads concretely ("Day 3") rather than as a bare status word.
+const SUBMISSION_STATUS_LABEL: Record<MySubmissionStatus, string> = {
+  pending: 'pending review',
+  scheduled: 'scheduled',
+  approved: 'approved',
+  not_selected: 'not selected',
+};
+
 export default function ItemPool() {
   const { user } = useAuth();
   const { items, loading } = useItems();
@@ -69,8 +98,165 @@ export default function ItemPool() {
   const adult = useAdultContent();
   // The submitter's own pending submissions (#210): `useItems` reads only
   // `status == 'active'`, so a fresh `pending` add would otherwise vanish from
-  // this list the instant it lands. Merged in below, tagged "pending review".
-  const { items: myPending } = useMyPendingItems(user?.uid);
+  // this list the instant it lands. `deriveMySubmissions` below unions this
+  // LIVE, cross-device query with the local tracker for the follow-up states.
+  const { items: myPending, hasServerData: pendingServerReady } = useMyPendingItems(user?.uid);
+  // The submitter's own ACTIVE submissions (#559, Codex P2 round 2, PR #845):
+  // its OWN unfiltered query, not a client-side filter of `useItems()`'s
+  // public pool — see `useMyActiveItems`'s own doc comment for why the public
+  // pool's presentational hides (report threshold, adult-content posture, a
+  // since-banned author) must never make a genuinely `active` submission of
+  // the submitter's OWN read as `'not_selected'`.
+  const { items: activeMine, hasServerData: activeServerReady } = useMyActiveItems(user?.uid);
+  // The Day schedule, for `submitterStatus`'s "is the promised Day still
+  // open" check (#559) — the SAME `useEventDoc` subscription every other
+  // schedule-reading surface (Board, More) already holds; no new read.
+  const { data: event } = useEventDoc();
+  const days = event?.days ?? [];
+  // This device's own submission history (#559) — see src/data/mySuggestions.ts
+  // for why a rejected row can't just be READ back. Reloaded whenever the
+  // signed-in uid changes (account switch on a shared device). Keyed on the
+  // PRIMITIVE `user?.uid`, not the `user` object itself: `useAuth()` is not
+  // guaranteed to return a referentially-stable object on every render (a
+  // caller-supplied stand-in — e.g. an `useAuth: () => ({ user: {...}, ... })`
+  // test double with no memoization — can hand back a fresh object every
+  // call), and depending on the whole object here would re-run this effect,
+  // and re-`setTracked`, on EVERY render, forever.
+  const uid = user?.uid;
+  const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
+  useEffect(() => {
+    setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
+  }, [uid]);
+  // The previous render's `myPending` ids (#559, Codex P2, PR #845 rounds 8
+  // + 9) — see the `graceIds` effect below, just above where this is read.
+  const prevPendingIdsRef = useRef<ReadonlySet<string>>(new Set());
+  // Ids currently within their post-pending grace window (#559, Codex P2,
+  // PR #845 round 8), and the live timer that will expire each one. Real
+  // STATE, not a ref (Codex P2, PR #845 round 9): round 8's first cut kept
+  // this in a plain ref and relied on "some later render" to notice the
+  // window had passed — but mutating a ref never itself schedules a
+  // re-render, so a submission that is genuinely REJECTED (no active
+  // snapshot ever arriving to trigger one) had nothing left to trigger that
+  // later render at all, and could keep showing "pending review" forever.
+  // `setGraceIds` on the timer's own fire is what guarantees the window
+  // actually closes on its own.
+  const [graceIds, setGraceIds] = useState<ReadonlySet<string>>(new Set());
+  const graceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // A ticking clock (#559, Codex P2 round 2, PR #845), shared with
+  // Board.tsx/ProofFeed.tsx's identical need (Codex P2, PR #845 round 5 —
+  // extracted into one hook after the same unclamped-timer overflow bug,
+  // round 4 P1, turned up in all three hand-copies): without it, a panel
+  // left open across the submission's target Day's `unlockAt` keeps
+  // reporting `'scheduled'` off a stale `Date.now()` until some UNRELATED
+  // render happens to fire.
+  const now = useNextUnlockClock(event?.days);
+  // Persist each tracked entry's last-observed-active status (#559, Codex P2,
+  // PR #845 round 7): once a submission is actually SEEN in `activeMine`,
+  // remember its status/target so a LATER render where it's transiently
+  // absent (an admin approving mid-session — the pending and active
+  // listeners update independently) or permanently absent (an admin
+  // hard-hiding it after approval, which is unreadable to the submitter same
+  // as a rejection) keeps reporting that last-known state instead of
+  // flashing/settling into a false "not selected" — see
+  // `deriveMySubmissions`'s own doc comment. `refreshLastKnownStatuses`
+  // returns the SAME array reference when nothing changed, so this only
+  // writes when a tracked entry's observed status genuinely moved.
+  useEffect(() => {
+    const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
+    if (refreshed === tracked || !uid) return;
+    for (let i = 0; i < refreshed.length; i++) {
+      if (refreshed[i] !== tracked[i]) trackSuggestion(EVENT_ID, uid, refreshed[i]);
+    }
+    setTracked([...refreshed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days ?? []` (a fresh [] literal each render); this effect's own `setTracked` is what re-evaluates it on every genuine change to `tracked`/`activeMine`/`now`, matching the established pattern elsewhere in this file.
+  }, [tracked, activeMine, now, uid]);
+  // `ready` (#559, Codex P2 rounds 1 + 2): BOTH live queries must have
+  // delivered a SERVER-CONFIRMED snapshot — not merely cleared `loading` —
+  // before an absent tracked id can honestly mean "not selected". `loading`
+  // alone clears on an empty CACHE-only snapshot too (an offline or cold
+  // start), which would have let a genuinely still-pending or still-active
+  // submission read as `not_selected` while offline — see
+  // `deriveMySubmissions`'s own doc comment for the flash this prevents.
+  //
+  // A bounded grace window for the FIRST-time approval race (#559, Codex P2,
+  // PR #845 rounds 8 + 9): `myPending`/`activeMine` are independent
+  // listeners, so the pending-removal snapshot can land before the
+  // active-addition snapshot — for a submission this device has NEVER
+  // before seen active (round 7's `lastKnownStatus` cache is still unset),
+  // that overlap would otherwise read `'not_selected'` the instant the
+  // pending listener fires. An id that just vacated `myPending` without yet
+  // appearing in `activeMine` enters `graceIds` and gets a real
+  // `APPROVAL_GRACE_MS` timer (round 9 — a PLAIN ref-diff with no timer, the
+  // round-8 cut, relied on some LATER render to notice the window had
+  // passed; mutating a ref never schedules one, so a genuine rejection, with
+  // no active arrival ever coming to trigger a re-render, could keep
+  // reporting "pending review" forever). The timer's own `setGraceIds` fire
+  // is what guarantees the window closes on its own; the second effect below
+  // clears it EARLIER, the moment the id actually resolves active, so a fast
+  // approval does not have to wait out the full window.
+  useEffect(() => {
+    const currentPendingIds = new Set(myPending.map((it) => it.id));
+    const activeIds = new Set(activeMine.map((it) => it.id));
+    const vacated = [...prevPendingIdsRef.current].filter((id) => !currentPendingIds.has(id) && !activeIds.has(id));
+    prevPendingIdsRef.current = currentPendingIds;
+    if (vacated.length === 0) return;
+    setGraceIds((prev) => {
+      const next = new Set(prev);
+      for (const id of vacated) next.add(id);
+      return next;
+    });
+    for (const id of vacated) {
+      if (graceTimersRef.current.has(id)) continue;
+      const timer = setTimeout(() => {
+        graceTimersRef.current.delete(id);
+        setGraceIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, APPROVAL_GRACE_MS);
+      graceTimersRef.current.set(id, timer);
+    }
+  }, [myPending, activeMine]);
+  useEffect(() => {
+    if (graceIds.size === 0) return;
+    const activeIds = new Set(activeMine.map((it) => it.id));
+    const resolved = [...graceIds].filter((id) => activeIds.has(id));
+    if (resolved.length === 0) return;
+    setGraceIds((prev) => {
+      const next = new Set(prev);
+      for (const id of resolved) {
+        next.delete(id);
+        const timer = graceTimersRef.current.get(id);
+        if (timer) {
+          clearTimeout(timer);
+          graceTimersRef.current.delete(id);
+        }
+      }
+      return next;
+    });
+  }, [activeMine, graceIds]);
+  useEffect(
+    () => () => {
+      for (const timer of graceTimersRef.current.values()) clearTimeout(timer);
+    },
+    [],
+  );
+  const mySubmissions = deriveMySubmissions(
+    tracked,
+    myPending,
+    activeMine,
+    days,
+    now,
+    pendingServerReady && activeServerReady,
+    graceIds,
+  );
+  // Every id `mySubmissions` already renders WITH a status pill (#559, Codex
+  // P2) — excluded here so the plain pool list below never shows the SAME
+  // Prompt a second time with no status at all.
+  const mySubmissionIds = new Set(mySubmissions.map((s) => s.id));
+  const poolItems = items.filter((it) => !mySubmissionIds.has(it.id));
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
   // The first-time explainer (#610). State, not a render-time storage read:
@@ -109,8 +295,23 @@ export default function ItemPool() {
       return;
     }
     try {
-      await addItem(user.uid, text, adult && spicy);
+      const result = await addItem(user.uid, text, adult && spicy);
       track('add_item');
+      // `prompt_suggestion_submitted` (#559): NO Prompt text in the payload —
+      // just whether a Day could be named. Reports the target `addItem`
+      // itself ACTUALLY committed, never a client-recomputed guess (Codex
+      // P2, PR #845): a stale/reloading schedule snapshot here could disagree
+      // with what the write resolved against its OWN fresh read, corrupting
+      // the analytics at exactly the schedule boundaries it exists to measure.
+      track('prompt_suggestion_submitted', {
+        hasTargetDay: result?.targetDayIndex != null,
+        ...(result?.targetDayIndex != null ? { dayIndex: result.targetDayIndex } : {}),
+      });
+      if (result) {
+        const submitted = { id: result.id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
+        trackSuggestion(EVENT_ID, user.uid, submitted);
+        setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
+      }
       setText('');
       setSpicy(false);
     } catch (e) {
@@ -194,7 +395,7 @@ export default function ItemPool() {
         <LoadingState label="Fetching prompts…" />
       ) : (
         <div className="list">
-          {items.map((it) => (
+          {poolItems.map((it) => (
             <div key={it.id} className="row">
               <div className="grow">
                 <div className="name" style={{ fontWeight: 500 }}>
@@ -211,16 +412,21 @@ export default function ItemPool() {
               </button>
             </div>
           ))}
-          {/* Own pending submissions (#210): visible ONLY to their submitter,
-              never to other Players (mirrors the read rule's carve-out) — no
-              Report control, since reporting your own not-yet-live Prompt is
-              meaningless. */}
-          {myPending.map((it) => (
-            <div key={it.id} className="row">
+          {/* Own submissions (#210, extended #559): visible ONLY to their
+              submitter, never to other Players (mirrors the read rule's
+              carve-out) — no Report control, since reporting your own Prompt
+              is meaningless. `mySubmissions` carries every state the
+              acceptance list names: pending / scheduled / approved / not
+              selected (src/data/mySuggestions.ts). */}
+          {mySubmissions.map((s) => (
+            <div key={s.id} className="row">
               <div className="grow">
                 <div className="name" style={{ fontWeight: 500 }}>
-                  {it.text}
-                  <span className="pill">pending review</span>
+                  {s.text}
+                  <span className={'pill' + (s.status === 'not_selected' ? ' pill-muted' : '')}>
+                    {SUBMISSION_STATUS_LABEL[s.status]}
+                    {s.status === 'scheduled' && typeof s.dayIndex === 'number' ? ` · Day ${s.dayIndex + 1}` : ''}
+                  </span>
                 </div>
               </div>
             </div>

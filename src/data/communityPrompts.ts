@@ -126,3 +126,43 @@ export function routeApprovalToDay(
 export function isUsableTarget(targetDayIndex: unknown): targetDayIndex is number {
   return typeof targetDayIndex === 'number' && Number.isInteger(targetDayIndex) && targetDayIndex >= 0;
 }
+
+/**
+ * The submitter-facing state of their OWN Community Prompt (#559): still
+ * under review, approved and holding a live promise of a specific upcoming
+ * Day, or approved with no such promise left to make (dealt already,
+ * untargeted/every-Day, or retained with nowhere left to go).
+ *
+ * There is no `'rejected'`/"not selected" arm here on purpose. A rejected
+ * row is unreadable by its own submitter — `firestore.rules`' item read rule
+ * carves out `status == 'pending'` only, deliberately NOT `pending ||
+ * rejected` (specs/community-prompt-targeting.md), so this function only
+ * ever sees a row its caller could actually read: pending or active. "Not
+ * selected" is a CLIENT-SIDE inference from a previously-tracked submission
+ * disappearing from both live queries — `deriveMySubmissions` in
+ * `src/data/mySuggestions.ts` — never a value this function can return.
+ */
+export type SubmitterStatus = 'pending' | 'scheduled' | 'approved';
+
+export function submitterStatus(
+  item: { status: string; targetDayIndex?: number; retainedAt?: number },
+  days: readonly TargetableDay[],
+  now: number,
+): SubmitterStatus {
+  if (item.status === 'pending') return 'pending';
+  // A retained Prompt is active but has already used up its last chance at a
+  // Day — never re-derive "scheduled" from its now-unreachable `targetDayIndex`
+  // (specs/community-prompt-targeting.md § "Rolling forward, and rolling
+  // nowhere": the field is left in place on purpose, so it must not be read
+  // as a live promise here).
+  if (item.retainedAt == null && isUsableTarget(item.targetDayIndex)) {
+    const day = days.find((d) => d.index === item.targetDayIndex);
+    // "Scheduled" is a PROMISE — only true while the named Day can still
+    // actually take it (`isDayTargetable`). Once that Day freezes or its
+    // cutoff passes, the Prompt has either landed (dealt) or missed its
+    // window, and either way "approved" is the honest, non-committal state —
+    // this function has no snapshot to consult for "did it actually land".
+    if (day && isDayTargetable(day, now)) return 'scheduled';
+  }
+  return 'approved';
+}

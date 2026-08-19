@@ -25,8 +25,13 @@ const H = vi.hoisted(() => ({
   batchCommit: vi.fn(async () => {}),
   txSet: vi.fn(),
   txGet: vi.fn(),
+  // #559: captures `community_prompt_dealt` (fired via a dynamic import of
+  // ../analytics, mirroring the existing #387 mark_rejected call — see
+  // src/data/w1-board-mark-win.test.ts's identical harness shape).
+  trackSpy: vi.fn(),
 }));
 
+vi.mock('../analytics', () => ({ track: H.trackSpy }));
 vi.mock('../firebase', () => ({
   db: {},
   EVENT_ID: 'test-event',
@@ -168,6 +173,7 @@ beforeEach(() => {
   H.batchCommit.mockResolvedValue(undefined);
   H.txSet.mockReset();
   H.txGet.mockReset();
+  H.trackSpy.mockReset();
 });
 
 // The last board write's (ref, data) — the day-scoped Board doc, if any.
@@ -227,6 +233,44 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     // Every non-free cell id came from the snapshot.
     const nonFree = board!.data.cells.filter((c) => !c.free).map((c) => c.itemId);
     for (const id of nonFree) expect(ids).toContain(id);
+  });
+
+  // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
+  // prove this call site actually FIRES `community_prompt_dealt` after a
+  // genuinely new deal, with the right aggregate count and no Prompt text.
+  it('fires community_prompt_dealt with the count of Community Prompt Squares on the dealt card', async () => {
+    const ids = seedPool(30);
+    // One Prompt in the pool carries a usable target — the exact shape
+    // dealBoard stamps `communityPrompt`/`suggestedBy` from (Codex P2, PR
+    // #845 round 1 finding: gated behind the SAME usable-target check).
+    H.itemsById.set(ids[0], { ...H.itemsById.get(ids[0]), targetDayIndex: 2, createdBy: 'u-suggester' });
+    H.event = {
+      days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })),
+      settings: {},
+    };
+
+    const dealt = await dealDayCard(U, 2);
+    expect(dealt).toBe(true);
+
+    await vi.waitFor(() => expect(H.trackSpy).toHaveBeenCalledWith('community_prompt_dealt', { dayIndex: 2, count: 1 }));
+    for (const call of H.trackSpy.mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('prompt 0');
+    }
+  });
+
+  it('fires nothing when no Community Prompt lands on the dealt card', async () => {
+    const ids = seedPool(30);
+    H.event = {
+      days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })),
+      settings: {},
+    };
+
+    await dealDayCard(U, 2);
+    // Nothing to `waitFor` on a negative — flush the same microtask queue the
+    // dynamic import resolves on, then assert it never fired.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(H.trackSpy).not.toHaveBeenCalledWith('community_prompt_dealt', expect.anything());
   });
 
   it('withholds explicit snapshot Prompts until the 18+ posture is published', async () => {

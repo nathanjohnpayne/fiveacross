@@ -4,6 +4,7 @@ import { setActiveAdultContent } from '../../adultContent';
 import { DEFAULT_EDITION, setActiveEdition } from '../../editions';
 import ReviewQueue from './ReviewQueue';
 import { AdultContentConfirmDialog } from './AdultContentConfirm';
+import { track } from '../../analytics';
 import type { ItemDoc } from '../../types';
 
 // Covers the confirm that stands between an admin action and an Event turning
@@ -16,7 +17,15 @@ import type { ItemDoc } from '../../types';
 // `active` — so the box is a REQUEST, and warning there would put a consequence
 // notice on the one action that has none.
 
-const approveItem = vi.fn(async (..._a: unknown[]) => {});
+// #559: return type widened to allow a resolved ApprovalPlacement so the
+// analytics-emission tests below can stub a real outcome/dayIndex; existing
+// tests that never configure a resolved value keep getting `undefined`.
+const approveItem = vi.fn(
+  async (
+    ..._a: unknown[]
+  ): Promise<{ itemId: string; dayIndex: number | null; retained: boolean; outcome: string } | undefined> =>
+    undefined,
+);
 const bulkApproveItems = vi.fn(async () => {});
 
 vi.mock('../../firebase', () => ({
@@ -27,6 +36,12 @@ vi.mock('../../firebase', () => ({
   googleProvider: {},
   analytics: null,
 }));
+// #559: ReviewQueue now imports `track` (for `prompt_suggestion_approved`),
+// so the module graph reaches `../../analytics` — mock it directly rather
+// than letting the real module's own `../../firebase` (analyticsReady)
+// dependency leak into this suite's mock, the same posture
+// ItemPool.test.tsx already takes.
+vi.mock('../../analytics', () => ({ track: vi.fn() }));
 vi.mock('../../data/admin', () => ({
   approveItem: (...a: unknown[]) => approveItem(...(a as [])),
   bulkApproveItems: (...a: unknown[]) => bulkApproveItems(...(a as [])),
@@ -68,6 +83,7 @@ function queue(pendingItems: ItemDoc[]) {
 beforeEach(() => {
   approveItem.mockClear();
   bulkApproveItems.mockClear();
+  vi.mocked(track).mockClear();
   // The interesting posture: an Event that is NOT yet 18+, so the next explicit
   // approval is the flip.
   setActiveAdultContent(false);
@@ -124,6 +140,32 @@ describe('approving the first explicit Prompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
     await waitFor(() => expect(approveItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'admin'));
+  });
+
+  // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
+  // prove this call site actually fires `prompt_suggestion_approved` with
+  // the WRITE's own placement — wrapped around `run` itself rather than
+  // `guard`'s return, exactly because this flip-confirm dialog is the path
+  // that defers the real call (see ReviewQueue.tsx's own comment). No
+  // Prompt text in the payload.
+  it('fires prompt_suggestion_approved with the write\'s own outcome/dayIndex, through the flip-confirm dialog', async () => {
+    approveItem.mockResolvedValueOnce({ itemId: 'a', dayIndex: 2, retained: false, outcome: 'placed' });
+    queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
+    await waitFor(() => expect(track).toHaveBeenCalledWith('prompt_suggestion_approved', { outcome: 'placed', dayIndex: 2 }));
+    for (const call of (track as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('prompt a');
+    }
+  });
+
+  it('fires nothing for a stale (no-op) approval outcome', async () => {
+    approveItem.mockResolvedValueOnce({ itemId: 'a', dayIndex: null, retained: false, outcome: 'stale' });
+    queue([item('a', true)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Approve and make this Event 18\+/ }));
+    await waitFor(() => expect(approveItem).toHaveBeenCalled());
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_approved', expect.anything());
   });
 
   it('says nothing about a tame Prompt', async () => {

@@ -524,6 +524,30 @@ a {
   opacity: 0.7;
   border-style: dashed;
 }
+/* "New from the group" (#559): a Community Prompt Square (Cell.communityPrompt,
+   stamped at deal time). A tile-level accent ring rather than a corner glyph —
+   every corner is already claimed (✓ top-right, echo/Doubt top-left, proof ＋
+   bottom-left, tally bottom-right) — so this composes with any of them instead
+   of contending for the same pixel. Ring, not fill: must stay legible under
+   every Theme's own gradient once marked. */
+.cell.community {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* A Community Prompt Square that is ALSO marked (Codex P2, PR #845 round 10):
+   `.cell.marked` (above) and `.cell.community` (immediately above this rule)
+   share the same (0,2,0) specificity, so without this combined selector the
+   LATER-declared rule — `.cell.community`, since it follows `.cell.marked` in
+   this file — would win box-shadow OUTRIGHT and silently drop `.cell.marked`'s
+   own gradient glow the instant a Community Prompt gets ticked, the exact
+   same composition failure `.cell.win.community` (reduced-motion block, below)
+   already exists to prevent for the winning-line state. `box-shadow` layers
+   comma-separated values, so this keeps both: the community inset ring, plus
+   marked's own outer glow. */
+.cell.marked.community {
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    0 0 14px var(--shadow);
+}
 /* An Echo Mark (specs/echo-marks.md): a Square auto-marked because the Player's
    confirmed Mark on the SAME Prompt carried over from another Day Card. The
    subtle ⟲ glyph (top-left — the ✓ owns top-right, proof ＋ bottom-left, tally
@@ -2332,6 +2356,33 @@ textarea.input {
   border-color: var(--danger, #ff6b7a);
   color: var(--danger, #ff6b7a);
 }
+/* A player's OWN not-selected Community Prompt (#559, ItemPool.tsx's
+   submitter-state pills) — de-emphasized rather than accent/danger-toned:
+   this is a routine outcome, not a moderation alert. */
+.pill-muted {
+  color: var(--dim);
+}
+/* The "put it on tomorrow's card" entry point (#559, TomorrowsCardInvite.tsx),
+   mounted on both the Card and the Feed. Scoped, minimal — a single quiet
+   row, not a new chrome pattern. */
+.prompt-invite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.prompt-invite-copy {
+  font-size: 12px;
+}
+.prompt-invite-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+}
 
 /* ---------- admin console chrome (specs/admin-console-ia.md) ----------
    Every admin surface — hub and details — shares one AdminSheet: a sticky
@@ -2996,6 +3047,39 @@ body.install-prompt-visible.update-prompt-visible .bug-report-pick {
   margin: 12px 0 6px;
   font-size: 13px;
   font-weight: 600;
+}
+/* The bug/abuse choice (#670). A bare fieldset renders with a browser default
+   border and inline padding that reads as a stray box inside the sheet, so it
+   is reset to a plain stacked group; the legend keeps `.bug-report-label`'s
+   type so the group heading matches "What happened?" above the textarea. */
+.bug-report-kind {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* The whole label is the tap target, and it has to be a REAL 44px on a
+   phone-first UI — a 13px line plus a few px of padding measures ~24px, which
+   is the sort of thing a comment can claim and the box model quietly refuse.
+   `min-height` rather than padding so the row grows only when the text alone
+   would not reach the floor. */
+.bug-report-kind-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.bug-report-kind-option input {
+  /* A 16px control inside that 44px row: the label carries the target, so the
+     dot itself never has to. */
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  flex: none;
 }
 .bug-report-description {
   width: 100%;
@@ -3915,8 +3999,23 @@ body:has(.sheet-backdrop) .guidelines-trigger {
    Mark that RISES between snapshots — a returning Player's standing marks
    never re-stamp) and cleared on animationend. Declared after the deal rule
    so a mid-deal Mark prefers the stamp. */
+/* `--cell-stamp-shadow` (Codex P2, PR #845 round 10): the 45% keyframe below
+   sets `box-shadow` directly, which — unlike two competing static rules —
+   REPLACES whatever shadow the element already had for the animation's
+   duration, community ring included, regardless of selector specificity or
+   source order. A custom property lets the SAME keyframe read a different
+   value per element: the plain default here, and `.cell.community.just-marked`
+   below overrides it to layer the inset ring back in, so a Community Prompt's
+   "new from the group" ring survives its own stamp animation instead of
+   flashing out for the ~200ms the punch-in glow is visible. */
 .cell.just-marked {
+  --cell-stamp-shadow: 0 0 26px var(--shadow);
   animation: cell-stamp 0.45s var(--ease-pop);
+}
+.cell.community.just-marked {
+  --cell-stamp-shadow:
+    inset 0 0 0 2px var(--accent),
+    0 0 26px var(--shadow);
 }
 @keyframes cell-stamp {
   0% {
@@ -3925,7 +4024,7 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   45% {
     transform: scale(1.12);
     filter: brightness(1.4) saturate(1.2);
-    box-shadow: 0 0 26px var(--shadow);
+    box-shadow: var(--cell-stamp-shadow);
   }
   100% {
     transform: scale(1);
@@ -4393,6 +4492,444 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   }
 }
 
+/* ---------- setup wizard shell (#788, specs/event-setup-wizard.md) ----------
+   The organizer wizard mounts at its own top-level route (/setup/*), not as
+   an overlay sheet — so unlike .sheet-backdrop/.admin-sheet it fills the page
+   rather than floating above other tab content. `.wizard-cancel-confirm`
+   below is the one exception: it IS a transient overlay, so it reuses
+   .sheet-backdrop/.sheet/.sheet-actions as-is (see CancelConfirmDialog.tsx). */
+.wizard-shell {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wizard-sheethead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0 10px;
+  background: var(--bg);
+}
+.wizard-back,
+.wizard-save {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.wizard-back:hover,
+.wizard-back:focus-visible,
+.wizard-save:hover,
+.wizard-save:focus-visible {
+  color: var(--ink);
+}
+.wizard-cancel {
+  color: var(--dim);
+}
+.wizard-title {
+  font-weight: 700;
+  outline: none;
+}
+.wizard-save-spacer {
+  min-width: 1px;
+}
+.wizard-saved-flash {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  margin-top: -6px;
+}
+
+/* ---------- five-step indicator ---------- */
+.wizard-steps {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.wizard-step-item {
+  flex: 1;
+  display: flex;
+}
+.wizard-step-pill {
+  flex: 1;
+  min-width: max-content;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.wizard-step-pill:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.wizard-step-pill.is-done {
+  color: var(--ink);
+}
+.wizard-step-pill.is-current {
+  border-color: var(--primary);
+  color: var(--ink);
+  box-shadow: 0 0 10px var(--shadow);
+}
+.wizard-step-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  font-size: 9px;
+  flex: none;
+}
+
+.wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* The frames' `.secthead` equivalent — rendered once by the shell from the
+   registry's `heading`, not by each step's own body (Codex P2, PR #840). */
+.wizard-step-heading {
+  font-weight: 700;
+  font-size: 13px;
+}
+.wizard-step-placeholder {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.wizard-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wizard-issues {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1.5px solid var(--danger, #ff6b7a);
+  border-radius: 12px;
+  color: var(--ink);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wizard-btnrow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---------- Step 3 · Squares (#791, specs/event-setup-wizard.md § Squares)
+   The frames' `.secthead` / `.promptrow` / `.addbar` shapes, rendered with
+   this app's own tokens. Rhymes with Admin → Prompt pool (.row/.grow/.list)
+   rather than forking it: that surface edits ItemDocs, this one edits a
+   device-local draft, so they share the look and none of the plumbing. */
+.squares-step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.squares-subhead {
+  font-weight: 700;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.squares-seg {
+  margin-bottom: 0;
+}
+.squares-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.squares-note code {
+  font-size: 11px;
+}
+.squares-empty {
+  padding: 10px 0;
+}
+/* Wrapping, for the same reason the rows above wrap: the add bar carries a
+   text field, a pool select, a spicy toggle and an Add button, which do not
+   fit one phone line (Codex P2, round 2). The text field keeps a floor width
+   so it stays usable once it wraps onto its own line. */
+.squares-pack,
+.squares-confirm,
+.squares-addbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.squares-addbar > .grow,
+.squares-pack > .grow {
+  min-width: 12ch;
+  flex: 1 1 12ch;
+}
+.squares-pack .name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.squares-pack .sub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.squares-confirm,
+.squares-confirm-text {
+  font-size: 12px;
+}
+.squares-confirm {
+  border-color: var(--primary);
+  flex-wrap: wrap;
+}
+
+/* Per-pool counts. Three states, never two — an unassigned pool is not
+   "passing", the minimum simply does not apply to it. */
+.squares-counts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.squares-count {
+  border: 1.5px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+.squares-count.is-ok {
+  border-color: var(--primary);
+}
+.squares-count.is-short {
+  border-color: var(--danger, #ff6b7a);
+}
+.squares-count.is-idle {
+  color: var(--dim);
+}
+
+.squares-prompts,
+.squares-days {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+/* Wraps rather than overflowing: a Prompt row carries a pool chip, the text,
+   a spicy toggle and two icon buttons, and a Day row two selects and a
+   remove — more than a narrow phone fits on one line (Codex P2). `min-width`
+   lets the flexible middle actually shrink instead of forcing the row wider
+   than its container, which is what makes wrapping take effect at all. */
+.squares-prompt-row,
+.squares-day-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.squares-prompt-row > .grow,
+.squares-day-head > .grow {
+  min-width: 8ch;
+  flex: 1 1 8ch;
+  /* Prompt text is organizer-authored and can run 80 unbroken characters —
+     a URL, a hashtag, a long compound. Without this the flex item refuses to
+     shrink below its longest word and pushes the row's controls off a narrow
+     screen (Codex P2, round 4). `anywhere` rather than `break-word` so the
+     break also counts toward the item's intrinsic minimum width. */
+  overflow-wrap: anywhere;
+}
+.squares-day-row {
+  padding: 0;
+}
+.squares-prompt-row.is-gap,
+.squares-day-row.is-gap {
+  color: var(--danger, #ff6b7a);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+}
+.squares-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: var(--muted);
+  flex: none;
+}
+.squares-spicy,
+.squares-spicy-off {
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: none;
+  white-space: nowrap;
+}
+.squares-btnrow {
+  display: flex;
+}
+.squares-issues {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 8px 12px;
+  border: 1.5px solid var(--danger, #ff6b7a);
+  border-radius: 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ---------- Step 1 · Occasion (#789, `#frame-setup-occasion`) ----------
+   `.wizard-occasion-row` is a full-width button, not the frame's `.menurow`
+   (that class exists only inside the wireframes' own scoped <style> — no
+   real app stylesheet defines it), reusing the same `.pill`/`.muted` tokens
+   every other step already does. */
+.wizard-occasion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wizard-occasion-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 10px 12px;
+  cursor: pointer;
+  touch-action: manipulation;
+  font: inherit;
+}
+.wizard-occasion-row:hover,
+.wizard-occasion-row:focus-visible {
+  border-color: var(--ink);
+}
+.wizard-occasion-row.is-selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 10px var(--shadow);
+}
+.wizard-occasion-icon {
+  font-size: 20px;
+  flex: none;
+}
+.wizard-occasion-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.wizard-occasion-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+.wizard-occasion-blurb {
+  font-size: 12px;
+  color: var(--muted);
+}
+.wizard-occasion-pill {
+  flex: none;
+  white-space: nowrap;
+}
+.wizard-occasion-note {
+  font-size: 12px;
+}
+
+/* ---------- live preview strip (#795) ----------
+   The strip's swatch and the expanded card both render inside a
+   `ThemeIsland` (src/theme/ThemeIsland.tsx) — the same `[data-theme]`
+   scoped-retint mechanism `.board-area[data-theme]` already uses (Scope C,
+   above) — so the swatch/card genuinely pick up the DRAFT's own Theme
+   tokens (--primary/--secondary/--bg/…) rather than the wizard chrome's,
+   with no theme-specific CSS needed here. */
+.wizard-prevbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.wizard-prevbar-swatch {
+  flex: none;
+  width: 26px;
+  height: 32px;
+  border-radius: 6px;
+  background: linear-gradient(160deg, var(--primary), var(--secondary));
+  border: 1px solid var(--border);
+}
+.wizard-prevbar-caption {
+  flex: 1;
+}
+.wizard-prevbar-open {
+  flex: none;
+  margin-left: 0;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.wizard-preview-sheet {
+  /* Unlike the other content-heavy sheets, a full 5x5 board can make this
+     bottom-aligned fixed sheet taller than a short viewport (a phone in
+     landscape) — bound it and let the sheet's own content scroll rather
+     than push the close control off-screen (Codex P2, PR #857). */
+  max-height: 88dvh;
+  overflow-y: auto;
+}
+.wizard-preview-days {
+  margin-bottom: 8px;
+  overflow-x: auto;
+}
+.wizard-preview-board {
+  margin: 0;
+}
+.wizard-preview-daymeta {
+  font-size: 12px;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+.wizard-preview-shortfall {
+  margin: 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
 /* ---------- reduced motion: the kill switch ----------
    One universal neutralizer instead of per-animation opt-outs, so a future
    animation can never ship un-covered (the pre-pass block only caught the
@@ -4413,6 +4950,21 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   }
   .cell.win {
     box-shadow:
+      0 0 0 2px var(--accent),
+      0 0 14px var(--shadow);
+  }
+  /* A Community Prompt Square (#559) that is ALSO part of a winning line
+     (Codex P2, PR #845 round 6): `.cell.win`'s reduced-motion box-shadow
+     above has the SAME specificity as `.cell.community`'s (index.css, both
+     0,2,0) and comes later in the cascade, so on a normal render the win
+     ring would silently replace the community ring instead of composing
+     with it — the one state where the "new from the group" affordance is
+     specified to survive alongside every other Square state. `box-shadow`
+     takes multiple comma-separated layers, so this combined selector keeps
+     all three: the community inset ring, plus win's own outer ring + glow. */
+  .cell.win.community {
+    box-shadow:
+      inset 0 0 0 2px var(--accent),
       0 0 0 2px var(--accent),
       0 0 14px var(--shadow);
   }

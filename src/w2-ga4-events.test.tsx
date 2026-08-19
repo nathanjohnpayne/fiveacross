@@ -27,7 +27,7 @@ vi.mock('./firebase', () => ({
 }));
 
 describe('GA4_EVENTS catalog', () => {
-  it('enumerates the 12 PRD events plus the operational login_failed (#163), text_size_change (#215), reshuffle_card (#378), heart_post (specs/feed-hearts.md), most_loved_photo_frozen (specs/most-loved-photo.md), mark_rejected (#387), and unmark_square + echo_mark (#721)', () => {
+  it('enumerates the 12 PRD events plus the operational login_failed (#163), text_size_change (#215), reshuffle_card (#378), heart_post (specs/feed-hearts.md), most_loved_photo_frozen (specs/most-loved-photo.md), mark_rejected (#387), unmark_square + echo_mark (#721), and the Community Prompt entry-point trio prompt_suggestion_submitted/prompt_suggestion_approved/community_prompt_dealt (#559)', () => {
     expect(GA4_EVENTS).toEqual([
       'login',
       'login_failed',
@@ -49,6 +49,9 @@ describe('GA4_EVENTS catalog', () => {
       'mark_rejected',
       'unmark_square',
       'echo_mark',
+      'prompt_suggestion_submitted',
+      'prompt_suggestion_approved',
+      'community_prompt_dealt',
     ]);
   });
 });

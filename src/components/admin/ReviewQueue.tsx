@@ -16,8 +16,10 @@ import {
   setItemSpicy,
   banUser,
   unbanUser,
+  type ApprovalPlacement,
 } from '../../data/admin';
 import { deleteProof } from '../../data/proofs';
+import { track } from '../../analytics';
 import AsyncButton from './AsyncButton';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../../game/logic';
 import type { ClaimDoc, DayDef, EventDoc, ItemDoc, ProofDoc } from '../../types';
@@ -95,6 +97,7 @@ function ProofQueueRow({
   admins,
   days,
   frozenAt,
+  standingsFreezeAt,
 }: {
   proof: ProofDoc;
   threshold: number | undefined;
@@ -106,6 +109,10 @@ function ProofQueueRow({
   // The scheduler's freeze stamp (#265) — folded with the schedule through
   // standingsFrozen at delete time.
   frozenAt?: number;
+  // The Event's CONFIGURED Standings Freeze (ADR 0011), passed alongside the
+  // stamp so the delete-time gate honours an Event that states its own freeze
+  // rather than falling back to the ceremonial-Day derivation.
+  standingsFreezeAt?: number;
 }) {
   const autoHidden = isReportHidden(p.reportCount, threshold);
   return (
@@ -150,7 +157,7 @@ function ProofQueueRow({
             // observes the same freeze/ceremonial gates as the player's own —
             // evaluated inside the transaction via the getter.
             ceremonialDayIndexes: days ? [...ceremonialDayIndexSet(days)] : undefined,
-            statsFrozen: () => standingsFrozen({ frozenAt, days: days ?? [] }),
+            statsFrozen: () => standingsFrozen({ frozenAt, standingsFreezeAt, days: days ?? [] }),
           })
         }
       >
@@ -311,15 +318,49 @@ export default function ReviewQueue({
     setItemSpicy(id, spicy);
   };
   const explicitPending = pendingItems.filter(isSpicy);
+  // `prompt_suggestion_approved` (#559): one event per row that actually got
+  // approved — `stale`/`missing` wrote nothing (a double-click, a vanished
+  // row), so they fire nothing. No Prompt text; `outcome` + `dayIndex` only.
+  // Wrapped around `run` ITSELF, not chained onto `guard`'s own return: the
+  // 18+ flip-confirm dialog's `wouldFlip` branch resolves `guard`'s promise
+  // immediately with `undefined` and defers the real call to `pending.run()`
+  // inside the dialog's own confirm handler — attaching here means the
+  // event fires on whichever path actually runs the approval.
+  const trackApproval = (p: ApprovalPlacement): ApprovalPlacement => {
+    // Defensive against a nullish placement, not just the real `approveItem`
+    // contract (which always resolves one): test doubles for `data/admin`
+    // commonly stub a bare `async () => {}`, and analytics is presentational
+    // — it must never turn a mocked-away approval into a rejected promise.
+    if (p && p.outcome !== 'stale' && p.outcome !== 'missing') {
+      track('prompt_suggestion_approved', {
+        outcome: p.outcome,
+        ...(p.dayIndex != null ? { dayIndex: p.dayIndex } : {}),
+      });
+    }
+    return p;
+  };
+  // Array.isArray guard for the SAME reason as `trackApproval`'s nullish
+  // check above: a test double for `bulkApproveItems` commonly stubs a bare
+  // `vi.fn()` (undefined, not even a Promise) rather than an
+  // ApprovalPlacement[].
+  const trackApprovals = (placements: ApprovalPlacement[]): ApprovalPlacement[] =>
+    Array.isArray(placements) ? placements.map(trackApproval) : placements;
   // Pass the ROW, not the id (#557): approval routes the Prompt to the Day it
   // was submitted for, which `approveItem` reads off `targetDayIndex`.
+  // `Promise.resolve(...)` wraps each call rather than chaining `.then`
+  // directly on its result — a bare `vi.fn()` test double (no async, no
+  // explicit resolved value) returns `undefined`, not a thenable, and a raw
+  // `.then` on that throws synchronously before the mocked "approval" ever
+  // gets a chance to no-op harmlessly.
   const approveOne = (it: ItemDoc) =>
-    guard(isSpicy(it), 'approve', () => approveItem(it, adminUid));
+    guard(isSpicy(it), 'approve', () => Promise.resolve(approveItem(it, adminUid)).then(trackApproval));
   const approveAll = () =>
-    guard(explicitPending.length > 0, 'bulk-approve', () => bulkApproveItems(pendingItems, adminUid), {
-      explicitCount: explicitPending.length,
-      totalCount: pendingItems.length,
-    });
+    guard(
+      explicitPending.length > 0,
+      'bulk-approve',
+      () => Promise.resolve(bulkApproveItems(pendingItems, adminUid)).then(trackApprovals),
+      { explicitCount: explicitPending.length, totalCount: pendingItems.length },
+    );
 
   // The empty state and the flip confirm render TOGETHER, and the dialog is
   // deliberately outside the early return (Phase 4b P2). Confirming the last
@@ -362,6 +403,7 @@ export default function ReviewQueue({
                 admins={admins}
                 days={event?.days}
                 frozenAt={event?.frozenAt}
+                standingsFreezeAt={event?.standingsFreezeAt}
               />
             ) : (
               <ItemQueueRow

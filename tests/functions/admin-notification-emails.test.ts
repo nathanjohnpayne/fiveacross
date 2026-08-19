@@ -7,24 +7,32 @@
 // fake Firestore. No Functions runtime, no emulator, no live Resend key.
 import { describe, it, expect, vi } from 'vitest';
 import {
+  LABEL_MAX,
   MAX_ALERTS_PER_DIGEST,
   MAX_ATOMIC_WRITES,
   MAX_HOLD_MS,
   QUIET_PERIOD_MS,
   flattenLabel,
   sameRecipients,
+  FROZEN_TTL_MARGIN_MS,
+  PENDING_TTL_MS,
   TOMBSTONE_TTL_MS,
+  abuseAlertsForWrite,
   alertDocId,
+  bugReportEventId,
   drainKey,
+  isRetryableFirestoreError,
   planDrain,
   alertsForWrite,
   currentRowFor,
   enqueueAdminAlerts,
   recordAdminAlerts,
+  recordBugReportAlerts,
   runAdminAlertSweep,
   sendAdminDigestForEvent,
   type AdminAlertFirestore,
   type AlertableDoc,
+  type BugReportDoc,
 } from '../../functions/src/adminAlerts';
 import {
   ROWS_PER_SECTION,
@@ -535,7 +543,9 @@ describe('buildAdminDigestModel', () => {
     ]);
     expect(model.sections.map((s) => s.heading)).toEqual(['Awaiting approval', 'Reported & hidden']);
     expect(model.subject).toBe('Admin · Trieste → Barcelona—1 to approve, 1 to review');
-    expect(model.preheader).toBe('2 items in the review queue for Trieste → Barcelona.');
+    // DESTINATION-NEUTRAL (#670): abuse rows are not in the Review queue at all,
+    // so the preheader states the count and lets each module name its own home.
+    expect(model.preheader).toBe('2 items waiting for Trieste → Barcelona.');
     expect(model.sections[0].rows).toEqual([{ label: 'Spot a speedo', detail: 'new Prompt · pending approval' }]);
     expect(model.sections[1].rows[0].label).toBe('Prompt: Rude one');
   });
@@ -845,6 +855,8 @@ describe('sendAdminDigestForEvent', () => {
     // The row is REPLACED, not stamped: its copy of unapproved content is gone,
     // so nothing outlives the moderation decision it described...
     const rows = db.rows('events/med-2026/adminAlerts');
+    // The tombstone REPLACES the row, so the pending TTL written at enqueue is
+    // superseded by the shorter tombstone one rather than competing with it.
     expect(rows.map((r) => Object.keys(r).sort())).toEqual([
       ['expiresAt', 'id', 'sentAt'],
       ['expiresAt', 'id', 'sentAt'],
@@ -1386,6 +1398,61 @@ describe('the frozen outbound request', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toHaveLength(1);
   });
 
+  it('gives the frozen request an expiry that outlives every row it claims', async () => {
+    // The frozen document holds the fully rendered email — every Prompt's words
+    // and every abuse description in the batch — and persists for as long as
+    // delivery keeps failing. Without an expiry it outlives its own rows once
+    // their TTL reaps them, with nothing left able to replay, release or delete
+    // it (Phase 4b P1).
+    //
+    // It must OUTLIVE every row it claims. A freeze reaped while its claimed rows
+    // survive sends the next sweep down the missing-freeze rebuild path, which
+    // re-renders and re-sends — either 409ing against a still-live Resend key or,
+    // past the 24h window, delivering a second copy of a digest that already
+    // went out. Two earlier attempts (an inherited deadline, then a fixed week)
+    // each fell into one side of that.
+    const failing = vi.fn(async () => false);
+    const LATE = 40 * 24 * 60 * 60 * 1000;
+    const oldest = LATE - 60_000;
+    const db = build([alert('a1', { createdAt: oldest })]);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(failing), now: () => LATE });
+    // The send failed, so the batch stays frozen — exactly the state that lasts.
+    expect(result.reason).toBe('send-failed');
+    const batch = db.rows('events/med-2026/adminAlertBatches')[0];
+    expect(batch).toBeDefined();
+    // A Date, not epoch millis, or Firestore's TTL service ignores it entirely.
+    expect(batch.expiresAt).toBeInstanceOf(Date);
+    expect((batch.expiresAt as Date).getTime()).toBe(LATE + PENDING_TTL_MS + FROZEN_TTL_MARGIN_MS);
+    // Later than the oldest claimed row's own deadline BY A MARGIN. "Not
+    // earlier" is not enough: TTL deletion is asynchronous and unordered across
+    // the two collection groups, so a batch frozen minutes after its rows would
+    // otherwise be racing them.
+    expect((batch.expiresAt as Date).getTime() - (oldest + PENDING_TTL_MS)).toBeGreaterThanOrEqual(
+      FROZEN_TTL_MARGIN_MS,
+    );
+    // ...and still comfortably past the 24h idempotency window.
+    expect(PENDING_TTL_MS).toBeGreaterThan(24 * 60 * 60 * 1000);
+  });
+
+  it('RETIRES past-due claimed rows with no freeze rather than risking a duplicate send', async () => {
+    // The rebuild path is for a crash between the claim and the freeze — seconds
+    // old, nothing sent. Rows already past their own retention deadline with no
+    // frozen document are the opposite: a batch that keeps failing HAS a freeze,
+    // so an old claim without one means it existed and was reaped, and
+    // rebuilding would re-send bytes that may already have been delivered well
+    // outside Resend's window (Phase 4b P1).
+    const send = vi.fn(async () => true);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const LATE = 40 * 24 * 60 * 60 * 1000;
+    const db = build([alert('a1', { createdAt: 1_000, batchId: 'a1__1' })]);
+    const result = await sendAdminDigestForEvent(db, 'med-2026', { ...deps(send), now: () => LATE });
+    expect(result).toEqual({ sent: 0, retired: 1, reason: 'nothing-current' });
+    expect(send).not.toHaveBeenCalled();
+    // Cleared rather than left to be re-considered on every future sweep.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
+    spy.mockRestore();
+  });
+
   it('ABANDONS a frozen batch when the authorized recipients have changed', async () => {
     // A freeze is written BEFORE the send, so a crash in between (or a rejected
     // send) leaves bytes that may never have been delivered. Replaying them
@@ -1424,6 +1491,83 @@ describe('the frozen outbound request', () => {
     expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe(
       'admin-digest/med-2026/a1__1__1',
     );
+  });
+
+  it('ABANDONS a frozen batch whose abuse source has been deleted, rather than replaying it (#670)', async () => {
+    // A batch that keeps failing to send is retried every sweep for as long as
+    // it keeps failing — easily long enough for the 90-day retention sweep to
+    // remove a report the frozen bytes quote. The replay path deliberately
+    // re-derives nothing, so without this check the deleted report's
+    // description would be mailed anyway, which is the one thing the tombstone
+    // design promises not to do.
+    const send = vi.fn(async () => true);
+    const abuseRow = alert('a1', {
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: 'report_gone',
+      label: 'Someone is posting slurs in the feed',
+      status: 'new',
+      batchId: 'a1__1',
+    });
+    const db = build([abuseRow], {
+      // No `bugReports/report_gone`: retention removed it while the batch sat
+      // frozen behind a failing send.
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['u1@example.com'],
+        subject: 'Admin · Trieste → Barcelona—1 abuse report',
+        html: '<p>Someone is posting slurs in the feed</p>',
+        text: 'Someone is posting slurs in the feed',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 0,
+      reason: 'rebatched',
+    });
+    expect(send).not.toHaveBeenCalled();
+    // Same escape hatch as the roster-changed case: the freeze is dropped and
+    // the claim released, so the rows re-batch from scratch.
+    expect(db.rows('events/med-2026/adminAlertBatches')).toEqual([]);
+    // And the next sweep RETIRES the row through `currentRowFor` instead of
+    // mailing it — the deleted report never reaches an inbox.
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({
+      sent: 0,
+      retired: 1,
+      reason: 'nothing-current',
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('REPLAYS a frozen abuse batch whose source report is still there', async () => {
+    const send = vi.fn(async () => true);
+    const abuseRow = alert('a1', {
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: 'report_live',
+      label: 'Someone is posting slurs in the feed',
+      status: 'new',
+      batchId: 'a1__1',
+    });
+    const db = build([abuseRow], {
+      'bugReports/report_live': { kind: 'abuse', eventId: 'med-2026', reporterInEvent: true },
+      'events/med-2026/adminAlertBatches/a1__1': {
+        to: ['u1@example.com'],
+        subject: 'Admin · frozen abuse',
+        html: '<p>frozen</p>',
+        text: 'frozen',
+        from: 'x <x@example.com>',
+        alertCount: 1,
+        createdAt: 1,
+      },
+    });
+    expect(await sendAdminDigestForEvent(db, 'med-2026', deps(send))).toEqual({ sent: 1, retired: 0 });
+    // Byte-for-byte the frozen request, under its own key — a re-render would
+    // 409 against a key this batch has already used.
+    expect((send.mock.calls[0][0] as { html: string }).html).toBe('<p>frozen</p>');
+    expect((send.mock.calls[0][0] as { idempotencyKey: string }).idempotencyKey).toBe('admin-digest/med-2026/a1__1');
   });
 
   it('LEAVES the row untouched when release finds a NEWER claim already in place (stale)', async () => {
@@ -1727,5 +1871,484 @@ describe('runAdminAlertSweep', () => {
     expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
     // The broken Event keeps its work for the next sweep.
     expect(db.rows('events/broken/adminAlerts')).toHaveLength(1);
+  });
+});
+
+// --- Abuse-marked bug reports (#670) ---------------------------------------------
+//
+// The fourth alert kind, and the only one whose subject document does NOT live
+// under the Event. Everything below exists because of that one difference:
+// `bugReports` is top-level with an `eventId` FIELD, and it carries none of the
+// `status`/`reportCount` moderation vocabulary the other three are read through.
+
+const BUG_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc => ({
+  kind: 'bug',
+  description: 'The board stopped responding.',
+  eventId: 'med-2026',
+  status: 'new',
+  ...over,
+});
+
+/** An abuse report as INTAKE writes one: marked, and carrying the server's own
+ *  answer to "does this reporter belong to the Event they named?". */
+const ABUSE_REPORT = (over: Partial<BugReportDoc> = {}): BugReportDoc =>
+  BUG_REPORT({ kind: 'abuse', reporterInEvent: true, ...over });
+
+describe('abuseAlertsForWrite', () => {
+  it('queues exactly one abuse-reported alert for a report that BECAME abuse', () => {
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT())).toEqual([
+      {
+        kind: 'abuse-reported',
+        collection: 'bugReports',
+        docId: 'r1',
+        label: 'The board stopped responding.',
+        status: 'new',
+        visionFlag: null,
+        reportCount: 0,
+      },
+    ]);
+  });
+
+  it('queues nothing for a plain bug report — the inbox is where those are answered', () => {
+    expect(abuseAlertsForWrite('r1', undefined, BUG_REPORT())).toEqual([]);
+    // Absent `kind` is what every already-shipped client writes (#670's
+    // back-compat rule reaching the producer): still a bug, still silent.
+    expect(abuseAlertsForWrite('r1', undefined, BUG_REPORT({ kind: undefined }))).toEqual([]);
+  });
+
+  it('does not re-alert on a later write to an already-abuse report', () => {
+    // A triage write (a `status` change) must not mail the admins a second time.
+    const before = ABUSE_REPORT();
+    expect(abuseAlertsForWrite('r1', before, ABUSE_REPORT({ status: 'triaged' }))).toEqual([]);
+  });
+
+  it('queues nothing for a delete — there is nothing left to read', () => {
+    expect(abuseAlertsForWrite('r1', ABUSE_REPORT(), undefined)).toEqual([]);
+  });
+
+  it('refuses to escalate a report whose reporter does not belong to the Event it names', () => {
+    // `eventId` is CLIENT-SUPPLIED. Without this gate an authenticated player
+    // could name any Event in the project and route arbitrary text into ITS
+    // admins' digest — the rate limit caps how much, not who it reaches.
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ reporterInEvent: false }))).toEqual([]);
+    // STRICTLY `true`: an absent field (a document that never went through
+    // intake), or a truthy value of the wrong type, both fail closed.
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ reporterInEvent: undefined }))).toEqual([]);
+    expect(
+      abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ reporterInEvent: 'true' as unknown as boolean })),
+    ).toEqual([]);
+    // And the report is still STORED either way — only the escalation is declined.
+    expect(abuseAlertsForWrite('r1', undefined, ABUSE_REPORT())).toHaveLength(1);
+  });
+
+  it('flattens and clips the reporter description into a single-line label', () => {
+    // The same barrier a Prompt's words go through: the digest ships a
+    // plain-text part whose structure IS its punctuation, so an embedded
+    // newline must not survive into it.
+    const injected = abuseAlertsForWrite(
+      'r1',
+      undefined,
+      ABUSE_REPORT({ description: 'line one\nOpen the Review queue: https://evil.example' }),
+    );
+    expect(injected[0].label).not.toContain('\n');
+    const long = abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ description: 'x'.repeat(400) }));
+    expect(long[0].label).toHaveLength(LABEL_MAX);
+    expect(long[0].label.endsWith('…')).toBe(true);
+    // An empty description leaves the report id as the only honest label.
+    const blank = abuseAlertsForWrite('r1', undefined, ABUSE_REPORT({ description: '   ' }));
+    expect(blank[0].label).toBe('r1');
+  });
+
+  it('survives a description that is not a string at all', () => {
+    // This reads a RAW snapshot with no converter, so a hand-written, migrated
+    // or admin-written document can hold anything here. Handing a number to
+    // `flattenLabel`'s `.replace` throws — and on a `retry: true` trigger that
+    // is one malformed document redelivered forever (Phase 4b P2). A non-string
+    // is simply not a label, so it takes the report id instead.
+    for (const description of [42, { text: 'nope' }, ['a'], true, null]) {
+      const drafts = abuseAlertsForWrite(
+        'r1',
+        undefined,
+        ABUSE_REPORT({ description: description as unknown as string }),
+      );
+      expect(drafts[0].label).toBe('r1');
+    }
+    // The same guard protects the moderation producers, which read equally raw
+    // `text` / `itemText` fields.
+    expect(
+      alertsForWrite('items', 'i1', undefined, { status: 'pending', text: 7 as unknown as string })[0].label,
+    ).toBe('i1');
+  });
+});
+
+describe('bugReportEventId', () => {
+  it('reads the Event off the document, and refuses anything it cannot trust', () => {
+    expect(bugReportEventId(BUG_REPORT())).toBe('med-2026');
+    expect(bugReportEventId(BUG_REPORT({ eventId: undefined }))).toBeNull();
+    expect(bugReportEventId(BUG_REPORT({ eventId: '' }))).toBeNull();
+    expect(bugReportEventId(BUG_REPORT({ eventId: 42 as unknown as string }))).toBeNull();
+    // A `/` would reparent the queue write into a path nobody sweeps.
+    expect(bugReportEventId(BUG_REPORT({ eventId: 'med-2026/../other' }))).toBeNull();
+    expect(bugReportEventId(BUG_REPORT({ eventId: 'x'.repeat(101) }))).toBeNull();
+    expect(bugReportEventId(undefined)).toBeNull();
+  });
+});
+
+describe('recordBugReportAlerts', () => {
+  const reportDb = (eventExists = true, status = 'active') =>
+    fakeDb({}, eventExists ? { 'events/med-2026': { name: 'Trieste → Barcelona', status } } : {});
+
+  it('stamps every queued row with a TTL, so a stranded copy of a report cannot live forever', async () => {
+    // Until this existed a queue row had exactly ONE exit: being drained. The
+    // sweep only visits active Events, so a row whose Event is archived before
+    // the next sweep is never looked at again — and its copy of the reporter's
+    // description outlives the source report, the 90-day retention sweep that
+    // deletes it, and every decision anyone made about it (Phase 4b P1).
+    const db = reportDb();
+    await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, ABUSE_REPORT(), { now: () => NOW });
+    const row = db.rows('events/med-2026/adminAlerts')[0];
+    // A Date, NOT epoch millis: Firestore's TTL service only considers a
+    // timestamp-typed field, so a number would leave the policy reaping nothing.
+    expect(row.expiresAt).toBeInstanceOf(Date);
+    expect((row.expiresAt as Date).getTime()).toBe(NOW + PENDING_TTL_MS);
+    // Generous enough that no ordinary backlog is ever reaped, and shorter than
+    // the source-report retention window it must not outlive.
+    expect(PENDING_TTL_MS).toBeGreaterThan(TOMBSTONE_TTL_MS);
+    expect(PENDING_TTL_MS).toBeLessThan(90 * 24 * 60 * 60 * 1000);
+  });
+
+  it('enqueues an abuse alert scoped to the report’s own Event', async () => {
+    const db = reportDb();
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, ABUSE_REPORT())).toBe(1);
+    const rows = db.rows('events/med-2026/adminAlerts');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(alertDocId('cloud-event-1', 'abuse-reported'));
+    expect(rows[0].collection).toBe('bugReports');
+    expect(rows[0].docId).toBe('r1');
+    expect(rows[0].sentAt).toBeNull();
+  });
+
+  it('enqueues nothing for a plain bug report', async () => {
+    const db = reportDb();
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, BUG_REPORT())).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('is a no-op on trigger redelivery — the same CloudEvent id writes one row', async () => {
+    const db = reportDb();
+    const report = ABUSE_REPORT();
+    await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, report);
+    // The redelivery carries the same CloudEvent id, so `create` rejects with
+    // ALREADY_EXISTS and the second call writes nothing.
+    expect(await recordBugReportAlerts(db, 'r1', 'cloud-event-1', undefined, report)).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toHaveLength(1);
+  });
+
+  it('refuses to enqueue when the report names no usable Event, rather than guessing one', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb();
+    expect(
+      await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT({ eventId: undefined })),
+    ).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('refuses to enqueue against an Event that does not resolve', async () => {
+    // The sweep finds work by iterating `events`, so a row under an unresolvable
+    // Event would never be visited, drained or tombstoned — an orphaned copy of
+    // a report's words living in Firestore forever.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb(false);
+    expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    spy.mockRestore();
+  });
+
+  it('refuses to enqueue against a non-ACTIVE Event, matching the sweep’s own precondition', async () => {
+    // `runAdminAlertSweep` finds work with `where('status', '==', 'active')`, so
+    // a row under an archived Event is never visited unless somebody reactivates
+    // it. Reachable here in a way it is not for the moderation producers: those
+    // fire on writes to an Event's own content, which stop when the Event does,
+    // while a player can file a report against an Event long after it ended.
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    for (const event of [{ status: 'archived' }, { status: 'draft' }, { name: 'no status field at all' }]) {
+      const db = fakeDb({}, { 'events/med-2026': event });
+      expect(await recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).toBe(0);
+      expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    }
+    spy.mockRestore();
+  });
+
+  it('PROPAGATES a failed Event lookup so the retryable trigger can try again', async () => {
+    // The permanent answers above all return normally, which tells the platform
+    // "handled, do not retry" — correct, because retrying changes nothing about
+    // them. A transient Firestore failure is the opposite: nothing about the
+    // report is wrong, and swallowing it silently and permanently loses a report
+    // of harm. `notifyAbuseBugReport` is declared `retry: true`, and the alert
+    // id derives from the CloudEvent id, so a retry is a no-op if the write
+    // already landed (Phase 4b P1).
+    const db = fakeDb({}, { 'events/med-2026': { name: 'x', status: 'active' } }, ['events/med-2026']);
+    await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).rejects.toThrow(
+      /backend unavailable/,
+    );
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+  });
+
+  it('ACKNOWLEDGES a permanent failure instead of looping the retryable trigger on it', async () => {
+    // A retryable trigger that rethrows everything turns a misconfigured service
+    // account into an Eventarc redelivery loop that can never succeed, burning
+    // quota and burying the real error (Phase 4b P2).
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb();
+    const denied = Object.assign(new Error('permission denied'), { code: 7 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = (db as any).doc;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      if (path === 'events/med-2026') return { get: async () => { throw denied; } };
+      return original(path);
+    };
+    await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).resolves.toBe(0);
+    spy.mockRestore();
+  });
+
+  it('PROPAGATES a failed queue write, unlike the moderation producers', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = reportDb();
+    const boom = new Error('write unavailable');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = (db as any).doc;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      const ref = original(path);
+      if (path.includes('/adminAlerts/')) return { ...ref, create: async () => { throw boom; } };
+      return ref;
+    };
+    await expect(recordBugReportAlerts(db, 'r1', 'e1', undefined, ABUSE_REPORT())).rejects.toThrow(boom);
+    spy.mockRestore();
+  });
+
+  it('does NOT propagate a queue write failure for the moderation producers', async () => {
+    // ADR 0001: their trigger guards a content write and is not retryable, so a
+    // queue failure stays swallowed. The opt-in is what separates the two.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const db = fakeDb({}, {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const original = (db as any).doc;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (db as any).doc = (path: string) => {
+      const ref = original(path);
+      if (path.includes('/adminAlerts/')) return { ...ref, create: async () => { throw new Error('write unavailable'); } };
+      return ref;
+    };
+    await expect(
+      recordAdminAlerts(db, 'items', 'med-2026', 'i1', 'e1', undefined, ITEM({ status: 'pending' })),
+    ).resolves.toBe(0);
+    spy.mockRestore();
+  });
+});
+
+describe('isRetryableFirestoreError', () => {
+  it('treats request-is-wrong statuses as permanent and everything else as retryable', () => {
+    // Permanent: retrying cannot change the outcome.
+    for (const code of [3, 5, 6, 7, 9, 11, 12, 16]) {
+      expect(isRetryableFirestoreError({ code })).toBe(false);
+    }
+    for (const code of ['permission-denied', 'INVALID-ARGUMENT', 'not-found']) {
+      expect(isRetryableFirestoreError({ code })).toBe(false);
+    }
+    // Retryable: the request was fine, the backend was not.
+    for (const code of [1, 2, 4, 8, 10, 13, 14, 'unavailable', 'deadline-exceeded']) {
+      expect(isRetryableFirestoreError({ code })).toBe(true);
+    }
+    // Unknown or absent leans RETRYABLE on purpose: retrying something permanent
+    // wastes invocations, acknowledging something transient loses a report.
+    expect(isRetryableFirestoreError(new Error('no code at all'))).toBe(true);
+    expect(isRetryableFirestoreError(undefined)).toBe(true);
+    expect(isRetryableFirestoreError({ code: 999 })).toBe(true);
+  });
+});
+
+describe('the abuse module in the digest', () => {
+  const abuseAlert = (id: string, over: Partial<AdminAlertRecord> = {}): AdminAlertRecord =>
+    ALERT({
+      id,
+      kind: 'abuse-reported',
+      collection: 'bugReports',
+      docId: `report_${id}`,
+      label: 'Someone is posting slurs in the feed',
+      status: 'new',
+      reportCount: 0,
+      ...over,
+    });
+
+  it('renders abuse in its OWN module, ahead of the moderation ones, and names it in the subject', () => {
+    const model = buildAdminDigestModel({
+      event: EVENT,
+      eventId: 'med-2026',
+      alerts: [
+        abuseAlert('a1', { createdAt: 2_000 }),
+        ALERT({ id: 'a2', kind: 'item-created', status: 'pending', reportCount: 0, createdAt: 1_000 }),
+      ],
+      edition: 'gcb',
+      origin: 'https://gaycruisebingo.com',
+      now: NOW,
+    });
+    expect(model.sections.map((s) => s.heading)).toEqual(['Abuse reports', 'Awaiting approval']);
+    expect(model.sections[0].rows).toEqual([
+      { label: 'Someone is posting slurs in the feed', detail: 'abuse report · report_a1' },
+    ]);
+    expect(model.subject).toBe('Admin · Trieste → Barcelona—1 abuse report, 1 to approve');
+    expect(model.preheader).toContain('2 items');
+  });
+
+  it('renders one row per REPORT, never collapsing two abuse reports into one', () => {
+    // The moderation module keys by content because two reports about one Proof
+    // are one piece of work. A bug report has no subject document to collapse
+    // toward, only its own text — so each row stands for one report, and the
+    // report ID in its detail line is how an admin tells two rows apart. The
+    // rows deliberately do NOT claim two distinct reporters: intake has no
+    // submission idempotency yet, so one reporter retrying after a lost response
+    // can produce two reports.
+    const model = buildAdminDigestModel({
+      event: EVENT,
+      eventId: 'med-2026',
+      alerts: [abuseAlert('a1'), abuseAlert('a2', { docId: 'report_a1' })],
+      edition: 'gcb',
+      origin: 'https://gaycruisebingo.com',
+      now: NOW,
+    });
+    expect(model.sections[0].rows).toHaveLength(2);
+  });
+
+  it('points its overflow at the bug-report inbox, not at the Review queue the CTA opens', () => {
+    // Bug reports have no console surface; naming the wrong one would send an
+    // admin looking somewhere the rows are not.
+    const model = buildAdminDigestModel({
+      event: EVENT,
+      eventId: 'med-2026',
+      alerts: Array.from({ length: ROWS_PER_SECTION + 2 }, (_, i) => abuseAlert(`a${i + 1}`)),
+      edition: 'gcb',
+      origin: 'https://gaycruisebingo.com',
+      now: NOW,
+    });
+    expect(model.sections[0].overflow).toBe(2);
+    expect(renderAdminDigestText(model)).toContain('+2 more in the bug-report inbox');
+    expect(renderAdminDigestHtml(model)).toContain('+2 more in the bug-report inbox');
+  });
+
+  it('survives the moderation liveness rules that would otherwise drop it as resolved', () => {
+    // A bug report has no `status`/`reportCount` vocabulary, so every moderation
+    // liveness answer for it is meaningless. Without the exemption the row would
+    // be scored resolved and cleared the moment it was drained — queued,
+    // claimed, tombstoned, never mailed.
+    const alert = abuseAlert('a1');
+    expect(currentRowFor(alert, {}, false)).toEqual(alert);
+    expect(currentRowFor(alert, { status: 'active', reportCount: 0 }, false)).toEqual(alert);
+    // A FAILED read still fails open, like every other kind.
+    expect(currentRowFor(alert, undefined, true)).toEqual(alert);
+  });
+
+  it('RETIRES an abuse row whose source report has since been deleted', () => {
+    // Exempt from the moderation rules is not exempt from existence. A digest
+    // that cannot resolve a recipient leaves alerts pending indefinitely, and
+    // the 90-day retention sweep can remove the source report meanwhile —
+    // mailing the copied description and a dead report id after the private
+    // source was deliberately deleted would break the retention promise the
+    // tombstones exist to keep.
+    expect(currentRowFor(abuseAlert('a1'), undefined, false)).toBeNull();
+  });
+});
+
+describe('sendAdminDigestForEvent with an abuse alert', () => {
+  it('MAILS an abuse row without re-reading a document that does not live under the Event', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      {
+        'events/med-2026/adminAlerts': [
+          {
+            id: 'a1',
+            kind: 'abuse-reported',
+            collection: 'bugReports',
+            docId: 'report_xyz',
+            label: 'Someone is posting slurs in the feed',
+            status: 'new',
+            visionFlag: null,
+            reportCount: 0,
+            createdAt: 1,
+            sentAt: null,
+          },
+        ],
+        hostnames: [],
+        events: [{ id: 'med-2026', status: 'active' }],
+      },
+      {
+        'events/med-2026': EVENT,
+        // The source report at its TOP-LEVEL path. `events/med-2026/bugReports/
+        // report_xyz` is deliberately NOT seeded: looking there would find
+        // nothing and retire the row as though retention had deleted it.
+        'bugReports/report_xyz': { kind: 'abuse', eventId: 'med-2026', reporterInEvent: true },
+      },
+    );
+    const result = await sendAdminDigestForEvent(db, 'med-2026', {
+      send: send as never,
+      getAdminUids: async () => ['u1'],
+      getEmailForUid: async (uid: string) => `${uid}@example.com`,
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'Gay Cruise Bingo <bingo@example.com>',
+      now: () => NOW,
+      quietMs: 0,
+    });
+    expect(result).toEqual({ sent: 1, retired: 0 });
+    const arg = send.mock.calls[0][0] as { subject: string; text: string; html: string };
+    expect(arg.subject).toBe('Admin · Trieste → Barcelona—1 abuse report');
+    expect(arg.text).toContain('ABUSE REPORTS');
+    expect(arg.text).toContain('report_xyz');
+    expect(arg.html).toContain('Someone is posting slurs in the feed');
+    // Drained and tombstoned like any other row.
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
+  });
+
+  it('sends nothing and clears the row when the source report was deleted before the digest went out', async () => {
+    const send = vi.fn(async () => true);
+    const db = fakeDb(
+      {
+        'events/med-2026/adminAlerts': [
+          {
+            id: 'a1',
+            kind: 'abuse-reported',
+            collection: 'bugReports',
+            docId: 'report_gone',
+            label: 'Someone is posting slurs in the feed',
+            status: 'new',
+            visionFlag: null,
+            reportCount: 0,
+            createdAt: 1,
+            sentAt: null,
+          },
+        ],
+        hostnames: [],
+        events: [{ id: 'med-2026', status: 'active' }],
+      },
+      // No `bugReports/report_gone`: the retention sweep removed it while the
+      // alert sat pending behind an unresolvable recipient.
+      { 'events/med-2026': EVENT },
+    );
+    const result = await sendAdminDigestForEvent(db, 'med-2026', {
+      send: send as never,
+      getAdminUids: async () => ['u1'],
+      getEmailForUid: async (uid: string) => `${uid}@example.com`,
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'Gay Cruise Bingo <bingo@example.com>',
+      now: () => NOW,
+      quietMs: 0,
+    });
+    expect(result).toEqual({ sent: 0, retired: 1, reason: 'nothing-current' });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.rows('events/med-2026/adminAlerts').filter((r) => r.sentAt === null)).toEqual([]);
   });
 });

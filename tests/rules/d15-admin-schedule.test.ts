@@ -194,4 +194,131 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     days[1] = { ...days[1], unlockAt: FUTURE() + 3600_000 };
     await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days }));
   });
+
+  // ADR 0011 (#551): `scoring` joins the same lock. Flipping an already-played
+  // Day's Scoring Policy re-interprets the podium at once, while every Player's
+  // denormalized root totals keep the OLD policy until that Player folds
+  // another Mark — one roster, two rules, no way to tell the rows apart.
+  it('an Admin CANNOT change days[i].scoring for a Day whose unlockAt has already passed', async () => {
+    const days = seededDays();
+    days[0] = { ...days[0], scoring: 'ceremonial' };
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
+
+  it('an Admin CANNOT ADD or DROP scoring on an already-unlocked Day', async () => {
+    const added = seededDays();
+    added[0] = { ...added[0], scoring: 'competitive' }; // seeded Days carry none
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: added }));
+
+    const withPolicy = seededDays().map((d, i) => (i === 0 ? { ...d, scoring: 'competitive' } : d));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: withPolicy });
+    });
+    const dropped = withPolicy.map((d, i) => {
+      if (i !== 0) return d;
+      const { scoring, ...rest } = d as Record<string, unknown>;
+      return rest;
+    });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: dropped }));
+  });
+
+  it('an Admin CAN set days[i].scoring on a still-future Day', async () => {
+    const days = seededDays();
+    days[1] = { ...days[1], scoring: 'ceremonial' };
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
+
+  it('DENIES a malformed scoring value on a still-future Day', async () => {
+    const days = seededDays();
+    days[1] = { ...days[1], scoring: 'ceremoniall' };
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
+
+  // Bodega Bay's shape — FOUR Days, the largest Event that actually evaluates
+  // within Firestore's expression cap today. The enum check unrolls ten times,
+  // so this is the measurement that decides whether it can ship at all: if a
+  // legitimate four-Day edit still succeeds, the check costs nothing real for
+  // every Event that works, and the ten-Day case is #850's to fix.
+  it('still ALLOWS a legitimate edit on a FOUR-Day schedule with the enum check', async () => {
+    const fourDays = Array.from({ length: 4 }, (_, index) => ({
+      index,
+      date: `2026-08-0${7 + Math.min(index, 2)}`,
+      port: 'Bodega Bay',
+      portEmoji: '🐦',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 3 ? 'farewell' : 'main',
+      tutorial: index === 3,
+      scoring: index === 3 ? 'ceremonial' : 'competitive',
+      unlockAt: index < 2 ? PAST() : FUTURE(),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: fourDays });
+    });
+    const edited = fourDays.map((d, i) => (i === 2 ? { ...d, theme: 'neon-pink-playground' } : d));
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
+
+  // KNOWN FAILING — a PRE-EXISTING production bug, not a regression from #551.
+  //
+  // Firestore caps a rule at 1000 evaluated expressions. Every fixture in this
+  // file is two Days, so nothing here ever exercised the real Gay Cruise Bingo
+  // shape — and on a full TEN-Day schedule this rule does not finish: an admin
+  // editing a still-future Day's theme is DENIED by budget exhaustion. Verified
+  // against `origin/main`'s own firestore.rules, with none of #551's changes
+  // applied, so the Admin Schedule editor is already broken for the ten-Day
+  // Event in production.
+  //
+  // Skipped rather than deleted because the scenario is exactly right and the
+  // fix belongs to issue #850 (making `daysThemeLockOk` cheap enough to
+  // evaluate — the unrolled ten-way comparison is the cost). Un-skip it there.
+  // It is also the gate on adding per-Day `scoring` VALUE validation, which
+  // firestore.rules documents as deferred for this reason.
+  it.skip('still ALLOWS a legitimate edit on a full TEN-Day schedule (expression budget)', async () => {
+    const tenDays = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+      port: `Port ${index}`,
+      portEmoji: '🇮🇹',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',
+      tutorial: index === 0 || index === 9,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+      // Days 0-4 are already open; 5-9 are still ahead.
+      unlockAt: index < 5 ? PAST() : FUTURE(),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: tenDays });
+    });
+
+    const edited = tenDays.map((d, i) => (i === 7 ? { ...d, theme: 'neon-pink-playground' } : d));
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
+
+  it('still DENIES a locked-Day edit on a full TEN-Day schedule', async () => {
+    // Retained and PASSING — but read it alongside the skipped case above: on a
+    // ten-Day schedule this rule denies everything, so this assertion currently
+    // holds for the wrong reason. It is here so that when the budget bug is
+    // fixed, the locked-Day guarantee is still pinned at ten Days rather than
+    // only at two.
+    const tenDays = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+      port: `Port ${index}`,
+      portEmoji: '🇮🇹',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',
+      tutorial: index === 0 || index === 9,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+      unlockAt: index < 5 ? PAST() : FUTURE(),
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: tenDays });
+    });
+
+    const edited = tenDays.map((d, i) => (i === 2 ? { ...d, theme: 'neon-pink-playground' } : d));
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
 });
