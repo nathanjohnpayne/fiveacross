@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -14,15 +14,22 @@ const script = resolve(process.cwd(), 'scripts/worker-deploy.sh');
  * Stubbing the one command it shells out to is what makes those assertable
  * instead of reasoned about.
  */
-function runWithStubbedNpm({ secretListJson = null, secretListFails = false } = {}) {
+function runWithStubbedNpm({
+  secretListJson = null,
+  secretListFails = false,
+  routeBearing = false,
+  extraEnv = {},
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'worker-deploy-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const npm = join(bin, 'npm');
+  const npmCallLog = join(dir, 'npm-calls.log');
   writeFileSync(
     npm,
     `#!/usr/bin/env bash
 # Stub: only the secret listing matters; ci/deploy are no-ops.
+printf '%s\\n' "$*" >> "$NPM_CALL_LOG"
 for arg in "$@"; do
   if [[ "$arg" == "secret" ]]; then
     ${secretListFails ? 'exit 1' : `cat <<'JSON'
@@ -37,15 +44,40 @@ exit 0
   );
   chmodSync(npm, 0o755);
 
+  if (routeBearing) {
+    const grep = join(bin, 'grep');
+    writeFileSync(
+      grep,
+      `#!/usr/bin/env bash
+if [[ "$*" == *"worker/wrangler.toml"* ]]; then
+  exit 0
+fi
+exec /usr/bin/grep "$@"
+`,
+      'utf8',
+    );
+    chmodSync(grep, 0o755);
+  }
+
   // `--force` waives the branch/freshness guards; the clean-tree guard has its
   // own override. Both are needed to exercise the verification logic from a
   // working checkout — without DEPLOY_ALLOW_DIRTY the script exits 1 on a dirty
   // tree, which silently looks like a verification failure and lets a broken
   // assertion pass for the wrong reason.
-  return spawnSync('bash', [script, '--force'], {
+  const result = spawnSync('bash', [script, '--force'], {
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DEPLOY_ALLOW_DIRTY: '1' },
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      DEPLOY_ALLOW_DIRTY: '1',
+      NPM_CALL_LOG: npmCallLog,
+      ...extraEnv,
+    },
   });
+  return {
+    ...result,
+    npmCalls: readFileSync(npmCallLog, 'utf8').trim().split('\n'),
+  };
 }
 
 describe('worker deploy guard — argument handling', () => {
@@ -95,6 +127,19 @@ describe('worker deploy guard — required-secret verification', () => {
 });
 
 describe('worker deploy guard — route-bearing deploys', () => {
+  it('installs the locked Wrangler before pre-publish secret verification', () => {
+    const result = runWithStubbedNpm({
+      routeBearing: true,
+      secretListJson: '[{"name":"FIREBASE_API_KEY","type":"secret_text"}]',
+      extraEnv: { NPM_CONFIG_OMIT: 'dev', NODE_ENV: 'production' },
+    });
+    expect(result.status).toBe(0);
+    expect(result.npmCalls.slice(0, 2)).toEqual([
+      '--prefix worker ci --include=dev',
+      '--prefix worker exec -- wrangler secret list --format json',
+    ]);
+  });
+
   it('does not claim routes are unattached when none are configured', () => {
     // The shipped wrangler.toml keeps `routes` commented out.
     const result = runWithStubbedNpm({
