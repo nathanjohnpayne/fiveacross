@@ -170,6 +170,7 @@ describe('parseHandoffRequest', () => {
     // A protocol-relative path is read by a browser as a different ORIGIN — the
     // payload a naive "must start with /" check waves straight through.
     ['a protocol-relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=//evil.test`],
+    ['a same-host protocol-relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=//summer-camp.fiveacross.app/board`],
     ['a relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=board`],
   ])('refuses %s', (_label, search) => {
     expect(parseHandoffRequest(search)).toBeNull();
@@ -265,6 +266,7 @@ describe('startAuthHandoff', () => {
   it.each([
     ['an over-long path', `/${'a'.repeat(600)}`],
     ['an off-origin path', '//evil.example/steal'],
+    ['a same-host protocol-relative path', '//summer-camp.fiveacross.app/board'],
   ])('falls back to the safe root before storing or navigating for %s', async (_label, returnPath) => {
     const navigate = vi.fn();
     expect(

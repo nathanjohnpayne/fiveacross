@@ -219,6 +219,10 @@ export function parseHandoffRequest(search: string): HandoffRequest | null {
  */
 function isSameOriginPath(path: string, targetOrigin: string): boolean {
   if (!path.startsWith('/')) return false;
+  // The server requires a path beginning with exactly one slash. A
+  // protocol-relative path can resolve back to the same host and still violate
+  // that wire contract, so origin equality alone is not sufficient (#912).
+  if (path.startsWith('//') || path.startsWith('/\\')) return false;
   // Control characters are stripped or normalised by URL parsing rather than
   // rejected, so they have to go before the resolve rather than after.
   if (/[\u0000-\u001f\u007f]/.test(path)) return false;
