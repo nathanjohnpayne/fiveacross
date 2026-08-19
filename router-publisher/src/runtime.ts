@@ -22,6 +22,15 @@ const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['vacaybingo.vercel.app', ['vacay', 'vacaybingo.com']],
   ['gaycruisebingo.vercel.app', ['gcb', null]],
 ]);
+const RESERVED_EVENT_SLUGS = new Set([
+  'admin',
+  'api',
+  'auth',
+  'd',
+  'play',
+  'status',
+  'www',
+]);
 
 export class PublisherRuntimeError extends Error {
   constructor() {
@@ -74,6 +83,19 @@ function decodeDesired(value: unknown): Record<string, unknown> {
       : stringValue(encoded);
   }
   return result;
+}
+
+function isValidEventSlug(slug: string): boolean {
+  return (
+    slug.length >= 3 &&
+    slug.length <= 63 &&
+    /^[a-z0-9-]+$/.test(slug) &&
+    !slug.startsWith('-') &&
+    !slug.endsWith('-') &&
+    !slug.startsWith('r2-') &&
+    !RESERVED_EVENT_SLUGS.has(slug) &&
+    !(slug.length >= 4 && slug[2] === '-' && slug[3] === '-')
+  );
 }
 
 export function replicaPayloadFromFirestoreEvent(
@@ -152,16 +174,7 @@ function isRegistryHost(host: string): boolean {
   }
   const match = /^([a-z0-9-]+)\.(fiveacross\.app|vacaybingo\.com)$/.exec(host);
   if (match === null) return false;
-  const label = match[1];
-  return (
-    label.length >= 3 &&
-    label.length <= 63 &&
-    !label.startsWith('-') &&
-    !label.endsWith('-') &&
-    !label.startsWith('r2-') &&
-    !new Set(['admin', 'api', 'auth', 'd', 'play', 'status', 'www']).has(label) &&
-    !(label.length >= 4 && label[2] === '-' && label[3] === '-')
-  );
+  return isValidEventSlug(match[1]);
 }
 
 function validDesired(host: string, value: Record<string, unknown>): boolean {
@@ -189,7 +202,7 @@ function validDesired(host: string, value: Record<string, unknown>): boolean {
       ['active', 'disabled', 'archived'].includes(String(value.status)) &&
       (rootClass === undefined
         ? value.slug === host.split('.')[0] && value.pathNamespace === null
-        : value.pathNamespace === rootClass[1])
+        : isValidEventSlug(value.slug) && value.pathNamespace === rootClass[1])
     );
   }
   if (value.kind === 'root') {

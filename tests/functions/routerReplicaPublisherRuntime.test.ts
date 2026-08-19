@@ -162,6 +162,28 @@ describe('keyless publisher runtime adapter', () => {
     ).toThrow('invalid router replica event');
   });
 
+  it.each(['', 'admin', 'xn--poison', 'Mixed-Case', '-edge'])(
+    'rejects invalid flagship slug %j on an apex route',
+    (slug) => {
+      expect(() =>
+        replicaPayloadFromEvent('fiveacross.app', {
+          schemaVersion: 1,
+          revision: '1',
+          host: 'fiveacross.app',
+          desired: {
+            kind: 'route',
+            eventId: 'event',
+            status: 'active',
+            slug,
+            edition: 'fiveacross',
+            pathNamespace: 'fiveacross.app',
+          },
+          updatedAt: '2026-08-19T13:00:00.000Z',
+        }),
+      ).toThrow('invalid router replica event');
+    },
+  );
+
   it('decodes the Firestore written CloudEvent payload without a Firestore client', () => {
     const payload = replicaPayloadFromFirestoreEvent({
       specversion: '1.0',
