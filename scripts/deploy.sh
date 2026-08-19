@@ -575,16 +575,30 @@ fi
 
 # Step 2: Deploy
 echo ">> Deploying via op-firebase-deploy"
-# Bash 3.2 + `set -u`: expanding an empty `${DEPLOY_ARGS[@]}` aborts
-# with "DEPLOY_ARGS[@]: unbound variable" when no trailing deploy
-# args were appended (e.g. `deploy.sh --force --skip-build
-# --skip-cf-purge` with nothing after `--`). The `${ARR[@]+"${ARR[@]}"}`
-# idiom expands to the array contents only when the array has been
-# ASSIGNED — DEPLOY_ARGS=() at parse time qualifies as assigned, so
-# this expansion is always defined regardless of length. Bash 4+
-# tolerates the bare form; Bash 3.2 (still the macOS system shell)
-# does not. nathanpayne-codex Phase 4b r3 on PR #296 reproduced
-# the abort with `--force --skip-build --skip-cf-purge` under bash 3.2.
+# The classifier above is the sole owner of Firebase argv/project resolution.
+# Pass its project to the credential wrapper explicitly so that wrapper never
+# mistakes the value of a Firebase option (for example `--public dist`) for the
+# project on a bare deploy.sh call. Preserve the documented
+# `deploy.sh -- <project> ...` form by removing that already-resolved leading
+# positional project before forwarding the remaining Firebase arguments.
+OP_FIREBASE_DEPLOY_ARGS=()
+if [[ "${#DEPLOY_ARGS[@]}" -gt 0 ]]; then
+  OP_FIREBASE_DEPLOY_ARGS=("${DEPLOY_ARGS[@]}")
+fi
+if [[ -n "$DEPLOY_PROJECT" && "${#OP_FIREBASE_DEPLOY_ARGS[@]}" -gt 0 &&
+      "${OP_FIREBASE_DEPLOY_ARGS[0]}" == "$DEPLOY_PROJECT" ]]; then
+  OP_FIREBASE_DEPLOY_ARGS=("${OP_FIREBASE_DEPLOY_ARGS[@]:1}")
+fi
+OP_FIREBASE_DEPLOY_COMMAND=(op-firebase-deploy)
+if [[ -n "$DEPLOY_PROJECT" ]]; then
+  OP_FIREBASE_DEPLOY_COMMAND+=("$DEPLOY_PROJECT")
+fi
+if [[ "${#OP_FIREBASE_DEPLOY_ARGS[@]}" -gt 0 ]]; then
+  OP_FIREBASE_DEPLOY_COMMAND+=("${OP_FIREBASE_DEPLOY_ARGS[@]}")
+fi
+# The command array is always nonempty, even when there are no trailing deploy
+# args. This avoids Bash 3.2's `set -u` abort when expanding an empty argument
+# array (reproduced by nathanpayne-codex Phase 4b r3 on PR #296).
 #
 # The exit status is CAPTURED rather than left to `set -e` (#768 Codex P1 r2 —
 # ordering). Firebase reports the org-policy rejection of the `allUsers`
@@ -602,7 +616,7 @@ echo ">> Deploying via op-firebase-deploy"
 DEPLOY_LOG="$(mktemp "${TMPDIR:-/tmp}/deploy-firebase-XXXXXX")"
 
 set +e
-op-firebase-deploy ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"} 2>&1 | tee "$DEPLOY_LOG"
+"${OP_FIREBASE_DEPLOY_COMMAND[@]}" 2>&1 | tee "$DEPLOY_LOG"
 DEPLOY_STATUS="${PIPESTATUS[0]}"
 set -e
 

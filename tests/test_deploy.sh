@@ -1493,6 +1493,56 @@ for value_option_case in \
 done
 
 # ---------------------------------------------------------------------------
+# Cases 18i-18p (#852, post-rebase Standards P2): a bare deploy.sh call has
+# no positional project for op-firebase-deploy to consume. The canonical Node
+# parser resolves the project from .firebaserc, but the downstream credential
+# wrapper used to reparse the raw argv and mistake the first split option
+# VALUE for its project (for example `--public dist` deployed as project
+# `dist`). Every value-taking form below must therefore reach the wrapper only
+# AFTER the classifier-resolved project.
+# ---------------------------------------------------------------------------
+for downstream_project_case in \
+  "18i:-m:release-message" "18j:--message:release-message" \
+  "18k:-p:dist" "18l:--public:dist" \
+  "18m:--account:operator@example.com" "18n:--token:test-token" \
+  "18o:-c:firebase.json" "18p:--config:firebase.json"; do
+  case_id="${downstream_project_case%%:*}"
+  remainder="${downstream_project_case#*:}"
+  value_option="${remainder%%:*}"
+  option_value="${remainder#*:}"
+  repo="$WORKDIR/case${case_id}-downstream-project"
+  init_fixture_repo "$repo"
+  (
+    cd "$repo"
+    printf '%s\n' '{"projects":{"default":"fixture-project"}}' > .firebaserc
+    git add .firebaserc
+    git commit --quiet -m 'add deploy project'
+  )
+  out="$WORKDIR/case${case_id}.out"
+  err="$WORKDIR/case${case_id}.err"
+  log="$WORKDIR/ofd-calls-${case_id}.log"
+  : >"$log"
+
+  set +e
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$log" \
+    bash -c "cd '$repo' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic --skip-invoker -- '$value_option' '$option_value' --only hosting" \
+    >"$out" 2>"$err"
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    fail "downstream-project ($case_id, $value_option): deploy.sh returned $rc. stderr was:"
+    cat "$err" >&2
+  elif ! awk -F '\t' '$1 == "op-firebase-deploy" && $2 == "fixture-project" { found = 1 } END { exit !found }' "$log"; then
+    fail "downstream-project ($case_id, $value_option): classifier project was not the wrapper's first argument. Call log was:"
+    cat "$log" >&2
+  else
+    pass "downstream-project ($case_id, $value_option): wrapper credential project stays pinned to fixture-project."
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Case 19a (#768 r5 — Codex P2, chicken-and-egg). A first deploy against a
 # brand-new target — neither Cloud Run service exists yet — must not be
 # aborted at the Step 1.6 pre-publish check, and the SAME condition must
