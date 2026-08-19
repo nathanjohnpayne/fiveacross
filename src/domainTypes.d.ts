@@ -296,6 +296,35 @@ export interface EventDoc {
   // in the contract so consumers never branch on undefined; `eventConverter`
   // defaults a missing legacy field (event docs seeded before #113) to [].
   bannedUids: string[];
+  /**
+   * The per-Event membership enforcement switch (specs/event-membership.md,
+   * epic #801). `'enforced'` means this Event's rules require an admission
+   * record at `events/{eventId}/memberships/{uid}`; anything else — including
+   * ABSENT — means they do not.
+   *
+   * Optional, and absent MUST read as `'off'`: every Event document in
+   * existence predates this field, and both live cohorts joined by
+   * self-creating their `players` row, so a deploy that read a missing field as
+   * "enforce" would lock every current player out mid-Event. Safety comes from
+   * the rollout being explicit per Event (#805), not from the default. Never
+   * read directly — resolve through `membershipEnforcementFor`
+   * (`src/data/eventMembership.ts`), which is the only place the default lives.
+   *
+   * WHY IT LIVES ON THIS DOCUMENT rather than beside the memberships it gates:
+   * `storage.rules` may access at most TWO Firestore documents per evaluation,
+   * and the membership record itself is one of them. A switch on any third
+   * document would be unreadable from Storage, so the only reachable home is a
+   * document the Storage predicate already fetches — this one, which
+   * `isEventAdmin()` (`storage.rules:7-10`) already reads.
+   *
+   * NOT CLIENT-WRITABLE, and that is not yet true: the `events/{eventId}`
+   * update rule has no key whitelist, so until #804 adds an immutability
+   * clause an Admin could flip it. That clause is one more expression on a rule
+   * that already exceeds Firestore's 1,000-expression cap at ten Days (#850),
+   * which is why the spec records #850 as a prerequisite of #804 rather than an
+   * unrelated bug.
+   */
+  membershipEnforcement?: MembershipEnforcement;
   settings: {
     reportHideThreshold: number;
     // Target share of spicy (🔞) Prompts among a Board's 24 non-free Squares,
@@ -1149,4 +1178,146 @@ export interface OccasionDef {
   /** The seeded pack, or `null` while unowned. */
   starterPackId: string | null;
   defaults: OccasionDefaults;
+}
+
+// ---- Phase 3: multi-Event isolation (specs/event-membership.md) ----
+//
+// The admission model. Appended as its own section for the same reason the
+// Phase 5 block above is: nothing here weaves into `EventDoc` except the single
+// `membershipEnforcement` field, and this file is a hot one with concurrent
+// tickets editing it mid-body.
+//
+// WHAT THIS SECTION IS FOR. `events/{eventId}/players/{uid}` already MEANS
+// membership in the ubiquitous language (`CONTEXT.md` § People) but cannot
+// AUTHORIZE it: `firestore.rules:1007-1008` lets any signed-in account create
+// its own Player row under any `eventId`, so a gate keyed off that row is
+// satisfiable by the reader (#844, and `specs/x-multi-event-schema.md`
+// § "Rules / indexes / hosting implications"). These types describe the
+// separate, non-self-writable record that CAN authorize it.
+//
+// SCOPE. Ticket #802 ships the vocabulary and the pure predicates only. No
+// rule enforces any of this yet (#804 Firestore, #806 Storage), nothing writes
+// a membership yet (#803 invitations, #805 backfill), and no Event is enforced
+// (`membershipEnforcement` is absent everywhere). The contract lands first
+// precisely so those five tickets implement one shape rather than five.
+
+/**
+ * What a membership grant conferred. Admin is the ONLY privileged role today
+ * (`CONTEXT.md` § People: "The only privileged role"), and a Host is a social
+ * identity that grants nothing — so this union is deliberately two-valued
+ * rather than speculative.
+ *
+ * `role` is the record OF THE GRANT, not the enforcement surface.
+ * `EventDoc.admins` remains the sole authority on privilege and is what
+ * `isAdmin()` reads; nothing in `firestore.rules` or `storage.rules` reads this
+ * field. The two are kept consistent by the server grant path and checked by
+ * `adminsMissingMembership` (`src/data/eventMembership.ts`) — see
+ * specs/event-membership.md § "Admins, bans, and the three notions of
+ * not-welcome".
+ */
+export type MembershipRole = 'member' | 'admin';
+
+/**
+ * Whether a membership currently admits. Exactly `'active'` admits; everything
+ * else does not.
+ *
+ * Revocation is a STATUS CHANGE, not a delete, so that "was removed" stays
+ * distinguishable from "was never here" — which the client needs in order to
+ * say which one happened, and which a re-invitation path needs in order not to
+ * silently re-admit somebody who was deliberately removed.
+ */
+export type MembershipStatus = 'active' | 'revoked';
+
+/** The per-Event enforcement posture. See `EventDoc.membershipEnforcement`. */
+export type MembershipEnforcement = 'off' | 'enforced';
+
+/**
+ * A document at `events/{eventId}/memberships/{uid}` — the organizer-issued,
+ * non-self-writable record that a User is admitted to an Event.
+ *
+ * THE DOCUMENT ID IS THE UID, and that is a constraint rather than a
+ * convenience: `storage.rules` can only reach Firestore through
+ * `firestore.get()`/`firestore.exists()` on a fully-qualified path, so the
+ * record has to be findable from `(eventId, uid)` alone with no query. That
+ * single requirement is what eliminated a membership array on the Event
+ * document and a subcollection under `users/{uid}`.
+ *
+ * NO CLIENT MAY WRITE THIS. The whole collection is denied to every client
+ * credential and written only by the Admin SDK, exactly as `hostnames/{host}`
+ * is (`firestore.rules:624-628`) — the in-tree precedent for a record whose
+ * value depends on clients not being able to author it. A membership a client
+ * can write is not a membership.
+ *
+ * FROZEN vs VERSIONED. The path and `status` are frozen forever: they are what
+ * the two rules files transcribe, and re-versioning them would put a rules
+ * deploy in lockstep with every data migration. Every other field sits behind
+ * `schemaVersion` and may change; `readMembership` reads a drifted version as a
+ * miss rather than coercing it (the convention `src/eventResolution.ts` uses
+ * for its cache envelope, ADR 0009).
+ */
+export interface MembershipDoc {
+  /** `MEMBERSHIP_SCHEMA_VERSION` at write time. Gates the parse, never the
+   *  authorization decision — see `src/data/eventMembership.ts`. */
+  schemaVersion: number;
+  /**
+   * The granting Event. Denormalised from the path on purpose: the Functions
+   * and the export paths read these documents detached from their location, and
+   * a future "which Events am I in?" lookup (#807's Event switching) needs a
+   * collectionGroup query, which can filter on a FIELD but not on the document
+   * id.
+   *
+   * That query is deliberately NOT enabled here. A `{path=**}/memberships/{uid}`
+   * read rule would be a new cross-Event read surface of exactly the kind this
+   * epic exists to close — the same shape as the `{path=**}/markers/{markerUid}`
+   * rule (`firestore.rules:1770-1772`) that already leaks other Events' markers.
+   * Whoever enables it must bind it to `resource.data.uid == request.auth.uid`.
+   */
+  eventId: string;
+  /** The admitted User. Authoritative copy is the document id; this is the
+   *  queryable one, for the reason `eventId` is denormalised. */
+  uid: string;
+  role: MembershipRole;
+  status: MembershipStatus;
+  /** ms epoch, stamped server-side. */
+  grantedAt: number;
+  /** The uid of the granting Admin, or a `system:` sentinel for grants with no
+   *  human author — `system:provisioner` for the launch provisioner's grant to
+   *  an Event's creator (#793), `system:backfill` for #805's migration of the
+   *  two live cohorts. Never empty: "we do not know who granted this" is a fact
+   *  worth recording explicitly rather than by omission. */
+  grantedBy: string;
+  /** The invitation this grant was redeemed from, or `null` for grants that
+   *  had no invitation (provisioner, backfill). Present so a revocation can
+   *  answer "how did this person get in?" and so an invitation cannot be
+   *  silently reused (#803, rhyming with #548's single-use discipline). */
+  invitationId: string | null;
+  /** ms epoch. Absent while `status` is `'active'`. */
+  revokedAt?: number;
+  /** The uid of the revoking Admin, or a `system:` sentinel. */
+  revokedBy?: string;
+}
+
+/**
+ * Why the admission predicate answered the way it did.
+ *
+ * The outcomes are distinguished because the client has to say different things
+ * for each: an unenforced Event is today's behaviour and shows nothing at all,
+ * `denied-revoked` is "you were removed from this Event", and
+ * `denied-not-a-member` is "this is not your Event". Collapsing them to a
+ * boolean would make the difference unrecoverable at the call site.
+ */
+export type AdmissionOutcome =
+  | 'admitted'
+  | 'admitted-unenforced'
+  | 'denied-not-a-member'
+  | 'denied-revoked'
+  /** A record exists but its `status` is neither `'active'` nor `'revoked'` —
+   *  shape drift or a half-written document. Denies, because an unreadable
+   *  answer is not an admission. */
+  | 'denied-unreadable';
+
+/** The result of `admits` (`src/data/eventMembership.ts`). */
+export interface AdmissionDecision {
+  admitted: boolean;
+  outcome: AdmissionOutcome;
 }
