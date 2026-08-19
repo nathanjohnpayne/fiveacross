@@ -48,6 +48,15 @@ export interface EditionBrand {
    *  because only vacay's frame carries one; when present it REPLACES the
    *  plain `tagline` on the signed-out gate, which the wireframe omits there. */
   signinTaglineChip?: string;
+  /** A second, ADDITIVE voice chip (#881, gcb/fiveacross Join frames) — same
+   *  italic slot as `signinTaglineChip`, drawn ABOVE it rather than instead
+   *  of it: both frames keep their own `.desc` tagline line right below the
+   *  chip. Deliberately a separate field, not a reuse of `signinTaglineChip`
+   *  with a modifier flag — that field's whole contract is "replaces the
+   *  tagline," which is true for vacay alone; giving gcb/fiveacross a
+   *  same-named field with different behavior would make the one field mean
+   *  two things depending on which brand sets it. */
+  signinVoiceChip?: string;
   /** The invitation copy block under the Join CTA ("Prompts are invitations,
    *  not chores…"). Optional: only the vacay frame draws it. */
   signinInviteNote?: string;
@@ -58,10 +67,16 @@ export interface EditionBrand {
    *  exhaustiveness sweep covers it like any other brand field. */
   signinCardVariant?: 'postcard';
   /** A fixed per-Edition stamp glyph for the gate's Event-preview corner
-   *  (#881: "postage on every gate" — 🏳️‍🌈 on gcb, 💒 on fiveacross). Distinct
-   *  from `signinCardVariant: 'postcard'`, which is vacay's OWN postage and
-   *  stays dynamic — it stamps whichever Day the preview is currently
-   *  showing (`previewDayEmoji`), not a fixed brand mark. When set, this
+   *  (#881: "postage on every gate" — 🏳️‍🌈 on gcb, ✳️ on fiveacross, its own
+   *  share mark). Deliberately NOT the 💒 the wireframe's fiveacross sample
+   *  happens to render (Codex P2, PR #896 round 1): fiveacross is the
+   *  occasion-neutral platform Edition, so a wedding glyph baked into the
+   *  Edition-level brand table would leak onto every OTHER occasion's gate
+   *  (a conference, a birthday) that Edition equally supports — the sample's
+   *  identity, not the brand's. Distinct from `signinCardVariant: 'postcard'`,
+   *  which is vacay's OWN postage and stays dynamic — it stamps whichever Day
+   *  the preview is currently showing (`previewDayEmoji`), not a fixed brand
+   *  mark. When set, this
    *  glyph wins over the dynamic one (`EventPostcard.tsx`) and must never
    *  repeat an emoji already drawn elsewhere on that gate screen. */
   signinStampGlyph?: string;

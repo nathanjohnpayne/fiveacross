@@ -46,9 +46,13 @@ const BRANDS: Record<string, EditionBrand> = {
     tagline: 'Sign in, get your card, mark it if you see it.',
     // The Join-frame voice chip and the gate's fixed postage mark (#881: "a
     // treatment only one brand receives reads as an accident" — vacay had
-    // both, gcb and fiveacross had neither). The rainbow flag doesn't repeat
-    // anything else the gcb Join frame draws.
-    signinTaglineChip: 'What happens at sea. Goes on the card.',
+    // both, gcb and fiveacross had neither). ADDITIVE, not vacay's replacing
+    // kind (Codex P2, PR #896 round 1): the gcb Join frame keeps its own
+    // plain tagline line right below this chip, so `signinVoiceChip` is the
+    // field, not `signinTaglineChip` (see the type's own note on why they're
+    // separate fields). The rainbow flag doesn't repeat anything else the
+    // gcb Join frame draws.
+    signinVoiceChip: 'What happens at sea. Goes on the card.',
     signinStampGlyph: '🏳️‍🌈',
     // #881: the old copy promised artefacts (printed cards, a PDF) the app
     // does not ship. All three Editions now state the same offline mechanic
@@ -107,9 +111,13 @@ const BRANDS: Record<string, EditionBrand> = {
     preEventVerb: 'Starts',
     tagline: 'Sign in, get your card, mark it if you see it.',
     // The Join-frame voice pieces (#647, wireframes § "Join—the postcard, not
-    // the casino"). The tagline chip replaces the plain tagline on the
-    // signed-out gate — gcb and fiveacross carry their own chip too (#881);
-    // the invite note and the postcard's dashed-stamp treatment stay
+    // the casino"). This chip REPLACES the plain tagline on the signed-out
+    // gate — vacay's frame draws no separate tagline line under it. gcb and
+    // fiveacross carry their own voice chip too (#881), but ADDITIVE: their
+    // frames keep the plain tagline right below it, so they use the
+    // separate `signinVoiceChip` field, not this one (see that field's own
+    // note for why "replace" and "add" are not the same field with a flag).
+    // The invite note and the postcard's dashed-stamp treatment stay
     // vacay-only, since its postage is the current Day's own emoji rather
     // than a fixed brand mark (see `signinStampGlyph` for the fixed kind).
     signinTaglineChip: 'Take the detour. For the story.',
@@ -179,11 +187,15 @@ const BRANDS: Record<string, EditionBrand> = {
     // framing its default Theme (✨ Marquee, #617) already speaks.
     preEventVerb: 'Opens',
     tagline: 'Sign in, get your card, mark it if you see it.',
-    // Same Join-frame voice-chip-plus-postage treatment as gcb (#881). The
-    // wedding-bell mark matches the sample Event on this Edition's own Join
-    // frame (Kim & Jo's Wedding) without repeating anything else drawn there.
-    signinTaglineChip: 'Bring everyone. Into the game.',
-    signinStampGlyph: '💒',
+    // Same Join-frame voice-chip-plus-postage treatment as gcb (#881),
+    // additive rather than replacing (see gcb's own note above). The postage
+    // is fiveacross's own share mark, not the wedding-bell the wireframe's
+    // sample happens to render (Codex P2, PR #896 round 1): this Edition is
+    // occasion-neutral, so a wedding glyph baked into the brand table would
+    // leak onto every OTHER occasion this same Edition equally supports (a
+    // conference, a birthday) — the sample's identity, not the brand's.
+    signinVoiceChip: 'Bring everyone. Into the game.',
+    signinStampGlyph: '✳️',
     offlineNote: 'Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.',
     // Title case for the tab and the home-screen label, as above. "Five Across"
     // is 11 characters, so it survives Android's short_name truncation whole.

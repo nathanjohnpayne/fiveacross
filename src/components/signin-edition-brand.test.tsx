@@ -29,9 +29,11 @@ describe('SignIn — the gate wears the resolved Edition', () => {
     // brand now serves more than the one sailing, and a baked "Trieste →
     // Barcelona · July 2026" reads as immediately wrong under any other
     // Event's postcard. Event specifics belong to Event data, not the brand.
-    // #881 gave gcb its own Join-frame voice chip, which replaces the plain
-    // tagline on screen — same itinerary-free spirit, new copy.
+    // #881 gave gcb its own Join-frame voice chip, ADDED above the plain
+    // tagline (not replacing it — that is vacay's own chip behavior) — same
+    // itinerary-free spirit, new copy.
     expect(screen.getByText('What happens at sea. Goes on the card.')).toBeTruthy();
+    expect(screen.getByText('Sign in, get your card, mark it if you see it.')).toBeTruthy();
     expect(screen.queryByText(/Trieste → Barcelona/)).toBeNull();
   });
 

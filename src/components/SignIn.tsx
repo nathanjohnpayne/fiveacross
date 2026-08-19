@@ -72,6 +72,14 @@ export default function SignIn() {
           heading's textContent is asserted brand-for-brand by
           signin-edition-brand.test.tsx and must stay exactly the wordmark. */}
       {brand.wordmarkByline && <span className="brand-byline">{brand.wordmarkByline}</span>}
+      {/* The ADDITIVE voice chip (#881, gcb/fiveacross Join frames) — drawn
+          ABOVE the tagline line below, never instead of it (that is
+          `signinTaglineChip`'s job, vacay-only). Gated on the re-prompt
+          posture too: the age-confirmation line takes this whole slot on a
+          re-prompt, so a brand voice chip has no business sitting above it. */}
+      {brand.signinVoiceChip && !(reprompt && adult) && (
+        <p className="signin-voice-chip">{brand.signinVoiceChip}</p>
+      )}
       <p className={brand.signinTaglineChip && !(reprompt && adult) ? 'signin-tagline-chip' : 'muted'}>
         {/* The re-prompt line makes an age claim of its own, so it is gated on
             the posture too — belt and braces. AuthProvider already refuses to
