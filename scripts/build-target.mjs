@@ -81,8 +81,10 @@ export const DEPLOY_TARGETS = Object.freeze({
     // mintAuthHandoff and exchangeAuthHandoff with both left 403.
     //
     // TO CLOSE IT: complete #547 by granting the fiveacross deploy SA
-    // run.services.update on fiveacross, then flip this to false. The existing
-    // pre-publish invoker check will prove the grant before Firebase publishes.
+    // run.services.update on fiveacross, successfully apply
+    // set-auth-handoff-invoker.sh to both callables, then flip this to false.
+    // Once false, deploy-target.mjs re-applies that idempotent pair before it
+    // constructs any hosting-only or full build/deploy invocation.
     skipInvokerReconcile: true,
   }),
 });

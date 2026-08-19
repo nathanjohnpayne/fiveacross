@@ -3,10 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deployInvocation, deployRequest } from './deploy-target.mjs';
+import { DEPLOY_TARGETS } from './build-target.mjs';
+import { deployInvocation, deployRequest, executeDeployRequest } from './deploy-target.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const deployTargetScript = resolve(repoRoot, 'scripts', 'deploy-target.mjs');
+const deployScript = resolve(repoRoot, 'scripts', 'deploy.sh');
+const authHandoffInvokerScript = resolve(repoRoot, 'scripts', 'set-auth-handoff-invoker.sh');
 
 describe('deploy target selection', () => {
   it('requires an explicit deploy target', () => {
@@ -34,9 +37,113 @@ describe('deploy target selection', () => {
     );
     expect(result.stderr).toContain(
       'Complete #547: grant the Five Across deploy service account run.services.update, ' +
-        'set skipInvokerReconcile to false, and let the existing pre-publish invoker check verify both handoff callables.',
+        'successfully apply AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh to both callables, ' +
+        'then set skipInvokerReconcile to false.',
     );
     expect(result.stderr).toContain('Nothing has been built or published.\nUsage:');
+  });
+
+  it('applies both-callable readiness before constructing or spawning a Five Across hosting deploy', () => {
+    const calls = [];
+    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
+
+    const result = executeDeployRequest(
+      { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--only', 'hosting'] },
+      readyConfig,
+      {
+        KEEP_ME: 'yes',
+        AUTH_HANDOFF_PROJECT: 'gaycruisebingo',
+        AUTH_HANDOFF_REGION: 'elsewhere',
+        AUTH_HANDOFF_MINT_SERVICE: 'wrong-mint',
+        AUTH_HANDOFF_EXCHANGE_SERVICE: 'wrong-exchange',
+      },
+      spawn,
+    );
+
+    expect(result.status).toBe(0);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual([
+      authHandoffInvokerScript,
+      [],
+      {
+        env: { KEEP_ME: 'yes', AUTH_HANDOFF_PROJECT: 'fiveacross' },
+        stdio: 'inherit',
+      },
+    ]);
+    expect(calls[1][0]).toBe(deployScript);
+    expect(calls[1][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross', '--only', 'hosting']);
+    expect(calls[1][2]).toMatchObject({
+      env: {
+        KEEP_ME: 'yes',
+        BUILD_CMD: 'npm run build:fiveacross',
+        DEPLOY_TARGET_PROJECT: 'fiveacross',
+      },
+      stdio: 'inherit',
+    });
+  });
+
+  it('applies both-callable readiness before constructing or spawning a full Five Across deploy', () => {
+    const calls = [];
+    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
+
+    executeDeployRequest(
+      { target: 'fiveacross', wrapperArgs: [], deployArgs: [] },
+      readyConfig,
+      {},
+      spawn,
+    );
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0]).toBe(authHandoffInvokerScript);
+    expect(calls[1][0]).toBe(deployScript);
+    expect(calls[1][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross']);
+  });
+
+  it('does not construct or spawn the Five Across deploy when either handoff callable is not ready', () => {
+    const calls = [];
+    const readyConfig = { ...DEPLOY_TARGETS.fiveacross, skipInvokerReconcile: false };
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 1 };
+    };
+
+    expect(() =>
+      executeDeployRequest(
+        { target: 'fiveacross', wrapperArgs: [], deployArgs: ['--only', 'hosting'] },
+        readyConfig,
+        {},
+        spawn,
+      ),
+    ).toThrow('both auth-handoff callables must be reachable');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(authHandoffInvokerScript);
+  });
+
+  it('keeps Gay Cruise Bingo on its unchanged single deploy spawn', () => {
+    const calls = [];
+    const spawn = (...args) => {
+      calls.push(args);
+      return { status: 0 };
+    };
+
+    executeDeployRequest(
+      { target: 'gaycruisebingo', wrapperArgs: [], deployArgs: ['--only', 'hosting'] },
+      DEPLOY_TARGETS.gaycruisebingo,
+      {},
+      spawn,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(deployScript);
+    expect(calls[0][1]).toEqual(['--', 'gaycruisebingo', '--only', 'hosting']);
   });
 
   it('keeps deploy-wrapper flags before Firebase options', () => {

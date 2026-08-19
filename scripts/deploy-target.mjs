@@ -1,7 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const DEPLOY_SCRIPT = resolve(SCRIPT_DIR, 'deploy.sh');
+const AUTH_HANDOFF_INVOKER_SCRIPT = resolve(SCRIPT_DIR, 'set-auth-handoff-invoker.sh');
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
   '--force',
@@ -49,11 +53,10 @@ export function deployRequest(argv) {
   };
 }
 
-export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env, wrapperArgs = []) {
+function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wrapperArgs) {
   if (wrapperArgs.includes('--skip-build')) {
     throw new Error('A named target deploy always rebuilds its selected target; --skip-build is not allowed.');
   }
-  const config = configForTarget(target);
   const args = [...wrapperArgs];
   if (config.skipCloudflarePurge && !args.includes('--skip-cf-purge')) args.push('--skip-cf-purge');
   if (config.skipInvokerReconcile && !args.includes('--skip-invoker')) args.push('--skip-invoker');
@@ -76,10 +79,20 @@ export function deployInvocation(target, deployArgs = [], inheritedEnv = process
   environment.DEPLOY_TARGET_PROJECT = config.firebaseProject;
 
   return {
-    command: resolve(process.cwd(), 'scripts', 'deploy.sh'),
+    command: DEPLOY_SCRIPT,
     args,
     environment,
   };
+}
+
+export function deployInvocation(target, deployArgs = [], inheritedEnv = process.env, wrapperArgs = []) {
+  return deployInvocationForConfig(
+    target,
+    configForTarget(target),
+    deployArgs,
+    inheritedEnv,
+    wrapperArgs,
+  );
 }
 
 function assertTargetDeployReady(target, config) {
@@ -89,9 +102,55 @@ function assertTargetDeployReady(target, config) {
   throw new Error(
     `Refusing to deploy ${target}: VITE_AUTH_HANDOFF_ORIGIN is active while skipInvokerReconcile is true. ` +
       `Complete #547: grant the Five Across deploy service account run.services.update, ` +
-      `set skipInvokerReconcile to false, and let the existing pre-publish invoker check verify both handoff callables. ` +
+      `successfully apply AUTH_HANDOFF_PROJECT=fiveacross scripts/set-auth-handoff-invoker.sh to both callables, ` +
+      `then set skipInvokerReconcile to false. ` +
       `Nothing has been built or published.`,
   );
+}
+
+export function executeDeployRequest(
+  request,
+  config = configForTarget(request.target),
+  inheritedEnv = process.env,
+  spawn = spawnSync,
+) {
+  assertTargetDeployReady(request.target, config);
+
+  const handoffOrigin = config.identity?.VITE_AUTH_HANDOFF_ORIGIN?.trim();
+  if (handoffOrigin) {
+    const readinessEnvironment = { ...inheritedEnv };
+    delete readinessEnvironment.AUTH_HANDOFF_PROJECT;
+    delete readinessEnvironment.AUTH_HANDOFF_REGION;
+    delete readinessEnvironment.AUTH_HANDOFF_MINT_SERVICE;
+    delete readinessEnvironment.AUTH_HANDOFF_EXCHANGE_SERVICE;
+    readinessEnvironment.AUTH_HANDOFF_PROJECT = config.firebaseProject;
+
+    const readiness = spawn(AUTH_HANDOFF_INVOKER_SCRIPT, [], {
+      env: readinessEnvironment,
+      stdio: 'inherit',
+    });
+    if (readiness.error || readiness.status !== 0) {
+      const cause = readiness.error ? ` (${readiness.error.message})` : '';
+      throw new Error(
+        `Refusing to deploy ${request.target}: the pre-build auth-handoff invoker readiness apply failed${cause}; ` +
+          `both auth-handoff callables must be reachable before the client build can ship. ` +
+          `Complete #547 with AUTH_HANDOFF_PROJECT=${config.firebaseProject} ` +
+          `scripts/set-auth-handoff-invoker.sh. Nothing has been built or published.`,
+      );
+    }
+  }
+
+  const invocation = deployInvocationForConfig(
+    request.target,
+    config,
+    request.deployArgs,
+    inheritedEnv,
+    request.wrapperArgs,
+  );
+  return spawn(invocation.command, invocation.args, {
+    env: invocation.environment,
+    stdio: 'inherit',
+  });
 }
 
 function usage() {
@@ -102,12 +161,11 @@ function usage() {
 
 function main() {
   let request;
-  let invocation;
+  let result;
   try {
     request = deployRequest(process.argv.slice(2));
     const config = configForTarget(request.target);
-    assertTargetDeployReady(request.target, config);
-    invocation = deployInvocation(request.target, request.deployArgs, process.env, request.wrapperArgs);
+    result = executeDeployRequest(request, config, process.env, spawnSync);
   } catch (error) {
     console.error(error.message);
     usage();
@@ -115,10 +173,6 @@ function main() {
     return;
   }
 
-  const result = spawnSync(invocation.command, invocation.args, {
-    env: invocation.environment,
-    stdio: 'inherit',
-  });
   if (result.error) {
     console.error(result.error.message);
     process.exitCode = 1;
