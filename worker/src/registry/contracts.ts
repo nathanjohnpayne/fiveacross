@@ -65,6 +65,11 @@ const PATH_NAMESPACES = new Set(['fiveacross.app', 'vacaybingo.com']);
 const RFC_3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)$/;
+const SYNTHETIC_EVENT = /^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/;
+
+export function isSyntheticRegistryHost(host: string): boolean {
+  return SYNTHETIC_EVENT.test(host) || SYNTHETIC_ROOT.test(host);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -105,7 +110,11 @@ function parseDesired(host: string, value: unknown): ReplicaDesired {
       throw new Error('invalid route status');
     }
     const classified = classifyHost(host);
-    if (classified.kind !== 'event' || classified.slug !== slug) {
+    const syntheticSlug = SYNTHETIC_EVENT.test(host) ? host.split('.')[0] : null;
+    if (
+      (syntheticSlug === null && (classified.kind !== 'event' || classified.slug !== slug)) ||
+      (syntheticSlug !== null && syntheticSlug !== slug)
+    ) {
       throw new Error('route slug must match the canonical host label');
     }
     if (pathNamespace !== null) throw new Error('pathNamespace is invalid on an Event subdomain');

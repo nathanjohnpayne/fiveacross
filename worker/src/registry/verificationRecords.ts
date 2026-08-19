@@ -15,3 +15,12 @@ export const REGISTRY_VERIFICATION_RECORDS: readonly VerificationRecord[] = Obje
 
 export const REGISTRY_SYNC_AUDIENCE =
   'https://five-across-event-registry.nathanpayne.workers.dev/__internal/hostname-replicas/v1';
+
+const REGISTRY_ORIGIN = 'https://five-across-event-registry.nathanpayne.workers.dev';
+
+export const REGISTRY_ROLE_AUDIENCES = {
+  audit: `${REGISTRY_ORIGIN}/__internal/hostname-replicas/v1/audit`,
+  recovery: `${REGISTRY_ORIGIN}/__internal/hostname-replicas/v1/recover`,
+  'source-attestor': `${REGISTRY_ORIGIN}/__internal/hostname-replicas/v1/source-attestor`,
+  'regional-probe': `${REGISTRY_ORIGIN}/__internal/hostname-replicas/v1/regional-probe`,
+} as const;

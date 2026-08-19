@@ -98,7 +98,10 @@ export function normalizeSlug(input: string): string {
  *  `validateSlug` so the wizard can say "that address is reserved" without
  *  first having to establish that it is otherwise well-formed. */
 export function isReservedLabel(label: string): boolean {
-  return RESERVED.has(label);
+  // `r2-*` is the controller-only rehearsal namespace from the registry
+  // contract. It is permanently excluded from organizer claims even when the
+  // suffix does not happen to be one of the two currently generated shapes.
+  return RESERVED.has(label) || label.startsWith('r2-');
 }
 
 /**

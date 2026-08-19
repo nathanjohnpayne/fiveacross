@@ -110,7 +110,13 @@ async function signedRequest(
 
 function harness(data: Awaited<ReturnType<typeof fixture>>) {
   const sync = vi.fn(async () => ({ status: 200 as const, result: 'applied' as const }));
-  const getByName = vi.fn(() => ({ sync }));
+  const getByName = vi.fn(() => ({
+    sync,
+    audit: vi.fn(),
+    recover: vi.fn(),
+    issueProbeChallenge: vi.fn(),
+    attestProbe: vi.fn(),
+  }));
   const limit = vi.fn(async () => ({ success: true }));
   const config: RegistryServiceConfig = { audience: AUDIENCE, verificationRecords: [data.record] };
   const deps: RegistryServiceDeps = {

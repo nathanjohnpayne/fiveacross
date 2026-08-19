@@ -16,6 +16,10 @@ import {
   type JwksResolver,
 } from './oidc';
 import type { SyncResponse } from './state';
+import type { RegistryAuditPage } from './audit';
+import type { ProbeAttestation, ProbeChallenge, ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
+import type { RecoveryRecord, RecoveryRequest } from './recovery';
+import { handleControlFetch } from './controlService';
 
 const MAX_SIGNATURE_AGE_MS = 60_000;
 const CANONICAL_POSITIVE_DECIMAL = /^[1-9]\d*$/;
@@ -34,6 +38,23 @@ const SYNC_RESULTS = new Set([
 
 export type HostRegistryStub = {
   sync(payload: RouterReplicaDesired, publisherEpoch: string): Promise<SyncResponse>;
+  audit(afterRecoverySequence?: string): Promise<RegistryAuditPage>;
+  recover(
+    request: RecoveryRequest,
+    context: { now: number; operatorSub: string; lockId: string; publisherIntegrityProven?: boolean },
+  ): Promise<{ sequence: string; action: RecoveryRecord['action'] }>;
+  issueProbeChallenge(
+    request: { host: string; phase: ProbePhase; expectedStateDigest: string },
+    principal: ProbePrincipal,
+    now: number,
+    nonce: string,
+  ): Promise<ProbeChallenge>;
+  attestProbe(
+    observation: ProbeObservation,
+    principal: ProbePrincipal,
+    now: number,
+    attestationId: string,
+  ): Promise<ProbeAttestation>;
 };
 
 export type HostRegistryNamespace = {
@@ -47,6 +68,9 @@ export type RegistryRateLimiter = {
 export type RegistryServiceConfig = {
   audience: string;
   verificationRecords: readonly VerificationRecord[];
+  roleAudiences?: Partial<
+    Record<'audit' | 'recovery' | 'source-attestor' | 'regional-probe', string>
+  >;
 };
 
 export type RegistryServiceDeps = {
@@ -54,6 +78,7 @@ export type RegistryServiceDeps = {
   jwks: JwksResolver;
   hostRegistry: HostRegistryNamespace;
   rateLimiter: RegistryRateLimiter;
+  randomId?: () => string;
 };
 
 function json(status: number, body: Record<string, unknown>): Response {
@@ -211,6 +236,10 @@ export async function handleRegistryFetch(
   deps: RegistryServiceDeps,
 ): Promise<Response> {
   const url = new URL(request.url);
-  if (url.pathname !== SYNC_PATH || url.search !== '') return json(404, { error: 'not-found' });
-  return syncResponse(request, config, deps);
+  if (url.pathname === SYNC_PATH && url.search === '') return syncResponse(request, config, deps);
+  const control = await handleControlFetch(request, config, {
+    ...deps,
+    randomId: deps.randomId ?? (() => crypto.randomUUID()),
+  });
+  return control ?? json(404, { error: 'not-found' });
 }

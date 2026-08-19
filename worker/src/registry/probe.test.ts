@@ -1,0 +1,187 @@
+// @vitest-environment node
+import { describe, expect, it } from 'vitest';
+import {
+  acceptProbeAttestation,
+  issueProbeChallenge,
+  matchProbeAttestations,
+  type ProbeObservation,
+} from './probe';
+
+const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
+const NOW = Date.parse('2026-08-19T12:35:00.000Z');
+const PRINCIPAL = {
+  subject: 'probe-sub-1',
+  keyVersion: 'probe-key/1',
+  keyFingerprint: 'a'.repeat(64),
+  region: 'us-west1',
+};
+
+function blockedObservation(nonce = 'nonce-1'): ProbeObservation {
+  return {
+    phase: 'blocked-before-worker',
+    probeNonce: nonce,
+    observedAt: '2026-08-19T12:34:45.000Z',
+    rayId: 'ray-1',
+    host: HOST,
+    requestPath: `/__registry-probe?nonce=${nonce}`,
+    expectedStatus: 403,
+    observedStatus: 403,
+    expectedBlockBodyDigest: 'b'.repeat(64),
+    observedBlockBodyDigest: 'b'.repeat(64),
+  };
+}
+
+describe('regional probe challenges', () => {
+  it('binds a random one-use challenge to subject, slot-derived region, phase, host, and state', () => {
+    const challenge = issueProbeChallenge(
+      {
+        host: HOST,
+        phase: 'blocked-before-worker',
+        expectedStateDigest: 'c'.repeat(64),
+      },
+      PRINCIPAL,
+      NOW,
+      'nonce-1',
+    );
+    expect(challenge).toMatchObject({
+      probeNonce: 'nonce-1',
+      subject: 'probe-sub-1',
+      region: 'us-west1',
+      phase: 'blocked-before-worker',
+      host: HOST,
+      consumed: false,
+    });
+    expect(challenge.expiresAt).toBe(NOW + 5 * 60_000);
+  });
+
+  it('accepts an exact fresh observation and marks the challenge consumed', () => {
+    const challenge = issueProbeChallenge(
+      { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: 'c'.repeat(64) },
+      PRINCIPAL,
+      NOW,
+      'nonce-1',
+    );
+    const result = acceptProbeAttestation(
+      challenge,
+      blockedObservation(),
+      PRINCIPAL,
+      NOW,
+      'attestation-1',
+    );
+    expect(result.challenge.consumed).toBe(true);
+    expect(result.attestation).toMatchObject({
+      id: 'attestation-1',
+      subject: 'probe-sub-1',
+      region: 'us-west1',
+      observation: { rayId: 'ray-1' },
+    });
+  });
+
+  it.each([
+    ['replay', (challenge: ReturnType<typeof issueProbeChallenge>) => ({ ...challenge, consumed: true })],
+    ['wrong subject', (challenge: ReturnType<typeof issueProbeChallenge>) => ({ ...challenge, subject: 'other' })],
+    ['expired', (challenge: ReturnType<typeof issueProbeChallenge>) => ({ ...challenge, expiresAt: NOW - 1 })],
+  ])('rejects %s', (_label, change) => {
+    const challenge = change(
+      issueProbeChallenge(
+        { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: 'c'.repeat(64) },
+        PRINCIPAL,
+        NOW,
+        'nonce-1',
+      ),
+    );
+    expect(() =>
+      acceptProbeAttestation(challenge, blockedObservation(), PRINCIPAL, NOW, 'attestation-1'),
+    ).toThrow();
+  });
+
+  it('rejects a forged nonce, host, wrong phase, caller-supplied region, or stale observation', () => {
+    const challenge = issueProbeChallenge(
+      { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: 'c'.repeat(64) },
+      PRINCIPAL,
+      NOW,
+      'nonce-1',
+    );
+    expect(() => acceptProbeAttestation(challenge, blockedObservation('forged'), PRINCIPAL, NOW, 'a')).toThrow('nonce');
+    expect(() =>
+      acceptProbeAttestation(challenge, { ...blockedObservation(), host: 'r2-other.fiveacross.app' }, PRINCIPAL, NOW, 'a'),
+    ).toThrow('host');
+    expect(() =>
+      acceptProbeAttestation(
+        challenge,
+        { ...blockedObservation(), phase: 'canonical-after-unblock' } as ProbeObservation,
+        PRINCIPAL,
+        NOW,
+        'a',
+      ),
+    ).toThrow('phase');
+    expect(() =>
+      acceptProbeAttestation(
+        challenge,
+        { ...blockedObservation(), region: 'caller-chosen' } as unknown as ProbeObservation,
+        PRINCIPAL,
+        NOW,
+        'a',
+      ),
+    ).toThrow('region');
+    expect(() =>
+      acceptProbeAttestation(
+        challenge,
+        { ...blockedObservation(), observedAt: '2026-08-19T12:30:00.000Z' },
+        PRINCIPAL,
+        NOW,
+        'a',
+      ),
+    ).toThrow('stale');
+  });
+
+  it('pairs exactly three distinct configured runners to provider Ray/path/status evidence', () => {
+    const attestations = [0, 1, 2].map((index) => {
+      const principal = {
+        subject: `probe-sub-${index}`,
+        keyVersion: `probe-key/${index}`,
+        keyFingerprint: String(index + 1).repeat(64),
+        region: ['us-west1', 'us-east1', 'europe-west1'][index],
+      };
+      const nonce = `nonce-${index}`;
+      const challenge = issueProbeChallenge(
+        { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: 'c'.repeat(64) },
+        principal,
+        NOW,
+        nonce,
+      );
+      return acceptProbeAttestation(
+        challenge,
+        { ...blockedObservation(nonce), rayId: `ray-${index}` },
+        principal,
+        NOW,
+        `att-${index}`,
+      ).attestation;
+    });
+    const providers = attestations.map((attestation) => ({
+      rayId: attestation.observation.rayId,
+      host: HOST,
+      path: attestation.observation.requestPath,
+      edgeResponseStatus: 403,
+    }));
+    expect(() =>
+      matchProbeAttestations(
+        attestations,
+        attestations.map((attestation) => attestation.id),
+        providers,
+        'blocked-before-worker',
+      ),
+    ).not.toThrow();
+
+    const duplicateRunner = [...attestations];
+    duplicateRunner[2] = { ...duplicateRunner[2], subject: duplicateRunner[0].subject };
+    expect(() =>
+      matchProbeAttestations(
+        duplicateRunner,
+        duplicateRunner.map((attestation) => attestation.id),
+        providers,
+        'blocked-before-worker',
+      ),
+    ).toThrow('distinct');
+  });
+});
