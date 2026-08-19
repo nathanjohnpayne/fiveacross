@@ -286,8 +286,8 @@ if [[ ${#ONLY_VALUES[@]} -gt 0 ]]; then
         # `functions` scope above and must be just as strict (#548, Codex P2
         # round 6). It previously fell through to the unfamiliar-selector arm
         # and went conservative, which could report success over a released
-        # service that was missing. The `--except` side already treats
-        # `functions:default` as the whole codebase; this makes `--only` agree.
+        # service that was missing. This arm is intentionally asymmetric with
+        # `--except functions:default`, which Firebase treats as a no-op.
         # If this repo ever gains NAMED codebases, give each its own arm here
         # rather than widening this one.
         functions:default)
