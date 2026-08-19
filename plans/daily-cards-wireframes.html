@@ -755,12 +755,14 @@
     position:relative;color:var(--ink);font-family:'Helvetica Neue',Arial,sans-serif}
   .ogc-gcb{--ink:#f6ecff;--dim:#b9a9d6;--primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;
     --og-cell:#181424;--og-bar:#36283c;--og-onbar:rgba(20,10,30,.45);--og-onglow:rgba(255,45,149,.30);
+    --og-ongrad:linear-gradient(145deg,#ff2d95,#00e6ff);
     --og-short:.69;--og-long:1;--og-cell-radius:3.25px;--og-freeink:#1a1206;
     --og-boardshadow:0 0 17.5px rgba(255,45,149,.10);background:
     radial-gradient(205px 155px at 4% 2%,rgba(255,45,149,.22),transparent 66%),
     radial-gradient(195px 150px at 100% 100%,rgba(0,230,255,.18),transparent 64%),#07060d}
   .ogc-vacay{--ink:#e6eef2;--dim:#6b7d87;--primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;
     --og-cell:#1b2a3a;--og-bar:#2e4759;--og-onbar:rgba(10,25,35,.40);--og-onglow:rgba(46,127,168,.20);
+    --og-ongrad:linear-gradient(150deg,#2e7fa8,#8fd0c3);
     --og-short:.69;--og-long:1;--og-cell-radius:3px;--og-freeink:#1b1005;
     --og-boardshadow:0 5.5px 12px rgba(0,0,0,.45);background:
     radial-gradient(205px 155px at 96% 6%,rgba(46,127,168,.20),transparent 66%),
@@ -768,6 +770,7 @@
   .ogc-vacay::before{content:"";position:absolute;inset:8.5px;border:1px dashed rgba(150,196,208,.36);border-radius:2px}
   .ogc-fa{--ink:#f2f4f8;--dim:#98a1b0;--primary:#3f66f0;--secondary:#2c4bd8;--accent:#f5c451;
     --og-cell:#191c25;--og-bar:#2b303c;--og-onbar:rgba(255,255,255,.55);--og-onglow:transparent;
+    --og-ongrad:linear-gradient(145deg,#3f66f0,#2c4bd8);
     --og-short:.62;--og-long:.78;--og-cell-radius:2.5px;--og-freeink:#171410;--og-boardshadow:none;background:
     repeating-linear-gradient(90deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
     repeating-linear-gradient(0deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
@@ -802,7 +805,7 @@
   .ogc .ogboardwrap{position:absolute;left:180.5px;top:23.5px;width:99.75px;text-align:center}
   .ogc-vacay .ogboardwrap{left:192.5px;top:37.5px;width:87.5px;transform:rotate(-2deg)}
   .ogc-fa .ogboardwrap{left:177px;top:22.5px;width:103px}
-  .ogc .oggrid{display:grid;grid-template-columns:repeat(5,1fr);gap:2.25px;padding:3.75px;
+  .ogc .oggrid{display:grid;box-sizing:border-box;grid-template-columns:repeat(5,1fr);gap:2.25px;padding:3.75px;
     border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:6.5px;box-shadow:var(--og-boardshadow)}
   .ogc-vacay .oggrid{gap:2.5px;padding:3.75px;border-color:rgba(143,208,195,.16);background:rgba(9,22,32,.82);border-radius:5.5px}
   .ogc-fa .oggrid{gap:2.5px;padding:4px;border-color:rgba(255,255,255,.10);border-radius:5px}
@@ -816,7 +819,7 @@
     border-radius:1px;background:var(--og-bar);transform-origin:left center}
   .ogc .ogsq::before{top:38%;transform:scaleX(var(--bar-one))}
   .ogc .ogsq::after{top:57%;transform:scaleX(var(--bar-two))}
-  .ogc .ogsq.on{background:linear-gradient(145deg,var(--primary),var(--secondary));border-color:transparent;
+  .ogc .ogsq.on{background:var(--og-ongrad);border-color:transparent;
     box-shadow:0 0 5.5px var(--og-onglow)}
   .ogc .ogsq.on::before,.ogc .ogsq.on::after{background:var(--og-onbar)}
   .ogc .ogsq.freec{display:flex;align-items:center;justify-content:center;background:var(--accent);border-color:var(--accent);
@@ -3902,7 +3905,7 @@
         <div class="ogmark">GAY CRUISE<br><b>BINGO</b></div>
         <div class="ogby">BY FIVE ACROSS</div>
         <div class="ogrule"></div>
-        <div class="ogdesc">Live multiplayer bingo for the high seas.</div>
+        <div class="ogdesc">Live multiplayer bingo<br>for the high seas.</div>
         <div class="ogdom">gaycruisebingo.com</div>
       </div>
       <div class="ogboardwrap">

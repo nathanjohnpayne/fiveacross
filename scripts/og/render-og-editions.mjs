@@ -149,7 +149,7 @@ const ART = {
       barbg: '#36283c',
       onbar: 'rgba(20,10,30,0.45)',
       onglow: OG_EDITION_ART.gcb.palette.onglow,
-      ongrad: 'linear-gradient(145deg,#ff2d95,#00e6ff)',
+      ongrad: OG_EDITION_ART.gcb.palette.onGradient,
       boardline: 'rgba(255,45,149,0.30)',
       boardshadow: OG_EDITION_ART.gcb.palette.boardshadow,
       freeink: OG_EDITION_ART.gcb.palette.freeink,
@@ -166,7 +166,7 @@ const ART = {
     // The words are the brand table's `appDescription`; the only thing art
     // direction owns is WHERE the line breaks, so the two-line block sits
     // square under the rule instead of running past the board.
-    desc: { wrapAfterWords: 3 },
+    desc: { wrapAfterWords: OG_EDITION_ART.gcb.descriptionWrapAfterWords },
     // The endorsement row (#688) adds ~45px to a stack that used to fill the
     // frame symmetrically, so the whole lockup rides up to keep the top and
     // bottom margins even. Gaps otherwise mirror Vacay's rhythm — one family.
@@ -208,7 +208,7 @@ const ART = {
       barbg: '#2e4759',
       onbar: 'rgba(10,25,35,0.40)',
       onglow: OG_EDITION_ART.vacay.palette.onglow,
-      ongrad: 'linear-gradient(150deg,#2e7fa8,#8fd0c3)',
+      ongrad: OG_EDITION_ART.vacay.palette.onGradient,
       boardline: 'rgba(143,208,195,0.16)',
       boardbg: 'rgba(9,22,32,0.82)',
       // The stamp's scrim: the page ground at 0.70, so the board recedes
@@ -289,7 +289,7 @@ const ART = {
       barbg: '#2b303c',
       onbar: 'rgba(255,255,255,0.55)',
       onglow: OG_EDITION_ART.fiveacross.palette.onglow,
-      ongrad: 'linear-gradient(145deg,#3f66f0,#2c4bd8)',
+      ongrad: OG_EDITION_ART.fiveacross.palette.onGradient,
       boardline: 'rgba(255,255,255,0.10)',
       boardshadow: OG_EDITION_ART.fiveacross.palette.boardshadow,
       freeink: OG_EDITION_ART.fiveacross.palette.freeink,

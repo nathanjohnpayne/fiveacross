@@ -1,6 +1,7 @@
 export type OgEditionArt = {
   eyebrow: { text: string; markStyle?: string };
-  palette: { freeink: string; onglow: string; boardshadow: string };
+  palette: { freeink: string; onglow: string; onGradient: string; boardshadow: string };
+  descriptionWrapAfterWords?: number;
   board: {
     cellRadius: number;
     pattern: readonly string[];

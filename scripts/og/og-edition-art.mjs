@@ -7,8 +7,10 @@ export const OG_EDITION_ART = {
     palette: {
       freeink: '#1a1206',
       onglow: 'rgba(255,45,149,0.30)',
+      onGradient: 'linear-gradient(145deg,#ff2d95,#00e6ff)',
       boardshadow: '0 0 70px rgba(255,45,149,0.10)',
     },
+    descriptionWrapAfterWords: 3,
     board: {
       cellRadius: 13,
       pattern: ['x..x.', '.x..x', 'xxFxx', '.x...', 'x..x.'],
@@ -28,6 +30,7 @@ export const OG_EDITION_ART = {
     palette: {
       freeink: '#1b1005',
       onglow: 'rgba(46,127,168,0.20)',
+      onGradient: 'linear-gradient(150deg,#2e7fa8,#8fd0c3)',
       boardshadow: '0 22px 48px rgba(0,0,0,0.45)',
     },
     board: {
@@ -50,6 +53,7 @@ export const OG_EDITION_ART = {
     palette: {
       freeink: '#171410',
       onglow: 'transparent',
+      onGradient: 'linear-gradient(145deg,#3f66f0,#2c4bd8)',
       boardshadow: 'none',
     },
     board: {

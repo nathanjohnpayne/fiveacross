@@ -342,6 +342,7 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
       expect(variables['og-cell-radius']).toBe(`${art.board.cellRadius / 4}px`);
       expect(variables['og-freeink']).toBe(art.palette.freeink);
       expect(normalizeCss(variables['og-onglow'])).toBe(normalizeCss(art.palette.onglow));
+      expect(normalizeCss(variables['og-ongrad'])).toBe(normalizeCss(art.palette.onGradient));
       expect(normalizeCss(variables['og-boardshadow'])).toBe(normalizeCss(quarterScalePixels(art.palette.boardshadow)));
     };
 
@@ -359,7 +360,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
         `<div class="ogeyebrow"><span>${brand.lexicon.shareMark}</span> ${OG_EDITION_ART.gcb.eyebrow.text}</div>`,
       );
       expect(gcb).toContain(`<div class="ogby">${brand.wordmarkByline}</div>`);
-      expect(gcb).toContain(`<div class="ogdesc">${brand.appDescription}</div>`);
+      const words = brand.appDescription.split(' ');
+      const wrapAt = OG_EDITION_ART.gcb.descriptionWrapAfterWords;
+      const wrappedDescription = `${words.slice(0, wrapAt).join(' ')}<br>${words.slice(wrapAt).join(' ')}`;
+      expect(gcb).toContain(`<div class="ogdesc">${wrappedDescription}</div>`);
       expect(gcb).toContain('<div class="ogrule"></div>');
       expect(gcb).toContain('<div class="ogcaption">BINGO</div>');
       assertBoardArt('gcb', 'gcb', gcb);
@@ -395,6 +399,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
       expect(fiveAcross).toContain('<div class="ogcaption">BINGO</div>');
       expect(fiveAcross).not.toContain('Packed room, no bars?');
       assertBoardArt('fiveacross', 'fa', fiveAcross);
+    });
+
+    it('keeps the quarter-scale grid inside each renderer-sized board wrapper', () => {
+      expect(wireframesHtml).toMatch(/\.ogc \.oggrid\{[^}]*box-sizing:border-box;/);
     });
   });
 });
