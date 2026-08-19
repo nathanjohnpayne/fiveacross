@@ -29,7 +29,11 @@ describe('SignIn — the gate wears the resolved Edition', () => {
     // brand now serves more than the one sailing, and a baked "Trieste →
     // Barcelona · July 2026" reads as immediately wrong under any other
     // Event's postcard. Event specifics belong to Event data, not the brand.
-    expect(screen.getByText(/Sign in, get your card, mark it if you see it\./)).toBeTruthy();
+    // #881 gave gcb its own Join-frame voice chip, ADDED above the plain
+    // tagline (not replacing it — that is vacay's own chip behavior) — same
+    // itinerary-free spirit, new copy.
+    expect(screen.getByText('What happens at sea. Goes on the card.')).toBeTruthy();
+    expect(screen.getByText('Sign in, get your card, mark it if you see it.')).toBeTruthy();
     expect(screen.queryByText(/Trieste → Barcelona/)).toBeNull();
   });
 
@@ -43,11 +47,15 @@ describe('SignIn — the gate wears the resolved Edition', () => {
     expect(screen.queryByText(/at sea/i)).toBeNull();
   });
 
-  it('brands the deal-failure retry panel too — it reuses the same shell', () => {
+  it('brands the deal-failure retry panel too — it reuses the same shell, with no offline-note claim about a card that was never dealt', () => {
+    // Codex P2, PR #896 round 4: no card exists yet on this screen, so
+    // brand.offlineNote's "your card keeps working offline" would be a false
+    // claim here specifically — this panel carries no offline note at all.
     setActiveEdition('vacay');
     render(<DealError message="Could not deal your card." onRetry={vi.fn()} retrying={false} />);
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('VACAY BINGO');
     expect(screen.queryByText(/at sea/i)).toBeNull();
+    expect(screen.queryByText(/keeps working offline/i)).toBeNull();
   });
 
   // The uptime synthetic (#142, tests/synthetic/app-mounts.spec.ts) waits for

@@ -189,17 +189,23 @@ describe('ErrorBoundary', () => {
 // reads the real brand table rather than holding strings, which a stubbed
 // module would hide.
 describe('ErrorBoundary — the crash panel wears the resolved Edition', () => {
-  it('shows the cruise brand on the legacy Edition', () => {
+  it('shows the cruise brand on the legacy Edition, with the total-failure fallback, not the routine offline note', () => {
+    // Codex P2, PR #896 round 2: the crash panel is the "app itself is
+    // broken" case specs/x-launch-checklist.md's printed-card fallback
+    // names, so it must show `crashFallbackNote`, never the routine
+    // `offlineNote` — "your card keeps working offline" would be false on
+    // a screen that exists because the app just crashed.
     render(
       <ErrorBoundary>
         <Boom />
       </ErrorBoundary>,
     );
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('GAY CRUISE BINGO');
-    expect(screen.getByText(/lost signal at sea/i)).toBeInTheDocument();
+    expect(screen.getByText(/printed cards and pdf/i)).toBeInTheDocument();
+    expect(screen.queryByText(/marks sync when you reconnect/i)).toBeNull();
   });
 
-  it('shows the Vacay brand once the resolver installs that Edition', () => {
+  it('shows the Vacay brand once the resolver installs that Edition, falling back to the routine offline note (no printed-card tradition of its own)', () => {
     setActiveEdition('vacay');
     render(
       <ErrorBoundary>
@@ -209,6 +215,7 @@ describe('ErrorBoundary — the crash panel wears the resolved Edition', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('VACAY BINGO');
     expect(screen.getByText(/marks sync when you reconnect/i)).toBeInTheDocument();
     expect(screen.queryByText(/at sea/i)).toBeNull();
+    expect(screen.queryByText(/printed cards/i)).toBeNull();
   });
 
   it('falls back to the legacy brand on an unknown Edition rather than a blank wordmark', () => {
