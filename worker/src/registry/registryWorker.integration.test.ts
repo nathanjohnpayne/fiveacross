@@ -165,8 +165,9 @@ describe('HostRegistryObject runtime transactions', () => {
       verifiedAt: new Date(NOW).toISOString(),
       edgeColoCode: ['SJC', 'IAD', 'LHR'][index],
       host: HOST,
-      path: `/__registry-probe?nonce=nonce-${index}`,
-      queryDigest: String(index + 1).repeat(64),
+      path: '/__registry-probe',
+      query: `nonce=nonce-${index}`,
+      queryDigest: createHash('sha256').update(`nonce=nonce-${index}`).digest('hex'),
       edgeResponseStatus: 403,
       httpLogResponseDigest: String(index + 4).repeat(64),
       firewall: {

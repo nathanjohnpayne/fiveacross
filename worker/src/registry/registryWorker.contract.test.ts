@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE = resolve(HERE, 'registryWorker.ts');
+const CONTROL_SOURCE = resolve(HERE, 'controlService.ts');
 const CONFIG = resolve(HERE, '../../wrangler.registry.toml');
 const ROUTER_CONFIG = resolve(HERE, '../../wrangler.toml');
 
@@ -48,5 +49,12 @@ describe('registry Worker capability/configuration contract', () => {
     expect(routerConfig).toContain('# routes = [');
     expect(routerConfig).not.toMatch(/^routes\s*=/m);
     expect(routerConfig).not.toContain('HOST_REGISTRY');
+  });
+
+  it('never treats omitted replacement evidence as proof of publisher integrity', async () => {
+    const source = await readFile(CONTROL_SOURCE, 'utf8');
+    expect(source).toContain('publisherIntegrityProven: false');
+    expect(source).toContain('activePublisherMappings: publisherVerificationMappings');
+    expect(source).not.toMatch(/publisherIntegrityProven:[^\n]*publisherReplacement\s*===\s*null/);
   });
 });

@@ -1,7 +1,7 @@
 import { normalizeHost } from '../host';
 import { REGISTRY_LOCATION_HINT, parseSyncRequest } from './contracts';
 import { ControlAuthUnavailableError, authenticatePinnedRole, type PinnedRoleRequest } from './controlAuth';
-import { verificationRecordMappingDigest, type VerificationRecord } from './keys';
+import { publisherVerificationMappings, verificationRecordMappingDigest, type VerificationRecord } from './keys';
 import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
 import type { RecoveryRequest, SourceAudit } from './recovery';
@@ -274,7 +274,179 @@ async function authenticateSourceAttestation(
   }
 }
 
-function parseRecovery(value: unknown): RecoveryRequest {
+function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  if (!isRecord(value) || !hasExactKeys(value, keys)) {
+    throw new Error(`invalid ${label}`);
+  }
+  return value;
+}
+
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error(`invalid ${label}`);
+  }
+  return value;
+}
+
+function validateDesiredSchema(value: unknown): void {
+  if (!isRecord(value)) throw new Error('invalid desired state');
+  const desired = value;
+  if (desired.kind === 'route') {
+    exactRecord(value, ['kind', 'eventId', 'status', 'slug', 'edition', 'pathNamespace'], 'route state');
+  } else if (desired.kind === 'root') {
+    exactRecord(value, ['kind', 'root', 'edition', 'pathNamespace'], 'root state');
+  } else if (desired.kind === 'tombstone') {
+    exactRecord(value, ['kind'], 'tombstone state');
+  } else {
+    throw new Error('invalid desired state');
+  }
+}
+
+function validateProviderRequestSchema(value: unknown): void {
+  const provider = exactRecord(
+    value,
+    [
+      'rayId',
+      'eventAt',
+      'verifiedAt',
+      'edgeColoCode',
+      'host',
+      'path',
+      'query',
+      'queryDigest',
+      'edgeResponseStatus',
+      'httpLogResponseDigest',
+      'firewall',
+    ],
+    'provider request',
+  );
+  if (provider.firewall !== null) {
+    exactRecord(
+      provider.firewall,
+      ['action', 'source', 'ruleId', 'ref', 'matchIndex', 'logResponseDigest'],
+      'provider firewall record',
+    );
+  }
+}
+
+function validateWafSchema(value: unknown): void {
+  const waf = exactRecord(
+    value,
+    [
+      'zoneId',
+      'rulesetId',
+      'ruleId',
+      'host',
+      'verifiedAt',
+      'blockNonce',
+      'providerRule',
+      'probeAttestationIds',
+      'providerRequests',
+    ],
+    'WAF evidence',
+  );
+  exactRecord(
+    waf.providerRule,
+    ['enabled', 'action', 'expression', 'ref', 'customResponseBodyDigest', 'responseDigest'],
+    'WAF provider rule',
+  );
+  stringArray(waf.probeAttestationIds, 'probe attestation IDs');
+  if (!Array.isArray(waf.providerRequests)) throw new Error('invalid provider requests');
+  waf.providerRequests.forEach(validateProviderRequestSchema);
+}
+
+function validatePublisherReplacementSchema(value: unknown): void {
+  const replacement = exactRecord(
+    value,
+    [
+      'quarantinedEpochCeiling',
+      'nextPublisherEpoch',
+      'replacementSubject',
+      'replacementKeyVersion',
+      'replacementKeyFingerprint',
+      'registryConfigDigest',
+      'controlEvidence',
+    ],
+    'publisher replacement',
+  );
+  const control = exactRecord(
+    replacement.controlEvidence,
+    [
+      'observedAt',
+      'quarantinedRuntime',
+      'replacementRuntime',
+      'activeEpochMappings',
+      'keyAccess',
+      'serviceAccountAccess',
+      'quarantinedAccessDecisions',
+      'attestorSub',
+      'attestorKeyVersion',
+      'attestorKeyFingerprint',
+      'attestationIssuedAt',
+      'attestationSignature',
+    ],
+    'publisher control evidence',
+  );
+  for (const runtime of [control.quarantinedRuntime, control.replacementRuntime]) {
+    exactRecord(
+      runtime,
+      ['subject', 'serviceAccountEmail', 'iamMember', 'functionFullResourceName', 'functionRevision', 'responseDigest'],
+      'publisher runtime readback',
+    );
+  }
+  if (!Array.isArray(control.activeEpochMappings)) throw new Error('invalid publisher mappings');
+  control.activeEpochMappings.forEach((mapping) =>
+    exactRecord(mapping, ['epoch', 'subject', 'keyVersion', 'algorithm', 'spkiSha256'], 'publisher mapping'),
+  );
+  if (!Array.isArray(control.keyAccess)) throw new Error('invalid key access readbacks');
+  control.keyAccess.forEach((entry) => {
+    const readback = exactRecord(
+      entry,
+      ['cryptoKey', 'policyEtag', 'signMembers', 'enabledVersions', 'responseDigest'],
+      'key access readback',
+    );
+    stringArray(readback.signMembers, 'key policy members');
+    if (!Array.isArray(readback.enabledVersions)) throw new Error('invalid enabled key versions');
+    readback.enabledVersions.forEach((version) =>
+      exactRecord(version, ['keyVersion', 'algorithm', 'spkiSha256'], 'enabled key version'),
+    );
+  });
+  if (!Array.isArray(control.serviceAccountAccess)) throw new Error('invalid service-account readbacks');
+  control.serviceAccountAccess.forEach((entry) => {
+    const readback = exactRecord(
+      entry,
+      [
+        'subject',
+        'serviceAccountEmail',
+        'iamMember',
+        'fullResourceName',
+        'policyEtag',
+        'tokenCreatorMembers',
+        'responseDigest',
+      ],
+      'service-account readback',
+    );
+    stringArray(readback.tokenCreatorMembers, 'service-account policy members');
+  });
+  if (!Array.isArray(control.quarantinedAccessDecisions)) throw new Error('invalid access decisions');
+  control.quarantinedAccessDecisions.forEach((decision) =>
+    exactRecord(
+      decision,
+      [
+        'principal',
+        'fullResourceName',
+        'permission',
+        'requestTime',
+        'overallAccessState',
+        'inheritedPoliciesComplete',
+        'responseDigest',
+      ],
+      'access decision',
+    ),
+  );
+}
+
+export function parseRecovery(value: unknown): RecoveryRequest {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
@@ -311,7 +483,16 @@ function parseRecovery(value: unknown): RecoveryRequest {
   ) {
     throw new Error('invalid source audit');
   }
+  const canonical = exactRecord(
+    source.canonicalProjection,
+    ['sourceDocumentDigest', 'host', 'desired'],
+    'canonical source projection',
+  );
+  validateDesiredSchema(canonical.desired);
   parseSyncRequest(JSON.stringify(source.ledgerPayload), 'application/json');
+  if (value.expectedCommitted !== null) {
+    exactRecord(value.expectedCommitted, ['revision', 'digest'], 'expected committed state');
+  }
   const kind = value.action.kind;
   const expectedActionKeys =
     kind === 'acquire-lock'
@@ -326,7 +507,70 @@ function parseRecovery(value: unknown): RecoveryRequest {
   if (expectedActionKeys.length === 0 || !hasExactKeys(value.action, expectedActionKeys)) {
     throw new Error('invalid recovery action');
   }
+  if (kind === 'acquire-lock' || kind === 'abort-lock') {
+    validateWafSchema(value.action.wafEvidence);
+  } else if (kind === 'clear-lock') {
+    stringArray(value.action.probeAttestationIds, 'probe attestation IDs');
+    if (!Array.isArray(value.action.providerRequests)) throw new Error('invalid provider requests');
+    value.action.providerRequests.forEach(validateProviderRequestSchema);
+  } else if (value.action.publisherReplacement !== null) {
+    validatePublisherReplacementSchema(value.action.publisherReplacement);
+  }
   return value as unknown as RecoveryRequest;
+}
+
+export function parseProbePayload(value: unknown, kind: 'challenge' | 'attest'): Record<string, unknown> {
+  const outer = exactRecord(
+    value,
+    kind === 'challenge'
+      ? ['schemaVersion', 'host', 'phase', 'expectedStateDigest']
+      : ['schemaVersion', 'host', 'observation'],
+    'probe request',
+  );
+  if (outer.schemaVersion !== 1 || typeof outer.host !== 'string') {
+    throw new Error('invalid probe request');
+  }
+  if (kind === 'challenge') {
+    if (
+      (outer.phase !== 'blocked-before-worker' && outer.phase !== 'canonical-after-unblock') ||
+      typeof outer.expectedStateDigest !== 'string' ||
+      !SHA256_HEX.test(outer.expectedStateDigest)
+    ) {
+      throw new Error('invalid probe challenge');
+    }
+    return outer;
+  }
+  if (!isRecord(outer.observation)) throw new Error('invalid probe observation');
+  const observation = outer.observation;
+  const common = ['phase', 'probeNonce', 'observedAt', 'rayId', 'host', 'requestPath'];
+  if (observation.phase === 'blocked-before-worker') {
+    exactRecord(
+      observation,
+      [...common, 'expectedStatus', 'observedStatus', 'expectedBlockBodyDigest', 'observedBlockBodyDigest'],
+      'blocked probe observation',
+    );
+  } else if (observation.phase === 'canonical-after-unblock') {
+    exactRecord(
+      observation,
+      [
+        ...common,
+        'expectedStatus',
+        'observedStatus',
+        'expectedReason',
+        'observedReason',
+        'expectedRevision',
+        'observedRevision',
+        'expectedServesOrigin',
+        'observedServesOrigin',
+        'originRequestId',
+      ],
+      'canonical probe observation',
+    );
+  } else {
+    throw new Error('invalid probe observation');
+  }
+  if (observation.host !== outer.host) throw new Error('probe host mismatch');
+  return outer;
 }
 
 async function enforceRateLimit(request: Request, role: string, deps: ControlServiceDeps): Promise<Response | null> {
@@ -414,8 +658,12 @@ async function recoveryResponse(
         now: deps.now(),
         operatorSub: recoveryRecord.subject,
         lockId: deps.randomId(),
-        publisherIntegrityProven: recovery.action.kind === 'apply' && recovery.action.publisherReplacement === null,
+        // Omission is never evidence. This endpoint has no independent
+        // trusted-publisher proof channel, so every recovery apply requires
+        // the separately signed replacement evidence.
+        publisherIntegrityProven: false,
         activeRegistryConfigDigest: await verificationRecordMappingDigest(config.verificationRecords),
+        activePublisherMappings: publisherVerificationMappings(config.verificationRecords),
       });
     if (!result.ok) return json(409, { error: 'recovery-refused' });
     return json(200, { sequence: result.sequence, action: result.action });
@@ -447,10 +695,13 @@ async function probeResponse(
   }
   const limited = await enforceRateLimit(request, `probe-${kind}`, deps);
   if (limited !== null) return limited;
-  if (!isRecord(parsed.value) || parsed.value.schemaVersion !== 1 || typeof parsed.value.host !== 'string') {
+  let probe: Record<string, unknown>;
+  try {
+    probe = parseProbePayload(parsed.value, kind);
+  } catch {
     return json(400, { error: 'invalid-request' });
   }
-  const host = parsed.value.host;
+  const host = probe.host as string;
   if (host !== normalizeHost(host) || host.endsWith('.')) {
     return json(400, { error: 'invalid-request' });
   }
@@ -466,19 +717,11 @@ async function probeResponse(
       locationHint: REGISTRY_LOCATION_HINT,
     });
     if (kind === 'challenge') {
-      if (
-        !hasExactKeys(parsed.value, ['schemaVersion', 'host', 'phase', 'expectedStateDigest']) ||
-        (parsed.value.phase !== 'blocked-before-worker' && parsed.value.phase !== 'canonical-after-unblock') ||
-        typeof parsed.value.expectedStateDigest !== 'string' ||
-        !SHA256_HEX.test(parsed.value.expectedStateDigest)
-      ) {
-        return json(400, { error: 'invalid-request' });
-      }
       const result = await stub.issueProbeChallenge(
         {
           host,
-          phase: parsed.value.phase as ProbePhase,
-          expectedStateDigest: parsed.value.expectedStateDigest,
+          phase: probe.phase as ProbePhase,
+          expectedStateDigest: probe.expectedStateDigest as string,
         },
         principal,
         deps.now(),
@@ -487,11 +730,8 @@ async function probeResponse(
       if (!result.ok) return json(409, { error: 'probe-refused' });
       return json(200, result.challenge as unknown as Record<string, unknown>);
     }
-    if (!hasExactKeys(parsed.value, ['schemaVersion', 'host', 'observation']) || !isRecord(parsed.value.observation)) {
-      return json(400, { error: 'invalid-request' });
-    }
     const result = await stub.attestProbe(
-      parsed.value.observation as ProbeObservation,
+      probe.observation as ProbeObservation,
       principal,
       deps.now(),
       deps.randomId(),

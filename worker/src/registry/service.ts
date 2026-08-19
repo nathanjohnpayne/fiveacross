@@ -10,7 +10,7 @@ import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oid
 import type { SyncResponse } from './state';
 import type { RegistryAuditPage } from './audit';
 import type { ProbeAttestation, ProbeChallenge, ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
-import type { RecoveryRecord, RecoveryRequest } from './recovery';
+import type { ActivePublisherMapping, RecoveryRecord, RecoveryRequest } from './recovery';
 import { handleControlFetch } from './controlService';
 
 const MAX_SIGNATURE_AGE_MS = 60_000;
@@ -41,6 +41,7 @@ export type HostRegistryStub = {
       lockId: string;
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
+      activePublisherMappings?: readonly ActivePublisherMapping[];
     },
   ): Promise<
     { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }

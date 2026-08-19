@@ -16,7 +16,7 @@ import { GoogleJwksCache } from './oidc';
 import { handleRegistryFetch, type HostRegistryNamespace, type RegistryRateLimiter } from './service';
 import { applyPublisherSync, initialRegistryState, registryLookup, type RegistryLookup } from './state';
 import { AUDIT_PAGE_SIZE, createAuditPage, type RegistryAuditPage } from './audit';
-import { applyRecovery, type RecoveryRecord, type RecoveryRequest } from './recovery';
+import { applyRecovery, type ActivePublisherMapping, type RecoveryRecord, type RecoveryRequest } from './recovery';
 import {
   acceptProbeAttestation,
   issueProbeChallenge,
@@ -141,6 +141,7 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       lockId: string;
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
+      activePublisherMappings?: readonly ActivePublisherMapping[];
     },
   ): Promise<
     { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }

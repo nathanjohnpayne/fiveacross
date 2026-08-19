@@ -70,6 +70,28 @@ describe('regional probe challenges', () => {
     });
   });
 
+  it('rejects an absolute runner URL even when its path and nonce match', () => {
+    const challenge = issueProbeChallenge(
+      {
+        host: HOST,
+        phase: 'blocked-before-worker',
+        expectedStateDigest: 'c'.repeat(64),
+      },
+      PRINCIPAL,
+      NOW,
+      'nonce-1',
+    );
+    expect(() =>
+      acceptProbeAttestation(
+        challenge,
+        { ...blockedObservation(), requestPath: 'https://attacker.invalid/__registry-probe?nonce=nonce-1' },
+        PRINCIPAL,
+        NOW,
+        'attestation-1',
+      ),
+    ).toThrow('request identity');
+  });
+
   it.each([
     [
       'replay',
@@ -194,7 +216,8 @@ describe('regional probe challenges', () => {
     const providers = attestations.map((attestation) => ({
       rayId: attestation.observation.rayId,
       host: HOST,
-      path: attestation.observation.requestPath,
+      path: '/__registry-probe',
+      query: `nonce=${attestation.challenge.probeNonce}`,
       edgeResponseStatus: 403,
     }));
     expect(() =>
@@ -206,6 +229,18 @@ describe('regional probe challenges', () => {
         { stateDigest: 'c'.repeat(64), now: NOW },
       ),
     ).not.toThrow();
+
+    const wrongProviderQuery = providers.map((provider) => ({ ...provider }));
+    wrongProviderQuery[0].query = 'nonce=different';
+    expect(() =>
+      matchProbeAttestations(
+        attestations,
+        attestations.map((attestation) => attestation.id),
+        wrongProviderQuery,
+        'blocked-before-worker',
+        { stateDigest: 'c'.repeat(64), now: NOW },
+      ),
+    ).toThrow('provider request');
 
     const duplicateRunner = [...attestations];
     duplicateRunner[2] = {
@@ -257,7 +292,8 @@ describe('regional probe challenges', () => {
       {
         rayId: observation.rayId,
         host: HOST,
-        path: observation.requestPath,
+        path: '/__registry-probe',
+        query: 'nonce=nonce-canonical',
         edgeResponseStatus: 503,
       },
     ];

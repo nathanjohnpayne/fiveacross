@@ -22,7 +22,10 @@ async function fixtureRecord(
     ['sign', 'verify'],
   )) as CryptoKeyPair;
   const spki = await crypto.subtle.exportKey('spki', pair.publicKey);
-  const pem = `-----BEGIN PUBLIC KEY-----\n${Buffer.from(spki).toString('base64').match(/.{1,64}/g)?.join('\n')}\n-----END PUBLIC KEY-----\n`;
+  const pem = `-----BEGIN PUBLIC KEY-----\n${Buffer.from(spki)
+    .toString('base64')
+    .match(/.{1,64}/g)
+    ?.join('\n')}\n-----END PUBLIC KEY-----\n`;
   const fingerprint = createHash('sha256')
     .update(createPublicKey(pem).export({ type: 'spki', format: 'der' }))
     .digest('hex');
@@ -54,6 +57,7 @@ describe('immutable pinned verification records', () => {
     ['mismatched fingerprint', { spkiSha256: '0'.repeat(64) }],
     ['wrong algorithm', { algorithm: 'RSA_SIGN_PSS_2048_SHA256' }],
     ['non-numeric publisher epoch', { epochOrSlot: '01' }],
+    ['non-numeric publisher subject', { subject: 'publisher@example.com' }],
   ])('rejects a %s before runtime use', async (_label, override) => {
     const { record } = await fixtureRecord(override as Partial<VerificationRecord>);
     await expect(validateVerificationRecords([record])).rejects.toThrow();
@@ -62,19 +66,23 @@ describe('immutable pinned verification records', () => {
   it('rejects duplicate role slots, key versions, and fingerprints', async () => {
     const first = await fixtureRecord();
     const sameSlot = await fixtureRecord({ keyVersion: `${first.record.keyVersion}-other` });
-    await expect(validateVerificationRecords([first.record, sameSlot.record])).rejects.toThrow(
-      'role/epoch/slot',
-    );
+    await expect(validateVerificationRecords([first.record, sameSlot.record])).rejects.toThrow('role/epoch/slot');
 
-    const duplicateVersion = { ...sameSlot.record, role: 'recovery' as const, epochOrSlot: 'primary', keyVersion: first.record.keyVersion };
-    await expect(validateVerificationRecords([first.record, duplicateVersion])).rejects.toThrow(
-      'key version',
-    );
+    const duplicateVersion = {
+      ...sameSlot.record,
+      role: 'recovery' as const,
+      epochOrSlot: 'primary',
+      keyVersion: first.record.keyVersion,
+    };
+    await expect(validateVerificationRecords([first.record, duplicateVersion])).rejects.toThrow('key version');
 
-    const duplicateFingerprint = { ...first.record, role: 'recovery' as const, epochOrSlot: 'primary', keyVersion: `${first.record.keyVersion}-2` };
-    await expect(validateVerificationRecords([first.record, duplicateFingerprint])).rejects.toThrow(
-      'fingerprint',
-    );
+    const duplicateFingerprint = {
+      ...first.record,
+      role: 'recovery' as const,
+      epochOrSlot: 'primary',
+      keyVersion: `${first.record.keyVersion}-2`,
+    };
+    await expect(validateVerificationRecords([first.record, duplicateFingerprint])).rejects.toThrow('fingerprint');
   });
 
   it('rejects one workload subject reused across security roles', async () => {
@@ -83,8 +91,7 @@ describe('immutable pinned verification records', () => {
       role: 'recovery',
       epochOrSlot: 'primary',
       subject: publisher.record.subject,
-      keyVersion:
-        'projects/p/locations/global/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+      keyVersion: 'projects/p/locations/global/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
     });
     await expect(validateVerificationRecords([publisher.record, recovery.record])).rejects.toThrow(
       'cross-role subject',

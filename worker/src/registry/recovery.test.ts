@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { projectionDigest, type RegistryState, type RouterReplicaDesired } from './contracts';
 import {
@@ -11,6 +12,7 @@ import {
   type WafEvidence,
 } from './recovery';
 import { applyPublisherSync, initialRegistryState } from './state';
+import { parseRecovery } from './controlService';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const NOW = Date.parse('2026-08-19T12:35:00.000Z');
@@ -54,14 +56,16 @@ async function sourceAudit(revision: string, eventId = 'synthetic-event'): Promi
 }
 
 function providerRequest(index: number, blocked: boolean): ProviderRequestEvidence {
+  const query = `nonce=nonce-${index}`;
   return {
     rayId: `ray-${index}`,
     eventAt: '2026-08-19T12:34:50.000Z',
     verifiedAt: '2026-08-19T12:34:55.000Z',
     edgeColoCode: ['SJC', 'IAD', 'LHR'][index - 1],
     host: HOST,
-    path: `/__registry-probe?nonce=nonce-${index}`,
-    queryDigest: String(index).repeat(64),
+    path: '/__registry-probe',
+    query,
+    queryDigest: createHash('sha256').update(query).digest('hex'),
     edgeResponseStatus: blocked ? 403 : 404,
     httpLogResponseDigest: String(index + 3).repeat(64),
     firewall: blocked
@@ -177,6 +181,29 @@ describe('source-attested recovery', () => {
         lockId: 'lock-2',
       }),
     ).rejects.toThrow('provider colos must be distinct');
+
+    const forgedQueryDigest = await wafEvidence();
+    forgedQueryDigest.providerRequests[0].queryDigest = 'a'.repeat(64);
+    await expect(
+      applyRecovery(state, await request(state, { kind: 'acquire-lock', wafEvidence: forgedQueryDigest }), {
+        now: NOW,
+        operatorSub: 'recovery-operator',
+        lockId: 'lock-3',
+      }),
+    ).rejects.toThrow('provider response digest');
+
+    const nestedExtra = await request(state, {
+      kind: 'acquire-lock',
+      wafEvidence: await wafEvidence(),
+    });
+    (
+      nestedExtra.action as Extract<RecoveryRequest['action'], { kind: 'acquire-lock' }>
+    ).wafEvidence.providerRequests[0] = {
+      ...(nestedExtra.action as Extract<RecoveryRequest['action'], { kind: 'acquire-lock' }>).wafEvidence
+        .providerRequests[0],
+      unexpectedTokenSink: 'must-not-persist',
+    } as never;
+    expect(() => parseRecovery(nestedExtra)).toThrow('provider request');
   });
 
   it('applies an equal repair or higher jump, records skips, and never goes backward', async () => {
@@ -227,6 +254,16 @@ describe('source-attested recovery', () => {
   });
 
   it('fences every quarantined epoch before activating a direct-only replacement', async () => {
+    const oldEmail = 'old-publisher@fiveacross.iam.gserviceaccount.com';
+    const replacementEmail = 'replacement-publisher@fiveacross.iam.gserviceaccount.com';
+    const oldMember = `serviceAccount:${oldEmail}`;
+    const replacementMember = `serviceAccount:${replacementEmail}`;
+    const oldResource = `//iam.googleapis.com/projects/fiveacross/serviceAccounts/${oldEmail}`;
+    const replacementResource = `//iam.googleapis.com/projects/fiveacross/serviceAccounts/${replacementEmail}`;
+    const oldFunctionResource =
+      '//cloudfunctions.googleapis.com/projects/fiveacross/locations/us-central1/functions/publisher-old';
+    const replacementFunctionResource =
+      '//cloudfunctions.googleapis.com/projects/fiveacross/locations/us-central1/functions/publisher-replacement';
     const base = {
       ...(await committedState()),
       highestAuthenticatedPublisherEpoch: '7',
@@ -242,33 +279,39 @@ describe('source-attested recovery', () => {
     const replacement: NonNullable<PublisherReplacement> = {
       quarantinedEpochCeiling: '7',
       nextPublisherEpoch: '8',
-      replacementSubject: 'replacement-subject',
+      replacementSubject: '1002',
       replacementKeyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
       replacementKeyFingerprint: 'e'.repeat(64),
       registryConfigDigest: 'f'.repeat(64),
       controlEvidence: {
         observedAt: '2026-08-19T12:34:50.000Z',
         quarantinedRuntime: {
-          subject: 'old-subject',
+          subject: '1001',
+          serviceAccountEmail: oldEmail,
+          iamMember: oldMember,
+          functionFullResourceName: oldFunctionResource,
           functionRevision: 'old-1',
           responseDigest: '1'.repeat(64),
         },
         replacementRuntime: {
-          subject: 'replacement-subject',
+          subject: '1002',
+          serviceAccountEmail: replacementEmail,
+          iamMember: replacementMember,
+          functionFullResourceName: replacementFunctionResource,
           functionRevision: 'new-1',
           responseDigest: '2'.repeat(64),
         },
         activeEpochMappings: [
           {
             epoch: '7',
-            subject: 'old-subject',
+            subject: '1001',
             keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/old/cryptoKeyVersions/1',
             algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const,
             spkiSha256: '9'.repeat(64),
           },
           {
             epoch: '8',
-            subject: 'replacement-subject',
+            subject: '1002',
             keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
             algorithm: 'RSA_SIGN_PKCS1_2048_SHA256' as const,
             spkiSha256: 'e'.repeat(64),
@@ -291,7 +334,7 @@ describe('source-attested recovery', () => {
           {
             cryptoKey: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement',
             policyEtag: 'new-etag',
-            signMembers: ['serviceAccount:replacement-subject'],
+            signMembers: [replacementMember],
             enabledVersions: [
               {
                 keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
@@ -304,13 +347,19 @@ describe('source-attested recovery', () => {
         ],
         serviceAccountAccess: [
           {
-            subject: 'old-subject',
+            subject: '1001',
+            serviceAccountEmail: oldEmail,
+            iamMember: oldMember,
+            fullResourceName: oldResource,
             policyEtag: 'old-sa-etag',
             tokenCreatorMembers: [],
             responseDigest: '5'.repeat(64),
           },
           {
-            subject: 'replacement-subject',
+            subject: '1002',
+            serviceAccountEmail: replacementEmail,
+            iamMember: replacementMember,
+            fullResourceName: replacementResource,
             policyEtag: 'new-sa-etag',
             tokenCreatorMembers: [],
             responseDigest: '6'.repeat(64),
@@ -318,27 +367,31 @@ describe('source-attested recovery', () => {
         ],
         quarantinedAccessDecisions: [
           {
-            principal: 'old-subject',
-            fullResourceName: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
+            principal: oldEmail,
+            fullResourceName:
+              '//cloudkms.googleapis.com/projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/1',
             permission: 'cloudkms.cryptoKeyVersions.useToSign' as const,
             requestTime: '2026-08-19T12:34:50.000Z',
             overallAccessState: 'CANNOT_ACCESS' as const,
+            inheritedPoliciesComplete: true as const,
             responseDigest: '7'.repeat(64),
           },
           {
-            principal: 'old-subject',
-            fullResourceName: 'replacement-subject',
+            principal: oldEmail,
+            fullResourceName: replacementResource,
             permission: 'iam.serviceAccounts.getOpenIdToken' as const,
             requestTime: '2026-08-19T12:34:50.000Z',
             overallAccessState: 'CANNOT_ACCESS' as const,
+            inheritedPoliciesComplete: true as const,
             responseDigest: '8'.repeat(64),
           },
           {
-            principal: 'old-subject',
-            fullResourceName: 'replacement-subject',
+            principal: oldEmail,
+            fullResourceName: replacementResource,
             permission: 'iam.serviceAccounts.getAccessToken' as const,
             requestTime: '2026-08-19T12:34:50.000Z',
             overallAccessState: 'CANNOT_ACCESS' as const,
+            inheritedPoliciesComplete: true as const,
             responseDigest: '9'.repeat(64),
           },
         ],
@@ -349,20 +402,30 @@ describe('source-attested recovery', () => {
         attestationSignature: 'signed-control-evidence',
       },
     };
-    const applied = await applyRecovery(
+    const replacementContext = {
+      now: NOW,
+      operatorSub: 'recovery-operator',
+      lockId: 'unused',
+      activeRegistryConfigDigest: 'f'.repeat(64),
+      activePublisherMappings: replacement.controlEvidence.activeEpochMappings,
+    } as const;
+    const strictRequest = await request(
       acquired.state,
-      await request(
-        acquired.state,
-        { kind: 'apply', lockId: 'lock-1', publisherReplacement: replacement },
-        sourceAudit('2'),
-      ),
-      {
-        now: NOW,
-        operatorSub: 'recovery-operator',
-        lockId: 'unused',
-        activeRegistryConfigDigest: 'f'.repeat(64),
-      },
+      { kind: 'apply', lockId: 'lock-1', publisherReplacement: replacement },
+      sourceAudit('2'),
     );
+    expect(parseRecovery(strictRequest)).toEqual(strictRequest);
+    const nestedReplacementExtra = structuredClone(strictRequest);
+    if (nestedReplacementExtra.action.kind !== 'apply' || nestedReplacementExtra.action.publisherReplacement === null) {
+      throw new Error('replacement fixture is malformed');
+    }
+    nestedReplacementExtra.action.publisherReplacement.controlEvidence.quarantinedRuntime = {
+      ...nestedReplacementExtra.action.publisherReplacement.controlEvidence.quarantinedRuntime,
+      leakedCredential: 'must-not-persist',
+    } as never;
+    expect(() => parseRecovery(nestedReplacementExtra)).toThrow('publisher runtime readback');
+
+    const applied = await applyRecovery(acquired.state, strictRequest, replacementContext);
     expect(applied.state.minimumPublisherEpoch).toBe('8');
     expect(applied.state.highestQuarantinedPublisherEpoch).toBe('7');
 
@@ -376,19 +439,14 @@ describe('source-attested recovery', () => {
           { kind: 'apply', lockId: 'lock-1', publisherReplacement: invalid },
           sourceAudit('2'),
         ),
-        {
-          now: NOW,
-          operatorSub: 'recovery-operator',
-          lockId: 'unused',
-          activeRegistryConfigDigest: 'f'.repeat(64),
-        },
+        replacementContext,
       ),
     ).rejects.toThrow('CANNOT_ACCESS');
 
     const unrelatedResources = structuredClone(replacement);
     unrelatedResources.controlEvidence.keyAccess[1] = structuredClone(unrelatedResources.controlEvidence.keyAccess[0]);
     unrelatedResources.controlEvidence.quarantinedAccessDecisions[0].fullResourceName =
-      'projects/p/locations/l/keyRings/r/cryptoKeys/unrelated/cryptoKeyVersions/1';
+      '//cloudkms.googleapis.com/projects/p/locations/l/keyRings/r/cryptoKeys/unrelated/cryptoKeyVersions/1';
     await expect(
       applyRecovery(
         acquired.state,
@@ -401,18 +459,13 @@ describe('source-attested recovery', () => {
           },
           sourceAudit('2'),
         ),
-        {
-          now: NOW,
-          operatorSub: 'recovery-operator',
-          lockId: 'unused',
-          activeRegistryConfigDigest: 'f'.repeat(64),
-        },
+        replacementContext,
       ),
     ).rejects.toThrow(/resource|readback/);
 
     const irrelevantDecision = structuredClone(replacement);
     irrelevantDecision.controlEvidence.quarantinedAccessDecisions[0].fullResourceName =
-      'projects/p/locations/l/keyRings/r/cryptoKeys/unrelated/cryptoKeyVersions/1';
+      '//cloudkms.googleapis.com/projects/p/locations/l/keyRings/r/cryptoKeys/unrelated/cryptoKeyVersions/1';
     await expect(
       applyRecovery(
         acquired.state,
@@ -425,12 +478,7 @@ describe('source-attested recovery', () => {
           },
           sourceAudit('2'),
         ),
-        {
-          now: NOW,
-          operatorSub: 'recovery-operator',
-          lockId: 'unused',
-          activeRegistryConfigDigest: 'f'.repeat(64),
-        },
+        replacementContext,
       ),
     ).rejects.toThrow('quarantine decisions');
 
@@ -448,14 +496,27 @@ describe('source-attested recovery', () => {
           },
           sourceAudit('2'),
         ),
-        {
-          now: NOW,
-          operatorSub: 'recovery-operator',
-          lockId: 'unused',
-          activeRegistryConfigDigest: 'f'.repeat(64),
-        },
+        replacementContext,
       ),
     ).rejects.toThrow('quarantined key version readback');
+
+    const omittedMapping = structuredClone(replacement);
+    omittedMapping.controlEvidence.activeEpochMappings.shift();
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(
+          acquired.state,
+          {
+            kind: 'apply',
+            lockId: 'lock-1',
+            publisherReplacement: omittedMapping,
+          },
+          sourceAudit('2'),
+        ),
+        replacementContext,
+      ),
+    ).rejects.toThrow('active epoch mappings do not match');
   });
 
   it('clears only after fresh source equals committed and three canonical records match', async () => {

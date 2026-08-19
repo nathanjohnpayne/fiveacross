@@ -1,8 +1,4 @@
-export type VerificationRole =
-  | 'publisher'
-  | 'recovery'
-  | 'source-attestor'
-  | 'regional-probe';
+export type VerificationRole = 'publisher' | 'recovery' | 'source-attestor' | 'regional-probe';
 
 export type VerificationRecord = {
   role: VerificationRole;
@@ -11,6 +7,14 @@ export type VerificationRecord = {
   keyVersion: string;
   algorithm: 'RSA_SIGN_PKCS1_2048_SHA256';
   pem: string;
+  spkiSha256: string;
+};
+
+export type PublisherVerificationMapping = {
+  epoch: string;
+  subject: string;
+  keyVersion: string;
+  algorithm: VerificationRecord['algorithm'];
   spkiSha256: string;
 };
 
@@ -49,13 +53,9 @@ export async function importPinnedVerificationKey(record: VerificationRecord): P
   if (!LOWER_SHA_256.test(record.spkiSha256)) throw new Error('invalid SPKI fingerprint');
   const recomputed = await fingerprintSpkiPem(record.pem);
   if (recomputed !== record.spkiSha256) throw new Error('SPKI fingerprint mismatch');
-  return crypto.subtle.importKey(
-    'spki',
-    spkiBytes(record.pem),
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  );
+  return crypto.subtle.importKey('spki', spkiBytes(record.pem), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, [
+    'verify',
+  ]);
 }
 
 export async function validateVerificationRecords(
@@ -70,8 +70,11 @@ export async function validateVerificationRecords(
     if (record.subject.length === 0 || record.keyVersion.length === 0 || record.epochOrSlot.length === 0) {
       throw new Error('verification record has an empty identity field');
     }
-    if (record.role === 'publisher' && !POSITIVE_DECIMAL.test(record.epochOrSlot)) {
-      throw new Error('publisher epoch must be canonical positive decimal');
+    if (
+      record.role === 'publisher' &&
+      (!POSITIVE_DECIMAL.test(record.epochOrSlot) || !POSITIVE_DECIMAL.test(record.subject))
+    ) {
+      throw new Error('publisher subject and epoch must be canonical positive decimals');
     }
     const slot = `${record.role}\u0000${record.epochOrSlot}`;
     if (slots.has(slot)) throw new Error('duplicate role/epoch/slot mapping');
@@ -106,9 +109,7 @@ export async function verifyPinnedSignature(
   return crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, exactBytes);
 }
 
-export async function verificationRecordMappingDigest(
-  records: readonly VerificationRecord[],
-): Promise<string> {
+export async function verificationRecordMappingDigest(records: readonly VerificationRecord[]): Promise<string> {
   const projection = [...records]
     .map((record) => [
       record.role,
@@ -119,11 +120,25 @@ export async function verificationRecordMappingDigest(
       record.spkiSha256,
     ])
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(JSON.stringify(projection)),
-  );
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(projection)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function publisherVerificationMappings(
+  records: readonly VerificationRecord[],
+): readonly PublisherVerificationMapping[] {
+  return records
+    .filter((record) => record.role === 'publisher')
+    .map((record) => ({
+      epoch: record.epochOrSlot,
+      subject: record.subject,
+      keyVersion: record.keyVersion,
+      algorithm: record.algorithm,
+      spkiSha256: record.spkiSha256,
+    }))
+    .sort((left, right) => {
+      const epochOrder =
+        BigInt(left.epoch) < BigInt(right.epoch) ? -1 : BigInt(left.epoch) > BigInt(right.epoch) ? 1 : 0;
+      return epochOrder || left.keyVersion.localeCompare(right.keyVersion);
+    });
 }

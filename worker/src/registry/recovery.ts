@@ -38,6 +38,7 @@ export type ProviderRequestEvidence = {
   edgeColoCode: string;
   host: string;
   path: string;
+  query: string;
   queryDigest: string;
   edgeResponseStatus: number;
   httpLogResponseDigest: string;
@@ -84,6 +85,9 @@ export type KeyAccessReadback = {
 
 export type ServiceAccountAccessReadback = {
   subject: string;
+  serviceAccountEmail: string;
+  iamMember: string;
+  fullResourceName: string;
   policyEtag: string;
   tokenCreatorMembers: string[];
   responseDigest: string;
@@ -98,28 +102,32 @@ export type AccessDecisionReadback = {
     | 'iam.serviceAccounts.getAccessToken';
   requestTime: string;
   overallAccessState: 'CANNOT_ACCESS';
+  inheritedPoliciesComplete: true;
   responseDigest: string;
+};
+
+export type PublisherRuntimeReadback = {
+  subject: string;
+  serviceAccountEmail: string;
+  iamMember: string;
+  functionFullResourceName: string;
+  functionRevision: string;
+  responseDigest: string;
+};
+
+export type ActivePublisherMapping = {
+  epoch: string;
+  subject: string;
+  keyVersion: string;
+  algorithm: 'RSA_SIGN_PKCS1_2048_SHA256';
+  spkiSha256: string;
 };
 
 type PublisherControlEvidence = {
   observedAt: string;
-  quarantinedRuntime: {
-    subject: string;
-    functionRevision: string;
-    responseDigest: string;
-  };
-  replacementRuntime: {
-    subject: string;
-    functionRevision: string;
-    responseDigest: string;
-  };
-  activeEpochMappings: Array<{
-    epoch: string;
-    subject: string;
-    keyVersion: string;
-    algorithm: 'RSA_SIGN_PKCS1_2048_SHA256';
-    spkiSha256: string;
-  }>;
+  quarantinedRuntime: PublisherRuntimeReadback;
+  replacementRuntime: PublisherRuntimeReadback;
+  activeEpochMappings: ActivePublisherMapping[];
   keyAccess: [KeyAccessReadback, KeyAccessReadback];
   serviceAccountAccess: [ServiceAccountAccessReadback, ServiceAccountAccessReadback];
   quarantinedAccessDecisions: [AccessDecisionReadback, AccessDecisionReadback, AccessDecisionReadback];
@@ -185,6 +193,7 @@ export type RecoveryContext = {
   lockId: string;
   publisherIntegrityProven?: boolean;
   activeRegistryConfigDigest?: string;
+  activePublisherMappings?: readonly ActivePublisherMapping[];
   consumeAttestations?: (ids: readonly string[], phase: 'blocked' | 'canonical') => Promise<void>;
 };
 
@@ -287,13 +296,13 @@ function validateRecoveryEnvelope(request: RecoveryRequest): void {
   }
 }
 
-function validateProviderRequests(
+async function validateProviderRequests(
   host: string,
   requests: readonly ProviderRequestEvidence[],
   blocked: boolean,
   now: number,
   waf?: WafEvidence,
-): void {
+): Promise<void> {
   if (requests.length !== 3) throw new Error('exactly three provider requests required');
   const rays = new Set<string>();
   const colos = new Set<string>();
@@ -303,7 +312,16 @@ function validateProviderRequests(
     if (request.host !== host || request.rayId.length === 0 || request.edgeColoCode.length === 0) {
       throw new Error('provider request host or identity mismatch');
     }
-    if (!SHA256_HEX.test(request.queryDigest) || !SHA256_HEX.test(request.httpLogResponseDigest)) {
+    if (
+      !request.path.startsWith('/') ||
+      request.path.includes('?') ||
+      request.path.includes('#') ||
+      request.query.startsWith('?') ||
+      request.query.includes('#') ||
+      !SHA256_HEX.test(request.queryDigest) ||
+      request.queryDigest !== (await sha256Hex(request.query)) ||
+      !SHA256_HEX.test(request.httpLogResponseDigest)
+    ) {
       throw new Error('provider response digest malformed');
     }
     rays.add(request.rayId);
@@ -350,10 +368,15 @@ async function validateWafEvidence(host: string, evidence: WafEvidence, now: num
   if (new Set(evidence.probeAttestationIds).size !== 3) {
     throw new Error('probe attestations must be distinct');
   }
-  validateProviderRequests(host, evidence.providerRequests, true, now, evidence);
+  await validateProviderRequests(host, evidence.providerRequests, true, now, evidence);
 }
 
-function validateReplacement(state: RegistryState, replacement: NonNullable<PublisherReplacement>, now: number): void {
+function validateReplacement(
+  state: RegistryState,
+  replacement: NonNullable<PublisherReplacement>,
+  now: number,
+  activePublisherMappings: readonly ActivePublisherMapping[] | undefined,
+): void {
   if (
     !POSITIVE_DECIMAL.test(replacement.quarantinedEpochCeiling) ||
     !POSITIVE_DECIMAL.test(replacement.nextPublisherEpoch) ||
@@ -377,9 +400,43 @@ function validateReplacement(state: RegistryState, replacement: NonNullable<Publ
   if (control.activeEpochMappings.length === 0 || control.activeEpochMappings.length > 16) {
     throw new Error('active epoch mappings are empty or oversized');
   }
+  const mappingProjection = (mapping: ActivePublisherMapping) =>
+    JSON.stringify([mapping.epoch, mapping.subject, mapping.keyVersion, mapping.algorithm, mapping.spkiSha256]);
+  const suppliedMappings = [...control.activeEpochMappings].sort((left, right) =>
+    mappingProjection(left).localeCompare(mappingProjection(right)),
+  );
+  const configuredMappings = [...(activePublisherMappings ?? [])].sort((left, right) =>
+    mappingProjection(left).localeCompare(mappingProjection(right)),
+  );
   if (
-    control.quarantinedRuntime.subject.length === 0 ||
+    activePublisherMappings === undefined ||
+    suppliedMappings.length !== configuredMappings.length ||
+    suppliedMappings.some(
+      (mapping, index) => mappingProjection(mapping) !== mappingProjection(configuredMappings[index]),
+    )
+  ) {
+    throw new Error('publisher active epoch mappings do not match registry configuration');
+  }
+  const canonicalServiceAccountResource = (email: string): string | null => {
+    const suffix = '.iam.gserviceaccount.com';
+    const at = email.indexOf('@');
+    const domain = at === -1 ? '' : email.slice(at + 1);
+    const project = domain.endsWith(suffix) ? domain.slice(0, -suffix.length) : '';
+    return at > 0 && project.length > 0 ? `//iam.googleapis.com/projects/${project}/serviceAccounts/${email}` : null;
+  };
+  const runtimeIdentityIsCanonical = (runtime: PublisherRuntimeReadback) =>
+    POSITIVE_DECIMAL.test(runtime.subject) &&
+    runtime.iamMember === `serviceAccount:${runtime.serviceAccountEmail}` &&
+    /^\/\/cloudfunctions\.googleapis\.com\/projects\/[^/]+\/locations\/[^/]+\/functions\/[^/]+$/.test(
+      runtime.functionFullResourceName,
+    );
+  if (
+    !POSITIVE_DECIMAL.test(replacement.replacementSubject) ||
     control.quarantinedRuntime.subject === replacement.replacementSubject ||
+    control.quarantinedRuntime.serviceAccountEmail === control.replacementRuntime.serviceAccountEmail ||
+    control.quarantinedRuntime.functionFullResourceName === control.replacementRuntime.functionFullResourceName ||
+    !runtimeIdentityIsCanonical(control.quarantinedRuntime) ||
+    !runtimeIdentityIsCanonical(control.replacementRuntime) ||
     control.quarantinedRuntime.functionRevision.length === 0 ||
     !SHA256_HEX.test(control.quarantinedRuntime.responseDigest) ||
     control.replacementRuntime.functionRevision.length === 0 ||
@@ -425,10 +482,7 @@ function validateReplacement(state: RegistryState, replacement: NonNullable<Publ
     member === 'allAuthenticatedUsers' ||
     member.startsWith('group:') ||
     member.startsWith('domain:');
-  const oldPrincipals = new Set([
-    control.quarantinedRuntime.subject,
-    `serviceAccount:${control.quarantinedRuntime.subject}`,
-  ]);
+  const oldPrincipals = new Set([control.quarantinedRuntime.subject, control.quarantinedRuntime.iamMember]);
   const keyResource = (keyVersion: string) => keyVersion.replace(/\/cryptoKeyVersions\/[1-9]\d*$/, '');
   const replacementKeyResource = keyResource(replacement.replacementKeyVersion);
   if (replacementKeyResource === replacement.replacementKeyVersion) {
@@ -471,6 +525,17 @@ function validateReplacement(state: RegistryState, replacement: NonNullable<Publ
   ) {
     throw new Error('publisher service-account readbacks do not match both runtimes');
   }
+  for (const runtime of [control.quarantinedRuntime, control.replacementRuntime]) {
+    const readback = control.serviceAccountAccess.find((candidate) => candidate.subject === runtime.subject);
+    if (
+      readback === undefined ||
+      readback.serviceAccountEmail !== runtime.serviceAccountEmail ||
+      readback.iamMember !== runtime.iamMember ||
+      readback.fullResourceName !== canonicalServiceAccountResource(runtime.serviceAccountEmail)
+    ) {
+      throw new Error('publisher service-account readback identity does not match its runtime');
+    }
+  }
   let replacementSigningGrant = false;
   for (const readback of control.keyAccess) {
     if (
@@ -491,7 +556,7 @@ function validateReplacement(state: RegistryState, replacement: NonNullable<Publ
           version.keyVersion === replacement.replacementKeyVersion &&
           version.spkiSha256 === replacement.replacementKeyFingerprint,
       ) &&
-      readback.signMembers.includes(`serviceAccount:${replacement.replacementSubject}`)
+      readback.signMembers.includes(control.replacementRuntime.iamMember)
     ) {
       replacementSigningGrant = true;
     }
@@ -514,11 +579,12 @@ function validateReplacement(state: RegistryState, replacement: NonNullable<Publ
     !permissions.has('iam.serviceAccounts.getAccessToken') ||
     control.quarantinedAccessDecisions.some(
       (decision) =>
-        decision.principal !== control.quarantinedRuntime.subject ||
+        decision.principal !== control.quarantinedRuntime.serviceAccountEmail ||
         decision.fullResourceName !==
           (decision.permission === 'cloudkms.cryptoKeyVersions.useToSign'
-            ? replacement.replacementKeyVersion
-            : replacement.replacementSubject) ||
+            ? `//cloudkms.googleapis.com/${replacement.replacementKeyVersion}`
+            : canonicalServiceAccountResource(control.replacementRuntime.serviceAccountEmail)) ||
+        decision.inheritedPoliciesComplete !== true ||
         !SHA256_HEX.test(decision.responseDigest) ||
         !Number.isFinite(Date.parse(decision.requestTime)),
     )
@@ -599,7 +665,7 @@ export async function applyRecovery(
       }
       let epochState = state;
       if (request.action.publisherReplacement !== null) {
-        validateReplacement(state, request.action.publisherReplacement, context.now);
+        validateReplacement(state, request.action.publisherReplacement, context.now, context.activePublisherMappings);
         if (
           context.activeRegistryConfigDigest !== undefined &&
           request.action.publisherReplacement.registryConfigDigest !== context.activeRegistryConfigDigest
@@ -651,7 +717,7 @@ export async function applyRecovery(
       ) {
         throw new Error('replacement publisher epoch has not authenticated');
       }
-      validateProviderRequests(request.host, request.action.providerRequests, false, context.now);
+      await validateProviderRequests(request.host, request.action.providerRequests, false, context.now);
       await context.consumeAttestations?.(request.action.probeAttestationIds, 'canonical');
       nextState = { ...state, recoverySequence: sequence, recoveryLock: null };
     } else {

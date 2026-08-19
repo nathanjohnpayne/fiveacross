@@ -94,6 +94,7 @@ export function matchProbeAttestations(
     rayId: string;
     host: string;
     path: string;
+    query: string;
     edgeResponseStatus: number;
   }[],
   phase: ProbePhase,
@@ -112,13 +113,29 @@ export function matchProbeAttestations(
   for (const [index, attestation] of attestations.entries()) {
     const provider = providerRequests[index];
     const receivedAt = Date.parse(attestation.receivedAt);
+    let observedRequest: URL;
+    try {
+      if (
+        !attestation.observation.requestPath.startsWith('/') ||
+        attestation.observation.requestPath.startsWith('//')
+      ) {
+        refuse('probe request identity is malformed');
+      }
+      observedRequest = new URL(attestation.observation.requestPath, 'https://registry-probe.invalid');
+    } catch {
+      refuse('probe request identity is malformed');
+    }
+    const expectedQuery = `nonce=${encodeURIComponent(attestation.challenge.probeNonce)}`;
     if (
       attestation.id !== expectedIds[index] ||
       attestation.challenge.consumed !== true ||
       attestation.observation.phase !== phase ||
       attestation.observation.host !== provider.host ||
       attestation.observation.rayId !== provider.rayId ||
-      attestation.observation.requestPath !== provider.path ||
+      observedRequest.pathname !== provider.path ||
+      observedRequest.search.slice(1) !== provider.query ||
+      provider.query !== expectedQuery ||
+      observedRequest.hash !== '' ||
       attestation.observation.observedStatus !== provider.edgeResponseStatus ||
       attestation.challenge.expectedStateDigest !== expected.stateDigest ||
       !Number.isFinite(receivedAt) ||
@@ -219,7 +236,21 @@ export function acceptProbeAttestation(
   if (!Number.isFinite(observedAt) || observedAt > now || now - observedAt > OBSERVATION_LIFETIME_MS) {
     refuse('probe observation is stale or future');
   }
-  if (observation.rayId.length === 0 || !observation.requestPath.includes(challenge.probeNonce)) {
+  let observedRequest: URL;
+  try {
+    if (!observation.requestPath.startsWith('/') || observation.requestPath.startsWith('//')) {
+      refuse('probe observation request identity mismatch');
+    }
+    observedRequest = new URL(observation.requestPath, 'https://registry-probe.invalid');
+  } catch {
+    refuse('probe observation request identity mismatch');
+  }
+  if (
+    observation.rayId.length === 0 ||
+    observedRequest.pathname.length === 0 ||
+    observedRequest.search.slice(1) !== `nonce=${encodeURIComponent(challenge.probeNonce)}` ||
+    observedRequest.hash !== ''
+  ) {
     refuse('probe observation request identity mismatch');
   }
   if (observation.expectedStatus !== observation.observedStatus) {

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 import { SYNC_PATH } from './contracts';
-import { findSourceRecord, PROBE_CHALLENGE_PATH } from './controlService';
+import { findSourceRecord, parseProbePayload, PROBE_CHALLENGE_PATH } from './controlService';
 import type { VerificationRecord } from './keys';
 import type { SourceAudit } from './recovery';
 import { GoogleJwksCache } from './oidc';
@@ -219,5 +219,30 @@ describe('registry default fetch control-plane endpoints', () => {
     );
     expect(response.status).toBe(400);
     expect(test.getByName).not.toHaveBeenCalled();
+  });
+
+  it('rejects extra nested probe observation fields before they can be persisted', () => {
+    expect(() =>
+      parseProbePayload(
+        {
+          schemaVersion: 1,
+          host: HOST,
+          observation: {
+            phase: 'blocked-before-worker',
+            probeNonce: 'nonce-1',
+            observedAt: new Date(NOW).toISOString(),
+            rayId: 'ray-1',
+            host: HOST,
+            requestPath: '/__registry-probe?nonce=nonce-1',
+            expectedStatus: 403,
+            observedStatus: 403,
+            expectedBlockBodyDigest: 'a'.repeat(64),
+            observedBlockBodyDigest: 'a'.repeat(64),
+            leakedCredential: 'must-not-persist',
+          },
+        },
+        'attest',
+      ),
+    ).toThrow('blocked probe observation');
   });
 });
