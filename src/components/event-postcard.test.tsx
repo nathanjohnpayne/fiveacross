@@ -100,11 +100,15 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
     }
   });
 
-  it('wears its own postage on every gate: vacay dynamic (the Day’s own emoji), gcb/fiveacross fixed (a brand mark)', () => {
+  it('wears its own postage on every gate: vacay dynamic on the postcard radius, gcb/fiveacross fixed on the plain panel', () => {
     // #881: postage used to be vacay-only ("a plain panel elsewhere"); now
-    // every Edition stamps its Join gate's card, but the glyph source differs
-    // — vacay's is the previewed Day's own emoji, gcb/fiveacross's is a fixed
-    // per-Edition mark that never varies with the Day.
+    // every Edition stamps its Join gate's card, but the glyph source AND the
+    // panel treatment differ — vacay's stamp is the previewed Day's own
+    // emoji on its tightened postcard radius; gcb/fiveacross's is a fixed
+    // per-Edition mark on the PLAIN panel (Codex P2, PR #896 round 1: the
+    // postcard radius class is not part of "postage on every gate" — the
+    // wireframes' `.stamped` treatment for gcb/fiveacross only adds corner
+    // padding, never the radius).
     applyResolvedEventPreview(PREVIEW);
     setActiveEdition('vacay');
     const vacay = render(<EventPostcard />);
@@ -115,7 +119,8 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
     setActiveEdition('gcb');
     applyResolvedEventPreview(PREVIEW);
     const gcb = render(<EventPostcard />);
-    expect(gcb.container.querySelector('.event-postcard-stamped')).not.toBeNull();
+    expect(gcb.container.querySelector('.event-postcard-stamped')).toBeNull();
+    expect(gcb.container.querySelector('.event-postcard-franked')).not.toBeNull();
     expect(gcb.container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
     cleanup();
 
@@ -123,7 +128,8 @@ describe('EventPostcard — the resolved slice, or nothing', () => {
     applyResolvedEventPreview(PREVIEW);
     const fa = render(<EventPostcard />);
     expect(fa.container.querySelector('.event-postcard')).not.toBeNull();
-    expect(fa.container.querySelector('.event-postcard-stamped')).not.toBeNull();
+    expect(fa.container.querySelector('.event-postcard-stamped')).toBeNull();
+    expect(fa.container.querySelector('.event-postcard-franked')).not.toBeNull();
     expect(fa.container.querySelector('.event-postcard-stamp')?.textContent).toBe('✳️');
   });
 });
@@ -210,11 +216,14 @@ describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
     );
   });
 
-  it('stamps gcb and fiveacross with their fixed brand mark, not the Day’s own emoji, even when the Day has one', () => {
+  it('stamps gcb and fiveacross with their fixed brand mark, not the Day’s own emoji, even when the Day has one — on the plain panel, not the postcard radius', () => {
     // #881 gave every Edition postage. gcb/fiveacross's mark is a FIXED
     // per-Edition glyph (`signinStampGlyph`), independent of whichever Day is
     // showing — unlike vacay's dynamic stamp, it never comes from (or varies
-    // with) `days[].emoji`.
+    // with) `days[].emoji`. Codex P2, PR #896 round 1: the fixed mark also
+    // does NOT opt the card into `.event-postcard-stamped` (vacay's postcard
+    // radius) — the wireframes give gcb/fiveacross's banner corner padding
+    // only, on the same 10px-radius plain panel it always had.
     const marks: [string, string][] = [
       ['gcb', '🏳️‍🌈'],
       ['fiveacross', '✳️'],
@@ -226,8 +235,29 @@ describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
       expect(container.querySelector('.event-postcard')).not.toBeNull();
       expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe(mark);
       expect(container.querySelector('.event-postcard-franked')).not.toBeNull();
+      expect(container.querySelector('.event-postcard-stamped')).toBeNull();
       cleanup();
     }
+  });
+
+  it('suppresses the Day’s inline emoji when a fixed brand mark happens to COINCIDE with it (Codex P2, PR #896 round 1)', () => {
+    // The "exactly once" contract is about whichever glyph actually lands in
+    // the corner, fixed or dynamic — not just the dynamic case. A gcb Day
+    // whose own seeded emoji happens to be the same rainbow flag as the
+    // fixed stamp must not print it twice.
+    setActiveEdition('gcb');
+    applyResolvedEventPreview({
+      eventName: 'Weekend in Bodega Bay',
+      dateRange: 'Aug 7–9',
+      hostedBy: 'Kim',
+      days: [{ date: '2999-08-07', title: 'Pride at Sea', emoji: '🏳️‍🌈' }],
+    });
+    const { container } = render(<EventPostcard />);
+    expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
+    expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
+      'Aug 7–9 · hosted by Kim · Day 1: Pride at Sea',
+    );
+    expect(container.textContent!.split('🏳️‍🌈').length - 1).toBe(1);
   });
 
   it('drops the stamp across local midnight when the next Day carries no emoji', () => {

@@ -146,8 +146,11 @@ describe('Gay Cruise Bingo is byte-identical to what shipped', () => {
     ['wordmark', 'GAY CRUISE BINGO'],
     ['tagline', 'Sign in, get your card, mark it if you see it.'],
     // #881: the ONE deliberate exception to "byte-identical" in this table —
-    // the old copy promised printed cards and a PDF the app has never
-    // shipped. Every other row above is still a live regression pin.
+    // this field is ADR 0006's ROUTINE-dead-zone promise now, not the
+    // total-failure fallback (the printed cards and PDF are real, launch-
+    // accepted artifacts per specs/x-launch-checklist.md — see
+    // `crashFallbackNote`, which now carries that message instead). Every
+    // other row above is still a live regression pin.
     ['offlineNote', 'Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.'],
     ['documentTitle', 'Gay Cruise Bingo'],
     ['appName', 'Gay Cruise Bingo'],

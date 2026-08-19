@@ -28,7 +28,10 @@ import { defaultViewedIndex } from './DaySwitcher';
  *
  * The pre-event VERB is Edition brand copy, not Event data (#602): "Sails" on
  * the cruise Edition, "Starts" on a house event — `EditionBrand.preEventVerb`.
- * Retiring the rest of the nautical vocabulary is epic #535's job.
+ * The pre-event GLYPH is too (#881, `EditionBrand.preEventGlyph`): "⚓" reads
+ * as cruise-specific decoration, so vacay and fiveacross carry their own
+ * rather than inheriting gcb's anchor. Retiring the rest of the nautical
+ * vocabulary is epic #535's job.
  *
  * Firestore-free like `theme/autoTheme.ts`, so the states are unit-testable
  * across clocks without mounting Nav. Clock-pure, Edition-scoped: the one
@@ -100,12 +103,16 @@ export function headerDayIdentity(
   const today = isoDateInTz(now, event?.timezone || 'Europe/Rome');
   if (today < first.date) {
     const start = shortDate(first.date);
+    const brand = editionBrand();
     return {
       // #881: the place line carried no glyph pre-cruise, against a theme
-      // line that always has one (`themeLine` below) — ⚓ closes that gap.
-      // Fixed, not Edition-scoped: unlike `preEventVerb` this isn't brand
-      // voice, just "there's a date coming."
-      place: start ? `⚓ ${editionBrand().preEventVerb} ${start}` : `${first.placeEmoji} ${first.place}`.trim(),
+      // line that always has one (`themeLine` below) — `preEventGlyph`
+      // closes that gap. Edition-scoped, same as `preEventVerb` itself
+      // (Codex P2, PR #896 round 1): a universal ⚓ read as cruise-specific
+      // decoration leaking into vacay/fiveacross, the same class of bug the
+      // no-cruise-noun sweep (#608) already guards other shared strings
+      // against.
+      place: start ? `${brand.preEventGlyph} ${brand.preEventVerb} ${start}` : `${first.placeEmoji} ${first.place}`.trim(),
       theme: themeLine(first.theme),
     };
   }

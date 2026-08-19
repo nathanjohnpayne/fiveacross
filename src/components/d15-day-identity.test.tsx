@@ -24,14 +24,16 @@ describe('headerDayIdentity — the header is a "where are we" instrument', () =
     });
   });
 
-  it('the pre-event verb is Edition brand copy: "Starts" on Vacay, not "Sails" (#602)', () => {
+  it('the pre-event verb AND glyph are Edition brand copy: "Starts"/🧳 on Vacay, not "Sails"/⚓ (#602, #881)', () => {
     // The regression: a house event's header counted down with nautical copy.
-    // "Sails" is `EditionBrand.preEventVerb` on the cruise Edition only; the
-    // date and theme resolution are Edition-independent. The ⚓ (#881) is
-    // fixed, not Edition-scoped — it stays regardless of the verb.
+    // "Sails" is `EditionBrand.preEventVerb` on the cruise Edition only, and
+    // (Codex P2, PR #896 round 1) so is the glyph in front of it — an anchor
+    // is cruise-specific decoration, so vacay carries its own
+    // `preEventGlyph` rather than gcb's ⚓. Date and theme resolution stay
+    // Edition-independent.
     setActiveEdition('vacay');
     expect(headerDayIdentity(EVENT, cest(2026, 7, 10))).toEqual({
-      place: '⚓ Starts Jul 15',
+      place: '🧳 Starts Jul 15',
       theme: '🛳️ Welcome Aboard',
     });
   });

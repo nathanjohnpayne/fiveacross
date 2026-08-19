@@ -43,6 +43,10 @@ const BRANDS: Record<string, EditionBrand> = {
     // scoping note on `wordmarkByline` in the vacay row below.
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Sails',
+    // #881: the pre-event header line's glyph — cruise-appropriate here,
+    // unlike a universal anchor (Codex P2, PR #896 round 1; see the field's
+    // own note).
+    preEventGlyph: '⚓',
     tagline: 'Sign in, get your card, mark it if you see it.',
     // The Join-frame voice chip and the gate's fixed postage mark (#881: "a
     // treatment only one brand receives reads as an accident" — vacay had
@@ -54,10 +58,24 @@ const BRANDS: Record<string, EditionBrand> = {
     // gcb Join frame draws.
     signinVoiceChip: 'What happens at sea. Goes on the card.',
     signinStampGlyph: '🏳️‍🌈',
-    // #881: the old copy promised artefacts (printed cards, a PDF) the app
-    // does not ship. All three Editions now state the same offline mechanic
-    // in the same words, varying only the opener.
+    // #881: this note is specifically ADR 0006's ROUTINE-dead-zone promise
+    // (a Player loses signal for a few minutes, the app itself keeps
+    // working) — all three Editions now state that same mechanic in the same
+    // words, varying only the opener. It is NOT the total-failure fallback;
+    // that stayed real (the printed cards and PDF genuinely exist per the
+    // launch-accepted PRD/spec — Codex P2, PR #896 round 2 caught the first
+    // cut conflating the two and silently dropping the crash panel's
+    // fallback message along with this one), and now lives in its own
+    // field below.
     offlineNote: 'Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.',
+    // The crash panel's fallback (`ErrorBoundary.tsx`), read instead of
+    // `offlineNote` above: `specs/x-launch-checklist.md` § "Printed 12-card
+    // PDF fallback" accepts the printed cards and PDF as the answer
+    // specifically for "the app itself is broken and can't be fixed in
+    // time" — a real, documented, pre-existing artifact (the PRD's own
+    // words: "already exist"), and gcb is the one Edition with that printed
+    // tradition to point to.
+    crashFallbackNote: "If the app won't recover, the printed cards and PDF still work.",
     // Verbatim the strings index.html and the manifest hardcoded before #586,
     // so a `gcb` build is byte-identical to the shipped deployment.
     documentTitle: 'Gay Cruise Bingo',
@@ -109,6 +127,10 @@ const BRANDS: Record<string, EditionBrand> = {
     // would be noise.
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Starts',
+    // #881: this Edition's own pre-event glyph — its share mark, not gcb's
+    // anchor (Codex P2, PR #896 round 1; nautical decoration does not belong
+    // on the trip register either).
+    preEventGlyph: '🧳',
     tagline: 'Sign in, get your card, mark it if you see it.',
     // The Join-frame voice pieces (#647, wireframes § "Join—the postcard, not
     // the casino"). This chip REPLACES the plain tagline on the signed-out
@@ -186,6 +208,10 @@ const BRANDS: Record<string, EditionBrand> = {
     // a birthday weekend all read naturally as "Opens Aug 7" — the doors-open
     // framing its default Theme (✨ Marquee, #617) already speaks.
     preEventVerb: 'Opens',
+    // #881: a plain calendar mark, not gcb's anchor (Codex P2, PR #896
+    // round 1) — functional, not decorative, matching this Edition's own
+    // "no lead-in emoji, functional emoji only" voice (see the Join caption).
+    preEventGlyph: '📅',
     tagline: 'Sign in, get your card, mark it if you see it.',
     // Same Join-frame voice-chip-plus-postage treatment as gcb (#881),
     // additive rather than replacing (see gcb's own note above). The postage

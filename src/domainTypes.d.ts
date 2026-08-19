@@ -42,6 +42,13 @@ export interface EditionBrand {
    *  endorsement of itself would be noise. */
   wordmarkByline?: string;
   preEventVerb: string;
+  /** The glyph on the pre-event header line ("⚓ Sails Jul 15", #881), paired
+   *  with `preEventVerb` since both are pre-cruise-only header copy. NOT a
+   *  universal ⚓ (Codex P2, PR #896 round 1): an anchor is cruise-specific
+   *  decoration, so hardcoding it for every Edition leaked the GCB nautical
+   *  register into vacay and fiveacross the same way a hardcoded cruise
+   *  noun would — `dayIdentity.tsx` reads this field instead. */
+  preEventGlyph: string;
   tagline: string;
   /** The gate's voice line ("Take the detour. For the story.") — the italic
    *  chip the wireframes draw inside the Join lockup (#647, § Join). Optional
@@ -80,7 +87,23 @@ export interface EditionBrand {
    *  glyph wins over the dynamic one (`EventPostcard.tsx`) and must never
    *  repeat an emoji already drawn elsewhere on that gate screen. */
   signinStampGlyph?: string;
+  /** The Join gate's / in-app offline note: ADR 0006's routine-dead-zone
+   *  promise ("your card keeps working offline, marks sync when you
+   *  reconnect"). NOT the total-failure fallback — that is
+   *  `crashFallbackNote` below, a deliberately separate field (Codex P2, PR
+   *  #896 round 2): `ErrorBoundary.tsx` used to reuse this same string for
+   *  its crash panel, so #881's rewrite of gcb's copy (dropping the printed-
+   *  cards/PDF claim, correct for the routine case) silently regressed the
+   *  crash panel's accepted launch-critical fallback message
+   *  (`specs/x-launch-checklist.md` § "Printed 12-card PDF fallback"). */
   offlineNote: string;
+  /** The crash panel's OWN fallback line (`ErrorBoundary.tsx`), read instead
+   *  of `offlineNote` when set. Optional: only gcb has a printed-card
+   *  tradition to point to (`specs/x-launch-checklist.md`); an Edition
+   *  without one falls back to the routine `offlineNote` — imperfect for a
+   *  total failure, but no worse than before this field existed, and no
+   *  Edition regresses a documented contract it never had. */
+  crashFallbackNote?: string;
   documentTitle: string;
   appName: string;
   appShortName: string;

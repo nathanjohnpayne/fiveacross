@@ -35,9 +35,14 @@ import { editionBrand } from '../editions';
 // Per-Edition treatment is data, not branching (#647, extended #881): every
 // Edition's Join gate now stamps this card, but not the same way. vacay's
 // brand row sets `signinCardVariant: 'postcard'` — a DYNAMIC stamp, the
-// previewed Day's own emoji. gcb and fiveacross instead set a fixed
-// `signinStampGlyph` (🏳️‍🌈, 💒) — a static per-Edition mark unrelated to
-// whichever Day is showing.
+// previewed Day's own emoji, AND the postcard's own tightened corner radius
+// (`.event-postcard-stamped`). gcb and fiveacross instead set a fixed
+// `signinStampGlyph` (🏳️‍🌈, ✳️) — a static per-Edition mark unrelated to
+// whichever Day is showing, and drawn on the plain (non-postcard-radius)
+// panel: `.event-postcard-stamped` stays vacay-only (Codex P2, PR #896 round
+// 1 — the wireframes' `.stamped` treatment for gcb/fiveacross's plain banner
+// changes only the corner padding, never the panel's own radius, which the
+// first cut of this field conflated).
 //
 // The dynamic stamp's postage is the previewed Day's emoji, and it exists
 // only when that emoji does (#776). It shipped three times as a bordered CSS
@@ -51,12 +56,17 @@ import { editionBrand } from '../editions';
 // once the brand sets it.
 //
 // The Day's OWN glyph appears exactly ONCE. The Day line has always led with
-// it, so a dynamic stamp that repeats it would print the same glyph twice on
-// one small card; when the corner takes it the line gives it up
+// it, so a stamp that repeats it would print the same glyph twice on one
+// small card; when the corner takes it the line gives it up
 // (`emojiPlacement: 'stamp'`) and keeps the Day named in words. A fixed brand
-// mark is a DIFFERENT glyph, never a copy of the Day's, so it never triggers
-// that trade — the line keeps leading with its own emoji exactly as it did
-// before either kind of stamp existed.
+// mark is USUALLY a different glyph, so it usually does not trigger that
+// trade — but a fixed mark and the Day's own emoji CAN coincide (a Pride-week
+// gcb Day using 🏳️‍🌈, say), and the contract is "never twice on one screen"
+// regardless of which kind of postage caused it (Codex P2, PR #896 round 1 —
+// the first cut only ever compared the DYNAMIC postage against the Day
+// glyph, which is always the same value by construction and so never caught
+// a fixed mark coincidentally matching it). The line gives up its copy
+// whenever the CORNER'S actual glyph — fixed or dynamic — matches the Day's.
 export default function EventPostcard() {
   const preview = useSyncExternalStore(subscribeEventPreview, activeEventPreview, activeEventPreview);
   // "Live" has to survive the gate being LEFT OPEN (Codex P2 round 1): the Day
@@ -93,20 +103,27 @@ export default function EventPostcard() {
   // the strength of the old Day's postage — and the card would hold that
   // mismatch until some later render. The seam is only as good as its callers.
   const now = Date.now();
-  // The DYNAMIC stamp (vacay's postcard variant only) — see the file-top note
-  // on the two postage kinds.
-  const dayPostage = brand.signinCardVariant === 'postcard' ? previewDayEmoji(preview.days, now) : null;
+  const isPostcardVariant = brand.signinCardVariant === 'postcard';
+  // The previewed Day's own emoji, resolved regardless of postage kind
+  // (Codex P2, PR #896 round 1): needed both as vacay's dynamic postage
+  // source AND to detect a fixed mark that coincidentally matches it — see
+  // the file-top note on the two postage kinds.
+  const dayGlyph = previewDayEmoji(preview.days, now);
+  const dayPostage = isPostcardVariant ? dayGlyph : null;
   // A fixed brand mark wins when the Edition sets one; otherwise fall back to
   // the dynamic Day postage, which is null on an Edition with neither.
   const postage = brand.signinStampGlyph ?? dayPostage;
-  // The postcard's tightened corner radius: on for vacay's variant even on a
-  // render where no Day postage resolves (#776's gap was the STAMP silently
-  // disappearing, not the corner), or whenever a fixed mark is configured —
-  // which, unlike the dynamic kind, is always present once set.
-  const stamped = brand.signinCardVariant === 'postcard' || brand.signinStampGlyph != null;
-  // Only the DYNAMIC stamp repeats a glyph the Day line already shows, so
-  // only it makes the line give up its own copy.
-  const meta = previewMetaLine(preview, now, dayPostage ? 'stamp' : 'inline');
+  // The postcard's tightened corner radius stays vacay-only (Codex P2, PR
+  // #896 round 1 — see the file-top note): a fixed mark draws on the plain
+  // panel, matching the wireframes' `.stamped` treatment for gcb/fiveacross,
+  // which never touches the radius. True even on a render where no Day
+  // postage resolves (#776's gap was the STAMP silently disappearing, not
+  // the corner), so this depends only on the variant, never on `postage`.
+  const stamped = isPostcardVariant;
+  // The line gives up its copy whenever the CORNER's actual glyph — fixed or
+  // dynamic — matches the Day's own, not only in the dynamic case (Codex P2,
+  // PR #896 round 1).
+  const meta = previewMetaLine(preview, now, dayGlyph && dayGlyph === postage ? 'stamp' : 'inline');
   const host = typeof window === 'undefined' ? null : window.location.hostname;
   return (
     <div

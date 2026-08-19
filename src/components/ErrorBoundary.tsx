@@ -104,7 +104,16 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, { 
         <button className="btn primary block" onClick={() => void resetShell()}>
           Reset &amp; reload
         </button>
-        <p className="muted" style={{ fontSize: 11 }}>{brand.offlineNote}</p>
+        {/* The total-failure fallback (Codex P2, PR #896 round 2), not the
+            routine `offlineNote` — this panel IS the "app itself is broken"
+            case `specs/x-launch-checklist.md`'s printed-card fallback names,
+            so an Edition that has one points here instead of at the
+            routine-dead-zone promise, which would be false on this exact
+            screen (the app crashed; it is not quietly working in the
+            background). Falls back to `offlineNote` for an Edition with no
+            printed-card tradition of its own — imperfect, but no Edition
+            regresses a contract it never had. */}
+        <p className="muted" style={{ fontSize: 11 }}>{brand.crashFallbackNote ?? brand.offlineNote}</p>
       </div>
     );
   }
