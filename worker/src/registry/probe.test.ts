@@ -4,6 +4,7 @@ import { acceptProbeAttestation, issueProbeChallenge, matchProbeAttestations, ty
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const NOW = Date.parse('2026-08-19T12:35:00.000Z');
+const WAF_REMOVED_AT = new Date(NOW - 1_000).toISOString();
 const PRINCIPAL = {
   subject: 'probe-sub-1',
   keyVersion: 'probe-key/1',
@@ -265,6 +266,9 @@ describe('regional probe challenges', () => {
         host: HOST,
         phase: 'canonical-after-unblock',
         expectedStateDigest: 'c'.repeat(64),
+        recoveryLockId: 'lock-1',
+        recoverySequence: '1',
+        wafRemovedAt: WAF_REMOVED_AT,
       },
       principal,
       NOW,
@@ -306,6 +310,9 @@ describe('regional probe challenges', () => {
         reason: null,
         revision: '1',
         servesOrigin: true,
+        recoveryLockId: 'lock-1',
+        recoverySequence: '1',
+        wafRemovedAt: WAF_REMOVED_AT,
       } as const,
     };
     expect(() =>

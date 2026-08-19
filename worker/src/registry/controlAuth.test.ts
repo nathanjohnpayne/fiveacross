@@ -35,7 +35,7 @@ async function fixture() {
   const spki = (await crypto.subtle.exportKey('spki', roleKey.publicKey)) as ArrayBuffer;
   const record: VerificationRecord = {
     role: 'recovery',
-    subject: 'recovery-sub',
+    subject: '2002',
     epochOrSlot: 'primary',
     keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
     algorithm: 'RSA_SIGN_PKCS1_2048_SHA256',

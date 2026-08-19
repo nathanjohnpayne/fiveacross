@@ -32,12 +32,11 @@ describe('registry Worker capability/configuration contract', () => {
     const historyWrite = recover.search(
       /transaction\.put\(\s*decimalKey\(HISTORY_PREFIX, result\.record\.sequence\),\s*result\.record,?\s*\)/,
     );
-    const evidenceDelete = recover.indexOf(
-      'transaction.delete([...consumedAttestationKeys, ...consumedAttestationExpiryKeys])',
-    );
+    const evidenceDelete = recover.indexOf('await transaction.delete([', historyWrite);
     expect(stateWrite).toBeGreaterThan(0);
     expect(historyWrite).toBeGreaterThan(stateWrite);
     expect(evidenceDelete).toBeGreaterThan(historyWrite);
+    expect(recover.slice(evidenceDelete)).toContain('...consumedAttestationPrincipalKeys');
     expect(recover).toMatch(
       /consumedAttestationExpiryKeys = .*\.map\([\s\S]*?probeExpiryKey\(probeAttestationExpiresAt\(attestation\), keys\[index\]\)/,
     );
@@ -50,6 +49,24 @@ describe('registry Worker capability/configuration contract', () => {
     expect(config).toContain('[[ratelimits]]');
     expect(config).not.toMatch(/\[\[kv_namespaces\]\]/);
     expect(config).not.toMatch(/^routes\s*=/m);
+  });
+
+  it('wires sanitized semantic events to sync, recovery, and empty-object cardinality outcomes', async () => {
+    const source = await readFile(SOURCE, 'utf8');
+    expect(source).toContain('createRecoverySemanticEvent');
+    expect(source).toContain('createCardinalitySemanticEvent');
+    expect(source).toContain('emitRegistrySemanticEvent');
+    expect(source).toContain('registryVersion: env.REGISTRY_VERSION');
+    expect(source).toContain('semanticLogger: emitRegistrySemanticEvent');
+  });
+
+  it('durably reschedules probe expiry after a cleanup storage failure', async () => {
+    const source = await readFile(SOURCE, 'utf8');
+    const alarm = source.slice(source.indexOf('async alarm()'), source.indexOf('async sync('));
+    expect(alarm).toContain('catch (error)');
+    expect(alarm).toContain('this.ctx.storage.setAlarm(now + PROBE_SWEEP_RETRY_MS)');
+    expect(alarm).toContain('throw error');
+    expect(alarm).toContain('principalIndexKey');
   });
 
   it('does not alter or attach the public Event router', async () => {

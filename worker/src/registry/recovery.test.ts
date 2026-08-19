@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { projectionDigest, type RegistryState, type RouterReplicaDesired } from './contracts';
 import {
   applyRecovery,
+  recoveryOperatorSignatureBytes,
   validateSourceAudit,
   type ProviderRequestEvidence,
   type PublisherReplacement,
@@ -18,10 +19,19 @@ import type { ConsumedProbeEvidence } from './probe';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const NOW = Date.parse('2026-08-19T12:35:00.000Z');
+const WAF_REMOVED_AT = new Date(NOW).toISOString();
+const ZONE_ID = '1'.repeat(32);
+const RULESET_ID = '2'.repeat(32);
+const RULE_ID = '3'.repeat(32);
 const RECOVERY_AUTHORIZATION = {
   operatorKeyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
   operatorKeyFingerprint: 'd'.repeat(64),
   operatorSignature: 'signed-recovery-request',
+  operatorSignatureScheme: 'v1',
+  operatorSignedRole: 'recovery',
+  operatorSignedMethod: 'POST',
+  operatorSignedPath: '/__internal/hostname-replicas/v1/recover',
+  operatorIssuedAt: String(NOW),
   requestBodyDigest: 'e'.repeat(64),
 } as const;
 
@@ -31,25 +41,41 @@ async function consumedEvidence(
 ): Promise<readonly ConsumedProbeEvidence[]> {
   return ids.map((id, index) => {
     const suffix = index + 1;
-    const probePhase = phase === 'blocked' ? ('blocked-before-worker' as const) : ('canonical-after-unblock' as const);
+    const challenge =
+      phase === 'blocked'
+        ? {
+            phase: 'blocked-before-worker' as const,
+            recoveryLockId: null,
+            recoverySequence: null,
+            wafRemovedAt: null,
+          }
+        : {
+            phase: 'canonical-after-unblock' as const,
+            recoveryLockId: 'lock-1',
+            recoverySequence: '1',
+            wafRemovedAt: WAF_REMOVED_AT,
+          };
     const common = {
       id,
-      receivedAt: '2026-08-19T12:34:56.000Z',
+      receivedAt:
+        phase === 'blocked'
+          ? '2026-08-19T12:34:56.000Z'
+          : new Date(NOW + 2_000).toISOString(),
       subject: `runner-${suffix}`,
       keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${suffix}/cryptoKeyVersions/1`,
       keyFingerprint: String(suffix).repeat(64),
       region: ['us-west1', 'us-east1', 'europe-west1'][index],
       challenge: {
+        ...challenge,
         probeNonce: `nonce-${suffix}`,
         subject: `runner-${suffix}`,
         keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${suffix}/cryptoKeyVersions/1`,
         keyFingerprint: String(suffix).repeat(64),
         region: ['us-west1', 'us-east1', 'europe-west1'][index],
-        phase: probePhase,
         host: HOST,
         expectedStateDigest: 'a'.repeat(64),
-        issuedAt: NOW - 10_000,
-        expiresAt: NOW + 10_000,
+        issuedAt: phase === 'blocked' ? NOW - 10_000 : NOW,
+        expiresAt: NOW + 5 * 60_000,
         consumed: true,
       },
       observation:
@@ -69,7 +95,7 @@ async function consumedEvidence(
           : {
               phase: 'canonical-after-unblock' as const,
               probeNonce: `nonce-${suffix}`,
-              observedAt: '2026-08-19T12:34:55.000Z',
+              observedAt: new Date(NOW + 1_000).toISOString(),
               rayId: `ray-${suffix}`,
               host: HOST,
               requestPath: `/__registry-probe?nonce=nonce-${suffix}`,
@@ -94,9 +120,14 @@ function recoveryContext(lockId: string, overrides: Partial<RecoveryContext> = {
     operatorSub: 'recovery-operator',
     lockId,
     ...RECOVERY_AUTHORIZATION,
+    expectedWafZone: {
+      namespace: 'fiveacross.app',
+      zoneId: ZONE_ID,
+      rulesetId: RULESET_ID,
+    },
     consumeAttestations: consumedEvidence,
     ...overrides,
-  };
+  } as RecoveryContext;
 }
 
 function payload(revision: string, eventId = 'synthetic-event'): RouterReplicaDesired {
@@ -141,8 +172,8 @@ function providerRequest(index: number, blocked: boolean): ProviderRequestEviden
   const query = `nonce=nonce-${index}`;
   return {
     rayId: `ray-${index}`,
-    eventAt: '2026-08-19T12:34:50.000Z',
-    verifiedAt: '2026-08-19T12:34:55.000Z',
+    eventAt: blocked ? '2026-08-19T12:34:50.000Z' : new Date(NOW + 1_000).toISOString(),
+    verifiedAt: blocked ? '2026-08-19T12:34:55.000Z' : new Date(NOW + 2_000).toISOString(),
     edgeColoCode: ['SJC', 'IAD', 'LHR'][index - 1],
     host: HOST,
     path: '/__registry-probe',
@@ -154,7 +185,7 @@ function providerRequest(index: number, blocked: boolean): ProviderRequestEviden
       ? {
           action: 'block',
           source: 'firewallcustom',
-          ruleId: 'rule-1',
+          ruleId: RULE_ID,
           ref: 'registry-recovery-lock-1',
           matchIndex: 0,
           logResponseDigest: String(index + 6).repeat(64),
@@ -173,9 +204,9 @@ async function wafEvidence(): Promise<WafEvidence> {
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
   return {
-    zoneId: 'zone-1',
-    rulesetId: 'ruleset-1',
-    ruleId: 'rule-1',
+    zoneId: ZONE_ID,
+    rulesetId: RULESET_ID,
+    ruleId: RULE_ID,
     host: HOST,
     verifiedAt: '2026-08-19T12:34:55.000Z',
     blockNonce,
@@ -319,6 +350,26 @@ describe('source-attested recovery', () => {
         recoveryContext('lock-3'),
       ),
     ).rejects.toThrow('provider response digest');
+
+    const wrongZone = await wafEvidence();
+    wrongZone.zoneId = '4'.repeat(32);
+    await expect(
+      applyRecovery(
+        state,
+        await request(state, { kind: 'acquire-lock', wafEvidence: wrongZone }),
+        recoveryContext('lock-wrong-zone'),
+      ),
+    ).rejects.toThrow('exact-host recovery rule');
+
+    const malformedRuleset = await wafEvidence();
+    malformedRuleset.rulesetId = 'not-a-cloudflare-id';
+    await expect(
+      applyRecovery(
+        state,
+        await request(state, { kind: 'acquire-lock', wafEvidence: malformedRuleset }),
+        recoveryContext('lock-malformed-ruleset'),
+      ),
+    ).rejects.toThrow('exact-host recovery rule');
 
     const nestedExtra = await request(state, {
       kind: 'acquire-lock',
@@ -686,19 +737,96 @@ describe('source-attested recovery', () => {
       }),
       recoveryContext('lock-1'),
     );
+    const preLockEvidence = (await consumedEvidence(
+      ['clear-1', 'clear-2', 'clear-3'],
+      'canonical',
+    )).map((entry) => ({
+      ...entry,
+      challenge: {
+        ...entry.challenge,
+        recoveryLockId: 'earlier-lock',
+        issuedAt: NOW - 1,
+      },
+    })) as ConsumedProbeEvidence[];
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(acquired.state, {
+          kind: 'clear-lock',
+          lockId: 'lock-1',
+          wafRemovedAt: WAF_REMOVED_AT,
+          probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
+          providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
+        }),
+        recoveryContext('unused', {
+          now: NOW + 3_000,
+          consumeAttestations: async () => preLockEvidence,
+        }),
+      ),
+    ).rejects.toThrow('not bound to WAF removal and current lock');
+
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(acquired.state, {
+          kind: 'clear-lock',
+          lockId: 'lock-1',
+          wafRemovedAt: new Date(NOW - 1).toISOString(),
+          probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
+          providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
+        }),
+        recoveryContext('unused', { now: NOW + 3_000 }),
+      ),
+    ).rejects.toThrow('predates the recovery lock');
     const clear = await applyRecovery(
       acquired.state,
       await request(acquired.state, {
         kind: 'clear-lock',
         lockId: 'lock-1',
-        wafRemovedAt: '2026-08-19T12:34:56.000Z',
+        wafRemovedAt: WAF_REMOVED_AT,
         probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
         providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
       }),
-      recoveryContext('unused'),
+      recoveryContext('unused', { now: NOW + 3_000 }),
     );
     expect(clear.state.recoveryLock).toBeNull();
     expect(clear.record.action).toBe('clear-lock');
+  });
+
+  it('persists an exact offline-replayable recovery operator signature envelope', async () => {
+    const key = (await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify'],
+    )) as CryptoKeyPair;
+    const context = recoveryContext('lock-replay');
+    const signature = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      key.privateKey,
+      recoveryOperatorSignatureBytes(context),
+    );
+    context.operatorSignature = Buffer.from(signature).toString('base64');
+    const state = await committedState();
+    const result = await applyRecovery(
+      state,
+      await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+      context,
+    );
+    await expect(
+      crypto.subtle.verify(
+        'RSASSA-PKCS1-v1_5',
+        key.publicKey,
+        Buffer.from(result.record.operatorSignature, 'base64'),
+        recoveryOperatorSignatureBytes(result.record),
+      ),
+    ).resolves.toBe(true);
+    expect(result.record.operatorIssuedAt).toBe(String(NOW));
+    expect(result.record.operatorSignedPath).toBe('/__internal/hostname-replicas/v1/recover');
   });
 
   it('aborts without mutating committed state and records that containment remains', async () => {

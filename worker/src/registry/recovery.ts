@@ -11,6 +11,7 @@ const SHA256_HEX = /^[a-f0-9]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const KMS_KEY_VERSION =
   /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
+const CLOUDFLARE_RESOURCE_ID = /^[a-f0-9]{32}$/;
 const MAX_SOURCE_AGE_MS = 5 * 60_000;
 const MAX_ATTESTATION_AGE_MS = 60_000;
 
@@ -189,6 +190,11 @@ export type RecoveryRecord = {
   operatorKeyVersion: string;
   operatorKeyFingerprint: string;
   operatorSignature: string;
+  operatorSignatureScheme: 'v1';
+  operatorSignedRole: 'recovery';
+  operatorSignedMethod: 'POST';
+  operatorSignedPath: string;
+  operatorIssuedAt: string;
   requestBodyDigest: string;
   incidentUrl: string;
   reason: string;
@@ -201,8 +207,18 @@ export type RecoveryContext = {
   operatorKeyVersion: string;
   operatorKeyFingerprint: string;
   operatorSignature: string;
+  operatorSignatureScheme: 'v1';
+  operatorSignedRole: 'recovery';
+  operatorSignedMethod: 'POST';
+  operatorSignedPath: string;
+  operatorIssuedAt: string;
   requestBodyDigest: string;
   lockId: string;
+  expectedWafZone: {
+    namespace: 'fiveacross.app' | 'vacaybingo.com';
+    zoneId: string;
+    rulesetId: string;
+  };
   publisherIntegrityProven?: boolean;
   activeRegistryConfigDigest?: string;
   activePublisherMappings?: readonly ActivePublisherMapping[];
@@ -317,10 +333,38 @@ function validateRecoveryAuthorization(context: RecoveryContext): void {
     !KMS_KEY_VERSION.test(context.operatorKeyVersion) ||
     !SHA256_HEX.test(context.operatorKeyFingerprint) ||
     context.operatorSignature.length === 0 ||
+    context.operatorSignatureScheme !== 'v1' ||
+    context.operatorSignedRole !== 'recovery' ||
+    context.operatorSignedMethod !== 'POST' ||
+    !/^\/__internal\/hostname-replicas\/v1\/recover(?:\?[^#]*)?$/.test(context.operatorSignedPath) ||
+    !/^[1-9]\d*$/.test(context.operatorIssuedAt) ||
     !SHA256_HEX.test(context.requestBodyDigest)
   ) {
     throw new Error('recovery authorization provenance is malformed');
   }
+}
+
+export function recoveryOperatorSignatureBytes(
+  record: Pick<
+    RecoveryRecord,
+    | 'operatorSignatureScheme'
+    | 'operatorSignedRole'
+    | 'operatorSignedMethod'
+    | 'operatorSignedPath'
+    | 'operatorIssuedAt'
+    | 'requestBodyDigest'
+  >,
+): Uint8Array {
+  return new TextEncoder().encode(
+    [
+      record.operatorSignatureScheme,
+      record.operatorSignedRole,
+      record.operatorSignedMethod,
+      record.operatorSignedPath,
+      record.operatorIssuedAt,
+      record.requestBodyDigest,
+    ].join('\n'),
+  );
 }
 
 async function consumeRequiredProbeEvidence(
@@ -347,6 +391,7 @@ async function validateProviderRequests(
   blocked: boolean,
   now: number,
   waf?: WafEvidence,
+  notBefore?: number,
 ): Promise<void> {
   if (requests.length !== 3) throw new Error('exactly three provider requests required');
   const rays = new Set<string>();
@@ -354,6 +399,11 @@ async function validateProviderRequests(
   for (const request of requests) {
     requireFresh(request.eventAt, now, MAX_SOURCE_AGE_MS, 'provider event');
     requireFresh(request.verifiedAt, now, MAX_SOURCE_AGE_MS, 'provider verification');
+    const eventAt = Date.parse(request.eventAt);
+    const verifiedAt = Date.parse(request.verifiedAt);
+    if (verifiedAt < eventAt || (notBefore !== undefined && (eventAt < notBefore || verifiedAt < notBefore))) {
+      throw new Error('provider evidence predates the authorized recovery phase');
+    }
     if (request.host !== host || request.rayId.length === 0 || request.edgeColoCode.length === 0) {
       throw new Error('provider request host or identity mismatch');
     }
@@ -392,11 +442,21 @@ async function validateProviderRequests(
   if (colos.size !== 3) throw new Error('provider colos must be distinct');
 }
 
-async function validateWafEvidence(host: string, evidence: WafEvidence, now: number): Promise<void> {
+async function validateWafEvidence(
+  host: string,
+  evidence: WafEvidence,
+  now: number,
+  expectedZone: RecoveryContext['expectedWafZone'],
+): Promise<void> {
   requireFresh(evidence.verifiedAt, now, MAX_SOURCE_AGE_MS, 'WAF verification');
   if (
+    !CLOUDFLARE_RESOURCE_ID.test(evidence.zoneId) ||
+    !CLOUDFLARE_RESOURCE_ID.test(evidence.rulesetId) ||
+    !CLOUDFLARE_RESOURCE_ID.test(evidence.ruleId) ||
+    !host.endsWith(`.${expectedZone.namespace}`) ||
+    evidence.zoneId !== expectedZone.zoneId ||
+    evidence.rulesetId !== expectedZone.rulesetId ||
     evidence.host !== host ||
-    evidence.ruleId.length === 0 ||
     evidence.providerRule.enabled !== true ||
     evidence.providerRule.action !== 'block' ||
     evidence.providerRule.expression !== `http.host eq "${host}"` ||
@@ -705,7 +765,7 @@ export async function applyRecovery(
 
   if (request.action.kind === 'acquire-lock') {
     if (state.recoveryLock !== null) throw new Error('recovery lock already held');
-    await validateWafEvidence(request.host, request.action.wafEvidence, context.now);
+    await validateWafEvidence(request.host, request.action.wafEvidence, context.now, context.expectedWafZone);
     probeEvidence = await consumeRequiredProbeEvidence(
       context,
       request.action.wafEvidence.probeAttestationIds,
@@ -778,6 +838,16 @@ export async function applyRecovery(
         },
       };
     } else if (request.action.kind === 'clear-lock') {
+      const lockAcquiredAt = Date.parse(lock.acquiredAt);
+      const wafRemovedAt = Date.parse(request.action.wafRemovedAt);
+      if (
+        !Number.isFinite(wafRemovedAt) ||
+        wafRemovedAt < lockAcquiredAt ||
+        wafRemovedAt > context.now ||
+        context.now - wafRemovedAt > MAX_SOURCE_AGE_MS
+      ) {
+        throw new Error('WAF removal time is malformed, stale, or predates the recovery lock');
+      }
       if (
         !sameCommitted(before, {
           revision: ledgerPayload.revision,
@@ -795,12 +865,39 @@ export async function applyRecovery(
       ) {
         throw new Error('replacement publisher epoch has not authenticated');
       }
-      await validateProviderRequests(request.host, request.action.providerRequests, false, context.now);
+      await validateProviderRequests(
+        request.host,
+        request.action.providerRequests,
+        false,
+        context.now,
+        undefined,
+        wafRemovedAt,
+      );
       probeEvidence = await consumeRequiredProbeEvidence(
         context,
         request.action.probeAttestationIds,
         'canonical',
       );
+      const authorizedWafRemovedAt = request.action.wafRemovedAt;
+      if (
+        probeEvidence.some((evidence) => {
+          if (evidence.challenge.phase !== 'canonical-after-unblock') return true;
+          const observedAt = Date.parse(evidence.observation.observedAt);
+          const receivedAt = Date.parse(evidence.receivedAt);
+          return (
+            evidence.challenge.recoveryLockId !== lock.lockId ||
+            evidence.challenge.recoverySequence !== state.recoverySequence ||
+            evidence.challenge.wafRemovedAt !== authorizedWafRemovedAt ||
+            evidence.challenge.issuedAt < wafRemovedAt ||
+            !Number.isFinite(observedAt) ||
+            observedAt < wafRemovedAt ||
+            !Number.isFinite(receivedAt) ||
+            receivedAt < observedAt
+          );
+        })
+      ) {
+        throw new Error('canonical probe evidence predates or is not bound to WAF removal and current lock');
+      }
       nextState = { ...state, recoverySequence: sequence, recoveryLock: null };
     } else {
       if (
@@ -811,7 +908,7 @@ export async function applyRecovery(
       ) {
         throw new Error('fresh source must equal committed state before abort');
       }
-      await validateWafEvidence(request.host, request.action.wafEvidence, context.now);
+      await validateWafEvidence(request.host, request.action.wafEvidence, context.now, context.expectedWafZone);
       probeEvidence = await consumeRequiredProbeEvidence(
         context,
         request.action.wafEvidence.probeAttestationIds,
@@ -839,6 +936,11 @@ export async function applyRecovery(
       operatorKeyVersion: context.operatorKeyVersion,
       operatorKeyFingerprint: context.operatorKeyFingerprint,
       operatorSignature: context.operatorSignature,
+      operatorSignatureScheme: context.operatorSignatureScheme,
+      operatorSignedRole: context.operatorSignedRole,
+      operatorSignedMethod: context.operatorSignedMethod,
+      operatorSignedPath: context.operatorSignedPath,
+      operatorIssuedAt: context.operatorIssuedAt,
       requestBodyDigest: context.requestBodyDigest,
       incidentUrl: request.incidentUrl,
       reason: request.reason,

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   fingerprintSpkiPem,
   importPinnedVerificationKey,
+  validateVerificationRecordIdentities,
   validateVerificationRecords,
   verifyPinnedSignature,
   type VerificationRecord,
@@ -58,6 +59,11 @@ describe('immutable pinned verification records', () => {
     ['wrong algorithm', { algorithm: 'RSA_SIGN_PSS_2048_SHA256' }],
     ['non-numeric publisher epoch', { epochOrSlot: '01' }],
     ['non-numeric publisher subject', { subject: 'publisher@example.com' }],
+    ['non-numeric recovery subject', { role: 'recovery', epochOrSlot: 'primary', subject: 'recovery@example.com' }],
+    [
+      'zero-valued regional-probe subject',
+      { role: 'regional-probe', epochOrSlot: 'us-west1', subject: '0' },
+    ],
   ])('rejects a %s before runtime use', async (_label, override) => {
     const { record } = await fixtureRecord(override as Partial<VerificationRecord>);
     await expect(validateVerificationRecords([record])).rejects.toThrow();
@@ -95,6 +101,46 @@ describe('immutable pinned verification records', () => {
     });
     await expect(validateVerificationRecords([publisher.record, recovery.record])).rejects.toThrow(
       'cross-role subject',
+    );
+  });
+
+  it('requires every regional probe slot to have its own numeric Google subject', async () => {
+    const west = await fixtureRecord({
+      role: 'regional-probe',
+      epochOrSlot: 'us-west1',
+      subject: '3003',
+      keyVersion: 'projects/p/locations/global/keyRings/r/cryptoKeys/probe-west/cryptoKeyVersions/1',
+    });
+    const east = await fixtureRecord({
+      role: 'regional-probe',
+      epochOrSlot: 'us-east1',
+      subject: west.record.subject,
+      keyVersion: 'projects/p/locations/global/keyRings/r/cryptoKeys/probe-east/cryptoKeyVersions/1',
+    });
+
+    await expect(validateVerificationRecords([west.record, east.record])).rejects.toThrow(
+      'regional probe subject',
+    );
+
+    const duplicateWestSlot = await fixtureRecord({
+      role: 'regional-probe',
+      epochOrSlot: west.record.epochOrSlot,
+      subject: '4004',
+      keyVersion: 'projects/p/locations/global/keyRings/r/cryptoKeys/probe-west-2/cryptoKeyVersions/1',
+    });
+    await expect(validateVerificationRecords([west.record, duplicateWestSlot.record])).rejects.toThrow(
+      'role/epoch/slot',
+    );
+  });
+
+  it('validates role identity shape synchronously for Worker startup', async () => {
+    const { record } = await fixtureRecord({
+      role: 'source-attestor',
+      epochOrSlot: 'source',
+      subject: 'source@example.com',
+    });
+    expect(() => validateVerificationRecordIdentities([record])).toThrow(
+      'canonical positive decimal',
     );
   });
 

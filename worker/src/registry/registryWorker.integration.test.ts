@@ -9,6 +9,9 @@ import type { RecoveryRequest, SourceAudit, WafEvidence } from './recovery';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const NOW = Date.now();
+const ZONE_ID = '1'.repeat(32);
+const RULESET_ID = '2'.repeat(32);
+const RULE_ID = '3'.repeat(32);
 let registryBundle = '';
 const instances: Miniflare[] = [];
 
@@ -154,6 +157,27 @@ describe('HostRegistryObject runtime transactions', () => {
     ).resolves.toEqual({ status: 200, result: 'replay' });
 
     const digest = projectionDigest(accepted);
+    await expect(
+      rpc(instance, {
+        op: 'challenge',
+        request: {
+          host: HOST,
+          phase: 'canonical-after-unblock',
+          expectedStateDigest: digest,
+          recoveryLockId: 'not-yet-acquired',
+          recoverySequence: '1',
+          wafRemovedAt: new Date(NOW).toISOString(),
+        },
+        principal: {
+          subject: 'pre-lock-runner',
+          keyVersion: 'probe-key/pre-lock',
+          keyFingerprint: 'f'.repeat(64),
+          region: 'us-west1',
+        },
+        now: NOW,
+        nonce: 'pre-lock-nonce',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'probe-refused' });
     const blockNonce = 'block-nonce-1';
     const blockDigest = createHash('sha256')
       .update(JSON.stringify({ recoveryBlock: blockNonce }))
@@ -173,7 +197,7 @@ describe('HostRegistryObject runtime transactions', () => {
       firewall: {
         action: 'block' as const,
         source: 'firewallcustom' as const,
-        ruleId: 'rule-1',
+        ruleId: RULE_ID,
         ref: 'registry-recovery',
         matchIndex: 0 as const,
         logResponseDigest: String(index + 7).repeat(64),
@@ -241,9 +265,9 @@ describe('HostRegistryObject runtime transactions', () => {
       attestationSignature: 'signed-source',
     };
     const wafEvidence: WafEvidence = {
-      zoneId: 'zone-1',
-      rulesetId: 'ruleset-1',
-      ruleId: 'rule-1',
+      zoneId: ZONE_ID,
+      rulesetId: RULESET_ID,
+      ruleId: RULE_ID,
       host: HOST,
       verifiedAt: new Date(NOW).toISOString(),
       blockNonce,
@@ -278,8 +302,18 @@ describe('HostRegistryObject runtime transactions', () => {
             'projects/p/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
           operatorKeyFingerprint: 'e'.repeat(64),
           operatorSignature: 'signed-recovery-request',
+          operatorSignatureScheme: 'v1',
+          operatorSignedRole: 'recovery',
+          operatorSignedMethod: 'POST',
+          operatorSignedPath: '/__internal/hostname-replicas/v1/recover',
+          operatorIssuedAt: String(NOW),
           requestBodyDigest: 'f'.repeat(64),
           lockId: 'lock-1',
+          expectedWafZone: {
+            namespace: 'fiveacross.app',
+            zoneId: ZONE_ID,
+            rulesetId: RULESET_ID,
+          },
         },
       }),
     ).resolves.toEqual({ ok: true, sequence: '1', action: 'acquire-lock' });
@@ -320,6 +354,72 @@ describe('HostRegistryObject runtime transactions', () => {
     }>(instance, { op: 'audit', after: '0' });
     expect(afterReset.page.recoveryLock.lockId).toBe('lock-1');
     expect(afterReset.page.records.map((record) => record.sequence)).toEqual(['1']);
+  }, 30_000);
+
+  it('transactionally caps outstanding probe artifacts per principal and per host', async () => {
+    const principalInstance = miniflare();
+    const committed = payload('1', 'principal-cap');
+    await rpc(principalInstance, { op: 'sync', payload: committed, epoch: '1' });
+    const digest = projectionDigest(committed);
+    const principal: ProbePrincipal = {
+      subject: 'probe-principal-cap',
+      keyVersion: 'probe-key/principal-cap',
+      keyFingerprint: 'a'.repeat(64),
+      region: 'us-west1',
+    };
+    for (let index = 0; index < 4; index += 1) {
+      await expect(
+        rpc(principalInstance, {
+          op: 'challenge',
+          request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
+          principal,
+          now: NOW,
+          nonce: `principal-cap-${index}`,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+    }
+    await expect(
+      rpc(principalInstance, {
+        op: 'challenge',
+        request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
+        principal,
+        now: NOW,
+        nonce: 'principal-cap-4',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'probe-refused' });
+
+    const hostInstance = miniflare();
+    await rpc(hostInstance, { op: 'sync', payload: committed, epoch: '1' });
+    for (let index = 0; index < 48; index += 1) {
+      await expect(
+        rpc(hostInstance, {
+          op: 'challenge',
+          request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
+          principal: {
+            subject: `probe-host-cap-${index}`,
+            keyVersion: `probe-key/host-cap-${index}`,
+            keyFingerprint: createHash('sha256').update(`host-cap-${index}`).digest('hex'),
+            region: `region-${index}`,
+          },
+          now: NOW,
+          nonce: `host-cap-${index}`,
+        }),
+      ).resolves.toMatchObject({ ok: true });
+    }
+    await expect(
+      rpc(hostInstance, {
+        op: 'challenge',
+        request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
+        principal: {
+          subject: 'probe-host-cap-overflow',
+          keyVersion: 'probe-key/host-cap-overflow',
+          keyFingerprint: 'b'.repeat(64),
+          region: 'overflow-region',
+        },
+        now: NOW,
+        nonce: 'host-cap-overflow',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'probe-refused' });
   }, 30_000);
 
   it('expires unused probe artifacts across reset while retaining fresh evidence', async () => {

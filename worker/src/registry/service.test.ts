@@ -5,6 +5,7 @@ import { type RouterReplicaDesired, SYNC_PATH } from './contracts';
 import { GoogleJwksCache } from './oidc';
 import { handleRegistryFetch, type RegistryServiceConfig, type RegistryServiceDeps } from './service';
 import type { VerificationRecord } from './keys';
+import type { SyncResponse } from './state';
 
 const NOW = Date.parse('2026-08-19T13:00:00.000Z');
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
@@ -146,9 +147,9 @@ async function signedRequest(
 }
 
 function harness(data: Awaited<ReturnType<typeof fixture>>) {
-  const sync = vi.fn(async () => ({
-    status: 200 as const,
-    result: 'applied' as const,
+  const sync = vi.fn(async (): Promise<SyncResponse> => ({
+    status: 200,
+    result: 'applied',
   }));
   const getByName = vi.fn(() => ({
     sync,
@@ -158,8 +159,10 @@ function harness(data: Awaited<ReturnType<typeof fixture>>) {
     attestProbe: vi.fn(),
   }));
   const limit = vi.fn(async () => ({ success: true }));
+  const semanticLogger = vi.fn();
   const config: RegistryServiceConfig = {
     audience: AUDIENCE,
+    registryVersion: 'v1',
     verificationRecords: [data.record],
   };
   const deps: RegistryServiceDeps = {
@@ -167,8 +170,9 @@ function harness(data: Awaited<ReturnType<typeof fixture>>) {
     jwks: data.cache,
     hostRegistry: { getByName },
     rateLimiter: { limit },
+    semanticLogger,
   };
-  return { config, deps, sync, getByName, limit };
+  return { config, deps, sync, getByName, limit, semanticLogger };
 }
 
 describe('registry default fetch sync endpoint', () => {
@@ -182,6 +186,47 @@ describe('registry default fetch sync endpoint', () => {
       locationHint: 'wnam',
     });
     expect(test.sync).toHaveBeenCalledExactlyOnceWith(PAYLOAD, '1');
+    expect(test.semanticLogger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'event-router-registry.semantic',
+        operation: 'sync',
+        outcome: 'applied',
+        registryVersion: 'v1',
+        host: HOST,
+        revision: '1',
+        keyVersion: KEY_VERSION,
+      }),
+    );
+  });
+
+  it('emits an aged gap outcome distinct from conflict without logging request credentials', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    test.sync.mockResolvedValue({ status: 409, result: 'revision-gap' });
+    test.deps.now = vi
+      .fn<() => number>()
+      .mockReturnValueOnce(NOW)
+      .mockReturnValueOnce(NOW + 359_950)
+      .mockReturnValueOnce(NOW + 360_000);
+
+    const request = await signedRequest(data);
+    const response = await handleRegistryFetch(request, test.config, test.deps);
+    expect(response.status).toBe(409);
+    expect(test.semanticLogger).toHaveBeenCalledExactlyOnceWith({
+      schemaVersion: 1,
+      event: 'event-router-registry.semantic',
+      operation: 'sync',
+      outcome: 'gap',
+      registryVersion: 'v1',
+      host: HOST,
+      revision: '1',
+      latencyMs: 50,
+      gapAgeMs: 360_000,
+      keyVersion: KEY_VERSION,
+      recoveryAction: null,
+    });
+    expect(JSON.stringify(test.semanticLogger.mock.calls)).not.toContain(data.token);
+    expect(JSON.stringify(test.semanticLogger.mock.calls)).not.toContain('x-registry-body-signature');
   });
 
   it.each([

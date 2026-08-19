@@ -70,6 +70,50 @@ export const REGISTRY_R0_CONTRACT = Object.freeze({
       costAlertRequired: true,
       tokenRuntimeVisible: false,
     }),
+    observability: Object.freeze({
+      semanticEvent: 'event-router-registry.semantic',
+      requiredFields: Object.freeze(['outcome', 'registryVersion', 'host', 'revision', 'latencyMs']),
+      excludedFields: Object.freeze([
+        'authorization',
+        'token',
+        'signature',
+        'requestBody',
+        'eventData',
+        'firebaseKey',
+      ]),
+      alertPolicies: Object.freeze([
+        Object.freeze({
+          id: 'revision-conflict',
+          outcome: 'conflict',
+          countGreaterThan: 0,
+          windowSeconds: 60,
+        }),
+        Object.freeze({
+          id: 'aged-revision-gap',
+          outcome: 'gap',
+          gapAgeMsGreaterThan: 300_000,
+          windowSeconds: 60,
+        }),
+        Object.freeze({
+          id: 'recovery-action',
+          outcome: 'recovered',
+          countGreaterThan: 0,
+          windowSeconds: 60,
+        }),
+        Object.freeze({
+          id: 'recovery-locked',
+          outcome: 'recovery-locked',
+          countGreaterThan: 0,
+          windowSeconds: 60,
+        }),
+        Object.freeze({
+          id: 'empty-object-cardinality',
+          outcome: 'empty-object',
+          distinctHostsGreaterThan: 64,
+          windowSeconds: 300,
+        }),
+      ]),
+    }),
   }),
 });
 
@@ -121,6 +165,29 @@ export function validateRegistryR0Contract(contract = REGISTRY_R0_CONTRACT) {
       JSON.stringify(['http_requests', 'firewall_events'])
   ) {
     throw new Error('R0 Cloudflare capability/evidence boundary is incomplete');
+  }
+  const observability = contract.cloudflare.observability;
+  const expectedAlertPolicies = [
+    { id: 'revision-conflict', outcome: 'conflict', countGreaterThan: 0, windowSeconds: 60 },
+    { id: 'aged-revision-gap', outcome: 'gap', gapAgeMsGreaterThan: 300_000, windowSeconds: 60 },
+    { id: 'recovery-action', outcome: 'recovered', countGreaterThan: 0, windowSeconds: 60 },
+    { id: 'recovery-locked', outcome: 'recovery-locked', countGreaterThan: 0, windowSeconds: 60 },
+    {
+      id: 'empty-object-cardinality',
+      outcome: 'empty-object',
+      distinctHostsGreaterThan: 64,
+      windowSeconds: 300,
+    },
+  ];
+  if (
+    observability?.semanticEvent !== 'event-router-registry.semantic' ||
+    JSON.stringify(observability.requiredFields) !==
+      JSON.stringify(['outcome', 'registryVersion', 'host', 'revision', 'latencyMs']) ||
+    JSON.stringify(observability.excludedFields) !==
+      JSON.stringify(['authorization', 'token', 'signature', 'requestBody', 'eventData', 'firebaseKey']) ||
+    JSON.stringify(observability.alertPolicies) !== JSON.stringify(expectedAlertPolicies)
+  ) {
+    throw new Error('R0 registry semantic observability contract is incomplete');
   }
   return contract;
 }

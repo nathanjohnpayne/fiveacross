@@ -7,6 +7,10 @@ import {
 
 const EVENT_HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const ROOT_HOST = 'r2-root-abcdefghijklmnopqrst.vacaybingo.com';
+const ACTIVE_HOST = 'r2-bbbbbbbbbbbbbbbbbbbbbbbbbb.fiveacross.app';
+const TOMBSTONE_HOST = 'r2-cccccccccccccccccccccccccc.vacaybingo.com';
+const UNKNOWN_HOST = 'r2-dddddddddddddddddddddddddd.fiveacross.app';
+const COLD_HOST = 'r2-eeeeeeeeeeeeeeeeeeeeeeeeee.vacaybingo.com';
 
 function expectedState(host) {
   if (host.includes('r2-root-')) {
@@ -67,6 +71,8 @@ function reservationReceipt(request, transform = (reservedHosts) => reservedHost
   const reservedHosts = request.reservations.map((reservation) => ({
     host: reservation.host,
     class: reservation.class,
+    materialization: reservation.materialization,
+    expectedState: structuredClone(reservation.expectedState),
     permanent: reservation.permanent,
     runId: reservation.runId,
     reservationPath: reservation.reservationPath,
@@ -76,6 +82,11 @@ function reservationReceipt(request, transform = (reservedHosts) => reservedHost
     routerReplica: structuredClone(reservation.routerReplica),
     projectionDigest: reservation.projectionDigest,
     sourceReplicaEqual: true,
+    reservationPreviouslyAbsent: true,
+    hostnamePreviouslyAbsent: true,
+    ledgerPreviouslyAbsent: true,
+    hostnameAbsent: reservation.hostname === null,
+    ledgerAbsent: reservation.routerReplica === null,
   }));
   return {
     committed: true,
@@ -126,17 +137,51 @@ describe('guarded rehearsal controller', () => {
     expect(() => validateRehearsalManifest(wrongSigner)).toThrow('signature');
   });
 
-  it('requires an exact route-disabled or root expected-state shape bound to its host class', () => {
-    expect(validateRehearsalManifest(manifest())).toMatchObject({ runId: 'run-1' });
+  it('accepts the complete signed materialized and uninitialized rehearsal state matrix', () => {
+    const candidate = manifest([
+      ACTIVE_HOST,
+      EVENT_HOST,
+      ROOT_HOST,
+      TOMBSTONE_HOST,
+      UNKNOWN_HOST,
+      COLD_HOST,
+    ]);
+    candidate.hosts[0].expectedState = {
+      ...expectedState(ACTIVE_HOST),
+      status: 'active',
+    };
+    candidate.hosts[3].expectedState = { kind: 'tombstone', revision: '1' };
+    candidate.hosts[4].expectedState = {
+      kind: 'uninitialized',
+      scenario: 'unknown',
+    };
+    candidate.hosts[5].expectedState = {
+      kind: 'uninitialized',
+      scenario: 'cold',
+    };
+
+    expect(validateRehearsalManifest(candidate).hosts.map((item) => item.expectedState)).toEqual(
+      candidate.hosts.map((item) => item.expectedState),
+    );
+  });
+
+  it('requires exact state shapes, revision 1 for materialized state, and valid host bindings', () => {
+    expect(validateRehearsalManifest(manifest())).toMatchObject({
+      runId: 'run-1',
+    });
 
     const invalidStates = [
       'disabled',
-      { ...expectedState(EVENT_HOST), status: 'active' },
+      { ...expectedState(EVENT_HOST), status: 'archived' },
       { ...expectedState(EVENT_HOST), slug: 'another-host' },
       { ...expectedState(EVENT_HOST), edition: 'vacay' },
       { ...expectedState(EVENT_HOST), pathNamespace: 'fiveacross.app' },
       { ...expectedState(EVENT_HOST), revision: '01' },
+      { ...expectedState(EVENT_HOST), revision: '2' },
       { ...expectedState(EVENT_HOST), root: 'doorway' },
+      { kind: 'tombstone', revision: '2' },
+      { kind: 'uninitialized', scenario: 'warm' },
+      { kind: 'uninitialized', scenario: 'unknown', revision: '1' },
       expectedState(ROOT_HOST),
     ];
     for (const state of invalidStates) {
@@ -154,6 +199,7 @@ describe('guarded rehearsal controller', () => {
       { ...expectedState(ROOT_HOST), edition: 'fiveacross' },
       { ...expectedState(ROOT_HOST), pathNamespace: 'vacaybingo.com' },
       { ...expectedState(ROOT_HOST), revision: '0' },
+      { ...expectedState(ROOT_HOST), revision: '2' },
       { ...expectedState(ROOT_HOST), slug: 'r2-root-abcdefghijklmnopqrst' },
     ];
     for (const state of invalidRootStates) {
@@ -194,6 +240,9 @@ describe('guarded rehearsal controller', () => {
     expect(provider.reserveTransaction.mock.calls[0][0].reservations[0]).toEqual({
       host: EVENT_HOST,
       class: 'synthetic',
+      materialization: 'source-and-ledger',
+      requirePriorAbsence: true,
+      expectedState: expectedState(EVENT_HOST),
       permanent: true,
       runId: 'run-1',
       reservationPath: `routerRehearsals/${EVENT_HOST}`,
@@ -227,6 +276,9 @@ describe('guarded rehearsal controller', () => {
     expect(provider.reserveTransaction.mock.calls[0][0].reservations[1]).toEqual({
       host: ROOT_HOST,
       class: 'root-test',
+      materialization: 'source-and-ledger',
+      requirePriorAbsence: true,
+      expectedState: expectedState(ROOT_HOST),
       permanent: true,
       runId: 'run-1',
       reservationPath: `routerRehearsals/${ROOT_HOST}`,
@@ -263,6 +315,140 @@ describe('guarded rehearsal controller', () => {
         reviewAuthorizationId: 'review-123',
       }),
     );
+  });
+
+  it('atomically materializes the full matrix while leaving unknown and cold hosts reserved-only', async () => {
+    const candidate = manifest([
+      ACTIVE_HOST,
+      EVENT_HOST,
+      ROOT_HOST,
+      TOMBSTONE_HOST,
+      UNKNOWN_HOST,
+      COLD_HOST,
+    ]);
+    candidate.hosts[0].expectedState = {
+      ...expectedState(ACTIVE_HOST),
+      status: 'active',
+    };
+    candidate.hosts[3].expectedState = { kind: 'tombstone', revision: '1' };
+    candidate.hosts[4].expectedState = {
+      kind: 'uninitialized',
+      scenario: 'unknown',
+    };
+    candidate.hosts[5].expectedState = {
+      kind: 'uninitialized',
+      scenario: 'cold',
+    };
+    const provider = deps();
+
+    await provisionRehearsal(candidate, provider, { dryRun: false });
+
+    const reservations = provider.reserveTransaction.mock.calls[0][0].reservations;
+    expect(reservations[0]).toMatchObject({
+      host: ACTIVE_HOST,
+      materialization: 'source-and-ledger',
+      requirePriorAbsence: true,
+      routerReplica: {
+        revision: '1',
+        desired: { kind: 'route', status: 'active' },
+      },
+    });
+    expect(reservations[3]).toEqual({
+      host: TOMBSTONE_HOST,
+      class: 'synthetic',
+      materialization: 'ledger-only',
+      requirePriorAbsence: true,
+      expectedState: { kind: 'tombstone', revision: '1' },
+      permanent: true,
+      runId: 'run-1',
+      reservationPath: `routerRehearsals/${TOMBSTONE_HOST}`,
+      hostnamePath: `hostnames/${TOMBSTONE_HOST}`,
+      ledgerPath: `routerReplicas/${TOMBSTONE_HOST}`,
+      hostname: null,
+      routerReplica: {
+        schemaVersion: 1,
+        revision: '1',
+        host: TOMBSTONE_HOST,
+        desired: { kind: 'tombstone' },
+        updatedAt: '2026-08-19T13:00:00.000Z',
+      },
+      projectionDigest: '0646abacdcf6a5153d3cbbea3bbeb809ab72981587f4283be8119472572d38ce',
+    });
+    for (const [index, scenario] of [
+      [4, 'unknown'],
+      [5, 'cold'],
+    ]) {
+      expect(reservations[index]).toMatchObject({
+        materialization: 'reserved-only',
+        requirePriorAbsence: true,
+        expectedState: { kind: 'uninitialized', scenario },
+        hostname: null,
+        routerReplica: null,
+        projectionDigest: null,
+      });
+      expect(candidate.hosts[index].expectedState).toEqual({
+        kind: 'uninitialized',
+        scenario,
+      });
+    }
+    expect(provider.createExactDns).toHaveBeenCalledTimes(6);
+    expect(provider.attachExactRoute).toHaveBeenCalledTimes(6);
+  });
+
+  it('requires prior-absence and reserved-only absence attestations before provider mutation', async () => {
+    const candidate = manifest([UNKNOWN_HOST]);
+    candidate.hosts[0].expectedState = {
+      kind: 'uninitialized',
+      scenario: 'unknown',
+    };
+    const forgeries = [
+      (attestation) => {
+        attestation.reservationPreviouslyAbsent = false;
+      },
+      (attestation) => {
+        attestation.hostnamePreviouslyAbsent = false;
+      },
+      (attestation) => {
+        attestation.ledgerPreviouslyAbsent = false;
+      },
+      (attestation) => {
+        attestation.hostnameAbsent = false;
+      },
+      (attestation) => {
+        attestation.ledgerAbsent = false;
+      },
+      (attestation) => {
+        attestation.hostname = { status: 'disabled' };
+      },
+      (attestation) => {
+        attestation.routerReplica = { revision: '1' };
+      },
+      (attestation) => {
+        attestation.projectionDigest = 'f'.repeat(64);
+      },
+      (attestation) => {
+        attestation.materialization = 'source-and-ledger';
+      },
+      (attestation) => {
+        attestation.expectedState = { kind: 'uninitialized', scenario: 'cold' };
+      },
+    ];
+
+    for (const forge of forgeries) {
+      const provider = deps({
+        reserveTransaction: vi.fn(async (request) =>
+          reservationReceipt(request, (attestations) => {
+            forge(attestations[0]);
+            return attestations;
+          }),
+        ),
+      });
+      await expect(provisionRehearsal(candidate, provider, { dryRun: false })).rejects.toThrow(
+        'reservation transaction',
+      );
+      expect(provider.createExactDns).not.toHaveBeenCalled();
+      expect(provider.attachExactRoute).not.toHaveBeenCalled();
+    }
   });
 
   it('refuses invalid signatures, expired manifests, and dirty or non-main artifacts before mutation', async () => {
@@ -343,6 +529,30 @@ describe('guarded rehearsal controller', () => {
       },
       (hosts) => {
         hosts[0].sourceReplicaEqual = false;
+        return hosts;
+      },
+      (hosts) => {
+        hosts[0].reservationPreviouslyAbsent = false;
+        return hosts;
+      },
+      (hosts) => {
+        hosts[0].hostnamePreviouslyAbsent = false;
+        return hosts;
+      },
+      (hosts) => {
+        hosts[0].ledgerPreviouslyAbsent = false;
+        return hosts;
+      },
+      (hosts) => {
+        hosts[0].hostnameAbsent = true;
+        return hosts;
+      },
+      (hosts) => {
+        hosts[0].ledgerAbsent = true;
+        return hosts;
+      },
+      (hosts) => {
+        hosts[0].materialization = 'reserved-only';
         return hosts;
       },
       (hosts) => {

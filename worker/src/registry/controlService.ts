@@ -3,7 +3,7 @@ import { REGISTRY_LOCATION_HINT, parseSyncRequest } from './contracts';
 import { ControlAuthUnavailableError, authenticatePinnedRole, type PinnedRoleRequest } from './controlAuth';
 import { publisherVerificationMappings, verificationRecordMappingDigest, type VerificationRecord } from './keys';
 import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
-import type { ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
+import type { ProbeChallengeRequest, ProbeObservation, ProbePrincipal } from './probe';
 import type { RecoveryRequest, SourceAudit } from './recovery';
 import type { HostRegistryNamespace, RegistryRateLimiter, RegistryServiceConfig } from './service';
 
@@ -114,7 +114,15 @@ async function authenticateRequest(
   bodyDigest: string,
   config: RegistryServiceConfig,
   deps: ControlServiceDeps,
-): Promise<{ record: VerificationRecord; signature: string }> {
+): Promise<{
+  record: VerificationRecord;
+  signature: string;
+  issuedAtRaw: string;
+  signatureScheme: 'v1';
+  signedRole: 'recovery' | 'regional-probe';
+  signedMethod: string;
+  signedPath: string;
+}> {
   const token = bearer(request.headers.get('authorization'));
   const slot = request.headers.get('x-registry-role-slot');
   const keyVersion = request.headers.get('x-registry-key-version');
@@ -152,7 +160,15 @@ async function authenticateRequest(
       verificationRecords: config.verificationRecords,
     },
   );
-  return { record, signature };
+  return {
+    record,
+    signature,
+    issuedAtRaw,
+    signatureScheme: 'v1' as const,
+    signedRole: role,
+    signedMethod: request.method,
+    signedPath: `${url.pathname}${url.search}`,
+  };
 }
 
 async function authenticateAudit(
@@ -528,10 +544,21 @@ export function parseRecovery(value: unknown): RecoveryRequest {
 }
 
 export function parseProbePayload(value: unknown, kind: 'challenge' | 'attest'): Record<string, unknown> {
+  const challengePhase = isRecord(value) ? value.phase : undefined;
   const outer = exactRecord(
     value,
     kind === 'challenge'
-      ? ['schemaVersion', 'host', 'phase', 'expectedStateDigest']
+      ? challengePhase === 'canonical-after-unblock'
+        ? [
+            'schemaVersion',
+            'host',
+            'phase',
+            'expectedStateDigest',
+            'recoveryLockId',
+            'recoverySequence',
+            'wafRemovedAt',
+          ]
+        : ['schemaVersion', 'host', 'phase', 'expectedStateDigest']
       : ['schemaVersion', 'host', 'observation'],
     'probe request',
   );
@@ -542,7 +569,14 @@ export function parseProbePayload(value: unknown, kind: 'challenge' | 'attest'):
     if (
       (outer.phase !== 'blocked-before-worker' && outer.phase !== 'canonical-after-unblock') ||
       typeof outer.expectedStateDigest !== 'string' ||
-      !SHA256_HEX.test(outer.expectedStateDigest)
+      !SHA256_HEX.test(outer.expectedStateDigest) ||
+      (outer.phase === 'canonical-after-unblock' &&
+        (typeof outer.recoveryLockId !== 'string' ||
+          outer.recoveryLockId.length === 0 ||
+          typeof outer.recoverySequence !== 'string' ||
+          !/^[1-9]\d*$/.test(outer.recoverySequence) ||
+          typeof outer.wafRemovedAt !== 'string' ||
+          !Number.isFinite(Date.parse(outer.wafRemovedAt))))
     ) {
       throw new Error('invalid probe challenge');
     }
@@ -660,6 +694,15 @@ async function recoveryResponse(
   const authenticated = await authenticateRequest(request, 'recovery', parsed.bodyDigest, config, deps);
   await authenticateSourceAttestation(request, authenticated.record, recovery, config, deps);
   try {
+    const namespace = recovery.host.endsWith('.fiveacross.app')
+      ? ('fiveacross.app' as const)
+      : recovery.host.endsWith('.vacaybingo.com')
+        ? ('vacaybingo.com' as const)
+        : null;
+    const recoveryZone = namespace === null ? undefined : config.recoveryZones?.[namespace];
+    if (namespace === null || recoveryZone === undefined) {
+      throw new Error('recovery zone configuration unavailable');
+    }
     const result = await deps.hostRegistry
       .getByName(recovery.host, { locationHint: REGISTRY_LOCATION_HINT })
       .recover(recovery, {
@@ -668,8 +711,14 @@ async function recoveryResponse(
         operatorKeyVersion: authenticated.record.keyVersion,
         operatorKeyFingerprint: authenticated.record.spkiSha256,
         operatorSignature: authenticated.signature,
+        operatorSignatureScheme: authenticated.signatureScheme,
+        operatorSignedRole: 'recovery',
+        operatorSignedMethod: 'POST',
+        operatorSignedPath: authenticated.signedPath,
+        operatorIssuedAt: authenticated.issuedAtRaw,
         requestBodyDigest: parsed.bodyDigest,
         lockId: deps.randomId(),
+        expectedWafZone: { namespace, ...recoveryZone },
         // Omission is never evidence. This endpoint has no independent
         // trusted-publisher proof channel, so every recovery apply requires
         // the separately signed replacement evidence.
@@ -730,11 +779,7 @@ async function probeResponse(
     });
     if (kind === 'challenge') {
       const result = await stub.issueProbeChallenge(
-        {
-          host,
-          phase: probe.phase as ProbePhase,
-          expectedStateDigest: probe.expectedStateDigest as string,
-        },
+        probe as unknown as ProbeChallengeRequest,
         principal,
         deps.now(),
         deps.randomId(),

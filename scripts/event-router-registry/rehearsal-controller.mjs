@@ -5,7 +5,6 @@ const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)
 const COMMIT = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SIGNATURE_VALUE = /^[A-Za-z0-9_-]+$/;
-const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const MAX_RESERVATIONS = 64;
 
 function exactKeys(value, expected, label) {
@@ -33,19 +32,35 @@ function editionForHost(host) {
 }
 
 function validateExpectedState(host, hostClass, value) {
-  if (hostClass === 'synthetic') {
+  if (hostClass === 'root-test') {
+    exactKeys(
+      value,
+      ['kind', 'revision', 'root', 'edition', 'pathNamespace'],
+      'manifest expected state',
+    );
+    if (
+      value.kind !== 'root' ||
+      value.revision !== '1' ||
+      (value.root !== 'doorway' && value.root !== 'not-found') ||
+      value.edition !== editionForHost(host) ||
+      value.pathNamespace !== null
+    ) {
+      throw new Error('manifest expected state does not match its synthetic root-test host');
+    }
+    return;
+  }
+
+  if (value?.kind === 'route') {
     exactKeys(
       value,
       ['kind', 'revision', 'eventId', 'status', 'slug', 'edition', 'pathNamespace'],
       'manifest expected state',
     );
     if (
-      value.kind !== 'route' ||
-      typeof value.revision !== 'string' ||
-      !POSITIVE_DECIMAL.test(value.revision) ||
+      value.revision !== '1' ||
       typeof value.eventId !== 'string' ||
       value.eventId.length === 0 ||
-      value.status !== 'disabled' ||
+      (value.status !== 'active' && value.status !== 'disabled') ||
       value.slug !== host.split('.')[0] ||
       value.edition !== editionForHost(host) ||
       value.pathNamespace !== null
@@ -55,21 +70,23 @@ function validateExpectedState(host, hostClass, value) {
     return;
   }
 
-  exactKeys(
-    value,
-    ['kind', 'revision', 'root', 'edition', 'pathNamespace'],
-    'manifest expected state',
-  );
-  if (
-    value.kind !== 'root' ||
-    typeof value.revision !== 'string' ||
-    !POSITIVE_DECIMAL.test(value.revision) ||
-    (value.root !== 'doorway' && value.root !== 'not-found') ||
-    value.edition !== editionForHost(host) ||
-    value.pathNamespace !== null
-  ) {
-    throw new Error('manifest expected state does not match its synthetic root-test host');
+  if (value?.kind === 'tombstone') {
+    exactKeys(value, ['kind', 'revision'], 'manifest expected state');
+    if (value.revision !== '1') {
+      throw new Error('manifest expected state does not match its synthetic tombstone host');
+    }
+    return;
   }
+
+  if (value?.kind === 'uninitialized') {
+    exactKeys(value, ['kind', 'scenario'], 'manifest expected state');
+    if (value.scenario !== 'unknown' && value.scenario !== 'cold') {
+      throw new Error('manifest expected state does not match an uninitialized synthetic host');
+    }
+    return;
+  }
+
+  throw new Error('manifest expected state does not match its synthetic host');
 }
 
 export function validateRehearsalManifest(value) {
@@ -285,6 +302,8 @@ function validateReservationReceipt(receipt, reservations, binding) {
       [
         'host',
         'class',
+        'materialization',
+        'expectedState',
         'permanent',
         'runId',
         'reservationPath',
@@ -294,6 +313,11 @@ function validateReservationReceipt(receipt, reservations, binding) {
         'routerReplica',
         'projectionDigest',
         'sourceReplicaEqual',
+        'reservationPreviouslyAbsent',
+        'hostnamePreviouslyAbsent',
+        'ledgerPreviouslyAbsent',
+        'hostnameAbsent',
+        'ledgerAbsent',
       ],
       'reservation transaction host attestation',
     );
@@ -302,12 +326,19 @@ function validateReservationReceipt(receipt, reservations, binding) {
       expected === undefined ||
       seen.has(attestation.host) ||
       attestation.class !== expected.class ||
+      attestation.materialization !== expected.materialization ||
+      canonicalJson(attestation.expectedState) !== canonicalJson(expected.expectedState) ||
       attestation.permanent !== expected.permanent ||
       attestation.runId !== expected.runId ||
       attestation.reservationPath !== expected.reservationPath ||
       attestation.hostnamePath !== expected.hostnamePath ||
       attestation.ledgerPath !== expected.ledgerPath ||
       attestation.sourceReplicaEqual !== true ||
+      attestation.reservationPreviouslyAbsent !== true ||
+      attestation.hostnamePreviouslyAbsent !== true ||
+      attestation.ledgerPreviouslyAbsent !== true ||
+      attestation.hostnameAbsent !== (expected.hostname === null) ||
+      attestation.ledgerAbsent !== (expected.routerReplica === null) ||
       attestation.projectionDigest !== expected.projectionDigest ||
       canonicalJson(attestation.hostname) !== canonicalJson(expected.hostname) ||
       canonicalJson(attestation.routerReplica) !== canonicalJson(expected.routerReplica)
@@ -329,6 +360,7 @@ function desiredForExpectedState(expectedState) {
       pathNamespace: expectedState.pathNamespace,
     };
   }
+  if (expectedState.kind === 'tombstone') return { kind: 'tombstone' };
   return {
     kind: 'root',
     root: expectedState.root,
@@ -349,6 +381,7 @@ function hostnameForExpectedState(host, expectedState) {
       isCanonical: true,
     };
   }
+  if (expectedState.kind === 'tombstone') return null;
   return {
     root: expectedState.root,
     edition: expectedState.edition,
@@ -358,51 +391,66 @@ function hostnameForExpectedState(host, expectedState) {
 
 function digestProjection(routerReplica) {
   const { desired } = routerReplica;
-  const tuple =
-    desired.kind === 'route'
-      ? [
-          1,
-          routerReplica.revision,
-          routerReplica.host,
-          'route',
-          desired.eventId,
-          desired.status,
-          desired.slug,
-          desired.edition,
-          desired.pathNamespace,
-        ]
-      : [
-          1,
-          routerReplica.revision,
-          routerReplica.host,
-          'root',
-          desired.root,
-          desired.edition,
-          desired.pathNamespace,
-        ];
+  let tuple;
+  if (desired.kind === 'route') {
+    tuple = [
+      1,
+      routerReplica.revision,
+      routerReplica.host,
+      'route',
+      desired.eventId,
+      desired.status,
+      desired.slug,
+      desired.edition,
+      desired.pathNamespace,
+    ];
+  } else if (desired.kind === 'root') {
+    tuple = [
+      1,
+      routerReplica.revision,
+      routerReplica.host,
+      'root',
+      desired.root,
+      desired.edition,
+      desired.pathNamespace,
+    ];
+  } else {
+    tuple = [1, routerReplica.revision, routerReplica.host, 'tombstone'];
+  }
   return createHash('sha256').update(JSON.stringify(tuple)).digest('hex');
 }
 
 function reservationFor(item, runId, updatedAt) {
-  const desired = desiredForExpectedState(item.expectedState);
-  const routerReplica = {
-    schemaVersion: 1,
-    revision: item.expectedState.revision,
-    host: item.host,
-    desired,
-    updatedAt,
-  };
+  const uninitialized = item.expectedState.kind === 'uninitialized';
+  const desired = uninitialized ? null : desiredForExpectedState(item.expectedState);
+  const routerReplica = uninitialized
+    ? null
+    : {
+        schemaVersion: 1,
+        revision: item.expectedState.revision,
+        host: item.host,
+        desired,
+        updatedAt,
+      };
+  const hostname = uninitialized ? null : hostnameForExpectedState(item.host, item.expectedState);
   return {
     host: item.host,
     class: item.class,
+    materialization: uninitialized
+      ? 'reserved-only'
+      : item.expectedState.kind === 'tombstone'
+        ? 'ledger-only'
+        : 'source-and-ledger',
+    expectedState: structuredClone(item.expectedState),
+    requirePriorAbsence: true,
     permanent: true,
     runId,
     reservationPath: `routerRehearsals/${item.host}`,
     hostnamePath: `hostnames/${item.host}`,
     ledgerPath: `routerReplicas/${item.host}`,
-    hostname: hostnameForExpectedState(item.host, item.expectedState),
+    hostname,
     routerReplica,
-    projectionDigest: digestProjection(routerReplica),
+    projectionDigest: routerReplica === null ? null : digestProjection(routerReplica),
   };
 }
 

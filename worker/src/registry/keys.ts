@@ -58,23 +58,30 @@ export async function importPinnedVerificationKey(record: VerificationRecord): P
   ]);
 }
 
-export async function validateVerificationRecords(
+export function validateVerificationRecordIdentities(
   records: readonly VerificationRecord[],
-): Promise<readonly VerificationRecord[]> {
+): readonly VerificationRecord[] {
   const slots = new Set<string>();
   const versions = new Set<string>();
   const fingerprints = new Set<string>();
   const subjectRoles = new Map<string, VerificationRole>();
+  const regionalProbeSubjects = new Set<string>();
 
   for (const record of records) {
     if (record.subject.length === 0 || record.keyVersion.length === 0 || record.epochOrSlot.length === 0) {
       throw new Error('verification record has an empty identity field');
     }
-    if (
-      record.role === 'publisher' &&
-      (!POSITIVE_DECIMAL.test(record.epochOrSlot) || !POSITIVE_DECIMAL.test(record.subject))
-    ) {
-      throw new Error('publisher subject and epoch must be canonical positive decimals');
+    if (!POSITIVE_DECIMAL.test(record.subject)) {
+      throw new Error('verification subject must be a canonical positive decimal');
+    }
+    if (record.role === 'publisher' && !POSITIVE_DECIMAL.test(record.epochOrSlot)) {
+      throw new Error('publisher epoch must be a canonical positive decimal');
+    }
+    if (record.role === 'regional-probe') {
+      if (regionalProbeSubjects.has(record.subject)) {
+        throw new Error('regional probe subject must be distinct per slot');
+      }
+      regionalProbeSubjects.add(record.subject);
     }
     const slot = `${record.role}\u0000${record.epochOrSlot}`;
     if (slots.has(slot)) throw new Error('duplicate role/epoch/slot mapping');
@@ -90,8 +97,15 @@ export async function validateVerificationRecords(
     subjectRoles.set(record.subject, record.role);
   }
 
-  await Promise.all(records.map((record) => importPinnedVerificationKey(record)));
   return records;
+}
+
+export async function validateVerificationRecords(
+  records: readonly VerificationRecord[],
+): Promise<readonly VerificationRecord[]> {
+  const identityValidated = validateVerificationRecordIdentities(records);
+  await Promise.all(identityValidated.map((record) => importPinnedVerificationKey(record)));
+  return identityValidated;
 }
 
 export async function verifyPinnedSignature(

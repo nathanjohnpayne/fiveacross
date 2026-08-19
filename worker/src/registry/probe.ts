@@ -16,6 +16,21 @@ function refuse(message: string): never {
 
 export type ProbePhase = 'blocked-before-worker' | 'canonical-after-unblock';
 
+export type ProbeChallengeRequest =
+  | {
+      host: string;
+      phase: 'blocked-before-worker';
+      expectedStateDigest: string;
+    }
+  | {
+      host: string;
+      phase: 'canonical-after-unblock';
+      expectedStateDigest: string;
+      recoveryLockId: string;
+      recoverySequence: string;
+      wafRemovedAt: string;
+    };
+
 export type ProbePrincipal = {
   subject: string;
   keyVersion: string;
@@ -23,19 +38,34 @@ export type ProbePrincipal = {
   region: string;
 };
 
-export type ProbeChallenge = {
+type ProbeChallengeBase = {
   probeNonce: string;
   subject: string;
   keyVersion: string;
   keyFingerprint: string;
   region: string;
-  phase: ProbePhase;
   host: string;
   expectedStateDigest: string;
   issuedAt: number;
   expiresAt: number;
   consumed: boolean;
 };
+
+export type ProbeChallenge = ProbeChallengeBase &
+  (
+    | {
+        phase: 'blocked-before-worker';
+        recoveryLockId: null;
+        recoverySequence: null;
+        wafRemovedAt: null;
+      }
+    | {
+        phase: 'canonical-after-unblock';
+        recoveryLockId: string;
+        recoverySequence: string;
+        wafRemovedAt: string;
+      }
+  );
 
 export type ProbeObservation =
   | {
@@ -113,6 +143,9 @@ export type CanonicalProbeExpectation = {
   reason: null | 'inactive' | 'unknown-host';
   revision: string;
   servesOrigin: boolean;
+  recoveryLockId: string;
+  recoverySequence: string;
+  wafRemovedAt: string;
 };
 
 export function matchProbeAttestations(
@@ -177,9 +210,20 @@ export function matchProbeAttestations(
     if (phase === 'canonical-after-unblock') {
       const observation = attestation.observation;
       const canonical = expected.canonical;
+      const observedAt = Date.parse(observation.observedAt);
+      const wafRemovedAt = Date.parse(canonical?.wafRemovedAt ?? '');
       if (
         observation.phase !== 'canonical-after-unblock' ||
         canonical === undefined ||
+        attestation.challenge.phase !== 'canonical-after-unblock' ||
+        attestation.challenge.recoveryLockId !== canonical.recoveryLockId ||
+        attestation.challenge.recoverySequence !== canonical.recoverySequence ||
+        attestation.challenge.wafRemovedAt !== canonical.wafRemovedAt ||
+        !Number.isFinite(wafRemovedAt) ||
+        attestation.challenge.issuedAt < wafRemovedAt ||
+        !Number.isFinite(observedAt) ||
+        observedAt < wafRemovedAt ||
+        receivedAt < observedAt ||
         canonical.stateDigest !== expected.stateDigest ||
         observation.expectedStatus !== canonical.status ||
         observation.observedStatus !== canonical.status ||
@@ -206,7 +250,7 @@ export function matchProbeAttestations(
 }
 
 export function issueProbeChallenge(
-  request: { host: string; phase: ProbePhase; expectedStateDigest: string },
+  request: ProbeChallengeRequest,
   principal: ProbePrincipal,
   now: number,
   probeNonce: string,
@@ -218,23 +262,43 @@ export function issueProbeChallenge(
     principal.keyVersion.length === 0 ||
     !SHA256_HEX.test(principal.keyFingerprint) ||
     principal.region.length === 0 ||
-    probeNonce.length < 7
+    probeNonce.length < 7 ||
+    (request.phase === 'canonical-after-unblock' &&
+      (request.recoveryLockId.length === 0 ||
+        !/^[1-9]\d*$/.test(request.recoverySequence) ||
+        !Number.isFinite(Date.parse(request.wafRemovedAt)) ||
+        Date.parse(request.wafRemovedAt) > now ||
+        now - Date.parse(request.wafRemovedAt) > CHALLENGE_LIFETIME_MS))
   ) {
     refuse('probe challenge input malformed');
   }
-  return {
+  const base: ProbeChallengeBase = {
     probeNonce,
     subject: principal.subject,
     keyVersion: principal.keyVersion,
     keyFingerprint: principal.keyFingerprint,
     region: principal.region,
-    phase: request.phase,
     host: request.host,
     expectedStateDigest: request.expectedStateDigest,
     issuedAt: now,
     expiresAt: now + CHALLENGE_LIFETIME_MS,
     consumed: false,
   };
+  return request.phase === 'blocked-before-worker'
+    ? {
+        ...base,
+        phase: request.phase,
+        recoveryLockId: null,
+        recoverySequence: null,
+        wafRemovedAt: null,
+      }
+    : {
+        ...base,
+        phase: request.phase,
+        recoveryLockId: request.recoveryLockId,
+        recoverySequence: request.recoverySequence,
+        wafRemovedAt: request.wafRemovedAt,
+      };
 }
 
 export function acceptProbeAttestation(

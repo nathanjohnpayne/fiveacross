@@ -132,7 +132,7 @@ describe('registry default fetch control-plane endpoints', () => {
   it('binds source-attestor attribution to the authenticated pinned subject', () => {
     const record = {
       role: 'source-attestor',
-      subject: 'source-subject-1',
+      subject: '3003',
       epochOrSlot: 'source',
       keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/source/cryptoKeyVersions/1',
       algorithm: 'RSA_SIGN_PKCS1_2048_SHA256',
@@ -140,7 +140,7 @@ describe('registry default fetch control-plane endpoints', () => {
       spkiSha256: 'a'.repeat(64),
     } satisfies VerificationRecord;
     const audit = {
-      attestorSub: 'forged-source-subject',
+      attestorSub: '4004',
       attestorKeyVersion: record.keyVersion,
       attestorKeyFingerprint: record.spkiSha256,
     } as SourceAudit;
@@ -277,8 +277,8 @@ describe('registry default fetch control-plane endpoints', () => {
         } satisfies VerificationRecord,
       };
     };
-    const recoveryRole = await role('recovery', 'recovery-subject', 'primary');
-    const sourceRole = await role('source-attestor', 'source-subject', 'source');
+    const recoveryRole = await role('recovery', '100000000000000000001', 'primary');
+    const sourceRole = await role('source-attestor', '100000000000000000002', 'source');
     const recoveryAudience = `${ORIGIN}/recovery-audience`;
     const sourceAudience = `${ORIGIN}/source-audience`;
     const token = async (subject: string, audience: string) => {
@@ -384,6 +384,9 @@ describe('registry default fetch control-plane endpoints', () => {
       audience: `${ORIGIN}${SYNC_PATH}`,
       verificationRecords: [recoveryRole.record, sourceRole.record],
       roleAudiences: { recovery: recoveryAudience, 'source-attestor': sourceAudience },
+      recoveryZones: {
+        'fiveacross.app': { zoneId: '1'.repeat(32), rulesetId: '2'.repeat(32) },
+      },
     };
     const deps: RegistryServiceDeps = {
       now: () => NOW,
@@ -427,7 +430,17 @@ describe('registry default fetch control-plane endpoints', () => {
       operatorKeyVersion: recoveryRole.record.keyVersion,
       operatorKeyFingerprint: recoveryRole.record.spkiSha256,
       operatorSignature: recoverySignature,
+      operatorSignatureScheme: 'v1',
+      operatorSignedRole: 'recovery',
+      operatorSignedMethod: 'POST',
+      operatorSignedPath: RECOVERY_PATH,
+      operatorIssuedAt: String(NOW),
       requestBodyDigest: bodyDigest,
+      expectedWafZone: {
+        namespace: 'fiveacross.app',
+        zoneId: '1'.repeat(32),
+        rulesetId: '2'.repeat(32),
+      },
     });
     expect(JSON.stringify(context)).not.toContain(recoveryToken);
     expect(JSON.stringify(context)).not.toContain(sourceToken);

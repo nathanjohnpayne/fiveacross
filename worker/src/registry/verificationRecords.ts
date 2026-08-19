@@ -1,4 +1,4 @@
-import type { VerificationRecord } from './keys';
+import { validateVerificationRecordIdentities, type VerificationRecord } from './keys';
 
 /**
  * Provisioning writes reviewed public verification records here before the
@@ -11,7 +11,14 @@ import type { VerificationRecord } from './keys';
  * exact shape after checking the KMS version, algorithm, PEM CRC32C and SPKI
  * fingerprint. No private key or OAuth credential belongs in this file.
  */
-export const REGISTRY_VERIFICATION_RECORDS: readonly VerificationRecord[] = Object.freeze([]);
+const REGISTRY_VERIFICATION_RECORD_CONFIG: readonly VerificationRecord[] = Object.freeze([]);
+
+// Role/subject/slot/key uniqueness is synchronous and runs as the module is
+// instantiated. Invalid reviewed identity configuration therefore prevents a
+// Worker isolate from starting rather than waiting for the first request.
+export const REGISTRY_VERIFICATION_RECORDS = validateVerificationRecordIdentities(
+  REGISTRY_VERIFICATION_RECORD_CONFIG,
+);
 
 export const REGISTRY_SYNC_AUDIENCE =
   'https://five-across-event-registry.nathanpayne.workers.dev/__internal/hostname-replicas/v1';
@@ -28,3 +35,8 @@ export const REGISTRY_ROLE_AUDIENCES = {
 // Provisioning replaces this fail-closed placeholder with the dedicated audit
 // service account's numeric Google subject before any private audit is run.
 export const REGISTRY_AUDIT_SUBJECT = '';
+
+// Provisioning replaces this fail-closed map with the reviewed Cloudflare
+// zone and account-level custom-ruleset identifiers for each served
+// Namespace. Recovery refuses WAF evidence until the exact mapping is pinned.
+export const REGISTRY_RECOVERY_ZONES = Object.freeze({});

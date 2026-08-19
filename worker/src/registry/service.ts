@@ -9,9 +9,16 @@ import { validateVerificationRecords, verifyPinnedSignature, type VerificationRe
 import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { SyncResponse } from './state';
 import type { RegistryAuditPage } from './audit';
-import type { ProbeAttestation, ProbeChallenge, ProbeObservation, ProbePhase, ProbePrincipal } from './probe';
+import type {
+  ProbeAttestation,
+  ProbeChallenge,
+  ProbeChallengeRequest,
+  ProbeObservation,
+  ProbePrincipal,
+} from './probe';
 import type { ActivePublisherMapping, RecoveryRecord, RecoveryRequest } from './recovery';
 import { handleControlFetch } from './controlService';
+import { createSyncSemanticEvent, type RegistrySemanticEvent } from './telemetry';
 
 const MAX_SIGNATURE_AGE_MS = 60_000;
 const CANONICAL_POSITIVE_DECIMAL = /^[1-9]\d*$/;
@@ -41,8 +48,18 @@ export type HostRegistryStub = {
       operatorKeyVersion: string;
       operatorKeyFingerprint: string;
       operatorSignature: string;
+      operatorSignatureScheme: 'v1';
+      operatorSignedRole: 'recovery';
+      operatorSignedMethod: 'POST';
+      operatorSignedPath: string;
+      operatorIssuedAt: string;
       requestBodyDigest: string;
       lockId: string;
+      expectedWafZone: {
+        namespace: 'fiveacross.app' | 'vacaybingo.com';
+        zoneId: string;
+        rulesetId: string;
+      };
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
       activePublisherMappings?: readonly ActivePublisherMapping[];
@@ -51,7 +68,7 @@ export type HostRegistryStub = {
     { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }
   >;
   issueProbeChallenge(
-    request: { host: string; phase: ProbePhase; expectedStateDigest: string },
+    request: ProbeChallengeRequest,
     principal: ProbePrincipal,
     now: number,
     nonce: string,
@@ -74,9 +91,13 @@ export type RegistryRateLimiter = {
 
 export type RegistryServiceConfig = {
   audience: string;
+  registryVersion?: string;
   verificationRecords: readonly VerificationRecord[];
   auditSubject?: string;
   roleAudiences?: Partial<Record<'audit' | 'recovery' | 'source-attestor' | 'regional-probe', string>>;
+  recoveryZones?: Partial<
+    Record<'fiveacross.app' | 'vacaybingo.com', { zoneId: string; rulesetId: string }>
+  >;
 };
 
 export type RegistryServiceDeps = {
@@ -85,6 +106,7 @@ export type RegistryServiceDeps = {
   hostRegistry: HostRegistryNamespace;
   rateLimiter: RegistryRateLimiter;
   randomId?: () => string;
+  semanticLogger?: (event: RegistrySemanticEvent) => void;
 };
 
 function json(status: number, body: Record<string, unknown>): Response {
@@ -225,11 +247,31 @@ async function syncResponse(
   }
 
   try {
+    const startedAt = deps.now();
     const stub = deps.hostRegistry.getByName(payload.host, {
       locationHint: REGISTRY_LOCATION_HINT,
     });
     const result = await stub.sync(payload, epoch);
     if (!isSyncResponse(result)) return json(503, { error: 'registry-state-unavailable' });
+    const finishedAt = deps.now();
+    if (config.registryVersion !== undefined && deps.semanticLogger !== undefined) {
+      try {
+        deps.semanticLogger(
+          createSyncSemanticEvent({
+            registryVersion: config.registryVersion,
+            host: payload.host,
+            revision: payload.revision,
+            result: result.result,
+            updatedAt: payload.updatedAt,
+            keyVersion,
+            startedAt,
+            finishedAt,
+          }),
+        );
+      } catch {
+        // Observability cannot change an already committed sync response.
+      }
+    }
     return json(result.status, { result: result.result });
   } catch {
     return json(503, { error: 'registry-state-unavailable' });
