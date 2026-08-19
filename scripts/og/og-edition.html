@@ -396,7 +396,7 @@
         const sq = document.createElement('div');
         sq.className = 'sq' + (ch === 'x' ? ' on' : ch === 'F' ? ' free' : '');
         if (c.board.cellRadius != null) sq.style.borderRadius = c.board.cellRadius + 'px';
-        if (c.board.barInset != null) sq.style.padding = `0 ${c.board.barInset}px`;
+        if (ch !== 'F' && c.board.barInset != null) sq.style.padding = `0 ${c.board.barInset}px`;
         if (ch === 'F') {
           const b = document.createElement('b');
           b.textContent = c.board.freeLabel;
