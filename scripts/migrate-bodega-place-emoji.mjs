@@ -57,9 +57,17 @@
 // Idempotent: a second run reports "already correct — nothing to write" and
 // exits 0. Credentials: a gitignored repo-root serviceAccountKey.json if present
 // (cert), else Application Default Credentials — the SAME resolution as
-// scripts/seed.mjs and scripts/migrate-schedule-2026-07-17.mjs. The project and
-// Event are hard-pinned below, because `.firebaserc`'s default project is
-// `gaycruisebingo` and this Event lives on `fiveacross`.
+// scripts/seed.mjs and scripts/migrate-schedule-2026-07-17.mjs.
+//
+// DESTINATION. The project and Event are hard-pinned, because `.firebaserc`'s
+// default project is `gaycruisebingo` and this Event lives on `fiveacross`. The
+// pin honours only the migration-specific `BODEGA_EMOJI_PROJECT_ID` /
+// `BODEGA_EMOJI_EVENT_ID`, never the generic `GOOGLE_CLOUD_PROJECT` /
+// `GCLOUD_PROJECT` / `VITE_EVENT_ID` that seed.mjs and the `verify:seed:*`
+// scripts use — an ambient value left over from another task must not be able to
+// redirect this one. Writing to a non-pinned destination additionally requires
+// `--allow-non-pinned-target`, since a restored copy's schedule is identical and
+// the alignment check cannot tell it from production (Phase 4b, #916).
 //
 // APPLIED to fiveacross/bodega-bay-2026 on 2026-08-18; kept for the audit trail
 // and its unit-tested planning core. Three Days moved, all on `placeEmoji`:
@@ -225,12 +233,20 @@ export function planEmojiMigration(liveDays, targets = TARGET_DAYS) {
  *   'conflict'    — neither. Somebody changed the decision, or the seed drifted
  *                   somewhere unplanned. Fatal: refuse rather than push a glyph
  *                   the seed will contradict.
- * A seed Day missing the FIELD is 'converged' by omission — the seed simply does
- * not assert that field, so there is nothing to disagree with. A missing DAY is
- * a different thing entirely and is a 'conflict': the seed no longer describes a
- * Day this table still plans to write, so either the itinerary was reindexed or
- * a Day was dropped, and a retained migration would carry its old decision into
- * a live or restored Event while reporting that the seed agreed. (Codex P2,
+ * Omission is read per FIELD, and the two emoji fields are not symmetric
+ * (Phase 4b observation #915):
+ *   - `placeEmoji` is the CANONICAL field. A seed Day that omits it does not
+ *     "not assert a glyph" — it asserts no glyph at all, because a fresh seed
+ *     from that payload resolves through `migrateDayFields` to ''. That
+ *     contradicts the #881 decision as squarely as a wrong value would, so it
+ *     is a 'conflict'.
+ *   - `portEmoji` is the LEGACY field the #566 rename is retiring, and its
+ *     absence is the desired end state. Omission there is genuinely nothing to
+ *     disagree with.
+ * A missing DAY is a 'conflict' for a related reason: the seed no longer
+ * describes a Day this table still plans to write, so either the itinerary was
+ * reindexed or a Day was dropped, and a retained migration would carry its old
+ * decision into a live or restored Event while reporting agreement. (Codex P2,
  * round 1.)
  */
 export function seedDivergence(seedDays = EVENT_SEED.days, targets = TARGET_DAYS) {
@@ -242,7 +258,11 @@ export function seedDivergence(seedDays = EVENT_SEED.days, targets = TARGET_DAYS
       continue;
     }
     for (const field of EMOJI_FIELDS) {
-      if (!(field in day)) continue;
+      if (!(field in day)) {
+        if (field === LEGACY_EMOJI_FIELD) continue; // absence is the end state
+        entries.push({ index: target.index, field, value: undefined, target: target.emoji, status: 'conflict' });
+        continue;
+      }
       const value = day[field];
       const status =
         value === target.emoji ? 'converged' : target.superseded.includes(value) ? 'pending-fix' : 'conflict';
@@ -343,6 +363,46 @@ export function assertWritablePlan(plan, liveDays = []) {
   }
 }
 
+/**
+ * Resolve which project/Event this run targets. Pure, so the destination rules
+ * are unit-testable without firebase-admin.
+ *
+ * Deliberately reads ONLY migration-specific variables. The generic
+ * `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `VITE_EVENT_ID` that
+ * `scripts/seed.mjs` and the `verify:seed:*` npm scripts use are IGNORED here
+ * (Phase 4b observation #916). An earlier version honoured them, which quietly
+ * contradicted this script's own "hard-pinned" claim: `npm run
+ * verify:seed:fiveacross` exports `GOOGLE_CLOUD_PROJECT`, and an operator with
+ * one of those still exported from an unrelated task could have redirected a
+ * `--apply` at another project without ever deciding to. Retargeting is a real
+ * operation (a staging restore), so it stays possible — but it has to be an act,
+ * not an inheritance.
+ *
+ * Because a restored copy has an IDENTICAL schedule, the alignment check cannot
+ * tell it from production. So a non-pinned destination additionally requires
+ * `--allow-non-pinned-target` to WRITE. A dry run against one is always allowed;
+ * inspecting a restore is the whole point of the override.
+ */
+export function resolveTarget(env = process.env, argv = []) {
+  const projectId = env.BODEGA_EMOJI_PROJECT_ID || EXPECTED_PROJECT_ID;
+  const eventId = env.BODEGA_EMOJI_EVENT_ID || EXPECTED_EVENT_ID;
+  const pinned = projectId === EXPECTED_PROJECT_ID && eventId === EXPECTED_EVENT_ID;
+  const apply = argv.includes('--apply') || argv.includes('--execute');
+  const acknowledged = argv.includes('--allow-non-pinned-target');
+  return { projectId, eventId, pinned, apply, acknowledged };
+}
+
+/** Refuse to WRITE to a destination the operator has not explicitly accepted. */
+export function assertWritableTarget(target) {
+  if (!target.apply || target.pinned || target.acknowledged) return;
+  throw new Error(
+    `bodega-place-emoji: REFUSING — --apply targets ${target.projectId}/${target.eventId}, which is not the pinned ` +
+      `${EXPECTED_PROJECT_ID}/${EXPECTED_EVENT_ID}. A restored or staging copy has an identical schedule, so the ` +
+      'alignment check cannot tell it from production. Re-run with --allow-non-pinned-target if that is what you ' +
+      'mean. No write performed.',
+  );
+}
+
 /** Fatal only on a real conflict; a still-unmerged PR #896 is reported by the
  *  caller and allowed through. */
 export function assertSeedAgreement(divergence) {
@@ -363,7 +423,7 @@ export function assertSeedAgreement(divergence) {
 // planning core stays import-safe for the unit test.
 // ---------------------------------------------------------------------------
 
-async function initFirestore() {
+async function initFirestore(target) {
   const { readFileSync, existsSync } = await import('node:fs');
   const adminAppModule = 'firebase-admin/app';
   const adminFirestoreModule = 'firebase-admin/firestore';
@@ -383,35 +443,36 @@ async function initFirestore() {
     throw err;
   }
 
-  // Both are overridable so the script can be pointed at a restore/staging copy,
-  // but each override must be stated explicitly — the defaults are the pinned
-  // production identities, never `.firebaserc`'s (`gaycruisebingo`).
-  const projectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || EXPECTED_PROJECT_ID;
-  const eventId = process.env.VITE_EVENT_ID || EXPECTED_EVENT_ID;
-
   const keyUrl = new URL('../serviceAccountKey.json', import.meta.url);
   initializeApp({
     ...(existsSync(keyUrl)
       ? { credential: cert(JSON.parse(readFileSync(keyUrl))) }
       : { credential: applicationDefault() }),
-    projectId,
+    projectId: target.projectId,
   });
-  return { db: getFirestore(), eventId, projectId };
+  return getFirestore();
 }
 
 async function main() {
-  const apply = process.argv.includes('--apply') || process.argv.includes('--execute');
-  const { db, eventId, projectId } = await initFirestore();
-
-  console.log(
-    `bodega-place-emoji: event=${eventId} project=${projectId} mode=${apply ? 'APPLY' : 'DRY-RUN'}`,
-  );
-  if (projectId !== EXPECTED_PROJECT_ID || eventId !== EXPECTED_EVENT_ID) {
+  // Resolved and enforced BEFORE firebase-admin is even loaded, so a run aimed
+  // at a destination the operator has not accepted cannot open a connection.
+  const target = resolveTarget(process.env, process.argv);
+  const { projectId, eventId, apply } = target;
+  console.log(`bodega-place-emoji: event=${eventId} project=${projectId} mode=${apply ? 'APPLY' : 'DRY-RUN'}`);
+  if (!target.pinned) {
     console.log(
-      `  note: overridden from the pinned ${EXPECTED_PROJECT_ID}/${EXPECTED_EVENT_ID} — the alignment check below is ` +
-        'what keeps this honest.',
+      `  note: NON-PINNED destination (pinned is ${EXPECTED_PROJECT_ID}/${EXPECTED_EVENT_ID}) — set via ` +
+        'BODEGA_EMOJI_PROJECT_ID / BODEGA_EMOJI_EVENT_ID.',
     );
   }
+  try {
+    assertWritableTarget(target);
+  } catch (err) {
+    console.error(`\n${err.message}`);
+    process.exit(1);
+  }
+
+  const db = await initFirestore(target);
 
   // Checked before the doc is even read: a seed the table no longer matches
   // makes the whole plan suspect.

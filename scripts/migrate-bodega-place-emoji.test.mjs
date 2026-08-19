@@ -9,9 +9,11 @@ import {
   TARGET_DAYS,
   assertSeedAgreement,
   assertWritablePlan,
+  assertWritableTarget,
   correctDay,
   diffDay,
   planEmojiMigration,
+  resolveTarget,
   seedDivergence,
 } from './migrate-bodega-place-emoji.mjs';
 import { EVENT_SEED } from './seed-data/bodega-bay-2026.mjs';
@@ -380,5 +382,79 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
 
   it('refuses an empty seed rather than reporting agreement', () => {
     expect(() => assertSeedAgreement(seedDivergence([]))).toThrow();
+  });
+
+  // Phase 4b observation #915. The two fields are not symmetric: a seed Day
+  // that omits the CANONICAL `placeEmoji` does not decline to assert a glyph, it
+  // asserts none — a fresh seed from that payload resolves to '' through
+  // `migrateDayFields` — which contradicts #881 as squarely as a wrong value.
+  it('refuses a seed Day that omits the canonical placeEmoji', () => {
+    const seeded = TARGET_DAYS.map((t) => (t.index === 1 ? { index: t.index } : { index: t.index, placeEmoji: t.emoji }));
+    const divergence = seedDivergence(seeded);
+    expect(divergence.conflicts).toHaveLength(1);
+    expect(divergence.conflicts[0]).toMatchObject({ index: 1, field: 'placeEmoji', value: undefined });
+    expect(() => assertSeedAgreement(divergence)).toThrow(/does not recognise/);
+  });
+
+  // The legacy field is the other way round: its absence is the #566 end state.
+  it('accepts a seed Day that omits the legacy portEmoji', () => {
+    const seeded = TARGET_DAYS.map((t) => ({ index: t.index, placeEmoji: t.emoji }));
+    expect(seedDivergence(seeded).conflicts).toEqual([]);
+  });
+
+  it('still accepts the real seed module, which asserts placeEmoji on every Day', () => {
+    expect(seedDivergence(EVENT_SEED.days).conflicts).toEqual([]);
+  });
+});
+
+// Phase 4b observation #916. An earlier version honoured the generic
+// GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT / VITE_EVENT_ID, which quietly
+// contradicted this script's own hard-pinned claim — `npm run
+// verify:seed:fiveacross` exports GOOGLE_CLOUD_PROJECT, so an ambient value left
+// over from an unrelated task could redirect an --apply nobody meant to redirect.
+describe('migrate-bodega-place-emoji: destination pinning', () => {
+  it('defaults to the pinned project and Event', () => {
+    const target = resolveTarget({}, []);
+    expect(target).toMatchObject({ projectId: 'fiveacross', eventId: 'bodega-bay-2026', pinned: true });
+  });
+
+  it.each(['GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT'])('ignores the generic %s', (name) => {
+    const target = resolveTarget({ [name]: 'gaycruisebingo' }, ['--apply']);
+    expect(target.projectId).toBe('fiveacross');
+    expect(target.pinned).toBe(true);
+    expect(() => assertWritableTarget(target)).not.toThrow();
+  });
+
+  it('ignores the generic VITE_EVENT_ID', () => {
+    const target = resolveTarget({ VITE_EVENT_ID: 'med-2026' }, ['--apply']);
+    expect(target.eventId).toBe('bodega-bay-2026');
+    expect(target.pinned).toBe(true);
+  });
+
+  it('honours the migration-specific overrides', () => {
+    const target = resolveTarget({ BODEGA_EMOJI_PROJECT_ID: 'restore-x', BODEGA_EMOJI_EVENT_ID: 'copy-y' }, []);
+    expect(target).toMatchObject({ projectId: 'restore-x', eventId: 'copy-y', pinned: false });
+  });
+
+  it('allows a dry run against a non-pinned destination — inspecting a restore is the point', () => {
+    const target = resolveTarget({ BODEGA_EMOJI_PROJECT_ID: 'restore-x' }, []);
+    expect(() => assertWritableTarget(target)).not.toThrow();
+  });
+
+  it('refuses to WRITE to a non-pinned destination without acknowledgement', () => {
+    const target = resolveTarget({ BODEGA_EMOJI_PROJECT_ID: 'restore-x' }, ['--apply']);
+    expect(() => assertWritableTarget(target)).toThrow(/not the pinned/);
+  });
+
+  it('writes to a non-pinned destination once explicitly acknowledged', () => {
+    const target = resolveTarget({ BODEGA_EMOJI_EVENT_ID: 'copy-y' }, ['--apply', '--allow-non-pinned-target']);
+    expect(target.pinned).toBe(false);
+    expect(() => assertWritableTarget(target)).not.toThrow();
+  });
+
+  it('treats --execute as an apply for the destination gate too', () => {
+    const target = resolveTarget({ BODEGA_EMOJI_PROJECT_ID: 'restore-x' }, ['--execute']);
+    expect(target.apply).toBe(true);
+    expect(() => assertWritableTarget(target)).toThrow(/not the pinned/);
   });
 });
