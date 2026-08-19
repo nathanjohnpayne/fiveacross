@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { submitterStatus, type TargetableDay } from './communityPrompts';
-import { loadTrackedSuggestions, trackSuggestion, deriveMySubmissions, refreshLastKnownStatuses } from './mySuggestions';
+import {
+  loadTrackedSuggestions,
+  persistTrackedSuggestions,
+  trackSuggestion,
+  deriveMySubmissions,
+  refreshLastKnownStatuses,
+} from './mySuggestions';
 import type { ItemDoc } from '../types';
 
 // jsdom here leaves `window.localStorage` unset (src/data/cardCache.test.ts's
@@ -148,6 +154,22 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded[0].id).toBe('id-2');
     expect(loaded.at(-1)?.id).toBe('id-21');
     expect(loaded.find(({ id }) => id === 'id-10')?.text).toBe('refreshed');
+  });
+
+  it('persists one normalized capped snapshot when multiple stale entries refresh together (#909)', () => {
+    const oversized = Array.from({ length: 22 }, (_, i) => ({
+      id: `id-${i}`,
+      text: `original-${i}`,
+      submittedAt: i,
+    }));
+    const activeMine = oversized.map((tracked) => item({ id: tracked.id, text: `refreshed-${tracked.id}` }));
+    const refreshed = refreshLastKnownStatuses(oversized, activeMine, [], 0);
+
+    const persisted = persistTrackedSuggestions('ev-1', 'u1', refreshed);
+
+    expect(persisted.map(({ id }) => id)).toEqual(Array.from({ length: 20 }, (_, i) => `id-${i + 2}`));
+    expect(persisted[0].lastKnownText).toBe('refreshed-id-2');
+    expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual(persisted);
   });
 
   it('scopes tracking per Event AND per uid — no cross-Event or cross-account bleed', () => {

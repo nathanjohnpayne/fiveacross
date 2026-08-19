@@ -5,6 +5,7 @@ import { addItem, checkItemRateLimit, itemRateLimitRemainingMs, reportItem } fro
 import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
 import {
   loadTrackedSuggestions,
+  persistTrackedSuggestions,
   trackSuggestion,
   deriveMySubmissions,
   refreshLastKnownStatuses,
@@ -236,10 +237,7 @@ export default function ItemPool() {
   useEffect(() => {
     const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
     if (refreshed === tracked || !uid) return;
-    for (let i = 0; i < refreshed.length; i++) {
-      if (refreshed[i] !== tracked[i]) trackSuggestion(EVENT_ID, uid, refreshed[i]);
-    }
-    setTracked([...refreshed]);
+    setTracked(persistTrackedSuggestions(EVENT_ID, uid, refreshed));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `days` derives from `event?.days ?? []` (a fresh [] literal each render); this effect's own `setTracked` is what re-evaluates it on every genuine change to `tracked`/`activeMine`/`now`, matching the established pattern elsewhere in this file.
   }, [tracked, activeMine, now, uid]);
   // `ready` (#559, Codex P2 rounds 1 + 2): BOTH live queries must have

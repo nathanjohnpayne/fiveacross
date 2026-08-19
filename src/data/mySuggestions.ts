@@ -184,6 +184,32 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
   }
 }
 
+/** Persist one complete tracker snapshot after repairing its untrusted stored
+ *  shape. The first occurrence of an id owns its position, later duplicates
+ *  are discarded, and the cap is applied by array position without consulting
+ *  client timestamps. Returning the persisted snapshot lets callers update
+ *  in-memory state from the same normalized value. */
+export function persistTrackedSuggestions(
+  eventId: string,
+  uid: string,
+  suggestions: readonly TrackedSuggestion[],
+): TrackedSuggestion[] {
+  const seenIds = new Set<string>();
+  const normalized = suggestions
+    .filter(({ id }) => {
+      if (seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    })
+    .slice(-TRACKED_LIMIT);
+  try {
+    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(normalized));
+  } catch {
+    /* nothing to persist */
+  }
+  return normalized;
+}
+
 /**
  * Record a fresh submission from THIS device — or refresh an existing
  * tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/`lastKnownText`
@@ -221,26 +247,16 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
  * exactly as untrustworthy for a one-time fix as it is for an ongoing one).
  */
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
-  try {
-    const existing = loadTrackedSuggestions(eventId, uid);
-    const seenIds = new Set<string>();
-    const normalized = existing.filter(({ id }) => {
-      if (seenIds.has(id)) return false;
-      seenIds.add(id);
-      return true;
-    });
-    const index = normalized.findIndex((s) => s.id === suggestion.id);
-    let next: TrackedSuggestion[];
-    if (index === -1) {
-      next = [...normalized, suggestion];
-    } else {
-      next = normalized.slice();
-      next[index] = suggestion;
-    }
-    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(next.slice(-TRACKED_LIMIT)));
-  } catch {
-    /* nothing to persist */
+  const existing = loadTrackedSuggestions(eventId, uid);
+  const index = existing.findIndex((s) => s.id === suggestion.id);
+  let next: TrackedSuggestion[];
+  if (index === -1) {
+    next = [...existing, suggestion];
+  } else {
+    next = existing.slice();
+    next[index] = suggestion;
   }
+  persistTrackedSuggestions(eventId, uid, next);
 }
 
 export type MySubmissionStatus = SubmitterStatus | 'not_selected';
