@@ -12,10 +12,14 @@ export const OG_EDITION_ART = {
     },
     descriptionWrapAfterWords: 3,
     board: {
+      size: 399,
+      pad: 15,
+      gap: 9,
       cellRadius: 13,
       pattern: ['x..x.', '.x..x', 'xxFxx', '.x...', 'x..x.'],
       barShort: 69,
       barLong: 100,
+      barInset: 13,
       bars: [
         ['ls', 'sl', 'ls', 'ss', 'll'],
         ['sl', 'ls', 'ss', 'll', 'sl'],
@@ -34,10 +38,14 @@ export const OG_EDITION_ART = {
       boardshadow: '0 22px 48px rgba(0,0,0,0.45)',
     },
     board: {
+      size: 350,
+      pad: 15,
+      gap: 10,
       cellRadius: 12,
       pattern: ['.x..x', 'x..x.', 'xxFxx', '..x..', 'x...x'],
       barShort: 69,
       barLong: 100,
+      barInset: 13,
       bars: [
         ['sl', 'll', 'ls', 'ss', 'ls'],
         ['ll', 'sl', 'ss', 'ls', 'sl'],
@@ -57,10 +65,14 @@ export const OG_EDITION_ART = {
       boardshadow: 'none',
     },
     board: {
+      size: 412,
+      pad: 16,
+      gap: 10,
       cellRadius: 10,
       pattern: ['.....', '.....', 'xxFxx', '.....', '.....'],
       barShort: 62,
       barLong: 78,
+      barInset: 13,
       bars: [
         ['ls', 'sl', 'ls', 'sl', 'ls'],
         ['sl', 'ls', 'sl', 'ls', 'sl'],

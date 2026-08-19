@@ -3,10 +3,14 @@ export type OgEditionArt = {
   palette: { freeink: string; onglow: string; onGradient: string; boardshadow: string };
   descriptionWrapAfterWords?: number;
   board: {
+    size: number;
+    pad: number;
+    gap: number;
     cellRadius: number;
     pattern: readonly string[];
     barShort: number;
     barLong: number;
+    barInset: number;
     bars: readonly (readonly string[])[];
   };
   stamp?: { text: string };

@@ -339,6 +339,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
       expect(boardBars(markup)).toEqual(art.board.bars);
       expect(Number(variables['og-short']) * 100).toBe(art.board.barShort);
       expect(Number(variables['og-long']) * 100).toBe(art.board.barLong);
+      expect(variables['og-bar-inset']).toBe(`${art.board.barInset / 4}px`);
+      const cellWidth = (art.board.size - 2 - 2 * art.board.pad - 4 * art.board.gap) / 5;
+      const barSpan = (cellWidth - 2 - 2 * art.board.barInset) / 4;
+      expect(Number.parseFloat(variables['og-bar-span'])).toBeCloseTo(barSpan, 6);
       expect(variables['og-cell-radius']).toBe(`${art.board.cellRadius / 4}px`);
       expect(variables['og-freeink']).toBe(art.palette.freeink);
       expect(normalizeCss(variables['og-onglow'])).toBe(normalizeCss(art.palette.onglow));
@@ -347,10 +351,13 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
     };
 
     it('loads the same checked display faces as the renderer template', () => {
-      const fontStylesheet =
+      const rendererFontStylesheet =
         'https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Oswald:wght@300;400;500;600;700&display=block';
-      expect(ogTemplateHtml).toContain(fontStylesheet);
-      expect(wireframesHtml).toContain(fontStylesheet);
+      const wireframeFontStylesheet =
+        'https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@300;400;500;600;700&display=block';
+      expect(ogTemplateHtml).toContain(rendererFontStylesheet);
+      expect(wireframesHtml).toContain(wireframeFontStylesheet);
+      expect(wireframesHtml).not.toContain('family=Anton&family=Bebas+Neue');
     });
 
     it('draws the GCB eyebrow, lockup, rule, caption, and renderer pattern', () => {
@@ -376,6 +383,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
       expect(vacay).toContain(
         `<div class="ogeyebrow"><span>${brand.lexicon.shareMark}</span> ${OG_EDITION_ART.vacay.eyebrow.text}</div>`,
       );
+      const [lead, ...rest] = brand.wordmark.split(' ');
+      expect(vacay).toContain(`<div class="ogmark">${lead}<br><b>${rest.join(' ')}</b></div>`);
+      expect(vacay).toContain(`<div class="ogby">${brand.wordmarkByline}</div>`);
+      expect(vacay).toContain(`<div class="ogdesc">${brand.appDescription}</div>`);
       expect(vacay).toContain(
         `<div class="ogstamp"><span>${brand.lexicon.shareMark}</span>${OG_EDITION_ART.vacay.stamp.text.replace(
           'THE ',
@@ -403,6 +414,8 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
 
     it('keeps the quarter-scale grid inside each renderer-sized board wrapper', () => {
       expect(wireframesHtml).toMatch(/\.ogc \.oggrid\{[^}]*box-sizing:border-box;/);
+      expect(wireframesHtml).toMatch(/\.ogc \.ogstamp\{[^}]*box-sizing:border-box;/);
+      expect(wireframesHtml).toContain('width:var(--og-bar-span)');
     });
   });
 });

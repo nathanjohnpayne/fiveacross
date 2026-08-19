@@ -179,7 +179,6 @@
     flex-direction: column;
     justify-content: center;
     gap: 9px;
-    padding: 0 13px;
   }
   /* The two rules inside a square stand in for prompt text at a size where
      real words would be unreadable noise. Their LENGTHS vary per square, and
@@ -397,6 +396,7 @@
         const sq = document.createElement('div');
         sq.className = 'sq' + (ch === 'x' ? ' on' : ch === 'F' ? ' free' : '');
         if (c.board.cellRadius != null) sq.style.borderRadius = c.board.cellRadius + 'px';
+        if (c.board.barInset != null) sq.style.padding = `0 ${c.board.barInset}px`;
         if (ch === 'F') {
           const b = document.createElement('b');
           b.textContent = c.board.freeLabel;

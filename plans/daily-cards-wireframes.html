@@ -9,7 +9,7 @@
      loaded here because #884 claims composition parity with the renderer. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Oswald:wght@300;400;500;600;700&display=block" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@300;400;500;600;700&display=block" rel="stylesheet">
 <style>
   /* lucide sizing—official lucide-static SVGs inlined below (self-contained, no CDN);
      each svg's data-lucide attribute names the icon for lucide-react in the real build */
@@ -756,22 +756,22 @@
   .ogc-gcb{--ink:#f6ecff;--dim:#b9a9d6;--primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;
     --og-cell:#181424;--og-bar:#36283c;--og-onbar:rgba(20,10,30,.45);--og-onglow:rgba(255,45,149,.30);
     --og-ongrad:linear-gradient(145deg,#ff2d95,#00e6ff);
-    --og-short:.69;--og-long:1;--og-cell-radius:3.25px;--og-freeink:#1a1206;
+    --og-short:.69;--og-long:1;--og-bar-inset:3.25px;--og-bar-span:9.55px;--og-cell-radius:3.25px;--og-freeink:#1a1206;
     --og-boardshadow:0 0 17.5px rgba(255,45,149,.10);background:
     radial-gradient(205px 155px at 4% 2%,rgba(255,45,149,.22),transparent 66%),
     radial-gradient(195px 150px at 100% 100%,rgba(0,230,255,.18),transparent 64%),#07060d}
   .ogc-vacay{--ink:#e6eef2;--dim:#6b7d87;--primary:#2e7fa8;--secondary:#8fd0c3;--accent:#e8862e;
     --og-cell:#1b2a3a;--og-bar:#2e4759;--og-onbar:rgba(10,25,35,.40);--og-onglow:rgba(46,127,168,.20);
     --og-ongrad:linear-gradient(150deg,#2e7fa8,#8fd0c3);
-    --og-short:.69;--og-long:1;--og-cell-radius:3px;--og-freeink:#1b1005;
+    --og-short:.69;--og-long:1;--og-bar-inset:3.25px;--og-bar-span:6.9px;--og-cell-radius:3px;--og-freeink:#1b1005;
     --og-boardshadow:0 5.5px 12px rgba(0,0,0,.45);background:
     radial-gradient(205px 155px at 96% 6%,rgba(46,127,168,.20),transparent 66%),
     radial-gradient(190px 150px at 4% 96%,rgba(143,208,195,.13),transparent 64%),#0a141c}
-  .ogc-vacay::before{content:"";position:absolute;inset:8.5px;border:1px dashed rgba(150,196,208,.36);border-radius:2px}
+  .ogc-vacay::before{content:"";position:absolute;inset:8.5px;border:.5px dashed rgba(150,196,208,.36);border-radius:1px}
   .ogc-fa{--ink:#f2f4f8;--dim:#98a1b0;--primary:#3f66f0;--secondary:#2c4bd8;--accent:#f5c451;
     --og-cell:#191c25;--og-bar:#2b303c;--og-onbar:rgba(255,255,255,.55);--og-onglow:transparent;
     --og-ongrad:linear-gradient(145deg,#3f66f0,#2c4bd8);
-    --og-short:.62;--og-long:.78;--og-cell-radius:2.5px;--og-freeink:#171410;--og-boardshadow:none;background:
+    --og-short:.62;--og-long:.78;--og-bar-inset:3.25px;--og-bar-span:9.9px;--og-cell-radius:2.5px;--og-freeink:#171410;--og-boardshadow:none;background:
     repeating-linear-gradient(90deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
     repeating-linear-gradient(0deg,rgba(255,255,255,.028) 0 1px,transparent 1px 24px),
     radial-gradient(225px 160px at 78% 30%,rgba(63,102,240,.10),transparent 70%),#0f1116}
@@ -806,16 +806,17 @@
   .ogc-vacay .ogboardwrap{left:192.5px;top:37.5px;width:87.5px;transform:rotate(-2deg)}
   .ogc-fa .ogboardwrap{left:177px;top:22.5px;width:103px}
   .ogc .oggrid{display:grid;box-sizing:border-box;grid-template-columns:repeat(5,1fr);gap:2.25px;padding:3.75px;
-    border:1px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:6.5px;box-shadow:var(--og-boardshadow)}
+    border:.25px solid color-mix(in srgb,var(--primary) 30%,transparent);border-radius:6.5px;box-shadow:var(--og-boardshadow)}
   .ogc-vacay .oggrid{gap:2.5px;padding:3.75px;border-color:rgba(143,208,195,.16);background:rgba(9,22,32,.82);border-radius:5.5px}
   .ogc-fa .oggrid{gap:2.5px;padding:4px;border-color:rgba(255,255,255,.10);border-radius:5px}
   .ogc .ogsq{--bar-one:var(--og-long);--bar-two:var(--og-short);aspect-ratio:1/1;border-radius:var(--og-cell-radius);
-    border:1px solid rgba(255,255,255,.07);background:var(--og-cell);position:relative}
+    border:.25px solid rgba(255,255,255,.07);background:var(--og-cell);position:relative}
   .ogc .ogsq[data-bars^='s']{--bar-one:var(--og-short)}
   .ogc .ogsq[data-bars^='l']{--bar-one:var(--og-long)}
   .ogc .ogsq[data-bars$='s']{--bar-two:var(--og-short)}
   .ogc .ogsq[data-bars$='l']{--bar-two:var(--og-long)}
-  .ogc .ogsq::before,.ogc .ogsq::after{content:"";position:absolute;left:20%;width:58%;height:1.5px;
+  .ogc .ogsq::before,.ogc .ogsq::after{content:"";position:absolute;left:50%;margin-left:calc(var(--og-bar-span) / -2);
+    width:var(--og-bar-span);height:1.5px;
     border-radius:1px;background:var(--og-bar);transform-origin:left center}
   .ogc .ogsq::before{top:38%;transform:scaleX(var(--bar-one))}
   .ogc .ogsq::after{top:57%;transform:scaleX(var(--bar-two))}
@@ -826,7 +827,7 @@
     color:var(--og-freeink);font-family:'Oswald','Arial Narrow',sans-serif;font-size:5.25px;font-weight:700;letter-spacing:.04em}
   .ogc .ogsq.freec::before,.ogc .ogsq.freec::after{display:none}
   .ogc .ogcaption{margin-top:5.5px;font-size:4.25px;font-weight:700;letter-spacing:.34em;color:var(--accent)}
-  .ogc .ogstamp{position:absolute;z-index:2;left:257px;top:14px;width:26.5px;height:31.5px;border:1px dashed var(--accent);
+  .ogc .ogstamp{position:absolute;z-index:2;box-sizing:border-box;left:257px;top:14px;width:26.5px;height:31.5px;border:.5px dashed var(--accent);
     border-radius:2px;background:rgba(10,20,28,.70);display:flex;flex-direction:column;align-items:center;justify-content:center;
     color:var(--accent);font-family:'Oswald','Arial Narrow',sans-serif;font-size:3px;font-weight:700;line-height:1.4;letter-spacing:.12em;text-align:center}
   .ogc .ogstamp span{font-family:initial;font-size:9px;line-height:1;margin-bottom:2px}

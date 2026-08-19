@@ -174,9 +174,9 @@ const ART = {
     board: {
       x: 722,
       y: 94,
-      size: 399,
-      pad: 15,
-      gap: 9,
+      size: OG_EDITION_ART.gcb.board.size,
+      pad: OG_EDITION_ART.gcb.board.pad,
+      gap: OG_EDITION_ART.gcb.board.gap,
       radius: 26,
       cellRadius: OG_EDITION_ART.gcb.board.cellRadius,
       freeLabel: 'FREE',
@@ -186,6 +186,7 @@ const ART = {
       // of it (~29px). `s`/`l` per rule, top then bottom.
       barShort: OG_EDITION_ART.gcb.board.barShort,
       barLong: OG_EDITION_ART.gcb.board.barLong,
+      barInset: OG_EDITION_ART.gcb.board.barInset,
       bars: OG_EDITION_ART.gcb.board.bars,
     },
     caption: 'BINGO',
@@ -247,9 +248,9 @@ const ART = {
       // through the rotation.
       x: 770,
       y: 150,
-      size: 350,
-      pad: 15,
-      gap: 10,
+      size: OG_EDITION_ART.vacay.board.size,
+      pad: OG_EDITION_ART.vacay.board.pad,
+      gap: OG_EDITION_ART.vacay.board.gap,
       radius: 22,
       cellRadius: OG_EDITION_ART.vacay.board.cellRadius,
       // The postcard tilt. Measured off the #609 render's cell edges, not
@@ -264,6 +265,7 @@ const ART = {
       // is real and STABLE — a copy-only re-render reproduces it exactly.
       barShort: OG_EDITION_ART.vacay.board.barShort,
       barLong: OG_EDITION_ART.vacay.board.barLong,
+      barInset: OG_EDITION_ART.vacay.board.barInset,
       bars: OG_EDITION_ART.vacay.board.bars,
     },
     // The dashed stamp box over the board's shoulder. Its glyph is the same
@@ -312,9 +314,9 @@ const ART = {
     board: {
       x: 708,
       y: 90,
-      size: 412,
-      pad: 16,
-      gap: 10,
+      size: OG_EDITION_ART.fiveacross.board.size,
+      pad: OG_EDITION_ART.fiveacross.board.pad,
+      gap: OG_EDITION_ART.fiveacross.board.gap,
       radius: 20,
       cellRadius: OG_EDITION_ART.fiveacross.board.cellRadius,
       // The platform's own mark sits in the free square, the way the other
@@ -326,6 +328,7 @@ const ART = {
       // wordmark and unglowing type carry.
       barShort: OG_EDITION_ART.fiveacross.board.barShort,
       barLong: OG_EDITION_ART.fiveacross.board.barLong,
+      barInset: OG_EDITION_ART.fiveacross.board.barInset,
       bars: OG_EDITION_ART.fiveacross.board.bars,
     },
     caption: 'BINGO',
