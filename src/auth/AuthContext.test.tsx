@@ -405,6 +405,69 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
+  // Phase 4b P1 round 4 on #836, finding 1: `signInWithRedirect()` is
+  // awaited, so there is a real async window between writing this attempt's
+  // own records and a START failure reaching the catch — during which a
+  // DIFFERENT same-origin tab can start its own redirect and overwrite
+  // these origin-wide singleton keys. The catch's cleanup must be
+  // token-matched (compare-and-delete), not an unconditional clear, or it
+  // would delete that other tab's legitimate, newer records.
+  it("does not clear a DIFFERENT tab's records if signInWithRedirect() fails after they were overwritten mid-attempt", async () => {
+    vi.stubGlobal('navigator', {
+      ...window.navigator,
+      onLine: true,
+      userAgent:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1',
+      platform: 'iPhone',
+      maxTouchPoints: 5,
+    });
+    const authMock = mockedAuth as { config?: { authDomain?: string } };
+    authMock.config = { authDomain: window.location.hostname };
+
+    const redirectStart = deferred<void>();
+    mocks.signInWithRedirect.mockReturnValueOnce(redirectStart.promise);
+
+    let signIn!: (acknowledgedAdultContent: boolean) => Promise<void>;
+    function Capture() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    render(
+      <AuthProvider>
+        <Capture />
+      </AuthProvider>,
+    );
+
+    const attempt = signIn(true).catch(() => {});
+
+    // A different tab starts its own redirect while this one is still
+    // mid-flight, overwriting the shared ORIGIN-WIDE singleton keys with its
+    // own token. Its sessionStorage is NOT simulated here — sessionStorage
+    // is inherently tab-scoped, so a different tab could never write to
+    // this one's, which is exactly why this tab's own marker is safe to
+    // clear unconditionally below (see the source comment).
+    const otherPending = stamp('tok-other');
+    const otherAck = stamp('tok-other');
+    localStorage.setItem(REDIRECT_PENDING_KEY, otherPending);
+    localStorage.setItem(SIGNIN_ADULT_ACK_KEY, otherAck);
+
+    // This tab's own signInWithRedirect() now fails to start.
+    redirectStart.fail(new Error('start failed'));
+    await attempt;
+
+    // The other tab's records must survive untouched.
+    expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(otherPending);
+    expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(otherAck);
+    // This tab's own session marker is still safely cleared (tab-scoped,
+    // never touched by another tab).
+    expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
+
+    delete authMock.config;
+    sessionStorage.clear();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
   it('keeps popup sign-in in an installed iOS PWA with a stable app window', async () => {
     vi.stubGlobal('navigator', {
       ...window.navigator,
@@ -978,12 +1041,29 @@ describe('AuthContext deal-error hardening', () => {
     });
 
     it('clears the pending record once the redirect actually completes (signal a)', async () => {
+      // Session marker required (Phase 4b P1 round 4 on #836): clearing is
+      // keyed on the session-scoped token — the only identity this tab can
+      // prove is its own — not on the origin-wide pending record alone.
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-a');
       localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
       mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
 
       mount();
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
       expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBeNull();
+    });
+
+    // Phase 4b P1 round 4 on #836: without the session-scoped token, this
+    // tab cannot PROVE the origin-wide pending record is still its own — it
+    // may already belong to a different tab's newer attempt — so a verified
+    // completion must not clear it, even though `login` still fires.
+    it('does NOT clear the pending record on signal (a) when the session marker is absent', async () => {
+      localStorage.setItem(REDIRECT_PENDING_KEY, stamp('tok-a'));
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).not.toBeNull();
     });
 
     it('clears the durable records on a CONFIRMED (marker-present) getRedirectResult rejection', async () => {
@@ -1213,6 +1293,39 @@ describe('AuthContext deal-error hardening', () => {
       await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
 
       // The newer attempt's records must survive untouched.
+      expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(newerPending);
+      expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(newerAck);
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    });
+
+    // Phase 4b P1 round 4 on #836, finding 2 (corrects the round-3 fix's own
+    // residual — Codex's fresh evidence: the round-3 test only overwrote
+    // AFTER this mount had already snapshotted its own token). The overwrite
+    // can happen BEFORE this mount ever runs — any time while this tab was
+    // away at Google — so even establishing `pendingTokenRef` at the very
+    // top of this mount's own effect does not help: it would read the
+    // ALREADY-overwritten value. Only the session-storage token (written
+    // before this tab left, and never touched by another tab) can be
+    // trusted, and that is what verified cleanup and the attestation gate
+    // must key on instead of the origin-wide pending record's current value.
+    it("does not clear a NEWER attempt's records when they were already overwritten BEFORE this mount started", async () => {
+      // This tab's own token, from before it left for Google — survives in
+      // sessionStorage regardless of what happens to the origin-wide keys.
+      sessionStorage.setItem(PENDING_REDIRECT_ATTESTATION_KEY, 'tok-old');
+      // A DIFFERENT tab already started its own, newer redirect while this
+      // tab was away, overwriting the shared singleton keys BEFORE this
+      // mount (this tab's own return) even begins.
+      const newerPending = stamp('tok-new');
+      const newerAck = stamp('tok-new');
+      localStorage.setItem(REDIRECT_PENDING_KEY, newerPending);
+      localStorage.setItem(SIGNIN_ADULT_ACK_KEY, newerAck);
+      mocks.getRedirectResult.mockResolvedValueOnce({ user: FAKE_USER });
+
+      mount();
+
+      await waitFor(() => expect(mocks.track).toHaveBeenCalledWith('login', { method: 'google' }));
+      // The newer attempt's records must survive untouched — this tab's own
+      // proven token ('tok-old') does not match what is currently stored.
       expect(localStorage.getItem(REDIRECT_PENDING_KEY)).toBe(newerPending);
       expect(localStorage.getItem(SIGNIN_ADULT_ACK_KEY)).toBe(newerAck);
       expect(mocks.attestAdult).not.toHaveBeenCalled();

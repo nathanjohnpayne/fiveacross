@@ -1819,20 +1819,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
   // The pending record's TOKEN, established ONCE for this mount, from a
   // fresh, TTL-checked read (Phase 4b P1 round 3 on #836, preserving Codex
-  // P2 round 6's live-recheck guarantee for THAT read). EAGERLY, at the top
-  // of the getRedirectResult effect below — synchronously, at mount, before
-  // either completion signal can possibly fire — not lazily on first use;
-  // see that effect's own comment for why this is the earliest safe moment.
-  // Cached from then on, rather than re-read on every call: once this mount
-  // has committed to a specific attempt token, a LATER re-read could pick up
-  // a DIFFERENT, newer attempt that has since overwritten this same
-  // origin-wide singleton key — using that newer token for THIS mount's own
-  // (unrelated) completion would let it clear or misjudge a different tab's
-  // still-in-flight record. `completeRedirectReturn` also re-establishes it
-  // defensively on first use as a safety net, in case that ordering
-  // assumption is ever broken by a future edit; a same-tick race is not
-  // otherwise physically reachable (different tabs run in different
-  // event-loop turns), so this is belt-and-braces, not the primary guard.
+  // P2 round 6's live-recheck guarantee for THAT read), EAGERLY at the top
+  // of the getRedirectResult effect below rather than lazily on first use —
+  // see that effect's own comment for the ordering. That EAGER read only
+  // ever protects a narrow same-tick race, though (Codex P2 round 4 on
+  // #836, correcting this comment's own earlier, broader claim): a
+  // different same-origin tab can overwrite this origin-wide singleton at
+  // ANY point during the whole time this tab is away at Google — a window
+  // of real seconds, not one tick — so `pendingTokenRef` is NEVER treated
+  // as a proven "this is my own attempt" identity for anything
+  // security-sensitive. It is used ONLY for the durable login-logged dedup
+  // in `completeRedirectReturn` below, where a wrong read costs at most a
+  // harmless extra or missing analytics event. The verified-completion
+  // cleanup and the attestation gate key on `appOwnedRedirectToken` instead
+  // (the session-storage token — tab-scoped, so no other tab could ever
+  // have written or read it), which is the only identity this tab can
+  // actually prove is its own.
   const pendingTokenRef = useRef<string | null | undefined>(undefined);
   // `verifiedByFirebase` (Phase 4b P1 round 2 on #836 — corrects the round-1
   // fix's flawed premise): whether `u` is KNOWN to be the credential THIS
@@ -1903,34 +1905,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!verifiedByFirebase) return;
 
-      // The transaction is Firebase-verified and has now definitively
-      // completed for THIS attempt — safe to clear, but only records that
-      // still match the token this mount is tracking (Codex P2 on #836;
-      // compare-and-delete per Phase 4b P1 round 3).
-      if (pendingToken !== null) {
-        clearRedirectPendingIfToken(pendingToken);
-        clearRedirectLoginLoggedIfToken(pendingToken);
-      }
-
-      // Persist ONLY an acknowledgement that was actually collected (Phase 4b
-      // round 4) for THIS SAME attempt — see the two-token confirmation
-      // above. The posture is read when the redirect STARTS, not when it
-      // returns: an Event that turns adult while the player is away at
-      // Google would otherwise have this branch stamp a durable, cross-Event
-      // `attestedAdultAt` for a checkbox that was never on screen. Never
-      // awaited inline — this function returns synchronously to its
-      // (possibly synchronous) callers — so its own rejection is handled
-      // here rather than relying on a caller's promise chain to adopt it
-      // (Codex P2 round 2 on #836: `persistAttestation` currently never
-      // rejects — its own try/catch has no rethrow — but this keeps that an
-      // implementation detail of THIS call site, not an invariant a future
-      // edit could silently violate into an unhandled rejection).
-      const ackToken = peekCollectedAcknowledgement();
+      // The transaction is Firebase-verified — `u` is proven to be THIS
+      // tab's own return. But the origin-wide `pendingToken` read above is
+      // NOT proven to still be this tab's own record (Codex P2 round 4 on
+      // #836, correcting the round-3 fix's own residual): the overwrite
+      // window is not a narrow same-tick race — it spans the ENTIRE time
+      // this tab was away at Google, during which any other same-origin tab
+      // could have started its own redirect and overwritten these singleton
+      // keys, regardless of how early `pendingToken` was read. The ONLY
+      // identity this tab can PROVE is its own is the session-storage
+      // token — tab-scoped, so no other tab could ever have written or read
+      // it. Cleanup and the attestation gate are keyed on THAT, not on
+      // `pendingToken`; `pendingToken` is used only for the durable
+      // login-logged dedup above, whose worst case on a wrong read is a
+      // harmless extra/missing analytics event, never a wrongly-deleted or
+      // wrongly-attested record belonging to a different tab.
       const appOwnedRedirectToken = consumeAppOwnedRedirectTokenOnce();
-      if (pendingToken !== null && ackToken === pendingToken && appOwnedRedirectToken === pendingToken) {
-        clearCollectedAcknowledgementIfToken(pendingToken);
-        void persistAttestation(u).catch(() => {});
+      if (appOwnedRedirectToken !== null) {
+        clearRedirectPendingIfToken(appOwnedRedirectToken);
+        clearRedirectLoginLoggedIfToken(appOwnedRedirectToken);
+
+        // Persist ONLY an acknowledgement that was actually collected
+        // (Phase 4b round 4) for THIS SAME attempt, confirmed by the
+        // acknowledgement record's own token matching this tab's proven
+        // session token. The posture is read when the redirect STARTS, not
+        // when it returns: an Event that turns adult while the player is
+        // away at Google would otherwise have this branch stamp a durable,
+        // cross-Event `attestedAdultAt` for a checkbox that was never on
+        // screen. Never awaited inline — this function returns synchronously
+        // to its (possibly synchronous) callers — so its own rejection is
+        // handled here rather than relying on a caller's promise chain to
+        // adopt it (Codex P2 round 2 on #836: `persistAttestation` currently
+        // never rejects — its own try/catch has no rethrow — but this keeps
+        // that an implementation detail of THIS call site, not an invariant
+        // a future edit could silently violate into an unhandled
+        // rejection).
+        const ackToken = peekCollectedAcknowledgement();
+        if (ackToken === appOwnedRedirectToken) {
+          clearCollectedAcknowledgementIfToken(appOwnedRedirectToken);
+          void persistAttestation(u).catch(() => {});
+        }
       }
+      // If the session token was lost (#346), there is no identity this tab
+      // can prove as its own — leave every durable record untouched (a
+      // different tab's data must never be guessed at) and withhold the
+      // attestation. `login` has already been logged above regardless.
     },
     [consumeAppOwnedRedirectTokenOnce, persistAttestation],
   );
@@ -1947,16 +1966,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (redirectResultHandledRef.current) return;
     redirectResultHandledRef.current = true;
-    // Established HERE, synchronously, at the earliest possible moment
-    // (Phase 4b P1 round 3 on #836) — before either completion signal can
-    // possibly fire (onAuthStateChanged's own callback is inherently async,
-    // never synchronous, and this effect body runs before it). This is what
-    // makes the "established once, from a fresh read" comment on
-    // `pendingTokenRef`'s declaration true in practice: a different tab
-    // would need to overwrite this origin-wide key in the same synchronous
-    // tick as this mount's own effect-flush to beat it, which is not
-    // physically possible — different tabs run in different event-loop
-    // turns even though they share the same origin's storage.
+    // Established HERE, synchronously, at mount, before either completion
+    // signal can possibly fire (Phase 4b P1 round 3 on #836). This closes
+    // only a narrow same-tick race, though — see `pendingTokenRef`'s own
+    // declaration comment (corrected in round 4) for why a different tab
+    // can still overwrite this origin-wide key at any point during the
+    // WHOLE time this tab is away at Google, well beyond one tick. This
+    // read is used only for the durable login-logged dedup, never treated
+    // as a proven "mine" identity for clearing or attestation — that uses
+    // `appOwnedRedirectToken` (session-scoped) instead.
     if (pendingTokenRef.current === undefined) pendingTokenRef.current = peekRedirectPending();
 
     void getRedirectResult(auth)
@@ -2072,14 +2090,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           await signInWithRedirect(auth, googleProvider);
         } catch (err) {
           // A failed START (signInWithRedirect rejects before navigating away)
-          // is a terminal outcome for this attempt — clear every record it
-          // wrote so it cannot be mistaken for an in-flight redirect by a
-          // later attempt on this same, still-live page. Plain (non-token)
-          // clears are safe here: nothing else has had time to overwrite
-          // these specific keys between the writes above and this catch.
+          // is a terminal outcome for THIS attempt — clear the records it
+          // wrote so they cannot be mistaken for an in-flight redirect by a
+          // later attempt on this same, still-live page. Token-matched
+          // compare-and-delete (Codex P2 round 4 on #836), NOT a plain
+          // unconditional clear: `signInWithRedirect` is awaited, so there
+          // is a real async window during which a DIFFERENT same-origin tab
+          // could start its OWN redirect and overwrite these origin-wide
+          // singleton keys before this promise settles — an earlier version
+          // of this comment wrongly assumed no such window existed. The
+          // session-storage marker itself is tab-scoped (never written by
+          // another tab), so consuming it unconditionally remains safe.
           consumePendingRedirectAttestation();
-          clearCollectedAcknowledgement();
-          clearRedirectPending();
+          clearCollectedAcknowledgementIfToken(attemptToken);
+          clearRedirectPendingIfToken(attemptToken);
+          clearRedirectLoginLoggedIfToken(attemptToken);
           trackSignInFailure(err);
           throw err;
         }
