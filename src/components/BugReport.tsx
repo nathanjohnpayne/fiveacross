@@ -7,6 +7,7 @@ import {
   captureAppSurface,
   submitBugReport,
   type BugReportKind,
+  type SubmitBugReportInput,
 } from '../data/bugReports';
 
 // `lucide-react`'s `Bug` (daily-cards-spec § "Iconography — Lucide"), formerly
@@ -29,6 +30,10 @@ function errorMessage(error: unknown): string {
     return detail || 'The report was rejected. Adjust it and try again.';
   }
   return 'Could not submit the report. Check your connection and try again.';
+}
+
+function isInvalidArgument(error: unknown): boolean {
+  return ((error as { code?: unknown } | null)?.code ?? '').toString().includes('invalid-argument');
 }
 
 /**
@@ -78,6 +83,8 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [submissionId, setSubmissionId] = useState<string | null>(null);
+  const [frozenInput, setFrozenInput] = useState<SubmitBugReportInput | null>(null);
   const [submittedId, setSubmittedId] = useState<string | null>(null);
   // What the SERVER did, not what the sheet hoped it would do. Only the server
   // knows whether an abuse report reached an admin, so the receipt reports the
@@ -89,6 +96,9 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   // than what was sent (#670, Codex P2 round 5).
   const [submittedKind, setSubmittedKind] = useState<BugReportKind>('bug');
   const previewUrl = useMemo(() => (screenshot ? URL.createObjectURL(screenshot) : null), [screenshot]);
+  const presentedCaptureState = frozenInput
+    ? (frozenInput.screenshotDataUrl ? 'ready' : 'failed')
+    : captureState;
 
   useEffect(() => () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -151,6 +161,8 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
         return;
       }
       setStage('sheet');
+      setSubmissionId(crypto.randomUUID());
+      setFrozenInput(null);
       setDescription('');
       setKind('bug');
       setError(null);
@@ -166,6 +178,8 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
     if (busy) return;
     captureAttemptRef.current += 1;
     setStage('closed');
+    setSubmissionId(null);
+    setFrozenInput(null);
     setScreenshot(null);
     setCaptureRoute(null);
     setCaptureState('idle');
@@ -238,28 +252,39 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   }, [stage, captureState, close]);
 
   const submit = async () => {
-    if (!description.trim()) return;
-    // Read ONCE, at click time. Everything below is async, and this closure must
-    // send and report the same classification even if the control moves under it.
-    const sentKind = kind;
+    if (!description.trim() || !submissionId) return;
     setBusy(true);
     setError(null);
     try {
-      const screenshotDataUrl = screenshot ? await blobToDataUrl(screenshot) : null;
-      const result = await submitBugReport(
-        buildBugReportInput({
+      let input = frozenInput;
+      if (!input) {
+        // The first Send is the evidence boundary. A capture already in flight
+        // may finish after this snapshot, but it must not replace the preview
+        // while retries keep submitting the frozen text-only payload.
+        captureAttemptRef.current += 1;
+        const frozenScreenshot = screenshot;
+        const frozenCaptureError = captureError;
+        const screenshotDataUrl = frozenScreenshot ? await blobToDataUrl(frozenScreenshot) : null;
+        input = buildBugReportInput({
+          submissionId,
           description,
-          kind: sentKind,
+          kind,
           screenshotDataUrl,
-          captureError,
-          route: screenshot ? (captureRoute ?? undefined) : undefined,
-        }),
-      );
+          captureError: frozenCaptureError,
+          route: frozenScreenshot ? (captureRoute ?? undefined) : undefined,
+        });
+        setCaptureState(frozenScreenshot ? 'ready' : 'failed');
+        setFrozenInput(input);
+      }
+      const result = await submitBugReport(input);
       setSubmittedId(result.reportId);
-      setSubmittedKind(sentKind);
+      setSubmittedKind(input.kind);
       setEscalationEligible(result.escalationEligible === true);
       setScreenshot(null);
+      setSubmissionId(null);
+      setFrozenInput(null);
     } catch (submitError) {
+      if (isInvalidArgument(submitError)) setFrozenInput(null);
       setError(errorMessage(submitError));
     } finally {
       setBusy(false);
@@ -335,7 +360,7 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                     {/* Frozen while a submit is in flight, alongside Cancel: a
                         classification that can move after Send is a receipt that
                         can describe a report nobody filed. */}
-                    <fieldset className="bug-report-kind" disabled={busy}>
+                    <fieldset className="bug-report-kind" disabled={busy || frozenInput !== null}>
                       <legend className="bug-report-label">What kind of report is this?</legend>
                       <label className="bug-report-kind-option">
                         <input
@@ -383,30 +408,36 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       maxLength={BUG_REPORT_DESCRIPTION_MAX}
                       placeholder="What were you trying to do, and what happened instead?"
                       value={description}
+                      disabled={busy || frozenInput !== null}
                       onChange={(event) => setDescription(event.target.value)}
                     />
                     <div className="bug-report-capture" aria-live="polite">
-                      {captureState === 'capturing' && <p>Capturing this app view…</p>}
-                      {captureState === 'ready' && previewUrl && (
+                      {presentedCaptureState === 'capturing' && <p>Capturing this app view…</p>}
+                      {presentedCaptureState === 'ready' && previewUrl && (
                         <>
                           <img src={previewUrl} alt="Screenshot that will be submitted with this bug report" />
                           <div className="bug-report-capture-actions">
-                            <button className="btn" type="button" onClick={capture}>Retake screenshot</button>
-                            <button className="btn" type="button" onClick={() => setStage('pick')}>Capture a different screen</button>
+                            <button className="btn" type="button" disabled={busy || frozenInput !== null} onClick={capture}>Retake screenshot</button>
+                            <button className="btn" type="button" disabled={busy || frozenInput !== null} onClick={() => setStage('pick')}>Capture a different screen</button>
                           </div>
                         </>
                       )}
-                      {captureState === 'failed' && (
+                      {presentedCaptureState === 'failed' && (
                         <>
-                          <p>Screenshot unavailable. You can still send a text-only report.</p>
+                          <p>
+                            {frozenInput
+                              ? 'This retry is frozen as a text-only report; no screenshot will be submitted.'
+                              : 'Screenshot unavailable. You can still send a text-only report.'}
+                          </p>
                           <div className="bug-report-capture-actions">
-                            <button className="btn" type="button" onClick={capture}>Try screenshot again</button>
-                            <button className="btn" type="button" onClick={() => setStage('pick')}>Capture a different screen</button>
+                            <button className="btn" type="button" disabled={busy || frozenInput !== null} onClick={capture}>Try screenshot again</button>
+                            <button className="btn" type="button" disabled={busy || frozenInput !== null} onClick={() => setStage('pick')}>Capture a different screen</button>
                           </div>
                         </>
                       )}
                     </div>
                     {error && <p className="bug-report-error" role="alert">{error}</p>}
+                    {busy && <p className="bug-report-privacy" role="status" tabIndex={0}>Sending report…</p>}
                     <div className="sheet-actions">
                       <button className="btn" type="button" disabled={busy} onClick={close}>Cancel</button>
                       <button className="btn primary" type="button" disabled={!description.trim() || busy} onClick={submit}>

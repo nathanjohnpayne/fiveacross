@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   httpsCallable: vi.fn(),
   signInWithCustomToken: vi.fn(),
   signOut: vi.fn(),
+  attestAdult: vi.fn(),
 }));
 
 vi.mock('firebase/functions', () => ({ httpsCallable: mocks.httpsCallable }));
@@ -19,11 +20,13 @@ vi.mock('firebase/auth', () => ({
   signOut: mocks.signOut,
 }));
 vi.mock('../firebase', () => ({ auth: {}, functions: {} }));
+vi.mock('../data/api', () => ({ attestAdult: mocks.attestAdult }));
 
 import { HANDOFF_FRAGMENT_KEY, consumeHandoffFailure } from './handoffClient';
 import { HANDOFF_EXCHANGE_TIMEOUT_MS, completeAuthHandoff, mintAuthHandoff } from './handoffExchange';
 import {
   HANDOFF_TRANSACTION_KEY,
+  HANDOFF_TRANSACTION_TTL_MS,
   rememberHandoffTransaction,
   readHandoffTransaction,
 } from './handoffTransaction';
@@ -60,6 +63,7 @@ beforeEach(() => {
   mocks.httpsCallable.mockReset();
   mocks.signInWithCustomToken.mockReset().mockResolvedValue({ user: { uid: 'u1' } });
   mocks.signOut.mockReset().mockResolvedValue(undefined);
+  mocks.attestAdult.mockReset().mockResolvedValue(undefined);
   consumeHandoffFailure();
 });
 
@@ -104,11 +108,19 @@ describe('mintAuthHandoff', () => {
 });
 
 describe('completeAuthHandoff', () => {
-  function armTransaction(overrides: Partial<{ targetOrigin: string; verifier: string }> = {}) {
+  function armTransaction(
+    overrides: Partial<{
+      targetOrigin: string;
+      verifier: string;
+      acknowledgedAdultContent: boolean;
+      createdAt: number;
+    }> = {},
+  ) {
     rememberHandoffTransaction({
       verifier: 'V'.repeat(43),
       targetOrigin: ORIGIN,
       returnPath: '/board',
+      acknowledgedAdultContent: false,
       createdAt: Date.now(),
       ...overrides,
     });
@@ -126,6 +138,57 @@ describe('completeAuthHandoff', () => {
       origin: ORIGIN,
     });
     expect(mocks.signInWithCustomToken).toHaveBeenCalledWith({}, 'ct-1');
+    expect(consumeHandoffFailure()).toBeNull();
+  });
+
+  it('persists a collected acknowledgement for the exact user returned by this handoff', async () => {
+    const returnedUser = { uid: 'handoff-user' };
+    armTransaction({ acknowledgedAdultContent: true });
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.signInWithCustomToken.mockResolvedValue({ user: returnedUser });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.attestAdult).toHaveBeenCalledOnce();
+    expect(mocks.attestAdult).toHaveBeenCalledWith(returnedUser);
+  });
+
+  it('does not attest when this handoff collected no acknowledgement', async () => {
+    armTransaction({ acknowledgedAdultContent: false });
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+  });
+
+  it('cannot use an expired handoff acknowledgement', async () => {
+    armTransaction({
+      acknowledgedAdultContent: true,
+      createdAt: Date.now() - HANDOFF_TRANSACTION_TTL_MS - 1,
+    });
+    const exchange = vi.fn();
+    callables({ exchangeAuthHandoff: exchange });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(false);
+    expect(exchange).not.toHaveBeenCalled();
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+  });
+
+  it('cannot carry an abandoned acknowledgement into its replacement transaction', async () => {
+    armTransaction({ verifier: 'A'.repeat(43), acknowledgedAdultContent: true });
+    armTransaction({ verifier: 'B'.repeat(43), acknowledgedAdultContent: false });
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+  });
+
+  it('keeps the successful session when the attestation write rejects', async () => {
+    armTransaction({ acknowledgedAdultContent: true });
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.attestAdult.mockRejectedValue(new Error('offline'));
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(mocks.signOut).not.toHaveBeenCalled();
     expect(consumeHandoffFailure()).toBeNull();
   });
 
@@ -194,11 +257,12 @@ describe('completeAuthHandoff', () => {
 // bootstrap path is written to avoid. Captive and shipboard wifi produce exactly
 // that: `navigator.onLine` true and a request that hangs forever.
 describe('completeAuthHandoff is bounded against a hung network', () => {
-  function armTransaction() {
+  function armTransaction(acknowledgedAdultContent = false) {
     rememberHandoffTransaction({
       verifier: 'V'.repeat(43),
       targetOrigin: ORIGIN,
       returnPath: '/board',
+      acknowledgedAdultContent,
       createdAt: Date.now(),
     });
   }
@@ -223,6 +287,20 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
   });
 
+  it(
+    'does not strand the authenticated app when the attestation write never settles',
+    async () => {
+      armTransaction(true);
+      callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+      mocks.attestAdult.mockImplementation(() => new Promise(() => {}));
+
+      expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(true);
+      expect(mocks.signOut).not.toHaveBeenCalled();
+      expect(consumeHandoffFailure()).toBeNull();
+    },
+    150,
+  );
+
   it('leaves room for a slow phone on bad wifi rather than a snappy default', () => {
     expect(HANDOFF_EXCHANGE_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
   });
@@ -239,6 +317,7 @@ describe('a timed-out sign-in cannot mutate auth state later', () => {
       verifier: 'V'.repeat(43),
       targetOrigin: ORIGIN,
       returnPath: '/board',
+      acknowledgedAdultContent: false,
       createdAt: Date.now(),
     });
   }
@@ -282,17 +361,18 @@ describe('a timed-out sign-in cannot mutate auth state later', () => {
 // and only then does attempt 1's abandoned promise resolve. An unconditional
 // sign-out at that point destroys the good session attempt 2 just established.
 describe('late reconciliation is generation-aware', () => {
-  function armTransaction() {
+  function armTransaction(acknowledgedAdultContent = false) {
     rememberHandoffTransaction({
       verifier: 'V'.repeat(43),
       targetOrigin: ORIGIN,
       returnPath: '/board',
+      acknowledgedAdultContent,
       createdAt: Date.now(),
     });
   }
 
   it('does NOT sign out when a newer attempt has already succeeded', async () => {
-    armTransaction();
+    armTransaction(true);
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
 
     let landFirst: (v: unknown) => void = () => {};
@@ -317,6 +397,7 @@ describe('late reconciliation is generation-aware', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
   });
 
   it('still signs out when no newer attempt intervened', async () => {

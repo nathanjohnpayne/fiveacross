@@ -1,8 +1,405 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID as nodeRandomUUID } from 'node:crypto';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
-import { BugReportInputError, nextRateState, validateBugReportInput, type RateState } from './bugReportCore';
+import {
+  BugReportInputError,
+  nextRateState,
+  validateBugReportInput,
+  type RateState,
+  type ValidBugReport,
+} from './bugReportCore';
+import { isAlreadyExists } from './firestoreErrors';
+
+const REPORT_ID_DOMAIN = 'bug-report-v1\0';
+const REQUEST_HASH_DOMAIN = 'bug-report-request-v1\0';
+const CURRENT_REQUEST_HASH_VERSION = 1 as const;
+
+export function deriveBugReportId(uid: string, submissionId: string): string {
+  return createHash('sha256').update(REPORT_ID_DOMAIN).update(uid).update('\0').update(submissionId).digest('hex');
+}
+
+function requestHashV1(report: ValidBugReport): string {
+  const screenshotSha256 = report.screenshot
+    ? createHash('sha256').update(report.screenshot).digest('hex')
+    : null;
+  const tuple = [
+    report.schemaVersion,
+    report.kind,
+    report.description,
+    report.captureError,
+    report.route,
+    report.eventId,
+    report.appVersion,
+    report.browser,
+    report.viewport.width,
+    report.viewport.height,
+    report.online,
+    screenshotSha256,
+  ];
+  return createHash('sha256').update(REQUEST_HASH_DOMAIN, 'utf8').update(JSON.stringify(tuple), 'utf8').digest('hex');
+}
+
+const REQUEST_HASH_VERIFIERS = new Map<number, (report: ValidBugReport) => string>([[1, requestHashV1]]);
+
+export function deriveBugReportRequestHash(report: ValidBugReport): { version: 1; value: string } {
+  return { version: CURRENT_REQUEST_HASH_VERSION, value: requestHashV1(report) };
+}
+
+export function verifyBugReportRequestHash(report: ValidBugReport, version: number, value: string): boolean {
+  const verifier = REQUEST_HASH_VERIFIERS.get(version);
+  if (!verifier) return false;
+  return verifier(report) === value;
+}
+
+interface IntakeSnapshot {
+  exists: boolean;
+  data(): Record<string, unknown> | undefined;
+}
+
+interface IntakeDocRef {
+  id: string;
+  path: string;
+  get(): Promise<IntakeSnapshot>;
+  create(data: object): Promise<unknown>;
+  delete(options?: { ignoreNotFound?: boolean }): Promise<unknown>;
+}
+
+interface IntakeTransaction {
+  get(ref: IntakeDocRef): Promise<IntakeSnapshot>;
+  create(ref: IntakeDocRef, data: object): unknown;
+  set(ref: IntakeDocRef, data: object): unknown;
+  update(ref: IntakeDocRef, data: object): unknown;
+}
+
+interface IntakeFirestore extends ReporterLookupFirestore {
+  doc(path: string): IntakeDocRef;
+  collection(path: string): { doc(id?: string): IntakeDocRef };
+  runTransaction<T>(work: (transaction: IntakeTransaction) => Promise<T>): Promise<T>;
+}
+
+interface IntakeFile {
+  save(bytes: Buffer, options: Record<string, unknown>): Promise<unknown>;
+  getMetadata(): Promise<[Record<string, unknown>]>;
+  delete(options?: { ignoreNotFound?: boolean }): Promise<unknown>;
+}
+
+export interface BugReportIntakeDependencies {
+  db: IntakeFirestore;
+  file(path: string): IntakeFile;
+  nowMs(): number;
+  randomUUID(): string;
+  timestamp(ms: number): unknown;
+  serverTimestamp(): unknown;
+  sleep(ms: number): Promise<void>;
+  resolveEscalation(db: ReporterLookupFirestore, eventId: string, uid: string): Promise<AbuseEscalation>;
+}
+
+type IntakeReceipt = { reportId: string; escalationEligible: boolean };
+type Coordination = {
+  reportId: string;
+  reporterHash: string;
+  submissionId: string;
+  requestHashVersion: 1;
+  requestHash: string;
+  report: ValidBugReport;
+};
+
+const INTAKE_LEASE_MS = 60_000;
+const FOLLOWER_POLL_MS = 100;
+const FOLLOWER_MAX_POLLS = 50;
+
+function timestampMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  const toMillis = (value as { toMillis?: unknown } | null)?.toMillis;
+  if (typeof toMillis === 'function') {
+    const result = toMillis.call(value);
+    return typeof result === 'number' && Number.isFinite(result) ? result : null;
+  }
+  return null;
+}
+
+function verifyCoordination(data: Record<string, unknown> | undefined, expected: Coordination): Record<string, unknown> {
+  if (!data || data.submissionId !== expected.submissionId || data.reporterHash !== expected.reporterHash) {
+    throw new HttpsError('failed-precondition', 'Stored submission identity does not match this retry.');
+  }
+  if (typeof data.requestHashVersion !== 'number' || typeof data.requestHash !== 'string') {
+    throw new HttpsError('failed-precondition', 'Stored submission hash version is not supported.');
+  }
+  if (!verifyBugReportRequestHash(expected.report, data.requestHashVersion, data.requestHash)) {
+    throw new HttpsError('failed-precondition', 'This submission identity was already used for a different report.');
+  }
+  return data;
+}
+
+function receiptFrom(data: Record<string, unknown>, reportId: string): IntakeReceipt {
+  if (data.intakeState !== 'complete') {
+    throw new HttpsError('failed-precondition', 'Stored submission is not a valid completed report.');
+  }
+  if (data.kind === 'bug') return { reportId, escalationEligible: false };
+  if (data.kind !== 'abuse' || typeof data.escalationEligible !== 'boolean') {
+    throw new HttpsError('failed-precondition', 'Stored submission has an invalid escalation outcome.');
+  }
+  return { reportId, escalationEligible: data.escalationEligible };
+}
+
+async function verifiedReadback(ref: IntakeDocRef, expected: Coordination): Promise<Record<string, unknown>> {
+  const snapshot = await ref.get();
+  if (!snapshot.exists) throw new HttpsError('unavailable', 'Submission outcome is not yet readable. Try again.');
+  return verifyCoordination(snapshot.data(), expected);
+}
+
+async function chargeLegacyRate(db: IntakeFirestore, reporterHash: string, nowMs: number): Promise<void> {
+  const rateRef = db.doc(`bugReportRateLimits/${reporterHash}`);
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(rateRef);
+    transaction.set(rateRef, nextRateState(snapshot.exists ? snapshot.data() as unknown as RateState : undefined, nowMs));
+  });
+}
+
+function reportDocument(
+  report: ValidBugReport,
+  reporterHash: string,
+  screenshotPath: string | null,
+  escalation: AbuseEscalation,
+  submittedAt: unknown,
+): Record<string, unknown> {
+  const lookupFailed = escalation.member === null || escalation.eventActive === null;
+  const escalationEligible = escalation.member === true && escalation.eventActive === true;
+  return {
+    schemaVersion: report.schemaVersion,
+    kind: report.kind,
+    ...(report.kind === 'abuse'
+      ? {
+          ...(lookupFailed ? {} : { reporterInEvent: escalation.member }),
+          escalationLookupFailed: lookupFailed,
+          escalationEligible,
+        }
+      : {}),
+    description: report.description,
+    screenshotPath,
+    captureError: report.captureError,
+    route: report.route,
+    eventId: report.eventId,
+    appVersion: report.appVersion,
+    browser: report.browser,
+    viewport: report.viewport,
+    online: report.online,
+    reporterHash,
+    submittedAt,
+    status: 'new',
+  };
+}
+
+async function submitLegacyBugReport(
+  uid: string,
+  report: ValidBugReport,
+  deps: BugReportIntakeDependencies,
+): Promise<IntakeReceipt> {
+  const nowMs = deps.nowMs();
+  const reporterHash = createHash('sha256').update(uid).digest('hex').slice(0, 20);
+  await chargeLegacyRate(deps.db, reporterHash, nowMs);
+  const escalation = report.kind === 'abuse'
+    ? await deps.resolveEscalation(deps.db, report.eventId, uid)
+    : { member: false, eventActive: false };
+  const reportRef = deps.db.collection('bugReports').doc();
+  const storagePath = report.screenshot ? `bug-reports/${reporterHash}/${reportRef.id}/screenshot.png` : null;
+  const file = storagePath ? deps.file(storagePath) : null;
+  if (file && report.screenshot) {
+    await file.save(report.screenshot, {
+      resumable: false,
+      validation: 'crc32c',
+      metadata: { contentType: 'image/png', cacheControl: 'private, max-age=0, no-store' },
+    });
+  }
+  try {
+    await reportRef.create(reportDocument(report, reporterHash, storagePath, escalation, deps.serverTimestamp()));
+  } catch (error) {
+    if (file) await file.delete({ ignoreNotFound: true }).catch(() => undefined);
+    throw error;
+  }
+  return {
+    reportId: reportRef.id,
+    escalationEligible: escalation.member === true && escalation.eventActive === true,
+  };
+}
+
+async function releaseOwnedLease(
+  deps: BugReportIntakeDependencies,
+  ref: IntakeDocRef,
+  expected: Coordination,
+  leaseId: string,
+): Promise<void> {
+  await deps.db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    if (!snapshot.exists) return;
+    const data = verifyCoordination(snapshot.data(), expected);
+    if (data.intakeState === 'pending' && data.leaseId === leaseId) {
+      transaction.update(ref, { leaseExpiresAt: deps.timestamp(deps.nowMs()) });
+    }
+  }).catch(() => undefined);
+}
+
+async function followSubmission(
+  deps: BugReportIntakeDependencies,
+  ref: IntakeDocRef,
+  expected: Coordination,
+): Promise<IntakeReceipt> {
+  for (let poll = 0; poll < FOLLOWER_MAX_POLLS; poll += 1) {
+    await deps.sleep(FOLLOWER_POLL_MS);
+    const data = await verifiedReadback(ref, expected);
+    if (data.intakeState === 'complete') return receiptFrom(data, expected.reportId);
+    if (data.intakeState !== 'pending') {
+      throw new HttpsError('failed-precondition', 'Stored submission has an invalid intake state.');
+    }
+  }
+  throw new HttpsError('unavailable', 'Submission is still being processed. Try again.');
+}
+
+export async function submitValidatedBugReport(
+  uid: string,
+  report: ValidBugReport,
+  deps: BugReportIntakeDependencies,
+): Promise<IntakeReceipt> {
+  if (!report.submissionId) return submitLegacyBugReport(uid, report, deps);
+
+  const nowMs = deps.nowMs();
+  const reporterHash = createHash('sha256').update(uid).digest('hex').slice(0, 20);
+  const reportId = deriveBugReportId(uid, report.submissionId);
+  const hash = deriveBugReportRequestHash(report);
+  const expected: Coordination = {
+    reportId,
+    reporterHash,
+    submissionId: report.submissionId,
+    requestHashVersion: hash.version,
+    requestHash: hash.value,
+    report,
+  };
+  const reportRef = deps.db.collection('bugReports').doc(reportId);
+  const rateRef = deps.db.doc(`bugReportRateLimits/${reporterHash}`);
+  const leaseId = deps.randomUUID();
+  let role: 'owner' | 'follower' | 'complete';
+
+  try {
+    role = await deps.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(reportRef);
+      if (snapshot.exists) {
+        const data = verifyCoordination(snapshot.data(), expected);
+        if (data.intakeState === 'complete') return 'complete';
+        if (data.intakeState !== 'pending' || typeof data.leaseId !== 'string' || timestampMs(data.leaseExpiresAt) === null) {
+          throw new HttpsError('failed-precondition', 'Stored submission has invalid coordination state.');
+        }
+        if ((timestampMs(data.leaseExpiresAt) ?? 0) > nowMs) return 'follower';
+        transaction.update(reportRef, { leaseId, leaseExpiresAt: deps.timestamp(nowMs + INTAKE_LEASE_MS) });
+        return 'owner';
+      }
+      const rateSnapshot = await transaction.get(rateRef);
+      const rate = nextRateState(rateSnapshot.exists ? rateSnapshot.data() as unknown as RateState : undefined, nowMs);
+      transaction.set(rateRef, rate);
+      transaction.create(reportRef, {
+        submissionId: report.submissionId,
+        reporterHash,
+        requestHashVersion: hash.version,
+        requestHash: hash.value,
+        intakeState: 'pending',
+        intakeStartedAt: deps.timestamp(nowMs),
+        leaseId,
+        leaseExpiresAt: deps.timestamp(nowMs + INTAKE_LEASE_MS),
+      });
+      return 'owner';
+    });
+  } catch (error) {
+    let data: Record<string, unknown>;
+    try {
+      // A transaction result can be lost after commit. Read back before
+      // deciding that this invocation is not the owner: if OUR lease is now
+      // durable, continuing is the only path that does not strand it for 60s.
+      // The same branch also closes the SDK/emulator ALREADY_EXISTS race.
+      data = await verifiedReadback(reportRef, expected);
+    } catch (readError) {
+      // ALREADY_EXISTS asserts that some document won, so an absent readback is
+      // itself an unavailable outcome. A malformed readback always wins over
+      // the original error because accepting it would cross submission bounds.
+      if (
+        isAlreadyExists(error) ||
+        (readError instanceof HttpsError && readError.code === 'failed-precondition')
+      ) throw readError;
+      throw error;
+    }
+    if (data.intakeState === 'complete') {
+      role = 'complete';
+    } else if (
+      data.intakeState === 'pending' &&
+      typeof data.leaseId === 'string' &&
+      timestampMs(data.leaseExpiresAt) !== null
+    ) {
+      role = data.leaseId === leaseId ? 'owner' : 'follower';
+    } else {
+      throw new HttpsError('failed-precondition', 'Stored submission has invalid coordination state.');
+    }
+  }
+
+  if (role === 'complete') return receiptFrom(await verifiedReadback(reportRef, expected), reportId);
+  if (role === 'follower') return followSubmission(deps, reportRef, expected);
+
+  const storagePath = report.screenshot ? `bug-reports/${reporterHash}/${reportId}/screenshot.png` : null;
+  try {
+    const escalation = report.kind === 'abuse'
+      ? await deps.resolveEscalation(deps.db, report.eventId, uid)
+      : { member: false, eventActive: false };
+    if (storagePath && report.screenshot) {
+      const file = deps.file(storagePath);
+      try {
+        await file.save(report.screenshot, {
+          resumable: false,
+          validation: 'crc32c',
+          preconditionOpts: { ifGenerationMatch: 0 },
+          metadata: {
+            contentType: 'image/png',
+            cacheControl: 'private, max-age=0, no-store',
+            metadata: { requestHashVersion: String(hash.version), requestHash: hash.value },
+          },
+        });
+      } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code;
+        if (!isAlreadyExists(error) && code !== 412 && code !== '412') throw error;
+        const [metadata] = await file.getMetadata();
+        const custom = metadata.metadata as Record<string, unknown> | undefined;
+        if (custom?.requestHashVersion !== String(hash.version) || custom.requestHash !== hash.value) {
+          throw new HttpsError('failed-precondition', 'Stored screenshot does not match this submission.');
+        }
+      }
+    }
+
+    const finalDocument = {
+      ...reportDocument(report, reporterHash, storagePath, escalation, deps.serverTimestamp()),
+      submissionId: report.submissionId,
+      requestHashVersion: hash.version,
+      requestHash: hash.value,
+      intakeState: 'complete',
+    };
+    await deps.db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(reportRef);
+      if (!snapshot.exists) throw new HttpsError('failed-precondition', 'Submission reservation disappeared.');
+      const data = verifyCoordination(snapshot.data(), expected);
+      if (data.intakeState !== 'pending' || data.leaseId !== leaseId) {
+        throw new HttpsError('aborted', 'Submission ownership changed. Retry to read the stored outcome.');
+      }
+      transaction.set(reportRef, finalDocument);
+    });
+    return receiptFrom(finalDocument, reportId);
+  } catch (error) {
+    try {
+      const data = await verifiedReadback(reportRef, expected);
+      if (data.intakeState === 'complete') return receiptFrom(data, reportId);
+    } catch (readError) {
+      if (readError instanceof HttpsError && readError.code === 'failed-precondition') throw readError;
+    }
+    await releaseOwnedLease(deps, reportRef, expected, leaseId);
+    throw error;
+  }
+}
 
 /** The minimal Firestore surface the participation check needs, so it can be
  *  exercised without an Admin SDK. */
@@ -105,143 +502,34 @@ export async function resolveAbuseEscalation(
   return { member: null, eventActive: null };
 }
 
+function productionIntakeDependencies(): BugReportIntakeDependencies {
+  const db = getFirestore() as unknown as IntakeFirestore;
+  return {
+    db,
+    file: (path) => getStorage().bucket().file(path) as unknown as IntakeFile,
+    nowMs: () => Date.now(),
+    randomUUID: () => nodeRandomUUID(),
+    timestamp: (ms) => new Date(ms),
+    serverTimestamp: () => FieldValue.serverTimestamp(),
+    sleep: async (ms) => await new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    resolveEscalation: resolveAbuseEscalation,
+  };
+}
+
 export async function handleSubmitBugReport(
   request: CallableRequest<unknown>,
   requireAppCheck: boolean,
+  deps: BugReportIntakeDependencies = productionIntakeDependencies(),
 ): Promise<{ reportId: string; escalationEligible: boolean }> {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in before reporting a bug.');
   if (requireAppCheck && !request.app) throw new HttpsError('failed-precondition', 'App Check is required.');
-  const nowMs = Date.now();
-  const db = getFirestore();
-  const uidHash = createHash('sha256').update(uid).digest('hex').slice(0, 20);
-  const rateRef = db.doc(`bugReportRateLimits/${uidHash}`);
-  await db.runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(rateRef);
-    const current = snapshot.exists ? (snapshot.data() as RateState) : undefined;
-    try {
-      transaction.set(rateRef, nextRateState(current, nowMs));
-    } catch (error) {
-      if (error instanceof BugReportInputError) throw new HttpsError(error.code, error.message);
-      throw error;
-    }
-  });
-
-  let report: ReturnType<typeof validateBugReportInput>;
   try {
-    report = validateBugReportInput(request.data);
+    const report = validateBugReportInput(request.data);
+    return await submitValidatedBugReport(uid, report, deps);
   } catch (error) {
+    if (error instanceof HttpsError) throw error;
     if (error instanceof BugReportInputError) throw new HttpsError(error.code, error.message);
     throw error;
   }
-
-  // Only an abuse report pays for this, because only an abuse report escalates —
-  // and it never rejects the SUBMISSION. A report filed from the sign-in or join
-  // screen, by someone who has not joined the Event yet, still lands in the
-  // inbox exactly as it always did; this declines to ESCALATE it, which is the
-  // only thing the claimed Event buys the reporter.
-  //
-  // Resolved HERE and persisted rather than checked at the trigger, because the
-  // trigger only ever sees `reporterHash` — a truncated SHA-256 that is
-  // deliberately not resolvable back to a uid. This is the one point in the flow
-  // holding both facts at once.
-  const escalation: AbuseEscalation =
-    report.kind === 'abuse'
-      ? await resolveAbuseEscalation(db, report.eventId, uid)
-      : { member: false, eventActive: false };
-  // `null` on either half means the question was never answered, which is a
-  // different thing from answering it "no".
-  const lookupFailed = escalation.member === null || escalation.eventActive === null;
-  const escalationEligible = escalation.member === true && escalation.eventActive === true;
-
-  const reportRef = db.collection('bugReports').doc();
-  const storagePath = report.screenshot
-    ? `bug-reports/${uidHash}/${reportRef.id}/screenshot.png`
-    : null;
-  const file = storagePath ? getStorage().bucket().file(storagePath) : null;
-  if (file && report.screenshot) {
-    await file.save(report.screenshot, {
-      resumable: false,
-      validation: 'crc32c',
-      metadata: { contentType: 'image/png', cacheControl: 'private, max-age=0, no-store' },
-    });
-  }
-  try {
-    await reportRef.create({
-      schemaVersion: report.schemaVersion,
-      // Server-normalised, never the raw client value: `bugReports` is denied to
-      // clients in both directions, so this document is the ONLY place the
-      // reporter's abuse marking exists — and it is what the `notifyAbuseBugReport`
-      // trigger reads to decide whether an admin hears about it (#670).
-      kind: report.kind,
-      // Both written only on an abuse report, so their presence means "this was
-      // checked" rather than "this defaulted", and they answer DIFFERENT
-      // questions — which is the whole reason there are two of them (#670,
-      // Codex P2 round 6):
-      //
-      //   `reporterInEvent` is the trigger's GATE INPUT. `abuseAlertsForWrite`
-      //   requires it to be strictly `true`, so a hand-written or migrated
-      //   document that never went through the check above cannot escalate. It
-      //   is a necessary condition for escalation, not a sufficient one.
-      //
-      //   `escalationEligible` is whether this submission MET THE CONDITIONS to
-      //   be escalated — membership AND a live Event, the same conjunction the
-      //   callable returns to the reporter. Persisted because it is a durable
-      //   fact about the submission rather than a stale snapshot of Event state:
-      //   if somebody asks why a report never surfaced, this is the record of
-      //   what the submission itself decided.
-      //
-      // NEITHER IS A DELIVERY CLAIM, AND NEITHER SAYS AN ALERT WAS QUEUED. The
-      // naming went through `notified` and then `escalated` before landing here,
-      // and both were wrong for the same reason (Phase 4b P1): this runs BEFORE
-      // the asynchronous trigger, which re-reads Event status itself and may not
-      // have run at all yet. Eligibility is the only thing knowable at this
-      // point, so it is the only thing claimed — the trigger owns whether an
-      // alert exists, and the digest owns whether anyone was told.
-      ...(report.kind === 'abuse'
-        ? {
-            // `reporterInEvent` is written ONLY when it is a real answer. An
-            // unanswered lookup records no authorization decision at all, and
-            // says so, rather than leaving a `false` nothing can tell apart from
-            // a confirmed non-member.
-            ...(lookupFailed ? {} : { reporterInEvent: escalation.member }),
-            escalationLookupFailed: lookupFailed,
-            escalationEligible,
-          }
-        : {}),
-      description: report.description,
-      screenshotPath: storagePath,
-      captureError: report.captureError,
-      route: report.route,
-      eventId: report.eventId,
-      appVersion: report.appVersion,
-      browser: report.browser,
-      viewport: report.viewport,
-      online: report.online,
-      reporterHash: uidHash,
-      submittedAt: FieldValue.serverTimestamp(),
-      status: 'new',
-    });
-  } catch (error) {
-    if (file) await file.delete({ ignoreNotFound: true }).catch(() => undefined);
-    throw error;
-  }
-  // TELL THE REPORTER WHAT THIS SUBMISSION DID (#670, Codex P2). The sheet
-  // cannot work it out alone — both halves are server-side facts — and a person
-  // reporting harm must not be left believing the admins were reached when the
-  // report only entered the inbox. So the outcome is returned rather than
-  // promised up front.
-  //
-  // `escalationEligible`, NOT `escalated` and certainly not `notified`. This
-  // function returns BEFORE the trigger that queues the alert has run, so it
-  // cannot honestly report even that much: the trigger re-reads Event status for
-  // itself, and beyond it the digest may resolve no admin recipient at all. What
-  // this callable knows is that the submission met the conditions — nothing
-  // about what happened next. Wording it as eligibility is what keeps the sheet
-  // from reassuring somebody reporting harm about an outcome nobody has yet
-  // determined (Phase 4b P1).
-  //
-  // It discloses nothing a caller could not already establish by observation,
-  // and staying silent is worse for exactly the person this exists to protect.
-  return { reportId: reportRef.id, escalationEligible };
 }

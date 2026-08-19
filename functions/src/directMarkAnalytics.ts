@@ -9,6 +9,9 @@
  * order in which one Board actually changed.
  */
 
+import { FieldValue } from 'firebase-admin/firestore';
+import { isAlreadyExists } from './firestoreErrors';
+
 export type DirectMarkAnalyticsEvent = {
   name: 'mark_square' | 'unmark_square';
   source?: 'pledge' | 'proof' | 'admin_confirm';
@@ -191,11 +194,6 @@ export function boardAnalyticsForWrite(params: {
 type TransitionDoc = { create(data: BoardAnalyticsEvent & { recordedAt: unknown }): Promise<unknown> };
 export type DirectMarkAnalyticsStore = { doc(path: string): TransitionDoc };
 
-function isAlreadyExists(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  return code === 6 || code === 'already-exists' || code === 'ALREADY_EXISTS';
-}
-
 /**
  * Creates one immutable event row per transition identity. Firestore can
  * redeliver a trigger, so `create()` (rather than a merge set) makes repeated
@@ -216,4 +214,3 @@ export async function recordDirectMarkAnalytics(
     }
   }
 }
-import { FieldValue } from 'firebase-admin/firestore';

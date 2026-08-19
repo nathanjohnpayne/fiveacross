@@ -41,10 +41,10 @@ Run credential preflight in deploy mode, then export new reports:
 
 ```bash
 eval "$(scripts/op-preflight.sh --agent codex --mode deploy)"
-npm run bugs:pull
+npm run bugs:pull -- gaycruisebingo
 ```
 
-The command reads the Firebase project from `.firebaserc` and the bucket from `BUG_REPORT_BUCKET` or `VITE_FIREBASE_STORAGE_BUCKET` in `.env.local`. It writes each validated report atomically under `.github/bug-reports/inbox/<report-id>/`. Existing inbox or imported IDs are skipped, malformed reports are listed as failures, and partial directories are removed. The inbox and imported directories are gitignored.
+The required target name selects both the Firebase project and private Storage bucket from the repository's canonical target registry; ambient `.firebaserc`, `GOOGLE_CLOUD_PROJECT`, `BUG_REPORT_BUCKET`, and local env files cannot redirect it. Use `fiveacross` instead only after loading that project's matching deploy credential. The output names `projectId` and `storageBucket` before the report counts, and each validated report is written atomically under `.github/bug-reports/inbox/<report-id>/`. Existing inbox or imported IDs are skipped, malformed reports are listed as failures, and partial directories are removed. The inbox and imported directories are gitignored.
 
 A screenshot-backed report contains `report.json`, `description.md`, and `screenshot.png`. A text-only report intentionally omits `screenshot.png` and records its bounded capture error in `report.json`.
 
@@ -77,15 +77,15 @@ set -a; source "$HOME/.cache/mergepath/op-preflight-<agent>.env"; set +a
 
 Never run `op-preflight … --mode deploy` bare (unwrapped): it echoes `export CF_API_TOKEN=…` and the SA-key path to stdout, leaking the Cloudflare token into the terminal or the scheduled-task log. Always `eval "$(…)"` it, and `source` the cache file (also silent) in later steps.
 
-Bucket gotcha: there is normally **no** `.env.local` in a fresh checkout/worktree. `.env.example` now names the enabled `gaycruisebingo.firebasestorage.app` bucket, where the reports' screenshots live. Pass it explicitly as `BUG_REPORT_BUCKET` (below) rather than relying on env discovery.
+The credential is project-scoped, and the target argument below is deliberately not an ambient project override. The normal preflight above loads `gaycruisebingo`. Before operating on Five Across, reload preflight with the override inside the command substitution so credential selection happens for that project: `eval "$(OP_PREFLIGHT_FIREBASE_PROJECT_ID=fiveacross scripts/op-preflight.sh --agent <agent> --mode deploy)"`.
 
 ### 2. Pull
 
 ```bash
-BUG_REPORT_BUCKET=gaycruisebingo.firebasestorage.app npm run bugs:pull
+npm run bugs:pull -- gaycruisebingo
 ```
 
-The command prints a JSON summary (`exported` / `skipped` / `failed`) and writes each report to `.github/bug-reports/inbox/<report-id>/`. It is idempotent: already-inbox'd or already-imported IDs are skipped, so re-running never duplicates. Dedupe is **durable**—the pull also skips any report recorded in the committed `.github/bug-reports/imported-ledger.jsonl` ledger (one `{reportId, issue, url, importedAt}` line per import; report IDs are opaque Firestore doc IDs, so the ledger carries no PII and is safe to commit). That means a fresh clone, a different machine, or a checkout whose gitignored local `imported/` tree was deleted still skips everything already turned into an issue—dedupe no longer depends on local state that a worktree deletion can wipe. Ledgered reports are skipped before validating mutable source fields, so an already-imported historical report cannot break future pulls just because its immutable Firestore document no longer matches the current exporter schema. Malformed, incomplete, or conflicting ledger rows fail closed instead of being skipped; fix the committed ledger before rerunning, because silently ignoring a bad durable record can either duplicate an imported report or hide one without a valid receipt. A non-empty `failed` array (malformed report or unreadable screenshot) exits non-zero; these are pull-time export failures with **no inbox directory**, so do **not** run `bugs:disposition` on them—it requires an existing `inbox/<id>/` and throws `Inbox report <id> does not exist`. Surface them instead: re-run the pull, and if they persist inspect the source `bugReports` document/screenshot. (`bugs:disposition` is only for reports that pulled cleanly into the inbox but cannot be imported—see step 6.) Do not treat `exported: [] / failed: []` as "nothing to do" on its own: an earlier approval-gated run (or an interrupted import) may have left already-pulled reports in `.github/bug-reports/inbox/`, and the pull reports those as `skipped` (not `exported`) because the directory already exists. Before stopping, list `inbox/*` and process any report that has neither an `imported/<id>/` receipt nor a `disposition.json`. Stop only when `failed: []`, the pull added nothing new, and no un-actioned report remains in the inbox.
+The command prints a JSON summary (`projectId` / `storageBucket` / `exported` / `skipped` / `failed`) and writes each report to `.github/bug-reports/inbox/<report-id>/`. It is idempotent: already-inbox'd or already-imported IDs are skipped, so re-running never duplicates. Dedupe is **durable**—the pull also skips any report recorded in the committed `.github/bug-reports/imported-ledger.jsonl` ledger (one `{reportId, issue, url, importedAt}` line per import; report IDs are opaque Firestore doc IDs, so the ledger carries no PII and is safe to commit). That means a fresh clone, a different machine, or a checkout whose gitignored local `imported/` tree was deleted still skips everything already turned into an issue—dedupe no longer depends on local state that a worktree deletion can wipe. Ledgered reports are skipped before validating mutable source fields, so an already-imported historical report cannot break future pulls just because its immutable Firestore document no longer matches the current exporter schema. Malformed, incomplete, or conflicting ledger rows fail closed instead of being skipped; fix the committed ledger before rerunning, because silently ignoring a bad durable record can either duplicate an imported report or hide one without a valid receipt. A non-empty `failed` array (malformed report or unreadable screenshot) exits non-zero; these are pull-time export failures with **no inbox directory**, so do **not** run `bugs:disposition` on them—it requires an existing `inbox/<id>/` and throws `Inbox report <id> does not exist`. Surface them instead: re-run the pull, and if they persist inspect the source `bugReports` document/screenshot. (`bugs:disposition` is only for reports that pulled cleanly into the inbox but cannot be imported—see step 6.) Do not treat `exported: [] / failed: []` as "nothing to do" on its own: an earlier approval-gated run (or an interrupted import) may have left already-pulled reports in `.github/bug-reports/inbox/`, and the pull reports those as `skipped` (not `exported`) because the directory already exists. Before stopping, list `inbox/*` and process any report that has neither an `imported/<id>/` receipt nor a `disposition.json`. Stop only when `failed: []`, the pull added nothing new, and no un-actioned report remains in the inbox.
 
 ### 3. Review each report
 
@@ -174,4 +174,23 @@ Scheduled runs execute in the local app environment, so they use the same creden
 
 The screenshot preview is the reporter's consent boundary. Capture is limited to `.app`, excludes the bug-report UI, and never invokes screen sharing, so browser chrome and other applications are outside the capture. Exported metadata contains a truncated SHA-256 uid hash, never the raw uid, email address, auth token, Firebase download token, proof-media URL, or console/local-storage content.
 
-Treat screenshots as potentially personal event data. Keep Firebase reports for at most 90 days, unless a linked issue still requires the evidence. During monthly maintenance, export anything needed for active issues, then delete expired `bugReports` documents and their matching Storage objects using an authenticated admin workflow. Delete imported local evidence when its issue closes or after 90 days, whichever is later. Never commit inbox/imported evidence.
+Treat screenshots as potentially personal event data. Keep Firebase reports for at most 90 days, unless a linked issue still requires the evidence. During monthly maintenance, export anything needed for active issues. Then use the same authenticated Application Default Credential, explicit Firebase project, and private bucket from steps 1–2 to inspect interrupted intake rows:
+
+Run the dry-run and apply pass separately for both deployed Firebase projects. Load the matching project credential, inspect that target's dry-run, and apply it before switching credentials:
+
+```bash
+# Default gaycruisebingo deploy credential:
+npm run bugs:prune-pending -- gaycruisebingo
+npm run bugs:prune-pending -- gaycruisebingo --apply
+
+# Reload the Five Across credential before its separate dry-run and apply pass:
+eval "$(OP_PREFLIGHT_FIREBASE_PROJECT_ID=fiveacross scripts/op-preflight.sh --agent <agent> --mode deploy)"
+npm run bugs:prune-pending -- fiveacross
+npm run bugs:prune-pending -- fiveacross --apply
+```
+
+The command is dry-run by default. It scans PENDING and DELETING rows separately in bounded, document-id-ordered pages and reports `projectId`, `storageBucket`, `apply`, `scanned`, `eligible`, `claimed`, `resumed`, `deleted`, `skippedRace`, and per-report `failed` results. It selects only intake reservations at least 90 days old whose intake or cleanup lease is expired; it never prunes a COMPLETE report. Review the JSON and require the named project, bucket, and `apply: false` to match the intended target before running the adjacent `--apply` command. Require the apply result to repeat the same project and bucket with `apply: true`.
+
+The apply pass leases each row transactionally before deleting its deterministic private screenshot and deletes the document only while it still owns that lease. A completion/takeover race is skipped, concurrent cleaners cannot share ownership, a missing screenshot is harmless, and a partial failure leaves a discoverable DELETING row for a later monthly run. Any `failed` entry makes the command exit nonzero; retain the output, correct the credential or service problem, and rerun rather than deleting the document manually.
+
+After staging cleanup, delete expired COMPLETE `bugReports` documents and their matching Storage objects through the existing authenticated admin procedure, preserving evidence still linked from an active issue. Delete imported local evidence when its issue closes or after 90 days, whichever is later. Never commit inbox/imported evidence.

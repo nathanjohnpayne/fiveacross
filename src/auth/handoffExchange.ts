@@ -11,6 +11,7 @@
 import { httpsCallable } from 'firebase/functions';
 import { signInWithCustomToken, signOut } from 'firebase/auth';
 import { auth, functions } from '../firebase';
+import { attestAdult } from '../data/api';
 import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
 import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTransaction';
 
@@ -183,7 +184,18 @@ export async function completeAuthHandoff(input: {
   );
 
   try {
-    await bounded(signIn, input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS);
+    const timeoutMs = input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS;
+    const credential = await bounded(signIn, timeoutMs);
+    if (transaction.acknowledgedAdultContent) {
+      try {
+        await bounded(attestAdult(credential.user), timeoutMs);
+      } catch {
+        // Authentication already succeeded. A failed acknowledgement write
+        // leaves the settled profile unstamped, so AuthProvider's existing
+        // re-prompt safely collects it again instead of treating sign-in as
+        // failed or signing the new session back out.
+      }
+    }
     return true;
   } catch {
     abandoned = true;

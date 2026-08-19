@@ -26,6 +26,7 @@ export interface BugReportViewport {
 
 export interface SubmitBugReportInput {
   schemaVersion: typeof BUG_REPORT_SCHEMA_VERSION;
+  submissionId: string;
   kind: BugReportKind;
   description: string;
   screenshotDataUrl: string | null;
@@ -208,6 +209,7 @@ export async function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 export function buildBugReportInput(args: {
+  submissionId: string;
   description: string;
   screenshotDataUrl: string | null;
   captureError: string | null;
@@ -222,6 +224,7 @@ export function buildBugReportInput(args: {
 }): SubmitBugReportInput {
   return {
     schemaVersion: BUG_REPORT_SCHEMA_VERSION,
+    submissionId: args.submissionId,
     kind: args.kind ?? 'bug',
     description: args.description.trim(),
     screenshotDataUrl: args.screenshotDataUrl,

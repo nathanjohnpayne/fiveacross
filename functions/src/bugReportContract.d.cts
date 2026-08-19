@@ -4,6 +4,8 @@ export type BugReportKind = 'bug' | 'abuse';
 
 export interface ValidClientReportFields {
   schemaVersion: 1;
+  /** Retry identity for idempotent clients; null for already-shipped clients. */
+  submissionId: string | null;
   /** Normalised, never rejected: an absent or unknown value is a plain `bug`,
    *  so already-shipped clients that send no `kind` keep working unchanged. */
   kind: BugReportKind;

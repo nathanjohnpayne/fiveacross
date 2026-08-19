@@ -39,6 +39,7 @@
  */
 import { resolveAdminEmails, type ResolveDeps } from './notify';
 import { resolveEmailFrom, resolveEventOrigin } from './dailyEmail';
+import { isAlreadyExists } from './firestoreErrors';
 import {
   buildAdminDigestModel,
   renderAdminDigestHtml,
@@ -428,14 +429,6 @@ export function isRetryableFirestoreError(err: unknown): boolean {
   return true;
 }
 
-/** Firestore surfaces ALREADY_EXISTS as gRPC status 6; the emulator and some
- *  SDK versions only carry it in the message, so both are checked. */
-function isAlreadyExists(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  if (code === 6 || code === 'already-exists') return true;
-  return /already exists/i.test((err as { message?: string } | null)?.message ?? '');
-}
-
 /** The whole producer side in one call — the shape `index.ts`'s trigger seams
  *  use, so the seam stays three lines and the decision stays testable here.
  *  `transitionId` is the triggering write's CloudEvent id (#101 Codex F3),
@@ -483,6 +476,11 @@ export interface BugReportDoc {
    *  its presence means "checked" rather than "defaulted". */
   reporterInEvent?: boolean;
   status?: string;
+  intakeState?: string;
+  submissionId?: string;
+  reporterHash?: string;
+  requestHashVersion?: number;
+  requestHash?: string;
 }
 
 /** The intake contract's own `eventId` shape (`bugReportContract.cjs`), restated
@@ -495,14 +493,10 @@ const EVENT_ID_SHAPE = /^[A-Za-z0-9_-]{1,100}$/;
 /**
  * Pure: the alerts one `bugReports/{reportId}` write earns.
  *
- * ONE SIGNAL, and it is a TRANSITION rather than a state: the report is
- * CURRENTLY marked `abuse` and was not before. In practice every abuse report is
- * a create — the callable writes the document once and `firestore.rules` denies
- * clients both directions — so the `before` half is not load-bearing today. It
- * is still the right predicate: it is what keeps a future operator triage write
- * (a `status` change on an already-abuse report) from re-alerting, and it makes
- * the function say what it means rather than relying on a collection's current
- * immutability to be true forever.
+ * Idempotent intake first creates a coordination-only PENDING document. Its one
+ * semantic creation event is the matching PENDING-to-COMPLETE replacement; the
+ * staging create and later COMPLETE updates are silent. Legacy documents carry
+ * no `intakeState` and retain their one absent-before abuse-create signal.
  *
  * A plain `bug` earns nothing, which is the entire point of the field — the
  * inbox is where bugs are answered, and mailing an admin about each one would
@@ -525,7 +519,38 @@ export function abuseAlertsForWrite(
   after: BugReportDoc | undefined,
 ): AdminAlertDraft[] {
   if (!after) return [];
-  if (after.kind !== 'abuse' || before?.kind === 'abuse') return [];
+  const coordinationKeys: Array<keyof BugReportDoc> = [
+    'submissionId',
+    'reporterHash',
+    'requestHashVersion',
+    'requestHash',
+  ];
+  const idempotencyKeys: Array<keyof BugReportDoc> = [
+    'submissionId',
+    'requestHashVersion',
+    'requestHash',
+  ];
+  const hasIntakeState = before?.intakeState !== undefined || after.intakeState !== undefined;
+  if (hasIntakeState) {
+    if (!before || before.intakeState !== 'pending' || after.intakeState !== 'complete') return [];
+    if (!/^[a-f0-9]{64}$/.test(reportId)) return [];
+    if (coordinationKeys.some((key) => before[key] === undefined || before[key] !== after[key])) return [];
+    if (
+      typeof after.submissionId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(after.submissionId) ||
+      typeof after.reporterHash !== 'string' || !/^[a-f0-9]{20}$/.test(after.reporterHash) ||
+      after.requestHashVersion !== 1 ||
+      typeof after.requestHash !== 'string' || !/^[a-f0-9]{64}$/.test(after.requestHash)
+    ) return [];
+  } else if (before) {
+    return [];
+  } else if (idempotencyKeys.some((key) => after[key] !== undefined)) {
+    // The only state-less shape is a report written by the legacy intake,
+    // which predates idempotency fields but already carries reporterHash. A
+    // partially migrated idempotency row must not borrow that compatibility
+    // path and manufacture an alert.
+    return [];
+  }
+  if (after.kind !== 'abuse') return [];
   if (after.reporterInEvent !== true) return [];
   return [
     {

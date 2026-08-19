@@ -33,6 +33,7 @@
     "bugs:pull": "node scripts/bug-reports.mjs pull",
     "bugs:archive": "node scripts/bug-reports.mjs archive",
     "bugs:disposition": "node scripts/bug-reports.mjs disposition",
+    "bugs:prune-pending": "node scripts/bug-reports.mjs prune-pending",
     "deploy": "node scripts/deploy-target.mjs",
     "deploy:hosting": "node scripts/deploy-target.mjs --hosting",
     "deploy:gaycruisebingo": "node scripts/deploy-target.mjs gaycruisebingo",

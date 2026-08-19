@@ -11,6 +11,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  adultContent: false,
   signIn: vi.fn(),
   attest: vi.fn(),
   resolveSignInStrategy: vi.fn(),
@@ -25,7 +26,7 @@ vi.mock('../auth/authMode', () => ({ resolveSignInStrategy: mocks.resolveSignInS
 // An Event with no adult content, so the 18+ checkbox is absent and the button
 // is enabled on load. This test is about which ROUTE the tap takes; the
 // acknowledgement gate is #608's and is covered by its own tests.
-vi.mock('../hooks/useAdultContent', () => ({ useAdultContent: () => false }));
+vi.mock('../hooks/useAdultContent', () => ({ useAdultContent: () => mocks.adultContent }));
 vi.mock('../auth/handoffClient', () => ({
   startAuthHandoff: mocks.startAuthHandoff,
   consumeHandoffFailure: mocks.consumeHandoffFailure,
@@ -46,6 +47,7 @@ function tap() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.adultContent = false;
   mocks.consumeHandoffFailure.mockReturnValue(null);
   mocks.startAuthHandoff.mockResolvedValue(true);
   mocks.resolveSignInStrategy.mockReturnValue({ kind: 'direct' });
@@ -70,9 +72,26 @@ describe('SignIn — which route the tap takes', () => {
       authOrigin: HANDOFF.authOrigin,
       targetOrigin: HANDOFF.targetOrigin,
       returnPath: HANDOFF.returnPath,
+      acknowledgedAdultContent: false,
     });
     // The one collapse that would defeat the whole feature.
     expect(mocks.signIn).not.toHaveBeenCalled();
+  });
+
+  it('carries the acknowledgement actually collected for the handoff transaction', async () => {
+    mocks.adultContent = true;
+    mocks.resolveSignInStrategy.mockReturnValue(HANDOFF);
+    render(<SignIn />);
+    fireEvent.click(screen.getByRole('checkbox'));
+    tap();
+
+    await waitFor(() => expect(mocks.startAuthHandoff).toHaveBeenCalled());
+    expect(mocks.startAuthHandoff).toHaveBeenCalledWith({
+      authOrigin: HANDOFF.authOrigin,
+      targetOrigin: HANDOFF.targetOrigin,
+      returnPath: HANDOFF.returnPath,
+      acknowledgedAdultContent: true,
+    });
   });
 
   it('asks for the current location back, so the handoff does not lose the player place', () => {
