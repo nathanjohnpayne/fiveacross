@@ -464,6 +464,8 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     // The same regression #617 closes for the third Edition: before these rows
     // existed, `known` computed false for 'fiveacross' and the picker fell back
     // to the whole gcb scope — Dog Tag T-Dance on a conference's Theme picker.
+    // `fiveacross-slate` is deliberately NOT here — see the chrome-exclusion
+    // describe block below (#882).
     expect(ids('fiveacross')).toEqual(['marquee', 'confetti-hour', 'afterglow']);
   });
 
@@ -487,14 +489,24 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     }
   });
 
-  it('PARTITIONS the registry — every Theme is pickable on exactly one Edition', () => {
+  it('PARTITIONS the pickable registry — every non-chrome Theme is pickable on exactly one Edition', () => {
     // Stronger than the two lists above: a Theme added without an Edition can
     // no longer slip through as "shared", and a Theme claimed by two Editions
     // has to be a deliberate, visible choice rather than an omission.
+    //
+    // The union excludes `chrome`-flagged Themes on purpose (#882): a
+    // platform-chrome Theme is registered and `THEME_EDITIONS`-bound like any
+    // other, but `themesForEdition` filters it out of every picker, so it is
+    // never a member of any Edition's pick list — see the dedicated
+    // "platform-chrome Themes" describe block below for that half of the
+    // contract. Subtracting it here keeps this test's job narrow: the
+    // NON-CHROME registry still partitions pairwise with no overlap and
+    // nothing left out.
     const gcb = ids('gcb');
     const vacay = ids('vacay');
     const fiveacross = ids('fiveacross');
-    expect([...gcb, ...vacay, ...fiveacross].sort()).toEqual(THEMES.map((t) => t.id).sort());
+    const pickableRegistry = THEMES.filter((t) => !t.chrome).map((t) => t.id);
+    expect([...gcb, ...vacay, ...fiveacross].sort()).toEqual(pickableRegistry.sort());
     expect(gcb.filter((id) => vacay.includes(id))).toEqual([]);
     expect(gcb.filter((id) => fiveacross.includes(id))).toEqual([]);
     expect(vacay.filter((id) => fiveacross.includes(id))).toEqual([]);
@@ -524,6 +536,43 @@ describe('themesForEdition — pickable list is scoped, registry is not', () => 
     for (const id of ['the-birds', 'welcome-aboard', 'neon-playground', 'marquee']) {
       expect(registry).toContain(id);
     }
+  });
+});
+
+// --- Platform-chrome Themes (#882) ------------------------------------------
+//
+// A Theme MAY be flagged `chrome: true` on its THEMES entry instead of being
+// an ordinary occasion Theme: it dresses surfaces that have no Day (utility
+// states, the admin console, email, gallery/share surfaces outside a Day
+// context), never a Day a player or organizer can wear. `fiveacross-slate` is
+// the first (and, as of this ticket, only) one. It stays in the complete
+// REGISTRY and the WCAG contrast suite above audits it exactly like any other
+// Theme — `chrome` only narrows the PICKER, per the split `themesForEdition`'s
+// own doc comment draws.
+describe('platform-chrome Themes are registered but never pickable (#882)', () => {
+  it('fiveacross-slate is in the registry, flagged chrome, and never the fiveacross Edition default', () => {
+    const meta = THEMES.find((t) => t.id === 'fiveacross-slate');
+    expect(meta).toBeDefined();
+    expect(meta?.chrome).toBe(true);
+    expect(defaultThemeForEdition('fiveacross')).not.toBe('fiveacross-slate');
+  });
+
+  it.each(['gcb', 'vacay', 'fiveacross', 'not-an-edition'])(
+    'fiveacross-slate is absent from the %s picker',
+    (edition) => {
+      expect(themesForEdition(edition).map((t) => t.id)).not.toContain('fiveacross-slate');
+    },
+  );
+
+  it('themesForEditionIncluding still surfaces it (prepended) if a stored value ever names it', () => {
+    // Defense in depth: no picker offers this id, so no UI path can write it
+    // to a Day or defaultTheme — but if a hand-edited Firestore doc ever did,
+    // the admin control must display it rather than silently substituting a
+    // different Theme (the same "never misreport what is set" contract
+    // themesForEditionIncluding gives an ordinary off-Edition Theme).
+    const list = themesForEditionIncluding('fiveacross-slate', 'fiveacross').map((t) => t.id);
+    expect(list[0]).toBe('fiveacross-slate');
+    expect(list).toEqual(['fiveacross-slate', 'marquee', 'confetti-hour', 'afterglow']);
   });
 });
 
