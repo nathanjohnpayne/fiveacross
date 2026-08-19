@@ -93,6 +93,8 @@
         <span>Opening your bingo card…</span>
       </div>
     </div>
-    <script type="module" src="/src/main.tsx"></script>
+    <!-- entry.tsx, not main.tsx: the handoff code has to leave the URL before
+         anything that could observe a URL is loaded (#549). See src/entry.tsx. -->
+    <script type="module" src="/src/entry.tsx"></script>
   </body>
 </html>
