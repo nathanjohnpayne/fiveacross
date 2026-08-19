@@ -283,6 +283,30 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
   });
 
+  it('still ALLOWS changing every theme on a full future TEN-Day schedule (worst-case expression budget)', async () => {
+    const tenDays = Array.from({ length: 10 }, (_, index) => ({
+      index,
+      date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+      port: `Port ${index}`,
+      portEmoji: '🇮🇹',
+      theme: index === 0 ? 'welcome-aboard' : 'get-sporty',
+      tonight: ['One', 'Two'],
+      pool: index === 0 ? 'embark' : index === 9 ? 'farewell' : 'main',
+      tutorial: index === 0 || index === 9,
+      scoring: index === 9 ? 'ceremonial' : 'competitive',
+      unlockAt: FUTURE() + index * 3600_000,
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: tenDays });
+    });
+
+    const edited = tenDays.map((day, index) => ({
+      ...day,
+      theme: `replacement-theme-${index}`,
+    }));
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
+  });
+
   it('still DENIES a locked-Day edit on a full TEN-Day schedule', async () => {
     // Paired with the allow case above so reducing expression cost never weakens
     // the lock on a changed Day that has already opened.
