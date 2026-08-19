@@ -438,9 +438,15 @@ service cloud.firestore {
     // Clamping `unlockAt` too (Codex P2) closes the two-step bypass where a write
     // that changes only an unlocked Day's `unlockAt` (theme unchanged) moved the
     // lock source into the future, letting a SECOND write then change the theme.
+    function dayScoringValid(day) {
+      return !('scoring' in day)
+        || day.scoring == 'competitive'
+        || day.scoring == 'ceremonial';
+    }
     function dayThemeChangeOk(newDay, oldDay) {
       return newDay == oldDay
-        || (dayTonightShapeOk(newDay, oldDay)
+        || (dayScoringValid(newDay)
+            && dayTonightShapeOk(newDay, oldDay)
             && (!dayLocked(oldDay) || daySchedUnchanged(newDay, oldDay)));
     }
 
@@ -473,11 +479,6 @@ service cloud.firestore {
     // succeeds with this check in place. It is pinned by a test, alongside the
     // ten-Day case that fails WITHOUT this check on origin/main and belongs to
     // issue #850.
-    function dayScoringValid(day) {
-      return !('scoring' in day)
-        || day.scoring == 'competitive'
-        || day.scoring == 'ceremonial';
-    }
     function daysScoringValid(days) {
       return (days.size() < 1  || dayScoringValid(days[0]))
         && (days.size() < 2  || dayScoringValid(days[1]))
@@ -489,6 +490,32 @@ service cloud.firestore {
         && (days.size() < 8  || dayScoringValid(days[7]))
         && (days.size() < 9  || dayScoringValid(days[8]))
         && (days.size() < 10 || dayScoringValid(days[9]));
+    }
+
+    // Initial setup can legitimately restyle every still-future Day at once.
+    // The general lock path first compares each complete Day map before
+    // expanding its shape checks; doing that ten times crosses Firestore's
+    // expression cap even though a theme-only write cannot affect scoring,
+    // Tonight metadata, or the unlock source. This narrow fast path proves
+    // each old Day is still future and each map changes ONLY `theme`, so all
+    // other invariants carry through byte-for-byte without re-evaluation.
+    function futureThemeOnlyChangeOk(newDay, oldDay) {
+      return !dayLocked(oldDay)
+        && newDay.diff(oldDay).affectedKeys().hasOnly(['theme']);
+    }
+    function tenDayFutureThemesOnlyOk(newDays, oldDays) {
+      return newDays.size() == 10
+        && oldDays.size() == 10
+        && futureThemeOnlyChangeOk(newDays[0], oldDays[0])
+        && futureThemeOnlyChangeOk(newDays[1], oldDays[1])
+        && futureThemeOnlyChangeOk(newDays[2], oldDays[2])
+        && futureThemeOnlyChangeOk(newDays[3], oldDays[3])
+        && futureThemeOnlyChangeOk(newDays[4], oldDays[4])
+        && futureThemeOnlyChangeOk(newDays[5], oldDays[5])
+        && futureThemeOnlyChangeOk(newDays[6], oldDays[6])
+        && futureThemeOnlyChangeOk(newDays[7], oldDays[7])
+        && futureThemeOnlyChangeOk(newDays[8], oldDays[8])
+        && futureThemeOnlyChangeOk(newDays[9], oldDays[9]);
     }
 
     // Mirror `standingsFreezeAtFor`: an explicitly stated scoring policy wins;
@@ -885,13 +912,19 @@ service cloud.firestore {
         // gates above already use), every entry's theme change must be on a
         // still-future Day. See `daysThemeLockOk` above.
         && (!('days' in request.resource.data)
-            || (resource != null
-                && 'days' in resource.data
-                && request.resource.data.days == resource.data.days)
+            // A changed existing schedule validates each changed Day inside
+            // `daysThemeLockOk`, sharing one ten-way traversal with its shape
+            // and lock checks. Running a second unroll here pushes the valid
+            // all-ten-Days-changed write past Firestore's expression cap
+            // (#934/#940). Creates and legacy docs with no prior schedule still
+            // need the standalone resulting-state validation below.
+            || (resource != null && 'days' in resource.data)
             || daysScoringValid(request.resource.data.days))
         && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
+            || request.resource.data.days == resource.data.days
+            || tenDayFutureThemesOnlyOk(request.resource.data.days, resource.data.days)
             || daysThemeLockOk(request.resource.data.days, resource.data.days))
         // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
         // P2 on PR #841). Between the cutoff and the scheduler's `frozenAt`
