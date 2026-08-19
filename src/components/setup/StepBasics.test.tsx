@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { EventDraft } from '../../types';
+import { deviceTimezoneSuggestion } from '../../data/eventDraft';
 import { createEventDraft } from '../../data/eventDraft';
 import StepBasics, { CHECK_DEBOUNCE_MS, slugify } from './StepBasics';
 import type { SlugAvailability } from '../../data/hostnames';
@@ -18,8 +19,21 @@ const mocks = vi.hoisted(() => ({
   checkSlugAvailability: vi.fn<(hostname: string) => Promise<SlugAvailability>>(),
 }));
 
+// The component asks `checkEventAddressAvailability` for every address a launch
+// would claim, but these tests still drive the per-HOSTNAME answer, so the stub
+// fans one out over the same helper the real one composes. That keeps each test
+// expressing "this address answers X" rather than having to know the shape of
+// the multi-host result, and it means a test seeding one answer still exercises
+// the canonical/alternate fan-out rather than bypassing it.
 vi.mock('../../data/hostnames', () => ({
   checkSlugAvailability: mocks.checkSlugAvailability,
+  checkEventAddressAvailability: async (slug: string, alternateApex: string | null) => {
+    const hosts = [`${slug}.fiveacross.app`];
+    if (alternateApex !== null) hosts.push(`${slug}.${alternateApex}`);
+    return Promise.all(
+      hosts.map(async (hostname) => ({ hostname, status: await mocks.checkSlugAvailability(hostname) })),
+    );
+  },
 }));
 
 function draftWith(over: Partial<EventDraft> = {}): EventDraft {
@@ -104,10 +118,16 @@ describe('name, dates, timezone', () => {
   });
 
   it('"Use this device\'s zone" writes the device suggestion', () => {
-    const { getDraft } = renderStep(draftWith({ timezone: 'UTC' }));
+    // Compared against `deviceTimezoneSuggestion()` rather than asserting the
+    // result is not 'UTC' (Codex P1, PR #911). The old form passed only where
+    // the runner's zone happened to differ from the seeded value: on
+    // `ubuntu-latest`, which app-ci uses, `Intl` legitimately resolves to
+    // 'UTC', so clicking wrote 'UTC' over 'UTC' and the inequality failed.
+    // That is an environment-dependent assertion, not a contract — the
+    // contract is "the button writes whatever the device reports".
+    const { getDraft } = renderStep(draftWith({ timezone: 'Pacific/Auckland' }));
     fireEvent.click(screen.getByRole('button', { name: "Use this device's zone" }));
-    expect(getDraft().timezone.length).toBeGreaterThan(0);
-    expect(getDraft().timezone).not.toBe('UTC');
+    expect(getDraft().timezone).toBe(deviceTimezoneSuggestion());
   });
 });
 

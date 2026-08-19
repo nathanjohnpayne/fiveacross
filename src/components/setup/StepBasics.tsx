@@ -3,8 +3,8 @@ import type { ClaimMode } from '../../types';
 import type { StepRenderProps } from './stepRegistry';
 import { deviceTimezoneSuggestion } from '../../data/eventDraft';
 import { isSupportedTimezone } from '../../data/draftValidation';
-import { checkSlugAvailability, type SlugAvailability } from '../../data/hostnames';
-import { alternateNamespaceApex } from '../../editions';
+import { checkEventAddressAvailability, type SlugAvailability } from '../../data/hostnames';
+import { alternateNamespaceApex, CANONICAL_NAMESPACE_APEX } from '../../editions';
 import { normalizeSlug, validateSlug, SLUG_MAX_LENGTH, SLUG_MIN_LENGTH, type SlugRejection } from '../../slug';
 
 /**
@@ -33,7 +33,6 @@ const CLAIM_MODE_LABEL: Record<ClaimMode, string> = {
   admin_confirmed: 'Admin-confirmed',
 };
 
-const CANONICAL_NAMESPACE_APEX = 'fiveacross.app';
 
 /** Debounce window before an edited candidate is checked over the network.
  *  Long enough that a fast typist does not fire one read per keystroke,
@@ -59,7 +58,14 @@ type AddressStatus =
   | { kind: 'empty' }
   | { kind: 'invalid'; reason: SlugRejection }
   | { kind: 'checking' }
-  | { kind: SlugAvailability };
+  | { kind: 'available' }
+  /** `hostname` names WHICH of the two previewed addresses is occupied. Both
+   *  are checked (the Edition alternate is a guarantee, not a bonus — owner
+   *  ruling 2026-08-19), so "already taken" without naming one would block a
+   *  candidate for a reason the organizer can see previewed but cannot act
+   *  on: the canonical may be free and the alternate not. */
+  | { kind: 'taken'; hostname: string }
+  | { kind: 'check-failed' };
 
 function statusCopy(status: AddressStatus): string {
   switch (status.kind) {
@@ -72,7 +78,7 @@ function statusCopy(status: AddressStatus): string {
     case 'available':
       return '✓ available';
     case 'taken':
-      return '✕ already taken';
+      return `✕ ${status.hostname} is already taken`;
     case 'check-failed':
       return "Couldn't check right now — try again in a moment.";
   }
@@ -178,9 +184,18 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
     }
 
     const timer = setTimeout(() => {
-      void checkSlugAvailability(`${candidate}.${CANONICAL_NAMESPACE_APEX}`).then((result) => {
+      void checkEventAddressAvailability(candidate, alternateNamespaceApex(draft.edition)).then((checked) => {
         if (checkIdRef.current !== myCheckId) return; // superseded by a later edit
-        setStatus({ kind: result });
+        // Fail closed on the WORST answer across every address a launch would
+        // claim, and name the first address that is not free. `check-failed`
+        // outranks `taken` because "we could not tell" must never read as a
+        // definite refusal the organizer might try to work around.
+        const failed = checked.find((c) => c.status === 'check-failed');
+        const taken = checked.find((c) => c.status === 'taken');
+        const result: SlugAvailability = failed ? 'check-failed' : taken ? 'taken' : 'available';
+        if (failed) setStatus({ kind: 'check-failed' });
+        else if (taken) setStatus({ kind: 'taken', hostname: taken.hostname });
+        else setStatus({ kind: 'available' });
         if (result === 'available') {
           updateDraft((d) => (d.slugCandidate === candidate ? d : { ...d, slugCandidate: candidate }));
         } else {
@@ -199,7 +214,11 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
     // own already-committed value, read once via `draft.slugCandidate` at
     // the top of this run rather than as a reactive dependency).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slugInput]);
+    // `draft.edition` IS a dependency: it selects the Edition alternate apex,
+    // so a re-picked occasion that rebinds the Edition changes WHICH addresses
+    // a launch would claim. Leaving it out would leave a candidate showing
+    // "available" against the previous Edition's pair.
+  }, [slugInput, draft.edition]);
 
   const normalizedCandidate = normalizeSlug(slugInput);
   const alternateApex = alternateNamespaceApex(draft.edition);

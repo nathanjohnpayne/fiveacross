@@ -402,6 +402,16 @@ export function buildTimeEdition(
  * wizard can currently reach it, and leaving it out would silently need a
  * second edit the day a `gcb` occasion is added.
  */
+/**
+ * The canonical Namespace every Event is reachable in, regardless of Edition
+ * (CONTEXT.md § Namespace). Lives here beside {@link alternateNamespaceApex}
+ * rather than in the wizard step that renders it, because the data layer needs
+ * the same fact to check availability and the launch provisioner (#793) needs
+ * it to claim — three consumers reading one constant instead of each carrying
+ * their own copy of a string that must never disagree.
+ */
+export const CANONICAL_NAMESPACE_APEX = 'fiveacross.app';
+
 const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = {
   vacay: 'vacaybingo.com',
   gcb: 'gaycruisebingo.com',

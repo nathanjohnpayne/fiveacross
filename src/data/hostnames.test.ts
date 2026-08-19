@@ -22,7 +22,12 @@ vi.mock('../firebase', () => ({ db: {}, applyResolvedEventId: mocks.applyResolve
 vi.mock('./cardCache', () => ({ setCardCacheEventId: mocks.setCardCacheEventId }));
 vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: mocks.applyResolvedCanonicalHost }));
 
-import { fetchHostnameDoc, bootstrapEventResolution, checkSlugAvailability } from './hostnames';
+import {
+  fetchHostnameDoc,
+  bootstrapEventResolution,
+  checkSlugAvailability,
+  checkEventAddressAvailability,
+} from './hostnames';
 import { activeEdition, setActiveEdition, DEFAULT_EDITION } from '../editions';
 import { adultContentRequired, resetAdultContentForTests, setActiveAdultContent } from '../adultContent';
 
@@ -227,13 +232,54 @@ describe('checkSlugAvailability — the setup wizard address step (#790)', () =>
   });
 
   it('reads "taken" for a malformed document rather than treating it as free', async () => {
-    // `fetchHostnameDoc` itself returns null for a malformed doc too, but that
-    // null is indistinguishable from "no document" — this predicate cannot
-    // and should not try to tell the two apart; a half-written record still
-    // occupies the address as far as an organizer trying to claim it is
-    // concerned.
+    // The assertion used to read `'available'` here while the test's own name
+    // and comment said the opposite (Codex P1, PR #911) — it passed, and so
+    // read as coverage OF the contract it actually inverted. The cause was
+    // routing through `fetchHostnameDoc`, which runs `coerceHostnameDoc` and
+    // returns null for a document whose `eventId` or `status` is invalid.
+    // A half-written record still occupies its label: the provisioner claims
+    // by document id (#793) and will refuse it, so reporting "available" only
+    // moves the refusal to the end of the wizard.
     mocks.getDocFromServer.mockResolvedValue(snap({ status: 'not-a-real-status' }));
-    expect(await checkSlugAvailability('h.fiveacross.app')).toBe('available');
+    expect(await checkSlugAvailability('h.fiveacross.app')).toBe('taken');
+  });
+
+  it('reads "taken" for a document with NO recognizable fields at all', async () => {
+    // The far end of the same case: an empty object still exists, so the
+    // label is still occupied.
+    mocks.getDocFromServer.mockResolvedValue(snap({}));
+    expect(await checkSlugAvailability('h.fiveacross.app')).toBe('taken');
+  });
+
+  it('checks BOTH addresses a launch would claim, not just the canonical one', async () => {
+    // Self-review, PR #911: the step previews `<slug>.fiveacross.app` AND the
+    // Edition alternate as addresses the organizer will receive, and #793
+    // claims both atomically — so checking only the canonical let a candidate
+    // whose alternate was taken pass Step 2 and be refused at launch.
+    mocks.getDocFromServer.mockResolvedValue(snap(null));
+    const checked = await checkEventAddressAvailability('point-reyes', 'vacaybingo.com');
+    expect(checked.map((c) => c.hostname)).toEqual([
+      'point-reyes.fiveacross.app',
+      'point-reyes.vacaybingo.com',
+    ]);
+    expect(checked.every((c) => c.status === 'available')).toBe(true);
+  });
+
+  it('reports the ALTERNATE as taken even when the canonical is free', async () => {
+    // The case the canonical-only check could not see at all.
+    mocks.getDocFromServer.mockImplementation((ref: { path?: string }) =>
+      Promise.resolve((ref?.path ?? '').endsWith('vacaybingo.com') ? snap(DOC) : snap(null)),
+    );
+    const checked = await checkEventAddressAvailability('bodega-bay', 'vacaybingo.com');
+    expect(checked.find((c) => c.hostname.endsWith('fiveacross.app'))?.status).toBe('available');
+    expect(checked.find((c) => c.hostname.endsWith('vacaybingo.com'))?.status).toBe('taken');
+  });
+
+  it('checks only the canonical address when the Edition owns no alternate', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap(null));
+    const checked = await checkEventAddressAvailability('point-reyes', null);
+    expect(checked).toHaveLength(1);
+    expect(checked[0].hostname).toBe('point-reyes.fiveacross.app');
   });
 
   it('reads "check-failed" rather than throwing when the network read fails', async () => {
