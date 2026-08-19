@@ -258,9 +258,18 @@ export async function startAuthHandoff(input: {
     // this page. A long or otherwise invalid current URL must not send the
     // player into a guaranteed rejection-and-retry loop; root is the safe,
     // same-origin fallback and preserves the sign-in itself (#912).
-    const returnPath = isSameOriginPath(input.returnPath, input.targetOrigin)
-      ? input.returnPath
-      : '/';
+    const returnPathIsValid = isSameOriginPath(input.returnPath, input.targetOrigin);
+    if (!returnPathIsValid) {
+      // Fixed text only: the rejected value can contain private query data and
+      // must not be copied into logs. Diagnostics are best-effort and must not
+      // turn the safe root fallback into a sign-in failure.
+      try {
+        console.debug('[auth-handoff] invalid return path; using root');
+      } catch {
+        // Telemetry never blocks authentication.
+      }
+    }
+    const returnPath = returnPathIsValid ? input.returnPath : '/';
     const verifier = createVerifier();
     const transactionId = await transactionIdFor(verifier);
     const stored = rememberHandoffTransaction({

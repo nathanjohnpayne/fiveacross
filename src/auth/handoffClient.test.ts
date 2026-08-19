@@ -46,6 +46,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -233,6 +234,43 @@ describe('parseHandoffRequest', () => {
 });
 
 describe('startAuthHandoff', () => {
+  it('reports the safe-root fallback without logging the rejected path', async () => {
+    const rejectedPath = `/private-${'x'.repeat(600)}`;
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+    expect(
+      await startAuthHandoff({
+        authOrigin: CENTRAL,
+        targetOrigin: ORIGIN,
+        returnPath: rejectedPath,
+        navigate: vi.fn(),
+      }),
+    ).toBe(true);
+
+    expect(debug).toHaveBeenCalledOnce();
+    expect(debug).toHaveBeenCalledWith('[auth-handoff] invalid return path; using root');
+    expect(JSON.stringify(debug.mock.calls)).not.toContain(rejectedPath);
+  });
+
+  it('still starts with the safe root when the debug signal itself throws', async () => {
+    vi.spyOn(console, 'debug').mockImplementation(() => {
+      throw new Error('debug unavailable');
+    });
+    const navigate = vi.fn();
+
+    expect(
+      await startAuthHandoff({
+        authOrigin: CENTRAL,
+        targetOrigin: ORIGIN,
+        returnPath: '//evil.example/private',
+        navigate,
+      }),
+    ).toBe(true);
+    expect(new URL(navigate.mock.calls[0][0] as string).searchParams.get(HANDOFF_PARAM_RETURN)).toBe(
+      '/',
+    );
+  });
+
   it('stores the verifier and navigates to the central origin', async () => {
     const navigate = vi.fn();
     expect(
