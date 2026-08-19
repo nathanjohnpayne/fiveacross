@@ -65,46 +65,39 @@ function storageKey(eventId: string, uid: string): string {
   return `gcb.mySuggestions.${eventId}.${uid}`;
 }
 
-/** A separate, tiny sentinel key rather than a field on `TrackedSuggestion`
- *  itself (`migrateOrderIfNeeded`'s own doc comment) — one bit per
- *  (eventId, uid), not one per entry. */
-function orderMigratedKey(eventId: string, uid: string): string {
-  return `gcb.mySuggestions.orderMigrated.${eventId}.${uid}`;
-}
-
 /**
- * One-time repair for a blob written by the PRE-#864-round-2
- * remove-and-append `trackSuggestion` (Codex P2, PR #890 round 2): that
- * version could leave a REFRESHED old entry sitting at the array's tail, so
- * treating array position as submission order (this file's current, clock-
- * skew-immune cap) would perpetuate the WRONG eviction target forever for a
- * blob that already has that problem baked in — not just for one
- * transitional read, since nothing about ordinary use ever re-sorts it.
+ * NO migration repairs a legacy blob's order, and this is a deliberate
+ * choice, not an oversight (Codex P2, PR #890 rounds 2 AND 4).
  *
- * Sorting by `submittedAt` is the right (and only available) repair for
- * data that ALREADY exists — the clock-skew risk that rules out an ONGOING
- * sort-based cap (round 1 finding) does not apply here: that risk was about
- * letting a FUTURE skewed write decide against a genuine new submission,
- * and a one-time repair of existing rows makes no such comparison against
- * anything not already sitting in the array.
+ * Round 2 found the gap: a blob written by the pre-round-1
+ * remove-and-append `trackSuggestion` can have a REFRESHED old entry
+ * sitting at the array's tail, so treating array position as submission
+ * order would perpetuate that blob's own disorder indefinitely.
  *
- * Runs at most once per (eventId, uid), marked by a small sentinel key, so
- * no LATER operation is ever exposed to the sort-based risk again — this is
- * a migration, not an ongoing policy.
+ * A one-time `submittedAt`-sort repair (round 2's own first cut at a fix)
+ * sounded like the answer, but round 4 found it reintroduces the EXACT
+ * clock-skew loss round 1 exists to prevent, just narrowed to the one
+ * migration moment instead of every write: `submittedAt` is a CLIENT clock
+ * reading, not a monotonic sequence, so a legacy blob whose true newest
+ * entry happens to carry a SMALLER timestamp than older entries (a clock
+ * correction mid-cruise, say) would have that genuinely-newest entry sorted
+ * to the FRONT by the repair — and the very next write could then evict it
+ * immediately, the identical failure mode by a different route.
+ *
+ * There is no third option: `submittedAt` is the ONLY per-entry signal a
+ * legacy blob carries, and it is untrustworthy for ordering BOTH before and
+ * after any one-time transform of it — no amount of "just this once"
+ * scoping changes that, since the transform still has to trust the same
+ * unreliable field to decide anything. Attempting a repair therefore risks
+ * being WRONG in the same direction it is trying to fix, while doing
+ * nothing costs only a possible one-entry, one-time mis-ordering within a
+ * PURELY LOCAL, ADVISORY, non-authoritative cache (this module's own
+ * header comment) for a Player who happens to be upgrading across exactly
+ * the pre-round-1 build boundary. Leaving it alone is the honest call: the
+ * array-position cap this file uses today is correct for every entry
+ * written under it, self-heals within `TRACKED_LIMIT` submissions either
+ * way, and never needs to trust a timestamp to do so.
  */
-function migrateOrderIfNeeded(eventId: string, uid: string): void {
-  try {
-    if (localStorage.getItem(orderMigratedKey(eventId, uid)) !== null) return;
-    const existing = loadTrackedSuggestions(eventId, uid);
-    const repaired = [...existing].sort((a, b) => a.submittedAt - b.submittedAt);
-    localStorage.setItem(storageKey(eventId, uid), JSON.stringify(repaired));
-    localStorage.setItem(orderMigratedKey(eventId, uid), String(Date.now()));
-  } catch {
-    // Best-effort, matching every other storage operation in this module —
-    // `trackSuggestion`'s own array-position cap is still correct GOING
-    // FORWARD even when this one-time repair could not run.
-  }
-}
 
 /**
  * The full set of values `TrackedSuggestion['lastKnownStatus']` may hold —
@@ -215,14 +208,14 @@ export function loadTrackedSuggestions(eventId: string, uid: string): TrackedSug
  * what the clock says.
  *
  * Array position is only a faithful proxy for submission order GOING
- * FORWARD, though — a blob a pre-round-2 build already wrote may have
- * REFRESHED entries sitting out of order. `migrateOrderIfNeeded` repairs
- * that once, before this function's own array-position logic ever reads
- * the existing array (Codex P2, PR #890 round 2).
+ * FORWARD — a blob a pre-round-1 build already wrote may have a REFRESHED
+ * entry sitting out of order, and this function deliberately does NOT
+ * attempt to repair that (see the comment above `TRACKED_LIMIT`'s cap
+ * discussion for why: the only available repair signal, `submittedAt`, is
+ * exactly as untrustworthy for a one-time fix as it is for an ongoing one).
  */
 export function trackSuggestion(eventId: string, uid: string, suggestion: TrackedSuggestion): void {
   try {
-    migrateOrderIfNeeded(eventId, uid);
     const existing = loadTrackedSuggestions(eventId, uid);
     const index = existing.findIndex((s) => s.id === suggestion.id);
     let next: TrackedSuggestion[];

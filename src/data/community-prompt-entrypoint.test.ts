@@ -178,42 +178,34 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded.find((s) => s.id === 'skewed-0')).toBeUndefined();
   });
 
-  it('one-time repairs a blob left out of order by the PRE-round-2 remove-and-append implementation, before the next write ever caps by array position (Codex P2, PR #890 round 2)', () => {
-    // Models exactly what the OLD (pre-#864-round-2) `trackSuggestion` could
-    // leave behind: `old-1` (the actual oldest submission) was REFRESHED at
-    // some point and moved to the array's TAIL, while `id-2..id-20` sit in
-    // their genuine submission order ahead of it — a blob written entirely
-    // by a build older than this fix, never touched by the new code yet.
+  it('never re-sorts a legacy blob by submittedAt — array position governs the cap even for a blob a pre-round-1 build left out of order (Codex P2, PR #890 rounds 2 + 4)', () => {
+    // Models what the OLD (pre-#864-round-1) `trackSuggestion` could leave
+    // behind: `old-1` (the actual oldest submission) was refreshed at some
+    // point and moved to the array's TAIL. A one-time submittedAt-sort
+    // "repair" (round 2's own first cut) sounds like the fix, but round 4
+    // found it reintroduces the identical clock-skew loss round 1 exists to
+    // prevent, just narrowed to the migration moment — so there is
+    // deliberately NO migration (see the comment above `trackSuggestion`).
+    // Array position — the actual write/refresh order this run of the code
+    // produced — is what the cap uses, full stop; a legacy blob's own
+    // pre-existing disorder is left exactly as found.
     const legacy = [
       ...Array.from({ length: 19 }, (_, i) => ({ id: `id-${i + 2}`, text: `t${i + 2}`, submittedAt: i + 2 })),
       { id: 'old-1', text: 'the actual oldest', submittedAt: 1 },
     ];
     localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify(legacy));
 
-    // The very next write — a genuinely new submission — triggers the
-    // one-time migration before doing anything else.
     trackSuggestion('ev-1', 'u1', { id: 'id-21', text: 'newest', submittedAt: 21 });
 
     const loaded = loadTrackedSuggestions('ev-1', 'u1');
     expect(loaded).toHaveLength(20);
-    // The genuinely oldest entry — wherever the legacy bug had left it — is
-    // what the cap evicts...
-    expect(loaded.find((s) => s.id === 'old-1')).toBeUndefined();
-    // ...never a merely-earlier-looking array position that isn't actually
-    // the oldest submission.
-    expect(loaded.find((s) => s.id === 'id-2')).toBeDefined();
+    // The cap evicts whatever sits at array position 0 — `id-2`, the
+    // legacy blob's own first entry — NOT `old-1` (which the pre-round-1
+    // bug had already moved to the tail, and this run makes no attempt to
+    // relocate).
+    expect(loaded.find((s) => s.id === 'id-2')).toBeUndefined();
+    expect(loaded.find((s) => s.id === 'old-1')).toBeDefined();
     expect(loaded.find((s) => s.id === 'id-21')).toBeDefined();
-  });
-
-  it('migrates at most once — a SECOND write does not re-sort by submittedAt again (so a later clock-skewed write cannot exploit an ongoing sort)', () => {
-    trackSuggestion('ev-1', 'u1', { id: 'a', text: 'a', submittedAt: 100 });
-    trackSuggestion('ev-1', 'u1', { id: 'b', text: 'b', submittedAt: 50 }); // an "earlier" timestamp, written SECOND
-    // If every write re-sorted by submittedAt, 'b' (submittedAt: 50) would
-    // sort BEFORE 'a' (submittedAt: 100) despite being written after it —
-    // array position must reflect WRITE order after the one-time migration
-    // has already run once.
-    const loaded = loadTrackedSuggestions('ev-1', 'u1');
-    expect(loaded.map((s) => s.id)).toEqual(['a', 'b']);
   });
 
   it('discards a persisted entry whose lastKnownStatus is not a valid SubmitterStatus, rather than letting a malformed value reach the pill label (#865)', () => {

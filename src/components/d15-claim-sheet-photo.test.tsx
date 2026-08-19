@@ -33,7 +33,7 @@ vi.mock('firebase/storage', () => ({
   deleteObject: vi.fn(),
 }));
 
-import ProofSheet from './ProofSheet';
+import ProofSheet, { resolveSuggestedByName } from './ProofSheet';
 import { uploadProofMedia } from '../data/storage';
 import type { Cell } from '../types';
 
@@ -429,30 +429,6 @@ describe('ProofSheet — "Suggested by [player]" attribution (#559)', () => {
     expect(await screen.findByText(/Suggested by Suggester Robin/)).toBeInTheDocument();
   });
 
-  it('never renders the stale name even on the SYNCHRONOUS render that commits a changed suggestedBy, with no effect given a turn to run first (Codex + CodeRabbit, PR #890 round 1)', async () => {
-    // Round-1 finding: clearing state at the START of a passive effect is
-    // not enough on its own — the render that commits the changed
-    // `cell.suggestedBy` happens BEFORE that effect runs (and can paint
-    // before it runs, in a real browser), so a bare "clear it in the
-    // effect" can still show the previous suggester's name for a Square it
-    // no longer belongs to. The fix gates the RENDER itself on the resolved
-    // name's uid matching `cell.suggestedBy`, which is correct on the very
-    // first synchronous render pass — this asserts synchronously, right
-    // after `rerender()` returns, with no `await` letting any effect run.
-    const first = communityCell();
-    const second: Cell = { ...communityCell(), itemId: 'i1', suggestedBy: 'u-other-suggester' };
-    H.fetchDisplayName.mockResolvedValueOnce('Suggester Sam');
-
-    const { rerender } = render(<ProofSheet {...baseProps()} cell={first} cells={[first]} />);
-    expect(await screen.findByText(/Suggested by Suggester Sam/)).toBeInTheDocument();
-
-    H.fetchDisplayName.mockReturnValue(new Promise<string>(() => {})); // never resolves
-    rerender(<ProofSheet {...baseProps()} cell={second} cells={[second]} />);
-    // No `await` anywhere above this line since the rerender — the render
-    // gate must already be correct on its own.
-    expect(screen.queryByText(/Suggested by Suggester Sam/)).not.toBeInTheDocument();
-  });
-
   it('does not throw when the sheet unmounts before the lookup resolves (a stale in-flight fetch)', async () => {
     let resolveFetch: (name: string) => void = () => {};
     H.fetchDisplayName.mockReturnValue(new Promise<string>((resolve) => { resolveFetch = resolve; }));
@@ -462,5 +438,29 @@ describe('ProofSheet — "Suggested by [player]" attribution (#559)', () => {
     // an unmounted component — the effect's cleanup sets a `cancelled` flag.
     expect(() => resolveFetch('Too Late Larry')).not.toThrow();
     await Promise.resolve();
+  });
+});
+
+describe('resolveSuggestedByName (#863, CodeRabbit PR #890 round 3)', () => {
+  // Direct unit coverage of the render gate itself, with no React rendering
+  // and no `act()`/effect timing involved at all — this is what actually
+  // proves the gate is correct for every possible timing, since a
+  // component-level `rerender()` test cannot (`act()` can flush passive
+  // effects before `rerender()` returns, so it cannot isolate "before any
+  // effect ran").
+  it('returns the name when the resolved uid matches the CURRENT suggestedBy', () => {
+    expect(resolveSuggestedByName({ uid: 'u1', name: 'Sam' }, 'u1')).toBe('Sam');
+  });
+
+  it('returns null when the resolved uid no longer matches — a stale resolution for a DIFFERENT cell', () => {
+    expect(resolveSuggestedByName({ uid: 'u1', name: 'Sam' }, 'u2')).toBeNull();
+  });
+
+  it('returns null when nothing has resolved yet', () => {
+    expect(resolveSuggestedByName(null, 'u1')).toBeNull();
+  });
+
+  it('returns null when there is no current suggester at all', () => {
+    expect(resolveSuggestedByName({ uid: 'u1', name: 'Sam' }, undefined)).toBeNull();
   });
 });

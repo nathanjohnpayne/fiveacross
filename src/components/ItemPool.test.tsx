@@ -472,24 +472,25 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
   });
 
   it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list, even under the most adversarial timing this harness can construct (Codex + CodeRabbit, PR #890 round 1)', async () => {
-    // NOTE on what this test can and cannot prove: `rerender()` and
-    // `resolveAdd()` are issued back-to-back with no `await` between them,
-    // inside one `act()` call — the most adversarial ordering this harness
-    // can construct. Empirically (round 2 investigation), React Testing
-    // Library does not actually commit the `rerender()` before this
-    // continuation's microtask runs in that exact shape, so this specific
-    // construction cannot, on its own, prove `uidRef` was already updated
-    // by the time the guard below reads it. What it DOES prove is the
-    // on-screen OUTCOME under that same adversarial ordering: this
-    // component carries a SECOND, independent safety net — the account-
-    // switch effect a few lines above, which unconditionally reloads
-    // `tracked` from u2's OWN localStorage the instant `uid` changes — so
-    // even if this specific guard's timing were imperfect, u1's row could
-    // not survive rendering under u2. The two OTHER tests below (form reset
-    // and analytics suppression, which have no such second safety net) use
-    // two separately-settled `act()` calls instead, which this
-    // investigation confirmed DOES let the ref update land before the
-    // continuation checks it — the achievable, and realistic, guarantee.
+    // `rerender()` and `resolveAdd()` are issued back-to-back with no
+    // `await` between them, inside one `act()` call — the most adversarial
+    // ordering this harness can construct. This proves the on-screen
+    // OUTCOME holds even then, via TWO independent mechanisms: the
+    // `uidRef`-guarded skip on the completion (may or may not have observed
+    // the new uid yet, depending on exactly when this continuation runs
+    // relative to React processing the pending `rerender()`), AND the
+    // render-phase `tracked`-reload-on-switch a few lines above, which
+    // OVERWRITES whatever `tracked` holds with a fresh, uid-scoped
+    // localStorage read as part of the SAME render pass that ever commits
+    // `uid: 'u2'` — so even in the one render where the completion's guard
+    // might still observe a stale ref, nothing from that stale write can
+    // survive into what actually gets painted. The two OTHER tests below
+    // (form reset and analytics suppression, which have no such second
+    // safety net — there is nothing to "reload" for a plain compose field
+    // or an analytics call) use two separately-settled `act()` calls
+    // instead, which lets the account switch fully commit before the write
+    // resolves — the achievable, realistic guarantee for mechanisms that
+    // only have the one guard to rely on.
     let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
     H.addItem.mockReturnValue(
       new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {

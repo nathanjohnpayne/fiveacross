@@ -154,30 +154,45 @@ export default function ItemPool() {
   // without needing to skip the (correctly-attributed) Firestore write or
   // localStorage persist.
   const uidRef = useRef(uid);
-  // Assigned DURING RENDER, not in any effect at all — not even
-  // `useLayoutEffect` (Codex P1, PR #890 round 2). Round 1's fix used a
-  // layout effect, reasoning that it runs synchronously as part of the
-  // commit that changed `uid`, closing the window a regular passive effect
-  // leaves — true, but an EFFECT (layout or not) only runs once React
-  // actually gets a turn to flush that commit, which is a SEPARATE step
-  // from the render itself and can still be deferred behind other pending
-  // work. Writing the ref unconditionally, right here in the render body,
-  // removes that extra step entirely: calling the component function IS
-  // what updates local variables like `uid`, so this ref is current the
-  // instant ANY render for the new account happens, with no dependency on
-  // React ever getting around to running an effect at all. This closes the
-  // window for every case where the browser gets any turn to process the
-  // account-switch update before the OLD write's continuation runs — an
-  // arbitrarily adversarial interleaving where a promise already scheduled
-  // in the exact same microtask turn as the account switch could still
-  // observe a stale ref (because that continuation runs before ANY
-  // rendering happens at all, not merely before an effect does) is a
-  // narrower, harder-to-reach edge this fix does not additionally chase.
-  uidRef.current = uid;
-  const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
-  useEffect(() => {
-    setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
+  // `useLayoutEffect`, not a raw render-phase write (Codex P1, PR #890
+  // round 4, correcting round 2's own "fix"). Round 2 tried assigning this
+  // ref UNCONDITIONALLY in the render body, reasoning that the render phase
+  // always runs before any effect could — true, but that reasoning proves
+  // too much: React can START a render (running this line) and then
+  // INTERRUPT or ABANDON it without ever committing, and a raw ref mutation
+  // is not part of React's reconciliation — it is not rolled back when that
+  // happens, unlike a `setState` call. A layout effect only ever runs for a
+  // render that ACTUALLY commits, which is the correctness property this
+  // ref needs; round 2's own concern (a same-tick microtask observing a
+  // stale ref before this effect gets a turn to run) is real but narrower
+  // in consequence than it first appears, because `uidRef` is no longer the
+  // ONLY thing guarding account-owned state: `tracked` below and the
+  // compose fields above are BOTH reset via a render-phase `setState` call
+  // (safe from the abandoned-render problem, since React manages that
+  // rollback) keyed on `uid` itself, not on this ref — so even a
+  // momentarily-stale `uidRef` cannot make stale data survive into what
+  // actually renders for the new account; the ref's remaining job (skipping
+  // a stale `setTracked`/`setText`/analytics call from an old completion)
+  // is a belt-and-suspenders layer on top of that, not the sole guarantee.
+  useLayoutEffect(() => {
+    uidRef.current = uid;
   }, [uid]);
+  const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
+  // Loaded on the uid TRANSITION itself, DURING RENDER — not in a passive
+  // `useEffect` (CodeRabbit, PR #890 round 2, re-verifying round 2's OWN
+  // fix: a passive effect here has the exact same gap `uidRef` and the
+  // compose-state reset just above document — the new account's render can
+  // still commit (and be found in the DOM) showing the OLD account's
+  // `tracked` rows before that effect ever runs). `loadTrackedSuggestions`
+  // is a plain synchronous `localStorage` READ (no network, no promise), so
+  // it is safe to call directly in the render body — the same "adjusting
+  // state when a prop changes" pattern already used for `composeResetForUid`
+  // just below and for `issuesShownForStep` in WizardChrome.tsx.
+  const [trackedLoadedForUid, setTrackedLoadedForUid] = useState<string | undefined>(undefined);
+  if (uid !== trackedLoadedForUid) {
+    setTrackedLoadedForUid(uid);
+    setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
+  }
   // The previous render's `myPending` ids (#559, Codex P2, PR #845 rounds 8
   // + 9) — see the `graceIds` effect below, just above where this is read.
   const prevPendingIdsRef = useRef<ReadonlySet<string>>(new Set());

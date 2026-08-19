@@ -90,6 +90,27 @@ interface Props {
   onClose: () => void;
 }
 
+/**
+ * Whether a resolved {uid, name} pair is still valid to DISPLAY for the
+ * CURRENT `suggestedBy` — pulled out as a pure, exported function (CodeRabbit,
+ * PR #890 round 3) so the render-gate's correctness is provable directly,
+ * with no dependency on React's render/effect/`act()` timing at all: a bare
+ * `rerender()` call inside a test does not reliably prove "no effect ran
+ * yet" (`act()` can flush passive effects before `rerender()` returns), so
+ * asserting against a live component only shows that SOME sequence of
+ * events produced the right DOM — never that the underlying comparison
+ * itself is what makes it so, independent of when anything else runs. This
+ * function's own contract removes that ambiguity: it is correct BY
+ * CONSTRUCTION, for every possible timing, because it is not a react effect
+ * at all.
+ */
+export function resolveSuggestedByName(
+  resolved: { uid: string; name: string } | null,
+  suggestedBy: string | undefined,
+): string | null {
+  return resolved && resolved.uid === suggestedBy ? resolved.name : null;
+}
+
 export default function ProofSheet(props: Props) {
   const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, restoreFocusTo, onClose } = props;
   // Photo opens pre-selected (#309, folding in the #310 row-16 parity note):
@@ -172,7 +193,7 @@ export default function ProofSheet(props: Props) {
       cancelled = true;
     };
   }, [cell.communityPrompt, cell.suggestedBy]);
-  const suggestedByName = resolved && resolved.uid === cell.suggestedBy ? resolved.name : null;
+  const suggestedByName = resolveSuggestedByName(resolved, cell.suggestedBy);
 
   // Modal focus management, the same contract every other sheet carries
   // (ProfileEditor, AcceptableUse, More, FeedWhoListSheet, AdminSheet): move
