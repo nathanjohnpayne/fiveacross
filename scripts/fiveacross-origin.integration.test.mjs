@@ -4,38 +4,44 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildEnvironment, DEPLOY_TARGETS } from './build-target.mjs';
 
 const mocks = vi.hoisted(() => ({
   applyResolvedCanonicalHost: vi.fn(),
-  applyResolvedEventId: vi.fn(),
   getDocFromServer: vi.fn(),
-  setCardCacheEventId: vi.fn(),
 }));
 
-vi.mock('firebase/firestore', () => ({
+vi.mock('firebase/firestore', async (importOriginal) => ({
+  ...(await importOriginal()),
   doc: (_db, ...path) => ({ path: path.join('/') }),
   getDocFromServer: mocks.getDocFromServer,
 }));
-vi.mock('../src/firebase', () => ({ db: {}, applyResolvedEventId: mocks.applyResolvedEventId }));
-vi.mock('../src/data/cardCache', () => ({ setCardCacheEventId: mocks.setCardCacheEventId }));
 vi.mock('../src/canonicalHost', () => ({
   applyResolvedCanonicalHost: mocks.applyResolvedCanonicalHost,
 }));
 
 import { adultContentRequired, adultContentSettledAdult, resetAdultContentForTests } from '../src/adultContent';
-import { bootstrapEventResolution } from '../src/data/hostnames';
 import { activeEdition, setActiveEdition } from '../src/editions';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fiveAcrossTargetEnv = {
   ...DEPLOY_TARGETS.fiveacross.identity,
-  VITE_EVENT_ID: '',
   VITE_POSTHOG_KEY: 'phc_test',
   VITE_RECAPTCHA_SITE_KEY: '',
 };
 const requiredViteKeys = Object.keys(fiveAcrossTargetEnv).filter((key) => key.startsWith('VITE_'));
+const targetEnvironment = buildEnvironment(
+  'fiveacross',
+  fiveAcrossTargetEnv,
+  { ...process.env, GITHUB_SHA: '1111111111111111111111111111111111111111' },
+  requiredViteKeys,
+);
+
+let bootstrapEventResolution;
+let cardCache;
+let firebaseIdentity;
+let localValues;
 
 const hostnameDocs = {
   'bodega-bay.fiveacross.app': {
@@ -70,11 +76,23 @@ const hostnameDocs = {
 
 const snap = (data) => ({ exists: () => data != null, data: () => data });
 
+beforeAll(async () => {
+  for (const [key, value] of Object.entries(targetEnvironment)) {
+    if (key.startsWith('VITE_')) vi.stubEnv(key, value);
+  }
+  ({ bootstrapEventResolution } = await import('../src/data/hostnames'));
+  cardCache = await import('../src/data/cardCache');
+  firebaseIdentity = await import('../src/firebase');
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubEnv('VITE_EVENT_ID', '');
-  vi.stubEnv('VITE_EDITION', 'vacay');
-  vi.stubEnv('VITE_ADULT_CONTENT', 'false');
+  localValues = new Map();
+  vi.stubGlobal('localStorage', {
+    getItem: (key) => localValues.get(key) ?? null,
+    setItem: (key, value) => localValues.set(key, value),
+    removeItem: (key) => localValues.delete(key),
+  });
   setActiveEdition('gcb');
   resetAdultContentForTests();
   mocks.getDocFromServer.mockImplementation(({ path }) => {
@@ -84,24 +102,21 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+afterAll(() => {
   vi.unstubAllEnvs();
 });
 
 describe('Five Across production origin', () => {
   it('emits Vacay static chrome without a baked Bodega Event id', () => {
     const outDir = mkdtempSync(join(tmpdir(), 'fiveacross-origin-'));
-    const environment = buildEnvironment(
-      'fiveacross',
-      fiveAcrossTargetEnv,
-      { ...process.env, GITHUB_SHA: '1111111111111111111111111111111111111111' },
-      requiredViteKeys,
-    );
-
     try {
       const vite = resolve(repoRoot, 'node_modules', '.bin', 'vite');
       const build = spawnSync(vite, ['build', '--mode', 'production', '--outDir', outDir], {
         cwd: repoRoot,
-        env: environment,
+        env: targetEnvironment,
         encoding: 'utf8',
       });
       expect(build.status, build.stderr || build.stdout).toBe(0);
@@ -128,8 +143,17 @@ describe('Five Across production origin', () => {
       const resolution = await bootstrapEventResolution(hostname);
 
       expect(resolution).toMatchObject({ kind: 'event', eventId: doc.eventId, edition: doc.edition });
-      expect(mocks.applyResolvedEventId).toHaveBeenCalledWith(doc.eventId);
-      expect(mocks.setCardCacheEventId).toHaveBeenCalledWith(doc.eventId);
+      expect(firebaseIdentity.EVENT_ID).toBe(doc.eventId);
+      cardCache.saveCardSnapshot({
+        uid: 'identity-probe',
+        dayIndex: null,
+        cells: [{ index: 0 }],
+        bingoCount: 0,
+        day: null,
+      });
+      const cardKey = `gcb:card-snapshot:${doc.eventId}:identity-probe:legacy`;
+      expect(localValues.has(cardKey)).toBe(true);
+      expect(JSON.parse(localValues.get(cardKey)).eventId).toBe(doc.eventId);
       expect(activeEdition()).toBe(doc.edition);
       expect(adultContentRequired()).toBe(doc.adultContent);
       if (doc.adultContent) expect(adultContentSettledAdult()).toBe(true);
