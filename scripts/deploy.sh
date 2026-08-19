@@ -462,8 +462,8 @@ if [[ ${#ONLY_VALUES[@]} -eq 0 ]]; then
   done
 fi
 
-# Reconciliation coordinates are PINNED to the selected deploy target, never
-# inherited (#768 r4 Codex P2).
+# Reconciliation coordinates and readiness-only identity controls are PINNED
+# to the selected deploy target, never inherited (#768 r4 Codex P2; #852).
 #
 # scripts/set-bug-report-invoker.sh and scripts/set-email-unsubscribe-invoker.sh
 # read BUG_REPORT_* / EMAIL_UNSUBSCRIBE_* overrides so an operator can point a
@@ -479,6 +479,7 @@ fi
 # A manual repair is unaffected — run the scripts directly, as their own
 # --help documents.
 INVOKER_ENV=(env
+  -u GCLOUD_IMPERSONATE_SERVICE_ACCOUNT -u GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION
   -u BUG_REPORT_PROJECT -u BUG_REPORT_REGION -u BUG_REPORT_SERVICE
   -u EMAIL_UNSUBSCRIBE_PROJECT -u EMAIL_UNSUBSCRIBE_REGION -u EMAIL_UNSUBSCRIBE_SERVICE
   -u AUTH_HANDOFF_PROJECT -u AUTH_HANDOFF_REGION
@@ -575,12 +576,14 @@ resolve_invoker_deploy_credential() {
 
 guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 
-# Match firebase-tools' own pure-local command preflight before this wrapper
-# can make a live readiness update. In the Firebase CLI this validator runs
-# before filterTargets: `--only` + `--except`, bare + filtered Functions, and
-# colon filters on non-filterable targets are rejected rather than reaching a
-# deploy. Reuse the pinned implementation so this safety boundary cannot drift
-# into a second hand-maintained Firebase grammar.
+# Match firebase-tools' own pure-local command and Hosting-config preflight
+# before this wrapper can make a live readiness update. In the Firebase CLI,
+# grammar validation runs before filterTargets; Hosting then resolves qualified
+# selectors against firebase.json. Reuse both pinned implementations so
+# `--only` + `--except`, bare + filtered Functions, unsupported colon filters,
+# and unknown Hosting sites are rejected at the same boundary. The result also
+# tells the readiness selector when a valid site-qualified exclusion removed
+# this checkout's only Hosting config.
 if [[ -n "$EXPECT_ARG" ]]; then
   cat >&2 <<EOF
 ✗ Firebase deploy option requires a value: $EXPECT_ARG.
@@ -589,8 +592,15 @@ EOF
   exit 1
 fi
 echo ">> Validating Firebase deploy target filters (local)"
-if ! node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" \
-  "${ONLY_VALUES[0]-}" "${EXCEPT_VALUES[0]-}"; then
+FILTER_VALIDATION_RESULT=""
+if ! FILTER_VALIDATION_RESULT="$(node "$SCRIPT_DIR/validate-firebase-deploy-filters.mjs" \
+  "${ONLY_VALUES[0]-}" "${EXCEPT_VALUES[0]-}" "$DEPLOY_PROJECT" "$PWD/firebase.json")"; then
+  exit 1
+fi
+if [[ "$FILTER_VALIDATION_RESULT" == "hosting-not-selected" ]]; then
+  HOSTING_ATTEMPTED=false
+elif [[ "$FILTER_VALIDATION_RESULT" != "hosting-selected" ]]; then
+  echo "✗ Firebase deploy target validation returned an unrecognized result. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
   exit 1
 fi
 

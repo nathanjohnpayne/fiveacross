@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configForTarget, DEPLOY_TARGETS } from './build-target.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(SCRIPT_DIR, '..');
 const DEPLOY_SCRIPT = resolve(SCRIPT_DIR, 'deploy.sh');
 
 export const DEPLOY_WRAPPER_FLAGS = Object.freeze([
@@ -139,6 +140,7 @@ export function executeDeployRequest(
     request.wrapperArgs,
   );
   return spawn(invocation.command, invocation.args, {
+    cwd: REPO_ROOT,
     env: invocation.environment,
     stdio: 'inherit',
   });

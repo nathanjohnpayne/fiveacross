@@ -90,6 +90,7 @@ describe('deploy target selection', () => {
     expect(calls[0][0]).toBe(deployScript);
     expect(calls[0][1]).toEqual(['--skip-cf-purge', '--', 'fiveacross', '--only', 'hosting']);
     expect(calls[0][2]).toMatchObject({
+      cwd: repoRoot,
       env: {
         KEEP_ME: 'yes',
         BUILD_CMD: 'npm run build:fiveacross',

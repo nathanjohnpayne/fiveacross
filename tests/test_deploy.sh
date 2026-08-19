@@ -279,7 +279,8 @@ init_fixture_repo() {
     git config user.name "Test"
     git config commit.gpgsign false
     echo "initial" > README.md
-    git add README.md
+    printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"}}' > firebase.json
+    git add README.md firebase.json
     git commit --quiet -m "initial"
   )
 }
@@ -436,7 +437,8 @@ fi
 REPO4="$WORKDIR/case4-empty-args-repo"
 mkdir -p "$REPO4"
 ( cd "$REPO4" && git init -q -b main && git config user.email a@b.c && git config user.name a && \
-  echo init >README.md && git add README.md && git commit -q -m init )
+  echo init >README.md && printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"}}' >firebase.json && \
+  git add README.md firebase.json && git commit -q -m init )
 
 OUT4="$WORKDIR/case4.out"
 ERR4="$WORKDIR/case4.err"
@@ -2286,10 +2288,50 @@ run_invalid_filter_case 23x --except functions --only functions:default:exchange
 run_invalid_filter_case 23y --only functions,functions:mintAuthHandoff
 run_invalid_filter_case 23ya --only functions:mintAuthHandoff,functions
 run_invalid_filter_case 23z --only remoteconfig:production
+run_invalid_filter_case 23zb --only hosting:not-a-site
 run_invalid_filter_case 24a --only
 run_invalid_filter_case 24b --except
 run_invalid_filter_case 24c -m
 run_invalid_filter_case 24d -p
+
+# Firebase resolves Hosting selectors against this checkout's firebase.json.
+# Excluding its only site means neither Hosting nor Functions can publish, so
+# exact-SA readiness must stay untouched. An exclusion for some other site
+# leaves this repository's Hosting config selected and therefore keeps the
+# proof mandatory.
+run_readiness_scope_case 24g skipped --except functions,hosting:fiveacross
+run_readiness_scope_case 24h required --except functions,hosting:some-other-site
+
+# Automatic pre/post reconciliation owns its credential selection. A stale
+# readiness-only impersonation export must not change the effective identity
+# used by those ordinary calls.
+REPO24I="$WORKDIR/case24i-ambient-impersonation"
+init_fixture_repo "$REPO24I"
+: >"$WORKDIR/gcloud-calls-24i.log"
+: >"$WORKDIR/ofd-calls-24i.log"
+set +e
+(
+  cd "$REPO24I"
+  PATH="$STUB_DIR:$PATH" \
+  OFD_LOG="$WORKDIR/ofd-calls-24i.log" \
+  GCLOUD_BIN="$STUB_DIR/gcloud" \
+  GCLOUD_LOG="$WORKDIR/gcloud-calls-24i.log" \
+  GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
+  GCLOUD_IMPERSONATE_SERVICE_ACCOUNT=wrong-ambient@example.invalid \
+  GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION=true \
+  BUILD_CMD=: \
+    bash "$SCRIPT" --force --skip-cf-purge --skip-synthetic -- fiveacross --only functions:emailUnsubscribe
+) >"$WORKDIR/case24i.out" 2>"$WORKDIR/case24i.err"
+RC24I=$?
+set -e
+if [[ $RC24I -ne 0 ]]; then
+  fail "ambient-impersonation: ordinary reconciliation failed instead of scrubbing readiness-only identity controls (rc=$RC24I)."
+  cat "$WORKDIR/case24i.err" >&2
+elif grep -q -- '--impersonate-service-account=wrong-ambient@example.invalid' "$WORKDIR/gcloud-calls-24i.log"; then
+  fail "ambient-impersonation: ordinary reconciliation inherited the readiness-only impersonation identity."
+else
+  pass "ambient-impersonation: ordinary reconciliation scrubs readiness-only identity controls."
+fi
 
 # The source guard must fail before the readiness process can make a Cloud Run
 # update. This fixture deliberately stays on feature/deploy-test and omits
