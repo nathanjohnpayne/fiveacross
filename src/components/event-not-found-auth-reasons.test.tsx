@@ -14,9 +14,14 @@ const HOST = 'summer-camp.fiveacross.app';
 
 describe('EventNotFound — the #549 sign-in route failures', () => {
   it('keeps the player-facing headline shared with auth-unconfigured', () => {
-    // A player can act on none of the three, so they read the same. The
+    // A player can act on none of these states, so they read the same. The
     // difference is the operator sentence below, not the headline.
-    for (const reason of ['auth-unconfigured', 'auth-same-origin-unavailable', 'auth-handoff-misconfigured'] as const) {
+    for (const reason of [
+      'auth-unconfigured',
+      'auth-same-origin-unavailable',
+      'auth-mode-invalid',
+      'auth-handoff-misconfigured',
+    ] as const) {
       const { unmount } = render(<EventNotFound hostname={HOST} reason={reason} />);
       expect(screen.getByRole('heading')).toHaveTextContent('This address is not open yet');
       unmount();
@@ -36,6 +41,13 @@ describe('EventNotFound — the #549 sign-in route failures', () => {
     render(<EventNotFound hostname={HOST} reason="auth-handoff-misconfigured" />);
     expect(screen.getByText(/has not been finished for this address/i)).toBeInTheDocument();
     expect(screen.getByText(/VITE_AUTH_HANDOFF_ORIGIN/)).toBeInTheDocument();
+  });
+
+  it('names VITE_AUTH_MODE when the configured mode is invalid', () => {
+    render(<EventNotFound hostname={HOST} reason="auth-mode-invalid" />);
+    expect(screen.getByText(/sign-in mode is not recognised/i)).toBeInTheDocument();
+    expect(screen.getByText(/VITE_AUTH_MODE/)).toBeInTheDocument();
+    expect(screen.queryByText(/VITE_AUTH_HANDOFF_ORIGIN/)).toBeNull();
   });
 
   it('does not confuse the two, in either direction', () => {
