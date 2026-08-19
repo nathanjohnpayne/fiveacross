@@ -5,6 +5,8 @@ status: accepted
 
 # The edge Event router (`event-router`)
 
+> **App Check cutover amendment accepted, not implemented (#888).** [ADR 0014](../docs/adr/0014-app-check-compatible-edge-routing-registry.md) and [`event-router-registry`](event-router-registry.md) replace the target lookup seam with a server-published, transactional per-host Durable Object registry and remove every Firebase runtime credential from the Worker. This file and `worker/` still describe the deployed-but-unrouted Firestore REST implementation until the implementation tickets land. Both wildcard/real-host routes remain blocked; the implementation contract permits only its guarded temporary synthetic exact-route manifest for R0–R3 evidence. Do not weaken App Check or read this note as deployment authority.
+
 Implements the edge half of [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md) for epic #529: one versioned Cloudflare Worker on `*.fiveacross.app` and `*.vacaybingo.com`, so a new Event needs no DNS record, no Hosting custom domain, no certificate and no Worker route of its own. `specs/hostnames-lookup.md` owns the collection this reads; `specs/event-resolution.md` owns the client that reads the same collection after the router has let the request through. The service lives in [`worker/`](../worker/README.md).
 
 ## Glossary
