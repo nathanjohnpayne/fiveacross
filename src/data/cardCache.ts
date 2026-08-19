@@ -12,7 +12,7 @@ export type { CardSnapshot, CardSnapshotDay };
 //
 // Kept in sync by `setCardCacheEventId`, which startup resolution calls
 // alongside `applyResolvedEventId` (#543). Without that, a multi-Event build —
-// which ships with NO `VITE_EVENT_ID`, since its presence is what marks a
+// which ships with an empty `VITE_EVENT_ID`, since a non-empty value marks a
 // bundle as single-Event — would leave this at the 'med-2026' default while
 // every Firestore path used the resolved id. The cache would then key on a
 // different Event than the data it caches, which is precisely the cross-Event

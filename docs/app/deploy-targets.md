@@ -7,10 +7,10 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 | | Gay Cruise Bingo | Five Across / Vacay |
 |---|---|---|
 | Firebase project | `gaycruisebingo` | `fiveacross` |
-| Event | `med-2026` | `bodega-bay-2026` |
+| Event resolution | baked `med-2026` | `hostnames/{host}` (the three current hosts resolve to `bodega-bay-2026`) |
 | Player hosts | `gaycruisebingo.com`, `gaycruisebingo.web.app` | `bodega-bay.fiveacross.app` (canonical), `bodega-bay.vacaybingo.com`, `fiveacross.app` |
 | Vercel mirrors | `gaycruisebingo.vercel.app` | `vacaybingo.vercel.app`, `fiveacross.vercel.app` — **sign-in does not work yet** |
-| Baked `VITE_EDITION` | `gcb` (explicit) | `vacay` (explicit) |
+| Static Edition identity | `gcb` from `VITE_EDITION` | trusted `vacay` fallback; runtime Edition comes from the hostname document |
 | Baked `VITE_FIREBASE_AUTH_DOMAIN` | `gaycruisebingo.com` | `bodega-bay.vacaybingo.com` |
 | Baked `VITE_FIREBASE_MEASUREMENT_ID` | `G-42N7WYDYT5` | `G-42N7WYDYT5` |
 | Baked `VITE_POSTHOG_HOST` | blank (explicit) | blank (explicit) |
@@ -21,19 +21,19 @@ This repo ships to **two** Firebase projects from one codebase. The target comma
 
 ### Which hosts to verify
 
-`bodega-bay.fiveacross.app` is the canonical host. The target deploy command runs its synthetic there. Verify `bodega-bay.vacaybingo.com` as well after significant changes: both are live serving hosts for the same Firebase release.
+`bodega-bay.fiveacross.app` is the canonical host, and the target deploy command runs its synthetic there. `bodega-bay.vacaybingo.com` and `fiveacross.app` are also live Bodega serving hosts for the same Firebase release. Verify all three after significant changes and before any Worker cutover; an origin build is not ready if even one resolves or brands itself differently.
 
-### Both targets are single-Event builds
+### The targets use different Event modes
 
-A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup **for Event routing**, so the Event and the Edition are frozen at build time. It still reads that document for the adult-content posture: `README.md` § Event id notes the live watcher re-proves the seeded posture and observes a later server-side raise regardless of build mode. The Five Across target config sets `VITE_EVENT_ID=bodega-bay-2026`.
+A non-empty `VITE_EVENT_ID` means the bundle never consults the `hostnames/{host}` lookup **for Event routing**, so the Event and runtime Edition are frozen at build time. It still reads that document for the adult-content posture: `README.md` § Event id notes the live watcher re-proves the seeded posture and observes a later server-side raise. Gay Cruise Bingo keeps this single-Event mode with `med-2026`.
 
-This **contradicts `README.md` § Event id**, which says a Five Across build "MUST leave it empty". That instruction is scoped to the wildcard-router design — the multi-Event build every `*.fiveacross.app` host would share once the Worker router ([#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545)) exists. Today's hosts are exact Firebase Hosting custom domains, one Event each, and the single-Event build is the deliberate choice: `preview-deploys.md` records the reasoning, which is that a hostname-resolved build must complete a Firestore `getDocFromServer` before first paint and `shouldMountOnBootstrapFailure` fails **closed** to the `unreachable` screen if that read fails.
+The Five Across target is the generic hostname-resolved origin behind the Worker router ([#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545)). Its target file must contain the `VITE_EVENT_ID` key with an exact empty value; target validation rejects any non-empty value and the wrapper scrubs stale ambient `VITE_*` variables before Vite starts. Each active serving hostname supplies Event, runtime Edition and adult-content posture from its live routing document before mount. Lookup failure is deliberately fail-closed to the `unreachable` screen rather than mounting a fallback Event.
 
-Reconstructing the target env from the README alone would therefore produce a build that behaves differently from what is deployed. Copy the registered web-app values; do not infer them.
+Static browser/PWA identity is a separate constraint. The trusted target registry supplies `vacay` as the static fallback so the three existing Bodega hosts retain their current HTML, manifest and link-preview identity. That fallback never chooses the runtime Event or Edition. Until #546 supplies per-host static rewriting, do not attach a non-Vacay Edition hostname to the wildcard.
 
 ## Target environment files
 
-`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event, Edition, and adult-content seed before it builds. Both targets name their Edition and audience posture explicitly (`gcb`/`true` or `vacay`/`false`); neither relies on an application default. The wrapper removes ambient `VITE_*` values and disables Vite's subsequent root env-file load, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
+`.env.gaycruisebingo` and `.env.fiveacross` sit beside the generic local-development `.env.local`. They are ignored by Git and each contains the Firebase web-app config for exactly one project. `scripts/build-target.mjs` requires every `VITE_*` key from `.env.example`, then verifies the target's Firebase web-app identity (project, auth domain, Storage bucket, sender id, app id, and measurement id), Event mode, Edition input and adult-content seed before it builds. The Five Across file must explicitly set `VITE_EVENT_ID=`. The wrapper removes ambient `VITE_*` values, supplies the target registry's build-only static fallback, and disables Vite's subsequent root env-file load, so a developer's `.env.local` cannot override or fill in part of a production target. App Check keys belong in the target file too when enabled.
 
 The Functions package already follows the same convention through `functions/.env.gaycruisebingo` and `functions/.env.fiveacross`.
 
@@ -87,7 +87,7 @@ The synthetic proves the application mounted. For an independent target check, v
 
 ```bash
 EXPECTED_SHA="$(git rev-parse HEAD)"
-for HOST in https://bodega-bay.fiveacross.app https://bodega-bay.vacaybingo.com; do
+for HOST in https://bodega-bay.fiveacross.app https://bodega-bay.vacaybingo.com https://fiveacross.app; do
   ASSET=$(curl -sS "$HOST/" | grep -oE '/assets/index-[^"]*\.js' | head -1)
   printf '%s ' "$HOST"
   if curl -sS "$HOST$ASSET" | grep -q 'projectId:"fiveacross"' && \

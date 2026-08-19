@@ -40,7 +40,7 @@ So the handoff is the cheaper side: bounded work whose cost does not grow with t
 
 Four refinements the review surfaced, each stated because the naive version is tempting:
 
-- **A single-Event build never consults the lookup for Event identity.** `VITE_EVENT_ID`'s presence means the bundle already knows which Event it serves, so startup routing short-circuits. The independent 18+ watcher may still consult `hostnames/{host}` after that short-circuit because a build-time non-adult seed must observe a later server-side raise (ADR 0012).
+- **A single-Event build never consults the lookup for Event identity.** A non-empty `VITE_EVENT_ID` means the bundle already knows which Event it serves, so startup routing short-circuits; an empty value selects hostname resolution. The independent 18+ watcher may still consult `hostnames/{host}` after that short-circuit because a build-time non-adult seed must observe a later server-side raise (ADR 0012).
 - **The cache is bounded, not permanent.** A hostname's Event assignment is durable, which is why caching is safe at all, but an unbounded cache would keep a browser booting an *archived* Event forever.
 - **Revalidation must reach the server to count.** The seam uses `getDocFromServer`, not `getDoc`. A plain `getDoc` may answer from Firestore's own cache, so an offline or captive client would read a stale mapping, treat it as a successful revalidation, and restamp the entry for another full TTL—a bound that renews itself is not a bound.
 - **Status must be explicit.** A routing document with no recognised `status` is not servable. Defaulting a missing field to active would let a half-written document publish an Event before the record opts in.
