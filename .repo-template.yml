@@ -10,6 +10,20 @@
 # Used by check_spec_test_alignment when the default filename search
 # wouldn't find the test.
 spec_test_map:
+  # auth-handoff-client's coverage is module-named (the mode/strategy table, the
+  # transaction store, the boundary primitives, the two callable legs, the
+  # client/server parity pin, the central-origin page, the two new failure
+  # screens, and the allowlist entry for the central auth origin), so none of
+  # them share the spec basename — map them all explicitly.
+  auth-handoff-client:
+    - src/auth/authMode.test.ts
+    - src/auth/handoffTransaction.test.ts
+    - src/auth/handoffClient.test.ts
+    - src/auth/handoffExchange.test.ts
+    - src/auth/handoff-parity.test.ts
+    - src/auth/AuthHandoffOrigin.test.tsx
+    - src/components/event-not-found-auth-reasons.test.tsx
+    - src/auth-domain.test.ts
   # event-setup-wizard's coverage is module-named (the draft store seam, the
   # occasion matrix, and the shared validation predicates), so none of the
   # three share the spec basename — map them explicitly.

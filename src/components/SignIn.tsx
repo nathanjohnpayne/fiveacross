@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { editionBrand } from '../editions';
+import { resolveSignInStrategy } from '../auth/authMode';
+import { consumeHandoffFailure, startAuthHandoff } from '../auth/handoffClient';
 import EventPostcard from './EventPostcard';
 
 // The wordmark, the signed-out line and the offline note come from the resolved
@@ -39,16 +41,79 @@ export default function SignIn() {
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const brand = editionBrand();
+  // A handoff that failed BEFORE this tree existed (#549). `main.tsx` completes
+  // the return leg pre-mount, so a failure there has nowhere to surface until
+  // this screen renders — which it does, because a failed handoff leaves the
+  // player signed out and lands them right here. Read once, at first render, so
+  // a later re-render cannot resurrect a stale message.
+  const [handoffFailed] = useState(() => consumeHandoffFailure() !== null);
+  const [startFailed, setStartFailed] = useState(false);
 
   const go = async () => {
     setBusy(true);
+    setStartFailed(false);
     try {
-      if (reprompt) await attest();
+      if (reprompt) {
+        await attest();
+        return;
+      }
+      // Which route sign-in takes from this origin (#549, ADR 0010). Resolved at
+      // TAP time, from the same function `main.tsx` gated the mount on, so the
+      // button can never take a route the mount gate judged unusable.
+      const strategy = resolveSignInStrategy({
+        mode: import.meta.env.VITE_AUTH_MODE,
+        configuredAuthDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+        hostname: window.location.hostname,
+        handoffOrigin: import.meta.env.VITE_AUTH_HANDOFF_ORIGIN,
+        currentOrigin: window.location.origin,
+        // Come back where they started, not to the root — the handoff is
+        // invisible plumbing and should not also lose the player's place.
+        returnPath: `${window.location.pathname}${window.location.search}`,
+      });
+
+      if (strategy.kind === 'handoff') {
+        // Leaves this origin, so nothing after it runs on success and `busy`
+        // stays true through the navigation — which is what we want: the button
+        // must not re-arm while the browser is on its way out.
+        //
+        // KNOWN GAP, deliberately not papered over: the 18+ acknowledgement
+        // collected here does not ride along. `AuthContext`'s acknowledgement
+        // record is consumed by its `getRedirectResult` effect, and a handoff
+        // return signs in with a custom token instead, so the record is
+        // discarded unused. The consequence is one extra tap — a returning
+        // player meets AuthProvider's existing 18+ re-prompt and attests there —
+        // and that is the direction this has to fail in: fabricating a durable,
+        // cross-Event `attestedAdultAt` for a box nobody saw would be the
+        // genuinely bad outcome. Threading it properly means touching
+        // AuthContext's private acknowledgement helpers, which #765 (PR #836) is
+        // actively rewriting; it is tracked as follow-up rather than raced.
+        const started = await startAuthHandoff({
+          authOrigin: strategy.authOrigin,
+          targetOrigin: strategy.targetOrigin,
+          returnPath: strategy.returnPath,
+        });
+        if (!started) {
+          setStartFailed(true);
+          setBusy(false);
+        }
+        return;
+      }
+
+      if (strategy.kind === 'unavailable') {
+        // Unreachable in practice — `main.tsx` renders its own screen instead of
+        // mounting the app at all. Handled anyway rather than falling through to
+        // `signIn()`, because falling through IS the silent cross-mode fallback
+        // ADR 0010 forbids.
+        setStartFailed(true);
+        setBusy(false);
+        return;
+      }
+
       // Pass the acknowledgement THIS render actually collected. Re-reading
       // the mutable posture inside AuthContext can turn a no-checkbox tap into
       // a fabricated cross-Event attestation if the Event flips 18+ between
       // the click and the auth transaction starting.
-      else await signIn(adult && ack);
+      await signIn(adult && ack);
     } catch {
       setBusy(false);
     }
@@ -112,6 +177,16 @@ export default function SignIn() {
             ? 'Enter the event'
             : 'Continue with Google'}
       </button>
+      {/* The handoff's explicit failure surface (#549, ADR 0010: "failure states
+          are explicit — no silent fallback"). Two causes, one message, because
+          the player's next move is identical and the server deliberately refuses
+          to say which of expired / already-used / unknown a code was. Below the
+          button, so the retry it asks for is the thing directly above it. */}
+      {(handoffFailed || startFailed) && (
+        <p className="muted" role="alert" data-testid="signin-handoff-error">
+          That sign-in didn't finish. Please tap Continue with Google to try again.
+        </p>
+      )}
       {/* The invitation copy block under the CTA (#647) — brand-carried, so
           only the Editions whose Join frame draws it render it (vacay). */}
       {brand.signinInviteNote && (

@@ -21,7 +21,10 @@ import { armUncontrolledUpdateReload, postClientBuild } from './swClientBridge';
 import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
 import { shouldMountOnBootstrapFailure } from './eventResolution';
-import { isSignInReachableOnHost } from './auth-domain';
+import { parseAuthOrigin, resolveSignInStrategy } from './auth/authMode';
+import { HANDOFF_AUTH_PATH, clearHandoffFragment, readHandoffCode } from './auth/handoffClient';
+import { completeAuthHandoff } from './auth/handoffExchange';
+import AuthHandoffOrigin from './auth/AuthHandoffOrigin';
 import './theme/themes.css';
 import './index.css';
 
@@ -203,115 +206,184 @@ const appTree = (
 );
 
 /**
- * Resolve which Event this hostname serves BEFORE mounting (#543, ADR 0009).
+ * The central auth origin short-circuit (#549, ADR 0010).
  *
- * Gating the mount is the point: every Firestore path derives from `EVENT_ID`,
- * so mounting first and resolving later would start listeners against the wrong
- * Event and then swap it underneath them. On a single-Event build this
- * short-circuits to the env value without any network read, so the legacy
- * deployment pays nothing for this.
- *
- * The `.catch` is a hard blank-screen guard, not defensive habit.
- * `bootstrapEventResolution` is written never to throw and never to hang — the
- * fetch is timeout-raced and every branch returns a value — but this is the one
- * code path where an unexpected throw would render NOTHING at all, which is the
- * 2026-07-24 incident exactly. What it renders instead splits on the build
- * mode (`shouldMountOnBootstrapFailure`, Phase 4b P1 on #576): an env-pinned
- * build mounts, because its baked `EVENT_ID` is the correct Event and a blank
- * page on a phone in a rental house is not recoverable; a hostname-resolved
- * build fails CLOSED to the "unreachable" screen, because its pre-resolution
- * `EVENT_ID` is the legacy fallback and mounting would serve the legacy Event
- * on an arbitrary hostname with the auth-reachability gate skipped.
+ * `auth.fiveacross.app` serves this same bundle but is NOT an Event address: it
+ * has no `hostnames` document, so letting it fall through to the resolution
+ * below would spend a network round trip only to render the not-found screen on
+ * the one origin every Event depends on for sign-in. The check is therefore
+ * ahead of the bootstrap rather than inside it, and it is exact — this build's
+ * own configured auth origin, on the one path that page is served at, and
+ * nothing else. An Event origin can never match, because its `window.location.origin`
+ * is by construction not the origin it hands off TO.
  */
-void bootstrapEventResolution()
-  .then((resolution) => {
-    // Register the brand/edition/Event analytics dimensions (#556) as soon as
-    // they are known, regardless of which branch below ends up rendering —
-    // even the not-found and auth-blocked screens below fire GA4's automatic
-    // events, so those screens should carry Event context too, same as
-    // ConsentNotice's disclosure obligation a few lines down. Skipped for the
-    // uptime synthetic (#142), matching `initPostHog`'s own guard above.
-    if (resolution.kind === 'event' && !isSyntheticProbe()) {
-      registerAnalyticsDimensions({ eventId: resolution.eventId, eventSlug: resolution.slug });
-    }
-    // Only NOW does PostHog itself start (#556, Phase 4b P1) — see
-    // `startPostHogAfterResolution`'s own doc for why this ordering is
-    // load-bearing, not incidental.
-    startPostHogAfterResolution();
-    // The ONE explicit GA4 page_view (#611, Phase 4b P1) — see
-    // `emitInitialPageView`'s own doc for why Event resolution having
-    // already settled here is half of the ordering guarantee it needs.
-    void emitInitialPageView();
-    // An Event can resolve on an origin the AUTH stack has never been
-    // configured for — hostname resolution is exactly what made that possible
-    // (ADR 0010 § not-yet-implemented; Codex P1 on #576). Mounting the app there
-    // would render a Google button that cannot return to this origin, so it is
-    // reported as a state rather than discovered mid-sign-in. "Reachable" is
-    // deliberately wider than "configured": `gaycruisebingo.web.app` mounts so
-    // AuthProvider's documented handoff to `firebaseapp.com` can run
-    // (src/auth-domain.ts, Codex P1 round 5 on #576).
-    const authBlocked =
-      resolution.kind === 'event' &&
-      !isSignInReachableOnHost(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, window.location.hostname);
-    if (authBlocked) {
-      // This branch intentionally never mounts AuthProvider/ThemedApp, so it
-      // has no Firebase User. Release the PostHog startup gate explicitly as
-      // signed out before the fallback screen can capture anything.
+const centralAuthOrigin = parseAuthOrigin(import.meta.env.VITE_AUTH_HANDOFF_ORIGIN);
+const atCentralAuthOrigin =
+  centralAuthOrigin !== null &&
+  window.location.origin === centralAuthOrigin &&
+  window.location.pathname === HANDOFF_AUTH_PATH;
+
+if (atCentralAuthOrigin) {
+  // Never mounts AuthProvider/ThemedApp, so — exactly like the auth-blocked and
+  // not-found branches below — the PostHog startup gate is released explicitly
+  // as signed out before anything can capture against it.
+  phSetAuthState(null);
+  root.render(
+    <React.StrictMode>
+      <AuthHandoffOrigin />
+    </React.StrictMode>,
+  );
+} else {
+  /**
+   * Resolve which Event this hostname serves BEFORE mounting (#543, ADR 0009).
+   *
+   * Gating the mount is the point: every Firestore path derives from `EVENT_ID`,
+   * so mounting first and resolving later would start listeners against the wrong
+   * Event and then swap it underneath them. On a single-Event build this
+   * short-circuits to the env value without any network read, so the legacy
+   * deployment pays nothing for this.
+   *
+   * The `.catch` is a hard blank-screen guard, not defensive habit.
+   * `bootstrapEventResolution` is written never to throw and never to hang — the
+   * fetch is timeout-raced and every branch returns a value — but this is the one
+   * code path where an unexpected throw would render NOTHING at all, which is the
+   * 2026-07-24 incident exactly. What it renders instead splits on the build
+   * mode (`shouldMountOnBootstrapFailure`, Phase 4b P1 on #576): an env-pinned
+   * build mounts, because its baked `EVENT_ID` is the correct Event and a blank
+   * page on a phone in a rental house is not recoverable; a hostname-resolved
+   * build fails CLOSED to the "unreachable" screen, because its pre-resolution
+   * `EVENT_ID` is the legacy fallback and mounting would serve the legacy Event
+   * on an arbitrary hostname with the auth-reachability gate skipped.
+   */
+  void bootstrapEventResolution()
+    .then(async (resolution) => {
+      // Register the brand/edition/Event analytics dimensions (#556) as soon as
+      // they are known, regardless of which branch below ends up rendering —
+      // even the not-found and auth-blocked screens below fire GA4's automatic
+      // events, so those screens should carry Event context too, same as
+      // ConsentNotice's disclosure obligation a few lines down. Skipped for the
+      // uptime synthetic (#142), matching `initPostHog`'s own guard above.
+      if (resolution.kind === 'event' && !isSyntheticProbe()) {
+        registerAnalyticsDimensions({ eventId: resolution.eventId, eventSlug: resolution.slug });
+      }
+      // Only NOW does PostHog itself start (#556, Phase 4b P1) — see
+      // `startPostHogAfterResolution`'s own doc for why this ordering is
+      // load-bearing, not incidental.
+      startPostHogAfterResolution();
+      // The ONE explicit GA4 page_view (#611, Phase 4b P1) — see
+      // `emitInitialPageView`'s own doc for why Event resolution having
+      // already settled here is half of the ordering guarantee it needs.
+      void emitInitialPageView();
+      // An Event can resolve on an origin the AUTH stack has never been
+      // configured for — hostname resolution is exactly what made that possible
+      // (ADR 0010; Codex P1 on #576). Mounting the app there would render a
+      // Google button that cannot return to this origin, so it is reported as a
+      // state rather than discovered mid-sign-in.
+      //
+      // #549 widens this from a predicate to a ROUTE. `resolveSignInStrategy`
+      // still asks `isSignInReachableOnHost` first — so `gaycruisebingo.web.app`
+      // keeps mounting for AuthProvider's documented `firebaseapp.com` handoff,
+      // and local/e2e origins keep signing in against the emulator — but an
+      // unregistered Event host is no longer automatically blocked: in the
+      // default `handoff` mode the ADR 0010 handoff carries sign-in there, which
+      // is the entire point of the wildcard architecture. What still blocks is a
+      // route that CANNOT work, and each of those gets its own screen rather
+      // than the generic one, because "nobody provisioned this address" and
+      // "this build was told to sign in a way that cannot work here" are fixed
+      // by different people in different places.
+      const signInStrategy = resolveSignInStrategy({
+        mode: import.meta.env.VITE_AUTH_MODE,
+        configuredAuthDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+        hostname: window.location.hostname,
+        handoffOrigin: import.meta.env.VITE_AUTH_HANDOFF_ORIGIN,
+        currentOrigin: window.location.origin,
+        returnPath: '/',
+      });
+      if (resolution.kind === 'event' && signInStrategy.kind === 'unavailable') {
+        // This branch intentionally never mounts AuthProvider/ThemedApp, so it
+        // has no Firebase User. Release the PostHog startup gate explicitly as
+        // signed out before the fallback screen can capture anything.
+        phSetAuthState(null);
+        root.render(
+          <React.StrictMode>
+            <EventNotFound
+              hostname={window.location.hostname}
+              reason={
+                signInStrategy.reason === 'same-origin-host-unregistered'
+                  ? 'auth-same-origin-unavailable'
+                  : 'auth-handoff-misconfigured'
+              }
+            />
+            <ConsentNotice />
+          </React.StrictMode>,
+        );
+        return;
+      }
+
+      // The handoff RETURN leg (#549). The player is back on the origin they
+      // started from, carrying an opaque code in the fragment. This runs before
+      // the app mounts so the session exists by the time `onAuthStateChanged`
+      // first settles — completing it inside the tree instead would render the
+      // signed-out SignIn screen and then flip it out from under the player.
+      //
+      // The fragment is cleared FIRST, unconditionally, so the code leaves the
+      // address bar whether or not the exchange goes on to succeed. Failure is
+      // recorded, never retried: the code is single-use and is spent by the time
+      // anything here can fail, so a retry could only fail again.
+      if (resolution.kind === 'event') {
+        const handoffCode = readHandoffCode(window.location.hash);
+        if (handoffCode !== null) {
+          clearHandoffFragment();
+          await completeAuthHandoff({ code: handoffCode, origin: window.location.origin });
+        }
+      }
+      if (resolution.kind === 'not-found') phSetAuthState(null);
+      root.render(
+        resolution.kind === 'not-found' ? (
+          <React.StrictMode>
+            <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
+            {/* The 18+ analytics disclosure has to survive this branch too. GA4
+                loads on `firebase.ts` import, and PostHog startup plus its
+                explicit signed-out baseline have already been requested for
+                this outcome too. Collection can therefore begin as this task
+                unwinds — and this is exactly the branch a first-time visitor to an unknown
+                wildcard host lands on (Codex on #576). Safe to put beside the
+                deliberately dependency-free not-found screen: `ConsentNotice`
+                imports `useState` and nothing else — no auth, no Firestore, no
+                router, no theme — so it cannot become a new way for the
+                fallback itself to fail. */}
+            <ConsentNotice />
+          </React.StrictMode>
+        ) : (
+          appTree
+        ),
+      );
+    })
+    .catch(() => {
+      // The resolution promise itself rejected — no dimensions could have been
+      // registered either way, but PostHog still needs to run for whichever
+      // screen renders below (same disclosure obligation as the other
+      // branches). NOTE this handler ALSO catches an exception thrown by the
+      // `.then()` SUCCESS callback above (e.g. a render failure) — possibly
+      // AFTER that callback already started analytics. `emitInitialPageView`
+      // is idempotent for exactly this path (#613, Phase 4b round-2 P2: a
+      // second emission used to double-log the page_view), and a repeated
+      // `initPostHog` no-ops once ready.
+      startPostHogAfterResolution();
+      void emitInitialPageView();
+      if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
+        root.render(appTree);
+        return;
+      }
       phSetAuthState(null);
       root.render(
         <React.StrictMode>
-          <EventNotFound hostname={window.location.hostname} reason="auth-unconfigured" />
+          <EventNotFound hostname={window.location.hostname} reason="unreachable" />
+          {/* Same disclosure obligation as the not-found branch above: analytics
+              was requested via `startPostHogAfterResolution()` above and released
+              with the explicit signed-out baseline before this screen mounted. */}
           <ConsentNotice />
         </React.StrictMode>,
       );
-      return;
-    }
-    if (resolution.kind === 'not-found') phSetAuthState(null);
-    root.render(
-      resolution.kind === 'not-found' ? (
-        <React.StrictMode>
-          <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
-          {/* The 18+ analytics disclosure has to survive this branch too. GA4
-              loads on `firebase.ts` import, and PostHog startup plus its
-              explicit signed-out baseline have already been requested for
-              this outcome too. Collection can therefore begin as this task
-              unwinds — and this is exactly the branch a first-time visitor to an unknown
-              wildcard host lands on (Codex on #576). Safe to put beside the
-              deliberately dependency-free not-found screen: `ConsentNotice`
-              imports `useState` and nothing else — no auth, no Firestore, no
-              router, no theme — so it cannot become a new way for the
-              fallback itself to fail. */}
-          <ConsentNotice />
-        </React.StrictMode>
-      ) : (
-        appTree
-      ),
-    );
-  })
-  .catch(() => {
-    // The resolution promise itself rejected — no dimensions could have been
-    // registered either way, but PostHog still needs to run for whichever
-    // screen renders below (same disclosure obligation as the other
-    // branches). NOTE this handler ALSO catches an exception thrown by the
-    // `.then()` SUCCESS callback above (e.g. a render failure) — possibly
-    // AFTER that callback already started analytics. `emitInitialPageView`
-    // is idempotent for exactly this path (#613, Phase 4b round-2 P2: a
-    // second emission used to double-log the page_view), and a repeated
-    // `initPostHog` no-ops once ready.
-    startPostHogAfterResolution();
-    void emitInitialPageView();
-    if (shouldMountOnBootstrapFailure(import.meta.env.VITE_EVENT_ID || null)) {
-      root.render(appTree);
-      return;
-    }
-    phSetAuthState(null);
-    root.render(
-      <React.StrictMode>
-        <EventNotFound hostname={window.location.hostname} reason="unreachable" />
-        {/* Same disclosure obligation as the not-found branch above: analytics
-            was requested via `startPostHogAfterResolution()` above and released
-            with the explicit signed-out baseline before this screen mounted. */}
-        <ConsentNotice />
-      </React.StrictMode>,
-    );
-  });
+    });
+}
