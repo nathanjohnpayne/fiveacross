@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildRecoveryArtifacts } from './recovery-controller.mjs';
+import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const READ_AT = '2026-08-19T12:00:00.000Z';
@@ -15,18 +16,23 @@ const NEXT_FUNCTION =
 const OLD_KEY = 'projects/fiveacross/locations/us/keyRings/event-router/cryptoKeys/router-publisher-old';
 const NEXT_KEY = 'projects/fiveacross/locations/us/keyRings/event-router/cryptoKeys/router-publisher-next';
 const OLD_VERSION = `${OLD_KEY}/cryptoKeyVersions/1`;
+const OLD_VERSION_2 = `${OLD_KEY}/cryptoKeyVersions/2`;
 const NEXT_VERSION = `${NEXT_KEY}/cryptoKeyVersions/1`;
 const NEXT_VERSION_FULL = `//cloudkms.googleapis.com/${NEXT_VERSION}`;
 const NEXT_ACCOUNT_FULL = `//iam.googleapis.com/projects/fiveacross/serviceAccounts/${REPLACEMENT_EMAIL}`;
 const OLD_MEMBER = `serviceAccount:${QUARANTINED_EMAIL}`;
 const NEXT_MEMBER = `serviceAccount:${REPLACEMENT_EMAIL}`;
 const OLD_FINGERPRINT = '1'.repeat(64);
+const OLD_FINGERPRINT_2 = '0'.repeat(64);
 const NEXT_FINGERPRINT = '2'.repeat(64);
 const REGISTRY_DIGEST = '3'.repeat(64);
 const SOURCE_ATTESTOR_SUB = '109876543210987654399';
 const SOURCE_ATTESTOR_KEY =
   'projects/fiveacross/locations/us/keyRings/event-router/cryptoKeys/source-attestor/cryptoKeyVersions/1';
 const SOURCE_ATTESTOR_FINGERPRINT = '4'.repeat(64);
+const SOURCE_ATTESTOR_AUDIENCE = REGISTRY_R0_CONTRACT.identities.find(
+  ({ role }) => role === 'source-attestor',
+).audience;
 
 const hostnameDocument = {
   eventId: 'synthetic-event',
@@ -105,7 +111,7 @@ function recoveryInput(overrides = {}) {
     incidentUrl: 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/970',
     reason: 'Replace a quarantined publisher after exact provider readback.',
     sourceAttestor: {
-      audience: 'https://registry.example.workers.dev/__internal/hostname-replicas/v1',
+      audience: SOURCE_ATTESTOR_AUDIENCE,
       oidcSubject: SOURCE_ATTESTOR_SUB,
       keyVersion: SOURCE_ATTESTOR_KEY,
       keyFingerprint: SOURCE_ATTESTOR_FINGERPRINT,
@@ -253,7 +259,7 @@ function dependencies(overrides = {}) {
         credentialSource: 'interactive-human-impersonation',
         tokenIssuedAt: '2026-08-19T12:00:25.000Z',
         tokenExpiresAt: '2026-08-19T12:15:25.000Z',
-        audience: 'https://registry.example.workers.dev/__internal/hostname-replicas/v1',
+        audience: SOURCE_ATTESTOR_AUDIENCE,
         oidcSubject: SOURCE_ATTESTOR_SUB,
         keyVersion: SOURCE_ATTESTOR_KEY,
         keyFingerprint: SOURCE_ATTESTOR_FINGERPRINT,
@@ -408,6 +414,33 @@ describe('operator recovery evidence controller', () => {
         inheritedPoliciesComplete: true,
       }),
     ]);
+  });
+
+  it('accepts every enabled overlap version for the quarantined publisher key through its epoch ceiling', async () => {
+    const plan = replacementPlan();
+    plan.activeEpochMappings.unshift({
+      epoch: '6',
+      subject: QUARANTINED_SUB,
+      keyVersion: OLD_VERSION_2,
+      algorithm: 'RSA_SIGN_PKCS1_2048_SHA256',
+      spkiSha256: OLD_FINGERPRINT_2,
+    });
+    const readback = controlReadbacks();
+    readback.activeRegistry.mappings = structuredClone(plan.activeEpochMappings);
+    readback.keyAccess[0].enabledVersions.push({
+      keyVersion: OLD_VERSION_2,
+      algorithm: 'RSA_SIGN_PKCS1_2048_SHA256',
+      spkiSha256: OLD_FINGERPRINT_2,
+    });
+    const deps = dependencies({
+      readPublisherControlReadbacks: vi.fn(async () => readback),
+    });
+
+    const result = await buildRecoveryArtifacts(recoveryInput({ publisherReplacement: plan }), deps);
+
+    expect(result.request.action.publisherReplacement.controlEvidence.activeEpochMappings).toEqual(
+      plan.activeEpochMappings,
+    );
   });
 
   it('refuses source/ledger drift before reading controls or obtaining human credentials', async () => {

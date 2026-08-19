@@ -38,6 +38,10 @@ export type HostRegistryStub = {
     context: {
       now: number;
       operatorSub: string;
+      operatorKeyVersion: string;
+      operatorKeyFingerprint: string;
+      operatorSignature: string;
+      requestBodyDigest: string;
       lockId: string;
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
@@ -90,8 +94,9 @@ function json(status: number, body: Record<string, unknown>): Response {
   });
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -128,16 +133,19 @@ async function syncResponse(
     return json(413, { error: 'request-too-large' });
   }
 
-  let bytes: ArrayBuffer;
+  let rawBytes: Uint8Array;
   try {
-    bytes = await request.arrayBuffer();
+    rawBytes = new Uint8Array(await request.arrayBuffer());
   } catch {
     return json(400, { error: 'invalid-request' });
   }
-  if (bytes.byteLength > SYNC_MAX_BYTES) return json(413, { error: 'request-too-large' });
+  if (rawBytes.byteLength > SYNC_MAX_BYTES) return json(413, { error: 'request-too-large' });
+  if (rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf) {
+    return json(400, { error: 'invalid-request' });
+  }
   let body: string;
   try {
-    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(rawBytes);
   } catch {
     return json(400, { error: 'invalid-request' });
   }
@@ -210,7 +218,7 @@ async function syncResponse(
   }
 
   const exactSignatureInput = new TextEncoder().encode(
-    ['v1', 'POST', SYNC_PATH, issuedAtRaw, epoch, await sha256Hex(body)].join('\n'),
+    ['v1', 'POST', SYNC_PATH, issuedAtRaw, epoch, await sha256Hex(rawBytes)].join('\n'),
   );
   if (!(await verifyPinnedSignature(record, exactSignatureInput, signature))) {
     return json(401, { error: 'unauthorized' });

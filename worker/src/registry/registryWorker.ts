@@ -19,8 +19,10 @@ import { AUDIT_PAGE_SIZE, createAuditPage, type RegistryAuditPage } from './audi
 import { applyRecovery, type ActivePublisherMapping, type RecoveryRecord, type RecoveryRequest } from './recovery';
 import {
   acceptProbeAttestation,
+  consumedProbeEvidence,
   issueProbeChallenge,
   matchProbeAttestations,
+  probeAttestationExpiresAt,
   ProbeRefusedError,
   type CanonicalProbeExpectation,
   type ProbeAttestation,
@@ -35,6 +37,13 @@ const STATE_KEY = 'registry-state';
 const HISTORY_PREFIX = 'recovery/';
 const CHALLENGE_PREFIX = 'probe/challenge/';
 const ATTESTATION_PREFIX = 'probe/attestation/';
+const PROBE_EXPIRY_PREFIX = 'probe/expiry/';
+const PROBE_SWEEP_LIMIT = 64;
+
+type ProbeExpiryIndex = {
+  artifactKey: string;
+  expiresAt: number;
+};
 
 class RegistryStorageError extends Error {
   constructor(readonly storageCause: unknown) {
@@ -49,6 +58,16 @@ function decimalKey(prefix: string, value: string): string {
 
 function opaqueKey(prefix: string, value: string): string {
   return `${prefix}${encodeURIComponent(value)}`;
+}
+
+function probeExpiryKey(expiresAt: number, artifactKey: string): string {
+  return `${PROBE_EXPIRY_PREFIX}${String(expiresAt).padStart(16, '0')}:${encodeURIComponent(artifactKey)}`;
+}
+
+async function scheduleProbeSweep(transaction: DurableObjectTransaction, expiresAt: number): Promise<void> {
+  const scheduledAt = expiresAt + 1;
+  const current = await transaction.getAlarm();
+  if (current === null || scheduledAt < current) await transaction.setAlarm(scheduledAt);
 }
 
 function canonicalProbeExpectation(
@@ -89,6 +108,43 @@ export interface RegistryWorkerEnv {
 }
 
 export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    await this.ctx.storage.transaction(async (transaction) => {
+      const indexes = await transaction.list<ProbeExpiryIndex>({
+        prefix: PROBE_EXPIRY_PREFIX,
+        limit: PROBE_SWEEP_LIMIT,
+      });
+      const deleteKeys: string[] = [];
+      let nextExpiry: number | null = null;
+      for (const [indexKey, index] of indexes) {
+        const valid =
+          typeof index === 'object' &&
+          index !== null &&
+          Number.isSafeInteger(index.expiresAt) &&
+          (index.artifactKey.startsWith(CHALLENGE_PREFIX) || index.artifactKey.startsWith(ATTESTATION_PREFIX)) &&
+          indexKey === probeExpiryKey(index.expiresAt, index.artifactKey);
+        if (!valid) {
+          deleteKeys.push(indexKey);
+          continue;
+        }
+        if (now <= index.expiresAt) {
+          nextExpiry = index.expiresAt;
+          break;
+        }
+        deleteKeys.push(index.artifactKey, indexKey);
+      }
+      if (deleteKeys.length > 0) await transaction.delete(deleteKeys);
+      if (nextExpiry !== null) {
+        await transaction.setAlarm(nextExpiry + 1);
+      } else if (indexes.size === PROBE_SWEEP_LIMIT) {
+        await transaction.setAlarm(now + 1);
+      } else {
+        await transaction.deleteAlarm();
+      }
+    });
+  }
+
   async sync(payload: RouterReplicaDesired, publisherEpoch: string) {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
@@ -142,6 +198,10 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       publisherIntegrityProven?: boolean;
       activeRegistryConfigDigest?: string;
       activePublisherMappings?: readonly ActivePublisherMapping[];
+      operatorKeyVersion: string;
+      operatorKeyFingerprint: string;
+      operatorSignature: string;
+      requestBodyDigest: string;
     },
   ): Promise<
     { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }
@@ -150,6 +210,8 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       const stored = await transaction.get<unknown>(STATE_KEY);
       const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
       let result: Awaited<ReturnType<typeof applyRecovery>>;
+      let consumedAttestationKeys: string[] = [];
+      let consumedAttestationExpiryKeys: string[] = [];
       try {
         result = await applyRecovery(state, request, {
           ...context,
@@ -204,11 +266,11 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
                 throw new ProbeRefusedError('canonical probe does not match the committed source revision');
               }
             }
-            try {
-              await transaction.delete(keys);
-            } catch (error) {
-              throw new RegistryStorageError(error);
-            }
+            consumedAttestationKeys = keys;
+            consumedAttestationExpiryKeys = (attestations as ProbeAttestation[]).map((attestation, index) =>
+              probeExpiryKey(probeAttestationExpiresAt(attestation), keys[index]),
+            );
+            return (attestations as ProbeAttestation[]).map(consumedProbeEvidence);
           },
         });
       } catch (error) {
@@ -217,6 +279,9 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       }
       await transaction.put(STATE_KEY, result.state);
       await transaction.put(decimalKey(HISTORY_PREFIX, result.record.sequence), result.record);
+      if (consumedAttestationKeys.length > 0) {
+        await transaction.delete([...consumedAttestationKeys, ...consumedAttestationExpiryKeys]);
+      }
       return {
         ok: true as const,
         sequence: result.record.sequence,
@@ -248,6 +313,11 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
         return { ok: false as const, error: 'probe-refused' as const };
       }
       await transaction.put(key, challenge);
+      await transaction.put(probeExpiryKey(challenge.expiresAt, key), {
+        artifactKey: key,
+        expiresAt: challenge.expiresAt,
+      } satisfies ProbeExpiryIndex);
+      await scheduleProbeSweep(transaction, challenge.expiresAt);
       return { ok: true as const, challenge };
     });
   }
@@ -275,7 +345,14 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
         return { ok: false as const, error: 'probe-refused' as const };
       }
       await transaction.delete(challengeKey);
+      await transaction.delete(probeExpiryKey(challenge.expiresAt, challengeKey));
       await transaction.put(attestationKey, accepted.attestation);
+      const attestationExpiresAt = probeAttestationExpiresAt(accepted.attestation);
+      await transaction.put(probeExpiryKey(attestationExpiresAt, attestationKey), {
+        artifactKey: attestationKey,
+        expiresAt: attestationExpiresAt,
+      } satisfies ProbeExpiryIndex);
+      await scheduleProbeSweep(transaction, attestationExpiresAt);
       return { ok: true as const, attestation: accepted.attestation };
     });
   }

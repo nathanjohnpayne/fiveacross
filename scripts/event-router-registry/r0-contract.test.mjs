@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { REGISTRY_ROLE_AUDIENCES } from '../../worker/src/registry/verificationRecords.ts';
 import { REGISTRY_R0_CONTRACT, validateRegistryR0Contract } from './r0-contract.mjs';
 
 describe('registry R0 provisioning contract', () => {
@@ -16,6 +17,12 @@ describe('registry R0 provisioning contract', () => {
         tokenRuntimeVisible: false,
       },
     });
+  });
+
+  it('keeps the reviewed source-attestor audience identical to the registry verifier', () => {
+    const sourceAttestor = REGISTRY_R0_CONTRACT.identities.find(({ role }) => role === 'source-attestor');
+    expect(sourceAttestor?.audience).toBe(REGISTRY_ROLE_AUDIENCES['source-attestor']);
+    expect(sourceAttestor?.audience).toMatch(/\/__internal\/hostname-replicas\/v1\/source-attestor$/);
   });
 
   it('fails closed if a publisher receives Firestore or public-key-viewer capability', () => {

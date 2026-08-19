@@ -1,7 +1,7 @@
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const CHALLENGE_LIFETIME_MS = 5 * 60_000;
 const OBSERVATION_LIFETIME_MS = 60_000;
-const STORED_ATTESTATION_LIFETIME_MS = 5 * 60_000;
+export const STORED_ATTESTATION_LIFETIME_MS = 5 * 60_000;
 
 export class ProbeRefusedError extends Error {
   constructor(message: string) {
@@ -78,6 +78,34 @@ export type ProbeAttestation = {
   challenge: ProbeChallenge;
   observation: ProbeObservation;
 };
+
+export type ConsumedProbeEvidence = {
+  id: string;
+  receivedAt: string;
+  subject: string;
+  keyVersion: string;
+  keyFingerprint: string;
+  region: string;
+  challenge: ProbeChallenge;
+  observation: ProbeObservation;
+};
+
+export function consumedProbeEvidence(attestation: ProbeAttestation): ConsumedProbeEvidence {
+  return {
+    id: attestation.id,
+    receivedAt: attestation.receivedAt,
+    subject: attestation.subject,
+    keyVersion: attestation.keyVersion,
+    keyFingerprint: attestation.keyFingerprint,
+    region: attestation.region,
+    challenge: structuredClone(attestation.challenge),
+    observation: structuredClone(attestation.observation),
+  };
+}
+
+export function probeAttestationExpiresAt(attestation: ProbeAttestation): number {
+  return Date.parse(attestation.receivedAt) + STORED_ATTESTATION_LIFETIME_MS;
+}
 
 export type CanonicalProbeExpectation = {
   stateDigest: string;

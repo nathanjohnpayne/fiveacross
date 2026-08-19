@@ -7,15 +7,97 @@ import {
   validateSourceAudit,
   type ProviderRequestEvidence,
   type PublisherReplacement,
+  type RecoveryContext,
   type RecoveryRequest,
   type SourceAudit,
   type WafEvidence,
 } from './recovery';
 import { applyPublisherSync, initialRegistryState } from './state';
 import { parseRecovery } from './controlService';
+import type { ConsumedProbeEvidence } from './probe';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const NOW = Date.parse('2026-08-19T12:35:00.000Z');
+const RECOVERY_AUTHORIZATION = {
+  operatorKeyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+  operatorKeyFingerprint: 'd'.repeat(64),
+  operatorSignature: 'signed-recovery-request',
+  requestBodyDigest: 'e'.repeat(64),
+} as const;
+
+async function consumedEvidence(
+  ids: readonly string[],
+  phase: 'blocked' | 'canonical',
+): Promise<readonly ConsumedProbeEvidence[]> {
+  return ids.map((id, index) => {
+    const suffix = index + 1;
+    const probePhase = phase === 'blocked' ? ('blocked-before-worker' as const) : ('canonical-after-unblock' as const);
+    const common = {
+      id,
+      receivedAt: '2026-08-19T12:34:56.000Z',
+      subject: `runner-${suffix}`,
+      keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${suffix}/cryptoKeyVersions/1`,
+      keyFingerprint: String(suffix).repeat(64),
+      region: ['us-west1', 'us-east1', 'europe-west1'][index],
+      challenge: {
+        probeNonce: `nonce-${suffix}`,
+        subject: `runner-${suffix}`,
+        keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${suffix}/cryptoKeyVersions/1`,
+        keyFingerprint: String(suffix).repeat(64),
+        region: ['us-west1', 'us-east1', 'europe-west1'][index],
+        phase: probePhase,
+        host: HOST,
+        expectedStateDigest: 'a'.repeat(64),
+        issuedAt: NOW - 10_000,
+        expiresAt: NOW + 10_000,
+        consumed: true,
+      },
+      observation:
+        phase === 'blocked'
+          ? {
+              phase: 'blocked-before-worker' as const,
+              probeNonce: `nonce-${suffix}`,
+              observedAt: '2026-08-19T12:34:55.000Z',
+              rayId: `ray-${suffix}`,
+              host: HOST,
+              requestPath: `/__registry-probe?nonce=nonce-${suffix}`,
+              expectedStatus: 403 as const,
+              observedStatus: 403 as const,
+              expectedBlockBodyDigest: '1'.repeat(64),
+              observedBlockBodyDigest: '1'.repeat(64),
+            }
+          : {
+              phase: 'canonical-after-unblock' as const,
+              probeNonce: `nonce-${suffix}`,
+              observedAt: '2026-08-19T12:34:55.000Z',
+              rayId: `ray-${suffix}`,
+              host: HOST,
+              requestPath: `/__registry-probe?nonce=nonce-${suffix}`,
+              expectedStatus: 404,
+              observedStatus: 404,
+              expectedReason: 'unknown-host' as const,
+              observedReason: 'unknown-host' as const,
+              expectedRevision: '1',
+              observedRevision: '1',
+              expectedServesOrigin: false,
+              observedServesOrigin: false,
+              originRequestId: null,
+            },
+    };
+    return common;
+  });
+}
+
+function recoveryContext(lockId: string, overrides: Partial<RecoveryContext> = {}): RecoveryContext {
+  return {
+    now: NOW,
+    operatorSub: 'recovery-operator',
+    lockId,
+    ...RECOVERY_AUTHORIZATION,
+    consumeAttestations: consumedEvidence,
+    ...overrides,
+  };
+}
 
 function payload(revision: string, eventId = 'synthetic-event'): RouterReplicaDesired {
   return {
@@ -155,13 +237,48 @@ describe('source-attested recovery', () => {
 
   it('acquires an exact-host durable lock only with three distinct blocked provider records', async () => {
     const state = await committedState();
+    const consumedProbeEvidence = [1, 2, 3].map((index) => ({
+      id: `att-${index}`,
+      receivedAt: '2026-08-19T12:34:56.000Z',
+      subject: `runner-${index}`,
+      keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${index}/cryptoKeyVersions/1`,
+      keyFingerprint: String(index).repeat(64),
+      region: ['us-west1', 'us-east1', 'europe-west1'][index - 1],
+      challenge: {
+        probeNonce: `nonce-${index}`,
+        subject: `runner-${index}`,
+        keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${index}/cryptoKeyVersions/1`,
+        keyFingerprint: String(index).repeat(64),
+        region: ['us-west1', 'us-east1', 'europe-west1'][index - 1],
+        phase: 'blocked-before-worker' as const,
+        host: HOST,
+        expectedStateDigest: state.committed?.digest ?? '',
+        issuedAt: NOW - 10_000,
+        expiresAt: NOW + 10_000,
+        consumed: true as const,
+      },
+      observation: {
+        phase: 'blocked-before-worker' as const,
+        probeNonce: `nonce-${index}`,
+        observedAt: '2026-08-19T12:34:55.000Z',
+        rayId: `ray-${index}`,
+        host: HOST,
+        requestPath: `/__registry-probe?nonce=nonce-${index}`,
+        expectedStatus: 403 as const,
+        observedStatus: 403 as const,
+        expectedBlockBodyDigest: '1'.repeat(64),
+        observedBlockBodyDigest: '1'.repeat(64),
+      },
+    }));
     const result = await applyRecovery(
       state,
       await request(state, {
         kind: 'acquire-lock',
         wafEvidence: await wafEvidence(),
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
+      recoveryContext('lock-1', {
+        consumeAttestations: async () => consumedProbeEvidence as never,
+      }),
     );
     expect(result.state.recoveryLock).toMatchObject({
       lockId: 'lock-1',
@@ -170,26 +287,37 @@ describe('source-attested recovery', () => {
     expect(result.record).toMatchObject({
       sequence: '1',
       action: 'acquire-lock',
+      operatorSub: 'recovery-operator',
+      ...RECOVERY_AUTHORIZATION,
+      probeEvidence: consumedProbeEvidence,
     });
+
+    await expect(
+      applyRecovery(
+        state,
+        await request(state, { kind: 'acquire-lock', wafEvidence: await wafEvidence() }),
+        recoveryContext('lock-without-probes', { consumeAttestations: undefined }),
+      ),
+    ).rejects.toThrow('probe attestation consumer is unavailable');
 
     const evidence = await wafEvidence();
     evidence.providerRequests[2].edgeColoCode = evidence.providerRequests[0].edgeColoCode;
     await expect(
-      applyRecovery(state, await request(state, { kind: 'acquire-lock', wafEvidence: evidence }), {
-        now: NOW,
-        operatorSub: 'recovery-operator',
-        lockId: 'lock-2',
-      }),
+      applyRecovery(
+        state,
+        await request(state, { kind: 'acquire-lock', wafEvidence: evidence }),
+        recoveryContext('lock-2'),
+      ),
     ).rejects.toThrow('provider colos must be distinct');
 
     const forgedQueryDigest = await wafEvidence();
     forgedQueryDigest.providerRequests[0].queryDigest = 'a'.repeat(64);
     await expect(
-      applyRecovery(state, await request(state, { kind: 'acquire-lock', wafEvidence: forgedQueryDigest }), {
-        now: NOW,
-        operatorSub: 'recovery-operator',
-        lockId: 'lock-3',
-      }),
+      applyRecovery(
+        state,
+        await request(state, { kind: 'acquire-lock', wafEvidence: forgedQueryDigest }),
+        recoveryContext('lock-3'),
+      ),
     ).rejects.toThrow('provider response digest');
 
     const nestedExtra = await request(state, {
@@ -214,26 +342,21 @@ describe('source-attested recovery', () => {
         kind: 'acquire-lock',
         wafEvidence: await wafEvidence(),
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
+      recoveryContext('lock-1'),
     );
     const repairedAudit = sourceAudit('1', 'canonical-repair');
     await expect(
       applyRecovery(
         acquired.state,
         await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: null }, repairedAudit),
-        { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused' },
+        recoveryContext('unused'),
       ),
     ).rejects.toThrow('publisher replacement required');
 
     const jump = await applyRecovery(
       acquired.state,
       await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: null }, sourceAudit('4')),
-      {
-        now: NOW,
-        operatorSub: 'recovery-operator',
-        lockId: 'unused',
-        publisherIntegrityProven: true,
-      },
+      recoveryContext('unused', { publisherIntegrityProven: true }),
     );
     expect(jump.state.committed?.revision).toBe('4');
     expect(jump.record.skippedRevisionRange).toEqual({ from: '2', to: '3' });
@@ -243,12 +366,7 @@ describe('source-attested recovery', () => {
       applyRecovery(
         jump.state,
         await request(jump.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: null }, sourceAudit('3')),
-        {
-          now: NOW,
-          operatorSub: 'recovery-operator',
-          lockId: 'unused',
-          publisherIntegrityProven: true,
-        },
+        recoveryContext('unused', { publisherIntegrityProven: true }),
       ),
     ).rejects.toThrow('source-behind');
   });
@@ -274,7 +392,7 @@ describe('source-attested recovery', () => {
         kind: 'acquire-lock',
         wafEvidence: await wafEvidence(),
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
+      recoveryContext('lock-1'),
     );
     const replacement: NonNullable<PublisherReplacement> = {
       quarantinedEpochCeiling: '7',
@@ -402,13 +520,10 @@ describe('source-attested recovery', () => {
         attestationSignature: 'signed-control-evidence',
       },
     };
-    const replacementContext = {
-      now: NOW,
-      operatorSub: 'recovery-operator',
-      lockId: 'unused',
+    const replacementContext = recoveryContext('unused', {
       activeRegistryConfigDigest: 'f'.repeat(64),
       activePublisherMappings: replacement.controlEvidence.activeEpochMappings,
-    } as const;
+    });
     const strictRequest = await request(
       acquired.state,
       { kind: 'apply', lockId: 'lock-1', publisherReplacement: replacement },
@@ -500,6 +615,48 @@ describe('source-attested recovery', () => {
       ),
     ).rejects.toThrow('quarantined key version readback');
 
+    const extraReplacementSigner = structuredClone(replacement);
+    extraReplacementSigner.controlEvidence.keyAccess[1].signMembers.push(
+      'serviceAccount:unreviewed@fiveacross.iam.gserviceaccount.com',
+    );
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(
+          acquired.state,
+          {
+            kind: 'apply',
+            lockId: 'lock-1',
+            publisherReplacement: extraReplacementSigner,
+          },
+          sourceAudit('2'),
+        ),
+        replacementContext,
+      ),
+    ).rejects.toThrow('replacement key policy must exactly match');
+
+    const extraReplacementVersion = structuredClone(replacement);
+    extraReplacementVersion.controlEvidence.keyAccess[1].enabledVersions.push({
+      keyVersion: 'projects/p/locations/l/keyRings/r/cryptoKeys/replacement/cryptoKeyVersions/2',
+      algorithm: 'RSA_SIGN_PKCS1_2048_SHA256',
+      spkiSha256: '8'.repeat(64),
+    });
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(
+          acquired.state,
+          {
+            kind: 'apply',
+            lockId: 'lock-1',
+            publisherReplacement: extraReplacementVersion,
+          },
+          sourceAudit('2'),
+        ),
+        replacementContext,
+      ),
+    ).rejects.toThrow('replacement key policy must exactly match');
+
     const omittedMapping = structuredClone(replacement);
     omittedMapping.controlEvidence.activeEpochMappings.shift();
     await expect(
@@ -527,7 +684,7 @@ describe('source-attested recovery', () => {
         kind: 'acquire-lock',
         wafEvidence: await wafEvidence(),
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
+      recoveryContext('lock-1'),
     );
     const clear = await applyRecovery(
       acquired.state,
@@ -538,7 +695,7 @@ describe('source-attested recovery', () => {
         probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
         providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused' },
+      recoveryContext('unused'),
     );
     expect(clear.state.recoveryLock).toBeNull();
     expect(clear.record.action).toBe('clear-lock');
@@ -552,7 +709,7 @@ describe('source-attested recovery', () => {
         kind: 'acquire-lock',
         wafEvidence: await wafEvidence(),
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'lock-1' },
+      recoveryContext('lock-1'),
     );
     const aborted = await applyRecovery(
       acquired.state,
@@ -561,7 +718,7 @@ describe('source-attested recovery', () => {
         lockId: 'lock-1',
         wafEvidence: await wafEvidence(),
       }),
-      { now: NOW, operatorSub: 'recovery-operator', lockId: 'unused' },
+      recoveryContext('unused'),
     );
     expect(aborted.state.committed).toEqual(state.committed);
     expect(aborted.state.recoveryLock).toBeNull();

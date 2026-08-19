@@ -48,8 +48,9 @@ function bearer(value: string | null): string | null {
   return /^Bearer ([A-Za-z0-9._-]+)$/.exec(value)?.[1] ?? null;
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -62,7 +63,10 @@ function canonicalJson(value: unknown): string {
     .join(',')}}`;
 }
 
-async function readExactJson(request: Request, maximum: number): Promise<{ body: string; value: unknown }> {
+async function readExactJson(
+  request: Request,
+  maximum: number,
+): Promise<{ rawBytes: Uint8Array; body: string; bodyDigest: string; value: unknown }> {
   if (request.headers.get('content-type') !== 'application/json') {
     throw new Response(JSON.stringify({ error: 'unsupported-media-type' }), {
       status: 415,
@@ -74,23 +78,26 @@ async function readExactJson(request: Request, maximum: number): Promise<{ body:
       status: 413,
     });
   }
-  const bytes = await request.arrayBuffer();
-  if (bytes.byteLength > maximum) {
+  const rawBytes = new Uint8Array(await request.arrayBuffer());
+  if (rawBytes.byteLength > maximum) {
     throw new Response(JSON.stringify({ error: 'request-too-large' }), {
       status: 413,
     });
   }
+  if (rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf) {
+    throw new Response(JSON.stringify({ error: 'invalid-request' }), { status: 400 });
+  }
   let body: string;
   let value: unknown;
   try {
-    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(rawBytes);
     value = JSON.parse(body);
   } catch {
     throw new Response(JSON.stringify({ error: 'invalid-request' }), {
       status: 400,
     });
   }
-  return { body, value };
+  return { rawBytes, body, bodyDigest: await sha256Hex(rawBytes), value };
 }
 
 function roleAudience(config: RegistryServiceConfig, role: ControlRole): string {
@@ -104,10 +111,10 @@ function roleAudience(config: RegistryServiceConfig, role: ControlRole): string 
 async function authenticateRequest(
   request: Request,
   role: 'recovery' | 'regional-probe',
-  body: string,
+  bodyDigest: string,
   config: RegistryServiceConfig,
   deps: ControlServiceDeps,
-): Promise<VerificationRecord> {
+): Promise<{ record: VerificationRecord; signature: string }> {
   const token = bearer(request.headers.get('authorization'));
   const slot = request.headers.get('x-registry-role-slot');
   const keyVersion = request.headers.get('x-registry-key-version');
@@ -126,9 +133,9 @@ async function authenticateRequest(
   const issuedAt = Number(issuedAtRaw);
   const url = new URL(request.url);
   const exactBytes = new TextEncoder().encode(
-    ['v1', role, request.method, `${url.pathname}${url.search}`, issuedAtRaw, await sha256Hex(body)].join('\n'),
+    ['v1', role, request.method, `${url.pathname}${url.search}`, issuedAtRaw, bodyDigest].join('\n'),
   );
-  return authenticatePinnedRole(
+  const record = await authenticatePinnedRole(
     {
       role,
       slot,
@@ -145,6 +152,7 @@ async function authenticateRequest(
       verificationRecords: config.verificationRecords,
     },
   );
+  return { record, signature };
 }
 
 async function authenticateAudit(
@@ -627,7 +635,7 @@ async function recoveryResponse(
   deps: ControlServiceDeps,
 ): Promise<Response> {
   if (request.method !== 'POST') return json(405, { error: 'method-not-allowed' });
-  let parsed: { body: string; value: unknown };
+  let parsed: Awaited<ReturnType<typeof readExactJson>>;
   try {
     parsed = await readExactJson(request, RECOVERY_MAX_BYTES);
   } catch (response) {
@@ -649,14 +657,18 @@ async function recoveryResponse(
   } catch {
     return json(400, { error: 'invalid-request' });
   }
-  const recoveryRecord = await authenticateRequest(request, 'recovery', parsed.body, config, deps);
-  await authenticateSourceAttestation(request, recoveryRecord, recovery, config, deps);
+  const authenticated = await authenticateRequest(request, 'recovery', parsed.bodyDigest, config, deps);
+  await authenticateSourceAttestation(request, authenticated.record, recovery, config, deps);
   try {
     const result = await deps.hostRegistry
       .getByName(recovery.host, { locationHint: REGISTRY_LOCATION_HINT })
       .recover(recovery, {
         now: deps.now(),
-        operatorSub: recoveryRecord.subject,
+        operatorSub: authenticated.record.subject,
+        operatorKeyVersion: authenticated.record.keyVersion,
+        operatorKeyFingerprint: authenticated.record.spkiSha256,
+        operatorSignature: authenticated.signature,
+        requestBodyDigest: parsed.bodyDigest,
         lockId: deps.randomId(),
         // Omission is never evidence. This endpoint has no independent
         // trusted-publisher proof channel, so every recovery apply requires
@@ -679,7 +691,7 @@ async function probeResponse(
   deps: ControlServiceDeps,
 ): Promise<Response> {
   if (request.method !== 'POST') return json(405, { error: 'method-not-allowed' });
-  let parsed: { body: string; value: unknown };
+  let parsed: Awaited<ReturnType<typeof readExactJson>>;
   try {
     parsed = await readExactJson(request, RECOVERY_MAX_BYTES);
   } catch (response) {
@@ -705,7 +717,7 @@ async function probeResponse(
   if (host !== normalizeHost(host) || host.endsWith('.')) {
     return json(400, { error: 'invalid-request' });
   }
-  const record = await authenticateRequest(request, 'regional-probe', parsed.body, config, deps);
+  const { record } = await authenticateRequest(request, 'regional-probe', parsed.bodyDigest, config, deps);
   const principal: ProbePrincipal = {
     subject: record.subject,
     keyVersion: record.keyVersion,

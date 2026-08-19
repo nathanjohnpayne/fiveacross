@@ -288,4 +288,25 @@ describe('registry default fetch sync endpoint', () => {
     expect(response.status).toBe(400);
     expect(test.getByName).not.toHaveBeenCalled();
   });
+
+  it('rejects a UTF-8 BOM before identity or DO work', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const json = new TextEncoder().encode(JSON.stringify(PAYLOAD));
+    const body = new Uint8Array(3 + json.length);
+    body.set([0xef, 0xbb, 0xbf]);
+    body.set(json, 3);
+    const response = await handleRegistryFetch(
+      new Request(AUDIENCE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+      test.config,
+      test.deps,
+    );
+    expect(response.status).toBe(400);
+    expect(test.limit).not.toHaveBeenCalled();
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
 });

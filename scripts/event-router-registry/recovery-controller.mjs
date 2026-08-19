@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
@@ -26,6 +27,9 @@ const ROOT_HOSTS = new Map([
 const EVENT_HOST = /^([a-z0-9-]+)\.(fiveacross\.app|vacaybingo\.com)$/;
 const SYNTHETIC_EVENT = /^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/;
 const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)$/;
+const SOURCE_ATTESTOR_AUDIENCE = REGISTRY_R0_CONTRACT.identities.find(
+  ({ role }) => role === 'source-attestor',
+).audience;
 
 export class RecoveryControllerRefusal extends Error {
   constructor(code) {
@@ -133,11 +137,12 @@ function validateAudience(value) {
   try {
     const parsed = new URL(value);
     if (
+      value !== SOURCE_ATTESTOR_AUDIENCE ||
       parsed.protocol !== 'https:' ||
       !parsed.hostname.endsWith('.workers.dev') ||
       parsed.username !== '' ||
       parsed.password !== '' ||
-      parsed.pathname !== '/__internal/hostname-replicas/v1' ||
+      parsed.pathname !== '/__internal/hostname-replicas/v1/source-attestor' ||
       parsed.search !== '' ||
       parsed.hash !== '' ||
       parsed.toString() !== value
@@ -246,8 +251,7 @@ function validateReplacementPlan(value) {
   for (const mapping of value.activeEpochMappings) {
     const old =
       mapping.subject === value.quarantined.oidcSubject &&
-      mapping.keyVersion === value.quarantined.keyVersion &&
-      mapping.spkiSha256 === value.quarantined.keyFingerprint &&
+      cryptoKeyOf(mapping.keyVersion) === value.quarantined.cryptoKey &&
       BigInt(mapping.epoch) <= BigInt(value.quarantinedEpochCeiling);
     const replacement =
       mapping.epoch === value.nextPublisherEpoch &&

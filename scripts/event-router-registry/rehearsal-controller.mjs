@@ -5,6 +5,7 @@ const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)
 const COMMIT = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SIGNATURE_VALUE = /^[A-Za-z0-9_-]+$/;
+const POSITIVE_DECIMAL = /^[1-9]\d*$/;
 const MAX_RESERVATIONS = 64;
 
 function exactKeys(value, expected, label) {
@@ -25,6 +26,50 @@ function closedClass(host) {
   if (SYNTHETIC_EVENT.test(host)) return 'synthetic';
   if (SYNTHETIC_ROOT.test(host)) return 'root-test';
   throw new Error(`host is outside the closed synthetic class: ${host}`);
+}
+
+function editionForHost(host) {
+  return host.endsWith('.fiveacross.app') ? 'fiveacross' : 'vacay';
+}
+
+function validateExpectedState(host, hostClass, value) {
+  if (hostClass === 'synthetic') {
+    exactKeys(
+      value,
+      ['kind', 'revision', 'eventId', 'status', 'slug', 'edition', 'pathNamespace'],
+      'manifest expected state',
+    );
+    if (
+      value.kind !== 'route' ||
+      typeof value.revision !== 'string' ||
+      !POSITIVE_DECIMAL.test(value.revision) ||
+      typeof value.eventId !== 'string' ||
+      value.eventId.length === 0 ||
+      value.status !== 'disabled' ||
+      value.slug !== host.split('.')[0] ||
+      value.edition !== editionForHost(host) ||
+      value.pathNamespace !== null
+    ) {
+      throw new Error('manifest expected state does not match its synthetic event host');
+    }
+    return;
+  }
+
+  exactKeys(
+    value,
+    ['kind', 'revision', 'root', 'edition', 'pathNamespace'],
+    'manifest expected state',
+  );
+  if (
+    value.kind !== 'root' ||
+    typeof value.revision !== 'string' ||
+    !POSITIVE_DECIMAL.test(value.revision) ||
+    (value.root !== 'doorway' && value.root !== 'not-found') ||
+    value.edition !== editionForHost(host) ||
+    value.pathNamespace !== null
+  ) {
+    throw new Error('manifest expected state does not match its synthetic root-test host');
+  }
 }
 
 export function validateRehearsalManifest(value) {
@@ -120,12 +165,11 @@ export function validateRehearsalManifest(value) {
       typeof item.dnsRecordId !== 'string' ||
       item.dnsRecordId.length === 0 ||
       typeof item.routeId !== 'string' ||
-      item.routeId.length === 0 ||
-      typeof item.expectedState !== 'string' ||
-      item.expectedState.length === 0
+      item.routeId.length === 0
     ) {
       throw new Error('manifest artifact metadata is malformed');
     }
+    validateExpectedState(item.host, expectedClass, item.expectedState);
     if (hosts.has(item.host) || dnsIds.has(item.dnsRecordId) || routeIds.has(item.routeId)) {
       throw new Error('manifest hosts and artifact IDs must be unique');
     }
@@ -213,7 +257,7 @@ function validateReviewedArtifact(readback, manifest) {
   }
 }
 
-function validateReservationReceipt(receipt, manifest, binding) {
+function validateReservationReceipt(receipt, reservations, binding) {
   exactKeys(
     receipt,
     ['committed', 'aggregateReservations', 'manifestDigest', 'reservedHosts'],
@@ -222,21 +266,144 @@ function validateReservationReceipt(receipt, manifest, binding) {
   if (
     receipt.committed !== true ||
     !Number.isInteger(receipt.aggregateReservations) ||
-    receipt.aggregateReservations < manifest.hosts.length ||
+    receipt.aggregateReservations < reservations.length ||
     receipt.aggregateReservations > MAX_RESERVATIONS ||
     receipt.manifestDigest !== binding.manifestDigest ||
     !Array.isArray(receipt.reservedHosts)
   ) {
     throw new Error('authoritative reservation transaction did not enforce the aggregate 64 cap');
   }
-  const expected = [...manifest.hosts.map((item) => item.host)].sort();
-  const actual = [...new Set(receipt.reservedHosts)].sort();
-  if (
-    actual.length !== expected.length ||
-    actual.some((host, index) => host !== expected[index])
-  ) {
-    throw new Error('authoritative reservation transaction did not reserve the exact manifest');
+
+  if (receipt.reservedHosts.length !== reservations.length) {
+    throw new Error('authoritative reservation transaction did not attest every reserved host');
   }
+  const expectedByHost = new Map(reservations.map((reservation) => [reservation.host, reservation]));
+  const seen = new Set();
+  for (const attestation of receipt.reservedHosts) {
+    exactKeys(
+      attestation,
+      [
+        'host',
+        'class',
+        'permanent',
+        'runId',
+        'reservationPath',
+        'hostnamePath',
+        'ledgerPath',
+        'hostname',
+        'routerReplica',
+        'projectionDigest',
+        'sourceReplicaEqual',
+      ],
+      'reservation transaction host attestation',
+    );
+    const expected = expectedByHost.get(attestation.host);
+    if (
+      expected === undefined ||
+      seen.has(attestation.host) ||
+      attestation.class !== expected.class ||
+      attestation.permanent !== expected.permanent ||
+      attestation.runId !== expected.runId ||
+      attestation.reservationPath !== expected.reservationPath ||
+      attestation.hostnamePath !== expected.hostnamePath ||
+      attestation.ledgerPath !== expected.ledgerPath ||
+      attestation.sourceReplicaEqual !== true ||
+      attestation.projectionDigest !== expected.projectionDigest ||
+      canonicalJson(attestation.hostname) !== canonicalJson(expected.hostname) ||
+      canonicalJson(attestation.routerReplica) !== canonicalJson(expected.routerReplica)
+    ) {
+      throw new Error('authoritative reservation transaction did not attest exact equal state');
+    }
+    seen.add(attestation.host);
+  }
+}
+
+function desiredForExpectedState(expectedState) {
+  if (expectedState.kind === 'route') {
+    return {
+      kind: 'route',
+      eventId: expectedState.eventId,
+      status: expectedState.status,
+      slug: expectedState.slug,
+      edition: expectedState.edition,
+      pathNamespace: expectedState.pathNamespace,
+    };
+  }
+  return {
+    kind: 'root',
+    root: expectedState.root,
+    edition: expectedState.edition,
+    pathNamespace: expectedState.pathNamespace,
+  };
+}
+
+function hostnameForExpectedState(host, expectedState) {
+  if (expectedState.kind === 'route') {
+    return {
+      eventId: expectedState.eventId,
+      canonicalHost: host,
+      edition: expectedState.edition,
+      status: expectedState.status,
+      slug: expectedState.slug,
+      pathNamespace: expectedState.pathNamespace,
+      isCanonical: true,
+    };
+  }
+  return {
+    root: expectedState.root,
+    edition: expectedState.edition,
+    pathNamespace: expectedState.pathNamespace,
+  };
+}
+
+function digestProjection(routerReplica) {
+  const { desired } = routerReplica;
+  const tuple =
+    desired.kind === 'route'
+      ? [
+          1,
+          routerReplica.revision,
+          routerReplica.host,
+          'route',
+          desired.eventId,
+          desired.status,
+          desired.slug,
+          desired.edition,
+          desired.pathNamespace,
+        ]
+      : [
+          1,
+          routerReplica.revision,
+          routerReplica.host,
+          'root',
+          desired.root,
+          desired.edition,
+          desired.pathNamespace,
+        ];
+  return createHash('sha256').update(JSON.stringify(tuple)).digest('hex');
+}
+
+function reservationFor(item, runId, updatedAt) {
+  const desired = desiredForExpectedState(item.expectedState);
+  const routerReplica = {
+    schemaVersion: 1,
+    revision: item.expectedState.revision,
+    host: item.host,
+    desired,
+    updatedAt,
+  };
+  return {
+    host: item.host,
+    class: item.class,
+    permanent: true,
+    runId,
+    reservationPath: `routerRehearsals/${item.host}`,
+    hostnamePath: `hostnames/${item.host}`,
+    ledgerPath: `routerReplicas/${item.host}`,
+    hostname: hostnameForExpectedState(item.host, item.expectedState),
+    routerReplica,
+    projectionDigest: digestProjection(routerReplica),
+  };
 }
 
 function operations(manifest) {
@@ -276,13 +443,8 @@ export async function provisionRehearsal(
   });
   validateReviewedArtifact(artifact, manifest);
 
-  const reservations = manifest.hosts.map((item) => ({
-    host: item.host,
-    class: item.class,
-    permanent: true,
-    runId: manifest.runId,
-    rootProjection: item.class === 'root-test' ? { pathNamespace: null } : null,
-  }));
+  const updatedAt = new Date(now).toISOString();
+  const reservations = manifest.hosts.map((item) => reservationFor(item, manifest.runId, updatedAt));
   if (typeof dependencies.reserveTransaction !== 'function') {
     throw new Error('authoritative reservation transaction is unavailable');
   }
@@ -292,7 +454,7 @@ export async function provisionRehearsal(
     binding,
     reservations,
   });
-  validateReservationReceipt(receipt, manifest, binding);
+  validateReservationReceipt(receipt, reservations, binding);
   for (const item of manifest.hosts) {
     await dependencies.createExactDns(item.host, item.dnsRecordId, { proxied: true, binding });
     await dependencies.attachExactRoute(item.host, `${item.host}/*`, item.routeId, binding);

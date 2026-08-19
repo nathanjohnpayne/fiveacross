@@ -5,9 +5,12 @@ import {
   type ReplicaDesired,
   type RouterReplicaDesired,
 } from './contracts';
+import type { ConsumedProbeEvidence } from './probe';
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
+const KMS_KEY_VERSION =
+  /^projects\/[^/]+\/locations\/[^/]+\/keyRings\/[^/]+\/cryptoKeys\/[^/]+\/cryptoKeyVersions\/[1-9]\d*$/;
 const MAX_SOURCE_AGE_MS = 5 * 60_000;
 const MAX_ATTESTATION_AGE_MS = 60_000;
 
@@ -181,7 +184,12 @@ export type RecoveryRecord = {
   skippedRevisionRange: null | { from: string; to: string };
   sourceAudit: SourceAudit;
   evidence: RecoveryRequest['action'];
+  probeEvidence: ConsumedProbeEvidence[];
   operatorSub: string;
+  operatorKeyVersion: string;
+  operatorKeyFingerprint: string;
+  operatorSignature: string;
+  requestBodyDigest: string;
   incidentUrl: string;
   reason: string;
   containmentRemains: boolean;
@@ -190,11 +198,18 @@ export type RecoveryRecord = {
 export type RecoveryContext = {
   now: number;
   operatorSub: string;
+  operatorKeyVersion: string;
+  operatorKeyFingerprint: string;
+  operatorSignature: string;
+  requestBodyDigest: string;
   lockId: string;
   publisherIntegrityProven?: boolean;
   activeRegistryConfigDigest?: string;
   activePublisherMappings?: readonly ActivePublisherMapping[];
-  consumeAttestations?: (ids: readonly string[], phase: 'blocked' | 'canonical') => Promise<void>;
+  consumeAttestations?: (
+    ids: readonly string[],
+    phase: 'blocked' | 'canonical',
+  ) => Promise<readonly ConsumedProbeEvidence[]>;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -294,6 +309,36 @@ function validateRecoveryEnvelope(request: RecoveryRequest): void {
   if (incident.protocol !== 'https:' || request.reason.trim().length === 0) {
     throw new Error('incidentUrl must be HTTPS and reason is required');
   }
+}
+
+function validateRecoveryAuthorization(context: RecoveryContext): void {
+  if (
+    context.operatorSub.length === 0 ||
+    !KMS_KEY_VERSION.test(context.operatorKeyVersion) ||
+    !SHA256_HEX.test(context.operatorKeyFingerprint) ||
+    context.operatorSignature.length === 0 ||
+    !SHA256_HEX.test(context.requestBodyDigest)
+  ) {
+    throw new Error('recovery authorization provenance is malformed');
+  }
+}
+
+async function consumeRequiredProbeEvidence(
+  context: RecoveryContext,
+  ids: readonly string[],
+  phase: 'blocked' | 'canonical',
+): Promise<ConsumedProbeEvidence[]> {
+  if (context.consumeAttestations === undefined) {
+    throw new Error('probe attestation consumer is unavailable');
+  }
+  const consumed = [...(await context.consumeAttestations(ids, phase))];
+  if (
+    consumed.length !== ids.length ||
+    consumed.some((entry, index) => entry.id !== ids[index])
+  ) {
+    throw new Error('consumed probe evidence does not match the authorized attestation IDs');
+  }
+  return consumed;
 }
 
 async function validateProviderRequests(
@@ -497,12 +542,39 @@ function validateReplacement(
     throw new Error('quarantined key readback is missing or ambiguous');
   }
   const expectedKeyResources = new Set([replacementKeyResource, ...quarantinedKeyResources]);
+  const replacementKeyReadback = control.keyAccess.find(
+    (readback) => readback.cryptoKey === replacementKeyResource,
+  );
+  const expectedReplacementVersions = control.activeEpochMappings
+    .filter((active) => keyResource(active.keyVersion) === replacementKeyResource)
+    .map((active) => ({
+      keyVersion: active.keyVersion,
+      algorithm: active.algorithm,
+      spkiSha256: active.spkiSha256,
+    }));
+  const versionProjection = (version: KeyAccessReadback['enabledVersions'][number]) =>
+    JSON.stringify([version.keyVersion, version.algorithm, version.spkiSha256]);
   if (
     expectedKeyResources.size !== 2 ||
     new Set(control.keyAccess.map((readback) => readback.cryptoKey)).size !== 2 ||
     control.keyAccess.some((readback) => !expectedKeyResources.has(readback.cryptoKey))
   ) {
     throw new Error('publisher key readbacks do not match the quarantined and replacement resources');
+  }
+  const suppliedReplacementVersions = [...(replacementKeyReadback?.enabledVersions ?? [])]
+    .map(versionProjection)
+    .sort();
+  const configuredReplacementVersions = expectedReplacementVersions.map(versionProjection).sort();
+  if (
+    replacementKeyReadback === undefined ||
+    replacementKeyReadback.signMembers.length !== 1 ||
+    replacementKeyReadback.signMembers[0] !== control.replacementRuntime.iamMember ||
+    suppliedReplacementVersions.length !== configuredReplacementVersions.length ||
+    suppliedReplacementVersions.some(
+      (version, index) => version !== configuredReplacementVersions[index],
+    )
+  ) {
+    throw new Error('replacement key policy must exactly match its active mapping and direct signer');
   }
   const quarantinedMappings = control.activeEpochMappings.filter(
     (active) => active.subject === control.quarantinedRuntime.subject,
@@ -620,6 +692,7 @@ export async function applyRecovery(
   context: RecoveryContext,
 ): Promise<{ state: RegistryState; record: RecoveryRecord }> {
   validateRecoveryEnvelope(request);
+  validateRecoveryAuthorization(context);
   const ledgerPayload = await validateSourceAudit(request.host, request.sourceAudit, context.now);
   const before = committedRef(state.committed);
   if (!sameCommitted(before, request.expectedCommitted)) throw new Error('committed-state CAS failed');
@@ -628,11 +701,16 @@ export async function applyRecovery(
   let nextState: RegistryState = state;
   let skippedRevisionRange: RecoveryRecord['skippedRevisionRange'] = null;
   let containmentRemains = false;
+  let probeEvidence: ConsumedProbeEvidence[] = [];
 
   if (request.action.kind === 'acquire-lock') {
     if (state.recoveryLock !== null) throw new Error('recovery lock already held');
     await validateWafEvidence(request.host, request.action.wafEvidence, context.now);
-    await context.consumeAttestations?.(request.action.wafEvidence.probeAttestationIds, 'blocked');
+    probeEvidence = await consumeRequiredProbeEvidence(
+      context,
+      request.action.wafEvidence.probeAttestationIds,
+      'blocked',
+    );
     nextState = {
       ...state,
       recoverySequence: sequence,
@@ -718,7 +796,11 @@ export async function applyRecovery(
         throw new Error('replacement publisher epoch has not authenticated');
       }
       await validateProviderRequests(request.host, request.action.providerRequests, false, context.now);
-      await context.consumeAttestations?.(request.action.probeAttestationIds, 'canonical');
+      probeEvidence = await consumeRequiredProbeEvidence(
+        context,
+        request.action.probeAttestationIds,
+        'canonical',
+      );
       nextState = { ...state, recoverySequence: sequence, recoveryLock: null };
     } else {
       if (
@@ -730,7 +812,11 @@ export async function applyRecovery(
         throw new Error('fresh source must equal committed state before abort');
       }
       await validateWafEvidence(request.host, request.action.wafEvidence, context.now);
-      await context.consumeAttestations?.(request.action.wafEvidence.probeAttestationIds, 'blocked');
+      probeEvidence = await consumeRequiredProbeEvidence(
+        context,
+        request.action.wafEvidence.probeAttestationIds,
+        'blocked',
+      );
       containmentRemains = true;
       nextState = { ...state, recoverySequence: sequence, recoveryLock: null };
     }
@@ -748,7 +834,12 @@ export async function applyRecovery(
       skippedRevisionRange,
       sourceAudit: request.sourceAudit,
       evidence: request.action,
+      probeEvidence,
       operatorSub: context.operatorSub,
+      operatorKeyVersion: context.operatorKeyVersion,
+      operatorKeyFingerprint: context.operatorKeyFingerprint,
+      operatorSignature: context.operatorSignature,
+      requestBodyDigest: context.requestBodyDigest,
       incidentUrl: request.incidentUrl,
       reason: request.reason,
       containmentRemains,

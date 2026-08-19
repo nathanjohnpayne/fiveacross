@@ -8,7 +8,7 @@ import type { ProbeObservation, ProbePrincipal } from './probe';
 import type { RecoveryRequest, SourceAudit, WafEvidence } from './recovery';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
-const NOW = Date.parse('2026-08-19T12:35:00.000Z');
+const NOW = Date.now();
 let registryBundle = '';
 const instances: Miniflare[] = [];
 
@@ -274,6 +274,11 @@ describe('HostRegistryObject runtime transactions', () => {
         context: {
           now: NOW,
           operatorSub: 'recovery-operator',
+          operatorKeyVersion:
+            'projects/p/locations/l/keyRings/r/cryptoKeys/recovery/cryptoKeyVersions/1',
+          operatorKeyFingerprint: 'e'.repeat(64),
+          operatorSignature: 'signed-recovery-request',
+          requestBodyDigest: 'f'.repeat(64),
           lockId: 'lock-1',
         },
       }),
@@ -289,11 +294,18 @@ describe('HostRegistryObject runtime transactions', () => {
     const audit = await rpc<{
       ok: true;
       page: {
-        records: Array<{ action: string }>;
+        records: Array<{ action: string; probeEvidence: Array<{ subject: string; challenge: { consumed: boolean } }> }>;
         highestAuthenticatedPublisherEpoch: string;
       };
     }>(instance, { op: 'audit', after: '0' });
     expect(audit.page.records.map((record) => record.action)).toEqual(['acquire-lock']);
+    expect(audit.page.records[0].probeEvidence).toHaveLength(3);
+    expect(audit.page.records[0].probeEvidence.map((entry) => entry.subject)).toEqual([
+      'probe-0',
+      'probe-1',
+      'probe-2',
+    ]);
+    expect(audit.page.records[0].probeEvidence.every((entry) => entry.challenge.consumed)).toBe(true);
     expect(audit.page.highestAuthenticatedPublisherEpoch).toBe('7');
 
     await instance.unsafeEvictDurableObject('', 'HostRegistryObject', {
@@ -308,5 +320,115 @@ describe('HostRegistryObject runtime transactions', () => {
     }>(instance, { op: 'audit', after: '0' });
     expect(afterReset.page.recoveryLock.lockId).toBe('lock-1');
     expect(afterReset.page.records.map((record) => record.sequence)).toEqual(['1']);
+  }, 30_000);
+
+  it('expires unused probe artifacts across reset while retaining fresh evidence', async () => {
+    const instance = miniflare();
+    const committed = payload('1', 'alarm-cleanup');
+    await rpc(instance, { op: 'sync', payload: committed, epoch: '1' });
+    const digest = projectionDigest(committed);
+    const runtimeNow = Date.now();
+    const nearlyExpiredNow = runtimeNow - 5 * 60_000 + 250;
+    const principal = (suffix: string): ProbePrincipal => ({
+      subject: `probe-${suffix}`,
+      keyVersion: `probe-key/${suffix}`,
+      keyFingerprint: createHash('sha256').update(suffix).digest('hex'),
+      region: `region-${suffix}`,
+    });
+    const challenge = (nonce: string, runner: ProbePrincipal, now: number) =>
+      rpc<{ ok: boolean }>(instance, {
+        op: 'challenge',
+        request: { host: HOST, phase: 'blocked-before-worker', expectedStateDigest: digest },
+        principal: runner,
+        now,
+        nonce,
+      });
+    const observation = (nonce: string, now: number): ProbeObservation => ({
+      phase: 'blocked-before-worker',
+      probeNonce: nonce,
+      observedAt: new Date(now).toISOString(),
+      rayId: `ray-${nonce}`,
+      host: HOST,
+      requestPath: `/__registry-probe?nonce=${nonce}`,
+      expectedStatus: 403,
+      observedStatus: 403,
+      expectedBlockBodyDigest: 'a'.repeat(64),
+      observedBlockBodyDigest: 'a'.repeat(64),
+    });
+
+    const oldChallengeRunner = principal('old-challenge');
+    await expect(challenge('old-challenge', oldChallengeRunner, nearlyExpiredNow)).resolves.toMatchObject({ ok: true });
+
+    const oldAttestationRunner = principal('old-attestation');
+    await expect(challenge('old-attested', oldAttestationRunner, nearlyExpiredNow)).resolves.toMatchObject({ ok: true });
+    await expect(
+      rpc(instance, {
+        op: 'attest',
+        observation: observation('old-attested', nearlyExpiredNow),
+        principal: oldAttestationRunner,
+        now: nearlyExpiredNow,
+        id: 'reused-attestation-id',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    const freshChallengeRunner = principal('fresh-challenge');
+    await expect(challenge('fresh-challenge', freshChallengeRunner, runtimeNow)).resolves.toMatchObject({ ok: true });
+    const freshAttestationRunner = principal('fresh-attestation');
+    await expect(challenge('fresh-attested', freshAttestationRunner, runtimeNow)).resolves.toMatchObject({ ok: true });
+    await expect(
+      rpc(instance, {
+        op: 'attest',
+        observation: observation('fresh-attested', runtimeNow),
+        principal: freshAttestationRunner,
+        now: runtimeNow,
+        id: 'fresh-attestation-id',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await instance.unsafeEvictDurableObject('', 'HostRegistryObject', { name: HOST });
+
+    const deadline = Date.now() + 2_000;
+    let reusedChallenge: { ok: boolean } = { ok: false };
+    while (!reusedChallenge.ok && Date.now() < deadline) {
+      reusedChallenge = await challenge('old-challenge', oldChallengeRunner, Date.now());
+      if (!reusedChallenge.ok) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(reusedChallenge).toMatchObject({ ok: true });
+
+    const replacementRunner = principal('replacement-old-attestation');
+    await expect(challenge('replacement-old-attestation', replacementRunner, Date.now())).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(
+      rpc(instance, {
+        op: 'attest',
+        observation: observation('replacement-old-attestation', Date.now()),
+        principal: replacementRunner,
+        now: Date.now(),
+        id: 'reused-attestation-id',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await expect(
+      rpc(instance, {
+        op: 'attest',
+        observation: observation('fresh-challenge', runtimeNow),
+        principal: freshChallengeRunner,
+        now: runtimeNow,
+        id: 'fresh-challenge-attestation',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    const duplicateRunner = principal('duplicate-fresh');
+    await expect(challenge('duplicate-fresh', duplicateRunner, runtimeNow)).resolves.toMatchObject({ ok: true });
+    await expect(
+      rpc(instance, {
+        op: 'attest',
+        observation: observation('duplicate-fresh', runtimeNow),
+        principal: duplicateRunner,
+        now: runtimeNow,
+        id: 'fresh-attestation-id',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'probe-refused' });
   }, 30_000);
 });

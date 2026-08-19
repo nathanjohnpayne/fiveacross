@@ -24,15 +24,23 @@ describe('registry Worker capability/configuration contract', () => {
     expect(entrypoint).not.toMatch(/\b(sync|recover|audit)\s*\(/);
   });
 
-  it('commits recovery state and its sequence-addressed history record in one transaction', async () => {
+  it('retains recovery history before atomically deleting consumed probe evidence and expiry indexes', async () => {
     const source = await readFile(SOURCE, 'utf8');
     const recover = source.slice(source.indexOf('async recover('), source.indexOf('async issueProbeChallenge('));
     expect(recover).toContain('this.ctx.storage.transaction');
-    expect(recover).toContain('transaction.put(STATE_KEY, result.state)');
-    expect(recover).toMatch(
+    const stateWrite = recover.indexOf('transaction.put(STATE_KEY, result.state)');
+    const historyWrite = recover.search(
       /transaction\.put\(\s*decimalKey\(HISTORY_PREFIX, result\.record\.sequence\),\s*result\.record,?\s*\)/,
     );
-    expect(recover).toContain('transaction.delete(keys)');
+    const evidenceDelete = recover.indexOf(
+      'transaction.delete([...consumedAttestationKeys, ...consumedAttestationExpiryKeys])',
+    );
+    expect(stateWrite).toBeGreaterThan(0);
+    expect(historyWrite).toBeGreaterThan(stateWrite);
+    expect(evidenceDelete).toBeGreaterThan(historyWrite);
+    expect(recover).toMatch(
+      /consumedAttestationExpiryKeys = .*\.map\([\s\S]*?probeExpiryKey\(probeAttestationExpiresAt\(attestation\), keys\[index\]\)/,
+    );
   });
 
   it('owns one SQLite-backed per-host namespace, fixed placement, rate limiting, and no KV', async () => {
