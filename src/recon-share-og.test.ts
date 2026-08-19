@@ -260,7 +260,10 @@ describe('recon: the per-Edition unfurl artwork is regenerable and table-driven 
     // literal copy of any of those strings in the renderer's CODE is the drift
     // this replaces, so it fails here. Comments are stripped first: the header
     // legitimately narrates #681's 🗺️ → 🧳 move and #688's endorsement.
-    const code = read('../scripts/og/render-og-editions.mjs')
+    const code = [
+      read('../scripts/og/render-og-editions.mjs'),
+      read('../scripts/og/og-edition-art.mjs'),
+    ].join('\n')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '');
     for (const edition of ['gcb', 'vacay', 'fiveacross']) {
