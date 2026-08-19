@@ -1406,6 +1406,21 @@ export type MembershipDoc = ActiveMembership | RevokedMembership;
 export type AdmissionOutcome =
   | 'admitted'
   | 'admitted-unenforced'
+  /**
+   * Admitted ONLY by Decision D-A's transitional `|| isAdmin(eventId)` disjunct
+   * — the caller is on `EventDoc.admins` but holds no active membership, and
+   * the Event IS enforced. Exists so the transitional posture is representable
+   * in the reference predicate rather than only in prose (Phase 4b P1 on PR
+   * #891): without it, `admits()` cannot express the state D-A tells #804 to
+   * ship, and the reference would contradict the rules it is supposed to pin.
+   *
+   * **This outcome is the bypass, so it is also the audit hook.** Every
+   * admission it accounts for is one the final posture denies. It disappears
+   * when #805's backfill is verified and the disjunct is removed; a non-zero
+   * count at that point is exactly the set D-A's rollout has not finished
+   * with, and `adminsMissingMembership()` names them.
+   */
+  | 'admitted-admin-transitional'
   /** No authenticated identity. Denies FIRST, before the enforcement switch is
    *  consulted, mirroring the reference predicate's leading `signedIn()` — an
    *  unenforced Event is open to every signed-in account, not to the public. */

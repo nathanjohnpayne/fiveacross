@@ -47,6 +47,7 @@ import type {
   AdmissionDecision,
   AdmissionOutcome,
   EventDoc,
+  MembershipBase,
   MembershipDoc,
   MembershipEnforcement,
   MembershipRole,
@@ -65,8 +66,16 @@ export const MEMBERSHIP_COLLECTION = 'memberships';
  * never as coerced data.
  *
  * DELIBERATELY NOT AN AUTHORIZATION INPUT — see `admits` below.
+ *
+ * ANNOTATED, NOT INFERRED (Phase 4b P2 on PR #891). The type annotation is the
+ * lockstep with `MembershipBase['schemaVersion']` that the contract's own
+ * comment promises. Left inferred, the two `1`s were independent literals: a
+ * writer could bump one and type-check, persisting records that AUTHORIZE —
+ * `admits()` is version-blind by design — while `readMembership()` rejects
+ * every one of them, and no test would fail because the fixtures derive their
+ * version from THIS constant. Now a one-sided bump is a compile error.
  */
-export const MEMBERSHIP_SCHEMA_VERSION = 1;
+export const MEMBERSHIP_SCHEMA_VERSION: MembershipBase['schemaVersion'] = 1;
 
 /**
  * The one path builder. Rules, Storage rules, the client, the Functions and the
@@ -247,14 +256,34 @@ export function membershipEnforcementFor(
  *
  *  - reads the RAW membership data, not a parsed record (rules see raw data);
  *  - is version-blind (see {@link isActiveMembershipData});
- *  - does NOT treat Admin as implying admission. `EventDoc.admins` stays the
- *    sole authority on PRIVILEGE and `memberships` the sole authority on
- *    ADMISSION; the model instead requires every Admin to hold a membership,
- *    an invariant {@link adminsMissingMembership} checks and the grant path
- *    maintains. A disjunction here would make `admins` a second membership
- *    system, cost a second `firestore.get()` on every Storage media read, and
- *    still need the invariant anyway. The break-glass for an Admin locked out
- *    by a backfill miss is the enforcement switch, not a rules clause.
+ *  - does NOT treat Admin as implying admission IN THE FINAL POSTURE.
+ *    `EventDoc.admins` stays the sole authority on PRIVILEGE and `memberships`
+ *    the sole authority on ADMISSION; the model requires every Admin to hold a
+ *    membership, an invariant {@link adminsMissingMembership} checks and the
+ *    grant path maintains. A permanent disjunction would make `admins` a second
+ *    membership system, cost a second `firestore.get()` on every Storage media
+ *    read, and still need the invariant anyway.
+ *
+ * THE TRANSITIONAL EXCEPTION, AND WHY IT IS A PARAMETER. Decision D-A (ruled by
+ * the owner 2026-08-18) ships exactly that disjunction — `|| isAdmin(eventId)` —
+ * in #804 and removes it once #805's backfill is verified. The three objections
+ * above are still true; they are why it is transitional rather than the design.
+ * `transitionalAdminBypass` therefore selects the posture instead of the module
+ * picking one, so parity can be pinned against whichever rules text is deployed
+ * (Phase 4b P1 on PR #891: a reference that could not express D-A would force
+ * #804 to contradict either the ruling or these tests, and could authorize one
+ * UID differently across Firestore, Storage and Functions).
+ *
+ *    **The bypass admits a REVOKED Admin, and that is not an oversight.**
+ *    `|| isAdmin(eventId)` is a pure disjunct in rules, so it fires no matter
+ *    WHY the membership check failed — absent, revoked, or unreadable. Mirroring
+ *    that faithfully re-opens the round 4 P1 on this PR ("revoked Admin still
+ *    passes `isAdmin()`") for the duration of the rollout. Narrowing it here to
+ *    exclude revocation would be safer in isolation and WORSE in aggregate: the
+ *    reference would no longer match the deployed clause, which is the precise
+ *    failure this parameter exists to prevent. If that residual is unacceptable,
+ *    the fix belongs in D-A — a narrowed rules clause costing another `get()` —
+ *    not in a reference that silently disagrees with the rules.
  *
  * BANNING IS DELIBERATELY NOT ADMISSION. `isBanned` is accepted and, by design,
  * changes nothing about the outcome. `EventDoc.bannedUids` is a presentational,
@@ -289,8 +318,29 @@ export function admits(input: {
   membership: unknown;
   /** Whether the uid appears in `EventDoc.bannedUids`. Does not affect admission. */
   isBanned?: boolean;
+  /**
+   * Whether the uid appears in `EventDoc.admins`. Consulted ONLY when
+   * {@link transitionalAdminBypass} is in force; absent that flag this input is
+   * inert, because the final posture denies an Admin who holds no membership.
+   */
+  isAdmin?: boolean;
+  /**
+   * Whether Decision D-A's transitional `|| isAdmin(eventId)` disjunct is
+   * deployed (Phase 4b P1 on PR #891).
+   *
+   * A DEPLOY-TIME property, not data: it is the presence of a clause in the
+   * rules text during rollout, and #804 ships it while a follow-up removes it.
+   * It is a parameter here rather than a constant so the reference predicate
+   * can be exercised in BOTH postures and pinned against whichever rules text
+   * is actually deployed — the alternative, hard-coding one of them, is what
+   * makes a reference and its rules drift.
+   *
+   * Defaults to `false`: the final posture is the contract, and the bypass is
+   * the temporary deviation that has to be asked for explicitly.
+   */
+  transitionalAdminBypass?: boolean;
 }): AdmissionDecision {
-  const { uid, enforcement, membership } = input;
+  const { uid, enforcement, membership, isAdmin, transitionalAdminBypass } = input;
 
   if (typeof uid !== 'string' || uid === '') {
     return { admitted: false, outcome: 'denied-not-signed-in' };
@@ -299,10 +349,16 @@ export function admits(input: {
     return { admitted: true, outcome: 'admitted-unenforced' };
   }
   if (membership == null || typeof membership !== 'object') {
+    if (transitionalAdminBypass === true && isAdmin === true) {
+      return { admitted: true, outcome: 'admitted-admin-transitional' };
+    }
     return { admitted: false, outcome: 'denied-not-a-member' };
   }
   if (isActiveMembershipData(membership)) {
     return { admitted: true, outcome: 'admitted' };
+  }
+  if (transitionalAdminBypass === true && isAdmin === true) {
+    return { admitted: true, outcome: 'admitted-admin-transitional' };
   }
   const status = (membership as { status?: unknown }).status;
   return {
@@ -320,10 +376,12 @@ export function admits(input: {
  * these FIRST, before any enforcement flip, and this predicate is what makes
  * "first" checkable rather than merely instructed.
  *
- * Pure and order-independent: takes the Event's `admins` roster and whatever
- * membership records were read, and returns the uids in the first with no
- * ACTIVE record in the second. A revoked Admin counts as missing, because a
- * revoked membership does not admit.
+ * Pure, and order-independent in the strong sense: the returned array is
+ * sorted, so the same Admin set yields a byte-identical result regardless of
+ * roster order. Takes the Event's `admins` roster and whatever membership
+ * records were read, and returns the uids in the first with no ACTIVE record in
+ * the second. A revoked Admin counts as missing, because a revoked membership
+ * does not admit.
  */
 export function adminsMissingMembership(input: {
   admins: readonly string[];
@@ -337,7 +395,12 @@ export function adminsMissingMembership(input: {
     seen.add(uid);
     if (!isActiveMembershipData(input.memberships[uid])) missing.push(uid);
   }
-  return missing;
+  // Sorted, so the documented order-independence is a property of the RESULT
+  // and not merely of the answer's membership (Phase 4b P3 on PR #891). Without
+  // this the output followed `input.admins` order, so the same Admin set read
+  // back in a different order produced a different array — and #805 compares
+  // and logs this list across runs.
+  return missing.sort();
 }
 
 export type { AdmissionDecision, AdmissionOutcome };

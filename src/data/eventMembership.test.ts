@@ -20,6 +20,7 @@ import {
 const EVENT = 'cruise';
 const ALICE = 'alice-uid';
 const BOB = 'bob-uid';
+const CAROL = 'carol-uid';
 
 // Overrides are deliberately loose: many fixtures below construct records the
 // contract forbids (a drifted schemaVersion, a bad status, a half-applied
@@ -328,6 +329,135 @@ describe('admits — the one decision', () => {
   });
 });
 
+describe('the schemaVersion lockstep is enforced by the compiler, not by convention', () => {
+  it('accepts a fully typed MembershipDoc built from the runtime constant', () => {
+    // Phase 4b P2 on PR #891. Every other fixture here is deliberately loose so
+    // it can express shapes the contract forbids; the consequence was that NO
+    // test ever type-checked a record against `MembershipDoc`, and the import
+    // sat unused. This one is typed, so if `MembershipBase['schemaVersion']`
+    // and `MEMBERSHIP_SCHEMA_VERSION` ever disagree the file stops compiling —
+    // which is the same failure the annotation on the constant produces, caught
+    // from the consumer's side instead of the producer's.
+    const typed: MembershipDoc = {
+      schemaVersion: MEMBERSHIP_SCHEMA_VERSION,
+      eventId: EVENT,
+      uid: ALICE,
+      role: 'member',
+      status: 'active',
+      grantedAt: 1_700_000_000_000,
+      grantedBy: 'admin-uid',
+      invitationId: 'inv-1',
+    };
+    expect(readMembership(typed)).not.toBeNull();
+    expect(admits({ uid: ALICE, enforcement: 'enforced', membership: typed }).admitted).toBe(true);
+  });
+});
+
+describe('Decision D-A — the transitional Admin bypass #804 ships and a follow-up removes', () => {
+  // Phase 4b P1 on PR #891: D-A told #804 to ship `|| isAdmin(eventId)` while
+  // this reference and its tests required an Admin without a membership to be
+  // DENIED. #804 could satisfy one or the other, never both. These pin BOTH
+  // postures so the deployed rules text always has a matching reference.
+
+  it('denies an Admin who holds no membership in the FINAL posture', () => {
+    // The flag defaults off, so this is what the contract says absent D-A.
+    expect(
+      admits({ uid: ALICE, enforcement: 'enforced', membership: null, isAdmin: true }),
+    ).toEqual({ admitted: false, outcome: 'denied-not-a-member' });
+  });
+
+  it('admits that same Admin while the transitional disjunct is deployed', () => {
+    expect(
+      admits({
+        uid: ALICE,
+        enforcement: 'enforced',
+        membership: null,
+        isAdmin: true,
+        transitionalAdminBypass: true,
+      }),
+    ).toEqual({ admitted: true, outcome: 'admitted-admin-transitional' });
+  });
+
+  it('does not admit a NON-Admin just because the bypass is deployed', () => {
+    expect(
+      admits({
+        uid: BOB,
+        enforcement: 'enforced',
+        membership: null,
+        isAdmin: false,
+        transitionalAdminBypass: true,
+      }),
+    ).toEqual({ admitted: false, outcome: 'denied-not-a-member' });
+  });
+
+  it('still denies an unauthenticated caller — the bypass sits BELOW signedIn()', () => {
+    // `|| isAdmin(eventId)` is inside the parenthesised disjunction; the leading
+    // `signedIn()` conjunct is outside it. A bypass that outranked sign-in would
+    // open every enforced Event to the public.
+    expect(
+      admits({
+        uid: null,
+        enforcement: 'enforced',
+        membership: null,
+        isAdmin: true,
+        transitionalAdminBypass: true,
+      }),
+    ).toEqual({ admitted: false, outcome: 'denied-not-signed-in' });
+  });
+
+  it('admits a REVOKED Admin while deployed — the accepted cost, pinned so it cannot drift in silently', () => {
+    // This is round 4's P1 on this PR ("revoked Admin still passes isAdmin()")
+    // re-opened for the duration of the rollout, because `|| isAdmin(eventId)`
+    // is a pure disjunct and fires regardless of WHY membership failed. Pinned
+    // rather than quietly narrowed: a reference that excluded revocation would
+    // be safer in isolation and would no longer match the deployed clause.
+    expect(
+      admits({
+        uid: ALICE,
+        enforcement: 'enforced',
+        membership: activeRecord({ status: 'revoked' }),
+        isAdmin: true,
+        transitionalAdminBypass: true,
+      }),
+    ).toEqual({ admitted: true, outcome: 'admitted-admin-transitional' });
+    // ...and is denied the moment the disjunct comes out.
+    expect(
+      admits({
+        uid: ALICE,
+        enforcement: 'enforced',
+        membership: activeRecord({ status: 'revoked' }),
+        isAdmin: true,
+      }),
+    ).toEqual({ admitted: false, outcome: 'denied-revoked' });
+  });
+
+  it('is inert on an UNENFORCED Event, which is every Event today', () => {
+    expect(
+      admits({
+        uid: ALICE,
+        enforcement: 'off',
+        membership: null,
+        isAdmin: true,
+        transitionalAdminBypass: true,
+      }),
+    ).toEqual({ admitted: true, outcome: 'admitted-unenforced' });
+  });
+
+  it('never fires for an Admin who DOES hold an active membership', () => {
+    // The bypass must not shadow a real admission, or the audit count it exists
+    // to provide would overstate how much of the rollout is still outstanding.
+    expect(
+      admits({
+        uid: ALICE,
+        enforcement: 'enforced',
+        membership: activeRecord(),
+        isAdmin: true,
+        transitionalAdminBypass: true,
+      }),
+    ).toEqual({ admitted: true, outcome: 'admitted' });
+  });
+});
+
 describe('adminsMissingMembership — the invariant #805 must satisfy before any flip', () => {
   it('is empty when every Admin holds an active membership', () => {
     expect(
@@ -353,8 +483,20 @@ describe('adminsMissingMembership — the invariant #805 must satisfy before any
     ).toEqual([ALICE]);
   });
 
-  it('is order-independent and de-duplicates a repeated admin uid', () => {
+  it('de-duplicates a repeated admin uid', () => {
     expect(adminsMissingMembership({ admins: [BOB, BOB], memberships: {} })).toEqual([BOB]);
+  });
+
+  it('is order-independent in the result, not merely in the answer it contains', () => {
+    // Phase 4b P3 on PR #891: the previous test under this name only proved
+    // de-duplication. The contract's claim is stronger — the same Admin SET
+    // must produce the same ARRAY — and before the sort it did not, because the
+    // output followed roster order. Two permutations, compared directly.
+    const memberships = { [ALICE]: activeRecord({ uid: ALICE }) };
+    const forward = adminsMissingMembership({ admins: [ALICE, BOB, CAROL], memberships });
+    const reversed = adminsMissingMembership({ admins: [CAROL, BOB, ALICE], memberships });
+    expect(forward).toEqual(reversed);
+    expect(forward).toEqual([BOB, CAROL].sort());
   });
 
   it('ignores empty and non-string entries rather than reporting them as people', () => {
