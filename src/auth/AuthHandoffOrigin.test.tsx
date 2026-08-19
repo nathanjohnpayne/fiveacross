@@ -5,6 +5,7 @@
 // that would be silent: it must navigate to the SERVER's URL verbatim, it must
 // not mint twice under StrictMode's double-invoked effects, and it must refuse a
 // malformed request rather than redirect to Google and strand the player.
+import { StrictMode } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -83,10 +84,8 @@ describe('AuthHandoffOrigin', () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
-  // StrictMode double-invokes effects in development, and both legs navigate the
-  // browser — an unguarded page fires two redirects and mints a second code
-  // nobody ever redeems.
-  it('mints once even when the effect runs twice', async () => {
+  // A plain re-render must not restart anything.
+  it('mints once across a re-render', async () => {
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/`);
 
@@ -95,6 +94,39 @@ describe('AuthHandoffOrigin', () => {
 
     await waitFor(() => expect(replace).toHaveBeenCalled());
     expect(mocks.mintAuthHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  // The REAL StrictMode lifecycle — setup, cleanup, setup — which a bare
+  // `rerender` does not exercise (Codex P2, round 1). Module-lifetime once-guards
+  // survive that cleanup, so the second setup used to return having done
+  // nothing while the first setup's continuations were already cancelled,
+  // leaving this page on "Signing you in…" forever in development. Under
+  // StrictMode React also double-invokes the render body, so the mint may be
+  // attempted twice; what must hold is that the page RESOLVES.
+  it('still completes under a real StrictMode mount', async () => {
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
+
+    render(
+      <StrictMode>
+        <AuthHandoffOrigin search={SEARCH} navigate={replace} />
+      </StrictMode>,
+    );
+
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(`${ORIGIN}/board`));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('still redirects a signed-out visitor under a real StrictMode mount', async () => {
+    withSession(null);
+
+    render(
+      <StrictMode>
+        <AuthHandoffOrigin search={SEARCH} navigate={replace} />
+      </StrictMode>,
+    );
+
+    await waitFor(() => expect(mocks.signInWithRedirect).toHaveBeenCalled());
   });
 
   it('refuses a malformed request without touching Google or the server', async () => {
@@ -129,15 +161,20 @@ describe('AuthHandoffOrigin', () => {
     expect(screen.getByText(/didn't finish/i)).toBeInTheDocument();
   });
 
-  // A rejected `getRedirectResult` is an ordinary first visit, not an error:
-  // swallowing it is what lets the session check below still run.
-  it('still checks the session when the redirect result rejects', async () => {
-    withSession({ uid: 'u1' });
-    mocks.getRedirectResult.mockRejectedValue(new Error('no pending redirect'));
-    mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/`);
+  // A rejected `getRedirectResult` is TERMINAL, not an ordinary first visit
+  // (Codex P2, round 1). An ordinary first visit resolves `null`; a rejection
+  // means Google returned an OAuth error or the player cancelled. Swallowing it
+  // left the observer seeing a signed-out user and firing another redirect —
+  // bouncing the player back to Google in a loop instead of showing the failure.
+  it('treats a rejected redirect result as terminal instead of looping to Google', async () => {
+    withSession(null);
+    mocks.getRedirectResult.mockRejectedValue(new Error('auth/user-cancelled'));
 
     render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
 
-    await waitFor(() => expect(replace).toHaveBeenCalledWith(`${ORIGIN}/`));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.getByText(/didn't finish/i)).toBeInTheDocument();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
   });
 });

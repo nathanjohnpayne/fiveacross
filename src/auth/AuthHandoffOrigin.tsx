@@ -23,7 +23,7 @@
  * `AuthContext` itself calls redirect stable). So there is no UA sniffing here
  * and no second copy of that decision to drift.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getRedirectResult, onAuthStateChanged, signInWithRedirect } from 'firebase/auth';
 import { auth, googleProvider } from '../firebase';
 import { parseHandoffRequest, type HandoffRequest } from './handoffClient';
@@ -84,15 +84,11 @@ export default function AuthHandoffOrigin({
 }) {
   const [phase, setPhase] = useState<Phase>('checking');
   const [failure, setFailure] = useState<FailureKind | null>(null);
-  // Both legs are once-per-mount. React 18 StrictMode double-invokes effects in
-  // development, and each of these navigates the browser — without the guards a
-  // dev run fires two redirects and two mints, spending a code nobody redeems.
-  const startedRef = useRef(false);
-  const mintedRef = useRef(false);
 
-  // Memoised for the same reason `navigate` is hoisted: a fresh object each
-  // render would re-run the effect below, whose cleanup cancels the in-flight
-  // sign-in that the once-guard then declines to restart.
+  // Memoised for the same reason `navigate` is hoisted to module scope: a fresh
+  // object each render would change the effect's dependencies, and this effect
+  // owns an in-flight sign-in that must not be torn down and restarted by an
+  // unrelated re-render.
   const request: HandoffRequest | null = useMemo(() => parseHandoffRequest(search), [search]);
 
   const fail = useCallback((kind: FailureKind) => {
@@ -100,52 +96,59 @@ export default function AuthHandoffOrigin({
     setPhase('failed');
   }, []);
 
-  const bounce = useCallback(
-    async (req: HandoffRequest) => {
-      if (mintedRef.current) return;
-      mintedRef.current = true;
+  // EVERYTHING lives inside the effect, with plain locals instead of refs, and
+  // that is the fix for a StrictMode hang rather than a style preference (Codex
+  // P2, round 1). React 18 StrictMode runs setup, cleanup, then setup again in
+  // development. Module-lifetime refs used as once-guards survive that cleanup,
+  // so the second setup saw "already started, already minted" and returned
+  // without doing anything — while the first setup's continuations had been
+  // marked cancelled. The page then sat on "Signing you in…" forever, on the one
+  // origin every Event depends on for sign-in, in exactly the environment it is
+  // developed in. Effect-scoped locals are re-created by the second setup, so
+  // the replay proceeds correctly; in production the effect runs once and the
+  // cleanup only fires when the page is leaving anyway.
+  useEffect(() => {
+    if (request === null) {
+      fail('bad-request');
+      return;
+    }
+
+    let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
+    // The observer acts at most once per setup. A flag rather than
+    // unsubscribing from inside the callback, because `onAuthStateChanged` may
+    // invoke its observer SYNCHRONOUSLY when the auth state is already known —
+    // in which case the callback runs before the returned unsubscribe function
+    // has been assigned, and reaching for it there is a temporal-dead-zone
+    // throw.
+    let handled = false;
+    let minted = false;
+
+    const bounce = async (req: HandoffRequest) => {
+      if (minted) return;
+      minted = true;
       setPhase('minting');
       try {
         const handoffUrl = await mintAuthHandoff(req);
+        if (cancelled) return;
         // VERBATIM, and `replace` rather than `assign`: the server built this
         // URL precisely so no client assembles a redirect target, and leaving
         // the central origin in history would put a spent handoff URL one Back
         // tap away.
         navigate(handoffUrl);
       } catch {
-        fail('mint-failed');
+        if (!cancelled) fail('mint-failed');
       }
-    },
-    [fail, navigate],
-  );
+    };
 
-  useEffect(() => {
-    if (request === null) {
-      fail('bad-request');
-      return;
-    }
-    if (startedRef.current) return;
-    startedRef.current = true;
-
-    let cancelled = false;
-    let unsubscribe: (() => void) | null = null;
-    // The observer acts exactly once. A `handled` flag rather than
-    // unsubscribing from inside the callback, because `onAuthStateChanged` may
-    // invoke its observer SYNCHRONOUSLY when the auth state is already known —
-    // in which case the callback runs before the returned unsubscribe function
-    // has been assigned, and reaching for it there is a temporal-dead-zone
-    // throw. Leaving the subscription up until cleanup is harmless: this page's
-    // only outcomes navigate away.
-    let handled = false;
-
-    // Settle the redirect return FIRST. `getRedirectResult` resolves non-null
-    // only on an actual return from Google, and it is what surfaces a failed
-    // round trip as an error rather than as a silent second redirect. A
-    // REJECTION here is an ordinary first visit, not a failure, so it is
-    // swallowed — the session check below is what decides either way.
-    void getRedirectResult(auth)
-      .catch(() => null)
-      .then(() => {
+    // Settle the redirect return FIRST. A REJECTION here is TERMINAL, not an
+    // ordinary first visit (Codex P2, round 1): an ordinary first visit resolves
+    // `null`, so a rejection means Google returned an OAuth error or the player
+    // cancelled. Swallowing it would leave the observer below seeing a
+    // signed-out user and firing `signInWithRedirect` again — bouncing the
+    // player back to Google in a loop instead of showing them the failure.
+    void getRedirectResult(auth).then(
+      () => {
         if (cancelled) return;
         // Then ask the session itself rather than trusting the result above: a
         // player who already has a session at this origin (a second Event, or a
@@ -162,13 +165,17 @@ export default function AuthHandoffOrigin({
             if (!cancelled) fail('sign-in-failed');
           });
         });
-      });
+      },
+      () => {
+        if (!cancelled) fail('sign-in-failed');
+      },
+    );
 
     return () => {
       cancelled = true;
       unsubscribe?.();
     };
-  }, [request, bounce, fail]);
+  }, [request, fail, navigate]);
 
   const body =
     phase === 'failed' && failure !== null

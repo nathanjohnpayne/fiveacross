@@ -59,6 +59,10 @@ Absent or malformed in handoff mode on an unregistered host, sign-in reports `ha
 
 The published transaction id is `base64url(SHA-256(verifier))`, computed with WebCrypto and required to be byte-identical to the server's `transactionIdFor`. A padding or alphabet drift would not fail loudly—it would fail as "this sign-in link is no longer valid" on every handoff, indistinguishable from a dozen benign causes—so the two implementations are pinned against each other in a parity test rather than trusted to a comment.
 
+**The stores are reached through a guarded accessor, never named directly at a call site.** Reading `globalThis.sessionStorage` is not a safe property access: in privacy-restricted browsers and some embedded contexts the getter itself throws `SecurityError`, and evaluated as a call argument that throw escapes before the helper's own `try` can run—so the fallback store never gets a turn and the start leg rejects instead of reporting `start-failed`.
+
+**A write is confirmed by reading back the record that was just written, not merely a record.** An abandoned, still-in-TTL transaction is readable, so the previous one is cleared first and the confirmation compares verifiers. Otherwise a write that fails in the session-first store while succeeding in the other would navigate with the new digest while the return leg reads the old verifier—every exchange rejected as a transaction mismatch, with neither side looking broken.
+
 **The verifier is written to both `sessionStorage` and `localStorage`, and read session-first.** `sessionStorage` is the narrower, correct-by-default home, but "the return lands in the tab that left" is not guaranteed: an installed PWA can hand a top-level navigation to the browser rather than the app window, and iOS Safari is already documented in this repo (`SIGNIN_ADULT_ACK_KEY`, `src/auth/AuthContext.tsx`) as dropping sessionStorage across a provider round trip while localStorage survives. A lost verifier is not a security failure; it is an unrecoverable dead end, because the code it was paired with is single-use and already spent by the time the loss is discovered. Neither store is assumed to exist—both are reached through `globalThis` with optional chaining, since a browser in private mode, and this repo's own jsdom test environment, can be missing one.
 
 **The local TTL is deliberately looser than the server's, not tighter.** `HANDOFF_TRANSACTION_TTL_MS` is five minutes against the server's 120-second `HANDOFF_TTL_MS`. The server owns expiry and is the only clock that may reject a code for age; a tighter local window would discard the verifier for a code the server would still have honoured. A record stamped in the future is rejected too—the clock moved during the round trip, which makes the age unknowable rather than small.
@@ -79,6 +83,10 @@ Only the digest travels. The verifier appears nowhere in the URL, and neither do
 
 The page settles any redirect return, then asks the session directly—an existing session at this origin mints immediately and never shows Google at all. Otherwise it starts `signInWithRedirect`, and on return calls `mintAuthHandoff` and navigates to the returned `handoffUrl`.
 
+**A rejected `getRedirectResult` is terminal, not an ordinary first visit.** An ordinary first visit resolves `null`; a rejection means Google returned an OAuth error or the player cancelled. Swallowing it leaves the session check seeing a signed-out user and firing another redirect, bouncing the player back to Google in a loop instead of showing them the failure.
+
+**All of the page's state is effect-scoped rather than held in refs**, which is what lets React StrictMode's setup/cleanup/setup replay in development proceed. Refs survive the cleanup, so once-guards held in them made the second setup return having done nothing while the first setup's continuations were already cancelled—leaving the page on "Signing you in…" forever, on the one origin every Event depends on for sign-in, in exactly the environment it is developed in.
+
 **Always redirect, never popup, and this is the one place that is unconditionally right.** `AuthContext` chooses between them because it is protecting live app state and an installed-PWA window that loses its OAuth popup (#395, #347). This page has no state to lose—everything it needs is in its own query string, which survives the round trip in the address bar—and its OAuth helper is same-origin by construction, which is exactly the condition under which `AuthContext` itself calls redirect stable. So there is no UA sniffing here and no second copy of that decision to drift.
 
 **The `handoffUrl` is navigated to verbatim, with `replace` rather than `assign`.** The server returns a URL rather than a code precisely so that no client ever assembles a redirect target; rebuilding or appending to it is what would reintroduce the open redirect. `replace` keeps a spent handoff URL from sitting one Back tap away.
@@ -94,6 +102,8 @@ The fragment is cleared first, unconditionally, with `history.replaceState`—no
 **The verifier is deleted on every terminal path, success included**, and before the sign-in rather than after: it has done its only job the moment the exchange returns, and the code it was paired with is spent either way. That also means the client cannot replay a handoff even if asked to—there is nothing left to replay it with.
 
 **Nothing here retries.** The code is single-use and spent by the time anything can fail, so a retry could only fail again.
+
+**A timed-out sign-in is explicitly reconciled, because a bound rejects rather than cancels.** A slow `signInWithCustomToken` can still succeed after the bound has given up, by which point the app has mounted signed out and the player is looking at a retry prompt—so a late session is either a surprise entry into the app or a race against the second handoff they just started. An abandoned attempt that lands late is therefore signed straight back out, which makes the outcome deterministic in both directions.
 
 **Both network steps are bounded by `HANDOFF_EXCHANGE_TIMEOUT_MS` (15s), and that bound guards a blank screen rather than a slow one.** `main.tsx` awaits this leg before it renders anything, so an exchange that never settles renders *nothing at all*—the 2026-07-24 incident shape the whole bootstrap path is written to avoid. Captive and shipboard wifi produce exactly that: `navigator.onLine` true and a request that hangs forever. Timing out costs the player one re-sign-in; not timing out costs them the app.
 
@@ -137,6 +147,11 @@ All three are pinned by a parity test that imports both sides, the same shape `s
 - **Given** a return whose verifier is missing or whose origin does not match, **when** the handoff completes, **then** it fails by name without sending the verifier anywhere. (Test: transaction-missing, origin-mismatch.)
 - **Given** a rejected exchange or a rejected custom token, **when** the handoff completes, **then** it fails by name, retries nothing, and leaves no verifier behind. (Test: exchange-rejected, sign-in-failed.)
 - **Given** an exchange or a sign-in that never settles, **when** the handoff completes, **then** it gives up inside the bound and lets the app mount signed out, rather than holding the render forever. (Test: exchange-hangs, sign-in-hangs.)
+- **Given** a sign-in that succeeds after the bound gave up, **then** it is signed back out rather than allowed to enter the app unannounced. (Test: late-sign-in-reconciled.)
+- **Given** a store whose name throws on access, **when** a transaction is stored, **then** the other store still takes it and nothing throws out of the start leg. (Test: unnameable-store.)
+- **Given** an abandoned transaction still in storage and a failed write to the session-first store, **when** the write is confirmed, **then** it reports failure rather than accepting the stale record. (Test: stale-record-not-accepted.)
+- **Given** a rejected `getRedirectResult` at the central origin, **then** it is reported as a failure rather than starting another redirect to Google. (Test: redirect-rejection-terminal.)
+- **Given** a real StrictMode mount of the central-origin page, **then** the bounce still completes. (Test: strictmode-completes.)
 - **Given** a code presented in a query string rather than a fragment, **when** the return leg reads it, **then** it is ignored. (Test: fragment-only.)
 
 ## Test coverage

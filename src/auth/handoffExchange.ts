@@ -9,7 +9,7 @@
  * in tests that never boot Firebase.
  */
 import { httpsCallable } from 'firebase/functions';
-import { signInWithCustomToken } from 'firebase/auth';
+import { signInWithCustomToken, signOut } from 'firebase/auth';
 import { auth, functions } from '../firebase';
 import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
 import { forgetHandoffTransaction, readHandoffTransaction } from './handoffTransaction';
@@ -138,10 +138,34 @@ export async function completeAuthHandoff(input: {
     forgetHandoffTransaction();
   }
 
+  // The sign-in is bounded like the exchange, but a bound alone is not enough
+  // here: `bounded` rejects, it does not CANCEL, so a slow
+  // `signInWithCustomToken` can still succeed after we have given up (Codex P2,
+  // round 1). By then `main.tsx` has mounted the app signed out and the player
+  // is looking at a retry prompt — a session materialising underneath that is
+  // either a surprise entry into the app or a race against the second handoff
+  // they just started.
+  //
+  // So a timed-out attempt is explicitly reconciled rather than left running:
+  // if it lands late, sign it straight back out. That makes the outcome
+  // deterministic in both directions — either the handoff completed inside its
+  // bound, or the player is signed out and the retry in front of them is the
+  // real path. Losing a session the player never saw costs one re-sign-in;
+  // letting it appear unannounced costs a race nobody can reproduce.
+  let abandoned = false;
+  const signIn = signInWithCustomToken(auth, customToken);
+  signIn.then(
+    () => {
+      if (abandoned) void signOut(auth).catch(() => {});
+    },
+    () => {},
+  );
+
   try {
-    await bounded(signInWithCustomToken(auth, customToken), input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS);
+    await bounded(signIn, input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS);
     return true;
   } catch {
+    abandoned = true;
     recordHandoffFailure('sign-in-failed');
     return false;
   }

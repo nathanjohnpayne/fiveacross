@@ -10,10 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   httpsCallable: vi.fn(),
   signInWithCustomToken: vi.fn(),
+  signOut: vi.fn(),
 }));
 
 vi.mock('firebase/functions', () => ({ httpsCallable: mocks.httpsCallable }));
-vi.mock('firebase/auth', () => ({ signInWithCustomToken: mocks.signInWithCustomToken }));
+vi.mock('firebase/auth', () => ({
+  signInWithCustomToken: mocks.signInWithCustomToken,
+  signOut: mocks.signOut,
+}));
 vi.mock('../firebase', () => ({ auth: {}, functions: {} }));
 
 import { HANDOFF_FRAGMENT_KEY, consumeHandoffFailure } from './handoffClient';
@@ -55,6 +59,7 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', memoryStorage());
   mocks.httpsCallable.mockReset();
   mocks.signInWithCustomToken.mockReset().mockResolvedValue({ user: { uid: 'u1' } });
+  mocks.signOut.mockReset().mockResolvedValue(undefined);
   consumeHandoffFailure();
 });
 
@@ -220,5 +225,54 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
 
   it('leaves room for a slow phone on bad wifi rather than a snappy default', () => {
     expect(HANDOFF_EXCHANGE_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
+  });
+});
+
+// Codex P2, round 1. `bounded` REJECTS, it does not CANCEL — so a slow
+// signInWithCustomToken can still succeed after we have given up. By then
+// main.tsx has mounted the app signed out and the player is on a retry prompt,
+// so a session materialising underneath is either a surprise entry into the app
+// or a race against the second handoff they just started.
+describe('a timed-out sign-in cannot mutate auth state later', () => {
+  function armTransaction() {
+    rememberHandoffTransaction({
+      verifier: 'V'.repeat(43),
+      targetOrigin: ORIGIN,
+      returnPath: '/board',
+      createdAt: Date.now(),
+    });
+  }
+
+  it('signs out an attempt that lands after the bound gave up', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    let land: (v: unknown) => void = () => {};
+    mocks.signInWithCustomToken.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = resolve;
+        }),
+    );
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+    expect(mocks.signOut).not.toHaveBeenCalled();
+
+    // …and now the abandoned operation completes.
+    land({ user: { uid: 'u1' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mocks.signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a sign-in that lands inside the bound completely alone', async () => {
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mocks.signOut).not.toHaveBeenCalled();
   });
 });

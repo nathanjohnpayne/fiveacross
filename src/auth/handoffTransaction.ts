@@ -106,25 +106,44 @@ export async function transactionIdFor(verifier: string): Promise<string> {
   return base64url(new Uint8Array(digest));
 }
 
-function writeStore(store: Storage | undefined, value: string): void {
+/**
+ * A store, or `undefined` if even NAMING it throws.
+ *
+ * Reading `globalThis.sessionStorage` is not a safe property access: in
+ * privacy-restricted browsers and some embedded/third-party contexts the getter
+ * itself throws `SecurityError`. Passing `globalThis.sessionStorage` straight
+ * into a helper evaluates that getter at the CALL SITE, outside the helper's
+ * own `try` — so the throw escapes before any fallback can run, and the
+ * localStorage half of the durability story never gets a turn (Codex P2, round
+ * 1). Every access therefore goes through here.
+ */
+function storeNamed(name: 'sessionStorage' | 'localStorage'): Storage | undefined {
   try {
-    store?.setItem(HANDOFF_TRANSACTION_KEY, value);
+    return globalThis[name];
+  } catch {
+    return undefined;
+  }
+}
+
+function writeStore(name: 'sessionStorage' | 'localStorage', value: string): void {
+  try {
+    storeNamed(name)?.setItem(HANDOFF_TRANSACTION_KEY, value);
   } catch {
     /* Private mode, disabled storage, or quota. The other store may still take it. */
   }
 }
 
-function readStore(store: Storage | undefined): string | null {
+function readStore(name: 'sessionStorage' | 'localStorage'): string | null {
   try {
-    return store?.getItem(HANDOFF_TRANSACTION_KEY) ?? null;
+    return storeNamed(name)?.getItem(HANDOFF_TRANSACTION_KEY) ?? null;
   } catch {
     return null;
   }
 }
 
-function clearStore(store: Storage | undefined): void {
+function clearStore(name: 'sessionStorage' | 'localStorage'): void {
   try {
-    store?.removeItem(HANDOFF_TRANSACTION_KEY);
+    storeNamed(name)?.removeItem(HANDOFF_TRANSACTION_KEY);
   } catch {
     /* Nothing to do — an unreadable store cannot be holding a live verifier either. */
   }
@@ -140,10 +159,20 @@ function clearStore(store: Storage | undefined): void {
  * discover that storage was unavailable.
  */
 export function rememberHandoffTransaction(record: HandoffTransactionRecord): boolean {
+  // Clear FIRST. An abandoned transaction from a previous attempt is readable
+  // and still in-TTL, so leaving it in place lets the confirmation below be
+  // satisfied by the WRONG record: if this write then fails in the
+  // session-first store but succeeds in the other, the navigation publishes the
+  // new digest while the return leg reads the old verifier, and every exchange
+  // is rejected as a transaction mismatch (Codex P2, round 1).
+  forgetHandoffTransaction();
+
   const serialized = JSON.stringify(record);
-  writeStore(globalThis.sessionStorage, serialized);
-  writeStore(globalThis.localStorage, serialized);
-  return readHandoffTransaction(record.createdAt) !== null;
+  writeStore('sessionStorage', serialized);
+  writeStore('localStorage', serialized);
+
+  // Confirm THIS record came back, not merely that some record did.
+  return readHandoffTransaction(record.createdAt)?.verifier === record.verifier;
 }
 
 /**
@@ -155,7 +184,7 @@ export function rememberHandoffTransaction(record: HandoffTransactionRecord): bo
  * again".
  */
 export function readHandoffTransaction(now: number): HandoffTransactionRecord | null {
-  const raw = readStore(globalThis.sessionStorage) ?? readStore(globalThis.localStorage);
+  const raw = readStore('sessionStorage') ?? readStore('localStorage');
   if (raw === null) return null;
 
   let parsed: unknown;
@@ -180,6 +209,6 @@ export function readHandoffTransaction(now: number): HandoffTransactionRecord | 
 
 /** Delete the verifier from both stores. Called on EVERY terminal path, success included. */
 export function forgetHandoffTransaction(): void {
-  clearStore(globalThis.sessionStorage);
-  clearStore(globalThis.localStorage);
+  clearStore('sessionStorage');
+  clearStore('localStorage');
 }

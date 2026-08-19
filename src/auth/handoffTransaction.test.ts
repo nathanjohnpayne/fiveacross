@@ -59,8 +59,41 @@ function deadStorage(): Storage {
   };
 }
 
+/**
+ * Run `fn` with the named globals throwing on ACCESS, then restore them exactly.
+ *
+ * `Reflect.deleteProperty` is not a valid undo here — it removes jsdom's real
+ * `sessionStorage` for every later test in the file — so the original
+ * descriptors are captured and put back.
+ */
+function withUnnameableStores(names: readonly string[], fn: () => void): void {
+  const saved = names.map(
+    (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
+  );
+  for (const name of names) {
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError');
+      },
+    });
+  }
+  try {
+    fn();
+  } finally {
+    for (const [name, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  }
+}
+
 beforeEach(() => {
-  sessionStorage.clear();
+  try {
+    globalThis.sessionStorage?.clear();
+  } catch {
+    /* a stubbed or absent store needs no clearing */
+  }
   vi.stubGlobal('localStorage', memoryStorage());
 });
 
@@ -221,5 +254,67 @@ describe('readHandoffTransaction rejects anything it cannot trust', () => {
 describe('storage key', () => {
   it('uses the Five Across namespace the rest of the era-appropriate state uses', () => {
     expect(HANDOFF_TRANSACTION_KEY.startsWith('fa:')).toBe(true);
+  });
+});
+
+// Codex P2, round 1 — two ways the durability story quietly broke.
+describe('storage hazards that are not ordinary failures', () => {
+  it('confirms the record it just wrote, not merely that some record exists', () => {
+    // An abandoned, still-in-TTL transaction is sitting in sessionStorage, and
+    // the new write fails there while succeeding in localStorage. Returning
+    // `true` here would navigate with the NEW digest while the return leg reads
+    // the OLD verifier — every exchange then rejected as a transaction
+    // mismatch, with nothing on either side looking broken.
+    const stale = record({ verifier: 'S'.repeat(43) });
+    const session = memoryStorage();
+    session.setItem(HANDOFF_TRANSACTION_KEY, JSON.stringify(stale));
+    const readOnly: Storage = {
+      ...session,
+      get length() {
+        return session.length;
+      },
+      getItem: (k: string) => session.getItem(k),
+      key: (i: number) => session.key(i),
+      clear: () => session.clear(),
+      removeItem: () => {
+        /* refuses to clear */
+      },
+      setItem: () => {
+        throw new Error('quota');
+      },
+    };
+    vi.stubGlobal('sessionStorage', readOnly);
+
+    const fresh = record({ verifier: 'F'.repeat(43) });
+    expect(rememberHandoffTransaction(fresh)).toBe(false);
+  });
+
+  it('clears any previous transaction before storing a new one', () => {
+    rememberHandoffTransaction(record({ verifier: 'A'.repeat(43) }));
+    rememberHandoffTransaction(record({ verifier: 'B'.repeat(43) }));
+    expect(readHandoffTransaction(NOW)?.verifier).toBe('B'.repeat(43));
+    expect(localStorage.getItem(HANDOFF_TRANSACTION_KEY)).toContain('B'.repeat(43));
+  });
+
+  // Reading `globalThis.sessionStorage` is not a safe property access: the
+  // GETTER itself throws SecurityError in privacy-restricted and embedded
+  // contexts. Evaluated at a call site, that throw escapes before any helper
+  // try-block runs, so the localStorage fallback never gets a turn.
+  it('falls back to localStorage when naming sessionStorage itself throws', () => {
+    withUnnameableStores(['sessionStorage'], () => {
+      expect(rememberHandoffTransaction(record())).toBe(true);
+      expect(readHandoffTransaction(NOW)).toEqual(record());
+      expect(() => forgetHandoffTransaction()).not.toThrow();
+    });
+  });
+
+  it('never throws out of forget, even when both stores refuse to be named', () => {
+    withUnnameableStores(['sessionStorage', 'localStorage'], () => {
+      expect(() => forgetHandoffTransaction()).not.toThrow();
+      expect(readHandoffTransaction(NOW)).toBeNull();
+      // Reported honestly as "not stored" rather than throwing out of the start
+      // leg, which is what keeps the inline `start-failed` state reachable.
+      expect(rememberHandoffTransaction(record())).toBe(false);
+    });
   });
 });
