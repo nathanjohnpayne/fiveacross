@@ -2549,6 +2549,23 @@ textarea.input {
   font-size: 14.5px;
   color: var(--ink);
 }
+/* The ADDITIVE voice chip (#881, gcb/fiveacross Join frames' .tag) — same
+   italic treatment and same pull-up against the byline above as the
+   replacing kind above, since it sits in the identical spot when it is the
+   first line under the wordmark. What differs is what follows it: a plain
+   `.muted` tagline paragraph, not nothing — the adjacent-sibling rule below
+   tightens that specific gap to the wireframe's zero-margin `.desc`, without
+   touching `.muted`'s normal spacing anywhere `.signin-voice-chip` is absent
+   (vacay, or the re-prompt posture). */
+.signin-voice-chip {
+  margin: -8px 0 0;
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--ink);
+}
+.signin-voice-chip + .muted {
+  margin-top: 2px;
+}
 /* The Event-preview card. Base treatment is the gcb/fiveacross Join frames'
    plain solid panel; vacay's brand row opts into the postcard variant below. */
 .event-postcard {
