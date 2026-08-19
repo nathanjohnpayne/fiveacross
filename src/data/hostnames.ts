@@ -15,6 +15,13 @@ import { hostnameKey } from '../hostnameKey';
 
 const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
 
+/** A root dot names the same DNS resource but serializes as a distinct browser
+ * origin. Keep that distinction ahead of every lookup path, including direct
+ * Hosting and rollback paths which do not traverse the Worker guard. */
+function hasTrailingRootDot(hostname: string): boolean {
+  return hostname.trim().endsWith('.');
+}
+
 // The Event chosen before React mounts. The live hostname watcher is an update
 // channel, not an Event switch, so its preview must keep agreeing with this
 // bootstrap result. `null` keeps the watcher test seam usable on its own; the
@@ -51,6 +58,7 @@ let bootstrappedEventId: string | null = null;
  * which the resolver renders as not-found rather than as a failed read.
  */
 export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
+  if (hasTrailingRootDot(hostname)) return null;
   const snap = await getDocFromServer(doc(db, 'hostnames', hostnameKey(hostname)));
   if (!snap.exists()) return null;
   return coerceHostnameDoc(snap.data() as Partial<HostnameDoc>, hostname);
@@ -95,6 +103,12 @@ function coerceHostnameDoc(d: Partial<HostnameDoc> | undefined, hostname: string
 export async function bootstrapEventResolution(
   hostname: string = window.location.hostname,
 ): Promise<Resolution> {
+  // Do this before the env short-circuit and local cache. The Worker rejects
+  // root-dot origins too, but direct Hosting and rollback routes can serve the
+  // shell without that guard; no branch may mount it as a configured Event.
+  if (hasTrailingRootDot(hostname)) {
+    return { kind: 'not-found', hostname, reason: 'missing' };
+  }
   const storage = safeLocalStorage();
   const resolution = await resolveEvent({
     hostname,

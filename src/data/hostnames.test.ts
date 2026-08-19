@@ -66,18 +66,12 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
     });
   });
 
-  it('strips a trailing root dot, so the client agrees with the edge router about the key', async () => {
-    // `bodega-bay.fiveacross.app.` and `bodega-bay.fiveacross.app` are the same
-    // DNS name. The edge Event router normalises the dot away and serves the
-    // app shell (worker/src/host.ts, #839), but the browser keeps the dot in
-    // `window.location.hostname` — so lowercasing alone sent the client looking
-    // for a document that does not exist, and the guest got EventNotFound on a
-    // host the edge had just declared servable.
+  it('rejects a trailing root dot before querying Firestore', async () => {
+    // A DNS root dot is a distinct serialized browser origin. The edge rejects
+    // it, and direct Hosting must not bypass that auth-safety boundary.
     mocks.getDocFromServer.mockResolvedValue(snap(DOC));
-    await fetchHostnameDoc('Bodega-Bay.VacayBingo.com.');
-    expect(mocks.getDocFromServer.mock.calls[0][0]).toMatchObject({
-      path: 'hostnames/bodega-bay.vacaybingo.com',
-    });
+    await expect(fetchHostnameDoc('Bodega-Bay.VacayBingo.com.')).resolves.toBeNull();
+    expect(mocks.getDocFromServer).not.toHaveBeenCalled();
   });
 
   it('reads a missing doc, a missing eventId and an unknown status all as null', async () => {
@@ -96,6 +90,20 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
 });
 
 describe('bootstrapEventResolution — installs everything the shell needs', () => {
+  it('rejects a root-dot hostname before an env-pinned build can mount', async () => {
+    vi.stubEnv('VITE_EVENT_ID', 'bodega-bay-2026');
+    try {
+      await expect(bootstrapEventResolution('bodega-bay.fiveacross.app.')).resolves.toEqual({
+        kind: 'not-found',
+        hostname: 'bodega-bay.fiveacross.app.',
+        reason: 'missing',
+      });
+      expect(mocks.getDocFromServer).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('installs the Event id, the card-cache id AND the Edition', async () => {
     mocks.getDocFromServer.mockResolvedValue(snap(DOC));
     const r = await bootstrapEventResolution('bodega-bay.vacaybingo.com');

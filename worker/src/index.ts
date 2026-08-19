@@ -20,6 +20,10 @@ export type { RouterEnv as Env };
  *  Kept long precisely so a Firestore outage does not become an outage here. */
 const CACHE_RETENTION_SECONDS = 86_400;
 
+type FenceRead =
+  | { kind: 'readable'; fenceAt: number | null }
+  | { kind: 'unreadable' };
+
 /**
  * Cloudflare's `caches.default` behind the narrow `HostnameCache` seam.
  *
@@ -63,17 +67,18 @@ export function cloudflareCache(cache: Cache): HostnameCache {
     return highest;
   };
 
-  const readFence = async (host: string): Promise<number | null> => {
+  const readFence = async (host: string): Promise<FenceRead> => {
     const remembered = rememberedFences.get(host) ?? null;
     let hit: Response | undefined;
     try {
       hit = await cache.match(fenceKeyFor(host));
     } catch {
-      // A locally remembered fence is sufficient to fail closed. Without one,
-      // the resolver will treat the cache fault as a normal miss.
-      return remembered;
+      // A fence is the ordering proof, not a hint. Even a locally remembered
+      // fence cannot prove another isolate has not persisted a newer one, so
+      // an unreadable fence makes the whole cache operation fail closed.
+      return { kind: 'unreadable' };
     }
-    if (hit === undefined) return remembered;
+    if (hit === undefined) return { kind: 'readable', fenceAt: remembered };
     try {
       const value: unknown = await hit.json();
       if (
@@ -82,13 +87,14 @@ export function cloudflareCache(cache: Cache): HostnameCache {
         typeof (value as { fenceAt?: unknown }).fenceAt === 'number' &&
         Number.isFinite((value as { fenceAt: number }).fenceAt)
       ) {
-        return rememberFence(host, (value as { fenceAt: number }).fenceAt);
+        return { kind: 'readable', fenceAt: rememberFence(host, (value as { fenceAt: number }).fenceAt) };
       }
     } catch {
-      // An invalid fence is no fence. The resolver still treats a cache fault
-      // as a miss, so corrupt cache metadata cannot become a request failure.
+      // Fall through to the fail-closed unreadable result below.
     }
-    return remembered;
+    // An invalid fence is no more trustworthy than an unavailable one. It
+    // must never be interpreted as permission to re-use a primary response.
+    return { kind: 'unreadable' };
   };
 
   const fenceResponse = (fenceAt: number): Response =>
@@ -102,7 +108,8 @@ export function cloudflareCache(cache: Cache): HostnameCache {
   return {
     async read(host) {
       return queue(host, async () => {
-        const fenceAt = await readFence(host);
+        const fence = await readFence(host);
+        if (fence.kind === 'unreadable') return null;
         const hit = await cache.match(keyFor(host));
         if (hit === undefined) return null;
         try {
@@ -117,7 +124,7 @@ export function cloudflareCache(cache: Cache): HostnameCache {
           // a positive read is valid only when it came from a lookup begun
           // after the newest refusal. Keeping the fence prevents an older
           // delayed write from erasing that ordering after a newer write wins.
-          return isCacheEnvelope(envelope) && (fenceAt === null || envelope.fetchedAt > fenceAt)
+          return isCacheEnvelope(envelope) && (fence.fenceAt === null || envelope.fetchedAt > fence.fenceAt)
             ? envelope
             : null;
         } catch {
@@ -127,7 +134,11 @@ export function cloudflareCache(cache: Cache): HostnameCache {
     },
     async write(host, envelope) {
       return queue(host, async () => {
-        const fenceAt = await readFence(host);
+        const fence = await readFence(host);
+        // An unreadable fence makes a positive answer unsafe to publish: it
+        // could have begun before an unseen refusal in another isolate.
+        if (fence.kind === 'unreadable') return;
+        const { fenceAt } = fence;
         // The drop has observed a lookup that started later than this one, so
         // this positive is known stale even if its delayed Firestore response
         // arrived last. Do not let it undo the refusal.
@@ -151,12 +162,18 @@ export function cloudflareCache(cache: Cache): HostnameCache {
           // must be deleted if that operation rejects, and this isolate cannot
           // serve an entry older than the attempted refusal in the meantime.
           const highWater = rememberFence(host, fenceAt);
-          try {
-            const previous = await readFence(host);
-            await cache.put(fenceKeyFor(host), fenceResponse(Math.max(previous ?? highWater, highWater)));
-          } catch {
-            // The local high-water mark above is the fail-closed fallback.
+          const previous = await readFence(host);
+          if (previous.kind === 'readable') {
+            try {
+              await cache.put(fenceKeyFor(host), fenceResponse(Math.max(previous.fenceAt ?? highWater, highWater)));
+            } catch {
+              // The local high-water mark above is the fail-closed fallback.
+            }
           }
+          // If the current durable fence cannot be read, do not risk replacing
+          // an unseen newer high-water mark with this older refusal. The
+          // primary deletion below still runs, and this isolate remembers its
+          // own fence until Cache reads are trustworthy again.
         }
         await cache.delete(keyFor(host));
       });
