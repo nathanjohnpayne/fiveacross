@@ -130,8 +130,49 @@ export function normalizeSubmittedAt(value) {
   }
 }
 
+function validStoredTime(value) {
+  if (typeof value === 'string') return Number.isFinite(Date.parse(value));
+  return normalizeSubmittedAt(value) !== null;
+}
+
+function validateCoordination(report) {
+  if (typeof report.id !== 'string' || !/^[a-f0-9]{64}$/.test(report.id)) {
+    throw new Error(`Invalid idempotent report id for ${report.id ?? 'unknown'}`);
+  }
+  if (typeof report.submissionId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(report.submissionId)) {
+    throw new Error(`Invalid submissionId for ${report.id}`);
+  }
+  if (typeof report.reporterHash !== 'string' || !/^[a-f0-9]{20}$/.test(report.reporterHash)) {
+    throw new Error(`Invalid reporter hash for ${report.id}`);
+  }
+  if (report.requestHashVersion !== 1 || typeof report.requestHash !== 'string' || !/^[a-f0-9]{64}$/.test(report.requestHash)) {
+    throw new Error(`Invalid request hash for ${report.id}`);
+  }
+}
+
+/** Returns whether this valid row is deliberately invisible to the inbox. */
+function validateIntakeVisibility(report) {
+  if (report.intakeState === undefined) return false;
+  if (!['pending', 'deleting', 'complete'].includes(report.intakeState)) {
+    throw new Error(`Invalid intake state for ${report.id ?? 'unknown'}`);
+  }
+  validateCoordination(report);
+  if (report.intakeState === 'complete') return false;
+  if (!validStoredTime(report.intakeStartedAt) || typeof report.leaseId !== 'string' || !validStoredTime(report.leaseExpiresAt)) {
+    throw new Error(`Invalid ${report.intakeState} coordination for ${report.id}`);
+  }
+  if (
+    report.intakeState === 'deleting' &&
+    (typeof report.cleanupLeaseId !== 'string' || !validStoredTime(report.cleanupLeaseExpiresAt))
+  ) {
+    throw new Error(`Invalid deleting coordination for ${report.id}`);
+  }
+  return true;
+}
+
 function safeReport(report) {
   if (!report || !REPORT_ID.test(report.id ?? '')) throw new Error('Invalid report id');
+  validateIntakeVisibility(report);
   const fields = validateClientReportFields(report);
   if (typeof report.reporterHash !== 'string' || !/^[a-f0-9]{20}$/.test(report.reporterHash)) throw new Error(`Invalid reporter hash for ${report.id}`);
   const expectedScreenshotPath = `bug-reports/${report.reporterHash}/${report.id}/screenshot.png`;
@@ -246,6 +287,10 @@ export async function exportReports({ reports, downloadScreenshot, root }) {
     }
     let validated;
     try {
+      if (validateIntakeVisibility(report)) {
+        summary.skipped.push(reportId);
+        continue;
+      }
       validated = safeReport(report);
     } catch (error) {
       summary.failed.push({ id: report?.id ?? 'unknown', error: error instanceof Error ? error.message : String(error) });

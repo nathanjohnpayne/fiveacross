@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { archiveReport, exportReports, normalizeSubmittedAt, recordDisposition } from '../../scripts/bug-reports-lib.mjs';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+const COMPLETE_ID = 'a'.repeat(64);
+const PENDING_ID = 'b'.repeat(64);
+const DELETING_ID = 'c'.repeat(64);
 let root: string;
 
 const report = (id = 'report_123') => ({
@@ -78,6 +81,68 @@ describe('local bug-report export', () => {
     const metadata = JSON.parse(await readFile(path.join(root, 'inbox/report_123/report.json'), 'utf8'));
     expect(metadata).not.toHaveProperty('rawUid');
     expect(metadata).not.toHaveProperty('futurePrivateField');
+  });
+
+  it('accepts a completed idempotent report but omits every coordination field', async () => {
+    const complete = {
+      ...report(COMPLETE_ID),
+      submissionId: 'submit_12345678',
+      requestHashVersion: 1,
+      requestHash: 'a'.repeat(64),
+      intakeState: 'complete',
+    };
+    const summary = await exportReports({ reports: [complete], downloadScreenshot: async () => PNG, root });
+    expect(summary.exported).toEqual([COMPLETE_ID]);
+    const metadata = JSON.parse(await readFile(path.join(root, `inbox/${COMPLETE_ID}/report.json`), 'utf8'));
+    for (const field of ['submissionId', 'requestHashVersion', 'requestHash', 'intakeState']) {
+      expect(metadata).not.toHaveProperty(field);
+    }
+  });
+
+  it('skips structurally valid pending and deleting coordination rows', async () => {
+    const pending = {
+      id: PENDING_ID,
+      submissionId: 'submit_12345678',
+      reporterHash: '0123456789abcdefabcd',
+      requestHashVersion: 1,
+      requestHash: 'a'.repeat(64),
+      intakeState: 'pending',
+      intakeStartedAt: '2026-07-09T00:00:00.000Z',
+      leaseId: 'lease-123',
+      leaseExpiresAt: '2026-07-09T00:01:00.000Z',
+    };
+    const deleting = {
+      ...pending,
+      id: DELETING_ID,
+      intakeState: 'deleting',
+      cleanupLeaseId: 'cleanup-123',
+      cleanupLeaseExpiresAt: '2026-07-09T00:10:00.000Z',
+    };
+    const summary = await exportReports({ reports: [pending, deleting], downloadScreenshot: async () => PNG, root });
+    expect(summary.skipped).toEqual([PENDING_ID, DELETING_ID]);
+    expect(summary.failed).toEqual([]);
+  });
+
+  it('fails closed on unknown or malformed coordination state', async () => {
+    for (const malformed of [
+      { id: 'pending_123', intakeState: 'pending' },
+      { ...report(), intakeState: 'future' },
+      {
+        id: 'pending_123',
+        submissionId: 'submit_12345678',
+        reporterHash: '0123456789abcdefabcd',
+        requestHashVersion: 1,
+        requestHash: 'a'.repeat(64),
+        intakeState: 'pending',
+        intakeStartedAt: '2026-07-09T00:00:00.000Z',
+        leaseId: 'lease-123',
+        leaseExpiresAt: '2026-07-09T00:01:00.000Z',
+      },
+      { ...report(COMPLETE_ID), intakeState: 'complete', requestHashVersion: 99 },
+    ]) {
+      const summary = await exportReports({ reports: [malformed], downloadScreenshot: async () => PNG, root });
+      expect(summary.failed).toHaveLength(1);
+    }
   });
 
   it('carries the abuse marking into the exported metadata, defaulting a pre-#670 report to bug', async () => {

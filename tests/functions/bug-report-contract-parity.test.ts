@@ -30,6 +30,11 @@ describe('the persisted report stays a superset of the shared client contract', 
     expectTypeOf<ValidBugReport['kind']>().toEqualTypeOf<BugReportKind>();
   });
 
+  it('the optional retry identity has the SAME nullable representation on both sides', () => {
+    expectTypeOf<ValidClientReportFields['submissionId']>().toEqualTypeOf<string | null>();
+    expectTypeOf<ValidBugReport['submissionId']>().toEqualTypeOf<string | null>();
+  });
+
   it('the declared kinds and the runtime list are the same list', () => {
     // The `.d.cts` union and the `.cjs` array are two hand-written statements of
     // one fact; a value present in one and missing from the other is the exact

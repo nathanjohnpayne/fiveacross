@@ -71,8 +71,16 @@ function validateClientReportFields(input) {
   if (!route.startsWith('/')) throw new Error('Route must be app-relative.');
   const eventId = boundedString(input.eventId, 'Event ID', 100, 1);
   if (!/^[A-Za-z0-9_-]+$/.test(eventId)) throw new Error('Event ID is invalid.');
+  let submissionId = null;
+  if (Object.prototype.hasOwnProperty.call(input, 'submissionId')) {
+    if (typeof input.submissionId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(input.submissionId)) {
+      throw new Error('Submission ID is invalid.');
+    }
+    submissionId = input.submissionId;
+  }
   return {
     schemaVersion: 1,
+    submissionId,
     kind: normalizeReportKind(input.kind),
     description: boundedString(input.description, 'Description', 4000, 1),
     captureError: input.captureError == null ? null : boundedString(input.captureError, 'Capture error', 200),

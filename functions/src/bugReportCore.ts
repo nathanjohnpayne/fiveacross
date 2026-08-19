@@ -18,6 +18,7 @@ export class BugReportInputError extends Error {
 
 export interface ValidBugReport {
   schemaVersion: 1;
+  submissionId: string | null;
   /** `bug` unless the reporter marked this abuse. Normalised by the shared
    *  contract, so an absent or unknown value arrives here as `bug` (#670). */
   kind: BugReportKind;

@@ -7,11 +7,12 @@ import { UNSAVED_WORK_ATTRIBUTE } from '../swClientBridge';
 
 const INDEX_CSS = readFileSync('src/index.css', 'utf8');
 
-const { captureSpy, submitSpy, blobToDataUrlSpy, buildInputSpy } = vi.hoisted(() => ({
+const { captureSpy, submitSpy, blobToDataUrlSpy, buildInputSpy, randomUuidSpy } = vi.hoisted(() => ({
   captureSpy: vi.fn(),
   submitSpy: vi.fn(),
   blobToDataUrlSpy: vi.fn(),
   buildInputSpy: vi.fn((value) => ({ ...value, schemaVersion: 1 })),
+  randomUuidSpy: vi.fn(),
 }));
 
 vi.mock('../data/bugReports', () => ({
@@ -29,6 +30,9 @@ beforeEach(() => {
   submitSpy.mockReset();
   blobToDataUrlSpy.mockReset();
   buildInputSpy.mockClear();
+  randomUuidSpy.mockReset();
+  randomUuidSpy.mockReturnValue('00000000-0000-4000-8000-000000000001');
+  Object.defineProperty(globalThis.crypto, 'randomUUID', { configurable: true, value: randomUuidSpy });
   createObjectURLMock = vi.fn(() => 'blob:preview');
   vi.stubGlobal('URL', {
     ...URL,
@@ -92,6 +96,7 @@ describe('W4 bug-report inbox', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
+      submissionId: '00000000-0000-4000-8000-000000000001',
       description: 'The card froze after I marked a square.',
       // A reporter who never touches the kind control sends `bug` — the same
       // thing an already-shipped client sends by sending nothing (#670).
@@ -211,17 +216,16 @@ describe('W4 bug-report inbox', () => {
       expect(landed()).not.toBeDisabled();
     };
 
-    // Backwards from the FIRST reachable control must wrap onto the last
-    // reachable one — not onto a disabled radio the browser would skip, and
-    // never out of the dialog.
-    textarea.focus();
+    // The frozen draft leaves one reachable status target while every mutable
+    // field and action is disabled. Both directions wrap onto that target,
+    // never onto a disabled field or out of the dialog.
+    const status = screen.getByRole('status');
+    status.focus();
     fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
     stillTrapped();
-    expect(landed()).not.toBe(textarea);
-    // ...and forwards from there wraps back to the textarea, which is now the
-    // first control the browser will actually focus.
+    expect(status).toHaveFocus();
     fireEvent.keyDown(document, { key: 'Tab' });
-    expect(textarea).toHaveFocus();
+    expect(status).toHaveFocus();
     stillTrapped();
     resolveSubmit({ reportId: 'report-1', escalationEligible: false });
     await screen.findByText('report-1');
@@ -274,6 +278,115 @@ describe('W4 bug-report inbox', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not submit');
     expect(blobToDataUrlSpy).toHaveBeenCalledWith(screenshot);
     expect(screen.getByRole('dialog', { name: 'Report a bug' })).toBeInTheDocument();
+  });
+
+  it('freezes one built payload and retry identity across an ambiguous retry', async () => {
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy
+      .mockRejectedValueOnce({ code: 'functions/unavailable' })
+      .mockResolvedValueOnce({ reportId: 'report-recovered' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    await screen.findByText(/Screenshot unavailable/);
+    const description = screen.getByLabelText('What happened?');
+    fireEvent.change(description, { target: { value: 'The card froze.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not submit');
+    expect(description).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Something is broken' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Try screenshot again' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    expect(await screen.findByText('report-recovered')).toBeInTheDocument();
+    expect(buildInputSpy).toHaveBeenCalledTimes(1);
+    expect(submitSpy).toHaveBeenCalledTimes(2);
+    expect(submitSpy.mock.calls[1][0]).toBe(submitSpy.mock.calls[0][0]);
+    expect(submitSpy.mock.calls[0][0]).toEqual(expect.objectContaining({
+      submissionId: '00000000-0000-4000-8000-000000000001',
+      description: 'The card froze.',
+    }));
+  });
+
+  it('keeps late capture results out of both the frozen retry payload and its preview', async () => {
+    let resolveCapture!: (image: Blob) => void;
+    captureSpy.mockReturnValue(new Promise<Blob>((resolve) => { resolveCapture = resolve; }));
+    submitSpy.mockRejectedValue({ code: 'functions/unavailable' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    await screen.findByText(/Capturing this app view/);
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'The card froze.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not submit');
+    expect(submitSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      screenshotDataUrl: null,
+      captureError: null,
+    }));
+
+    resolveCapture(new Blob(['late'], { type: 'image/png' }));
+    await Promise.resolve();
+    expect(screen.queryByAltText('Screenshot that will be submitted with this bug report')).not.toBeInTheDocument();
+    expect(screen.getByText(/retry is frozen as a text-only report/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(2));
+    expect(submitSpy.mock.calls[1][0]).toBe(submitSpy.mock.calls[0][0]);
+  });
+
+  it('unfreezes only a definitively pre-claim invalid payload and reuses its identity', async () => {
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy
+      .mockRejectedValueOnce({ code: 'functions/invalid-argument', message: 'Description is invalid.' })
+      .mockResolvedValueOnce({ reportId: 'report-corrected' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    await screen.findByText(/Screenshot unavailable/);
+    const description = screen.getByLabelText('What happened?');
+    fireEvent.change(description, { target: { value: 'First description.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Description is invalid.');
+    expect(description).not.toBeDisabled();
+    fireEvent.change(description, { target: { value: 'Corrected description.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    expect(await screen.findByText('report-corrected')).toBeInTheDocument();
+    expect(buildInputSpy).toHaveBeenCalledTimes(2);
+    expect(buildInputSpy.mock.calls.map(([input]) => input.submissionId)).toEqual([
+      '00000000-0000-4000-8000-000000000001',
+      '00000000-0000-4000-8000-000000000001',
+    ]);
+    expect(buildInputSpy.mock.calls[1][0].description).toBe('Corrected description.');
+  });
+
+  it('keeps one identity through park/reopen, then mints a new one after success or cancel', async () => {
+    randomUuidSpy
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000001')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000002')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000003');
+    captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
+    submitSpy.mockResolvedValue({ reportId: 'report-complete' });
+    renderFlow();
+
+    const launcher = screen.getByRole('button', { name: 'Report a bug' });
+    fireEvent.click(launcher);
+    await screen.findByText(/Screenshot unavailable/);
+    fireEvent.click(screen.getByRole('button', { name: 'Capture a different screen' }));
+    fireEvent.click(launcher);
+    expect(randomUuidSpy).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'The route froze.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await screen.findByText('report-complete');
+    expect(buildInputSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      submissionId: '00000000-0000-4000-8000-000000000001',
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    fireEvent.click(launcher);
+    expect(randomUuidSpy).toHaveBeenCalledTimes(2);
+    await screen.findByText(/Screenshot unavailable/);
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    fireEvent.click(launcher);
+    expect(randomUuidSpy).toHaveBeenCalledTimes(3);
+    await screen.findByText(/Screenshot unavailable/);
   });
 
   it('pairs the ready-state capture actions in a wrappable row below the full-width preview (#362)', async () => {
@@ -452,6 +565,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(blobToDataUrlSpy).toHaveBeenCalledWith(moreBlob);
     expect(buildInputSpy).toHaveBeenCalledWith({
+      submissionId: '00000000-0000-4000-8000-000000000001',
       description: 'The selected screen would not capture.',
       kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,more',
@@ -496,6 +610,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
+      submissionId: '00000000-0000-4000-8000-000000000001',
       description: 'A tile on my card is broken.',
       kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,card',
@@ -567,6 +682,7 @@ describe('W4 pick-a-screen capture (#324)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
     expect(buildInputSpy).toHaveBeenCalledWith({
+      submissionId: '00000000-0000-4000-8000-000000000001',
       description: 'Slow capture race.',
       kind: 'bug',
       screenshotDataUrl: 'data:image/png;base64,card',
