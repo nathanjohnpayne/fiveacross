@@ -149,6 +149,60 @@ describe('name, dates, timezone', () => {
     expect(screen.getByText(/isn't specific enough/i)).toBeInTheDocument();
   });});
 
+describe('address — an optimistically-trusted candidate is not left unverified', () => {
+  // Mirrors the real shell: the WIZARD stays mounted and holds the draft while
+  // the STEP is swapped out. Unmounting the whole tree would make the cleanup's
+  // `updateDraft` land on a dead parent and prove nothing.
+  function StepToggle({ initial, onDraft }: { initial: EventDraft; onDraft: (d: EventDraft) => void }) {
+    const [draft, setDraft] = useState(initial);
+    const [showStep, setShowStep] = useState(true);
+    useEffect(() => {
+      onDraft(draft);
+    }, [draft, onDraft]);
+    return (
+      <>
+        <button type="button" onClick={() => setShowStep(false)}>
+          leave step
+        </button>
+        {showStep && <StepBasics draft={draft} updateDraft={(u) => setDraft((d) => u(d))} />}
+      </>
+    );
+  }
+
+  function renderToggle(initial: EventDraft) {
+    let current = initial;
+    render(<StepToggle initial={initial} onDraft={(d) => { current = d; }} />);
+    return {
+      getDraft: () => current,
+      leave: () => fireEvent.click(screen.getByRole('button', { name: 'leave step' })),
+    };
+  }
+
+  it('clears the candidate when the step is left before its confirming check completes', () => {
+    // Phase 4b P1, PR #911. The optimistic branch shows an already-committed
+    // candidate as available with no network read, and leaving cancels the
+    // confirming check — so without this, an organizer who lands on a resumed
+    // step and hits Continue inside the debounce carries a `slugCandidate`
+    // nothing verified past every later completeness gate. It may be taken,
+    // hand-injected into an imported draft, or checked under a DIFFERENT
+    // Edition and so never tested against the alternate this one requires.
+    const { getDraft, leave } = renderToggle(draftWith({ slugCandidate: 'point-reyes' }));
+    expect(getDraft().slugCandidate).toBe('point-reyes');
+    leave(); // inside the debounce window: nothing has resolved
+    expect(getDraft().slugCandidate).toBe('');
+  });
+
+  it('KEEPS the candidate when the check confirmed it before the step was left', async () => {
+    // The other half — failing closed must not mean discarding a verified
+    // answer, or every step change would cost a fresh round trip.
+    mocks.checkSlugAvailability.mockResolvedValue('available');
+    const { getDraft, leave } = renderToggle(draftWith({ slugCandidate: 'point-reyes' }));
+    await settleDebounce();
+    leave();
+    expect(getDraft().slugCandidate).toBe('point-reyes');
+  });
+});
+
 describe('address — auto-generation and "editable once"', () => {
   it('auto-generates the address from the name while untouched', () => {
     renderStep(draftWith({ name: 'Weekend in Point Reyes' }));

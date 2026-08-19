@@ -415,4 +415,17 @@ describe('alternateNamespaceApex — the setup wizard address step (#790)', () =
   it('is null for an unrecognized Edition id', () => {
     expect(alternateNamespaceApex('not-a-real-edition')).toBeNull();
   });
+
+  it('is null for inherited Object.prototype keys, not a nonsense apex', () => {
+    // Phase 4b P2, PR #911: as an ordinary object literal the table returned
+    // the Function constructor for 'constructor' and a function for
+    // 'toString' — both truthy, so the `?? null` fallback never fired and an
+    // unrecognized id could produce an "apex" the wizard would preview, check
+    // and hand to the launch provisioner. Edition ids arrive from imported and
+    // hand-edited drafts, so these are reachable inputs rather than a
+    // theoretical class.
+    for (const key of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+      expect(alternateNamespaceApex(key)).toBeNull();
+    }
+  });
 });

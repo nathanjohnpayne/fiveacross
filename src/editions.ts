@@ -427,14 +427,22 @@ export function buildTimeEdition(
  */
 export const CANONICAL_NAMESPACE_APEX = 'fiveacross.app';
 
-const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = {
+// `null`-prototype so a lookup cannot reach Object.prototype (Phase 4b P2,
+// PR #911). As an ordinary object literal, `ALTERNATE_NAMESPACE_APEX['constructor']`
+// returned the Function constructor and `['toString']` a function — both
+// truthy, so `?? null` never fired and an unrecognized Edition id could yield
+// a nonsense "apex" that the wizard would preview, check and hand the launch
+// provisioner. Edition ids reach this table from imported and hand-edited
+// drafts, so "unrecognized" is not a hypothetical input class.
+const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = Object.assign(Object.create(null), {
   vacay: 'vacaybingo.com',
-};
+});
 
 /** `null` when `edition` owns no alternate Namespace — see
  *  `ALTERNATE_NAMESPACE_APEX`. */
 export function alternateNamespaceApex(edition: string): string | null {
-  return ALTERNATE_NAMESPACE_APEX[edition] ?? null;
+  const apex = ALTERNATE_NAMESPACE_APEX[edition];
+  return typeof apex === 'string' ? apex : null;
 }
 
 /** The brand fields that are plain strings — i.e. the ones a static HTML
