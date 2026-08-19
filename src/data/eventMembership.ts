@@ -11,11 +11,27 @@
  * ticket #804's emulator tests pin that the rules agree.
  *
  * PURE BY CONSTRUCTION. No Firebase import ever belongs here — not
- * `firebase/firestore`, not `firebase-admin`. The separately-rooted Functions
- * project imports this file by relative path (the same seam
- * `functions/src/dailyEmailContent.ts` uses for `src/domainTypes`), and the
- * rules suites import it in a Node context with no app bundle. A Firestore
- * import would break both.
+ * `firebase/firestore`, not `firebase-admin`. The client and the rules suites
+ * import it directly; a Firestore import would break the second, which runs in
+ * a Node context with no app bundle.
+ *
+ * THE FUNCTIONS CONSUME A MIRROR, NOT THIS FILE (Codex P2 on PR #891). The
+ * Functions project cannot import this module by relative path:
+ * `functions/tsconfig.json` sets `rootDir: "src"`, so a RUNTIME import from
+ * `../../src/**` fails with TS6059 — verified, not assumed. The two existing
+ * cross-tree imports (`functions/src/dailyEmailContent.ts:19`,
+ * `functions/src/finaleContent.ts:26`) work only because they are
+ * `import type` from a declaration-only `.d.ts`, which emits nothing; they are
+ * not a precedent for runtime code.
+ *
+ * The repo's established answer for runtime logic the Functions also need is a
+ * LOCAL MIRROR plus a parity test — `functions/src/scoringVocab.ts` mirrors
+ * `src/game/scoring.ts`, and `tests/functions/finale-parity.test.ts` feeds one
+ * fixture to both and fails if either side moves alone, because (in that
+ * mirror's own words) a mirror without a parity test is how the podium
+ * implementations diverged in the first place. #803 adds
+ * `functions/src/membershipVocab.ts` on exactly that pattern when the first
+ * callable needs these predicates. Until then there is no second copy to drift.
  *
  * THE INVARIANT THIS FILE PROTECTS. A membership record is one a client cannot
  * write. Today's Event "membership" fails that test: `events/{eventId}/players/{uid}`
