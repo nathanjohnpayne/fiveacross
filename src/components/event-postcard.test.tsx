@@ -240,7 +240,7 @@ describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
     }
   });
 
-  it('suppresses the Day’s inline emoji when a fixed brand mark happens to COINCIDE with it (Codex P2, PR #896 round 1)', () => {
+  it('suppresses the Day’s inline emoji when a fixed brand mark happens to COINCIDE with it (Codex P2, PR #896 round 2)', () => {
     // The "exactly once" contract is about whichever glyph actually lands in
     // the corner, fixed or dynamic — not just the dynamic case. A gcb Day
     // whose own seeded emoji happens to be the same rainbow flag as the
@@ -258,6 +258,42 @@ describe('EventPostcard — the stamp is its postage, or it is nothing', () => {
       'Aug 7–9 · hosted by Kim · Day 1: Pride at Sea',
     );
     expect(container.textContent!.split('🏳️‍🌈').length - 1).toBe(1);
+  });
+
+  describe('the coincidence check without Intl.Segmenter (Codex P2, PR #896 round 3)', () => {
+    // Round 2's fix (above) compared the fixed stamp against previewDayEmoji's
+    // FILTERED value — safe for rendering into the stamp's fixed-size box,
+    // but on a Segmenter-less browser it degrades a genuine multi-codepoint
+    // match (a ZWJ flag) to null, so the comparison silently missed the very
+    // duplicate it exists to catch. This is the literal regression case.
+    type IntlWithOptionalSegmenter = { Segmenter?: unknown };
+    const intlWithOptionalSegmenter = Intl as unknown as IntlWithOptionalSegmenter;
+    let originalSegmenter: unknown;
+
+    beforeEach(() => {
+      originalSegmenter = intlWithOptionalSegmenter.Segmenter;
+      delete intlWithOptionalSegmenter.Segmenter;
+    });
+
+    afterEach(() => {
+      intlWithOptionalSegmenter.Segmenter = originalSegmenter;
+    });
+
+    it('still suppresses the inline copy when the fixed stamp is a multi-codepoint glyph matching the Day’s own', () => {
+      setActiveEdition('gcb');
+      applyResolvedEventPreview({
+        eventName: 'Weekend in Bodega Bay',
+        dateRange: 'Aug 7–9',
+        hostedBy: 'Kim',
+        days: [{ date: '2999-08-07', title: 'Pride at Sea', emoji: '🏳️‍🌈' }],
+      });
+      const { container } = render(<EventPostcard />);
+      expect(container.querySelector('.event-postcard-stamp')?.textContent).toBe('🏳️‍🌈');
+      expect(container.querySelector('.event-postcard-meta')!.textContent).toBe(
+        'Aug 7–9 · hosted by Kim · Day 1: Pride at Sea',
+      );
+      expect(container.textContent!.split('🏳️‍🌈').length - 1).toBe(1);
+    });
   });
 
   it('drops the stamp across local midnight when the next Day carries no emoji', () => {

@@ -2,6 +2,7 @@ import { useEffect, useReducer, useSyncExternalStore } from 'react';
 import {
   activeEventPreview,
   previewDayEmoji,
+  previewDayRawEmoji,
   previewMetaLine,
   subscribeEventPreview,
 } from '../eventPreview';
@@ -104,15 +105,24 @@ export default function EventPostcard() {
   // mismatch until some later render. The seam is only as good as its callers.
   const now = Date.now();
   const isPostcardVariant = brand.signinCardVariant === 'postcard';
-  // The previewed Day's own emoji, resolved regardless of postage kind
-  // (Codex P2, PR #896 round 1): needed both as vacay's dynamic postage
-  // source AND to detect a fixed mark that coincidentally matches it — see
-  // the file-top note on the two postage kinds.
-  const dayGlyph = previewDayEmoji(preview.days, now);
-  const dayPostage = isPostcardVariant ? dayGlyph : null;
+  // The previewed Day's own emoji, FILTERED to a layout-safe single glyph —
+  // vacay's dynamic postage source ONLY, never the coincidence check below
+  // (Codex P2, PR #896 round 1 introduced this; round 3 found the reuse bug —
+  // see `dayRawGlyph`). Resolved only for the postcard variant: an Edition
+  // with a fixed mark never needs a DYNAMIC glyph at all.
+  const dayStampGlyph = isPostcardVariant ? previewDayEmoji(preview.days, now) : null;
+  // The SAME Day's emoji, UNFILTERED — the coincidence check needs this one,
+  // not the filtered value above (Codex P2, PR #896 round 3): the filter
+  // exists for the stamp box's layout safety, and on a Segmenter-less
+  // browser it degrades a legitimate multi-codepoint glyph (a ZWJ flag) to
+  // `null`, which would silently miss a fixed mark that coincidentally
+  // matches it — exactly the duplicate this comparison exists to catch. This
+  // is the same raw value the Day LINE itself renders inline, so the two can
+  // never disagree about what is actually on screen.
+  const dayRawGlyph = previewDayRawEmoji(preview.days, now);
   // A fixed brand mark wins when the Edition sets one; otherwise fall back to
   // the dynamic Day postage, which is null on an Edition with neither.
-  const postage = brand.signinStampGlyph ?? dayPostage;
+  const postage = brand.signinStampGlyph ?? dayStampGlyph;
   // The postcard's tightened corner radius stays vacay-only (Codex P2, PR
   // #896 round 1 — see the file-top note): a fixed mark draws on the plain
   // panel, matching the wireframes' `.stamped` treatment for gcb/fiveacross,
@@ -121,9 +131,9 @@ export default function EventPostcard() {
   // the corner), so this depends only on the variant, never on `postage`.
   const stamped = isPostcardVariant;
   // The line gives up its copy whenever the CORNER's actual glyph — fixed or
-  // dynamic — matches the Day's own, not only in the dynamic case (Codex P2,
-  // PR #896 round 1).
-  const meta = previewMetaLine(preview, now, dayGlyph && dayGlyph === postage ? 'stamp' : 'inline');
+  // dynamic — matches the Day's own RAW glyph, not only in the dynamic case
+  // (Codex P2, PR #896 rounds 1 and 3).
+  const meta = previewMetaLine(preview, now, dayRawGlyph && dayRawGlyph === postage ? 'stamp' : 'inline');
   const host = typeof window === 'undefined' ? null : window.location.hostname;
   return (
     <div

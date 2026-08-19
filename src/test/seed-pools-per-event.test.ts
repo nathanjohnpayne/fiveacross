@@ -307,8 +307,15 @@ describe('bodega-bay-2026 — Event payload pins', () => {
     // duplicate their Theme's own glyph (or, for the wrap-up, diverge from
     // the hand-corrected legacy field); all three now carry the de-duplicated
     // glyph on BOTH fields, so there's no longer a deliberate divergence to
-    // pin here.
-    expect(EVENT_SEED.days.map((d) => d.portEmoji === d.placeEmoji)).toEqual([true, true, true, true]);
+    // pin here. Pinned to the exact intended pairs (CodeRabbit, PR #896
+    // round 3), not just field equality — a regression that set BOTH fields
+    // to the same WRONG glyph would still pass an equality-only check.
+    expect(EVENT_SEED.days.map(({ placeEmoji, portEmoji }) => [placeEmoji, portEmoji])).toEqual([
+      ['🐚', '🐚'],
+      ['🦪', '🦪'],
+      ['🌅', '🌅'],
+      ['👋', '👋'],
+    ]);
     expect(EVENT_SEED.days[3].portEmoji).toBe('👋');
     expect(EVENT_SEED.sailStart).toBe(EVENT_SEED.startsOn);
     expect(EVENT_SEED.sailEnd).toBe(EVENT_SEED.endsOn);
