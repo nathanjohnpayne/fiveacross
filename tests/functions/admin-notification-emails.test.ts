@@ -519,6 +519,29 @@ describe('durable abuse-escalation sweep (#859)', () => {
     expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'retry-window-expired' });
   });
 
+  it('uses a fresh clock when a due task crosses its deadline before resolution', async () => {
+    const db = fakeDb(
+      { bugReportEscalations: [pendingTask({
+        createdAt: new Date(NOW - 7 * 24 * 60 * 60_000),
+        nextAttemptAt: new Date(NOW - 2),
+        deadlineAt: new Date(NOW),
+        expiresAt: new Date(NOW + 24 * 60 * 60_000),
+      })] },
+      {
+        [`bugReports/${REPORT_ID}`]: unresolvedReport(),
+        'events/med-2026': { status: 'active', admins: ['user-123'] },
+      },
+    );
+    const clock = vi.fn()
+      .mockReturnValueOnce(NOW - 1)
+      .mockReturnValue(NOW);
+
+    await runAbuseEscalationSweep(db, { now: clock });
+
+    expect(db.rows('events/med-2026/adminAlerts')).toEqual([]);
+    expect(db.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'retry-window-expired' });
+  });
+
   it('caps a retry at the deadline and tolerates a failed best-effort reschedule', async () => {
     const capped = fakeDb(
       { bugReportEscalations: [pendingTask({
@@ -657,6 +680,54 @@ describe('durable abuse-escalation sweep (#859)', () => {
     await runAdminAlertCycle(escalationContinues, { now: () => NOW });
     expect(escalationContinues.rows('bugReportEscalations')[0]).toMatchObject({ outcome: 'queued' });
     spy.mockRestore();
+  });
+
+  it('does not let a stalled escalation leg consume the digest window', async () => {
+    const send = vi.fn(async () => true);
+    const baseDb = fakeDb(
+      {
+        events: [{ id: 'med-2026', status: 'active' }],
+        'events/med-2026/adminAlerts': [{
+          id: 'existing', kind: 'item-created', collection: 'items', docId: 'i1', label: 'Prompt',
+          status: 'pending', visionFlag: null, reportCount: 0, createdAt: 1, sentAt: null,
+        }],
+      },
+      {
+        'events/med-2026': EVENT,
+        'events/med-2026/items/i1': { status: 'pending', reportCount: 0 },
+      },
+    );
+    type Query = ReturnType<AdminAlertFirestore['collection']>;
+    type QueryResult = Awaited<ReturnType<Query['get']>>;
+    let releaseEscalations: (result: QueryResult) => void = () => undefined;
+    const stalled = new Promise<QueryResult>((resolve) => { releaseEscalations = resolve; });
+    let stalledQuery: Query;
+    stalledQuery = {
+      where: () => stalledQuery,
+      orderBy: () => stalledQuery,
+      limit: () => stalledQuery,
+      get: () => stalled,
+    };
+    const stalledDb: AdminAlertFirestore = {
+      collection: (path) => path === 'bugReportEscalations' ? stalledQuery : baseDb.collection(path),
+      doc: (path) => baseDb.doc(path),
+      batch: () => baseDb.batch(),
+      runTransaction: (fn) => baseDb.runTransaction(fn),
+    };
+
+    const cycle = runAdminAlertCycle(stalledDb, {
+      now: () => NOW,
+      send: send as never,
+      getAdminUids: async () => ['user-123'],
+      getEmailForUid: async () => 'admin@example.com',
+      adminNotifyEmail: '',
+      appBaseUrl: 'https://gaycruisebingo.com',
+      from: 'x <x@example.com>',
+      quietMs: 0,
+    });
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    releaseEscalations({ docs: [] });
+    await cycle;
   });
 });
 

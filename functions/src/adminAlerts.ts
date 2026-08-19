@@ -792,12 +792,16 @@ function reportMatchesEscalation(
 async function resolveAbuseEscalationTask(
   db: AdminAlertFirestore,
   reportId: string,
-  now: number,
+  clock: () => number,
 ): Promise<void> {
   const taskRef = db.doc(`bugReportEscalations/${reportId}`);
   await db.runTransaction(async (tx) => {
     const task = (await tx.get(taskRef)).data();
     if (!task || task.state !== 'pending') return;
+    // Read the clock inside the transaction attempt. A task can cross its
+    // seven-day deadline while waiting behind the due query or an earlier row,
+    // and Firestore can replay this callback after contention.
+    const now = clock();
     const nextAttemptAt = firestoreTimeMs(task.nextAttemptAt);
     if (nextAttemptAt !== null && nextAttemptAt > now) return;
 
@@ -860,7 +864,7 @@ async function rescheduleAbuseEscalationTask(
   db: AdminAlertFirestore,
   reportId: string,
   observed: Record<string, unknown>,
-  now: number,
+  clock: () => number,
 ): Promise<void> {
   const taskRef = db.doc(`bugReportEscalations/${reportId}`);
   const observedAttempt = observed.attemptCount;
@@ -872,6 +876,7 @@ async function rescheduleAbuseEscalationTask(
       current.attemptCount !== observedAttempt ||
       firestoreTimeMs(current.nextAttemptAt) !== observedNext
     ) return;
+    const now = clock();
     const parsed = validPendingEscalation(current);
     if (!parsed) {
       tx.set(taskRef, terminalEscalation('source-invalid', now));
@@ -899,21 +904,22 @@ export async function runAbuseEscalationSweep(
   db: AdminAlertFirestore,
   deps: AbuseEscalationSweepDeps = {},
 ): Promise<void> {
-  const now = (deps.now ?? Date.now)();
+  const clock = deps.now ?? Date.now;
+  const queryNow = clock();
   const due = await db.collection('bugReportEscalations')
-    .where('nextAttemptAt', '<=', new Date(now))
+    .where('nextAttemptAt', '<=', new Date(queryNow))
     .orderBy('nextAttemptAt')
     .limit(MAX_ABUSE_ESCALATIONS_PER_SWEEP)
     .get();
   for (const task of due.docs) {
     try {
-      await resolveAbuseEscalationTask(db, task.id, now);
+      await resolveAbuseEscalationTask(db, task.id, clock);
     } catch (err) {
       // Firestore errors may echo a Player document path. Log only the status
       // code so the task's raw reporter uid never escapes this server-only row.
       console.error('runAbuseEscalationSweep: task failed', task.id, { code: firestoreErrorCodeForLog(err) });
       try {
-        await rescheduleAbuseEscalationTask(db, task.id, task.data() ?? {}, now);
+        await rescheduleAbuseEscalationTask(db, task.id, task.data() ?? {}, clock);
       } catch (rescheduleError) {
         console.error('runAbuseEscalationSweep: reschedule failed', task.id, {
           code: firestoreErrorCodeForLog(rescheduleError),
@@ -2116,14 +2122,15 @@ export async function runAdminAlertCycle(
   db: AdminAlertFirestore,
   deps: AdminDigestDeps & AbuseEscalationSweepDeps = {},
 ): Promise<void> {
-  try {
-    await runAbuseEscalationSweep(db, deps);
-  } catch (err) {
-    console.error('runAdminAlertCycle: abuse escalation sweep failed', err);
-  }
-  try {
-    await runAdminAlertSweep(db, deps);
-  } catch (err) {
-    console.error('runAdminAlertCycle: admin digest sweep failed', err);
-  }
+  // Both legs share a scheduler timeout but not a liveness dependency. Run
+  // them concurrently so a slow relationship lookup cannot consume the whole
+  // invocation before ordinary moderation alerts begin draining.
+  await Promise.all([
+    runAbuseEscalationSweep(db, deps).catch((err) => {
+      console.error('runAdminAlertCycle: abuse escalation sweep failed', err);
+    }),
+    runAdminAlertSweep(db, deps).catch((err) => {
+      console.error('runAdminAlertCycle: admin digest sweep failed', err);
+    }),
+  ]);
 }
