@@ -220,6 +220,9 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
     // "available" against the previous Edition's pair.
   }, [slugInput, draft.edition]);
 
+  // Read once per render: the device zone cannot change mid-session, and both
+  // the control's availability and its written value must agree on one answer.
+  const deviceSuggestion = deviceTimezoneSuggestion();
   const normalizedCandidate = normalizeSlug(slugInput);
   const alternateApex = alternateNamespaceApex(draft.edition);
 
@@ -295,16 +298,34 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
               Not a recognized IANA zone — try a region name such as America/Los_Angeles.
             </div>
           )}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => {
-              const timezone = deviceTimezoneSuggestion();
-              updateDraft((d) => ({ ...d, timezone }));
-            }}
-          >
-            Use this device's zone
-          </button>
+          {isSupportedTimezone(deviceSuggestion) ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                updateDraft((d) => ({ ...d, timezone: deviceSuggestion }));
+              }}
+            >
+              Use this device's zone
+            </button>
+          ) : (
+            /* The device reports a zone the read-side contract refuses — `UTC`
+             * on a UTC host, which is every CI runner and plenty of servers and
+             * VMs. Offering the button there hands the organizer a control that
+             * writes an INVALID value and blocks completion, which is the exact
+             * opposite of what it is for (CodeRabbit Major, PR #911).
+             *
+             * The validator's refusal is deliberate and not the thing to relax:
+             * it demands a REGION zone because DST and date boundaries decide
+             * which calendar day a Day unlocks on, and `UTC` cannot express
+             * that. So the control is withdrawn and the reason is stated,
+             * rather than writing a value the very next line renders an error
+             * for. */
+            <div className="wizard-field-hint">
+              This device reports <code>{deviceSuggestion || 'no zone'}</code>, which isn't specific enough — Day
+              unlocks need a region zone to land on the right date. Type one, such as America/Los_Angeles.
+            </div>
+          )}
         </div>
       </div>
 

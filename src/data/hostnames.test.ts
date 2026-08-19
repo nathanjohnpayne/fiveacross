@@ -267,12 +267,20 @@ describe('checkSlugAvailability — the setup wizard address step (#790)', () =>
 
   it('reports the ALTERNATE as taken even when the canonical is free', async () => {
     // The case the canonical-only check could not see at all.
+    // EXACT paths, not `endsWith` (CodeQL: incomplete URL substring
+    // sanitization). A suffix match treats `evilvacaybingo.com` as the
+    // alternate, so the assertion would still pass while the code under test
+    // read a different host than the one it claims to — and in a test whose
+    // whole point is WHICH address was queried, that is the assertion failing
+    // silently rather than a style nit.
+    const CANONICAL = 'hostnames/bodega-bay.fiveacross.app';
+    const ALTERNATE = 'hostnames/bodega-bay.vacaybingo.com';
     mocks.getDocFromServer.mockImplementation((ref: { path?: string }) =>
-      Promise.resolve((ref?.path ?? '').endsWith('vacaybingo.com') ? snap(DOC) : snap(null)),
+      Promise.resolve(ref?.path === ALTERNATE ? snap(DOC) : snap(null)),
     );
     const checked = await checkEventAddressAvailability('bodega-bay', 'vacaybingo.com');
-    expect(checked.find((c) => c.hostname.endsWith('fiveacross.app'))?.status).toBe('available');
-    expect(checked.find((c) => c.hostname.endsWith('vacaybingo.com'))?.status).toBe('taken');
+    expect(checked.find((c) => `hostnames/${c.hostname}` === CANONICAL)?.status).toBe('available');
+    expect(checked.find((c) => `hostnames/${c.hostname}` === ALTERNATE)?.status).toBe('taken');
   });
 
   it('checks only the canonical address when the Edition owns no alternate', async () => {

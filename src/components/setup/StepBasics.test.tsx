@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { EventDraft } from '../../types';
 import { deviceTimezoneSuggestion } from '../../data/eventDraft';
+import { isSupportedTimezone } from '../../data/draftValidation';
 import { createEventDraft } from '../../data/eventDraft';
 import StepBasics, { CHECK_DEBOUNCE_MS, slugify } from './StepBasics';
 import type { SlugAvailability } from '../../data/hostnames';
@@ -52,7 +53,14 @@ function draftWith(over: Partial<EventDraft> = {}): EventDraft {
  */
 function Harness({ initial, onDraft }: { initial: EventDraft; onDraft: (d: EventDraft) => void }) {
   const [draft, setDraft] = useState(initial);
-  onDraft(draft);
+  // Published from an effect, never during render (CodeRabbit, PR #911).
+  // Calling `onDraft` in the render body writes to test-observed state as a
+  // side effect of rendering, which React is free to replay or discard — so
+  // `getDraft()` could report a draft that was never committed. Under
+  // StrictMode's double-render that stops being theoretical.
+  useEffect(() => {
+    onDraft(draft);
+  }, [draft, onDraft]);
   return <StepBasics draft={draft} updateDraft={(updater) => setDraft((d) => updater(d))} />;
 }
 
@@ -117,19 +125,29 @@ describe('name, dates, timezone', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('"Use this device\'s zone" writes the device suggestion', () => {
-    // Compared against `deviceTimezoneSuggestion()` rather than asserting the
-    // result is not 'UTC' (Codex P1, PR #911). The old form passed only where
-    // the runner's zone happened to differ from the seeded value: on
-    // `ubuntu-latest`, which app-ci uses, `Intl` legitimately resolves to
-    // 'UTC', so clicking wrote 'UTC' over 'UTC' and the inequality failed.
-    // That is an environment-dependent assertion, not a contract — the
-    // contract is "the button writes whatever the device reports".
+  it('"Use this device\'s zone" writes a suggestion the validator ACCEPTS, not merely whatever the device reports', () => {
+    // Two assertions, and the second is the one that matters (CodeRabbit
+    // Major, PR #911). An earlier fix here compared the written value against
+    // `deviceTimezoneSuggestion()` and stopped there — which passes on a UTC
+    // host precisely BECAUSE the button wrote the invalid value 'UTC'. A test
+    // that goes green exactly when the feature is broken is worse than none.
+    if (!isSupportedTimezone(deviceTimezoneSuggestion())) return; // covered by the sibling test below
     const { getDraft } = renderStep(draftWith({ timezone: 'Pacific/Auckland' }));
     fireEvent.click(screen.getByRole('button', { name: "Use this device's zone" }));
     expect(getDraft().timezone).toBe(deviceTimezoneSuggestion());
+    expect(isSupportedTimezone(getDraft().timezone)).toBe(true);
   });
-});
+
+  it('withdraws the device-zone button entirely when the device reports a zone the contract refuses', () => {
+    // The UTC-host case, which is every CI runner and plenty of servers. The
+    // control used to be offered there and wrote 'UTC', which
+    // `isSupportedTimezone` rejects — a button whose purpose is to FIX the
+    // field putting it into an error state.
+    if (isSupportedTimezone(deviceTimezoneSuggestion())) return; // covered by the sibling test above
+    renderStep(draftWith({ timezone: 'Pacific/Auckland' }));
+    expect(screen.queryByRole('button', { name: "Use this device's zone" })).not.toBeInTheDocument();
+    expect(screen.getByText(/isn't specific enough/i)).toBeInTheDocument();
+  });});
 
 describe('address — auto-generation and "editable once"', () => {
   it('auto-generates the address from the name while untouched', () => {
