@@ -149,6 +149,31 @@ describe('name, dates, timezone', () => {
     expect(screen.getByText(/isn't specific enough/i)).toBeInTheDocument();
   });});
 
+describe('address — a failed check is recoverable', () => {
+  it('offers Retry after check-failed, and Retry re-runs the check on the SAME text', async () => {
+    // Phase 4b P2, PR #911: the effect's only triggers were the address text
+    // and the Edition, so after `check-failed` retyping the same address fired
+    // no onChange and nothing re-ran. "Try again in a moment" pointed at
+    // something that would never happen, leaving the workflow stuck until the
+    // organizer guessed they had to alter the address and change it back.
+    mocks.checkSlugAvailability.mockResolvedValueOnce('check-failed');
+    renderStep(draftWith());
+    fireEvent.change(addressInput(), { target: { value: 'point-reyes' } });
+    await settleDebounce();
+    expect(screen.getByTestId('address-availability-status')).toHaveTextContent(/couldn't check/i);
+
+    mocks.checkSlugAvailability.mockResolvedValue('available');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await settleDebounce();
+    expect(screen.getByTestId('address-availability-status')).toHaveTextContent(/available/i);
+  });
+
+  it('offers no Retry when the check succeeded', () => {
+    renderStep(draftWith({ slugCandidate: 'point-reyes' }));
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+});
+
 describe('address — an optimistically-trusted candidate is not left unverified', () => {
   // Mirrors the real shell: the WIZARD stays mounted and holds the draft while
   // the STEP is swapped out. Unmounting the whole tree would make the cleanup's

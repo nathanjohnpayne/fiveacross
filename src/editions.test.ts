@@ -11,8 +11,11 @@ import {
   applyEditionDocumentIdentity,
   wordmarkSegments,
   alternateNamespaceApex,
+  CANONICAL_NAMESPACE_APEX,
 } from './editions';
 import { themesForEdition, defaultThemeForEdition } from './theme/themes';
+// The router's OWN namespace set — the source of truth this table must not drift from.
+import { NAMESPACES } from '../worker/src/host';
 
 const EDITIONS = ['gcb', 'vacay', 'fiveacross'];
 
@@ -401,14 +404,21 @@ describe('alternateNamespaceApex — the setup wizard address step (#790)', () =
     expect(alternateNamespaceApex('gcb')).toBeNull();
   });
 
-  it('names only apexes the router actually serves', () => {
-    // Pins the table against `worker/src/host.ts`'s NAMESPACES so a future row
-    // cannot advertise an address the edge refuses. `fiveacross.app` is the
-    // canonical Namespace and never appears as an ALTERNATE.
-    const SERVED_ALTERNATES = ['vacaybingo.com'];
+  it('names only apexes the router actually serves, read from the router itself', () => {
+    // Derived from `worker/src/host.ts`'s own NAMESPACES rather than a second
+    // hardcoded list (Phase 4b P3, PR #911). The first version of this test
+    // claimed to pin the table against the router and did not — it compared
+    // one literal against another, so the production table and the router
+    // could drift in opposite directions with the test still green, which is
+    // exactly the failure it was written to prevent.
+    //
+    // `fiveacross.app` is the CANONICAL Namespace and never appears as an
+    // alternate, so the servable alternates are the router's set minus it.
+    const servedAlternates = NAMESPACES.filter((ns) => ns !== CANONICAL_NAMESPACE_APEX);
+    expect(servedAlternates.length).toBeGreaterThan(0); // guard against an empty filter passing vacuously
     for (const edition of ['gcb', 'vacay', 'fiveacross', 'not-a-real-edition']) {
       const apex = alternateNamespaceApex(edition);
-      if (apex !== null) expect(SERVED_ALTERNATES).toContain(apex);
+      if (apex !== null) expect(servedAlternates).toContain(apex);
     }
   });
 

@@ -80,7 +80,7 @@ function statusCopy(status: AddressStatus): string {
     case 'taken':
       return `✕ ${status.hostname} is already taken`;
     case 'check-failed':
-      return "Couldn't check right now — try again in a moment.";
+      return "Couldn't check right now.";
   }
 }
 
@@ -139,6 +139,12 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
   // unmount cancels the confirming check — so without this the step could be
   // left "complete" on a candidate nothing verified (Phase 4b P1, PR #911).
   const verifiedRef = useRef(false);
+  // Bumped by the Retry control so the effect re-runs on the SAME text. Without
+  // it a `check-failed` was a dead end (Phase 4b P2, PR #911): the effect's
+  // only trigger is `slugInput`/`draft.edition`, retyping the same address
+  // fires no `onChange`, and "try again in a moment" told the organizer to wait
+  // for something that would never happen on its own.
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     if (addressTouched) return;
@@ -262,7 +268,7 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
     // so a re-picked occasion that rebinds the Edition changes WHICH addresses
     // a launch would claim. Leaving it out would leave a candidate showing
     // "available" against the previous Edition's pair.
-  }, [slugInput, draft.edition]);
+  }, [slugInput, draft.edition, retryNonce]);
 
   // Read once per render: the device zone cannot change mid-session, and both
   // the control's availability and its written value must agree on one answer.
@@ -419,6 +425,18 @@ export default function StepBasics({ draft, updateDraft }: StepRenderProps) {
             className={`wizard-address-status wizard-address-status--${status.kind}`}
           >
             {statusCopy(status)}
+            {status.kind === 'check-failed' && (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  className="btn btn-link wizard-address-retry"
+                  onClick={() => setRetryNonce((n) => n + 1)}
+                >
+                  Retry
+                </button>
+              </>
+            )}
           </div>
           {normalizedCandidate !== '' && (
             <div className="wizard-address-hosts">
