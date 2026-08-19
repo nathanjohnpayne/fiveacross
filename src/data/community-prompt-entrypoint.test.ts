@@ -3,6 +3,7 @@ import { submitterStatus, type TargetableDay } from './communityPrompts';
 import {
   loadTrackedSuggestions,
   persistTrackedSuggestions,
+  refreshAndPersistLastKnownStatuses,
   trackSuggestion,
   deriveMySubmissions,
   refreshLastKnownStatuses,
@@ -163,10 +164,11 @@ describe('mySuggestions local tracker (#559)', () => {
       submittedAt: i,
     }));
     const activeMine = oversized.map((tracked) => item({ id: tracked.id, text: `refreshed-${tracked.id}` }));
-    const refreshed = refreshLastKnownStatuses(oversized, activeMine, [], 0);
+    const write = vi.spyOn(localStorage, 'setItem');
 
-    const persisted = persistTrackedSuggestions('ev-1', 'u1', refreshed);
+    const persisted = refreshAndPersistLastKnownStatuses('ev-1', 'u1', oversized, activeMine, [], 0);
 
+    expect(write).toHaveBeenCalledTimes(1);
     expect(persisted.map(({ id }) => id)).toEqual(Array.from({ length: 20 }, (_, i) => `id-${i + 2}`));
     expect(persisted[0].lastKnownText).toBe('refreshed-id-2');
     expect(loadTrackedSuggestions('ev-1', 'u1')).toEqual(persisted);

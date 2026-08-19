@@ -211,9 +211,10 @@ export function persistTrackedSuggestions(
 }
 
 /**
- * Record a fresh submission from THIS device — or refresh an existing
- * tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/`lastKnownText`
- * (`refreshLastKnownStatuses`' caller, `ItemPool.tsx`, calls this for BOTH).
+ * Record one fresh submission from THIS device — or replace one existing
+ * tracked entry at its first occurrence. ItemPool's multi-entry status/text
+ * refresh uses `refreshAndPersistLastKnownStatuses` instead, so the whole
+ * refreshed batch is normalized, capped, and persisted atomically.
  * Idempotent on `id` (a retried call — e.g. React StrictMode's
  * double-invoke — never duplicates the entry); silently drops on a storage
  * error, same fallback as the read.
@@ -400,7 +401,7 @@ export function deriveMySubmissions(
 /**
  * Refresh each tracked entry's `lastKnownStatus`/`lastKnownDayIndex`/
  * `lastKnownText` from the CURRENT `activeMine` query, for the caller to
- * persist (`trackSuggestion`) whenever an entry actually changes.
+ * persist whenever an entry actually changes.
  * Deliberately does nothing for an entry NOT currently found in `activeMine`
  * — a transiently-absent or genuinely-hidden entry keeps whatever it last
  * recorded, which is the whole point (see `deriveMySubmissions`'s doc
@@ -426,4 +427,23 @@ export function refreshLastKnownStatuses(
     return { ...t, lastKnownStatus: status, lastKnownDayIndex: dayIndex, lastKnownText: active.text };
   });
   return changed ? next : tracked;
+}
+
+/** Refresh ItemPool's complete tracked snapshot and persist it in one write.
+ * Keeping refresh plus persistence behind this seam prevents a caller from
+ * replaying individual entries from one stale oversized snapshot: the batch
+ * is normalized and capped once, and the exact persisted value is returned
+ * for in-memory state. A no-op refresh preserves the input reference and does
+ * not write. */
+export function refreshAndPersistLastKnownStatuses(
+  eventId: string,
+  uid: string,
+  tracked: readonly TrackedSuggestion[],
+  activeMine: readonly ItemDoc[],
+  days: readonly TargetableDay[],
+  now: number,
+): readonly TrackedSuggestion[] {
+  const refreshed = refreshLastKnownStatuses(tracked, activeMine, days, now);
+  if (refreshed === tracked) return tracked;
+  return persistTrackedSuggestions(eventId, uid, refreshed);
 }
