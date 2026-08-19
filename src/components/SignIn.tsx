@@ -75,21 +75,14 @@ export default function SignIn() {
         // Leaves this origin, so nothing after it runs on success and `busy`
         // stays true through the navigation — which is what we want: the button
         // must not re-arm while the browser is on its way out.
-        //
-        // KNOWN GAP, tracked as #895 (blocked by #836): the 18+ acknowledgement
-        // collected here does not ride along. `AuthContext`'s acknowledgement
-        // record is consumed by its `getRedirectResult` effect, and a handoff
-        // return signs in with a custom token instead, so the record is
-        // discarded unused. The consequence is one extra tap — a returning
-        // player meets AuthProvider's existing 18+ re-prompt and attests there —
-        // and that is the direction this has to fail in: fabricating a durable,
-        // cross-Event `attestedAdultAt` for a box nobody saw would be the
-        // genuinely bad outcome. Do not close it by relaxing the check; see #895
-        // for why the evidence has to stay transaction-scoped.
         const started = await startAuthHandoff({
           authOrigin: strategy.authOrigin,
           targetOrigin: strategy.targetOrigin,
           returnPath: strategy.returnPath,
+          // Captured from this render's actual checkbox state. The handoff
+          // transaction stores the evidence beside its verifier, so only this
+          // exact return can use it; a no-checkbox Event always carries false.
+          acknowledgedAdultContent: adult && ack,
         });
         if (!started) {
           // Drain the module-level channel as well as showing the local message

@@ -251,6 +251,7 @@ export async function startAuthHandoff(input: {
   authOrigin: string;
   targetOrigin: string;
   returnPath: string;
+  acknowledgedAdultContent?: boolean;
   navigate?: (url: string) => void;
 }): Promise<boolean> {
   try {
@@ -276,6 +277,7 @@ export async function startAuthHandoff(input: {
       verifier,
       targetOrigin: input.targetOrigin,
       returnPath,
+      acknowledgedAdultContent: input.acknowledgedAdultContent === true,
       createdAt: Date.now(),
     });
     if (!stored) {
