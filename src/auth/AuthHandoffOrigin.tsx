@@ -182,7 +182,11 @@ export default function AuthHandoffOrigin({
       fail(kind);
     };
 
-    deadline = setTimeout(() => terminate('sign-in-failed'), timeoutMs);
+    // Which failure the deadline reports depends on how far the page got
+    // (Phase 4b P2). Once minting has started the player IS signed in at this
+    // origin, so "Google sign-in didn't finish / nothing was changed" is simply
+    // untrue — the accurate statement is that we could not return them.
+    deadline = setTimeout(() => terminate(minted ? 'mint-failed' : 'sign-in-failed'), timeoutMs);
 
     const bounce = async (req: HandoffRequest) => {
       if (minted) return;

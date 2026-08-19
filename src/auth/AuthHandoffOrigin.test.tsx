@@ -301,3 +301,23 @@ describe('a navigation that throws is still a failure', () => {
     expect(throwingNavigate).toHaveBeenCalled();
   });
 });
+
+// Phase 4b P2. Once minting has started the player IS signed in at this origin,
+// so "Google sign-in didn't finish / nothing was changed" is simply untrue.
+describe('the deadline reports the failure that actually happened', () => {
+  it('says mint-failed when the hang is in minting, not sign-in', async () => {
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockImplementation(() => new Promise(() => {}));
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={25} />);
+
+    expect(await screen.findByText(/couldn't return you to your event/i)).toBeInTheDocument();
+    expect(screen.queryByText(/didn't finish/i)).toBeNull();
+  });
+
+  it('still says sign-in-failed when the hang is before minting', async () => {
+    mocks.getRedirectResult.mockImplementation(() => new Promise(() => {}));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={25} />);
+    expect(await screen.findByText(/didn't finish/i)).toBeInTheDocument();
+  });
+});

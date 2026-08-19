@@ -251,6 +251,12 @@ if (atCentralAuthOrigin) {
   root.render(
     <React.StrictMode>
       <AuthHandoffOrigin />
+      {/* Same disclosure obligation as the not-found and auth-blocked branches
+          below (Phase 4b P2): importing this module graph initialises Firebase
+          and GA4, so the central sign-in page is a telemetry-collecting surface
+          too and must carry the notice rather than being the one screen that
+          quietly does not. */}
+      <ConsentNotice />
     </React.StrictMode>,
   );
 } else {
