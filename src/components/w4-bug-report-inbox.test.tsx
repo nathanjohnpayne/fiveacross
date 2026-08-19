@@ -307,6 +307,31 @@ describe('W4 bug-report inbox', () => {
     }));
   });
 
+  it('keeps late capture results out of both the frozen retry payload and its preview', async () => {
+    let resolveCapture!: (image: Blob) => void;
+    captureSpy.mockReturnValue(new Promise<Blob>((resolve) => { resolveCapture = resolve; }));
+    submitSpy.mockRejectedValue({ code: 'functions/unavailable' });
+    renderFlow();
+    fireEvent.click(screen.getByRole('button', { name: 'Report a bug' }));
+    await screen.findByText(/Capturing this app view/);
+    fireEvent.change(screen.getByLabelText('What happened?'), { target: { value: 'The card froze.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not submit');
+    expect(submitSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      screenshotDataUrl: null,
+      captureError: null,
+    }));
+
+    resolveCapture(new Blob(['late'], { type: 'image/png' }));
+    await Promise.resolve();
+    expect(screen.queryByAltText('Screenshot that will be submitted with this bug report')).not.toBeInTheDocument();
+    expect(screen.getByText(/retry is frozen as a text-only report/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send report' }));
+    await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(2));
+    expect(submitSpy.mock.calls[1][0]).toBe(submitSpy.mock.calls[0][0]);
+  });
+
   it('unfreezes only a definitively pre-claim invalid payload and reuses its identity', async () => {
     captureSpy.mockRejectedValue(new Error('Canvas unavailable'));
     submitSpy

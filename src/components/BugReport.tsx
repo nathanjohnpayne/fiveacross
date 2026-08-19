@@ -96,6 +96,9 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
   // than what was sent (#670, Codex P2 round 5).
   const [submittedKind, setSubmittedKind] = useState<BugReportKind>('bug');
   const previewUrl = useMemo(() => (screenshot ? URL.createObjectURL(screenshot) : null), [screenshot]);
+  const presentedCaptureState = frozenInput
+    ? (frozenInput.screenshotDataUrl ? 'ready' : 'failed')
+    : captureState;
 
   useEffect(() => () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -255,15 +258,22 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
     try {
       let input = frozenInput;
       if (!input) {
-        const screenshotDataUrl = screenshot ? await blobToDataUrl(screenshot) : null;
+        // The first Send is the evidence boundary. A capture already in flight
+        // may finish after this snapshot, but it must not replace the preview
+        // while retries keep submitting the frozen text-only payload.
+        captureAttemptRef.current += 1;
+        const frozenScreenshot = screenshot;
+        const frozenCaptureError = captureError;
+        const screenshotDataUrl = frozenScreenshot ? await blobToDataUrl(frozenScreenshot) : null;
         input = buildBugReportInput({
           submissionId,
           description,
           kind,
           screenshotDataUrl,
-          captureError,
-          route: screenshot ? (captureRoute ?? undefined) : undefined,
+          captureError: frozenCaptureError,
+          route: frozenScreenshot ? (captureRoute ?? undefined) : undefined,
         });
+        setCaptureState(frozenScreenshot ? 'ready' : 'failed');
         setFrozenInput(input);
       }
       const result = await submitBugReport(input);
@@ -402,8 +412,8 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                       onChange={(event) => setDescription(event.target.value)}
                     />
                     <div className="bug-report-capture" aria-live="polite">
-                      {captureState === 'capturing' && <p>Capturing this app view…</p>}
-                      {captureState === 'ready' && previewUrl && (
+                      {presentedCaptureState === 'capturing' && <p>Capturing this app view…</p>}
+                      {presentedCaptureState === 'ready' && previewUrl && (
                         <>
                           <img src={previewUrl} alt="Screenshot that will be submitted with this bug report" />
                           <div className="bug-report-capture-actions">
@@ -412,9 +422,13 @@ export function BugReportProvider({ children }: { children: ReactNode }) {
                           </div>
                         </>
                       )}
-                      {captureState === 'failed' && (
+                      {presentedCaptureState === 'failed' && (
                         <>
-                          <p>Screenshot unavailable. You can still send a text-only report.</p>
+                          <p>
+                            {frozenInput
+                              ? 'This retry is frozen as a text-only report; no screenshot will be submitted.'
+                              : 'Screenshot unavailable. You can still send a text-only report.'}
+                          </p>
                           <div className="bug-report-capture-actions">
                             <button className="btn" type="button" disabled={busy || frozenInput !== null} onClick={capture}>Try screenshot again</button>
                             <button className="btn" type="button" disabled={busy || frozenInput !== null} onClick={() => setStage('pick')}>Capture a different screen</button>
