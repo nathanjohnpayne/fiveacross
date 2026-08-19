@@ -42,12 +42,28 @@ export interface EditionBrand {
    *  endorsement of itself would be noise. */
   wordmarkByline?: string;
   preEventVerb: string;
+  /** The glyph on the pre-event header line ("⚓ Sails Jul 15", #881), paired
+   *  with `preEventVerb` since both are pre-cruise-only header copy. NOT a
+   *  universal ⚓ (Codex P2, PR #896 round 1): an anchor is cruise-specific
+   *  decoration, so hardcoding it for every Edition leaked the GCB nautical
+   *  register into vacay and fiveacross the same way a hardcoded cruise
+   *  noun would — `dayIdentity.tsx` reads this field instead. */
+  preEventGlyph: string;
   tagline: string;
   /** The gate's voice line ("Take the detour. For the story.") — the italic
    *  chip the wireframes draw inside the Join lockup (#647, § Join). Optional
    *  because only vacay's frame carries one; when present it REPLACES the
    *  plain `tagline` on the signed-out gate, which the wireframe omits there. */
   signinTaglineChip?: string;
+  /** A second, ADDITIVE voice chip (#881, gcb/fiveacross Join frames) — same
+   *  italic slot as `signinTaglineChip`, drawn ABOVE it rather than instead
+   *  of it: both frames keep their own `.desc` tagline line right below the
+   *  chip. Deliberately a separate field, not a reuse of `signinTaglineChip`
+   *  with a modifier flag — that field's whole contract is "replaces the
+   *  tagline," which is true for vacay alone; giving gcb/fiveacross a
+   *  same-named field with different behavior would make the one field mean
+   *  two things depending on which brand sets it. */
+  signinVoiceChip?: string;
   /** The invitation copy block under the Join CTA ("Prompts are invitations,
    *  not chores…"). Optional: only the vacay frame draws it. */
   signinInviteNote?: string;
@@ -57,7 +73,37 @@ export interface EditionBrand {
    *  than a boolean so editions.test.ts's every-field-is-a-nonempty-string
    *  exhaustiveness sweep covers it like any other brand field. */
   signinCardVariant?: 'postcard';
+  /** A fixed per-Edition stamp glyph for the gate's Event-preview corner
+   *  (#881: "postage on every gate" — 🏳️‍🌈 on gcb, ✳️ on fiveacross, its own
+   *  share mark). Deliberately NOT the 💒 the wireframe's fiveacross sample
+   *  happens to render (Codex P2, PR #896 round 1): fiveacross is the
+   *  occasion-neutral platform Edition, so a wedding glyph baked into the
+   *  Edition-level brand table would leak onto every OTHER occasion's gate
+   *  (a conference, a birthday) that Edition equally supports — the sample's
+   *  identity, not the brand's. Distinct from `signinCardVariant: 'postcard'`,
+   *  which is vacay's OWN postage and stays dynamic — it stamps whichever Day
+   *  the preview is currently showing (`previewDayEmoji`), not a fixed brand
+   *  mark. When set, this
+   *  glyph wins over the dynamic one (`EventPostcard.tsx`) and must never
+   *  repeat an emoji already drawn elsewhere on that gate screen. */
+  signinStampGlyph?: string;
+  /** The Join gate's / in-app offline note: ADR 0006's routine-dead-zone
+   *  promise ("your card keeps working offline, marks sync when you
+   *  reconnect"). NOT the total-failure fallback — that is
+   *  `crashFallbackNote` below, a deliberately separate field (Codex P2, PR
+   *  #896 round 2): `ErrorBoundary.tsx` used to reuse this same string for
+   *  its crash panel, so #881's rewrite of gcb's copy (dropping the printed-
+   *  cards/PDF claim, correct for the routine case) silently regressed the
+   *  crash panel's accepted launch-critical fallback message
+   *  (`specs/x-launch-checklist.md` § "Printed 12-card PDF fallback"). */
   offlineNote: string;
+  /** The crash panel's OWN fallback line (`ErrorBoundary.tsx`), read instead
+   *  of `offlineNote` when set. Optional: only gcb has a printed-card
+   *  tradition to point to (`specs/x-launch-checklist.md`); an Edition
+   *  without one falls back to the routine `offlineNote` — imperfect for a
+   *  total failure, but no worse than before this field existed, and no
+   *  Edition regresses a documented contract it never had. */
+  crashFallbackNote?: string;
   documentTitle: string;
   appName: string;
   appShortName: string;
@@ -147,7 +193,15 @@ export type ThemeId =
   // reason as the Bodega trio above.
   | 'marquee'
   | 'confetti-hour'
-  | 'afterglow';
+  | 'afterglow'
+  // Five Across platform chrome (#882). Registered like the trio above —
+  // same contrast contract, same THEME_EDITIONS binding to `fiveacross` —
+  // but flagged `ThemeMeta.chrome: true` and filtered out of
+  // `themesForEdition`'s picker output: it dresses surfaces that have no
+  // Day (utility states, the admin console, email, the gallery/share
+  // surfaces outside a Day context), not a Day a player can wear. See
+  // specs/w1-themes.md § Registry vs. picker.
+  | 'fiveacross-slate';
 
 // One Day of an Event (daily-cards-spec § "Data model"). Ordered inside
 // `EventDoc.days` (length 10 for the July sailing, 4 for Bodega Bay — the

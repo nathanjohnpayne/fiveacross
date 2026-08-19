@@ -43,8 +43,39 @@ const BRANDS: Record<string, EditionBrand> = {
     // scoping note on `wordmarkByline` in the vacay row below.
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Sails',
+    // #881: the pre-event header line's glyph — cruise-appropriate here,
+    // unlike a universal anchor (Codex P2, PR #896 round 1; see the field's
+    // own note).
+    preEventGlyph: '⚓',
     tagline: 'Sign in, get your card, mark it if you see it.',
-    offlineNote: 'Lost signal at sea? The printed cards and PDF still work.',
+    // The Join-frame voice chip and the gate's fixed postage mark (#881: "a
+    // treatment only one brand receives reads as an accident" — vacay had
+    // both, gcb and fiveacross had neither). ADDITIVE, not vacay's replacing
+    // kind (Codex P2, PR #896 round 1): the gcb Join frame keeps its own
+    // plain tagline line right below this chip, so `signinVoiceChip` is the
+    // field, not `signinTaglineChip` (see the type's own note on why they're
+    // separate fields). The rainbow flag doesn't repeat anything else the
+    // gcb Join frame draws.
+    signinVoiceChip: 'What happens at sea. Goes on the card.',
+    signinStampGlyph: '🏳️‍🌈',
+    // #881: this note is specifically ADR 0006's ROUTINE-dead-zone promise
+    // (a Player loses signal for a few minutes, the app itself keeps
+    // working) — all three Editions now state that same mechanic in the same
+    // words, varying only the opener. It is NOT the total-failure fallback;
+    // that stayed real (the printed cards and PDF genuinely exist per the
+    // launch-accepted PRD/spec — Codex P2, PR #896 round 2 caught the first
+    // cut conflating the two and silently dropping the crash panel's
+    // fallback message along with this one), and now lives in its own
+    // field below.
+    offlineNote: 'Lost signal at sea? Your card keeps working offline—marks sync when you reconnect.',
+    // The crash panel's fallback (`ErrorBoundary.tsx`), read instead of
+    // `offlineNote` above: `specs/x-launch-checklist.md` § "Printed 12-card
+    // PDF fallback" accepts the printed cards and PDF as the answer
+    // specifically for "the app itself is broken and can't be fixed in
+    // time" — a real, documented, pre-existing artifact (the PRD's own
+    // words: "already exist"), and gcb is the one Edition with that printed
+    // tradition to point to.
+    crashFallbackNote: "If the app won't recover, the printed cards and PDF still work.",
     // Verbatim the strings index.html and the manifest hardcoded before #586,
     // so a `gcb` build is byte-identical to the shipped deployment.
     documentTitle: 'Gay Cruise Bingo',
@@ -96,11 +127,21 @@ const BRANDS: Record<string, EditionBrand> = {
     // would be noise.
     wordmarkByline: 'BY FIVE ACROSS',
     preEventVerb: 'Starts',
+    // #881: this Edition's own pre-event glyph — its share mark, not gcb's
+    // anchor (Codex P2, PR #896 round 1; nautical decoration does not belong
+    // on the trip register either).
+    preEventGlyph: '🧳',
     tagline: 'Sign in, get your card, mark it if you see it.',
     // The Join-frame voice pieces (#647, wireframes § "Join—the postcard, not
-    // the casino"). Only vacay's frame draws them: the tagline chip replaces
-    // the plain tagline on the signed-out gate, the invite note sits under the
-    // CTA, and the Event card wears the postcard's dashed stamp corner.
+    // the casino"). This chip REPLACES the plain tagline on the signed-out
+    // gate — vacay's frame draws no separate tagline line under it. gcb and
+    // fiveacross carry their own voice chip too (#881), but ADDITIVE: their
+    // frames keep the plain tagline right below it, so they use the
+    // separate `signinVoiceChip` field, not this one (see that field's own
+    // note for why "replace" and "add" are not the same field with a flag).
+    // The invite note and the postcard's dashed-stamp treatment stay
+    // vacay-only, since its postage is the current Day's own emoji rather
+    // than a fixed brand mark (see `signinStampGlyph` for the fixed kind).
     signinTaglineChip: 'Take the detour. For the story.',
     signinInviteNote:
       'Prompts are invitations, not chores. Take the fun detour, share the story if you want—five across earns a BINGO.',
@@ -167,7 +208,20 @@ const BRANDS: Record<string, EditionBrand> = {
     // a birthday weekend all read naturally as "Opens Aug 7" — the doors-open
     // framing its default Theme (✨ Marquee, #617) already speaks.
     preEventVerb: 'Opens',
+    // #881: a plain calendar mark, not gcb's anchor (Codex P2, PR #896
+    // round 1) — functional, not decorative, matching this Edition's own
+    // "no lead-in emoji, functional emoji only" voice (see the Join caption).
+    preEventGlyph: '📅',
     tagline: 'Sign in, get your card, mark it if you see it.',
+    // Same Join-frame voice-chip-plus-postage treatment as gcb (#881),
+    // additive rather than replacing (see gcb's own note above). The postage
+    // is fiveacross's own share mark, not the wedding-bell the wireframe's
+    // sample happens to render (Codex P2, PR #896 round 1): this Edition is
+    // occasion-neutral, so a wedding glyph baked into the brand table would
+    // leak onto every OTHER occasion this same Edition equally supports (a
+    // conference, a birthday) — the sample's identity, not the brand's.
+    signinVoiceChip: 'Bring everyone. Into the game.',
+    signinStampGlyph: '✳️',
     offlineNote: 'Packed room, no bars? Your card keeps working offline—marks sync when you reconnect.',
     // Title case for the tab and the home-screen label, as above. "Five Across"
     // is 11 characters, so it survives Android's short_name truncation whole.

@@ -59,6 +59,20 @@ describe('resolveAuthDomain', () => {
     },
   );
 
+  // The central auth origin (#547, #549, ADR 0010) — the one origin every
+  // wildcard Event host signs in through. It runs Google sign-in itself, so its
+  // OAuth helper has to be same-origin: without the pin it resolves the
+  // configured foreign authDomain and breaks under the very Safari storage
+  // partitioning this allowlist exists to avoid, on the one origin whose failure
+  // takes sign-in down for every Event at once.
+  it('pins the central auth origin to its own handler so the handoff can sign in there', () => {
+    expect(resolveAuthDomain('bodega-bay.vacaybingo.com', 'auth.fiveacross.app')).toBe(
+      'auth.fiveacross.app',
+    );
+    expect(isAuthConfiguredForHost('bodega-bay.vacaybingo.com', 'auth.fiveacross.app')).toBe(true);
+    expect(isSignInReachableOnHost('bodega-bay.vacaybingo.com', 'auth.fiveacross.app')).toBe(true);
+  });
+
   it.each([
     'gaycruisebingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app',
     'gaycruisebingo-git-some-other-branch-nathanjohnpaynes-projects.vercel.app',

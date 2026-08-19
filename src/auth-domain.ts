@@ -65,6 +65,24 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // hosts and the pre-mount gate darks them (#600 step 6's follow-up).
   'fiveacross.app',
   'bodega-bay.fiveacross.app',
+  // The CENTRAL AUTH ORIGIN (#547, #549, ADR 0010) — the one origin every
+  // wildcard Event host signs in through, because Google validates OAuth
+  // redirect URIs exactly and `<slug>.fiveacross.app` can therefore never be its
+  // own callback.
+  //
+  // It belongs here for the ordinary reason every other entry does, not a
+  // special one: this host runs Google sign-in itself, so its OAuth helper has
+  // to be same-origin. Without the pin, `resolveAuthDomain` hands it the
+  // configured `bodega-bay.vacaybingo.com`, the helper goes cross-origin, and
+  // the flow breaks under exactly the Safari storage partitioning this
+  // allowlist exists to avoid — on the one origin whose failure takes sign-in
+  // down for every Event at once.
+  //
+  // Registered on the `fiveacross` project's authorized domains and its Google
+  // OAuth web client, like the two entries above. That registration is #547 and
+  // is console-only: until a human completes it, this entry pins an authDomain
+  // Google will reject, so the handoff cannot carry real traffic yet.
+  'auth.fiveacross.app',
 ]);
 
 /** Keep production OAuth helper storage on the same origin as the app. */

@@ -10,6 +10,22 @@
 # Used by check_spec_test_alignment when the default filename search
 # wouldn't find the test.
 spec_test_map:
+  # auth-handoff-client's coverage is module-named (the mode/strategy table, the
+  # transaction store, the boundary primitives, the two callable legs, the
+  # client/server parity pin, the central-origin page, the two new failure
+  # screens, and the allowlist entry for the central auth origin), so none of
+  # them share the spec basename — map them all explicitly.
+  auth-handoff-client:
+    - src/auth/authMode.test.ts
+    - src/auth/handoffTransaction.test.ts
+    - src/auth/handoffClient.test.ts
+    - src/auth/handoffExchange.test.ts
+    - src/auth/handoff-parity.test.ts
+    - src/auth/AuthHandoffOrigin.test.tsx
+    - src/components/event-not-found-auth-reasons.test.tsx
+    - src/components/signin-handoff-route.test.tsx
+    - src/handoffBoot.test.ts
+    - src/auth-domain.test.ts
   # event-membership's coverage is module-named (the pure admission predicates),
   # so it does not share the spec basename — map it explicitly. The emulator
   # layer that proves the DEPLOYED rules agree with those predicates is #804's
@@ -93,6 +109,18 @@ spec_test_map:
   # og-renderer-commit-safety's coverage lives under scripts/og/ as *.test.mjs
   # (module-named, not spec-basename-named, and outside both test_globs
   # patterns below), so map every layer explicitly.
+  # event-router's coverage is module-named (the shared Slug contract, the
+  # namespace guard, the lookup's decision table, and the request pipeline) and
+  # spans two top-level directories, so none of the four share the spec
+  # basename — map them all explicitly.
+  event-router:
+    - src/slug.test.ts
+    - worker/src/host.test.ts
+    - worker/src/resolve.test.ts
+    - worker/src/router.test.ts
+    - worker/src/config.test.ts
+    - worker/src/index.test.ts
+    - scripts/worker-deploy.test.mjs
   og-renderer-commit-safety:
     - scripts/og/og-size-guard.test.mjs
     - scripts/og/og-scratch-path.test.mjs
@@ -106,13 +134,18 @@ spec_test_map:
 test_globs:
   - "tests/**"
   - "src/**/*.test.*"
+  # The edge Event router's specs are colocated with its source under worker/
+  # (#545), outside both patterns above.
+  - "worker/**/*.test.ts"
 
 # Top-level directories beyond the canonical set that are intentional in
-# this repo: the Vite app's static-assets dir. Justification per the Code
-# Modification Rules lives in plans/app-scaffold-dirs.md (this whitelist
-# only silences the lint gate). `cloud-run` was dropped from this list when
+# this repo: the Vite app's static-assets dir, and the separately deployed
+# Cloudflare Worker Event router (#545). Justification per the Code
+# Modification Rules lives in plans/app-scaffold-dirs.md for `public` and in
+# AGENTS.md § Repository Layout for `worker` (this whitelist only silences
+# the lint gate). `cloud-run` was dropped from this list when
 # #39 (ADR 0005) removed the Cloud Run OG renderer, the directory's only
 # occupant.
 # Inline-array form because check_no_forbidden_top_level_dirs only
 # recognizes `key: [a, b]`, not indented list items.
-extra_top_level_dirs: [public]
+extra_top_level_dirs: [public, worker]
