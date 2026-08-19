@@ -94,6 +94,19 @@ const LIVE_DAYS = [
 
 const themeEmoji = (id) => THEMES.find((t) => t.id === id)?.emoji;
 
+/** A seed Day shaped like the real payload: the identity fields `seedDivergence`
+ *  aligns on, plus whichever glyph fields the case under test wants to assert.
+ *  Built from the target so a fixture can never accidentally encode a stale
+ *  identity — each test states only the field it is actually varying. */
+const seedDay = (target, overrides = {}) => ({
+  index: target.index,
+  date: target.date,
+  place: target.place,
+  theme: target.theme,
+  placeEmoji: target.emoji,
+  ...overrides,
+});
+
 describe('migrate-bodega-place-emoji: the #881 target table', () => {
   it('pins the Event this migration is written for', () => {
     expect(EXPECTED_PROJECT_ID).toBe('fiveacross');
@@ -313,6 +326,28 @@ describe('migrate-bodega-place-emoji: unrecognised live glyphs', () => {
     expect(() => assertWritablePlan(plan, applied)).not.toThrow();
   });
 
+  // Phase 4b #919. `correctDay` promises to repair an empty-string legacy
+  // `portEmoji` — '' wins `migrateDayFields`' precedence and blanks the glyph.
+  // Classifying '' as unrecognised made `assertWritablePlan` refuse that exact
+  // repair, so the two guards contradicted each other. These are the end-to-end
+  // plan+assert tests that contradiction slipped past.
+  it('repairs an empty-string legacy portEmoji end to end rather than refusing it', () => {
+    const blanked = LIVE_DAYS.map((d, i) => (i === 3 ? { ...d, portEmoji: '' } : d));
+    const plan = planEmojiMigration(blanked);
+    expect(plan.unrecognized).toEqual([]);
+    expect(() => assertWritablePlan(plan, blanked)).not.toThrow();
+    expect(plan.diffs[3].changed.portEmoji).toEqual({ from: '', to: '👋' });
+    expect(plan.corrected[3].portEmoji).toBe('👋');
+  });
+
+  it('repairs an empty-string placeEmoji end to end too', () => {
+    const blanked = LIVE_DAYS.map((d, i) => (i === 0 ? { ...d, placeEmoji: '' } : d));
+    const plan = planEmojiMigration(blanked);
+    expect(plan.unrecognized).toEqual([]);
+    expect(() => assertWritablePlan(plan, blanked)).not.toThrow();
+    expect(plan.corrected[0].placeEmoji).toBe('🐚');
+  });
+
   // A Day with no `placeEmoji` renders no glyph at all (`migrateDayFields`
   // resolves it to ''), so writing the target repairs it rather than overwriting
   // anybody's edit.
@@ -342,12 +377,12 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
   });
 
   it('reports nothing once the seed carries the targets (post-#896 steady state)', () => {
-    const seeded = TARGET_DAYS.map((t) => ({ index: t.index, placeEmoji: t.emoji, portEmoji: t.emoji }));
+    const seeded = TARGET_DAYS.map((t) => seedDay(t, { portEmoji: t.emoji }));
     expect(seedDivergence(seeded).entries).toEqual([]);
   });
 
   it('refuses an unrecognised seed value — the decision changed, or the seed drifted', () => {
-    const seeded = TARGET_DAYS.map((t) => ({ index: t.index, placeEmoji: t.index === 1 ? '🦞' : t.emoji }));
+    const seeded = TARGET_DAYS.map((t) => seedDay(t, t.index === 1 ? { placeEmoji: '🦞' } : {}));
     const divergence = seedDivergence(seeded);
     expect(divergence.conflicts).toHaveLength(1);
     expect(divergence.conflicts[0]).toMatchObject({ index: 1, field: 'placeEmoji', value: '🦞' });
@@ -355,7 +390,7 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
   });
 
   it('treats a field the seed omits as nothing to disagree with', () => {
-    const seeded = TARGET_DAYS.map((t) => ({ index: t.index, placeEmoji: t.emoji }));
+    const seeded = TARGET_DAYS.map((t) => seedDay(t));
     expect(seedDivergence(seeded).entries).toEqual([]);
   });
 
@@ -363,10 +398,7 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
   // seed no longer describes a Day this table still plans to write — a dropped
   // or reindexed Day — and must not read as agreement.
   it('refuses a target Day the seed no longer describes', () => {
-    const seeded = TARGET_DAYS.filter((t) => t.index !== 2).map((t) => ({
-      index: t.index,
-      placeEmoji: t.emoji,
-    }));
+    const seeded = TARGET_DAYS.filter((t) => t.index !== 2).map((t) => seedDay(t));
     const divergence = seedDivergence(seeded);
     expect(divergence.conflicts).toHaveLength(1);
     expect(divergence.conflicts[0]).toMatchObject({ index: 2, field: '(day)' });
@@ -374,7 +406,7 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
   });
 
   it('refuses a reindexed seed even when every glyph value is a target', () => {
-    const seeded = TARGET_DAYS.map((t) => ({ index: t.index + 10, placeEmoji: t.emoji }));
+    const seeded = TARGET_DAYS.map((t) => seedDay(t, { index: t.index + 10 }));
     const divergence = seedDivergence(seeded);
     expect(divergence.conflicts).toHaveLength(TARGET_DAYS.length);
     expect(() => assertSeedAgreement(divergence)).toThrow();
@@ -389,7 +421,11 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
   // asserts none — a fresh seed from that payload resolves to '' through
   // `migrateDayFields` — which contradicts #881 as squarely as a wrong value.
   it('refuses a seed Day that omits the canonical placeEmoji', () => {
-    const seeded = TARGET_DAYS.map((t) => (t.index === 1 ? { index: t.index } : { index: t.index, placeEmoji: t.emoji }));
+    const seeded = TARGET_DAYS.map((t) => {
+      const day = seedDay(t);
+      if (t.index === 1) delete day.placeEmoji;
+      return day;
+    });
     const divergence = seedDivergence(seeded);
     expect(divergence.conflicts).toHaveLength(1);
     expect(divergence.conflicts[0]).toMatchObject({ index: 1, field: 'placeEmoji', value: undefined });
@@ -398,12 +434,40 @@ describe('migrate-bodega-place-emoji: seed cross-check', () => {
 
   // The legacy field is the other way round: its absence is the #566 end state.
   it('accepts a seed Day that omits the legacy portEmoji', () => {
-    const seeded = TARGET_DAYS.map((t) => ({ index: t.index, placeEmoji: t.emoji }));
+    const seeded = TARGET_DAYS.map((t) => seedDay(t));
     expect(seedDivergence(seeded).conflicts).toEqual([]);
   });
 
   it('still accepts the real seed module, which asserts placeEmoji on every Day', () => {
     expect(seedDivergence(EVENT_SEED.days).conflicts).toEqual([]);
+  });
+
+  // Phase 4b #920. Seed Days are located by `index`, so identity has to be
+  // checked before their glyphs mean anything: the target table is
+  // theme-dependent (each glyph was chosen to differ from that Day's own Theme),
+  // so a Day that keeps its index and glyph while its theme moves is a different
+  // Day wearing the same number.
+  it.each(ALIGNMENT_FIELDS.filter((f) => f !== 'index'))(
+    'refuses a seed Day whose %s no longer matches the target',
+    (field) => {
+      const seeded = TARGET_DAYS.map((t) => seedDay(t, t.index === 1 ? { [field]: 'moved' } : {}));
+      const divergence = seedDivergence(seeded);
+      expect(divergence.conflicts).toHaveLength(1);
+      expect(divergence.conflicts[0]).toMatchObject({ index: 1, field, value: 'moved' });
+      expect(() => assertSeedAgreement(divergence)).toThrow(/does not recognise/);
+    },
+  );
+
+  // The theme-distinctness test above reads the TARGET's theme. This reads the
+  // real seed's, so #881's actual rule is asserted against the shipped data —
+  // and the runtime alignment check is what keeps the two from drifting apart.
+  it('keeps every target glyph distinct from the REAL seed Day’s Theme glyph', () => {
+    for (const target of TARGET_DAYS) {
+      const seedDay = EVENT_SEED.days.find((d) => d.index === target.index);
+      expect(seedDay, `seed Day ${target.index} must exist`).toBeTruthy();
+      expect(seedDay.theme).toBe(target.theme);
+      expect(target.emoji, `Day ${target.index + 1} (${seedDay.theme})`).not.toBe(themeEmoji(seedDay.theme));
+    }
   });
 });
 

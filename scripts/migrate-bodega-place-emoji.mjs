@@ -190,6 +190,14 @@ export function diffDay(liveDay, target) {
     if (!(field in live)) continue;
     const value = live[field];
     if (value === target.emoji || target.superseded.includes(value)) continue;
+    // An EMPTY value is a blank to repair, not an edit to preserve — the same
+    // reasoning that makes an absent `placeEmoji` a repair. It is also the exact
+    // case `correctDay` exists to fix on the legacy field: `migrateDayFields`
+    // tests `typeof portEmoji === 'string'`, so '' wins precedence and renders no
+    // glyph at all. Classifying it as unrecognised made the two guards
+    // contradict — `assertWritablePlan` would refuse the very repair the
+    // contract promises (Phase 4b #919).
+    if (value === '') continue;
     unrecognized.push({ field, value });
   }
 
@@ -256,6 +264,17 @@ export function seedDivergence(seedDays = EVENT_SEED.days, targets = TARGET_DAYS
     if (!day) {
       entries.push({ index: target.index, field: '(day)', value: undefined, target: target.emoji, status: 'conflict' });
       continue;
+    }
+    // The seed Day is located by `index`, so its IDENTITY has to be checked too
+    // before its glyphs mean anything (Phase 4b #920). The target table is
+    // identity- and theme-dependent: each glyph was chosen to differ from that
+    // Day's own Theme. A seed Day that keeps its index and glyph while its
+    // `theme` (or `date`/`place`) moves is a different Day wearing the same
+    // number, and reading it as agreement would let the table's reasoning go
+    // stale silently.
+    for (const field of ALIGNMENT_FIELDS) {
+      if (day[field] === target[field]) continue;
+      entries.push({ index: target.index, field, value: day[field], target: target[field], status: 'conflict' });
     }
     for (const field of EMOJI_FIELDS) {
       if (!(field in day)) {
@@ -527,7 +546,12 @@ async function main() {
   // concurrent admin/scheduler edit between the dry-run read above and this
   // write cannot be silently overwritten — the plan is recomputed and
   // re-asserted against the transaction's own read.
+  // Reset per attempt, not once outside: Firestore may re-run the callback on
+  // contention, and a flag left set by an abandoned attempt would report a write
+  // that never committed.
+  let wrote = false;
   await db.runTransaction(async (tx) => {
+    wrote = false;
     const applySnap = await tx.get(ref);
     if (!applySnap.exists) throw new Error(`bodega-place-emoji: event ${eventId} not found — aborting.`);
     const applyDays = applySnap.get('days');
@@ -538,8 +562,16 @@ async function main() {
     assertWritablePlan(applyPlan, applyDays);
     if (!applyPlan.changed) return;
     tx.update(ref, { days: applyPlan.corrected });
+    wrote = true;
   });
-  console.log('\nbodega-place-emoji: applied — corrected days[] written transactionally. ✅');
+  // The transaction can legitimately find nothing left to do — another operator
+  // corrected the doc between the dry-run read above and this one. Say so rather
+  // than claiming a write that did not happen (Phase 4b #921).
+  console.log(
+    wrote
+      ? '\nbodega-place-emoji: applied — corrected days[] written transactionally. ✅'
+      : '\nbodega-place-emoji: another writer corrected it first — the transaction found nothing to write. ✅',
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
