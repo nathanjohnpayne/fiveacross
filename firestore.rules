@@ -733,6 +733,19 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // App Check-safe edge registry control-plane state (ADR 0014, #970).
+    // These are server/operator-only collections. Unlike `hostnames`, even a
+    // point get exposes publisher revision/control metadata that no browser
+    // needs; an Event Admin is still a Firebase client and receives no carve-
+    // out. Trusted Functions/Admin SDK paths bypass Security Rules explicitly.
+    match /routerReplicas/{host} {
+      allow read, write: if false;
+    }
+
+    match /routerRehearsals/{host} {
+      allow read, write: if false;
+    }
+
     // Global user profiles.
     match /users/{uid} {
       allow read: if signedIn();
