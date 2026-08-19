@@ -178,6 +178,44 @@ describe('mySuggestions local tracker (#559)', () => {
     expect(loaded.find((s) => s.id === 'skewed-0')).toBeUndefined();
   });
 
+  it('one-time repairs a blob left out of order by the PRE-round-2 remove-and-append implementation, before the next write ever caps by array position (Codex P2, PR #890 round 2)', () => {
+    // Models exactly what the OLD (pre-#864-round-2) `trackSuggestion` could
+    // leave behind: `old-1` (the actual oldest submission) was REFRESHED at
+    // some point and moved to the array's TAIL, while `id-2..id-20` sit in
+    // their genuine submission order ahead of it — a blob written entirely
+    // by a build older than this fix, never touched by the new code yet.
+    const legacy = [
+      ...Array.from({ length: 19 }, (_, i) => ({ id: `id-${i + 2}`, text: `t${i + 2}`, submittedAt: i + 2 })),
+      { id: 'old-1', text: 'the actual oldest', submittedAt: 1 },
+    ];
+    localStorage.setItem('gcb.mySuggestions.ev-1.u1', JSON.stringify(legacy));
+
+    // The very next write — a genuinely new submission — triggers the
+    // one-time migration before doing anything else.
+    trackSuggestion('ev-1', 'u1', { id: 'id-21', text: 'newest', submittedAt: 21 });
+
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded).toHaveLength(20);
+    // The genuinely oldest entry — wherever the legacy bug had left it — is
+    // what the cap evicts...
+    expect(loaded.find((s) => s.id === 'old-1')).toBeUndefined();
+    // ...never a merely-earlier-looking array position that isn't actually
+    // the oldest submission.
+    expect(loaded.find((s) => s.id === 'id-2')).toBeDefined();
+    expect(loaded.find((s) => s.id === 'id-21')).toBeDefined();
+  });
+
+  it('migrates at most once — a SECOND write does not re-sort by submittedAt again (so a later clock-skewed write cannot exploit an ongoing sort)', () => {
+    trackSuggestion('ev-1', 'u1', { id: 'a', text: 'a', submittedAt: 100 });
+    trackSuggestion('ev-1', 'u1', { id: 'b', text: 'b', submittedAt: 50 }); // an "earlier" timestamp, written SECOND
+    // If every write re-sorted by submittedAt, 'b' (submittedAt: 50) would
+    // sort BEFORE 'a' (submittedAt: 100) despite being written after it —
+    // array position must reflect WRITE order after the one-time migration
+    // has already run once.
+    const loaded = loadTrackedSuggestions('ev-1', 'u1');
+    expect(loaded.map((s) => s.id)).toEqual(['a', 'b']);
+  });
+
   it('discards a persisted entry whose lastKnownStatus is not a valid SubmitterStatus, rather than letting a malformed value reach the pill label (#865)', () => {
     localStorage.setItem(
       'gcb.mySuggestions.ev-1.u1',

@@ -471,7 +471,25 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     vi.unstubAllGlobals();
   });
 
-  it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list — even when the write resolves in the SAME batch as the account switch, before any effect gets a separate turn to settle first (Codex + CodeRabbit, PR #890 round 1)', async () => {
+  it('never splices the OLD account\'s submission into the NEW account\'s on-screen tracked list, even under the most adversarial timing this harness can construct (Codex + CodeRabbit, PR #890 round 1)', async () => {
+    // NOTE on what this test can and cannot prove: `rerender()` and
+    // `resolveAdd()` are issued back-to-back with no `await` between them,
+    // inside one `act()` call — the most adversarial ordering this harness
+    // can construct. Empirically (round 2 investigation), React Testing
+    // Library does not actually commit the `rerender()` before this
+    // continuation's microtask runs in that exact shape, so this specific
+    // construction cannot, on its own, prove `uidRef` was already updated
+    // by the time the guard below reads it. What it DOES prove is the
+    // on-screen OUTCOME under that same adversarial ordering: this
+    // component carries a SECOND, independent safety net — the account-
+    // switch effect a few lines above, which unconditionally reloads
+    // `tracked` from u2's OWN localStorage the instant `uid` changes — so
+    // even if this specific guard's timing were imperfect, u1's row could
+    // not survive rendering under u2. The two OTHER tests below (form reset
+    // and analytics suppression, which have no such second safety net) use
+    // two separately-settled `act()` calls instead, which this
+    // investigation confirmed DOES let the ref update land before the
+    // continuation checks it — the achievable, and realistic, guarantee.
     let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
     H.addItem.mockReturnValue(
       new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
@@ -488,16 +506,6 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     // Still pending — `addItem` has not resolved yet.
     expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false);
 
-    // Auth switches to a DIFFERENT account, and the write resolves inside
-    // the SAME `act()` batch — round 1's finding: a plain `useEffect`-based
-    // `uidRef` update is a PASSIVE effect and would not yet have run by the
-    // time a promise `.then()` continuation queued in the same tick checks
-    // it, letting the stale splice through anyway even though the earlier,
-    // two-separately-settled-`act()`-calls version of this test could not
-    // see that (it let the ref update fully settle before ever resolving
-    // the promise). `useLayoutEffect` closes the window instead: it runs
-    // SYNCHRONOUSLY as part of the very commit that changed `uid`, strictly
-    // before `resolveAdd` below is even called.
     H.user = { uid: 'u2' };
     await act(async () => {
       rerender(<ItemPool />);
@@ -540,5 +548,86 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
 
     // u1's stale completion must not have wiped u2's in-progress text.
     expect(input.value).toBe('u2 is mid-draft');
+  });
+
+  it('clears the compose box and spicy flag on the account switch ITSELF, even if the new account never types anything — so a stale draft can never be silently seen or submitted by them (Codex P1, PR #890 round 2)', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    const input = screen.getByPlaceholderText('Add a prompt…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'Submitted by u1' } });
+    fireEvent.click(screen.getByRole('checkbox')); // u1 tags it spicy
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    // u2 signs in — and does NOT type anything before u1's write resolves.
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+
+    // The switch itself must have already cleared the box — not waiting on
+    // u1's write to resolve (which, per the guard, will now SKIP clearing
+    // it, since it is no longer u1's turn). Without this, u2 would see
+    // u1's leftover text and spicy tag and could submit it unedited.
+    expect(input.value).toBe('');
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+    expect(input.value).toBe('');
+    expect(screen.getByRole('checkbox')).not.toBeChecked();
+  });
+
+  it("suppresses the submission's analytics events when auth changed before the write resolved, rather than attributing u1's submission to u2 (Codex P2, PR #890 round 2)", async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    const { rerender } = render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted by u1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    H.user = { uid: 'u2' };
+    await act(async () => rerender(<ItemPool />));
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    expect(track).not.toHaveBeenCalledWith('add_item');
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
+  });
+
+  it('still fires the submission analytics normally when auth did NOT change', async () => {
+    let resolveAdd: (r: { id: string; targetDayIndex?: number }) => void = () => {};
+    H.addItem.mockReturnValue(
+      new Promise<{ id: string; targetDayIndex?: number }>((resolve) => {
+        resolveAdd = resolve;
+      }),
+    );
+    H.user = { uid: 'u1' };
+    render(<ItemPool />);
+
+    fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
+      target: { value: 'Submitted by u1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+    await act(async () => {
+      resolveAdd({ id: 'new-item-1' });
+    });
+
+    expect(track).toHaveBeenCalledWith('add_item');
+    expect(track).toHaveBeenCalledWith('prompt_suggestion_submitted', expect.objectContaining({ hasTargetDay: false }));
   });
 });

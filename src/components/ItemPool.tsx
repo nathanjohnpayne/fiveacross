@@ -154,18 +154,26 @@ export default function ItemPool() {
   // without needing to skip the (correctly-attributed) Firestore write or
   // localStorage persist.
   const uidRef = useRef(uid);
-  // `useLayoutEffect`, not `useEffect` (Codex + CodeRabbit, PR #890 round 1):
-  // a REGULAR effect leaves `uidRef.current` holding the OLD uid until after
-  // the new-account render has committed and (in a real browser) painted —
-  // if the pending `addItem` promise resolves in exactly that window, the
-  // guard below still reads the stale uid and lets the splice through
-  // anyway, the same class of bug #862 already fixed for the grace window.
-  // A layout effect runs synchronously as part of the SAME commit that
-  // changed `uid`, so there is no window at all in which a resolving
-  // promise can observe a stale ref.
-  useLayoutEffect(() => {
-    uidRef.current = uid;
-  }, [uid]);
+  // Assigned DURING RENDER, not in any effect at all — not even
+  // `useLayoutEffect` (Codex P1, PR #890 round 2). Round 1's fix used a
+  // layout effect, reasoning that it runs synchronously as part of the
+  // commit that changed `uid`, closing the window a regular passive effect
+  // leaves — true, but an EFFECT (layout or not) only runs once React
+  // actually gets a turn to flush that commit, which is a SEPARATE step
+  // from the render itself and can still be deferred behind other pending
+  // work. Writing the ref unconditionally, right here in the render body,
+  // removes that extra step entirely: calling the component function IS
+  // what updates local variables like `uid`, so this ref is current the
+  // instant ANY render for the new account happens, with no dependency on
+  // React ever getting around to running an effect at all. This closes the
+  // window for every case where the browser gets any turn to process the
+  // account-switch update before the OLD write's continuation runs — an
+  // arbitrarily adversarial interleaving where a promise already scheduled
+  // in the exact same microtask turn as the account switch could still
+  // observe a stale ref (because that continuation runs before ANY
+  // rendering happens at all, not merely before an effect does) is a
+  // narrower, harder-to-reach edge this fix does not additionally chase.
+  uidRef.current = uid;
   const [tracked, setTracked] = useState<TrackedSuggestion[]>([]);
   useEffect(() => {
     setTracked(uid ? loadTrackedSuggestions(EVENT_ID, uid) : []);
@@ -315,6 +323,31 @@ export default function ItemPool() {
   const poolItems = items.filter((it) => !mySubmissionIds.has(it.id));
   const [text, setText] = useState('');
   const [spicy, setSpicy] = useState(false);
+  // Reset on the uid TRANSITION itself (#861 round 2, Codex P1): guarding
+  // the OLD account's completion from clearing this state (CodeRabbit,
+  // round 1) is not sufficient on its own. If the NEW account never types
+  // anything before that guarded completion is skipped, the OLD account's
+  // half-typed text — and its `spicy` flag, which decides whether the
+  // submission is tagged explicit — would otherwise sit in the compose box
+  // INDEFINITELY: visible to, and tappable/submittable by, the new account
+  // with no edit of their own.
+  //
+  // Compared and reset DURING RENDER — React's documented "adjusting state
+  // when a prop changes" pattern, the SAME one WizardChrome.tsx's
+  // `issuesShownForStep` already uses in this codebase — not in ANY effect,
+  // not even `useLayoutEffect` (round 2's own first cut). `uidRef` above
+  // has the full account of why an effect-based reset, layout or not, needs
+  // React to actually get a turn to run it, which a render-phase update
+  // does not: calling `setState` DURING rendering makes React re-render
+  // again immediately, before committing anything, so the very FIRST commit
+  // the new uid ever produces already has a blank compose box — with no
+  // dependency on an effect ever running at all.
+  const [composeResetForUid, setComposeResetForUid] = useState(uid);
+  if (uid !== composeResetForUid) {
+    setComposeResetForUid(uid);
+    setText('');
+    setSpicy(false);
+  }
   // The first-time explainer (#610). State, not a render-time storage read:
   // it opens on the TICK (the moment of first use), not on mount — a player
   // who never touches the tag never sees it.
@@ -358,17 +391,29 @@ export default function ItemPool() {
     }
     try {
       const result = await addItem(submittingUid, text, adult && spicy);
-      track('add_item');
-      // `prompt_suggestion_submitted` (#559): NO Prompt text in the payload —
-      // just whether a Day could be named. Reports the target `addItem`
-      // itself ACTUALLY committed, never a client-recomputed guess (Codex
-      // P2, PR #845): a stale/reloading schedule snapshot here could disagree
-      // with what the write resolved against its OWN fresh read, corrupting
-      // the analytics at exactly the schedule boundaries it exists to measure.
-      track('prompt_suggestion_submitted', {
-        hasTargetDay: result?.targetDayIndex != null,
-        ...(result?.targetDayIndex != null ? { dayIndex: result.targetDayIndex } : {}),
-      });
+      // Analytics attribution is ALSO guarded (#861 round 2, Codex P2):
+      // firing unconditionally after the awaited write would attribute
+      // whatever identity the analytics SDK is CURRENTLY identified as
+      // (PostHog/GA4) to this event — if auth switched mid-flight, that is
+      // the NEW account, not whoever actually submitted. Suppressing the
+      // event when the identity has since changed is simpler and safer
+      // than trying to override the SDK's ambient identity for one event,
+      // and losing one event for this narrow timing overlap is a much
+      // smaller cost than misattributing it.
+      if (uidRef.current === submittingUid) {
+        track('add_item');
+        // `prompt_suggestion_submitted` (#559): NO Prompt text in the
+        // payload — just whether a Day could be named. Reports the target
+        // `addItem` itself ACTUALLY committed, never a client-recomputed
+        // guess (Codex P2, PR #845): a stale/reloading schedule snapshot
+        // here could disagree with what the write resolved against its OWN
+        // fresh read, corrupting the analytics at exactly the schedule
+        // boundaries it exists to measure.
+        track('prompt_suggestion_submitted', {
+          hasTargetDay: result?.targetDayIndex != null,
+          ...(result?.targetDayIndex != null ? { dayIndex: result.targetDayIndex } : {}),
+        });
+      }
       if (result) {
         const submitted = { id: result.id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
         // Persisted under the SUBMITTING uid regardless of who is current —
