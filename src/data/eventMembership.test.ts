@@ -124,6 +124,13 @@ describe('readMembership — the versioned parse', () => {
     expect(readMembership(activeRecord({ invitationId: null }))?.invitationId).toBeNull();
   });
 
+  it('rejects an EMPTY invitationId — null is the reserved no-invitation value', () => {
+    // Codex P2 on PR #891. '' is neither a real invitation id nor the reserved
+    // null, so accepting it records an invitation-backed grant that cannot name
+    // the single-use invitation it consumed.
+    expect(readMembership(activeRecord({ invitationId: '' }))).toBeNull();
+  });
+
   it('rejects a revoked record whose audit fields are missing or unusable', () => {
     // Codex P2 on PR #891. Silently dropping the unusable half handed consumers
     // a "parsed" revocation with no author and no date — exactly the provenance

@@ -50,7 +50,7 @@ import type {
   MembershipEnforcement,
   MembershipRole,
   MembershipStatus,
-} from '../domainTypes';
+} from '../types';
 
 /** The collection under an Event that holds its admission records. */
 export const MEMBERSHIP_COLLECTION = 'memberships';
@@ -155,7 +155,13 @@ export function readMembership(raw: unknown): MembershipDoc | null {
   if (!isStatus(d.status)) return null;
   if (typeof d.grantedAt !== 'number' || !Number.isFinite(d.grantedAt)) return null;
   if (typeof d.grantedBy !== 'string' || d.grantedBy === '') return null;
-  if (!(d.invitationId === null || typeof d.invitationId === 'string')) return null;
+  // `null` is RESERVED for grants with no invitation (provisioner, backfill).
+  // An empty string is neither a real invitation id nor that reserved value, so
+  // accepting it would record an invitation-backed grant that cannot name the
+  // single-use invitation it consumed — losing exactly the provenance #803
+  // needs to diagnose reuse (Codex P2 on PR #891).
+  if (!(d.invitationId === null || (typeof d.invitationId === 'string' && d.invitationId !== '')))
+    return null;
 
   // Revocation is a PAIR, and its consistency with `status` is part of the
   // shape (Codex P2 on PR #891). A revoked record without usable audit fields

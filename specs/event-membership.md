@@ -47,14 +47,24 @@ That is a constraint, not a convenience. `storage.rules` can only reach Firestor
 
 ### Who may write it
 
-**No client credential may write this collection, in any Event, ever.** The rules arm #804 adds is the `hostnames` shape:
+**No client credential may write this collection, in any Event, ever.** Writes take the `hostnames` shape. Reads do **not** take the admission predicate, and the difference matters in both directions (Codex P1 on PR #891):
 
 ```
 match /memberships/{uid} {
-  allow read: if <the predicate below>;
+  // Self-inspection is NOT admission. A revoked member must still be able to
+  // read their OWN record, or the client cannot tell them "you were removed
+  // from this Event" and shows a permission error instead — and the
+  // `denied-revoked` outcome this spec promises becomes unreachable.
+  allow get: if isOwner(uid) || isAdmin(eventId);
+  // The roster is Admin-only. Gating it on admission instead would let any
+  // member enumerate every other member together with `grantedBy`,
+  // `invitationId` and the revocation audit fields.
+  allow list: if isAdmin(eventId);
   allow create, update, delete: if false;
 }
 ```
+
+Reusing `admitted(eventId)` here would have been wrong twice over: too tight for the member reading their own revocation, and far too loose for the member reading everyone else's. **The admission predicate gates Event CONTENT; it does not gate the admission record itself.**
 
 Creation cannot be a client transaction, for the same reason Event creation cannot be one (#785 § Contract facts) and for the same reason a handoff code cannot be (#548): the record's whole value is that the party it authorizes did not write it. Grants therefore arrive by exactly three Admin-SDK paths, and #803 owns the first:
 
@@ -132,7 +142,9 @@ Three properties are load-bearing and must survive any rewrite.
 
 **The `exists()` precedes the `get()`**, so a stranger — the adversary case — short-circuits after one access call and never pays for the second; only a legitimate member pays both. And **the enforcement check precedes the membership check**, so an unenforced Event costs exactly one access call and no membership read at all, which is what makes landing dark cheap rather than merely possible.
 
-**The `exists()` is not redundant, and collapsing the predicate to a single `get()` is a trap.** Ticket #802 asks for "exactly one document `get()`", and the constraint that actually matters — one *document*, at a path computable from `(eventId, uid)`, with no query — is met; the call count is two because `get(path).data.status` on a missing document does not evaluate to false, it *errors*, and an erroring clause is not a false clause. It denies the whole evaluation instead of yielding `false` to the surrounding expression, so a bare `get()` poisons every disjunction it sits inside — and #804 will need exactly those, since most rules here are `admitted(eventId) || isOwner(...)` or `admitted(eventId) || isAdmin(eventId)` shaped. `exists() && get()` yields a clean `false` and composes. The one place a single `get()` is safe is where the predicate is the entire condition, which is not worth a second, subtly different form of the same check.
+**Admission is CONJOINED with each rule's existing authorization, never disjoined.** The shape is `admitted(eventId) && <the rule's current condition>`. An earlier draft of this spec wrote `admitted(eventId) || isOwner(...)`, which is backwards and would have widened access rather than narrowing it: `boards` is owner/admin-only today (`:1105`) and `claims` likewise (`:1304`), so OR-ing admission in would have handed every member of an Event read access to every other member's private Board and Claims — a regression introduced by the very change meant to harden the boundary (Codex P1 on PR #891). Membership is an **additional** gate. It subtracts from what each rule already allows and never adds to it, and any rule that comes out of #804 more permissive than it went in is wrong on its face.
+
+**The `exists()` is not redundant, and collapsing the predicate to a single `get()` is a trap.** Ticket #802 asks for "exactly one document `get()`", and the constraint that actually matters — one *document*, at a path computable from `(eventId, uid)`, with no query — is met; the call count is two because `get(path).data.status` on a missing document does not evaluate to false, it *errors*, and an erroring clause is not a false clause. Under pure conjunction an error and a `false` both deny, so this is a robustness property rather than the correctness one the same paragraph previously claimed on the strength of the withdrawn OR shape. It still earns its call: `admitted()` has an internal disjunction, #689's block predicate and the `momentRetractions` arms compose further, and a clause that yields `false` can be reasoned about locally while one that throws cannot.
 
 ### The rules-evaluation budget
 
@@ -182,7 +194,7 @@ This is a prescription, not a measurement: #804 must confirm it at the emulator,
 
 What #804 and #806 gate, and — as importantly — what they must not.
 
-**Gate (Event-scoped, currently open to any signed-in account).** `events/{eventId}` read (`:728`); `items` (`:940-985`); `players` (`:1006-1009`); `reshuffles` (`:1043-1054`); `boards` (`:1105-1149`, create-side only per finding 1); `meta` (`:1180-1190`); `proofs` (`:1198-1298`); `claims` (`:1304-1306`); `tally` (`:1324-1325`) and its nested `markers` (`:1331-1339`); `doubts` (`:1348-1403`); `hearts` (`:1418-1457`); `moments` (`:1465-1606`); `momentRetractions` (`:1652-1681`); `notices` (`:1693-1755`). Every read arm above is a bare `signedIn()`.
+**Gate (Event-scoped, currently open to any signed-in account).** `events/{eventId}` read (`:728`); `items` (`:940-985`); `players` (`:1006-1009`); `reshuffles` (`:1043-1054`); `boards` (`:1105-1149`, create **and** update); `meta` (`:1180-1190`); `proofs` (`:1198-1298`); `claims` (`:1304-1306`); `tally` (`:1324-1325`) and its nested `markers` (`:1331-1339`); `doubts` (`:1348-1403`); `hearts` (`:1418-1457`); `moments` (`:1465-1606`); `momentRetractions` (`:1652-1681`); `notices` (`:1693-1755`). Most read arms above are a bare `signedIn()`, but **not all of them** — `boards` (`:1105`) and `claims` (`:1304`) are already owner/admin-only. Those two keep their existing predicate and gain admission as a conjunct; they must not be loosened to `signedIn() && admitted(...)`.
 
 **Gate (Storage).** `proofs/{eventId}/{uid}/{file}` read, create/update and delete (`storage.rules:29-37`). The read arm is the widest surface in either file.
 
@@ -236,7 +248,7 @@ The switch must not be client-writable, and today it would be: the `events/{even
 - **Given** a UID in `bannedUids` holding an active membership, **when** the predicate runs, **then** they are admitted: ban is presentational and admission is not, and the predicate demonstrably ignores the ban.
 - **Given** an Event with no `membershipEnforcement` field, **when** the predicate runs, **then** everyone signed in is admitted, with the outcome distinguishable from a real admission.
 - **Given** a membership written at a schema version this build does not understand, **when** it is read, **then** the parse yields a miss while the authorization answer still admits if `status` is `'active'`.
-- **Given** the heaviest existing rules path, **when** the added accesses are counted, **then** the spec records the worst case against the published limit — and it records that the reshuffle board write does **not** fit, with the create-side-only shape that does.
+- **Given** the heaviest existing rules path, **when** the added accesses are counted, **then** the spec records the worst case against the published limit — and it records that the reshuffle board write does **not** fit as written, with the two refactors that make it fit while admission still gates create **and** update.
 
 ## Decisions
 
