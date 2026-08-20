@@ -1,0 +1,31 @@
+name: repo-lint-local
+
+# Consumer-local CI checks (mergepath#601 annex). repo_lint.yml is
+# manifest-canonical: it is propagated byte-for-byte from mergepath and so
+# cannot carry gaycruisebingo-specific check wiring. This check is
+# gaycruisebingo-local (it has no mergepath counterpart), so it lives here in
+# the OPTIONAL, never-propagated annex that scripts/ci/check_ci_scripts_wired
+# scans as a union with repo_lint.yml. See mergepath#601 and the header of
+# scripts/ci/check_ci_scripts_wired for the union-scan contract.
+#
+# Before this annex the assertions were appended inline to this repo's copy of
+# scripts/ci/check_workflow_parsers. That file is inside the mergepath
+# `scripts/ci/` kit (type: kit, consumers: all), which the next propagation
+# wave mirrors here verbatim for the first time, so the append would have been
+# deleted with no gate able to see it happen. The wiring and the assertions
+# both move out of the kit surface to survive. See mergepath#1055.
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  repo-lint-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: make_ci_scripts_executable
+        run: chmod +x scripts/ci/*
+      - name: check_synthetic_uptime_parsers
+        run: ./scripts/ci/check_synthetic_uptime_parsers
