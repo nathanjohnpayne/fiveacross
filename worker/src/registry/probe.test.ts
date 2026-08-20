@@ -339,4 +339,22 @@ describe('regional probe challenges', () => {
       ),
     ).toThrow('provider request');
   });
+
+  it('requires canonical challenge issuance strictly after the WAF removal timestamp', () => {
+    expect(() =>
+      issueProbeChallenge(
+        {
+          host: HOST,
+          phase: 'canonical-after-unblock',
+          expectedStateDigest: 'c'.repeat(64),
+          recoveryLockId: 'lock-1',
+          recoverySequence: '1',
+          wafRemovedAt: new Date(NOW).toISOString(),
+        },
+        PRINCIPAL,
+        NOW,
+        'nonce-equal-boundary',
+      ),
+    ).toThrow('malformed');
+  });
 });

@@ -216,6 +216,99 @@ describe('registry default fetch control-plane endpoints', () => {
   });
 
   it.each([
+    ['wrong content type', { 'content-type': 'text/plain' }, 415],
+    [
+      'declared oversized body',
+      { 'content-type': 'application/json', 'content-length': String(16 * 1_024 + 1) },
+      413,
+    ],
+  ])('rejects a %s before rate limiting or reading a control body', async (_label, headers, status) => {
+    const data = await fixture();
+    const test = harness(data);
+    const request = new Request(`${ORIGIN}${RECOVERY_PATH}`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    });
+    const arrayBuffer = vi.spyOn(request, 'arrayBuffer');
+    const getReader = vi.spyOn(request.body!, 'getReader');
+
+    const response = await handleRegistryFetch(request, test.config, test.deps);
+
+    expect(response.status).toBe(status);
+    expect(test.limit).not.toHaveBeenCalled();
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(getReader).not.toHaveBeenCalled();
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
+
+  it('rate-limits a recovery request before reading its body or doing identity work', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const request = new Request(`${ORIGIN}${RECOVERY_PATH}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.11',
+      },
+      body: '{}',
+    });
+    const arrayBuffer = vi.spyOn(request, 'arrayBuffer');
+    const getReader = vi.spyOn(request.body!, 'getReader');
+    test.limit.mockImplementation(async () => {
+      expect(arrayBuffer).not.toHaveBeenCalled();
+      expect(getReader).not.toHaveBeenCalled();
+      return { success: false };
+    });
+
+    const response = await handleRegistryFetch(request, test.config, test.deps);
+
+    expect(response.status).toBe(429);
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(getReader).not.toHaveBeenCalled();
+    expect(test.limit).toHaveBeenCalledExactlyOnceWith({ key: 'recovery:203.0.113.11' });
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
+
+  it('cancels a chunked control body after reading only the 16 KiB bound plus one byte', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const chunks = [new Uint8Array(16 * 1_024), new Uint8Array([0]), new Uint8Array(32 * 1_024)];
+    let pulled = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          controller.enqueue(chunks[pulled++]!);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const request = new Request(`${ORIGIN}${RECOVERY_PATH}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.12',
+      },
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    expect(request.headers.get('content-length')).toBeNull();
+
+    const response = await handleRegistryFetch(request, test.config, test.deps);
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: 'request-too-large' });
+    expect(pulled).toBe(2);
+    expect(cancelled).toBe(true);
+    expect(test.limit).toHaveBeenCalledExactlyOnceWith({ key: 'recovery:203.0.113.12' });
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ['UTF-8 BOM', Uint8Array.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d])],
     ['invalid UTF-8', Uint8Array.from([0xc3, 0x28])],
   ])('rejects %s in a control body before identity or storage work', async (_label, body) => {
@@ -231,7 +324,7 @@ describe('registry default fetch control-plane endpoints', () => {
       test.deps,
     );
     expect(response.status).toBe(400);
-    expect(test.limit).not.toHaveBeenCalled();
+    expect(test.limit).toHaveBeenCalledExactlyOnceWith({ key: 'probe-challenge:unidentified-client' });
     expect(test.getByName).not.toHaveBeenCalled();
   });
 

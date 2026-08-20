@@ -401,7 +401,7 @@ async function validateProviderRequests(
     requireFresh(request.verifiedAt, now, MAX_SOURCE_AGE_MS, 'provider verification');
     const eventAt = Date.parse(request.eventAt);
     const verifiedAt = Date.parse(request.verifiedAt);
-    if (verifiedAt < eventAt || (notBefore !== undefined && (eventAt < notBefore || verifiedAt < notBefore))) {
+    if (verifiedAt < eventAt || (notBefore !== undefined && (eventAt <= notBefore || verifiedAt <= notBefore))) {
       throw new Error('provider evidence predates the authorized recovery phase');
     }
     if (request.host !== host || request.rayId.length === 0 || request.edgeColoCode.length === 0) {
@@ -842,7 +842,7 @@ export async function applyRecovery(
       const wafRemovedAt = Date.parse(request.action.wafRemovedAt);
       if (
         !Number.isFinite(wafRemovedAt) ||
-        wafRemovedAt < lockAcquiredAt ||
+        wafRemovedAt <= lockAcquiredAt ||
         wafRemovedAt > context.now ||
         context.now - wafRemovedAt > MAX_SOURCE_AGE_MS
       ) {
@@ -888,9 +888,9 @@ export async function applyRecovery(
             evidence.challenge.recoveryLockId !== lock.lockId ||
             evidence.challenge.recoverySequence !== state.recoverySequence ||
             evidence.challenge.wafRemovedAt !== authorizedWafRemovedAt ||
-            evidence.challenge.issuedAt < wafRemovedAt ||
+            evidence.challenge.issuedAt <= wafRemovedAt ||
             !Number.isFinite(observedAt) ||
-            observedAt < wafRemovedAt ||
+            observedAt <= wafRemovedAt ||
             !Number.isFinite(receivedAt) ||
             receivedAt < observedAt
           );

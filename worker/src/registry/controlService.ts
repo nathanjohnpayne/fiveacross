@@ -33,6 +33,58 @@ function json(status: number, body: Record<string, unknown>): Response {
   });
 }
 
+export class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super('request body too large');
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
+/**
+ * Retains no more than maximum + 1 received bytes. The extra byte is the
+ * unambiguous over-limit sentinel; once observed, the unread request stream is
+ * cancelled instead of being materialized with Request.arrayBuffer().
+ */
+export async function readBodyAtMost(request: Request, maximum: number): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(maximum) || maximum < 0) throw new Error('invalid body limit');
+  if (request.body === null) return new Uint8Array();
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let retainedBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new Error('invalid request body stream');
+
+      const remaining = maximum + 1 - retainedBytes;
+      const retained = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      if (retained.byteLength > 0) chunks.push(retained.slice());
+      retainedBytes += retained.byteLength;
+      if (retainedBytes > maximum) {
+        await reader.cancel().catch(() => undefined);
+        throw new RequestBodyTooLargeError();
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof RequestBodyTooLargeError)) {
+      await reader.cancel().catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(retainedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -63,10 +115,7 @@ function canonicalJson(value: unknown): string {
     .join(',')}}`;
 }
 
-async function readExactJson(
-  request: Request,
-  maximum: number,
-): Promise<{ rawBytes: Uint8Array; body: string; bodyDigest: string; value: unknown }> {
+function validateJsonBodyHeaders(request: Request, maximum: number): void {
   if (request.headers.get('content-type') !== 'application/json') {
     throw new Response(JSON.stringify({ error: 'unsupported-media-type' }), {
       status: 415,
@@ -78,10 +127,23 @@ async function readExactJson(
       status: 413,
     });
   }
-  const rawBytes = new Uint8Array(await request.arrayBuffer());
-  if (rawBytes.byteLength > maximum) {
-    throw new Response(JSON.stringify({ error: 'request-too-large' }), {
-      status: 413,
+}
+
+async function readExactJson(
+  request: Request,
+  maximum: number,
+): Promise<{ rawBytes: Uint8Array; body: string; bodyDigest: string; value: unknown }> {
+  let rawBytes: Uint8Array;
+  try {
+    rawBytes = await readBodyAtMost(request, maximum);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      throw new Response(JSON.stringify({ error: 'request-too-large' }), {
+        status: 413,
+      });
+    }
+    throw new Response(JSON.stringify({ error: 'invalid-request' }), {
+      status: 400,
     });
   }
   if (rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf) {
@@ -669,6 +731,21 @@ async function recoveryResponse(
   deps: ControlServiceDeps,
 ): Promise<Response> {
   if (request.method !== 'POST') return json(405, { error: 'method-not-allowed' });
+  try {
+    validateJsonBodyHeaders(request, RECOVERY_MAX_BYTES);
+  } catch (response) {
+    return response instanceof Response
+      ? new Response(response.body, {
+          status: response.status,
+          headers: {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+          },
+        })
+      : json(400, { error: 'invalid-request' });
+  }
+  const limited = await enforceRateLimit(request, 'recovery', deps);
+  if (limited !== null) return limited;
   let parsed: Awaited<ReturnType<typeof readExactJson>>;
   try {
     parsed = await readExactJson(request, RECOVERY_MAX_BYTES);
@@ -683,8 +760,6 @@ async function recoveryResponse(
         })
       : json(400, { error: 'invalid-request' });
   }
-  const limited = await enforceRateLimit(request, 'recovery', deps);
-  if (limited !== null) return limited;
   let recovery: RecoveryRequest;
   try {
     recovery = parseRecovery(parsed.value);
@@ -740,6 +815,21 @@ async function probeResponse(
   deps: ControlServiceDeps,
 ): Promise<Response> {
   if (request.method !== 'POST') return json(405, { error: 'method-not-allowed' });
+  try {
+    validateJsonBodyHeaders(request, RECOVERY_MAX_BYTES);
+  } catch (response) {
+    return response instanceof Response
+      ? new Response(response.body, {
+          status: response.status,
+          headers: {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+          },
+        })
+      : json(400, { error: 'invalid-request' });
+  }
+  const limited = await enforceRateLimit(request, `probe-${kind}`, deps);
+  if (limited !== null) return limited;
   let parsed: Awaited<ReturnType<typeof readExactJson>>;
   try {
     parsed = await readExactJson(request, RECOVERY_MAX_BYTES);
@@ -754,8 +844,6 @@ async function probeResponse(
         })
       : json(400, { error: 'invalid-request' });
   }
-  const limited = await enforceRateLimit(request, `probe-${kind}`, deps);
-  if (limited !== null) return limited;
   let probe: Record<string, unknown>;
   try {
     probe = parseProbePayload(parsed.value, kind);

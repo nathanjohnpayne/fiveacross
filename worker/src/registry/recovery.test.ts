@@ -19,7 +19,7 @@ import type { ConsumedProbeEvidence } from './probe';
 
 const HOST = 'r2-abcdefghijklmnopqrstuvwxyz.fiveacross.app';
 const NOW = Date.parse('2026-08-19T12:35:00.000Z');
-const WAF_REMOVED_AT = new Date(NOW).toISOString();
+const WAF_REMOVED_AT = new Date(NOW + 1_000).toISOString();
 const ZONE_ID = '1'.repeat(32);
 const RULESET_ID = '2'.repeat(32);
 const RULE_ID = '3'.repeat(32);
@@ -60,7 +60,7 @@ async function consumedEvidence(
       receivedAt:
         phase === 'blocked'
           ? '2026-08-19T12:34:56.000Z'
-          : new Date(NOW + 2_000).toISOString(),
+          : new Date(NOW + 4_000).toISOString(),
       subject: `runner-${suffix}`,
       keyVersion: `projects/p/locations/l/keyRings/r/cryptoKeys/probe-${suffix}/cryptoKeyVersions/1`,
       keyFingerprint: String(suffix).repeat(64),
@@ -74,7 +74,7 @@ async function consumedEvidence(
         region: ['us-west1', 'us-east1', 'europe-west1'][index],
         host: HOST,
         expectedStateDigest: 'a'.repeat(64),
-        issuedAt: phase === 'blocked' ? NOW - 10_000 : NOW,
+        issuedAt: phase === 'blocked' ? NOW - 10_000 : NOW + 2_000,
         expiresAt: NOW + 5 * 60_000,
         consumed: true,
       },
@@ -95,7 +95,7 @@ async function consumedEvidence(
           : {
               phase: 'canonical-after-unblock' as const,
               probeNonce: `nonce-${suffix}`,
-              observedAt: new Date(NOW + 1_000).toISOString(),
+              observedAt: new Date(NOW + 3_000).toISOString(),
               rayId: `ray-${suffix}`,
               host: HOST,
               requestPath: `/__registry-probe?nonce=nonce-${suffix}`,
@@ -172,8 +172,8 @@ function providerRequest(index: number, blocked: boolean): ProviderRequestEviden
   const query = `nonce=nonce-${index}`;
   return {
     rayId: `ray-${index}`,
-    eventAt: blocked ? '2026-08-19T12:34:50.000Z' : new Date(NOW + 1_000).toISOString(),
-    verifiedAt: blocked ? '2026-08-19T12:34:55.000Z' : new Date(NOW + 2_000).toISOString(),
+    eventAt: blocked ? '2026-08-19T12:34:50.000Z' : new Date(NOW + 3_000).toISOString(),
+    verifiedAt: blocked ? '2026-08-19T12:34:55.000Z' : new Date(NOW + 4_000).toISOString(),
     edgeColoCode: ['SJC', 'IAD', 'LHR'][index - 1],
     host: HOST,
     path: '/__registry-probe',
@@ -759,7 +759,7 @@ describe('source-attested recovery', () => {
           providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
         }),
         recoveryContext('unused', {
-          now: NOW + 3_000,
+          now: NOW + 5_000,
           consumeAttestations: async () => preLockEvidence,
         }),
       ),
@@ -775,9 +775,67 @@ describe('source-attested recovery', () => {
           probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
           providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
         }),
-        recoveryContext('unused', { now: NOW + 3_000 }),
+        recoveryContext('unused', { now: NOW + 5_000 }),
       ),
     ).rejects.toThrow('predates the recovery lock');
+
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(acquired.state, {
+          kind: 'clear-lock',
+          lockId: 'lock-1',
+          wafRemovedAt: new Date(NOW).toISOString(),
+          probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
+          providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
+        }),
+        recoveryContext('unused', { now: NOW + 5_000 }),
+      ),
+    ).rejects.toThrow('predates the recovery lock');
+
+    const equalProviderTime: WafEvidence['providerRequests'] = [
+      providerRequest(1, false),
+      providerRequest(2, false),
+      providerRequest(3, false),
+    ];
+    equalProviderTime[0].eventAt = WAF_REMOVED_AT;
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(acquired.state, {
+          kind: 'clear-lock',
+          lockId: 'lock-1',
+          wafRemovedAt: WAF_REMOVED_AT,
+          probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
+          providerRequests: equalProviderTime,
+        }),
+        recoveryContext('unused', { now: NOW + 5_000 }),
+      ),
+    ).rejects.toThrow('predates the authorized recovery phase');
+
+    const equalChallengeTime = (await consumedEvidence(
+      ['clear-1', 'clear-2', 'clear-3'],
+      'canonical',
+    )).map((entry) => ({
+      ...entry,
+      challenge: { ...entry.challenge, issuedAt: Date.parse(WAF_REMOVED_AT) },
+    })) as ConsumedProbeEvidence[];
+    await expect(
+      applyRecovery(
+        acquired.state,
+        await request(acquired.state, {
+          kind: 'clear-lock',
+          lockId: 'lock-1',
+          wafRemovedAt: WAF_REMOVED_AT,
+          probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
+          providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
+        }),
+        recoveryContext('unused', {
+          now: NOW + 5_000,
+          consumeAttestations: async () => equalChallengeTime,
+        }),
+      ),
+    ).rejects.toThrow('not bound to WAF removal and current lock');
     const clear = await applyRecovery(
       acquired.state,
       await request(acquired.state, {
@@ -787,7 +845,7 @@ describe('source-attested recovery', () => {
         probeAttestationIds: ['clear-1', 'clear-2', 'clear-3'],
         providerRequests: [providerRequest(1, false), providerRequest(2, false), providerRequest(3, false)],
       }),
-      recoveryContext('unused', { now: NOW + 3_000 }),
+      recoveryContext('unused', { now: NOW + 5_000 }),
     );
     expect(clear.state.recoveryLock).toBeNull();
     expect(clear.record.action).toBe('clear-lock');

@@ -292,12 +292,82 @@ describe('registry default fetch sync endpoint', () => {
     expect(test.getByName).not.toHaveBeenCalled();
   });
 
+  it('rejects a declared oversized sync body before rate limiting or reading', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const request = new Request(AUDIENCE, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': '2049',
+      },
+      body: '{}',
+    });
+    const arrayBuffer = vi.spyOn(request, 'arrayBuffer');
+    const getReader = vi.spyOn(request.body!, 'getReader');
+
+    const response = await handleRegistryFetch(request, test.config, test.deps);
+
+    expect(response.status).toBe(413);
+    expect(test.limit).not.toHaveBeenCalled();
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(getReader).not.toHaveBeenCalled();
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
+
   it('enforces the bound rate limiter before JWT work', async () => {
     const data = await fixture();
     const test = harness(data);
-    test.limit.mockResolvedValue({ success: false });
-    const response = await handleRegistryFetch(await signedRequest(data), test.config, test.deps);
+    const request = await signedRequest(data);
+    const arrayBuffer = vi.spyOn(request, 'arrayBuffer');
+    const getReader = vi.spyOn(request.body!, 'getReader');
+    test.limit.mockImplementation(async () => {
+      expect(arrayBuffer).not.toHaveBeenCalled();
+      expect(getReader).not.toHaveBeenCalled();
+      return { success: false };
+    });
+    const response = await handleRegistryFetch(request, test.config, test.deps);
     expect(response.status).toBe(429);
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(getReader).not.toHaveBeenCalled();
+    expect(test.getByName).not.toHaveBeenCalled();
+  });
+
+  it('cancels a chunked body after reading only the 2 KiB bound plus one byte', async () => {
+    const data = await fixture();
+    const test = harness(data);
+    const chunks = [new Uint8Array(2_048), new Uint8Array([0]), new Uint8Array(8_192)];
+    let pulled = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          controller.enqueue(chunks[pulled++]!);
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const request = new Request(AUDIENCE, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '2001:db8::1',
+      },
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    expect(request.headers.get('content-length')).toBeNull();
+
+    const response = await handleRegistryFetch(request, test.config, test.deps);
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: 'request-too-large' });
+    expect(pulled).toBe(2);
+    expect(cancelled).toBe(true);
+    expect(test.limit).toHaveBeenCalledExactlyOnceWith({ key: 'sync:2001:db8::1' });
     expect(test.getByName).not.toHaveBeenCalled();
   });
 
@@ -351,7 +421,7 @@ describe('registry default fetch sync endpoint', () => {
       test.deps,
     );
     expect(response.status).toBe(400);
-    expect(test.limit).not.toHaveBeenCalled();
+    expect(test.limit).toHaveBeenCalledExactlyOnceWith({ key: 'sync:unidentified-client' });
     expect(test.getByName).not.toHaveBeenCalled();
   });
 });

@@ -220,9 +220,9 @@ export function matchProbeAttestations(
         attestation.challenge.recoverySequence !== canonical.recoverySequence ||
         attestation.challenge.wafRemovedAt !== canonical.wafRemovedAt ||
         !Number.isFinite(wafRemovedAt) ||
-        attestation.challenge.issuedAt < wafRemovedAt ||
+        attestation.challenge.issuedAt <= wafRemovedAt ||
         !Number.isFinite(observedAt) ||
-        observedAt < wafRemovedAt ||
+        observedAt <= wafRemovedAt ||
         receivedAt < observedAt ||
         canonical.stateDigest !== expected.stateDigest ||
         observation.expectedStatus !== canonical.status ||
@@ -267,7 +267,7 @@ export function issueProbeChallenge(
       (request.recoveryLockId.length === 0 ||
         !/^[1-9]\d*$/.test(request.recoverySequence) ||
         !Number.isFinite(Date.parse(request.wafRemovedAt)) ||
-        Date.parse(request.wafRemovedAt) > now ||
+        Date.parse(request.wafRemovedAt) >= now ||
         now - Date.parse(request.wafRemovedAt) > CHALLENGE_LIFETIME_MS))
   ) {
     refuse('probe challenge input malformed');

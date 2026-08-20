@@ -2,6 +2,8 @@ import { createHash, createPublicKey } from 'node:crypto';
 
 const REQUIRED_ALGORITHM = 'RSA_SIGN_PKCS1_2048_SHA256';
 const ROLES = new Set(['publisher', 'recovery', 'source-attestor', 'regional-probe']);
+const KMS_KEY_VERSION =
+  /^projects\/[^/\s]+\/locations\/[^/\s]+\/keyRings\/[A-Za-z0-9_-]+\/cryptoKeys\/[A-Za-z0-9_-]+\/cryptoKeyVersions\/[1-9]\d*$/;
 
 const CRC32C_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -33,10 +35,17 @@ function assertPinRequest(request) {
   if (request.role === 'publisher' && !/^[1-9]\d*$/.test(request.epochOrSlot)) {
     throw new Error('publisher epoch must be canonical positive decimal');
   }
+  if (!/^[1-9]\d*$/.test(request.subject)) {
+    throw new Error('verification subject must be a canonical positive decimal');
+  }
+  if (!KMS_KEY_VERSION.test(request.keyVersion)) throw new Error('invalid KMS key version resource');
 }
 
 function fingerprintPem(pem) {
   const publicKey = createPublicKey(pem);
+  if (publicKey.asymmetricKeyType !== 'rsa' || publicKey.asymmetricKeyDetails?.modulusLength !== 2048) {
+    throw new Error('KMS public key must be RSA 2048 SubjectPublicKeyInfo');
+  }
   const der = publicKey.export({ type: 'spki', format: 'der' });
   return createHash('sha256').update(der).digest('hex');
 }

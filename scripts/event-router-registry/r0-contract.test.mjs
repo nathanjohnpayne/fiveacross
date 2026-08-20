@@ -25,10 +25,24 @@ describe('registry R0 provisioning contract', () => {
     expect(sourceAttestor?.audience).toMatch(/\/__internal\/hostname-replicas\/v1\/source-attestor$/);
   });
 
+  it('uses valid Google service-account emails for every configured identity', () => {
+    for (const identity of REGISTRY_R0_CONTRACT.identities) {
+      const match = /^([a-z][a-z0-9-]{4,28}[a-z0-9])@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/.exec(
+        identity.subjectAccount,
+      );
+      expect(match, identity.subjectAccount).not.toBeNull();
+      expect(match?.[1].length, identity.subjectAccount).toBeLessThanOrEqual(30);
+    }
+    expect(
+      REGISTRY_R0_CONTRACT.identities.find(({ role }) => role === 'source-attestor')?.subjectAccount,
+    ).toBe('event-router-source-attestor@fiveacross.iam.gserviceaccount.com');
+  });
+
   it('pins semantic fields and alert policies for every required operator outcome', () => {
     expect(REGISTRY_R0_CONTRACT.cloudflare.observability).toEqual({
       semanticEvent: 'event-router-registry.semantic',
-      requiredFields: ['outcome', 'registryVersion', 'host', 'revision', 'latencyMs'],
+      workersLogs: { enabled: true, headSamplingRate: 1 },
+      requiredFields: ['event', 'outcome', 'registryVersion', 'host', 'revision', 'latencyMs'],
       excludedFields: ['authorization', 'token', 'signature', 'requestBody', 'eventData', 'firebaseKey'],
       alertPolicies: [
         { id: 'revision-conflict', outcome: 'conflict', countGreaterThan: 0, windowSeconds: 60 },
@@ -67,5 +81,15 @@ describe('registry R0 provisioning contract', () => {
       ({ id }) => id !== 'revision-conflict',
     );
     expect(() => validateRegistryR0Contract(missingAlert)).toThrow('observability');
+  });
+
+  it.each([
+    ['overlong account id', 'event-router-registry-source-attestor@fiveacross.iam.gserviceaccount.com'],
+    ['invalid account id', 'event_router@fiveacross.iam.gserviceaccount.com'],
+    ['invalid project id', 'event-router-audit@FiveAcross.iam.gserviceaccount.com'],
+  ])('fails closed on an %s', (_label, subjectAccount) => {
+    const altered = structuredClone(REGISTRY_R0_CONTRACT);
+    altered.identities[1].subjectAccount = subjectAccount;
+    expect(() => validateRegistryR0Contract(altered)).toThrow('service-account email');
   });
 });

@@ -29,7 +29,7 @@ export const REGISTRY_R0_CONTRACT = Object.freeze({
     },
     {
       role: 'source-attestor',
-      subjectAccount: 'event-router-registry-source-attestor@fiveacross.iam.gserviceaccount.com',
+      subjectAccount: 'event-router-source-attestor@fiveacross.iam.gserviceaccount.com',
       audience: 'https://five-across-event-registry.nathanpayne.workers.dev/__internal/hostname-replicas/v1/source-attestor',
       key: 'projects/fiveacross/locations/us-central1/keyRings/event-router-registry/cryptoKeys/source-attestor',
       runtime: false,
@@ -72,7 +72,15 @@ export const REGISTRY_R0_CONTRACT = Object.freeze({
     }),
     observability: Object.freeze({
       semanticEvent: 'event-router-registry.semantic',
-      requiredFields: Object.freeze(['outcome', 'registryVersion', 'host', 'revision', 'latencyMs']),
+      workersLogs: Object.freeze({ enabled: true, headSamplingRate: 1 }),
+      requiredFields: Object.freeze([
+        'event',
+        'outcome',
+        'registryVersion',
+        'host',
+        'revision',
+        'latencyMs',
+      ]),
       excludedFields: Object.freeze([
         'authorization',
         'token',
@@ -129,6 +137,17 @@ export function validateRegistryR0Contract(contract = REGISTRY_R0_CONTRACT) {
   ) {
     throw new Error('R0 requires publisher, audit, recovery, source-attestor, and three probe identities');
   }
+  const googleServiceAccountEmail =
+    /^([a-z][a-z0-9-]{4,28}[a-z0-9])@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
+  if (
+    identities.some(
+      (identity) =>
+        typeof identity.subjectAccount !== 'string' ||
+        googleServiceAccountEmail.exec(identity.subjectAccount) === null,
+    )
+  ) {
+    throw new Error('R0 identity must use a valid Google service-account email');
+  }
   if (new Set(identities.map((identity) => identity.subjectAccount)).size !== identities.length) {
     throw new Error('R0 identities must be distinct');
   }
@@ -181,8 +200,10 @@ export function validateRegistryR0Contract(contract = REGISTRY_R0_CONTRACT) {
   ];
   if (
     observability?.semanticEvent !== 'event-router-registry.semantic' ||
+    observability.workersLogs?.enabled !== true ||
+    observability.workersLogs?.headSamplingRate !== 1 ||
     JSON.stringify(observability.requiredFields) !==
-      JSON.stringify(['outcome', 'registryVersion', 'host', 'revision', 'latencyMs']) ||
+      JSON.stringify(['event', 'outcome', 'registryVersion', 'host', 'revision', 'latencyMs']) ||
     JSON.stringify(observability.excludedFields) !==
       JSON.stringify(['authorization', 'token', 'signature', 'requestBody', 'eventData', 'firebaseKey']) ||
     JSON.stringify(observability.alertPolicies) !== JSON.stringify(expectedAlertPolicies)

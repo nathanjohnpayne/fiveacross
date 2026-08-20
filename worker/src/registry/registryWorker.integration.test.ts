@@ -319,6 +319,28 @@ describe('HostRegistryObject runtime transactions', () => {
     ).resolves.toEqual({ ok: true, sequence: '1', action: 'acquire-lock' });
 
     await expect(
+      rpc(instance, {
+        op: 'challenge',
+        request: {
+          host: HOST,
+          phase: 'canonical-after-unblock',
+          expectedStateDigest: digest,
+          recoveryLockId: 'lock-1',
+          recoverySequence: '1',
+          wafRemovedAt: new Date(NOW).toISOString(),
+        },
+        principal: {
+          subject: 'equal-boundary-runner',
+          keyVersion: 'probe-key/equal-boundary',
+          keyFingerprint: '9'.repeat(64),
+          region: 'us-west1',
+        },
+        now: NOW + 1,
+        nonce: 'equal-boundary-nonce',
+      }),
+    ).resolves.toEqual({ ok: false, error: 'probe-refused' });
+
+    await expect(
       rpc<{ status: number; result: string }>(instance, {
         op: 'sync',
         payload: payload('2', 'successor'),

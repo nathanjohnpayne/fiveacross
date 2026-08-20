@@ -425,7 +425,7 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
         (state.recoveryLock === null ||
           request.recoveryLockId !== state.recoveryLock.lockId ||
           request.recoverySequence !== state.recoverySequence ||
-          Date.parse(request.wafRemovedAt) < Date.parse(state.recoveryLock.acquiredAt))
+          Date.parse(request.wafRemovedAt) <= Date.parse(state.recoveryLock.acquiredAt))
       ) {
         return { ok: false as const, error: 'probe-refused' as const };
       }

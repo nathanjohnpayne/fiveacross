@@ -17,7 +17,7 @@ import type {
   ProbePrincipal,
 } from './probe';
 import type { ActivePublisherMapping, RecoveryRecord, RecoveryRequest } from './recovery';
-import { handleControlFetch } from './controlService';
+import { handleControlFetch, readBodyAtMost, RequestBodyTooLargeError } from './controlService';
 import { createSyncSemanticEvent, type RegistrySemanticEvent } from './telemetry';
 
 const MAX_SIGNATURE_AGE_MS = 60_000;
@@ -151,25 +151,8 @@ async function syncResponse(
     return json(415, { error: 'unsupported-media-type' });
   }
   const declaredLength = request.headers.get('content-length');
-  if (declaredLength !== null && /^\d+$/.test(declaredLength) && BigInt(declaredLength) > 2_048n) {
+  if (declaredLength !== null && /^\d+$/.test(declaredLength) && BigInt(declaredLength) > BigInt(SYNC_MAX_BYTES)) {
     return json(413, { error: 'request-too-large' });
-  }
-
-  let rawBytes: Uint8Array;
-  try {
-    rawBytes = new Uint8Array(await request.arrayBuffer());
-  } catch {
-    return json(400, { error: 'invalid-request' });
-  }
-  if (rawBytes.byteLength > SYNC_MAX_BYTES) return json(413, { error: 'request-too-large' });
-  if (rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf) {
-    return json(400, { error: 'invalid-request' });
-  }
-  let body: string;
-  try {
-    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(rawBytes);
-  } catch {
-    return json(400, { error: 'invalid-request' });
   }
 
   try {
@@ -182,6 +165,25 @@ async function syncResponse(
     }
   } catch {
     return json(503, { error: 'rate-limit-unavailable' });
+  }
+
+  let rawBytes: Uint8Array;
+  try {
+    rawBytes = await readBodyAtMost(request, SYNC_MAX_BYTES);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return json(413, { error: 'request-too-large' });
+    }
+    return json(400, { error: 'invalid-request' });
+  }
+  if (rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf) {
+    return json(400, { error: 'invalid-request' });
+  }
+  let body: string;
+  try {
+    body = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(rawBytes);
+  } catch {
+    return json(400, { error: 'invalid-request' });
   }
 
   let payload: RouterReplicaDesired;
