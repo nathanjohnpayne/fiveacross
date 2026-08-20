@@ -19,6 +19,11 @@ import { applyPublisherSync, initialRegistryState, registryLookup, type Registry
 import { AUDIT_PAGE_SIZE, createAuditPage, type RegistryAuditPage } from './audit';
 import { applyRecovery, type ActivePublisherMapping, type RecoveryRecord, type RecoveryRequest } from './recovery';
 import {
+  parseRecoveryHistoryEntry,
+  RECOVERY_HISTORY_PREFIX,
+  recoveryHistoryKey,
+} from './recoveryHistory';
+import {
   acceptProbeAttestation,
   consumedProbeEvidence,
   issueProbeChallenge,
@@ -52,7 +57,7 @@ import {
 } from './probeSweep';
 
 const STATE_KEY = 'registry-state';
-const HISTORY_PREFIX = 'recovery/';
+const HISTORY_PREFIX = RECOVERY_HISTORY_PREFIX;
 const PROBE_MAX_OUTSTANDING_PER_HOST = 48;
 const PROBE_MAX_OUTSTANDING_PER_PRINCIPAL = 4;
 const PROBE_SWEEP_RETRY_MS = 60_000;
@@ -74,10 +79,6 @@ class RegistryStorageError extends Error {
     super('registry storage unavailable');
     this.name = 'RegistryStorageError';
   }
-}
-
-function decimalKey(prefix: string, value: string): string {
-  return `${prefix}${value.length.toString().padStart(6, '0')}:${value}`;
 }
 
 function opaqueKey(prefix: string, value: string): string {
@@ -140,6 +141,12 @@ export interface RegistryWorkerEnv {
 }
 
 export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
+  #host(): string {
+    const host = this.ctx.id.name;
+    if (host === undefined) throw new Error('registry object is not name-addressed');
+    return host;
+  }
+
   async alarm(): Promise<void> {
     const now = Date.now();
     try {
@@ -161,7 +168,8 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   async sync(payload: RouterReplicaDesired, publisherEpoch: string) {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      const state =
+        stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored, this.#host());
       const result = await applyPublisherSync(state, payload, publisherEpoch);
       await transaction.put(STATE_KEY, result.state);
       return result.response;
@@ -185,7 +193,7 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
       return { kind: 'unknown-host' };
     }
     try {
-      return registryLookup(await parseStoredRegistryState(stored));
+      return registryLookup(await parseStoredRegistryState(stored, this.#host()));
     } catch {
       return { kind: 'unavailable' };
     }
@@ -196,21 +204,25 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   ): Promise<{ ok: true; page: RegistryAuditPage } | { ok: false; error: 'invalid-cursor' }> {
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      const state =
+        stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored, this.#host());
       if (
         !/^(?:0|[1-9]\d*)$/.test(afterRecoverySequence) ||
         BigInt(afterRecoverySequence) > BigInt(state.recoverySequence)
       ) {
         return { ok: false as const, error: 'invalid-cursor' as const };
       }
-      const records = await transaction.list<RecoveryRecord>({
+      const records = await transaction.list<unknown>({
         prefix: HISTORY_PREFIX,
-        startAfter: decimalKey(HISTORY_PREFIX, afterRecoverySequence),
+        startAfter: recoveryHistoryKey(afterRecoverySequence),
         limit: AUDIT_PAGE_SIZE + 1,
       });
+      const parsedRecords = [...records.entries()].map(([key, value]) =>
+        parseRecoveryHistoryEntry(key, value),
+      );
       return {
         ok: true as const,
-        page: createAuditPage(state, [...records.values()], afterRecoverySequence),
+        page: createAuditPage(state, parsedRecords, afterRecoverySequence),
       };
     });
   }
@@ -245,7 +257,8 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
     const startedAt = Date.now();
     const response = await this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      const state =
+        stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored, this.#host());
       let result: Awaited<ReturnType<typeof applyRecovery>>;
       let consumedAttestationKeys: string[] = [];
       let consumedAttestationExpiryKeys: string[] = [];
@@ -327,7 +340,7 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
         return { ok: false as const, error: 'recovery-refused' as const };
       }
       await transaction.put(STATE_KEY, result.state);
-      await transaction.put(decimalKey(HISTORY_PREFIX, result.record.sequence), result.record);
+      await transaction.put(recoveryHistoryKey(result.record.sequence), result.record);
       if (consumedAttestationKeys.length > 0) {
         await transaction.delete([
           ...consumedAttestationKeys,
@@ -366,7 +379,8 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
     const key = opaqueKey(CHALLENGE_PREFIX, nonce);
     return this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
-      const state = stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored);
+      const state =
+        stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored, this.#host());
       if (state.committed === null || request.expectedStateDigest !== state.committed.digest) {
         return { ok: false as const, error: 'probe-refused' as const };
       }

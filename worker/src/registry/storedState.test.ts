@@ -22,7 +22,7 @@ const PAYLOAD: RouterReplicaDesired = {
 describe('persisted registry state validation', () => {
   it('round-trips an exact state and committed digest', async () => {
     const state = (await applyPublisherSync(initialRegistryState(), PAYLOAD, '1')).state;
-    await expect(parseStoredRegistryState(state)).resolves.toEqual(state);
+    await expect(parseStoredRegistryState(state, PAYLOAD.host)).resolves.toEqual(state);
   });
 
   it.each([
@@ -32,7 +32,7 @@ describe('persisted registry state validation', () => {
     ['wrong digest', (state: Record<string, unknown>) => ({ ...state, committed: { ...(state.committed as object), digest: '0'.repeat(64) } })],
   ])('fails closed on %s', async (_label, mutate) => {
     const state = (await applyPublisherSync(initialRegistryState(), PAYLOAD, '1')).state;
-    await expect(parseStoredRegistryState(mutate(state as unknown as Record<string, unknown>))).rejects.toThrow(
+    await expect(parseStoredRegistryState(mutate(state as unknown as Record<string, unknown>), PAYLOAD.host)).rejects.toThrow(
       'registry state malformed',
     );
   });
@@ -47,6 +47,6 @@ describe('persisted registry state validation', () => {
       highestQuarantinedPublisherEpoch: quarantined,
     };
 
-    await expect(parseStoredRegistryState(state)).rejects.toThrow('registry state malformed');
+    await expect(parseStoredRegistryState(state, PAYLOAD.host)).rejects.toThrow('registry state malformed');
   });
 });

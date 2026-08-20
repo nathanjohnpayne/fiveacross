@@ -205,7 +205,7 @@ describe('registry default fetch control-plane endpoints', () => {
     expect(test.getByName).not.toHaveBeenCalled();
   });
 
-  it('distinguishes an unknown-ahead cursor from a retryable storage failure', async () => {
+  it('distinguishes an unknown-ahead cursor from malformed persisted audit history', async () => {
     const data = await fixture();
     const unknownAhead = harness(data);
     unknownAhead.audit.mockResolvedValueOnce({
@@ -216,11 +216,15 @@ describe('registry default fetch control-plane endpoints', () => {
       400,
     );
 
-    const unavailable = harness(data);
-    unavailable.audit.mockRejectedValueOnce(new Error('storage unavailable'));
-    expect((await handleRegistryFetch(await auditRequest(data), unavailable.config, unavailable.deps)).status).toBe(
-      503,
+    const malformedHistory = harness(data);
+    malformedHistory.audit.mockRejectedValueOnce(new Error('recovery history malformed'));
+    const unavailable = await handleRegistryFetch(
+      await auditRequest(data),
+      malformedHistory.config,
+      malformedHistory.deps,
     );
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: 'audit-unavailable' });
   });
 
   it('rate-limits control callers by Cloudflare client IP rather than rotating bearer bytes', async () => {

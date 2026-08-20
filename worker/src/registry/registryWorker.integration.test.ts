@@ -120,6 +120,33 @@ function projectionDigest(value: RouterReplicaDesired): string {
 }
 
 describe('HostRegistryObject runtime transactions', () => {
+  it('fails closed when an internally valid projection is stored under a different named object', async () => {
+    const instance = miniflare();
+    const foreignHost = 'r2-abcdefghijklmnopqrstuvwxya.fiveacross.app';
+    const foreignPayload: RouterReplicaDesired = {
+      ...payload('1', 'foreign-event'),
+      host: foreignHost,
+      desired: {
+        kind: 'route',
+        eventId: 'foreign-event',
+        status: 'active',
+        slug: 'r2-abcdefghijklmnopqrstuvwxya',
+        edition: 'fiveacross',
+        pathNamespace: null,
+      },
+    };
+
+    await expect(
+      rpc<{ status: number; result: string }>(instance, {
+        op: 'sync',
+        payload: foreignPayload,
+        epoch: '1',
+      }),
+    ).resolves.toEqual({ status: 200, result: 'applied' });
+
+    await expect(rpc(instance, { op: 'lookup' })).resolves.toEqual({ kind: 'unavailable' });
+  });
+
   it('serializes concurrent arrivals, survives response loss/reset, and atomically locks with consumed probe evidence', async () => {
     const instance = miniflare();
     const left = payload('1', 'left');

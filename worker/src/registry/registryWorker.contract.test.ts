@@ -31,7 +31,7 @@ describe('registry Worker capability/configuration contract', () => {
     expect(recover).toContain('this.ctx.storage.transaction');
     const stateWrite = recover.indexOf('transaction.put(STATE_KEY, result.state)');
     const historyWrite = recover.search(
-      /transaction\.put\(\s*decimalKey\(HISTORY_PREFIX, result\.record\.sequence\),\s*result\.record,?\s*\)/,
+      /transaction\.put\(\s*recoveryHistoryKey\(result\.record\.sequence\),\s*result\.record,?\s*\)/,
     );
     const evidenceDelete = recover.indexOf('await transaction.delete([', historyWrite);
     expect(stateWrite).toBeGreaterThan(0);

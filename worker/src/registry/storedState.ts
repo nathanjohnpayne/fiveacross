@@ -26,7 +26,7 @@ function validCommittedRef(value: unknown): boolean {
   );
 }
 
-export async function parseStoredRegistryState(value: unknown): Promise<RegistryState> {
+export async function parseStoredRegistryState(value: unknown, expectedHost: string): Promise<RegistryState> {
   try {
     if (
       !isRecord(value) ||
@@ -63,6 +63,7 @@ export async function parseStoredRegistryState(value: unknown): Promise<Registry
       }
       const payload = parseSyncRequest(JSON.stringify(value.committed.payload), 'application/json');
       if (
+        payload.host !== expectedHost ||
         payload.revision !== value.committed.revision ||
         (await projectionDigest(payload)) !== value.committed.digest
       ) {

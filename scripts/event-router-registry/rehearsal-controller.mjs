@@ -4,6 +4,7 @@ const SYNTHETIC_EVENT = /^r2-[a-z2-7]{26}\.(fiveacross\.app|vacaybingo\.com)$/;
 const SYNTHETIC_ROOT = /^r2-root-[a-z2-7]{20}\.(fiveacross\.app|vacaybingo\.com)$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const PROVIDER_RESOURCE_ID = /^[a-f0-9]{32}$/;
 const SIGNATURE_VALUE = /^[A-Za-z0-9_-]+$/;
 const MAX_RESERVATIONS = 64;
 
@@ -230,6 +231,225 @@ function manifestBinding(manifest, payloadBytes) {
   });
 }
 
+function sameCanonicalValue(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function boundProviderArtifact(expected, providerId, binding) {
+  return {
+    schemaVersion: 1,
+    kind: expected.kind,
+    providerId,
+    host: expected.host,
+    pattern: expected.pattern,
+    candidateId: expected.candidateId,
+    binding: structuredClone(binding),
+  };
+}
+
+function validateProviderArtifactReadback(readback, expected, binding) {
+  exactKeys(
+    readback,
+    expected.kind === 'dns'
+      ? ['kind', 'id', 'host', 'pattern', 'candidateId', 'proxied', 'binding']
+      : ['kind', 'id', 'host', 'pattern', 'candidateId', 'binding'],
+    `${expected.kind} provider readback`,
+  );
+  if (
+    readback.kind !== expected.kind ||
+    typeof readback.id !== 'string' ||
+    !PROVIDER_RESOURCE_ID.test(readback.id) ||
+    readback.host !== expected.host ||
+    readback.pattern !== expected.pattern ||
+    readback.candidateId !== expected.candidateId ||
+    !sameCanonicalValue(readback.binding, binding) ||
+    (expected.kind === 'dns' && readback.proxied !== true)
+  ) {
+    throw new Error(`${expected.kind} provider readback does not match the signed candidate`);
+  }
+  return boundProviderArtifact(expected, readback.id, binding);
+}
+
+function validateJournalArtifact(value, manifest, binding) {
+  exactKeys(
+    value,
+    ['schemaVersion', 'kind', 'providerId', 'host', 'pattern', 'candidateId', 'binding'],
+    'rehearsal artifact journal entry',
+  );
+  const item = manifest.hosts.find((candidate) => candidate.host === value.host);
+  if (value.kind !== 'dns' && value.kind !== 'route') {
+    throw new Error('rehearsal artifact journal entry has an invalid kind');
+  }
+  const expectedCandidate =
+    value.kind === 'dns' ? item?.dnsRecordId : value.kind === 'route' ? item?.routeId : undefined;
+  const expectedPattern = value.kind === 'dns' ? value.host : `${value.host}/*`;
+  if (
+    value.schemaVersion !== 1 ||
+    item === undefined ||
+    typeof value.providerId !== 'string' ||
+    !PROVIDER_RESOURCE_ID.test(value.providerId) ||
+    value.candidateId !== expectedCandidate ||
+    value.pattern !== expectedPattern ||
+    !sameCanonicalValue(value.binding, binding)
+  ) {
+    throw new Error('rehearsal artifact journal entry does not match the signed manifest');
+  }
+  return structuredClone(value);
+}
+
+function validateJournalReceipt(receipt, artifact) {
+  exactKeys(receipt, ['committed', 'artifact'], 'artifact journal receipt');
+  if (receipt.committed !== true || !sameCanonicalValue(receipt.artifact, artifact)) {
+    throw new Error('artifact journal did not durably bind the provider resource');
+  }
+}
+
+function artifactRecoveryError(journalError, artifact, compensationError) {
+  const compensated = compensationError === undefined;
+  const journalMessage =
+    journalError instanceof Error ? journalError.message : String(journalError);
+  const message = compensated
+    ? `${journalMessage}; compensated unjournaled ${artifact.kind} ${artifact.providerId}`
+    : `${journalMessage}; compensation failed for ${artifact.kind} ${artifact.providerId}`;
+  const errors = compensated ? [journalError] : [journalError, compensationError];
+  const error = new AggregateError(errors, message);
+  error.recoveryArtifact = structuredClone(artifact);
+  error.compensated = compensated;
+  return error;
+}
+
+function providerReconciliationError(validationError, readback, expected, binding) {
+  const reportedProviderId =
+    typeof readback === 'object' &&
+    readback !== null &&
+    !Array.isArray(readback) &&
+    typeof readback.id === 'string'
+      ? readback.id
+      : null;
+  const validationMessage =
+    validationError instanceof Error ? validationError.message : String(validationError);
+  const error = new AggregateError(
+    [validationError],
+    `${validationMessage}; provider returned no usable ${expected.kind} ID`,
+  );
+  error.reconciliationCandidate = {
+    kind: expected.kind,
+    host: expected.host,
+    pattern: expected.pattern,
+    candidateId: expected.candidateId,
+    reportedProviderId,
+    binding: structuredClone(binding),
+  };
+  error.compensated = false;
+  error.requiresReconciliation = true;
+  return error;
+}
+
+async function compensateUnjournaledArtifact(dependencies, artifact) {
+  const remove =
+    artifact.kind === 'dns' ? dependencies.removeExactDns : dependencies.removeExactRoute;
+  if (typeof remove !== 'function') {
+    throw new Error(`exact ${artifact.kind} compensation is unavailable`);
+  }
+  await remove(artifact.host, artifact.providerId, artifact.binding);
+  if (typeof dependencies.verifyExactArtifactAbsent !== 'function') {
+    throw new Error('exact provider absence verification is unavailable');
+  }
+  const receipt = await dependencies.verifyExactArtifactAbsent(structuredClone(artifact));
+  exactKeys(receipt, ['absent', 'artifact'], 'exact provider absence readback');
+  if (receipt.absent !== true || !sameCanonicalValue(receipt.artifact, artifact)) {
+    throw new Error('exact provider resource compensation was not verified absent');
+  }
+}
+
+async function validateOrCompensateProviderReadback(
+  dependencies,
+  readback,
+  expected,
+  binding,
+) {
+  try {
+    return validateProviderArtifactReadback(readback, expected, binding);
+  } catch (validationError) {
+    const providerId =
+      typeof readback === 'object' &&
+      readback !== null &&
+      !Array.isArray(readback) &&
+      typeof readback.id === 'string' &&
+      PROVIDER_RESOURCE_ID.test(readback.id)
+        ? readback.id
+        : null;
+    if (providerId === null) {
+      throw providerReconciliationError(validationError, readback, expected, binding);
+    }
+    const artifact = boundProviderArtifact(expected, providerId, binding);
+    try {
+      await compensateUnjournaledArtifact(dependencies, artifact);
+    } catch (compensationError) {
+      throw artifactRecoveryError(validationError, artifact, compensationError);
+    }
+    throw artifactRecoveryError(validationError, artifact);
+  }
+}
+
+async function journalProviderArtifact(dependencies, artifact) {
+  try {
+    if (typeof dependencies.journalArtifact !== 'function') {
+      throw new Error('durable rehearsal artifact journal is unavailable');
+    }
+    const receipt = await dependencies.journalArtifact(structuredClone(artifact));
+    validateJournalReceipt(receipt, artifact);
+    return artifact;
+  } catch (journalError) {
+    try {
+      await compensateUnjournaledArtifact(dependencies, artifact);
+    } catch (compensationError) {
+      throw artifactRecoveryError(journalError, artifact, compensationError);
+    }
+    throw artifactRecoveryError(journalError, artifact);
+  }
+}
+
+async function readArtifactJournal(dependencies, manifest, binding) {
+  if (typeof dependencies.readArtifactJournal !== 'function') {
+    throw new Error('durable rehearsal artifact journal readback is unavailable');
+  }
+  const receipt = await dependencies.readArtifactJournal({
+    binding,
+    runId: manifest.runId,
+    hosts: manifest.hosts.map((item) => item.host),
+  });
+  exactKeys(receipt, ['manifestDigest', 'runId', 'artifacts'], 'artifact journal readback');
+  if (
+    receipt.manifestDigest !== binding.manifestDigest ||
+    receipt.runId !== manifest.runId ||
+    !Array.isArray(receipt.artifacts)
+  ) {
+    throw new Error('artifact journal readback does not match the signed run');
+  }
+  const artifacts = receipt.artifacts.map((artifact) =>
+    validateJournalArtifact(artifact, manifest, binding),
+  );
+  const candidateKeys = new Set();
+  const providerKeys = new Set();
+  const dnsHosts = new Set(
+    artifacts.filter((artifact) => artifact.kind === 'dns').map((artifact) => artifact.host),
+  );
+  for (const artifact of artifacts) {
+    const candidateKey = `${artifact.kind}\0${artifact.host}\0${artifact.candidateId}`;
+    const providerKey = `${artifact.kind}\0${artifact.providerId}`;
+    if (candidateKeys.has(candidateKey) || providerKeys.has(providerKey)) {
+      throw new Error('artifact journal readback contains duplicate resources');
+    }
+    if (artifact.kind === 'route' && !dnsHosts.has(artifact.host)) {
+      throw new Error('artifact journal route is missing its preceding DNS record');
+    }
+    candidateKeys.add(candidateKey);
+    providerKeys.add(providerKey);
+  }
+  return artifacts;
+}
+
 async function verifySignedManifest(manifest, dependencies) {
   if (typeof dependencies.verifyManifestSignature !== 'function') {
     throw new Error('signed-manifest verifier is unavailable');
@@ -294,7 +514,9 @@ function validateReservationReceipt(receipt, reservations, binding) {
   if (receipt.reservedHosts.length !== reservations.length) {
     throw new Error('authoritative reservation transaction did not attest every reserved host');
   }
-  const expectedByHost = new Map(reservations.map((reservation) => [reservation.host, reservation]));
+  const expectedByHost = new Map(
+    reservations.map((reservation) => [reservation.host, reservation]),
+  );
   const seen = new Set();
   for (const attestation of receipt.reservedHosts) {
     exactKeys(
@@ -462,11 +684,7 @@ function operations(manifest) {
   ]);
 }
 
-export async function provisionRehearsal(
-  input,
-  dependencies,
-  { dryRun = true } = {},
-) {
+export async function provisionRehearsal(input, dependencies, { dryRun = true } = {}) {
   const manifest = validateRehearsalManifest(input);
   const planned = operations(manifest);
   if (dryRun) return { dryRun: true, operations: planned, manifest };
@@ -492,7 +710,9 @@ export async function provisionRehearsal(
   validateReviewedArtifact(artifact, manifest);
 
   const updatedAt = new Date(now).toISOString();
-  const reservations = manifest.hosts.map((item) => reservationFor(item, manifest.runId, updatedAt));
+  const reservations = manifest.hosts.map((item) =>
+    reservationFor(item, manifest.runId, updatedAt),
+  );
   if (typeof dependencies.reserveTransaction !== 'function') {
     throw new Error('authoritative reservation transaction is unavailable');
   }
@@ -503,20 +723,48 @@ export async function provisionRehearsal(
     reservations,
   });
   validateReservationReceipt(receipt, reservations, binding);
+  const journaledArtifacts = [];
+  // Provider create seams must reject failure-atomically; only resolved readbacks may represent
+  // a created resource. A usable ID in a malformed readback is compensated below.
   for (const item of manifest.hosts) {
-    await dependencies.createExactDns(item.host, item.dnsRecordId, { proxied: true, binding });
-    await dependencies.attachExactRoute(item.host, `${item.host}/*`, item.routeId, binding);
-  }
-  return { dryRun: false, operations: planned, manifest };
-}
+    const dnsReadback = await dependencies.createExactDns(item.host, item.dnsRecordId, {
+      proxied: true,
+      binding,
+    });
+    const dnsArtifact = await validateOrCompensateProviderReadback(
+      dependencies,
+      dnsReadback,
+      {
+        kind: 'dns',
+        host: item.host,
+        pattern: item.host,
+        candidateId: item.dnsRecordId,
+      },
+      binding,
+    );
+    journaledArtifacts.push(await journalProviderArtifact(dependencies, dnsArtifact));
 
-function recordedArtifactKeys(manifest) {
-  const keys = new Set();
-  for (const item of manifest.hosts) {
-    keys.add(`dns\0${item.dnsRecordId}\0${item.host}`);
-    keys.add(`route\0${item.routeId}\0${item.host}`);
+    const routePattern = `${item.host}/*`;
+    const routeReadback = await dependencies.attachExactRoute(
+      item.host,
+      routePattern,
+      item.routeId,
+      binding,
+    );
+    const routeArtifact = await validateOrCompensateProviderReadback(
+      dependencies,
+      routeReadback,
+      {
+        kind: 'route',
+        host: item.host,
+        pattern: routePattern,
+        candidateId: item.routeId,
+      },
+      binding,
+    );
+    journaledArtifacts.push(await journalProviderArtifact(dependencies, routeArtifact));
   }
-  return keys;
+  return { dryRun: false, operations: planned, manifest, journaledArtifacts };
 }
 
 export async function cleanupRehearsal(
@@ -525,34 +773,53 @@ export async function cleanupRehearsal(
   { dryRun = true, observedArtifacts = [] } = {},
 ) {
   const manifest = validateRehearsalManifest(input);
-  const recorded = recordedArtifactKeys(manifest);
-  for (const artifact of observedArtifacts) {
-    if (
-      !recorded.has(`${artifact.kind}\0${artifact.id}\0${artifact.host}`) ||
-      (artifact.kind !== 'dns' && artifact.kind !== 'route')
-    ) {
-      throw new Error('provider reported an unrecorded artifact');
-    }
-  }
   const planned = [
     ...manifest.hosts.map((item) => `tombstone and await DO convergence ${item.host}`),
-    ...manifest.hosts.map((item) => `remove exact route ${item.routeId}`),
-    ...manifest.hosts.map((item) => `remove exact DNS ${item.dnsRecordId}`),
+    ...manifest.hosts.map((item) => `remove journaled exact route for ${item.host}`),
+    ...manifest.hosts.map((item) => `remove journaled exact DNS for ${item.host}`),
   ];
   if (dryRun) {
-    return { dryRun: true, operations: planned, permanentReservationsRetained: true };
+    if (observedArtifacts.length > 0) {
+      throw new Error('provider artifact readback requires a durable journal read');
+    }
+    return {
+      dryRun: true,
+      operations: planned,
+      permanentReservationsRetained: true,
+    };
   }
 
   // Cleanup remains authorized after expiry so an old route can always be contained.
   const binding = await verifySignedManifest(manifest, dependencies);
+  const journaledArtifacts = await readArtifactJournal(dependencies, manifest, binding);
+  const recorded = new Set(
+    journaledArtifacts.map(
+      (artifact) => `${artifact.kind}\0${artifact.providerId}\0${artifact.host}`,
+    ),
+  );
+  for (const artifact of observedArtifacts) {
+    if (
+      (artifact.kind !== 'dns' && artifact.kind !== 'route') ||
+      !recorded.has(`${artifact.kind}\0${artifact.id}\0${artifact.host}`)
+    ) {
+      throw new Error('provider reported an unrecorded artifact');
+    }
+  }
   await dependencies.tombstoneAndWait(
     manifest.hosts.map((item) => item.host),
     binding,
   );
-  for (const item of manifest.hosts) {
-    await dependencies.removeExactRoute(item.host, item.routeId, binding);
-    await dependencies.removeExactDns(item.host, item.dnsRecordId, binding);
+  for (const artifact of journaledArtifacts.filter((candidate) => candidate.kind === 'route')) {
+    await dependencies.removeExactRoute(artifact.host, artifact.providerId, binding);
+  }
+  for (const artifact of journaledArtifacts.filter((candidate) => candidate.kind === 'dns')) {
+    await dependencies.removeExactDns(artifact.host, artifact.providerId, binding);
   }
   await dependencies.verifyAbsent(manifest.hosts, binding);
-  return { dryRun: false, operations: planned, permanentReservationsRetained: true };
+  return {
+    dryRun: false,
+    operations: planned,
+    permanentReservationsRetained: true,
+    journaledArtifacts,
+  };
 }

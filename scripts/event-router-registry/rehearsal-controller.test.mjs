@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
   cleanupRehearsal,
@@ -97,6 +98,9 @@ function reservationReceipt(request, transform = (reservedHosts) => reservedHost
 }
 
 function deps(overrides = {}) {
+  const journal = [];
+  const providerId = (kind, candidateId) =>
+    createHash('sha256').update(`${kind}\0${candidateId}`).digest('hex').slice(0, 32);
   const provider = {
     now: vi.fn(() => new Date('2026-08-19T13:00:00.000Z')),
     verifyManifestSignature: vi.fn(async () => true),
@@ -110,8 +114,36 @@ function deps(overrides = {}) {
       reviewAuthorizationId: 'review-123',
     })),
     reserveTransaction: vi.fn(async (request) => reservationReceipt(request)),
-    createExactDns: vi.fn(),
-    attachExactRoute: vi.fn(),
+    createExactDns: vi.fn(async (host, candidateId, options) => ({
+      kind: 'dns',
+      id: providerId('dns', candidateId),
+      host,
+      pattern: host,
+      candidateId,
+      proxied: options.proxied,
+      binding: structuredClone(options.binding),
+    })),
+    attachExactRoute: vi.fn(async (host, pattern, candidateId, binding) => ({
+      kind: 'route',
+      id: providerId('route', candidateId),
+      host,
+      pattern,
+      candidateId,
+      binding: structuredClone(binding),
+    })),
+    journalArtifact: vi.fn(async (artifact) => {
+      journal.push(structuredClone(artifact));
+      return { committed: true, artifact: structuredClone(artifact) };
+    }),
+    readArtifactJournal: vi.fn(async ({ binding, runId }) => ({
+      manifestDigest: binding.manifestDigest,
+      runId,
+      artifacts: structuredClone(journal),
+    })),
+    verifyExactArtifactAbsent: vi.fn(async (artifact) => ({
+      absent: true,
+      artifact: structuredClone(artifact),
+    })),
     tombstoneAndWait: vi.fn(),
     removeExactRoute: vi.fn(),
     removeExactDns: vi.fn(),
@@ -232,7 +264,10 @@ describe('guarded rehearsal controller', () => {
 
   it('passes exact hostname and equal replica state into one authoritative reservation transaction', async () => {
     const provider = deps();
-    await provisionRehearsal(manifest(), provider, { dryRun: false, existingReservations: 10_000 });
+    await provisionRehearsal(manifest(), provider, {
+      dryRun: false,
+      existingReservations: 10_000,
+    });
     expect(provider.reserveTransaction).toHaveBeenCalledOnce();
     expect(provider.reserveTransaction.mock.calls[0][0]).toMatchObject({
       maximumAggregate: 64,
@@ -582,7 +617,9 @@ describe('guarded rehearsal controller', () => {
 
   it('binds every provider artifact to the signed manifest and reviewed candidate', async () => {
     const provider = deps();
-    await provisionRehearsal(manifest(), provider, { dryRun: false });
+    const result = await provisionRehearsal(manifest(), provider, {
+      dryRun: false,
+    });
 
     const dnsOptions = provider.createExactDns.mock.calls[0][2];
     const routeBinding = provider.attachExactRoute.mock.calls[0][3];
@@ -608,31 +645,326 @@ describe('guarded rehearsal controller', () => {
       artifactSha256: 'b'.repeat(64),
       reviewAuthorizationId: 'review-123',
     });
+    expect(result.journaledArtifacts).toEqual([
+      expect.objectContaining({
+        kind: 'dns',
+        providerId: createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32),
+        candidateId: 'dns-0',
+        host: EVENT_HOST,
+        pattern: EVENT_HOST,
+      }),
+      expect.objectContaining({
+        kind: 'route',
+        providerId: createHash('sha256').update('route\0route-0').digest('hex').slice(0, 32),
+        candidateId: 'route-0',
+        host: EVENT_HOST,
+        pattern: `${EVENT_HOST}/*`,
+      }),
+      expect.objectContaining({
+        kind: 'dns',
+        providerId: createHash('sha256').update('dns\0dns-1').digest('hex').slice(0, 32),
+        candidateId: 'dns-1',
+        host: ROOT_HOST,
+        pattern: ROOT_HOST,
+      }),
+      expect.objectContaining({
+        kind: 'route',
+        providerId: createHash('sha256').update('route\0route-1').digest('hex').slice(0, 32),
+        candidateId: 'route-1',
+        host: ROOT_HOST,
+        pattern: `${ROOT_HOST}/*`,
+      }),
+    ]);
+    expect(result.journaledArtifacts.map((artifact) => artifact.providerId)).not.toContain('dns-0');
+    expect(result.journaledArtifacts.map((artifact) => artifact.providerId)).not.toContain(
+      'route-0',
+    );
+    expect(provider.journalArtifact).toHaveBeenCalledTimes(4);
+  });
+
+  it('refuses a provider create readback that is not bound to the signed candidate', async () => {
+    const actualDnsId = 'f'.repeat(32);
+    const provider = deps({
+      createExactDns: vi.fn(async (host, candidateId, options) => ({
+        kind: 'dns',
+        id: actualDnsId,
+        host: ROOT_HOST,
+        pattern: host,
+        candidateId,
+        proxied: true,
+        binding: structuredClone(options.binding),
+      })),
+    });
+
+    await expect(
+      provisionRehearsal(manifest([EVENT_HOST]), provider, { dryRun: false }),
+    ).rejects.toThrow('provider readback does not match the signed candidate');
+    expect(provider.journalArtifact).not.toHaveBeenCalled();
+    expect(provider.removeExactDns).toHaveBeenCalledWith(
+      EVENT_HOST,
+      actualDnsId,
+      expect.objectContaining({ runId: 'run-1' }),
+    );
+    expect(provider.verifyExactArtifactAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'dns',
+        providerId: actualDnsId,
+        candidateId: 'dns-0',
+        host: EVENT_HOST,
+      }),
+    );
+    expect(provider.attachExactRoute).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with exact reconciliation evidence when a create readback ID is unusable', async () => {
+    const provider = deps({
+      createExactDns: vi.fn(async (host, candidateId, options) => ({
+        kind: 'dns',
+        id: 'not-a-provider-id',
+        host,
+        pattern: host,
+        candidateId,
+        proxied: true,
+        binding: structuredClone(options.binding),
+      })),
+    });
+
+    const error = await provisionRehearsal(manifest([EVENT_HOST]), provider, {
+      dryRun: false,
+    }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.reconciliationCandidate).toMatchObject({
+      kind: 'dns',
+      host: EVENT_HOST,
+      pattern: EVENT_HOST,
+      candidateId: 'dns-0',
+      reportedProviderId: 'not-a-provider-id',
+      binding: expect.objectContaining({ runId: 'run-1' }),
+    });
+    expect(error.compensated).toBe(false);
+    expect(provider.journalArtifact).not.toHaveBeenCalled();
+    expect(provider.removeExactDns).not.toHaveBeenCalled();
+    expect(provider.attachExactRoute).not.toHaveBeenCalled();
+  });
+
+  it('cleans a journaled DNS artifact when route creation fails after DNS creation', async () => {
+    const provider = deps({
+      attachExactRoute: vi.fn(async () => {
+        throw new Error('provider route creation failed');
+      }),
+    });
+    const candidate = manifest([EVENT_HOST]);
+
+    await expect(provisionRehearsal(candidate, provider, { dryRun: false })).rejects.toThrow(
+      'provider route creation failed',
+    );
+    expect(provider.journalArtifact).toHaveBeenCalledOnce();
+    const journaledDns = provider.journalArtifact.mock.calls[0][0];
+    expect(journaledDns).toMatchObject({
+      kind: 'dns',
+      candidateId: 'dns-0',
+      providerId: createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32),
+    });
+
+    await expect(
+      cleanupRehearsal(candidate, provider, {
+        dryRun: false,
+        observedArtifacts: [{ kind: 'dns', id: journaledDns.providerId, host: EVENT_HOST }],
+      }),
+    ).resolves.toMatchObject({ permanentReservationsRetained: true });
+    expect(provider.tombstoneAndWait).toHaveBeenCalledBefore(provider.removeExactDns);
+    expect(provider.removeExactRoute).not.toHaveBeenCalled();
+    expect(provider.removeExactDns).toHaveBeenCalledWith(
+      EVENT_HOST,
+      journaledDns.providerId,
+      expect.objectContaining({ runId: 'run-1' }),
+    );
+    expect(provider.removeExactDns).not.toHaveBeenCalledWith(
+      EVENT_HOST,
+      'dns-0',
+      expect.anything(),
+    );
+    expect(provider.verifyAbsent).toHaveBeenCalledOnce();
+  });
+
+  it('removes and verifies an actual DNS ID when its durable journal write fails', async () => {
+    const provider = deps({
+      journalArtifact: vi.fn(async () => {
+        throw new Error('journal persistence failed');
+      }),
+    });
+    const actualDnsId = createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32);
+
+    await expect(
+      provisionRehearsal(manifest([EVENT_HOST]), provider, { dryRun: false }),
+    ).rejects.toThrow('journal persistence failed');
+    expect(provider.removeExactDns).toHaveBeenCalledWith(
+      EVENT_HOST,
+      actualDnsId,
+      expect.objectContaining({ runId: 'run-1' }),
+    );
+    expect(provider.verifyExactArtifactAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'dns',
+        providerId: actualDnsId,
+        candidateId: 'dns-0',
+        host: EVENT_HOST,
+      }),
+    );
+    expect(provider.attachExactRoute).not.toHaveBeenCalled();
+  });
+
+  it('compensates an unjournaled route while preserving its journaled DNS for cleanup', async () => {
+    const journal = [];
+    const provider = deps({
+      journalArtifact: vi.fn(async (artifact) => {
+        if (artifact.kind === 'route') throw new Error('route journal persistence failed');
+        journal.push(structuredClone(artifact));
+        return { committed: true, artifact: structuredClone(artifact) };
+      }),
+      readArtifactJournal: vi.fn(async ({ binding, runId }) => ({
+        manifestDigest: binding.manifestDigest,
+        runId,
+        artifacts: structuredClone(journal),
+      })),
+    });
+    const candidate = manifest([EVENT_HOST]);
+    const actualDnsId = createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32);
+    const actualRouteId = createHash('sha256').update('route\0route-0').digest('hex').slice(0, 32);
+
+    await expect(provisionRehearsal(candidate, provider, { dryRun: false })).rejects.toThrow(
+      'route journal persistence failed',
+    );
+    expect(provider.removeExactRoute).toHaveBeenCalledWith(
+      EVENT_HOST,
+      actualRouteId,
+      expect.objectContaining({ runId: 'run-1' }),
+    );
+    expect(provider.verifyExactArtifactAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'route', providerId: actualRouteId }),
+    );
+
+    await expect(cleanupRehearsal(candidate, provider, { dryRun: false })).resolves.toMatchObject({
+      permanentReservationsRetained: true,
+    });
+    expect(provider.removeExactDns).toHaveBeenCalledWith(
+      EVENT_HOST,
+      actualDnsId,
+      expect.objectContaining({ runId: 'run-1' }),
+    );
+    expect(provider.removeExactRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains the exact provider recovery handle when journal and compensation both fail', async () => {
+    const provider = deps({
+      journalArtifact: vi.fn(async () => {
+        throw new Error('journal persistence failed');
+      }),
+      removeExactDns: vi.fn(async () => {
+        throw new Error('provider removal failed');
+      }),
+    });
+    const actualDnsId = createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32);
+
+    const error = await provisionRehearsal(manifest([EVENT_HOST]), provider, {
+      dryRun: false,
+    }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.recoveryArtifact).toMatchObject({
+      kind: 'dns',
+      providerId: actualDnsId,
+      candidateId: 'dns-0',
+      host: EVENT_HOST,
+    });
+    expect(error.compensated).toBe(false);
+  });
+
+  it('cleans provider IDs from a durable journal regardless of readback ordering', async () => {
+    const provider = deps();
+    const candidate = manifest([EVENT_HOST]);
+    const provisioned = await provisionRehearsal(candidate, provider, {
+      dryRun: false,
+    });
+    provider.readArtifactJournal.mockImplementation(async ({ binding, runId }) => ({
+      manifestDigest: binding.manifestDigest,
+      runId,
+      artifacts: structuredClone(provisioned.journaledArtifacts).reverse(),
+    }));
+
+    await expect(cleanupRehearsal(candidate, provider, { dryRun: false })).resolves.toMatchObject({
+      permanentReservationsRetained: true,
+    });
+    expect(provider.removeExactRoute).toHaveBeenCalledWith(
+      EVENT_HOST,
+      createHash('sha256').update('route\0route-0').digest('hex').slice(0, 32),
+      expect.anything(),
+    );
+    expect(provider.removeExactDns).toHaveBeenCalledWith(
+      EVENT_HOST,
+      createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32),
+      expect.anything(),
+    );
+  });
+
+  it('refuses a journal readback that is not bound to the exact manifest host', async () => {
+    const provider = deps();
+    const candidate = manifest([EVENT_HOST]);
+    const provisioned = await provisionRehearsal(candidate, provider, {
+      dryRun: false,
+    });
+    provider.readArtifactJournal.mockImplementation(async ({ binding, runId }) => ({
+      manifestDigest: binding.manifestDigest,
+      runId,
+      artifacts: provisioned.journaledArtifacts.map((artifact) => ({
+        ...structuredClone(artifact),
+        host: ROOT_HOST,
+      })),
+    }));
+
+    await expect(cleanupRehearsal(candidate, provider, { dryRun: false })).rejects.toThrow(
+      'journal entry does not match the signed manifest',
+    );
+    expect(provider.tombstoneAndWait).not.toHaveBeenCalled();
+    expect(provider.removeExactRoute).not.toHaveBeenCalled();
+    expect(provider.removeExactDns).not.toHaveBeenCalled();
   });
 
   it('tombstones and waits for DO convergence before removing only manifest-recorded artifacts', async () => {
     const provider = deps();
+    const provisioned = await provisionRehearsal(manifest(), provider, {
+      dryRun: false,
+    });
     const result = await cleanupRehearsal(manifest(), provider, {
       dryRun: false,
-      observedArtifacts: [
-        { kind: 'dns', id: 'dns-0', host: EVENT_HOST },
-        { kind: 'route', id: 'route-0', host: EVENT_HOST },
-        { kind: 'dns', id: 'dns-1', host: ROOT_HOST },
-        { kind: 'route', id: 'route-1', host: ROOT_HOST },
-      ],
+      observedArtifacts: provisioned.journaledArtifacts.map((artifact) => ({
+        kind: artifact.kind,
+        id: artifact.providerId,
+        host: artifact.host,
+      })),
     });
     expect(result.permanentReservationsRetained).toBe(true);
     expect(provider.tombstoneAndWait).toHaveBeenCalledBefore(provider.removeExactRoute);
     expect(provider.removeExactRoute).toHaveBeenCalledTimes(2);
     expect(provider.removeExactDns).toHaveBeenCalledTimes(2);
+    expect(provider.removeExactRoute).toHaveBeenCalledWith(
+      EVENT_HOST,
+      createHash('sha256').update('route\0route-0').digest('hex').slice(0, 32),
+      expect.anything(),
+    );
+    expect(provider.removeExactDns).toHaveBeenCalledWith(
+      EVENT_HOST,
+      createHash('sha256').update('dns\0dns-0').digest('hex').slice(0, 32),
+      expect.anything(),
+    );
     expect(provider.verifyAbsent).toHaveBeenCalledOnce();
-    expect(provider.verifyManifestSignature).toHaveBeenCalledOnce();
+    expect(provider.verifyManifestSignature).toHaveBeenCalledTimes(2);
   });
 
   it('refuses cleanup when the provider reports an unrecorded artifact', async () => {
     const provider = deps();
     await expect(
       cleanupRehearsal(manifest(), provider, {
+        dryRun: false,
         observedArtifacts: [{ kind: 'route', id: 'unknown-route', host: EVENT_HOST }],
       }),
     ).rejects.toThrow('unrecorded artifact');
@@ -640,7 +972,9 @@ describe('guarded rehearsal controller', () => {
   });
 
   it('allows signature-authorized cleanup after the run expires', async () => {
-    const provider = deps({ now: vi.fn(() => new Date('2027-01-01T00:00:00.000Z')) });
+    const provider = deps({
+      now: vi.fn(() => new Date('2027-01-01T00:00:00.000Z')),
+    });
     await expect(cleanupRehearsal(manifest(), provider, { dryRun: false })).resolves.toMatchObject({
       permanentReservationsRetained: true,
     });
