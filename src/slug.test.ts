@@ -38,6 +38,13 @@ describe('reserved infrastructure labels', () => {
     expect(validateSlug('admiral')).toEqual({ ok: true, slug: 'admiral' });
     expect(validateSlug('api-summit')).toEqual({ ok: true, slug: 'api-summit' });
   });
+
+  it.each(['r2-abcdefghijklmnopqrstuvwxyz', 'r2-root-abcdefghijklmnopqrst'])(
+    'reserves the controller-only rehearsal class %s from ordinary claims',
+    (label) => {
+      expect(validateSlug(label)).toEqual({ ok: false, reason: 'reserved-label' });
+    },
+  );
 });
 
 describe('validateSlug', () => {

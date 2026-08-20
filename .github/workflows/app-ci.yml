@@ -2,7 +2,8 @@ name: app-ci
 
 # Runs the app test harness on every PR and on pushes to main: typecheck, the
 # jsdom unit/component suite, the production build, the Cloud Functions notifier
-# suite (tests/functions/), the Firestore/Storage security-rules suite against
+# suite (tests/functions/), the isolated registry publisher build, the
+# Firestore/Storage security-rules suite against
 # the emulators, and the offline-durability suite (tests/offline/) against the
 # auth + firestore emulators. The Playwright e2e layer is a local smoke runner
 # (`npm run test:e2e`) and is intentionally not run here.
@@ -38,8 +39,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The registry publisher is deliberately a separate Functions Framework
+      # codebase so its runtime dependency graph cannot inherit firebase-admin.
+      - name: Install isolated registry publisher dependencies
+        run: npm ci --prefix router-publisher
+
+      - name: Verify isolated registry publisher dependency boundary
+        run: npm run check:no-admin --prefix router-publisher
+
+      # Miniflare stays in the Worker's separately installed dependency tree;
+      # the root suite imports it only for the registry's real-workerd test.
+      - name: Install isolated Event router dependencies
+        run: npm ci --prefix worker
+
+      - name: Verify generated registry harness capability types
+        run: npm run check:registry-harness-types --prefix worker
+
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Typecheck isolated registry publisher
+        run: npm run typecheck:router-publisher
 
       - name: Unit + component tests (jsdom)
         run: npm test

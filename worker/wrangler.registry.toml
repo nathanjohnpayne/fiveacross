@@ -1,0 +1,32 @@
+# Private control-plane Worker for the App Check-safe Event-router registry.
+# It has a workers.dev control endpoint but NO Namespace route. Public routing
+# remains exclusively owned by #972/#973 and the wildcard blocks in
+# wrangler.toml stay commented.
+
+name = "five-across-event-registry"
+main = "src/registry/registryWorker.ts"
+compatibility_date = "2026-08-19"
+workers_dev = true
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+REGISTRY_VERSION = "v1"
+
+[[durable_objects.bindings]]
+name = "HOST_REGISTRY"
+class_name = "HostRegistryObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["HostRegistryObject"]
+
+[[ratelimits]]
+name = "REGISTRY_RATE_LIMITER"
+namespace_id = "970001"
+
+[ratelimits.simple]
+limit = 60
+period = 60

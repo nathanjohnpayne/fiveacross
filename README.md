@@ -91,6 +91,8 @@ The target files are local and ignored because they contain the client configura
 |---|---|
 | `src/` | App code: game logic, Firebase init, Event/Edition resolution, auth, theme, hooks, components |
 | `functions/` | Cloud Functions (unlocks, finale, moderation, email, bug reports—stats stay client-authoritative, ADR 0001) |
+| `router-publisher/` | Isolated keyless Function codebase that signs private Event-router registry updates without an Admin SDK dependency |
+| `worker/` | Public Event-router code plus the separately configured, unrouted private registry Worker and lookup harness |
 | `public/` | Static assets served verbatim (icons, manifest, `og-default.png`, service worker) |
 | `firestore.rules` · `storage.rules` · `firestore.indexes.json` | Security rules + indexes |
 | `scripts/` | Seed script + build / CI / deploy tooling |

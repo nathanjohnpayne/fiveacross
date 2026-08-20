@@ -1,0 +1,26 @@
+{
+  "name": "five-across-router-replica-publisher",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Keyless Firestore-event publisher for the private Event-router registry.",
+  "engines": {
+    "node": "22"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check:no-admin": "node scripts/check-no-admin.mjs",
+    "deploy:plan": "npm run build && node scripts/render-deploy.mjs",
+    "gcp-build": "npm run build"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^5.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.6.2"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}

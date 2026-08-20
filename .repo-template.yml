@@ -158,4 +158,4 @@ test_globs:
 # occupant.
 # Inline-array form because check_no_forbidden_top_level_dirs only
 # recognizes `key: [a, b]`, not indented list items.
-extra_top_level_dirs: [public, worker]
+extra_top_level_dirs: [public, router-publisher, worker]
