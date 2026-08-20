@@ -217,8 +217,8 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
         startAfter: recoveryHistoryKey(afterRecoverySequence),
         limit: AUDIT_PAGE_SIZE + 1,
       });
-      const parsedRecords = [...records.entries()].map(([key, value]) =>
-        parseRecoveryHistoryEntry(key, value, this.#host()),
+      const parsedRecords = await Promise.all(
+        [...records.entries()].map(([key, value]) => parseRecoveryHistoryEntry(key, value, this.#host())),
       );
       return {
         ok: true as const,
