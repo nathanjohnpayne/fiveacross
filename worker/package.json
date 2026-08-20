@@ -5,6 +5,7 @@
   "description": "Cloudflare Worker Event router for the Five Across wildcard Namespaces (#545, epic #529).",
   "type": "module",
   "scripts": {
+    "check:registry-harness-types": "wrangler types registry-harness-configuration.d.ts --config wrangler.registry-harness.toml --config wrangler.registry.toml --env-interface RegistryHarnessEnv --include-runtime=false --check",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "versions:upload": "wrangler versions upload"

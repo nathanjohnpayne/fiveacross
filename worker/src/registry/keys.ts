@@ -21,6 +21,8 @@ export type PublisherVerificationMapping = {
 const PUBLIC_KEY_PEM = /^-----BEGIN PUBLIC KEY-----\n([A-Za-z0-9+/=\n]+)\n-----END PUBLIC KEY-----\n?$/;
 const LOWER_SHA_256 = /^[0-9a-f]{64}$/;
 const POSITIVE_DECIMAL = /^[1-9]\d*$/;
+const KMS_CRYPTO_KEY_VERSION =
+  /^projects\/[^/\s]+\/locations\/[^/\s]+\/keyRings\/[A-Za-z0-9_-]+\/cryptoKeys\/[A-Za-z0-9_-]+\/cryptoKeyVersions\/[1-9]\d*$/;
 
 function decodeBase64(value: string): Uint8Array {
   try {
@@ -53,9 +55,17 @@ export async function importPinnedVerificationKey(record: VerificationRecord): P
   if (!LOWER_SHA_256.test(record.spkiSha256)) throw new Error('invalid SPKI fingerprint');
   const recomputed = await fingerprintSpkiPem(record.pem);
   if (recomputed !== record.spkiSha256) throw new Error('SPKI fingerprint mismatch');
-  return crypto.subtle.importKey('spki', spkiBytes(record.pem), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, [
-    'verify',
-  ]);
+  const key = await crypto.subtle.importKey(
+    'spki',
+    spkiBytes(record.pem),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  );
+  if (!('modulusLength' in key.algorithm) || key.algorithm.modulusLength !== 2048) {
+    throw new Error('verification key must be a 2048-bit RSA key');
+  }
+  return key;
 }
 
 export function validateVerificationRecordIdentities(
@@ -70,6 +80,9 @@ export function validateVerificationRecordIdentities(
   for (const record of records) {
     if (record.subject.length === 0 || record.keyVersion.length === 0 || record.epochOrSlot.length === 0) {
       throw new Error('verification record has an empty identity field');
+    }
+    if (!KMS_CRYPTO_KEY_VERSION.test(record.keyVersion)) {
+      throw new Error('verification key version must be a canonical Cloud KMS CryptoKeyVersion resource');
     }
     if (!POSITIVE_DECIMAL.test(record.subject)) {
       throw new Error('verification subject must be a canonical positive decimal');

@@ -8,6 +8,7 @@ import { validateHarnessServiceBinding } from '../../../scripts/event-router-reg
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG = resolve(HERE, '../../wrangler.registry-harness.toml');
+const GENERATED_TYPES = resolve(HERE, '../../registry-harness-configuration.d.ts');
 const SOURCE = resolve(HERE, 'registryHarness.ts');
 
 describe('private synthetic lookup harness', () => {
@@ -16,7 +17,7 @@ describe('private synthetic lookup harness', () => {
     'r2-root-abcdefghijklmnopqrst.vacaybingo.com',
   ])('point-looks up the manifest-safe host %s', async (host) => {
     const lookup = vi.fn(async () => ({ kind: 'unknown-host' as const }));
-    await expect(lookupSyntheticHost(host, { lookup })).resolves.toEqual({ kind: 'unknown-host' });
+    await expect(lookupSyntheticHost(host, lookup)).resolves.toEqual({ kind: 'unknown-host' });
     expect(lookup).toHaveBeenCalledExactlyOnceWith(host);
   });
 
@@ -28,12 +29,16 @@ describe('private synthetic lookup harness', () => {
     'r2-short.fiveacross.app',
   ])('rejects non-synthetic host %s without touching the registry', async (host) => {
     const lookup = vi.fn();
-    await expect(lookupSyntheticHost(host, { lookup })).rejects.toThrow('synthetic host rejected');
+    await expect(lookupSyntheticHost(host, lookup)).rejects.toThrow('synthetic host rejected');
     expect(lookup).not.toHaveBeenCalled();
   });
 
   it('binds explicitly to RegistryLookupEntrypoint and has no default-fetch or DO capability', async () => {
-    const [config, source] = await Promise.all([readFile(CONFIG, 'utf8'), readFile(SOURCE, 'utf8')]);
+    const [config, generatedTypes, source] = await Promise.all([
+      readFile(CONFIG, 'utf8'),
+      readFile(GENERATED_TYPES, 'utf8'),
+      readFile(SOURCE, 'utf8'),
+    ]);
     expect(validateHarnessServiceBinding(config)).toEqual({
       binding: 'REGISTRY',
       service: 'five-across-event-registry',
@@ -42,6 +47,12 @@ describe('private synthetic lookup harness', () => {
     expect(config).not.toContain('durable_objects');
     expect(config).not.toMatch(/^routes\s*=/m);
     expect(config).toContain('workers_dev = false');
+    expect(generatedTypes).toContain(
+      'REGISTRY: Service<typeof import("./src/registry/registryWorker").RegistryLookupEntrypoint>;',
+    );
+    expect(generatedTypes).not.toMatch(/REGISTRY:\s*Service\s*(?:\/\*|;)/);
+    expect(generatedTypes).not.toMatch(/\bfetch\s*\(/);
+    expect(source).not.toContain('interface RegistryHarnessEnv');
     expect(source).not.toMatch(/\.fetch\s*\(/);
     expect(source).not.toMatch(/\bfetch\s*\(/);
   });

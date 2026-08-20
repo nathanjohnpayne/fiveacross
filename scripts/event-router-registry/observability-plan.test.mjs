@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
 import {
@@ -196,6 +197,78 @@ describe('R0 registry observability provisioning plan', () => {
         },
       },
     });
+  });
+
+  it('names the unavoidable telemetry permission and contains it to fixed nonmutating requests', () => {
+    const plan = renderRegistryObservabilityPlan(INPUT);
+    expect(plan.telemetryAuthorization).toEqual({
+      requiredProviderPermission: 'Workers Observability Write',
+      readOnlyProviderPermissionAvailable: false,
+      providerPermissionExceedsOperationalNeed: true,
+      scope: {
+        accountId: INPUT.accountId,
+        serviceFilter: INPUT.registryScriptName,
+      },
+      allowedRequests: [
+        {
+          operation: 'key-discovery',
+          method: 'POST',
+          path: `/accounts/${INPUT.accountId}/workers/observability/telemetry/keys`,
+          fixedRenderedBodyRequired: true,
+        },
+        {
+          operation: 'dry-query',
+          method: 'POST',
+          path: `/accounts/${INPUT.accountId}/workers/observability/telemetry/query`,
+          fixedRenderedBodyRequired: true,
+          inlineParametersRequired: true,
+          dryRequired: true,
+        },
+      ],
+      forbiddenOperations: [
+        'saved-query-create-update-delete',
+        'telemetry-values',
+        'live-tail',
+        'provider-resource-mutation',
+      ],
+      providerMutationAllowed: false,
+    });
+    for (const monitor of plan.semanticAlerts) {
+      expect(monitor.keyReadback).toMatchObject({
+        method: 'POST',
+        path: plan.telemetryAuthorization.allowedRequests[0].path,
+      });
+      expect(monitor.query).toMatchObject({
+        method: 'POST',
+        path: plan.telemetryAuthorization.allowedRequests[1].path,
+        bodyTemplate: {
+          dry: true,
+          parameters: expect.any(Object),
+        },
+      });
+      expect(monitor.evaluation.requiredExecutor).toBe(
+        'reviewed-scheduled-contained-telemetry-runner',
+      );
+    }
+    expect(plan.executionGate).toMatchObject({
+      telemetryRequestsMustMatchAllowlist: true,
+      telemetryQueryDryMustRemainTrue: true,
+      providerMutationForbidden: true,
+    });
+  });
+
+  it('documents the broader provider permission without promising a read-only token', async () => {
+    const readme = await readFile('scripts/event-router-registry/README.md', 'utf8');
+    expect(readme).toContain(
+      'Cloudflare currently requires the exact `Workers Observability Write` permission for both telemetry operations',
+    );
+    expect(readme).toContain(
+      'There is no narrower read-only Cloudflare permission for these endpoints.',
+    );
+    expect(readme).toContain(
+      'The runner must accept only the artifact\'s fixed key-discovery body and fixed inline `dry: true` query bodies',
+    );
+    expect(readme).not.toContain('scheduled read-only query runner');
   });
 
   it('renders the plan through a credential-free CLI input seam', async () => {

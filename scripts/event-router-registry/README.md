@@ -1,6 +1,6 @@
 # Private registry provisioning renderers
 
-These commands render reviewed R0 artifacts only. They do not authenticate to Google or Cloudflare, create or update provider resources, deploy Workers or Functions, or attach routes. A human provisioning session supplies read-only provider responses through files or standard input and separately applies a reviewed plan with least-privilege provider tooling.
+These commands render reviewed R0 artifacts only. They do not authenticate to Google or Cloudflare, create or update provider resources, deploy Workers or Functions, or attach routes. A human provisioning session supplies provider responses through files or standard input and separately applies a reviewed plan with least-privilege provider tooling.
 
 ## Pin one Cloud KMS public key
 
@@ -44,4 +44,8 @@ Prepare an input document with this exact schema. Cloudflare account and zone ID
 node scripts/event-router-registry/observability-plan.mjs --input=registry-observability-input.json
 ```
 
-The output renders the desired nonsampled `http_requests` and `firewall_events` ingestion for both Namespace zones, Workers Logs at sampling rate 1, the current provider billing-alert preflight and desired policy, the R0 semantic query/readback definitions, and the reviewed retention gate. Cloudflare does not expose Log Explorer retention selection or native scheduling for arbitrary Workers telemetry queries through the APIs represented here, so the plan blocks on a reviewed account-contract retention readback and names the required scheduled read-only query runner rather than claiming those controls were provisioned. Applying requests, wiring the runner, and verifying every exact readback remain separate reviewed operations.
+The output renders the desired nonsampled `http_requests` and `firewall_events` ingestion for both Namespace zones, Workers Logs at sampling rate 1, the current provider billing-alert preflight and desired policy, the R0 semantic query/readback definitions, and the reviewed retention gate. Cloudflare does not expose Log Explorer retention selection or native scheduling for arbitrary Workers telemetry queries through the APIs represented here, so the plan blocks on a reviewed account-contract retention readback and names the required scheduled contained telemetry runner rather than claiming those controls were provisioned. Applying requests, wiring the runner, and verifying every exact readback remain separate reviewed operations.
+
+Cloudflare currently requires the exact `Workers Observability Write` permission for both telemetry operations used here: `POST /workers/observability/telemetry/keys` and `POST /workers/observability/telemetry/query`, including a query with `dry: true`. There is no narrower read-only Cloudflare permission for these endpoints. The permission name is therefore broader than the runner's intended behavior and must not be described or provisioned as a read-only token.
+
+The runner must accept only the artifact's fixed key-discovery body and fixed inline `dry: true` query bodies, scoped to the exact account and registry service filter. It must reject saved-query create/update/delete, telemetry-values, live-tail, and every other provider operation. It must not persist query results, mutate provider resources, deploy code, or attach routes. The rendered artifact contains no credential; credential creation and runner enforcement remain separate reviewed operations.

@@ -169,8 +169,53 @@ function semanticAlertShape(policy) {
   throw new Error(`alert policy ${policy.id} has no supported exact threshold`);
 }
 
+function telemetryPaths(input) {
+  const prefix = `/accounts/${input.accountId}/workers/observability/telemetry`;
+  return {
+    keyDiscovery: `${prefix}/keys`,
+    dryQuery: `${prefix}/query`,
+  };
+}
+
+function telemetryAuthorization(input) {
+  const paths = telemetryPaths(input);
+  return {
+    requiredProviderPermission: 'Workers Observability Write',
+    readOnlyProviderPermissionAvailable: false,
+    providerPermissionExceedsOperationalNeed: true,
+    scope: {
+      accountId: input.accountId,
+      serviceFilter: input.registryScriptName,
+    },
+    allowedRequests: [
+      {
+        operation: 'key-discovery',
+        method: 'POST',
+        path: paths.keyDiscovery,
+        fixedRenderedBodyRequired: true,
+      },
+      {
+        operation: 'dry-query',
+        method: 'POST',
+        path: paths.dryQuery,
+        fixedRenderedBodyRequired: true,
+        inlineParametersRequired: true,
+        dryRequired: true,
+      },
+    ],
+    forbiddenOperations: [
+      'saved-query-create-update-delete',
+      'telemetry-values',
+      'live-tail',
+      'provider-resource-mutation',
+    ],
+    providerMutationAllowed: false,
+  };
+}
+
 function semanticPlans(input, contract) {
   const observability = contract.cloudflare.observability;
+  const paths = telemetryPaths(input);
   return observability.alertPolicies.map((policy) => {
     const shape = semanticAlertShape(policy);
     return {
@@ -179,7 +224,7 @@ function semanticPlans(input, contract) {
       excludedFields: [...observability.excludedFields],
       keyReadback: {
         method: 'POST',
-        path: `/accounts/${input.accountId}/workers/observability/telemetry/keys`,
+        path: paths.keyDiscovery,
         bodyTemplate: {
           timeframe: { from: '{window-start-unix-ms}', to: '{window-end-unix-ms}' },
           datasets: [],
@@ -206,7 +251,7 @@ function semanticPlans(input, contract) {
       },
       query: {
         method: 'POST',
-        path: `/accounts/${input.accountId}/workers/observability/telemetry/query`,
+        path: paths.dryQuery,
         bodyTemplate: {
           queryId: `event-router-registry-${policy.id}`,
           timeframe: { from: '{window-start-unix-ms}', to: '{window-end-unix-ms}' },
@@ -242,7 +287,7 @@ function semanticPlans(input, contract) {
         trigger: shape.trigger,
         destination: structuredClone(input.notification),
         providerNativeScheduledQueryAvailable: false,
-        requiredExecutor: 'reviewed-scheduled-read-only-query-runner',
+        requiredExecutor: 'reviewed-scheduled-contained-telemetry-runner',
         failClosedUnlessReadbackMatches: true,
       },
     };
@@ -262,6 +307,7 @@ export function renderRegistryObservabilityPlan(rawInput, contract = REGISTRY_R0
     accountId: input.accountId,
     registryScriptName: input.registryScriptName,
     r0ContractSha256: contractSha256,
+    telemetryAuthorization: telemetryAuthorization(input),
     workersLogs: {
       enabled: observability.workersLogs.enabled,
       headSamplingRate: observability.workersLogs.headSamplingRate,
@@ -315,6 +361,9 @@ export function renderRegistryObservabilityPlan(rawInput, contract = REGISTRY_R0
       exactProviderReadbacksRequired: true,
       noDeploymentOrRouteMutation: true,
       noProviderCredentialFields: true,
+      telemetryRequestsMustMatchAllowlist: true,
+      telemetryQueryDryMustRemainTrue: true,
+      providerMutationForbidden: true,
     },
   };
 }

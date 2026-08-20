@@ -153,7 +153,9 @@ describe("private registry tracer", () => {
         export default {
           async fetch(request, env) {
             const body = await request.json();
-            return Response.json(await lookupSyntheticHost(body.host, env.REGISTRY));
+            return Response.json(
+              await lookupSyntheticHost(body.host, (host) => env.REGISTRY.lookup(host)),
+            );
           },
         };
       `,

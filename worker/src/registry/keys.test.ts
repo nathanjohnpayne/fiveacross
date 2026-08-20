@@ -16,9 +16,10 @@ function toBase64(bytes: ArrayBuffer): string {
 
 async function fixtureRecord(
   overrides: Partial<VerificationRecord> = {},
+  modulusLength = 2048,
 ): Promise<{ record: VerificationRecord; privateKey: CryptoKey }> {
   const pair = (await crypto.subtle.generateKey(
-    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
     true,
     ['sign', 'verify'],
   )) as CryptoKeyPair;
@@ -54,9 +55,15 @@ describe('immutable pinned verification records', () => {
     await expect(validateVerificationRecords([record])).resolves.toEqual([record]);
   });
 
+  it('rejects a fingerprint-valid RSA key whose imported modulus is not 2048 bits', async () => {
+    const { record } = await fixtureRecord({}, 4096);
+    await expect(validateVerificationRecords([record])).rejects.toThrow('2048-bit');
+  });
+
   it.each([
     ['mismatched fingerprint', { spkiSha256: '0'.repeat(64) }],
     ['wrong algorithm', { algorithm: 'RSA_SIGN_PSS_2048_SHA256' }],
+    ['noncanonical KMS key version', { keyVersion: 'not-a-kms-crypto-key-version' }],
     ['non-numeric publisher epoch', { epochOrSlot: '01' }],
     ['non-numeric publisher subject', { subject: 'publisher@example.com' }],
     ['non-numeric recovery subject', { role: 'recovery', epochOrSlot: 'primary', subject: 'recovery@example.com' }],
@@ -71,7 +78,7 @@ describe('immutable pinned verification records', () => {
 
   it('rejects duplicate role slots, key versions, and fingerprints', async () => {
     const first = await fixtureRecord();
-    const sameSlot = await fixtureRecord({ keyVersion: `${first.record.keyVersion}-other` });
+    const sameSlot = await fixtureRecord({ keyVersion: first.record.keyVersion.replace(/\/1$/, '/2') });
     await expect(validateVerificationRecords([first.record, sameSlot.record])).rejects.toThrow('role/epoch/slot');
 
     const duplicateVersion = {
@@ -86,7 +93,7 @@ describe('immutable pinned verification records', () => {
       ...first.record,
       role: 'recovery' as const,
       epochOrSlot: 'primary',
-      keyVersion: `${first.record.keyVersion}-2`,
+      keyVersion: first.record.keyVersion.replace(/\/1$/, '/3'),
     };
     await expect(validateVerificationRecords([first.record, duplicateFingerprint])).rejects.toThrow('fingerprint');
   });

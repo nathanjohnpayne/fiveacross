@@ -52,6 +52,9 @@ jobs:
       - name: Install isolated Event router dependencies
         run: npm ci --prefix worker
 
+      - name: Verify generated registry harness capability types
+        run: npm run check:registry-harness-types --prefix worker
+
       - name: Typecheck
         run: npm run typecheck
 

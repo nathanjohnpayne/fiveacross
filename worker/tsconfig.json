@@ -17,5 +17,5 @@
     "noFallthroughCasesInSwitch": true
   },
   "// tests": "The specs are INCLUDED, not excluded. They run under the repo-root Vitest program (vite.config.ts `include` covers worker/**), but no program there typechecks them — tsconfig.json stops at `src` — so leaving them out here would mean the router's only test suite compiled by nothing at all. They import their helpers from 'vitest' explicitly rather than relying on globals, so this program needs no `vitest/globals` entry to read them.",
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "registry-harness-configuration.d.ts"]
 }
