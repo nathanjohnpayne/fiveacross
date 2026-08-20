@@ -43,6 +43,13 @@ describe('registry Worker capability/configuration contract', () => {
     );
   });
 
+  it('refuses recovery requests for a different host before applying recovery state', async () => {
+    const source = await readFile(SOURCE, 'utf8');
+    const recover = source.slice(source.indexOf('async recover('), source.indexOf('async issueProbeChallenge('));
+    expect(recover).toContain('request.host !== objectHost');
+    expect(recover.indexOf('request.host !== objectHost')).toBeLessThan(recover.indexOf('applyRecovery('));
+  });
+
   it('owns one SQLite-backed per-host namespace, fixed placement, rate limiting, and no KV', async () => {
     const [source, config] = await Promise.all([readFile(SOURCE, 'utf8'), readFile(CONFIG, 'utf8')]);
     expect(source).toContain('locationHint: REGISTRY_LOCATION_HINT');

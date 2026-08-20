@@ -205,7 +205,7 @@ describe('persisted recovery history validation', () => {
   it('accepts an exact historical record without reapplying request freshness', () => {
     const value = record();
 
-    expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value)).toEqual(value);
+    expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).toEqual(value);
   });
 
   it.each(['acquire-lock', 'apply', 'clear-lock', 'abort-lock'] as const)(
@@ -213,7 +213,7 @@ describe('persisted recovery history validation', () => {
     (action) => {
       const value = recordFor(action);
 
-      expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value)).toEqual(value);
+      expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).toEqual(value);
     },
   );
 
@@ -237,12 +237,116 @@ describe('persisted recovery history validation', () => {
   ])('rejects %s', (_label, mutate) => {
     const value = record();
 
-    expect(() => parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), mutate(value))).toThrow(
+    expect(() => parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), mutate(value), HOST)).toThrow(
+      'recovery history malformed',
+    );
+  });
+
+  it.each([
+    [
+      'source and ledger',
+      (foreignHost: string) => {
+        const value = record();
+        return {
+          ...value,
+          sourceAudit: {
+            ...value.sourceAudit,
+            canonicalProjection: {
+              ...value.sourceAudit.canonicalProjection,
+              host: foreignHost,
+              desired: { ...value.sourceAudit.canonicalProjection.desired, slug: 'r2-abcdefghijklmnopqrstuvwxya' },
+            },
+            ledgerPayload: {
+              ...value.sourceAudit.ledgerPayload,
+              host: foreignHost,
+              desired: { ...value.sourceAudit.ledgerPayload.desired, slug: 'r2-abcdefghijklmnopqrstuvwxya' },
+            },
+          },
+        };
+      },
+    ],
+    [
+      'WAF and provider requests',
+      (foreignHost: string) => {
+        const value = recordFor('acquire-lock');
+        if (value.evidence.kind !== 'acquire-lock') throw new Error('test setup');
+        return {
+          ...value,
+          evidence: {
+            ...value.evidence,
+            wafEvidence: {
+              ...value.evidence.wafEvidence,
+              host: foreignHost,
+              providerRequests: value.evidence.wafEvidence.providerRequests.map((request) => ({
+                ...request,
+                host: foreignHost,
+              })) as typeof value.evidence.wafEvidence.providerRequests,
+            },
+          },
+        };
+      },
+    ],
+    [
+      'WAF expression',
+      (foreignHost: string) => {
+        const value = recordFor('acquire-lock');
+        if (value.evidence.kind !== 'acquire-lock') throw new Error('test setup');
+        return {
+          ...value,
+          evidence: {
+            ...value.evidence,
+            wafEvidence: {
+              ...value.evidence.wafEvidence,
+              providerRule: {
+                ...value.evidence.wafEvidence.providerRule,
+                expression: `http.host eq "${foreignHost}"`,
+              },
+            },
+          },
+        };
+      },
+    ],
+    [
+      'clear provider requests',
+      (foreignHost: string) => {
+        const value = recordFor('clear-lock');
+        if (value.evidence.kind !== 'clear-lock') throw new Error('test setup');
+        return {
+          ...value,
+          evidence: {
+            ...value.evidence,
+            providerRequests: value.evidence.providerRequests.map((request) => ({
+              ...request,
+              host: foreignHost,
+            })) as typeof value.evidence.providerRequests,
+          },
+        };
+      },
+    ],
+    [
+      'probe challenge and observation',
+      (foreignHost: string) => {
+        const value = recordFor('clear-lock');
+        return {
+          ...value,
+          probeEvidence: value.probeEvidence.map((evidence) => ({
+            ...evidence,
+            challenge: { ...evidence.challenge, host: foreignHost },
+            observation: { ...evidence.observation, host: foreignHost },
+          })),
+        };
+      },
+    ],
+  ])('rejects a foreign-host %s projection copied into the owning object history', (_label, build) => {
+    const foreignHost = 'r2-abcdefghijklmnopqrstuvwxya.fiveacross.app';
+    const value = build(foreignHost);
+
+    expect(() => parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).toThrow(
       'recovery history malformed',
     );
   });
 
   it.each(['recovery/000001:2', 'recovery/000002:01', 'recovery/1'])('rejects storage key mismatch %s', (key) => {
-    expect(() => parseRecoveryHistoryEntry(key, record())).toThrow('recovery history malformed');
+    expect(() => parseRecoveryHistoryEntry(key, record(), HOST)).toThrow('recovery history malformed');
   });
 });

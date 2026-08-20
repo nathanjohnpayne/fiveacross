@@ -77,7 +77,7 @@ function validateCommittedRef(value: unknown): void {
   sha256(reference.digest);
 }
 
-function validateSourceAudit(value: unknown): void {
+function validateSourceAudit(value: unknown, expectedHost: string): void {
   const source = exactRecord(value, [
     'revision',
     'digest',
@@ -104,6 +104,7 @@ function validateSourceAudit(value: unknown): void {
   const canonical = exactRecord(source.canonicalProjection, ['sourceDocumentDigest', 'host', 'desired']);
   sha256(canonical.sourceDocumentDigest);
   const canonicalHost = nonEmptyString(canonical.host);
+  if (canonicalHost !== expectedHost) throw new Error('source host');
   const ledger = parseSyncRequest(JSON.stringify(source.ledgerPayload), 'application/json');
   parseSyncRequest(
     JSON.stringify({
@@ -118,7 +119,7 @@ function validateSourceAudit(value: unknown): void {
   if (ledger.host !== canonicalHost || ledger.revision !== revision) throw new Error('source binding');
 }
 
-function validateProviderRequest(value: unknown): void {
+function validateProviderRequest(value: unknown, expectedHost: string): void {
   const request = exactRecord(value, [
     'rayId',
     'eventAt',
@@ -136,7 +137,7 @@ function validateProviderRequest(value: unknown): void {
   timestamp(request.eventAt);
   timestamp(request.verifiedAt);
   nonEmptyString(request.edgeColoCode);
-  nonEmptyString(request.host);
+  if (nonEmptyString(request.host) !== expectedHost) throw new Error('provider host');
   nonEmptyString(request.path);
   if (typeof request.query !== 'string') throw new Error('query');
   sha256(request.queryDigest);
@@ -160,7 +161,7 @@ function validateProviderRequest(value: unknown): void {
   sha256(firewall.logResponseDigest);
 }
 
-function validateWafEvidence(value: unknown): void {
+function validateWafEvidence(value: unknown, expectedHost: string): void {
   const waf = exactRecord(value, [
     'zoneId',
     'rulesetId',
@@ -175,7 +176,7 @@ function validateWafEvidence(value: unknown): void {
   for (const resource of [waf.zoneId, waf.rulesetId, waf.ruleId]) {
     if (typeof resource !== 'string' || !CLOUDFLARE_RESOURCE_ID.test(resource)) throw new Error('resource id');
   }
-  nonEmptyString(waf.host);
+  if (nonEmptyString(waf.host) !== expectedHost) throw new Error('WAF host');
   timestamp(waf.verifiedAt);
   nonEmptyString(waf.blockNonce);
   const providerRule = exactRecord(waf.providerRule, [
@@ -186,14 +187,19 @@ function validateWafEvidence(value: unknown): void {
     'customResponseBodyDigest',
     'responseDigest',
   ]);
-  if (providerRule.enabled !== true || providerRule.action !== 'block') throw new Error('provider rule');
-  nonEmptyString(providerRule.expression);
+  if (
+    providerRule.enabled !== true ||
+    providerRule.action !== 'block' ||
+    providerRule.expression !== `http.host eq "${expectedHost}"`
+  ) {
+    throw new Error('provider rule');
+  }
   nonEmptyString(providerRule.ref);
   sha256(providerRule.customResponseBodyDigest);
   sha256(providerRule.responseDigest);
   exactStringArray(waf.probeAttestationIds, 3).forEach(nonEmptyString);
   if (!Array.isArray(waf.providerRequests) || waf.providerRequests.length !== 3) throw new Error('provider requests');
-  waf.providerRequests.forEach(validateProviderRequest);
+  waf.providerRequests.forEach((request) => validateProviderRequest(request, expectedHost));
 }
 
 function validatePublisherRuntime(value: unknown): void {
@@ -340,15 +346,15 @@ function validatePublisherReplacement(value: unknown): void {
   nonEmptyString(control.attestationSignature);
 }
 
-function validateAction(value: unknown): string {
+function validateAction(value: unknown, expectedHost: string): string {
   if (!isRecord(value) || typeof value.kind !== 'string' || !ACTIONS.has(value.kind)) throw new Error('action');
   if (value.kind === 'acquire-lock') {
     const action = exactRecord(value, ['kind', 'wafEvidence']);
-    validateWafEvidence(action.wafEvidence);
+    validateWafEvidence(action.wafEvidence, expectedHost);
   } else if (value.kind === 'abort-lock') {
     const action = exactRecord(value, ['kind', 'lockId', 'wafEvidence']);
     nonEmptyString(action.lockId);
-    validateWafEvidence(action.wafEvidence);
+    validateWafEvidence(action.wafEvidence, expectedHost);
   } else if (value.kind === 'apply') {
     const action = exactRecord(value, ['kind', 'lockId', 'publisherReplacement']);
     nonEmptyString(action.lockId);
@@ -367,12 +373,12 @@ function validateAction(value: unknown): string {
     if (!Array.isArray(action.providerRequests) || action.providerRequests.length !== 3) {
       throw new Error('provider requests');
     }
-    action.providerRequests.forEach(validateProviderRequest);
+    action.providerRequests.forEach((request) => validateProviderRequest(request, expectedHost));
   }
   return value.kind;
 }
 
-function validateProbeChallenge(value: unknown): Record<string, unknown> {
+function validateProbeChallenge(value: unknown, expectedHost: string): Record<string, unknown> {
   const challenge = exactRecord(value, [
     'probeNonce',
     'subject',
@@ -398,6 +404,7 @@ function validateProbeChallenge(value: unknown): Record<string, unknown> {
   ]) {
     nonEmptyString(field);
   }
+  if (challenge.host !== expectedHost) throw new Error('challenge host');
   sha256(challenge.keyFingerprint);
   sha256(challenge.expectedStateDigest);
   integer(challenge.issuedAt);
@@ -421,7 +428,7 @@ function validateProbeChallenge(value: unknown): Record<string, unknown> {
   return challenge;
 }
 
-function validateProbeObservation(value: unknown): Record<string, unknown> {
+function validateProbeObservation(value: unknown, expectedHost: string): Record<string, unknown> {
   if (!isRecord(value) || typeof value.phase !== 'string') throw new Error('observation');
   const common = ['phase', 'probeNonce', 'observedAt', 'rayId', 'host', 'requestPath'];
   const observation =
@@ -457,6 +464,7 @@ function validateProbeObservation(value: unknown): Record<string, unknown> {
   ]) {
     nonEmptyString(field);
   }
+  if (observation.host !== expectedHost) throw new Error('observation host');
   timestamp(observation.observedAt);
   const expectedStatus = integer(observation.expectedStatus);
   const observedStatus = integer(observation.observedStatus);
@@ -482,7 +490,7 @@ function validateProbeObservation(value: unknown): Record<string, unknown> {
   return observation;
 }
 
-function validateProbeEvidence(value: unknown): void {
+function validateProbeEvidence(value: unknown, expectedHost: string): void {
   const evidence = exactRecord(value, [
     'id',
     'receivedAt',
@@ -499,8 +507,8 @@ function validateProbeEvidence(value: unknown): void {
   nonEmptyString(evidence.keyVersion);
   sha256(evidence.keyFingerprint);
   nonEmptyString(evidence.region);
-  const challenge = validateProbeChallenge(evidence.challenge);
-  const observation = validateProbeObservation(evidence.observation);
+  const challenge = validateProbeChallenge(evidence.challenge, expectedHost);
+  const observation = validateProbeObservation(evidence.observation, expectedHost);
   if (
     evidence.subject !== challenge.subject ||
     evidence.keyVersion !== challenge.keyVersion ||
@@ -527,8 +535,9 @@ export function recoveryHistoryKey(sequence: string): string {
   return `${RECOVERY_HISTORY_PREFIX}${sequence.length.toString().padStart(6, '0')}:${sequence}`;
 }
 
-export function parseRecoveryHistoryEntry(storageKey: string, value: unknown): RecoveryRecord {
+export function parseRecoveryHistoryEntry(storageKey: string, value: unknown, expectedHost: string): RecoveryRecord {
   try {
+    const host = nonEmptyString(expectedHost);
     const record = exactRecord(value, [
       'sequence',
       'action',
@@ -560,12 +569,12 @@ export function parseRecoveryHistoryEntry(storageKey: string, value: unknown): R
     validateCommittedRef(record.before);
     validateCommittedRef(record.after);
     validateSkippedRange(record.skippedRevisionRange);
-    validateSourceAudit(record.sourceAudit);
-    if (validateAction(record.evidence) !== record.action) throw new Error('action binding');
+    validateSourceAudit(record.sourceAudit, host);
+    if (validateAction(record.evidence, host) !== record.action) throw new Error('action binding');
     if (!Array.isArray(record.probeEvidence)) throw new Error('probe evidence');
     const expectedProbeCount = record.action === 'apply' ? 0 : 3;
     if (record.probeEvidence.length !== expectedProbeCount) throw new Error('probe evidence count');
-    record.probeEvidence.forEach(validateProbeEvidence);
+    record.probeEvidence.forEach((evidence) => validateProbeEvidence(evidence, host));
     nonEmptyString(record.operatorSub);
     if (typeof record.operatorKeyVersion !== 'string' || !KMS_KEY_VERSION.test(record.operatorKeyVersion)) {
       throw new Error('operator key');

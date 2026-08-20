@@ -218,7 +218,7 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
         limit: AUDIT_PAGE_SIZE + 1,
       });
       const parsedRecords = [...records.entries()].map(([key, value]) =>
-        parseRecoveryHistoryEntry(key, value),
+        parseRecoveryHistoryEntry(key, value, this.#host()),
       );
       return {
         ok: true as const,
@@ -254,11 +254,15 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   ): Promise<
     { ok: true; sequence: string; action: RecoveryRecord['action'] } | { ok: false; error: 'recovery-refused' }
   > {
+    const objectHost = this.#host();
+    if (request.host !== objectHost) {
+      return { ok: false as const, error: 'recovery-refused' as const };
+    }
     const startedAt = Date.now();
     const response = await this.ctx.storage.transaction(async (transaction) => {
       const stored = await transaction.get<unknown>(STATE_KEY);
       const state =
-        stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored, this.#host());
+        stored === undefined ? initialRegistryState() : await parseStoredRegistryState(stored, objectHost);
       let result: Awaited<ReturnType<typeof applyRecovery>>;
       let consumedAttestationKeys: string[] = [];
       let consumedAttestationExpiryKeys: string[] = [];
