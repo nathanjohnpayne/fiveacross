@@ -36,4 +36,17 @@ describe('persisted registry state validation', () => {
       'registry state malformed',
     );
   });
+
+  it.each([
+    ['equal to', '7'],
+    ['above', '8'],
+  ])('fails closed when the quarantined publisher epoch is %s the minimum epoch', async (_label, quarantined) => {
+    const state = {
+      ...(await applyPublisherSync(initialRegistryState(), PAYLOAD, '1')).state,
+      minimumPublisherEpoch: '7',
+      highestQuarantinedPublisherEpoch: quarantined,
+    };
+
+    await expect(parseStoredRegistryState(state)).rejects.toThrow('registry state malformed');
+  });
 });

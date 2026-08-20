@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE = resolve(HERE, 'registryWorker.ts');
+const PROBE_SWEEP_SOURCE = resolve(HERE, 'probeSweep.ts');
 const CONTROL_SOURCE = resolve(HERE, 'controlService.ts');
 const CONFIG = resolve(HERE, '../../wrangler.registry.toml');
 const ROUTER_CONFIG = resolve(HERE, '../../wrangler.toml');
@@ -61,12 +62,17 @@ describe('registry Worker capability/configuration contract', () => {
   });
 
   it('durably reschedules probe expiry after a cleanup storage failure', async () => {
-    const source = await readFile(SOURCE, 'utf8');
+    const [source, sweepSource] = await Promise.all([
+      readFile(SOURCE, 'utf8'),
+      readFile(PROBE_SWEEP_SOURCE, 'utf8'),
+    ]);
     const alarm = source.slice(source.indexOf('async alarm()'), source.indexOf('async sync('));
+    expect(alarm).toContain('sweepProbeArtifacts(transaction, now)');
     expect(alarm).toContain('catch (error)');
     expect(alarm).toContain('this.ctx.storage.setAlarm(now + PROBE_SWEEP_RETRY_MS)');
     expect(alarm).toContain('throw error');
-    expect(alarm).toContain('principalIndexKey');
+    expect(sweepSource).toContain('probePrincipalKey(principal, identity.artifactKey)');
+    expect(sweepSource).toContain("throw new Error('probe expiry index is malformed')");
   });
 
   it('does not alter or attach the public Event router', async () => {

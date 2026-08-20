@@ -70,6 +70,13 @@ export async function parseStoredRegistryState(value: unknown): Promise<Registry
       }
     }
 
+    if (
+      BigInt(value.highestQuarantinedPublisherEpoch) > 0n &&
+      BigInt(value.highestQuarantinedPublisherEpoch) >= BigInt(value.minimumPublisherEpoch)
+    ) {
+      throw new Error('quarantined publisher epoch is not fenced');
+    }
+
     if (value.recoveryLock !== null) {
       if (
         !isRecord(value.recoveryLock) ||

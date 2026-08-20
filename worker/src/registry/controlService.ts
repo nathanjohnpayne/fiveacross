@@ -1,7 +1,12 @@
 import { normalizeHost } from '../host';
 import { REGISTRY_LOCATION_HINT, parseSyncRequest } from './contracts';
 import { ControlAuthUnavailableError, authenticatePinnedRole, type PinnedRoleRequest } from './controlAuth';
-import { publisherVerificationMappings, verificationRecordMappingDigest, type VerificationRecord } from './keys';
+import {
+  publisherVerificationMappings,
+  validateAuditSubjectIdentity,
+  verificationRecordMappingDigest,
+  type VerificationRecord,
+} from './keys';
 import { JwksUnavailableError, verifyGoogleOidc, type JwksResolver } from './oidc';
 import type { ProbeChallengeRequest, ProbeObservation, ProbePrincipal } from './probe';
 import type { RecoveryRequest, SourceAudit } from './recovery';
@@ -239,13 +244,17 @@ async function authenticateAudit(
   deps: ControlServiceDeps,
 ): Promise<void> {
   const token = bearer(request.headers.get('authorization'));
-  if (token === null || config.auditSubject === undefined || config.auditSubject.length === 0) {
-    throw new Error('unauthorized');
+  if (token === null) throw new Error('unauthorized');
+  let auditSubject: string;
+  try {
+    auditSubject = validateAuditSubjectIdentity(config.auditSubject ?? '', config.verificationRecords);
+  } catch {
+    throw new ControlAuthUnavailableError('audit identity configuration unavailable');
   }
   try {
     await verifyGoogleOidc(
       token,
-      { audience: roleAudience(config, 'audit'), subject: config.auditSubject },
+      { audience: roleAudience(config, 'audit'), subject: auditSubject },
       deps.jwks,
       deps.now(),
     );

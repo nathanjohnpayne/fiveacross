@@ -83,4 +83,22 @@ describe('point audit pagination', () => {
     const state = { ...initialRegistryState(), recoverySequence: '102' };
     expect(() => createAuditPage(state, [], cursor)).toThrow('audit cursor');
   });
+
+  it('fails closed when a terminal page does not reach the stored recovery sequence', () => {
+    const state = { ...initialRegistryState(), recoverySequence: '102' };
+
+    expect(() => createAuditPage(state, [record(101)], '100')).toThrow(
+      'audit history is missing its terminal record',
+    );
+    expect(() => createAuditPage(state, [], '100')).toThrow(
+      'audit history is missing its terminal record',
+    );
+  });
+
+  it('accepts an empty terminal page only when its cursor equals the stored recovery sequence', () => {
+    const state = { ...initialRegistryState(), recoverySequence: '102' };
+
+    expect(createAuditPage(state, [], '102')).toMatchObject({ records: [], nextAfter: null });
+    expect(createAuditPage(initialRegistryState(), [], '0')).toMatchObject({ records: [], nextAfter: null });
+  });
 });

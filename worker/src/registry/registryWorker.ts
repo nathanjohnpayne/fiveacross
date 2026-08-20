@@ -40,23 +40,22 @@ import {
   isRegistryTelemetryVersion,
   type RegistrySemanticEvent,
 } from './telemetry';
+import {
+  ATTESTATION_PREFIX,
+  CHALLENGE_PREFIX,
+  PROBE_EXPIRY_PREFIX,
+  probeExpiryKey,
+  probePrincipalKey,
+  probePrincipalPrefix,
+  sweepProbeArtifacts,
+  type ProbeExpiryIndex,
+} from './probeSweep';
 
 const STATE_KEY = 'registry-state';
 const HISTORY_PREFIX = 'recovery/';
-const CHALLENGE_PREFIX = 'probe/challenge/';
-const ATTESTATION_PREFIX = 'probe/attestation/';
-const PROBE_EXPIRY_PREFIX = 'probe/expiry/';
-const PROBE_PRINCIPAL_PREFIX = 'probe/principal/';
-const PROBE_SWEEP_LIMIT = 64;
 const PROBE_MAX_OUTSTANDING_PER_HOST = 48;
 const PROBE_MAX_OUTSTANDING_PER_PRINCIPAL = 4;
 const PROBE_SWEEP_RETRY_MS = 60_000;
-
-type ProbeExpiryIndex = {
-  artifactKey: string;
-  expiresAt: number;
-  principalIndexKey: string;
-};
 
 function emitSemanticSafely(
   registryVersion: string | undefined,
@@ -83,20 +82,6 @@ function decimalKey(prefix: string, value: string): string {
 
 function opaqueKey(prefix: string, value: string): string {
   return `${prefix}${encodeURIComponent(value)}`;
-}
-
-function probeExpiryKey(expiresAt: number, artifactKey: string): string {
-  return `${PROBE_EXPIRY_PREFIX}${String(expiresAt).padStart(16, '0')}:${encodeURIComponent(artifactKey)}`;
-}
-
-function probePrincipalPrefix(principal: ProbePrincipal): string {
-  return `${PROBE_PRINCIPAL_PREFIX}${encodeURIComponent(principal.subject)}:${encodeURIComponent(
-    principal.keyFingerprint,
-  )}:${encodeURIComponent(principal.region)}/`;
-}
-
-function probePrincipalKey(principal: ProbePrincipal, artifactKey: string): string {
-  return `${probePrincipalPrefix(principal)}${encodeURIComponent(artifactKey)}`;
 }
 
 async function scheduleProbeSweep(transaction: DurableObjectTransaction, expiresAt: number): Promise<void> {
@@ -158,42 +143,7 @@ export class HostRegistryObject extends DurableObject<RegistryWorkerEnv> {
   async alarm(): Promise<void> {
     const now = Date.now();
     try {
-      await this.ctx.storage.transaction(async (transaction) => {
-        const indexes = await transaction.list<ProbeExpiryIndex>({
-          prefix: PROBE_EXPIRY_PREFIX,
-          limit: PROBE_SWEEP_LIMIT,
-        });
-        const deleteKeys: string[] = [];
-        let nextExpiry: number | null = null;
-        for (const [indexKey, index] of indexes) {
-          const valid =
-            typeof index === 'object' &&
-            index !== null &&
-            Number.isSafeInteger(index.expiresAt) &&
-            typeof index.artifactKey === 'string' &&
-            (index.artifactKey.startsWith(CHALLENGE_PREFIX) || index.artifactKey.startsWith(ATTESTATION_PREFIX)) &&
-            typeof index.principalIndexKey === 'string' &&
-            index.principalIndexKey.startsWith(PROBE_PRINCIPAL_PREFIX) &&
-            indexKey === probeExpiryKey(index.expiresAt, index.artifactKey);
-          if (!valid) {
-            deleteKeys.push(indexKey);
-            continue;
-          }
-          if (now <= index.expiresAt) {
-            nextExpiry = index.expiresAt;
-            break;
-          }
-          deleteKeys.push(index.artifactKey, index.principalIndexKey, indexKey);
-        }
-        if (deleteKeys.length > 0) await transaction.delete(deleteKeys);
-        if (nextExpiry !== null) {
-          await transaction.setAlarm(nextExpiry + 1);
-        } else if (indexes.size === PROBE_SWEEP_LIMIT) {
-          await transaction.setAlarm(now + 1);
-        } else {
-          await transaction.deleteAlarm();
-        }
-      });
+      await this.ctx.storage.transaction((transaction) => sweepProbeArtifacts(transaction, now));
     } catch (error) {
       // Cloudflare's automatic retries are bounded. Persist our own retry alarm
       // as well so a prolonged storage outage cannot turn five-minute probe

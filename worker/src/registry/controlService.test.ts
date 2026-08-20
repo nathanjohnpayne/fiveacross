@@ -54,7 +54,7 @@ async function fixture() {
     alg: 'RS256',
     use: 'sig',
   };
-  const subject = 'audit-subject';
+  const subject = '9009';
   const header = base64url(JSON.stringify({ alg: 'RS256', kid: 'kid-1', typ: 'JWT' }));
   const claims = base64url(
     JSON.stringify({
@@ -158,6 +158,39 @@ describe('registry default fetch control-plane endpoints', () => {
     });
     expect(test.audit).toHaveBeenCalledExactlyOnceWith('0');
     expect(JSON.stringify(await response.json())).not.toContain('payload');
+  });
+
+  it('fails closed on malformed or cross-role audit identity configuration before OIDC or DO access', async () => {
+    const data = await fixture();
+    const resolve = vi.spyOn(data.jwks, 'resolve');
+    const runtimeRecord = {
+      role: 'publisher',
+      subject: data.subject,
+      epochOrSlot: '1',
+      keyVersion: 'projects/p/locations/global/keyRings/r/cryptoKeys/publisher/cryptoKeyVersions/1',
+      algorithm: 'RSA_SIGN_PKCS1_2048_SHA256',
+      pem: 'unused because invalid identity configuration fails before key import',
+      spkiSha256: 'a'.repeat(64),
+    } satisfies VerificationRecord;
+
+    for (const configure of [
+      (config: RegistryServiceConfig) => {
+        config.auditSubject = '01';
+      },
+      (config: RegistryServiceConfig) => {
+        config.verificationRecords = [runtimeRecord];
+      },
+    ]) {
+      const test = harness(data);
+      configure(test.config);
+
+      const response = await handleRegistryFetch(await auditRequest(data), test.config, test.deps);
+
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toEqual({ error: 'identity-verification-unavailable' });
+      expect(test.getByName).not.toHaveBeenCalled();
+    }
+    expect(resolve).not.toHaveBeenCalled();
   });
 
   it('rejects malformed cursor and wrong methods before any DO access', async () => {

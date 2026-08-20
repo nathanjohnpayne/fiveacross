@@ -35,6 +35,12 @@ export function createAuditPage(
   }
   const hasMore = recordsAfterCursor.length > AUDIT_PAGE_SIZE;
   const records = recordsAfterCursor.slice(0, AUDIT_PAGE_SIZE);
+  if (!hasMore) {
+    const terminalSequence = records.at(-1)?.sequence ?? afterRecoverySequence;
+    if (BigInt(terminalSequence) !== BigInt(state.recoverySequence)) {
+      throw new Error('audit history is missing its terminal record');
+    }
+  }
   const lookup = registryLookup(state);
   return {
     committed:

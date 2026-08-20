@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   fingerprintSpkiPem,
   importPinnedVerificationKey,
+  validateAuditSubjectIdentity,
   validateVerificationRecordIdentities,
   validateVerificationRecords,
   verifyPinnedSignature,
@@ -109,6 +110,24 @@ describe('immutable pinned verification records', () => {
     await expect(validateVerificationRecords([publisher.record, recovery.record])).rejects.toThrow(
       'cross-role subject',
     );
+  });
+
+  it.each(['', '0', '01', 'audit@example.com'])('rejects noncanonical audit subject %j', (subject) => {
+    expect(() => validateAuditSubjectIdentity(subject, [])).toThrow('canonical positive decimal');
+  });
+
+  it('accepts a canonical audit-only Google subject', () => {
+    expect(validateAuditSubjectIdentity('9009', [])).toBe('9009');
+  });
+
+  it.each([
+    ['publisher', '1'],
+    ['recovery', 'primary'],
+    ['source-attestor', 'source'],
+    ['regional-probe', 'us-west1'],
+  ] as const)('rejects an audit subject reused by the %s role', async (role, epochOrSlot) => {
+    const { record } = await fixtureRecord({ role, epochOrSlot, subject: '9009' });
+    expect(() => validateAuditSubjectIdentity('9009', [record])).toThrow('cross-role subject');
   });
 
   it('requires every regional probe slot to have its own numeric Google subject', async () => {

@@ -113,6 +113,19 @@ export function validateVerificationRecordIdentities(
   return records;
 }
 
+export function validateAuditSubjectIdentity(
+  auditSubject: string,
+  records: readonly VerificationRecord[],
+): string {
+  if (!POSITIVE_DECIMAL.test(auditSubject)) {
+    throw new Error('audit subject must be a canonical positive decimal');
+  }
+  if (records.some((record) => record.subject === auditSubject)) {
+    throw new Error('audit cross-role subject reuse is forbidden');
+  }
+  return auditSubject;
+}
+
 export async function validateVerificationRecords(
   records: readonly VerificationRecord[],
 ): Promise<readonly VerificationRecord[]> {
