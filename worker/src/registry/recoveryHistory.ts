@@ -645,10 +645,11 @@ function validateProbeObservation(value: unknown, expectedHost: string): Record<
     observation.probeNonce,
     observation.rayId,
     observation.host,
-    observation.requestPath,
   ]) {
     nonEmptyString(field);
   }
+  const requestPath = nonEmptyString(observation.requestPath);
+  if (!requestPath.startsWith('/') || requestPath.startsWith('//')) throw new Error('observation request path');
   if (observation.host !== expectedHost) throw new Error('observation host');
   timestamp(observation.observedAt);
   const expectedStatus = integer(observation.expectedStatus);

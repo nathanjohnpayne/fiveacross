@@ -551,6 +551,16 @@ describe('persisted recovery history validation', () => {
     );
   });
 
+  it('rejects an absolute persisted probe request URL', async () => {
+    const value = recordFor('clear-lock');
+    value.probeEvidence[0].observation.requestPath =
+      'https://attacker.invalid/__registry-probe?nonce=nonce-0';
+
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).rejects.toThrow(
+      'recovery history malformed',
+    );
+  });
+
   it.each([
     {
       label: 'Ray ID',
