@@ -16,6 +16,15 @@ set -euo pipefail
 # real Firebase project — the same posture scripts/test-e2e.sh takes. It differs
 # from the e2e suite's id on purpose: this run CLEARS Firestore, and sharing an
 # id would let a capture wipe a suite run's fixture out from under it.
+#
+# DO NOT RUN THIS CONCURRENTLY WITH `npm run test:e2e` (Codex P2 on #1020).
+# A distinct project id namespaces the DATA, not the listening sockets: both
+# runs read the fixed emulator ports from firebase.json (8080 Firestore, 9099
+# Auth), and `firebase emulators:exec` exposes no per-invocation port override,
+# so the second run dies on the occupied ports before Playwright starts. The
+# web port (5184) and the build output (dist-marketing) are already separated;
+# the emulator ports are the remaining shared resource, and unpicking them
+# needs a second firebase config wired through the bundle. Run them in sequence.
 PROJECT_ID='demo-fiveacross-marketing'
 
 # The Firestore emulator is a Java program and `firebase emulators:exec` only

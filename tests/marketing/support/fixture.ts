@@ -16,10 +16,16 @@ import { doc, setDoc } from 'firebase/firestore';
 import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { expect, type Page, type Route } from '@playwright/test';
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync as readCache, renameSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
+import { expect, type Locator, type Page } from '@playwright/test';
+import {
+  completeEmulatorSignIn,
+  dismissConsentNotice,
+  signedInUid,
+  stubAuthWidgetCdn,
+} from '../../support/emulator-signin';
+
+// Re-exported so the spec imports its whole sign-in surface from one place.
+export { signedInUid };
 // @ts-expect-error — plain-JS seed script, no type declarations.
 import { seedItemDocId } from '../../../scripts/seed.mjs';
 import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/bodega-bay-2026.mjs';
@@ -30,21 +36,34 @@ import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/bod
 export const HERO_PROJECT_ID = 'demo-fiveacross-marketing';
 export const HERO_EVENT_ID = 'hero-shot';
 export const HERO_WEB_PORT = 5184;
+/** Build output for the capture bundle, kept out of the shared `dist`. */
+export const HERO_DIST_DIR = 'dist-marketing';
 export const HERO_BASE_URL = `http://127.0.0.1:${HERO_WEB_PORT}`;
 const FIRESTORE_HOST = '127.0.0.1';
 const FIRESTORE_PORT = 8080;
 
 const HOUR = 3_600_000;
 
+/** The seeded Event's zone. Also pinned as Playwright's `timezoneId` so the
+ *  rendered clock labels match the data. */
+export const EVENT_TIMEZONE = 'America/Los_Angeles';
+
 /** `YYYY-MM-DD` in the Event's own timezone, `offsetDays` from today. */
 function isoDay(offsetDays: number): string {
-  const d = new Date(Date.now() + offsetDays * 24 * HOUR);
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Los_Angeles',
+  // Advance CALENDAR fields, never 24-hour blocks (Codex P2 on #1020). Around
+  // the autumn fallback in America/Los_Angeles a day is 25 hours long, so
+  // `Date.now() + 24h` can land on the same local date it started on — which
+  // would emit duplicate Day dates and a one-day-short Event window. Resolve
+  // today's local date first, then let Date.UTC normalise the day arithmetic
+  // (it carries across month and year ends, and UTC has no DST to trip on).
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: EVENT_TIMEZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(d);
+  }).format(new Date());
+  const [y, m, d] = today.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
 }
 
 /**
@@ -80,6 +99,12 @@ const PLAYERS = [
   { uid: 'hero-p4', displayName: 'Tomas L.', squares: 6, bingos: 0 },
 ];
 export const FIRST_BINGO = PLAYERS[0];
+
+/** Seeded roster names — the spec waits on these instead of a blind delay. */
+export const PLAYER_NAMES: readonly string[] = PLAYERS.map((p) => p.displayName);
+
+/** A seeded Feed proof's body, used the same way. */
+export const FEED_PROOF_TEXT = 'To the group chat that actually showed up.';
 
 /** Today's Day index in the seeded schedule below. */
 export const HERO_TODAY_INDEX = 0;
@@ -184,7 +209,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         defaultTheme: DAY_CHROME.defaultTheme,
         claimMode: 'honor',
         settings: { reportHideThreshold: 4, spicyRatio: 0, easyMixRatio: 0.5 },
-        timezone: 'America/Los_Angeles',
+        timezone: EVENT_TIMEZONE,
         days: [
           {
             index: 0,
@@ -297,7 +322,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         photoURL: null,
         itemText: (EASY_ITEMS as SeedItem[])[6].text,
         type: 'text',
-        text: 'To the group chat that actually showed up.',
+        text: FEED_PROOF_TEXT,
         createdAt: now - 20 * 60_000,
         status: 'active',
         reportCount: 0,
@@ -349,42 +374,14 @@ export async function renameSignedInPlayer(
   });
 }
 
-// --- sign-in ---------------------------------------------------------------
-// Copied from support/join.ts (which hard-asserts the GCB wordmark) so this
-// throwaway can drive the Vacay / Five Across gates too.
-
-const GAPI_CACHE_DIR = path.join(process.cwd(), 'node_modules', '.cache', 'gcb-e2e-gapi');
-
-async function cacheThroughGapi(route: Route): Promise<void> {
-  const request = route.request();
-  if (request.method() !== 'GET') return route.fallback();
-  const url = request.url();
-  const key = createHash('sha1').update(url).digest('hex');
-  const file = path.join(GAPI_CACHE_DIR, key);
-  if (existsSync(file)) {
-    try {
-      return route.fulfill({ status: 200, contentType: 'text/javascript', body: readCache(file) });
-    } catch {
-      /* fall through to a fresh fetch */
-    }
-  }
-  const response = await route.fetch();
-  const body = await response.body();
-  if (response.ok()) {
-    try {
-      mkdirSync(GAPI_CACHE_DIR, { recursive: true });
-      const tmp = `${file}.tmp-${process.pid}`;
-      writeFileSync(tmp, body);
-      renameSync(tmp, file);
-    } catch {
-      /* best-effort cache */
-    }
-  }
-  return route.fulfill({ response });
-}
+// --- sign-in ----------------------------------------------------------------
+// The emulator widget, CDN stubs and uid readback are shared with the e2e
+// layer (tests/support/emulator-signin.ts). Only the GATE differs: this one is
+// edition-neutral, because Vacay and Five Across render neither the Gay Cruise
+// Bingo wordmark nor — with an ungated Event — the 18+ checkbox.
 
 /** Wait briefly for a locator; report whether it showed up. */
-export async function isPresent(locator: import('@playwright/test').Locator, timeout: number): Promise<boolean> {
+export async function isPresent(locator: Locator, timeout: number): Promise<boolean> {
   return locator
     .first()
     .waitFor({ state: 'visible', timeout })
@@ -393,70 +390,38 @@ export async function isPresent(locator: import('@playwright/test').Locator, tim
 }
 
 /** Click a locator if it appears within `timeout`; otherwise do nothing. */
-export async function clickIfPresent(
-  locator: import('@playwright/test').Locator,
-  timeout: number,
-): Promise<boolean> {
+export async function clickIfPresent(locator: Locator, timeout: number): Promise<boolean> {
   if (!(await isPresent(locator, timeout))) return false;
   await locator.first().click();
   return true;
 }
 
+/**
+ * Land on the app and sign in, without asserting any Edition's gate copy.
+ *
+ * The mechanics are the shared ones; only the two optional scrims differ from
+ * `joinViaSharedLink`. Both are OPTIONAL here rather than asserted, which is
+ * the whole reason this exists: Vacay renders no Gay Cruise Bingo wordmark,
+ * and an ungated Event renders no 18+ checkbox at all.
+ */
 export async function joinHero(page: Page): Promise<void> {
-  const ctx = page.context();
-  await ctx.route(/^https:\/\/(unpkg\.com|fonts\.googleapis\.com|fonts\.gstatic\.com)\//, (route) =>
-    route.fulfill({ status: 200, contentType: 'text/plain', body: '' }),
-  );
-  await ctx.route(/^https:\/\/(apis\.google\.com|www\.gstatic\.com)\//, cacheThroughGapi);
-
+  await stubAuthWidgetCdn(page); // popups inherit the context's routes
   await page.goto('/');
-  // `locator.isVisible()` never waits, so these optional scrims are waited for
+
+  // `locator.isVisible()` never waits, so each optional scrim is waited for
   // explicitly and treated as absent on timeout.
   await clickIfPresent(page.getByRole('button', { name: /got it/i }), 10_000);
+  await dismissConsentNotice(page);
 
-  // The 18+ acknowledgement only renders on an adult-content build; the hero
-  // build seeds an ungated hostname document, so check it only if it appears.
+  // The 18+ acknowledgement renders only on an adult-content Event; this
+  // fixture seeds an ungated hostname document, so check it only if present.
   const ack = page.getByRole('checkbox').first();
   if (await isPresent(ack, 3_000)) await ack.check();
 
   const popupPromise = page.waitForEvent('popup');
   await page.getByRole('button', { name: 'Continue with Google' }).click();
-  const popup = await popupPromise;
-  await popup.waitForLoadState('load', { timeout: 30_000 });
-  const autogen = popup.locator('#autogen-button');
-  await expect(async () => {
-    if (!(await autogen.isVisible())) await popup.locator('.js-new-account').click();
-    await expect(autogen).toBeVisible({ timeout: 2000 });
-  }).toPass({ timeout: 10_000 });
-  await autogen.click();
-  await popup.locator('#sign-in').click();
+  await completeEmulatorSignIn(await popupPromise);
 
   await expect(page.getByRole('navigation', { name: 'Primary' })).toBeVisible({ timeout: 30_000 });
 }
 
-export async function signedInUid(page: Page): Promise<string> {
-  const uid = await page.evaluate(async () => {
-    const open = indexedDB.open('firebaseLocalStorageDb');
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      open.onsuccess = () => resolve(open.result);
-      open.onerror = () => reject(open.error);
-    });
-    try {
-      const store = db
-        .transaction('firebaseLocalStorage', 'readonly')
-        .objectStore('firebaseLocalStorage');
-      const rows = await new Promise<Array<{ fbase_key?: string; value?: { uid?: string } }>>(
-        (resolve, reject) => {
-          const req = store.getAll();
-          req.onsuccess = () => resolve(req.result as never);
-          req.onerror = () => reject(req.error);
-        },
-      );
-      return rows.find((r) => r.fbase_key?.startsWith('firebase:authUser:'))?.value?.uid ?? '';
-    } finally {
-      db.close();
-    }
-  });
-  if (!uid) throw new Error('No signed-in Firebase user found.');
-  return uid;
-}

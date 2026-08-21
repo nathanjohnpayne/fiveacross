@@ -9,6 +9,7 @@ import { defineConfig, devices } from '@playwright/test';
 import {
   HERO_BASE_URL,
   HERO_EDITION,
+  HERO_DIST_DIR,
   HERO_EVENT_ID,
   HERO_PROJECT_ID,
   HERO_WEB_PORT,
@@ -36,7 +37,12 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `npx vite build --mode e2e && npx vite preview --port ${HERO_WEB_PORT} --strictPort --host 127.0.0.1`,
+      // Its OWN outDir. `vite build` defaults to `dist`, which the e2e suite's
+      // web server also builds into — two concurrent runs would empty and
+      // replace each other's bundle behind a live preview server, and the two
+      // bake different project/Event/Edition values, so a reload could serve
+      // the wrong app or 404 its assets (Codex P2 on #1020).
+      command: `npx vite build --mode e2e --outDir ${HERO_DIST_DIR} && npx vite preview --outDir ${HERO_DIST_DIR} --port ${HERO_WEB_PORT} --strictPort --host 127.0.0.1`,
       port: HERO_WEB_PORT,
       reuseExistingServer: false,
       timeout: 180_000,

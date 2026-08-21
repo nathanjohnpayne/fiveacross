@@ -11,6 +11,10 @@ build/
 # so this is scoped to the one generated subdirectory.
 artifacts/marketing/
 
+# Capture-bundle build output (its own outDir so a concurrent e2e build cannot
+# clobber it, and vice versa).
+dist-marketing/
+
 # Environment and secrets
 .env
 .env.local
