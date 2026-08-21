@@ -283,10 +283,10 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
       // Day 2 still locked so the standings are NOT frozen.
       await setDoc(doc(db, 'events', HERO_EVENT_ID), {
         name: HERO_EDITION === 'vacay' ? 'Bodega Bay' : 'The weekend',
-        startsOn: isoDay(-1),
-        endsOn: isoDay(1),
-        sailStart: isoDay(-1),
-        sailEnd: isoDay(1),
+        startsOn: isoDay(0),
+        endsOn: isoDay(2),
+        sailStart: isoDay(0),
+        sailEnd: isoDay(2),
         status: 'active',
         defaultTheme: DAY_CHROME.defaultTheme,
         claimMode: 'honor',
@@ -295,7 +295,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         days: [
           {
             index: 0,
-            date: isoDay(-1),
+            date: isoDay(0),
             ...DAY_CHROME.days[0],
             port: DAY_CHROME.days[0].place,
             portEmoji: DAY_CHROME.days[0].placeEmoji,
@@ -310,7 +310,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
           },
           {
             index: 1,
-            date: isoDay(0),
+            date: isoDay(1),
             ...DAY_CHROME.days[1],
             port: DAY_CHROME.days[1].place,
             portEmoji: DAY_CHROME.days[1].placeEmoji,
@@ -324,7 +324,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
           },
           {
             index: 2,
-            date: isoDay(1),
+            date: isoDay(2),
             ...DAY_CHROME.days[2],
             port: DAY_CHROME.days[2].place,
             portEmoji: DAY_CHROME.days[2].placeEmoji,
@@ -371,7 +371,15 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
       // Feed content: a shared tally (two players on one prompt), two text
       // proofs and a BINGO moment. No photo proofs — a hero shot must not
       // carry anybody's real picture, and a fake one would be worse.
-      const sharedText = (ITEMS as SeedItem[])[0].text;
+      // Every social entry is drawn from the ACTIVE Day's own dealable
+      // snapshot. Sourcing them from the main pool while stamping
+      // dayIndex 0 depicted players marking prompts nobody could have been
+      // dealt that Day — a screenshot asserting something the product
+      // cannot produce (Codex P2 on #1020).
+      const activeDayItems = heroDealable(
+        HERO_DAY_DEAL[HERO_TODAY_INDEX].items(),
+      ) as SeedItem[];
+      const sharedText = activeDayItems[0].text;
       const sharedId = seedItemDocId(sharedText);
       for (const [p, ago] of [
         [PLAYERS[1], 2 * HOUR],
@@ -390,7 +398,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         uid: PLAYERS[3].uid,
         displayName: PLAYERS[3].displayName,
         photoURL: null,
-        itemText: (ITEMS as SeedItem[])[3].text,
+        itemText: activeDayItems[3].text,
         type: 'text',
         text: 'Took the long way. Worth it.',
         createdAt: now - 40 * 60_000,
@@ -402,7 +410,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         uid: PLAYERS[2].uid,
         displayName: PLAYERS[2].displayName,
         photoURL: null,
-        itemText: (EASY_ITEMS as SeedItem[])[6].text,
+        itemText: activeDayItems[6].text,
         type: 'text',
         text: FEED_PROOF_TEXT,
         createdAt: now - 20 * 60_000,
