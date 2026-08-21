@@ -7,7 +7,7 @@ set -euo pipefail
 # Usage:
 #   scripts/marketing-shots.sh                     # Vacay Bingo chrome
 #   HERO_EDITION=fiveacross scripts/marketing-shots.sh
-#   scripts/marketing-shots.sh --grep "warm-up"    # args forward to Playwright
+#   scripts/marketing-shots.sh --grep "capture"     # args forward to Playwright
 #
 # Output: artifacts/marketing/*.png (gitignored — publish them by copying into
 # whichever repo consumes them, not by committing them here).
@@ -28,7 +28,11 @@ PROJECT_ID='demo-fiveacross-marketing'
 # passes on exactly the machines that have no JDK at all.
 java_works() { java -version >/dev/null 2>&1; }
 if ! java_works; then
-  for jdk in /opt/homebrew/opt/openjdk@21 /opt/homebrew/opt/openjdk /usr/local/opt/openjdk@21; do
+  # Both Homebrew prefixes, versioned and unversioned: /opt/homebrew on Apple
+  # silicon, /usr/local on Intel. `brew install openjdk` (no @21) is the common
+  # form and lands on the unversioned path (Codex P2 on #1020).
+  for jdk in /opt/homebrew/opt/openjdk@21 /opt/homebrew/opt/openjdk \
+             /usr/local/opt/openjdk@21 /usr/local/opt/openjdk; do
     if [[ -x "$jdk/bin/java" ]]; then
       PATH="$jdk/bin:$PATH"
       export PATH

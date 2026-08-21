@@ -84,6 +84,28 @@ export const FIRST_BINGO = PLAYERS[0];
 /** Today's Day index in the seeded schedule below. */
 export const HERO_TODAY_INDEX = 0;
 
+/**
+ * Per-Day deal inputs, keyed by Day index — the ONE place that says which pool
+ * a Day is dealt from and what its free space reads. Both the Event seed below
+ * and the spec's deterministic board read this, so switching
+ * `HERO_TODAY_INDEX` moves the card AND its contents together.
+ *
+ * Codex P2 on #1020: these used to be stated twice — the `days[]` literal here
+ * and a hardcoded `EASY_ITEMS` deal in the spec. Following the doc's "capture a
+ * different Day" row therefore repointed the board document while still dealing
+ * warm-up prompts, producing a main-Day screenshot full of warm-up content that
+ * looked entirely successful.
+ */
+export const HERO_DAY_DEAL: ReadonlyArray<{
+  pool: 'embark' | 'main' | 'farewell';
+  items: Array<{ text: string; spicy?: boolean }>;
+  freeText: string;
+}> = [
+  { pool: 'embark', items: EASY_ITEMS as Array<{ text: string; spicy?: boolean }>, freeText: 'The flock has landed' },
+  { pool: 'main', items: ITEMS as Array<{ text: string; spicy?: boolean }>, freeText: 'Main character on the coast' },
+  { pool: 'farewell', items: CLOSING_ITEMS as Array<{ text: string; spicy?: boolean }>, freeText: 'We did it for the story' },
+];
+
 // Per-Edition Day chrome. Bodega's own Themes are Vacay-scoped
 // (THEME_EDITIONS), so the platform build wears the occasion-neutral trio.
 const DAY_CHROME =
@@ -171,13 +193,13 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             port: DAY_CHROME.days[0].place,
             portEmoji: DAY_CHROME.days[0].placeEmoji,
             tonight: ['🍷 Arrival pours', '🌊 First look at the water'],
-            pool: 'embark',
+            pool: HERO_DAY_DEAL[0].pool,
             // The warm-up card: tutorial pool, tutorial tag, gentlest prompts.
             tutorial: true,
             scoring: 'competitive',
             unlockAt: now - 6 * HOUR,
             snapshotItemIds: easyIds,
-            freeText: 'The flock has landed',
+            freeText: HERO_DAY_DEAL[0].freeText,
           },
           {
             index: 1,
@@ -186,12 +208,12 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             port: DAY_CHROME.days[1].place,
             portEmoji: DAY_CHROME.days[1].placeEmoji,
             tonight: ['🦀 Harbor dinner', '🌅 Sunset'],
-            pool: 'main',
+            pool: HERO_DAY_DEAL[1].pool,
             tutorial: false,
             scoring: 'competitive',
             unlockAt: now + 20 * HOUR,
             snapshotItemIds: mainIds,
-            freeText: 'Main character on the coast',
+            freeText: HERO_DAY_DEAL[1].freeText,
           },
           {
             index: 2,
@@ -200,7 +222,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             port: DAY_CHROME.days[2].place,
             portEmoji: DAY_CHROME.days[2].placeEmoji,
             tonight: ['☕ Last coffee', '🧳 The slow pack'],
-            pool: 'farewell',
+            pool: HERO_DAY_DEAL[2].pool,
             // Ordinary locked Day, not the ceremonial wrap-up: the GOODBYE tag
             // a `tutorial` closing Day wears pushes the third chip past the
             // 393pt viewport, and a hero image with a word clipped mid-letter
@@ -209,7 +231,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             scoring: 'competitive',
             unlockAt: now + 44 * HOUR,
             snapshotItemIds: closingIds,
-            freeText: 'We did it for the story',
+            freeText: HERO_DAY_DEAL[2].freeText,
           },
         ],
       });

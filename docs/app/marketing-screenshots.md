@@ -36,7 +36,7 @@ Dates are computed relative to *today* (`isoDay`), so the Event always reads as 
 
 | You want | Change |
 |---|---|
-| A different Day / pool | `HERO_TODAY_INDEX` and the `days[]` unlock times in `fixture.ts` |
+| A different Day / pool | `HERO_TODAY_INDEX` and the `days[]` unlock times in `fixture.ts`. The deal pool and free-space text follow automatically — both the Event seed and the board write read `HERO_DAY_DEAL`, so they cannot drift apart |
 | More or fewer marks | `MARKED` in `marketing-shots.spec.ts` |
 | A different dealt card | `FIXED_SEED` in `marketing-shots.spec.ts` |
 | Another screen | Add a tab click plus `page.screenshot` at the end of the spec |

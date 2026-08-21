@@ -24,6 +24,13 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL: HERO_BASE_URL,
+    // Pinned so two machines produce byte-comparable captures. Leaderboard
+    // formats each seeded `firstBingoAt` with `toLocaleString([], …)`, which
+    // otherwise follows the host's locale and zone — identical fixture
+    // timestamps would render different visible labels (Codex P2 on #1020).
+    // The zone matches the seeded Event's own `timezone`.
+    locale: 'en-US',
+    timezoneId: 'America/Los_Angeles',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },

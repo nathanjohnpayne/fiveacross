@@ -19,11 +19,11 @@ import {
   HERO_EDITION,
   clickIfPresent,
   heroDealable,
+  HERO_DAY_DEAL,
 } from './support/fixture';
 import { dealBoard, type DealItem } from '../../src/game/logic';
 // @ts-expect-error — plain-JS seed script, no type declarations.
 import { seedItemDocId } from '../../scripts/seed.mjs';
-import { EASY_ITEMS } from '../../scripts/seed-data/bodega-bay-2026.mjs';
 
 const OUT_DIR = path.join(process.cwd(), 'artifacts', 'marketing');
 const FIXED_SEED = 606060;
@@ -59,20 +59,21 @@ test.afterAll(async () => {
 type SeedItem = { text: string; spicy?: boolean };
 
 async function writeHeroBoard(uid: string): Promise<string[]> {
-  // The main-day deal blends main + easy 50/50 (easyMixRatio 0.5), so the
-  // hero pool is both — exactly what the Player would have been dealt.
-  // The warm-up Day deals from the easy pool alone. `pool` is left UNSET on
-  // purpose: dealBoard reads it to split a main-day card into its easy and
-  // main halves, so tagging every prompt 'embark' would leave the main half
-  // empty and the deal would fail its MIN_POOL guard. Absent === 'main',
-  // which is exactly "one undifferentiated pool" — a tutorial-day deal.
-  const pool: DealItem[] = (heroDealable(EASY_ITEMS as SeedItem[]) as SeedItem[]).map((it) => ({
+  // Pool and free-space text both come from the selected Day, so changing
+  // HERO_TODAY_INDEX moves the card and its contents together (Codex P2).
+  const day = HERO_DAY_DEAL[HERO_TODAY_INDEX];
+  // `pool` is left UNSET on each item deliberately: dealBoard reads it to split
+  // a main-Day card into its easy and main halves, so tagging every prompt with
+  // this Day's pool would leave one half empty and trip the MIN_POOL guard.
+  // Absent === 'main', i.e. one undifferentiated pool, which is what dealing a
+  // single Day's snapshot means here.
+  const pool: DealItem[] = (heroDealable(day.items) as SeedItem[]).map((it) => ({
     id: seedItemDocId(it.text),
     text: it.text,
     spicy: it.spicy === true,
   })) as DealItem[];
   const now = Date.now();
-  const cells = dealBoard(pool, 'The flock has landed', FIXED_SEED, 0);
+  const cells = dealBoard(pool, day.freeText, FIXED_SEED, 0);
   for (const i of MARKED) {
     cells[i] = { ...cells[i], marked: true, markedAt: now - 2 * 3_600_000 };
   }
