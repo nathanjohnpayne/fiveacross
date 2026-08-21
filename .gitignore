@@ -5,6 +5,12 @@ build/
 .out/
 *.tsbuildinfo
 
+# Marketing screenshot output (docs/app/marketing-screenshots.md). Regenerated
+# on demand by scripts/marketing-shots.sh; the PNGs are copied into whichever
+# repo consumes them, never committed here. The rest of artifacts/ IS tracked,
+# so this is scoped to the one generated subdirectory.
+artifacts/marketing/
+
 # Environment and secrets
 .env
 .env.local
