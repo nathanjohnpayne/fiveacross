@@ -38,6 +38,42 @@ export const HERO_EVENT_ID = 'hero-shot';
 export const HERO_WEB_PORT = 5184;
 /** Build output for the capture bundle, kept out of the shared `dist`. */
 export const HERO_DIST_DIR = 'dist-marketing';
+
+/**
+ * The instant every rendered timestamp is derived from: today's date at 18:00
+ * in the Event's own zone.
+ *
+ * Pinned to a fixed TIME OF DAY rather than to `Date.now()` so two captures on
+ * the same day produce identical pixels — the Ranks rows render
+ * `firstBingoAt` through `toLocaleString`, which otherwise moved every run
+ * (Codex P2 round 2 on #1020). Pinned to TODAY'S DATE rather than to an
+ * absolute instant so the Event keeps reading as current; an absolute anchor
+ * would rot into a "Until next year" header the moment it passed.
+ */
+export function heroClock(): number {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: EVENT_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  // 18:00 local, expressed as an absolute instant. Built by probing the zone's
+  // offset for that date rather than assuming one, so it is correct on both
+  // sides of a DST boundary.
+  const [y, m, d] = today.split('-').map(Number);
+  const guess = Date.UTC(y, m - 1, d, 18, 0, 0);
+  const zoned = new Date(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: EVENT_TIMEZONE,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+      .format(new Date(guess))
+      .replace(/(\d+)\/(\d+)\/(\d+), (\d+):(\d+):(\d+)/, '$3-$1-$2T$4:$5:$6Z'),
+  ).getTime();
+  return guess + (guess - zoned);
+}
 export const HERO_BASE_URL = `http://127.0.0.1:${HERO_WEB_PORT}`;
 const FIRESTORE_HOST = '127.0.0.1';
 const FIRESTORE_PORT = 8080;
@@ -47,6 +83,9 @@ const HOUR = 3_600_000;
 /** The seeded Event's zone. Also pinned as Playwright's `timezoneId` so the
  *  rendered clock labels match the data. */
 export const EVENT_TIMEZONE = 'America/Los_Angeles';
+
+/** The seeded Event's easy-mix ratio; also what a main Day is dealt with. */
+export const EVENT_EASY_MIX_RATIO = 0.5;
 
 /** `YYYY-MM-DD` in the Event's own timezone, `offsetDays` from today. */
 function isoDay(offsetDays: number): string {
@@ -123,12 +162,46 @@ export const HERO_TODAY_INDEX = 0;
  */
 export const HERO_DAY_DEAL: ReadonlyArray<{
   pool: 'embark' | 'main' | 'farewell';
-  items: Array<{ text: string; spicy?: boolean }>;
   freeText: string;
+  /**
+   * The prompts this Day is dealt from, already shaped the way the app shapes
+   * them. `pool` is set on an item ONLY to mark it as the EASY half of a
+   * main-Day mix; dealBoard reads it for exactly that split, and an untagged
+   * item counts as main.
+   */
+  items: () => Array<{ text: string; spicy?: boolean; pool?: string }>;
+  /** `stratify: pool === 'main'` — the app's own rule (src/data/draftPreview.ts). */
+  stratify: boolean;
+  /** The Event's `settings.easyMixRatio`; inert unless the pool carries embark items. */
+  easyMixRatio: number;
 }> = [
-  { pool: 'embark', items: EASY_ITEMS as Array<{ text: string; spicy?: boolean }>, freeText: 'The flock has landed' },
-  { pool: 'main', items: ITEMS as Array<{ text: string; spicy?: boolean }>, freeText: 'Main character on the coast' },
-  { pool: 'farewell', items: CLOSING_ITEMS as Array<{ text: string; spicy?: boolean }>, freeText: 'We did it for the story' },
+  {
+    pool: 'embark',
+    freeText: 'The flock has landed',
+    items: () => [...(EASY_ITEMS as SeedItem[])],
+    stratify: false,
+    easyMixRatio: 0,
+  },
+  {
+    pool: 'main',
+    freeText: 'Main character on the coast',
+    // A main Day blends main + easy 50/50 (specs/easy-mix.md), so the pool
+    // carries BOTH and the easy half is tagged. Dealing main alone produced a
+    // card the app would never deal (Codex P2 round 2 on #1020).
+    items: () => [
+      ...(ITEMS as SeedItem[]),
+      ...(EASY_ITEMS as SeedItem[]).map((it) => ({ ...it, pool: 'embark' })),
+    ],
+    stratify: true,
+    easyMixRatio: EVENT_EASY_MIX_RATIO,
+  },
+  {
+    pool: 'farewell',
+    freeText: 'We did it for the story',
+    items: () => [...(CLOSING_ITEMS as SeedItem[])],
+    stratify: false,
+    easyMixRatio: 0,
+  },
 ];
 
 // Per-Edition Day chrome. Bodega's own Themes are Vacay-scoped
@@ -169,7 +242,16 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
 
   try {
     await testEnv.clearFirestore();
-    const now = Date.now();
+    // Two clocks, deliberately. `display` is the pinned instant behind every
+    // timestamp a viewer can READ, so captures are reproducible. `anchor` is
+    // what unlock times hang off, and it is the EARLIER of the pinned clock and
+    // the real one: Firestore rules gate the deal on `request.time` (the real
+    // server clock, which a frozen page clock cannot touch), while the client
+    // decides chip state from the frozen one — an unlock has to be in the past
+    // for both. Same split the parity fixture uses.
+    const display = heroClock();
+    const anchor = Math.min(Date.now(), display);
+    const now = display;
     const mainIds = idsOf(heroDealable(ITEMS as SeedItem[]) as SeedItem[]);
     const easyIds = idsOf(heroDealable(EASY_ITEMS as SeedItem[]) as SeedItem[]);
     const closingIds = idsOf(heroDealable(CLOSING_ITEMS as SeedItem[]) as SeedItem[]);
@@ -208,7 +290,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         status: 'active',
         defaultTheme: DAY_CHROME.defaultTheme,
         claimMode: 'honor',
-        settings: { reportHideThreshold: 4, spicyRatio: 0, easyMixRatio: 0.5 },
+        settings: { reportHideThreshold: 4, spicyRatio: 0, easyMixRatio: EVENT_EASY_MIX_RATIO },
         timezone: EVENT_TIMEZONE,
         days: [
           {
@@ -222,7 +304,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             // The warm-up card: tutorial pool, tutorial tag, gentlest prompts.
             tutorial: true,
             scoring: 'competitive',
-            unlockAt: now - 6 * HOUR,
+            unlockAt: anchor - 6 * HOUR,
             snapshotItemIds: easyIds,
             freeText: HERO_DAY_DEAL[0].freeText,
           },
@@ -236,7 +318,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             pool: HERO_DAY_DEAL[1].pool,
             tutorial: false,
             scoring: 'competitive',
-            unlockAt: now + 20 * HOUR,
+            unlockAt: anchor + 20 * HOUR,
             snapshotItemIds: mainIds,
             freeText: HERO_DAY_DEAL[1].freeText,
           },
@@ -254,7 +336,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             // reads as a rendering bug rather than as a horizontal scroller.
             tutorial: false,
             scoring: 'competitive',
-            unlockAt: now + 44 * HOUR,
+            unlockAt: anchor + 44 * HOUR,
             snapshotItemIds: closingIds,
             freeText: HERO_DAY_DEAL[2].freeText,
           },

@@ -22,6 +22,7 @@ import {
   HERO_DAY_DEAL,
   PLAYER_NAMES,
   FEED_PROOF_TEXT,
+  heroClock,
 } from './support/fixture';
 import { dealBoard, type DealItem } from '../../src/game/logic';
 // @ts-expect-error — plain-JS seed script, no type declarations.
@@ -89,13 +90,22 @@ async function writeHeroBoard(uid: string): Promise<string[]> {
   // this Day's pool would leave one half empty and trip the MIN_POOL guard.
   // Absent === 'main', i.e. one undifferentiated pool, which is what dealing a
   // single Day's snapshot means here.
-  const pool: DealItem[] = (heroDealable(day.items) as SeedItem[]).map((it) => ({
-    id: seedItemDocId(it.text),
-    text: it.text,
-    spicy: it.spicy === true,
-  })) as DealItem[];
-  const now = Date.now();
-  const cells = dealBoard(pool, day.freeText, FIXED_SEED, 0);
+  const pool: DealItem[] = (heroDealable(day.items()) as Array<SeedItem & { pool?: string }>).map(
+    (it) => ({
+      id: seedItemDocId(it.text),
+      text: it.text,
+      spicy: it.spicy === true,
+      // Carried through: it is what marks the EASY half of a main-Day mix.
+      ...(it.pool ? { pool: it.pool } : {}),
+    }),
+  ) as DealItem[];
+  const now = heroClock();
+  // Same options the app deals this Day with, so the captured card is a card
+  // the product would actually produce (Codex P2 round 2).
+  const cells = dealBoard(pool, day.freeText, FIXED_SEED, 0, {
+    stratify: day.stratify,
+    easyMixRatio: day.easyMixRatio,
+  });
   for (const i of MARKED) {
     cells[i] = { ...cells[i], marked: true, markedAt: now - 2 * 3_600_000 };
   }
@@ -109,6 +119,10 @@ async function writeHeroBoard(uid: string): Promise<string[]> {
 }
 
 test('capture marketing shots', async ({ page }) => {
+  // Freeze the page clock on the same instant the fixture stamps its visible
+  // timestamps with, so relative labels ("3h ago") and absolute ones render
+  // identically on every run (Codex P2 round 2 on #1020).
+  await page.clock.install({ time: heroClock() });
   await joinHero(page);
   const uid = await signedInUid(page);
 
