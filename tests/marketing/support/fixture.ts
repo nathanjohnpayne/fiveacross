@@ -58,10 +58,16 @@ export const HERO_DIST_DIR = 'dist-marketing';
 export function localHourOn(offsetDays: number, hour: number): number {
   const [y, m, d] = isoDay(offsetDays).split('-').map(Number);
   const guess = Date.UTC(y, m - 1, d, hour, 0, 0);
+  // `hourCycle: 'h23'`, never `hour12: false`: the latter is permitted to format
+  // midnight as `24:00:00` on some ICU builds, and this parses the result back
+  // through `Date`, which normalises hour 24 to the FOLLOWING day — shifting the
+  // computed offset by 24h and landing an unlock on the wrong calendar date for
+  // roughly half the year (Codex P2 on #1023). It does not reproduce on this
+  // runtime; `h23` makes it unrepresentable instead of relying on that.
   const zoned = new Date(
     new Intl.DateTimeFormat('en-US', {
       timeZone: EVENT_TIMEZONE,
-      hour12: false,
+      hourCycle: 'h23',
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     })
@@ -83,10 +89,16 @@ export function heroClock(): number {
   // sides of a DST boundary.
   const [y, m, d] = today.split('-').map(Number);
   const guess = Date.UTC(y, m - 1, d, 18, 0, 0);
+  // `hourCycle: 'h23'`, never `hour12: false`: the latter is permitted to format
+  // midnight as `24:00:00` on some ICU builds, and this parses the result back
+  // through `Date`, which normalises hour 24 to the FOLLOWING day — shifting the
+  // computed offset by 24h and landing an unlock on the wrong calendar date for
+  // roughly half the year (Codex P2 on #1023). It does not reproduce on this
+  // runtime; `h23` makes it unrepresentable instead of relying on that.
   const zoned = new Date(
     new Intl.DateTimeFormat('en-US', {
       timeZone: EVENT_TIMEZONE,
-      hour12: false,
+      hourCycle: 'h23',
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     })
