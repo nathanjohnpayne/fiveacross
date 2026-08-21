@@ -24,7 +24,7 @@ import {
   FEED_PROOF_TEXT,
   heroClock,
 } from './support/fixture';
-import { dealBoard, type DealItem } from '../../src/game/logic';
+import { CENTER, dealBoard, type DealItem } from '../../src/game/logic';
 // @ts-expect-error — plain-JS seed script, no type declarations.
 import { seedItemDocId } from '../../scripts/seed.mjs';
 
@@ -142,9 +142,26 @@ test('capture marketing shots', async ({ page }) => {
 
   // Wait for the deterministic board (the persistent cache can replay the
   // random first deal on reload).
+  // Poll the WHOLE board, not just cell 0 (Codex P2 round 3 on #1020). The
+  // persistent Firestore cache can replay the previous random deal on reload,
+  // and it repaints cell by cell — so a first-cell match can be true while the
+  // rest of the grid is still the stale card, and the capture would freeze that
+  // half-swapped state. Compare all 25 texts, normalised for the badge glyphs
+  // Board.tsx adds to a marked cell.
+  // The free centre renders the literal "FREE" above its text, so it is
+  // compared by CONTAINMENT while the 24 dealt squares are compared exactly.
+  const normalise = (t: string) => t.replace(/[✓＋+]/g, '').replace(/\s+/g, ' ').trim();
   await expect
-    .poll(async () => (await page.locator('.grid .cell').allTextContents())[0], { timeout: 30_000 })
-    .toContain(cellTexts[0]);
+    .poll(
+      async () => {
+        const shown = (await page.locator('.grid .cell').allTextContents()).map(normalise);
+        if (shown.length !== 25) return null;
+        const centreOk = shown[CENTER].includes(normalise(cellTexts[CENTER]));
+        return centreOk ? shown.filter((_, i) => i !== CENTER) : null;
+      },
+      { timeout: 30_000 },
+    )
+    .toEqual(cellTexts.filter((_, i) => i !== CENTER).map(normalise));
 
   await shoot(page, 'card');
 
