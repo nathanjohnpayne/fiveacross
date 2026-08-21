@@ -50,6 +50,27 @@ export const HERO_DIST_DIR = 'dist-marketing';
  * absolute instant so the Event keeps reading as current; an absolute anchor
  * would rot into a "Until next year" header the moment it passed.
  */
+/**
+ * The absolute instant of `hour:00` local time on the Day `offsetDays` from
+ * today — so an unlock can be placed ON its labeled calendar date rather than
+ * at a fixed offset from now (Codex P2 on #1023).
+ */
+export function localHourOn(offsetDays: number, hour: number): number {
+  const [y, m, d] = isoDay(offsetDays).split('-').map(Number);
+  const guess = Date.UTC(y, m - 1, d, hour, 0, 0);
+  const zoned = new Date(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: EVENT_TIMEZONE,
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+      .format(new Date(guess))
+      .replace(/(\d+)\/(\d+)\/(\d+), (\d+):(\d+):(\d+)/, '$3-$1-$2T$4:$5:$6Z'),
+  ).getTime();
+  return guess + (guess - zoned);
+}
+
 export function heroClock(): number {
   const today = new Intl.DateTimeFormat('en-CA', {
     timeZone: EVENT_TIMEZONE,
@@ -251,6 +272,13 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
     // for both. Same split the parity fixture uses.
     const display = heroClock();
     const anchor = Math.min(Date.now(), display);
+    // Each unlock must sit on the calendar date its Day is LABELLED with; a
+    // fixed offset from `anchor` does not guarantee that. A capture started
+    // before 06:00 put `anchor - 6h` on yesterday while the Day still read
+    // today, reintroducing exactly the date/state mismatch this fixture just
+    // fixed in the other direction (Codex P2 on #1023). Clamping to the start
+    // of the labelled day keeps the unlock in the past AND on its own date.
+    const todayUnlock = Math.max(localHourOn(0, 0), Math.min(anchor - 6 * HOUR, anchor));
     const now = display;
     const mainIds = idsOf(heroDealable(ITEMS as SeedItem[]) as SeedItem[]);
     const easyIds = idsOf(heroDealable(EASY_ITEMS as SeedItem[]) as SeedItem[]);
@@ -304,7 +332,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             // The warm-up card: tutorial pool, tutorial tag, gentlest prompts.
             tutorial: true,
             scoring: 'competitive',
-            unlockAt: anchor - 6 * HOUR,
+            unlockAt: todayUnlock,
             snapshotItemIds: easyIds,
             freeText: HERO_DAY_DEAL[0].freeText,
           },
@@ -318,7 +346,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             pool: HERO_DAY_DEAL[1].pool,
             tutorial: false,
             scoring: 'competitive',
-            unlockAt: anchor + 20 * HOUR,
+            unlockAt: localHourOn(1, 8),
             snapshotItemIds: mainIds,
             freeText: HERO_DAY_DEAL[1].freeText,
           },
@@ -336,7 +364,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             // reads as a rendering bug rather than as a horizontal scroller.
             tutorial: false,
             scoring: 'competitive',
-            unlockAt: anchor + 44 * HOUR,
+            unlockAt: localHourOn(2, 8),
             snapshotItemIds: closingIds,
             freeText: HERO_DAY_DEAL[2].freeText,
           },
