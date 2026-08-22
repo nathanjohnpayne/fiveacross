@@ -769,10 +769,36 @@ jobs:
   #      re-runs the arming logic on every push, BUT only proceeds when
   #      the `Gate: require existing non-author approval` step below
   #      confirms a valid non-author latest-state APPROVED review already
-  #      exists on the PR (`dismiss_stale_reviews` is OFF, so the
-  #      approval carries across the fix-push — see the BEHIND-PR
-  #      carryover behavior). A push with NO existing approval does NOT
-  #      arm. Every load-bearing gate (AUTHOR_MERGE_TOKEN identity,
+  #      exists on the PR. A push with NO existing approval does NOT
+  #      arm.
+  #
+  #      This comment used to justify that by asserting
+  #      `dismiss_stale_reviews` is OFF. It is not, and was not: measured
+  #      2026-08-22, the branch-protection API reports
+  #      dismiss_stale_reviews=true on ALL TEN fleet repos, with no
+  #      ruleset overriding classic protection. The step is nonetheless
+  #      correct, for a different reason than the old note claimed --
+  #      which is why the note is corrected rather than the code.
+  #
+  #      What actually makes it safe: the step never trusts the setting.
+  #      It re-reads the reviews API and recomputes the latest opinionated
+  #      state per registered non-author reviewer, so it observes whatever
+  #      the configuration produced instead of assuming it. If a push DID
+  #      dismiss the approval, the latest state is DISMISSED, no approver
+  #      is found, and the re-arm correctly does not fire -- a dismissed
+  #      approval means the PR is no longer approved. If the approval
+  #      survived, it re-arms. Both branches are right, under either
+  #      setting.
+  #
+  #      The carryover this path actually serves is `update-branch`, not
+  #      the ordinary fix-push. GitHub does not dismiss on an
+  #      update-branch merge and re-anchors the surviving review to the
+  #      new head: on #1080 the nathanpayne-codex APPROVED moved from
+  #      c0ee461 to a738d223 and stayed APPROVED. Sampling the last 25
+  #      merged hub PRs, every review_dismissed event was agent-initiated
+  #      (actor=nathanpayne-claude), not an automatic stale dismissal.
+  #
+  #      Do not "restore" a dependence on dismiss_stale_reviews here. Every load-bearing gate (AUTHOR_MERGE_TOKEN identity,
   #      blocking-label re-verify, required checks) re-applies on the NEW HEAD,
   #      and `gh pr merge --auto` is idempotent when --auto is already
   #      enabled.
@@ -1078,7 +1104,33 @@ jobs:
           REPO: ${{ github.repository }}
           REQUIRED_HEAD_CHECK_NAME: lint
         run: |
-          required_check_name=${REQUIRED_HEAD_CHECK_NAME:-lint}
+          # Resolve the check-run names that must be green on the PR head.
+          # Shared with dependabot-auto-merge.yml and the approval
+          # continuation so all three enforce ONE list with one
+          # implementation; see scripts/required-head-checks.sh for why the
+          # value is per-consumer and read from the default branch.
+          # First-rollout guard (#1070). On the PR introducing this helper,
+          # and on each consumer's first propagation PR, the checkout can
+          # predate the script. Fall back to the PRE-#1070 behaviour --
+          # `lint` alone -- rather than failing closed: a repo without the
+          # script cannot have received the config file either, so there is
+          # no configured gate to drop. This is NOT the indeterminate-read
+          # case, which stays fail-closed inside the script.
+          if [ ! -f scripts/required-head-checks.sh ]; then
+            echo "::notice::scripts/required-head-checks.sh absent (pre-#1070 checkout); using the default required head check."
+            required_check_names="lint"
+          elif ! required_check_names=$(bash scripts/required-head-checks.sh --repo "$REPO" --list); then
+            echo "::error::could not resolve the required head-check list; refusing to report merge readiness."
+            exit 1
+          fi
+          if [ -z "$required_check_names" ]; then
+            echo "::error::required head-check list resolved empty; refusing to report merge readiness."
+            exit 1
+          fi
+          echo "::notice::required head checks:"
+          printf '%s\n' "$required_check_names" | sed 's/^/::notice::  /'
+          # Retained for the diagnostics below, which name a single check.
+          required_check_name=$(printf '%s\n' "$required_check_names" | head -n 1)
           # Approval is durable readiness state. This job probes current-head
           # checks exactly once; it never reserves a runner while CI executes.
           # A successful repo-lint / annex / policy workflow later wakes the
@@ -1153,7 +1205,17 @@ jobs:
           # for this workflow at all"
           # as non-blocking -- the same trade-off gate (a) already made and
           # validated across #655 rounds 2-5.
-          required_checks_json=$(jq -n --arg name "$required_check_name" '[{name: $name, workflow: ""}]')
+          # Built from the resolved LIST. The consumers of this array below
+          # (check_count, .[$i].name, the rollup filter) already iterate it
+          # generically, so widening one name to several needs no change
+          # there. The scoping rule in the comment above is unchanged: only
+          # explicitly-configured hard requirements land here, never the
+          # path-filtered annex.
+          # -R over the NEWLINE list: check-run names contain spaces
+          # ("Merge clearance gate"), so word-splitting would shatter them
+          # into names that do not exist and this probe would never be ready.
+          required_checks_json=$(printf '%s\n' "$required_check_names" \
+            | jq -R . | jq -s -c '[.[] | select(length > 0) | {name: ., workflow: ""}]')
           annex_workflow=""
           annex_unfiltered="false"
           annex_probe_err=$(mktemp)
