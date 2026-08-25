@@ -150,6 +150,11 @@ function isoDay(offsetDays: number): string {
   return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
 }
 
+/** Which Edition chrome the build under capture wears. */
+export type HeroEdition = 'vacay' | 'fiveacross' | 'gcb';
+export const HERO_EDITION: HeroEdition =
+  (process.env.HERO_EDITION as HeroEdition | undefined) ?? 'vacay';
+
 /**
  * Prompts held OUT of the hero deal. Every one is a real, general-audience
  * Bodega prompt — they are excluded because a portfolio hero is read by
@@ -170,10 +175,20 @@ const HERO_PROMPT_EXCLUSIONS = new Set([
 export const heroDealable = (items: Array<{ text: string }>) =>
   items.filter((it) => !HERO_PROMPT_EXCLUSIONS.has(it.text));
 
-/** Which Edition chrome the build under capture wears. */
-export type HeroEdition = 'vacay' | 'fiveacross' | 'gcb';
-export const HERO_EDITION: HeroEdition =
-  (process.env.HERO_EDITION as HeroEdition | undefined) ?? 'vacay';
+/**
+ * The `embark` pool for the Edition under capture — the ONE source for it.
+ *
+ * Both the Event's seeded item documents / Day-0 `snapshotItemIds` AND the
+ * board `writeHeroBoard` deals read this. Deriving them separately is what
+ * Codex caught on #1031: the GCB branch changed only the board, so the frozen
+ * snapshot still listed Bodega ids while the board carried GCB prompts. The
+ * capture looked right purely because the board is written with security rules
+ * disabled — i.e. it depicted a card the app could never have dealt, which is
+ * the same class of defect as seeding a Feed entry outside the active Day's
+ * snapshot.
+ */
+const EMBARK_ITEMS: ReadonlyArray<{ text: string; spicy?: boolean }> =
+  HERO_EDITION === 'gcb' ? GCB_EMBARK_ITEMS : EASY_ITEMS;
 
 /**
  * Invented display names. Deliberately NOT the real roster: first name plus an
@@ -230,10 +245,7 @@ export const HERO_DAY_DEAL: ReadonlyArray<{
     // The TUTORIAL pool of whichever Edition is under capture. For GCB that is
     // `embark` and ONLY `embark` — its main pool is not imported into this
     // file at all, so a Day-index change cannot reach it by accident.
-    items: () =>
-      HERO_EDITION === 'gcb'
-        ? [...(GCB_EMBARK_ITEMS as SeedItem[])]
-        : [...(EASY_ITEMS as SeedItem[])],
+    items: () => [...(EMBARK_ITEMS as SeedItem[])],
     stratify: false,
     easyMixRatio: 0,
   },
@@ -245,7 +257,7 @@ export const HERO_DAY_DEAL: ReadonlyArray<{
     // card the app would never deal (Codex P2 round 2 on #1020).
     items: () => [
       ...(ITEMS as SeedItem[]),
-      ...(EASY_ITEMS as SeedItem[]).map((it) => ({ ...it, pool: 'embark' })),
+      ...(EMBARK_ITEMS as SeedItem[]).map((it) => ({ ...it, pool: 'embark' })),
     ],
     stratify: true,
     easyMixRatio: EVENT_EASY_MIX_RATIO,
@@ -333,16 +345,19 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
     const todayUnlock = Math.max(localHourOn(0, 0), Math.min(anchor - 6 * HOUR, anchor));
     const now = display;
     const mainIds = idsOf(heroDealable(ITEMS as SeedItem[]) as SeedItem[]);
-    const easyIds = idsOf(heroDealable(EASY_ITEMS as SeedItem[]) as SeedItem[]);
+    const easyIds = idsOf(heroDealable(EMBARK_ITEMS as SeedItem[]) as SeedItem[]);
     const closingIds = idsOf(heroDealable(CLOSING_ITEMS as SeedItem[]) as SeedItem[]);
 
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const db = ctx.firestore();
 
-      // Every prompt doc across the three Bodega pools.
+      // Every prompt doc the Event can deal. `embark` follows the Edition
+      // (EMBARK_ITEMS); `main` and `farewell` stay Bodega because only Days 1
+      // and 2 read them and those Days are locked for the whole capture — GCB's
+      // own main pool is not imported into this file at all.
       for (const { items, pool } of [
         { items: ITEMS as SeedItem[], pool: 'main' },
-        { items: EASY_ITEMS as SeedItem[], pool: 'embark' },
+        { items: EMBARK_ITEMS as SeedItem[], pool: 'embark' },
         { items: CLOSING_ITEMS as SeedItem[], pool: 'farewell' },
       ]) {
         for (const it of items) {
