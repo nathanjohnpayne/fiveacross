@@ -344,9 +344,17 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
     // of the labelled day keeps the unlock in the past AND on its own date.
     const todayUnlock = Math.max(localHourOn(0, 0), Math.min(anchor - 6 * HOUR, anchor));
     const now = display;
-    const mainIds = idsOf(heroDealable(ITEMS as SeedItem[]) as SeedItem[]);
-    const easyIds = idsOf(heroDealable(EMBARK_ITEMS as SeedItem[]) as SeedItem[]);
-    const closingIds = idsOf(heroDealable(CLOSING_ITEMS as SeedItem[]) as SeedItem[]);
+    /**
+     * A Day's frozen snapshot, derived from the SAME `HERO_DAY_DEAL` entry the
+     * board is dealt from. Deriving the two separately is what produced the
+     * Day-0 drift Codex caught on #1031, and fixing only Day 0 left the
+     * identical mismatch on Day 1 — the documented "capture a different Day"
+     * workflow would have mixed GCB embark prompts into a board whose snapshot
+     * listed Bodega main ids alone (and broken specs/easy-mix.md's both-pools
+     * contract with it). Per-Day derivation removes the class, not the case.
+     */
+    const snapshotIdsFor = (dayIndex: number): string[] =>
+      idsOf(heroDealable(HERO_DAY_DEAL[dayIndex].items() as SeedItem[]) as SeedItem[]);
 
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const db = ctx.firestore();
@@ -405,7 +413,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             tutorial: true,
             scoring: 'competitive',
             unlockAt: todayUnlock,
-            snapshotItemIds: easyIds,
+            snapshotItemIds: snapshotIdsFor(0),
             freeText: HERO_DAY_DEAL[0].freeText,
           },
           {
@@ -419,7 +427,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             tutorial: false,
             scoring: 'competitive',
             unlockAt: localHourOn(1, 8),
-            snapshotItemIds: mainIds,
+            snapshotItemIds: snapshotIdsFor(1),
             freeText: HERO_DAY_DEAL[1].freeText,
           },
           {
@@ -437,7 +445,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             tutorial: false,
             scoring: 'competitive',
             unlockAt: localHourOn(2, 8),
-            snapshotItemIds: closingIds,
+            snapshotItemIds: snapshotIdsFor(2),
             freeText: HERO_DAY_DEAL[2].freeText,
           },
         ],

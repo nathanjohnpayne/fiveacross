@@ -54,7 +54,9 @@ The Theme is **chrome**; the **pool** is the safety property. The capture stays 
 
 Do **not** reach for med-2026's own neon Day (index 2) to get this look: that Day is dealt from `main`.
 
-`VITE_ADULT_CONTENT: 'false'` stays truthful under this Edition for the same reason it is truthful under Vacay — the seeded Event contains only embark items, whatever the branding says.
+`VITE_ADULT_CONTENT: 'false'` stays truthful under this Edition, but state the invariant precisely: it holds because **every pool the fixture seeds is general-audience** — Bodega's `main` and `farewell`, which Days 1 and 2 still carry, plus the selected Edition's `embark`. It is *not* the case that a GCB capture seeds only embark items.
+
+The distinction matters for the next person to change this file: the loose version ("only embark is seeded") would keep reading as true while a future edit widened one of the Bodega pools, hiding a posture regression behind a justification that no longer applied.
 
 **The `fiveacross` Edition is wired but unused.** It renders the platform wordmark and the occasion-neutral Themes (Marquee / Confetti Hour / Afterglow), but it would still deal *Bodega* prompts under a generic "the weekend" frame, which reads as incoherent. It needs an occasion-neutral prompt pool before it produces a publishable shot. The Vacay capture already carries `BY FIVE ACROSS` under the wordmark, which is the platform story anyway.
 
