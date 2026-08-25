@@ -5,8 +5,14 @@
 //
 //   1. INVENTED display names. Never the real roster — the live podium, the
 //      Daily Honors strip and every Feed card carry real people's names.
-//   2. The Bodega Bay (Vacay) pools ONLY. They are general-audience
-//      (spicyRatio 0); the Gay Cruise Bingo pool is never seeded here.
+//   2. GENERAL-AUDIENCE POOLS ONLY. Bodega Bay (Vacay) is general-audience
+//      throughout. Gay Cruise Bingo is NOT: only its `embark` tutorial pool
+//      (med-2026's EASY_ITEMS) may be seeded, and `ITEMS` — the main pool,
+//      explicit throughout — is never imported into this file. That is
+//      enforced by the import list below, not by anyone remembering it.
+//      Note `spicy: false` is NOT a sufficient SFW test on its own: the
+//      embark pool ships at least one unflagged prompt that cannot go on a
+//      portfolio page, which is what HERO_PROMPT_EXCLUSIONS is for.
 //   3. NO photo proofs. A hero shot must carry nobody's real picture, and a
 //      staged fake one would be worse.
 //
@@ -29,6 +35,12 @@ export { signedInUid };
 // @ts-expect-error — plain-JS seed script, no type declarations.
 import { seedItemDocId } from '../../../scripts/seed.mjs';
 import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/bodega-bay-2026.mjs';
+// GCB: the `embark` TUTORIAL pool only. Importing med-2026's `ITEMS` here
+// would put the explicit main pool one typo away from a published capture —
+// this named import is the enforcement, so do not widen it to a namespace
+// import or re-export.
+// @ts-expect-error — plain-JS seed script, no type declarations.
+import { EASY_ITEMS as GCB_EMBARK_ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
 
 /** Keep this literal in lockstep with scripts/marketing-shots.sh's PROJECT_ID:
  *  the emulator, the browser bundle and this seeder must all name the same
@@ -150,13 +162,16 @@ const HERO_PROMPT_EXCLUSIONS = new Set([
   'Take a shot',
   'Give a convincing speech on why men should not be included in this trip',
   'Post of a picture of you and somebody else in your jammies',
+  // GCB embark pool. Flagged `spicy: false` and genuinely fine on the ship;
+  // not a line to enlarge to 393pt on a page a recruiter reads.
+  'Locate the Dick Deck (reconnaissance only)',
 ]);
 
 export const heroDealable = (items: Array<{ text: string }>) =>
   items.filter((it) => !HERO_PROMPT_EXCLUSIONS.has(it.text));
 
 /** Which Edition chrome the build under capture wears. */
-export type HeroEdition = 'vacay' | 'fiveacross';
+export type HeroEdition = 'vacay' | 'fiveacross' | 'gcb';
 export const HERO_EDITION: HeroEdition =
   (process.env.HERO_EDITION as HeroEdition | undefined) ?? 'vacay';
 
@@ -210,8 +225,15 @@ export const HERO_DAY_DEAL: ReadonlyArray<{
 }> = [
   {
     pool: 'embark',
-    freeText: 'The flock has landed',
-    items: () => [...(EASY_ITEMS as SeedItem[])],
+    // Each Edition's own warm-up copy. GCB's is med-2026's Day 0 free space.
+    freeText: HERO_EDITION === 'gcb' ? 'You made it aboard' : 'The flock has landed',
+    // The TUTORIAL pool of whichever Edition is under capture. For GCB that is
+    // `embark` and ONLY `embark` — its main pool is not imported into this
+    // file at all, so a Day-index change cannot reach it by accident.
+    items: () =>
+      HERO_EDITION === 'gcb'
+        ? [...(GCB_EMBARK_ITEMS as SeedItem[])]
+        : [...(EASY_ITEMS as SeedItem[])],
     stratify: false,
     easyMixRatio: 0,
   },
@@ -240,7 +262,25 @@ export const HERO_DAY_DEAL: ReadonlyArray<{
 // Per-Edition Day chrome. Bodega's own Themes are Vacay-scoped
 // (THEME_EDITIONS), so the platform build wears the occasion-neutral trio.
 const DAY_CHROME =
-  HERO_EDITION === 'vacay'
+  HERO_EDITION === 'gcb'
+    ? {
+        // med-2026's opening leg, wearing the Event's own default Theme
+        // (`neon-playground`) rather than the boarding-day one. A Theme is a
+        // skin any Day can wear — ThemeIsland lets a player switch at will —
+        // so this is a real app state, and neon is the one that reads as Gay
+        // Cruise Bingo at a glance next to the warm Vacay card.
+        //
+        // The Theme is CHROME. The POOL is the safety property, and it stays
+        // `embark` via HERO_TODAY_INDEX — do not reach for med-2026's neon
+        // Day 2 to get this look, because that Day is dealt from `main`.
+        defaultTheme: 'neon-playground',
+        days: [
+          { place: 'Trieste', placeEmoji: '🇮🇹', theme: 'neon-playground' },
+          { place: 'Split', placeEmoji: '🇭🇷', theme: 'neon-playground' },
+          { place: 'Sea Day', placeEmoji: '🌊', theme: 'neon-playground' },
+        ],
+      }
+    : HERO_EDITION === 'vacay'
     ? {
         defaultTheme: 'the-birds',
         days: [
@@ -322,7 +362,12 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
       // The Event: a three-day weekend, Day 1 unlocked this morning (today),
       // Day 2 still locked so the standings are NOT frozen.
       await setDoc(doc(db, 'events', HERO_EVENT_ID), {
-        name: HERO_EDITION === 'vacay' ? 'Bodega Bay' : 'The weekend',
+        name:
+          HERO_EDITION === 'gcb'
+            ? 'Trieste to Barcelona'
+            : HERO_EDITION === 'vacay'
+              ? 'Bodega Bay'
+              : 'The weekend',
         startsOn: isoDay(0),
         endsOn: isoDay(2),
         sailStart: isoDay(0),
