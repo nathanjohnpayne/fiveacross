@@ -19,7 +19,9 @@ So the capture drives the **real app** — same components, same Themes, same la
 `tests/marketing/support/fixture.ts` is the whole safety story, and it is deliberately small enough to re-read before every capture:
 
 1. **Invented display names.** `Rae M.`, `Devon K.`, `Priya S.`, `Tomas L.` — never the real roster.
-2. **Bodega Bay (Vacay) pools only.** They are the general-audience pools (`spicyRatio: 0`). `scripts/seed-data/med-2026.mjs` is never imported here.
+2. **General-audience pools only.** Bodega Bay (Vacay) is general-audience throughout (`spicyRatio: 0`). Gay Cruise Bingo is not — so only its `embark` **tutorial** pool (med-2026's `EASY_ITEMS`) may be seeded, and `med-2026`'s `ITEMS`, the explicit main pool, is never imported into the fixture. The named import list is the enforcement; do not widen it to a namespace import.
+
+   `spicy: false` is **not** a sufficient SFW test on its own. The embark pool ships at least one unflagged prompt that cannot go on a portfolio page, which is why `HERO_PROMPT_EXCLUSIONS` covers it. Read the rendered PNG before publishing one — the flag is a filter, not a guarantee.
 3. **No photo proofs.** The Feed seeds text proofs, a shared Tally and a BINGO Moment. A hero image must carry nobody's real picture, and a staged fake one would be worse.
 
 `HERO_PROMPT_EXCLUSIONS` additionally holds out a handful of real, perfectly fine prompts that read badly blown up to 393pt on a portfolio page. Add to that set rather than editing the seed data.
@@ -41,7 +43,20 @@ Dates are computed relative to *today* (`isoDay`), so the Event always reads as 
 | A different dealt card | `FIXED_SEED` in `marketing-shots.spec.ts` |
 | Another screen | Add a tab click plus `page.screenshot` at the end of the spec |
 | Five Across platform chrome | `HERO_EDITION=fiveacross scripts/marketing-shots.sh` (see the caveat below) |
+| Gay Cruise Bingo chrome | `HERO_EDITION=gcb scripts/marketing-shots.sh` — writes `gcb-card.png` etc. Deals the `embark` tutorial pool and wears the Event's own `neon-playground` Theme |
 | A different frame | `test.use({ viewport })` in the spec; `deviceScaleFactor` in `playwright.marketing.config.ts` |
+
+### The GCB capture
+
+`HERO_EDITION=gcb` renders the `GAY CRUISE BINGO` wordmark over `neon-playground` — the Event's own default Theme, and the one that reads as GCB at a glance beside the warm Vacay card on a project page.
+
+The Theme is **chrome**; the **pool** is the safety property. The capture stays on `HERO_TODAY_INDEX = 0`, the `embark` tutorial Day, whose prompts are boarding-day material — *find your muster station*, *hear the ship's horn*, *befriend a bartender*. A Theme is a skin any Day can wear (ThemeIsland lets a player switch at will), so a neon warm-up card is a real app state, not a staged one.
+
+Do **not** reach for med-2026's own neon Day (index 2) to get this look: that Day is dealt from `main`.
+
+`VITE_ADULT_CONTENT: 'false'` stays truthful under this Edition, but state the invariant precisely: it holds because **every pool the fixture seeds is general-audience** — Bodega's `main` and `farewell`, which Days 1 and 2 still carry, plus the selected Edition's `embark`. It is *not* the case that a GCB capture seeds only embark items.
+
+The distinction matters for the next person to change this file: the loose version ("only embark is seeded") would keep reading as true while a future edit widened one of the Bodega pools, hiding a posture regression behind a justification that no longer applied.
 
 **The `fiveacross` Edition is wired but unused.** It renders the platform wordmark and the occasion-neutral Themes (Marquee / Confetti Hour / Afterglow), but it would still deal *Bodega* prompts under a generic "the weekend" frame, which reads as incoherent. It needs an occasion-neutral prompt pool before it produces a publishable shot. The Vacay capture already carries `BY FIVE ACROSS` under the wordmark, which is the platform story anyway.
 
