@@ -2,8 +2,8 @@ name: repo-lint-local
 
 # Consumer-local CI checks (mergepath#601 annex). repo_lint.yml is
 # manifest-canonical: it is propagated byte-for-byte from mergepath and so
-# cannot carry gaycruisebingo-specific check wiring. This check is
-# gaycruisebingo-local (it has no mergepath counterpart), so it lives here in
+# cannot carry fiveacross-specific check wiring. This check is
+# fiveacross-local (it has no mergepath counterpart), so it lives here in
 # the OPTIONAL, never-propagated annex that scripts/ci/check_ci_scripts_wired
 # scans as a union with repo_lint.yml. See mergepath#601 and the header of
 # scripts/ci/check_ci_scripts_wired for the union-scan contract.

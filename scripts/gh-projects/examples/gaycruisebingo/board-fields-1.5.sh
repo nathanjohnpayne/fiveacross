@@ -31,7 +31,7 @@
 set -euo pipefail
 
 export OWNER="nathanjohnpayne"
-export REPO="nathanjohnpayne/gaycruisebingo"
+export REPO="nathanjohnpayne/fiveacross"
 export PROJECT=7
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Defaults to the committed, title-verified slug->issue map (regenerate with
@@ -130,7 +130,7 @@ for line in open(mapfile):
     line = line.strip()
     if "=" in line:
         s, n = line.split("=", 1); num[s] = n
-REPO = "nathanjohnpayne/gaycruisebingo"
+REPO = "nathanjohnpayne/fiveacross"
 COL = ["Track", "Phase", "Wave", "Size", "Status"]
 out = []
 for line in open(f"{work}/fields.tsv"):

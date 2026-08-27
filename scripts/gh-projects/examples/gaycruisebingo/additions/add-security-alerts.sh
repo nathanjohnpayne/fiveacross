@@ -15,7 +15,7 @@
 #   GCB_MAP=/tmp/sec.map bash scripts/gh-projects/examples/gaycruisebingo/additions/add-security-alerts.sh
 set -euo pipefail
 
-export REPO="nathanjohnpayne/gaycruisebingo" OWNER="nathanjohnpayne" PROJECT=7
+export REPO="nathanjohnpayne/fiveacross" OWNER="nathanjohnpayne" PROJECT=7
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BODIES="$SCRIPT_DIR/../bodies"
 MAP="${GCB_MAP:-$(mktemp -d)/sec.map}"; : > "$MAP"

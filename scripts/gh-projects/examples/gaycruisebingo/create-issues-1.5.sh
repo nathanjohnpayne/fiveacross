@@ -2,7 +2,7 @@
 # scripts/gh-projects/examples/gaycruisebingo/create-issues-1.5.sh
 #
 # Fresh-create driver for the Gay Cruise Bingo **Phase 1.5 — Daily Cards** backlog
-# (repo nathanjohnpayne/gaycruisebingo). Creates the epic parent + child tickets
+# (repo nathanjohnpayne/fiveacross). Creates the epic parent + child tickets
 # from the templated body files in ./bodies-1.5/, applies labels, and links
 # children as native sub-issues of the epic.
 #
@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-export REPO="nathanjohnpayne/gaycruisebingo"
+export REPO="nathanjohnpayne/fiveacross"
 export OWNER="nathanjohnpayne"
 export PROJECT=7   # referenced only by the sourced lib.sh guards; no project writes happen here.
 

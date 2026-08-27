@@ -1,12 +1,12 @@
 # `worker/` — the Five Across Event router
 
-One versioned Cloudflare Worker in front of the wildcard Namespaces `*.fiveacross.app` and `*.vacaybingo.com`, so a new Event needs no DNS record, no Hosting custom domain, no certificate and no Worker route of its own. Implements [#545](https://github.com/nathanjohnpayne/gaycruisebingo/issues/545) under epic [#529](https://github.com/nathanjohnpayne/gaycruisebingo/issues/529); the behavioural contract is [`specs/event-router.md`](../specs/event-router.md), and the Event-identity model it consumes is [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md).
+One versioned Cloudflare Worker in front of the wildcard Namespaces `*.fiveacross.app` and `*.vacaybingo.com`, so a new Event needs no DNS record, no Hosting custom domain, no certificate and no Worker route of its own. Implements [#545](https://github.com/nathanjohnpayne/fiveacross/issues/545) under epic [#529](https://github.com/nathanjohnpayne/fiveacross/issues/529); the behavioural contract is [`specs/event-router.md`](../specs/event-router.md), and the Event-identity model it consumes is [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md).
 
 ## What it is, and the two things it is not
 
 It is a **router** and a **namespace guard**. It validates the hostname's Namespace and first label against the Slug contract, resolves the address against the same world-readable `hostnames/{host}` collection the client reads, fails closed on anything that is not an explicit active match, and proxies what survives to the Firebase Hosting origin with a rewritten `Host` header.
 
-It is **not a canonicaliser**. [#599](https://github.com/nathanjohnpayne/gaycruisebingo/issues/599) as amended removed edge canonicalization: every registered host serves in place, and a serving domain is never bounced off itself. There is no code path in this directory that constructs a redirect, and `router.test.ts` sweeps every outcome asserting none appears. The canonical hostname still exists — its job is analytics aggregation and being the name printed on things, not being a redirect target — and share links deliberately carry the entry-point host ([#607](https://github.com/nathanjohnpayne/gaycruisebingo/issues/607)).
+It is **not a canonicaliser**. [#599](https://github.com/nathanjohnpayne/fiveacross/issues/599) as amended removed edge canonicalization: every registered host serves in place, and a serving domain is never bounced off itself. There is no code path in this directory that constructs a redirect, and `router.test.ts` sweeps every outcome asserting none appears. The canonical hostname still exists — its job is analytics aggregation and being the name printed on things, not being a redirect target — and share links deliberately carry the entry-point host ([#607](https://github.com/nathanjohnpayne/fiveacross/issues/607)).
 
 It is **not an authorization layer**. The application still verifies membership before reading any Event data. The router holds the Firebase *web* API key and no service-account credential, so it can read exactly what a browser standing on the same address can read, and `firestore.rules` is what enforces that rather than a promise this code makes about itself.
 
@@ -45,7 +45,7 @@ curl -sI http://localhost:8787/ -H 'Host: admin.fiveacross.app'      # expect 40
 
 ## Deploying and attaching
 
-**The deliverable of #545 ends at "deployable, tested, documented". Attaching the routes is the cutover, and the cutover is a human step** — it depends on the DNS work in [#539](https://github.com/nathanjohnpayne/gaycruisebingo/issues/539) and on the PRD's Gate ladder. `wrangler.toml` therefore ships with `routes` commented out, so no deploy command can perform a cutover by accident.
+**The deliverable of #545 ends at "deployable, tested, documented". Attaching the routes is the cutover, and the cutover is a human step** — it depends on the DNS work in [#539](https://github.com/nathanjohnpayne/fiveacross/issues/539) and on the PRD's Gate ladder. `wrangler.toml` therefore ships with `routes` commented out, so no deploy command can perform a cutover by accident.
 
 ### 1. Configure and deploy, unrouted
 
@@ -111,7 +111,7 @@ npm --prefix worker exec -- wrangler secret list        # names and types only �
 
 ### 4. Prerequisites that are NOT this Worker's code — and that block a multi-Event cutover
 
-A correct router is not sufficient. Three properties live outside this Worker's present code, and each blocks the cutover in a different way. They have their own follow-up issues — [#546](https://github.com/nathanjohnpayne/gaycruisebingo/issues/546), [#852](https://github.com/nathanjohnpayne/gaycruisebingo/issues/852), and [#888](https://github.com/nathanjohnpayne/gaycruisebingo/issues/888).
+A correct router is not sufficient. Three properties live outside this Worker's present code, and each blocks the cutover in a different way. They have their own follow-up issues — [#546](https://github.com/nathanjohnpayne/fiveacross/issues/546), [#852](https://github.com/nathanjohnpayne/fiveacross/issues/852), and [#888](https://github.com/nathanjohnpayne/fiveacross/issues/888).
 
 - **A non-Vacay hostname still needs per-host static identity (#546).** The `fiveacross` origin now builds with an empty `VITE_EVENT_ID`, so runtime Event, Edition and adult-content posture come from `hostnames/{host}` before mount. Its trusted Vacay static fallback preserves the existing Bodega hosts' HTML, manifest and crawler identity, but those file-level surfaces cannot change at runtime. Do not attach a non-Vacay Edition hostname until the Worker rewrites them per host.
 - **Sign-in must be reachable on a newly provisioned host.** `isSignInReachableOnHost` (`src/auth-domain.ts`) admits an exact set of first-party hosts plus local origins plus the documented handoff. An arbitrary new `*.fiveacross.app` label is in none of those, so the app renders `auth-unconfigured` rather than a sign-in button — even after the OAuth redirect URI is registered. Delivering "a new Event needs no code change" needs the [ADR 0010](../docs/adr/0010-centralised-auth-origin-with-handoff.md) handoff or a registration-aware readiness check.
@@ -127,7 +127,7 @@ So for each reserved label (`www`, `auth`, `api`, `admin`, `play`, `status`, `d`
 
 Then uncomment the `routes` block in `wrangler.toml` and redeploy. Attach **one Namespace at a time**, verify, and only then attach the second. Immediately after attaching, request each reserved hostname: anything answering `x-event-router-reason: reserved-label` is being intercepted and needs its exclusion before you go further.
 
-Before doing so, note the constraint carried forward from the closed Gate 3 issue ([#569](https://github.com/nathanjohnpayne/gaycruisebingo/issues/569)): the epic's original protective rule — do not let real players install the PWA before the cutover — is spent. Real players are already carrying installed shells and service workers minted from the direct-to-Hosting path, so this cutover has to be verified against **already-installed** shells, not clean installs. Open the app on a device that already has it installed from the home screen, not just in a fresh browser tab.
+Before doing so, note the constraint carried forward from the closed Gate 3 issue ([#569](https://github.com/nathanjohnpayne/fiveacross/issues/569)): the epic's original protective rule — do not let real players install the PWA before the cutover — is spent. Real players are already carrying installed shells and service workers minted from the direct-to-Hosting path, so this cutover has to be verified against **already-installed** shells, not clean installs. Open the app on a device that already has it installed from the home screen, not just in a fresh browser tab.
 
 Both apexes stay off the route list. `fiveacross.app` and `vacaybingo.com` are exact Firebase Hosting custom domains today; the router classifies an apex correctly and would serve it, but moving them is a separate decision from lighting up the wildcards, and doing both at once leaves nothing to roll back to.
 

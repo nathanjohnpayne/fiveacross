@@ -1,5 +1,5 @@
 {
-  "name": "gaycruisebingo-functions",
+  "name": "fiveacross-functions",
   "description": "Cloud Functions for Gay Cruise Bingo (Phase 1): moderation and thumbnails (stats stay client-authoritative, ADR 0001).",
   "private": true,
   "engines": {

@@ -17,7 +17,7 @@ export default function PlaceholderStep({ step }: { step: SetupStep }) {
       <p>
         {STEP_LABELS[step]} ships in{' '}
         <a
-          href={`https://github.com/nathanjohnpayne/gaycruisebingo/issues/${ticket}`}
+          href={`https://github.com/nathanjohnpayne/fiveacross/issues/${ticket}`}
           target="_blank"
           rel="noreferrer"
         >

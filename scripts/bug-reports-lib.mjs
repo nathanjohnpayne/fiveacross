@@ -5,7 +5,11 @@ import contract from '../functions/src/bugReportContract.cjs';
 const { REPORT_KINDS, validateClientReportFields, validatePngBytes } = contract;
 
 const REPORT_ID = /^[A-Za-z0-9_-]{6,100}$/;
-const ISSUE_URL = /^https:\/\/github\.com\/nathanjohnpayne\/gaycruisebingo\/issues\/(\d+)$/;
+// The repository was renamed gaycruisebingo → fiveacross. GitHub redirects the
+// old slug, and every pre-rename line of the committed ledger below still
+// carries it, so both names must keep parsing — tightening this to the new name
+// alone would make normalizeReceipt throw on all of them.
+const ISSUE_URL = /^https:\/\/github\.com\/nathanjohnpayne\/(?:fiveacross|gaycruisebingo)\/issues\/(\d+)$/;
 
 // The durable dedupe ledger (issue #146's "export ledger" decision, made durable).
 // One JSON object per line — {reportId, issue, url, importedAt} — recording every
@@ -56,12 +60,26 @@ function validateLedgerEntry(entry, lineNumber) {
   return normalizeReceipt(entry, prefix);
 }
 
+// The two slugs ISSUE_URL accepts are aliases for ONE repository, so a receipt
+// written under either names the same issue. Compare canonicalized URLs: a raw
+// byte comparison reads an old-slug ledger row and the documented new-slug URL
+// for the same issue as a conflict, aborting the idempotent stale-inbox cleanup
+// that retry path exists to perform. Canonicalizing preserves the property the
+// conflict checks are for — a DIFFERENT issue number still differs.
+const CANONICAL_REPO_SLUG = 'fiveacross';
+function canonicalIssueUrl(url) {
+  const match = ISSUE_URL.exec(String(url ?? ''));
+  return match ? `https://github.com/nathanjohnpayne/${CANONICAL_REPO_SLUG}/issues/${match[1]}` : String(url ?? '');
+}
+
 function sameReceipt(a, b) {
-  return a.reportId === b.reportId && a.issue === b.issue && a.url === b.url && a.importedAt === b.importedAt;
+  return a.reportId === b.reportId && a.issue === b.issue
+    && canonicalIssueUrl(a.url) === canonicalIssueUrl(b.url) && a.importedAt === b.importedAt;
 }
 
 function sameIssueTarget(a, b) {
-  return a.reportId === b.reportId && a.issue === b.issue && a.url === b.url;
+  return a.reportId === b.reportId && a.issue === b.issue
+    && canonicalIssueUrl(a.url) === canonicalIssueUrl(b.url);
 }
 
 /**
@@ -321,7 +339,7 @@ export async function exportReports({ reports, downloadScreenshot, root }) {
 export async function archiveReport({ reportId, issueUrl, root, now = new Date() }) {
   if (!REPORT_ID.test(reportId)) throw new Error('Invalid report id');
   const match = ISSUE_URL.exec(issueUrl);
-  if (!match) throw new Error('Issue URL must point to nathanjohnpayne/gaycruisebingo');
+  if (!match) throw new Error('Issue URL must point to nathanjohnpayne/fiveacross');
   const source = path.join(root, 'inbox', reportId);
   const destination = path.join(root, 'imported', reportId);
   const requested = {

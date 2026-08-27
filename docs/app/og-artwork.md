@@ -2,7 +2,7 @@
 
 The artwork a shared link previews with is a set of committed PNGs, not something the app renders. This is the runbook for changing them.
 
-Before #688, they had no generator. The three per-Edition renders landed as binaries in #642 (from the #609 design pass), so the first two content changes to them — [#681](https://github.com/nathanjohnpayne/gaycruisebingo/issues/681) moving Vacay's share mark from 🗺️ to 🧳, and [#688](https://github.com/nathanjohnpayne/gaycruisebingo/issues/688) giving Gay Cruise Bingo the `BY FIVE ACROSS` endorsement — each opened with an archaeology pass over a PNG. The generator exists so that stops being the workflow.
+Before #688, they had no generator. The three per-Edition renders landed as binaries in #642 (from the #609 design pass), so the first two content changes to them — [#681](https://github.com/nathanjohnpayne/fiveacross/issues/681) moving Vacay's share mark from 🗺️ to 🧳, and [#688](https://github.com/nathanjohnpayne/fiveacross/issues/688) giving Gay Cruise Bingo the `BY FIVE ACROSS` endorsement — each opened with an archaeology pass over a PNG. The generator exists so that stops being the workflow.
 
 ## The assets
 

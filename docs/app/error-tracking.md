@@ -30,7 +30,7 @@ Trust that read, not the in-app recommendation card. After a successful write, `
 
 ## Alert routing
 
-Two alerts file GitHub issues into `nathanjohnpayne/gaycruisebingo`, through PostHog integration 202688 (`github`, `nathanjohnpayne`).
+Two alerts file GitHub issues into `nathanjohnpayne/fiveacross`, through PostHog integration 202688 (`github`, `nathanjohnpayne`).
 
 | Alert | Trigger event | Issue title shape |
 |---|---|---|

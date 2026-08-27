@@ -6,7 +6,7 @@ set -euo pipefail
 # Source-level assertions over `.github/workflows/synthetic-uptime.yml`
 # (#768 Phase 4b, plus the #774 rollout-epoch anchor from Codex P2 on PR #827).
 #
-# These are gaycruisebingo-local: `synthetic-uptime.yml` exists only here, and
+# These are fiveacross-local: `synthetic-uptime.yml` exists only here, and
 # canonical `scripts/ci/check_workflow_parsers` carries no counterpart. They
 # used to live at the tail of the local copy of that file, which is the wrong
 # home for them. `scripts/ci/` is a mergepath `type: kit, consumers: all`
