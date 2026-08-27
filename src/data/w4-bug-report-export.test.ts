@@ -429,6 +429,47 @@ describe('local bug-report export', () => {
     await expect(stat(path.join(root, 'inbox/report_123'))).resolves.toBeDefined();
   });
 
+  it('accepts a mixed-slug inbox/ledger receipt pair and completes the archive', async () => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    // The inbox receipt was written post-rename (new slug); the durable ledger row
+    // predates it (old slug). Identical in every other field, so sameReceipt must
+    // read them as aliases at scripts/bug-reports-lib.mjs:367 and let the archive
+    // proceed rather than throwing "Inbox report ... has a conflicting receipt".
+    const importedAt = '2026-07-10T00:00:00.000Z';
+    const ledgerReceipt = { reportId: 'report_123', issue: 200, url: ISSUE_200_OLD_SLUG, importedAt };
+    await writeFile(
+      path.join(root, 'inbox/report_123/github-issue.json'),
+      `${JSON.stringify({ reportId: 'report_123', issue: 200, url: ISSUE_200, importedAt }, null, 2)}\n`,
+    );
+    await writeFile(path.join(root, LEDGER), `${JSON.stringify(ledgerReceipt)}\n`);
+
+    const receipt = await archiveReport({ reportId: 'report_123', issueUrl: ISSUE_200, root });
+
+    expect(receipt).toEqual(ledgerReceipt);
+    await expect(stat(path.join(root, 'imported/report_123'))).resolves.toBeDefined();
+    await expect(stat(path.join(root, 'inbox/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('still rejects a mixed-slug inbox/ledger pair naming different issues', async () => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    // Same aliasing, but the inbox receipt names issue 201 and the ledger 200.
+    // Canonicalizing the slug must not collapse a genuine issue-number conflict.
+    const importedAt = '2026-07-10T00:00:00.000Z';
+    await writeFile(
+      path.join(root, 'inbox/report_123/github-issue.json'),
+      `${JSON.stringify({ reportId: 'report_123', issue: 201, url: 'https://github.com/nathanjohnpayne/fiveacross/issues/201', importedAt }, null, 2)}\n`,
+    );
+    await writeFile(
+      path.join(root, LEDGER),
+      `${JSON.stringify({ reportId: 'report_123', issue: 200, url: ISSUE_200_OLD_SLUG, importedAt })}\n`,
+    );
+
+    await expect(archiveReport({ reportId: 'report_123', issueUrl: ISSUE_200, root }))
+      .rejects.toThrow('Inbox report report_123 has a conflicting receipt');
+
+    await expect(stat(path.join(root, 'inbox/report_123'))).resolves.toBeDefined();
+  });
+
   it('ledger append is idempotent and self-heals a pre-ledger import on re-archive', async () => {
     await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
     await archiveReport({ reportId: 'report_123', issueUrl: ISSUE_200, root, now: new Date('2026-07-10T00:00:00Z') });
