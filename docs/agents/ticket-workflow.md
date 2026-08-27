@@ -25,15 +25,15 @@ The built-ins cannot infer "claimed" or promote `Backlog → Ready` across a dep
 
 ## The manual protocol
 
-Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode all)"` then `export GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT"` (author identity `nathanjohnpayne`; `move-item.sh` verifies it). All commands assume `REPO=nathanjohnpayne/gaycruisebingo OWNER=nathanjohnpayne PROJECT=7`.
+Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode all)"` then `export GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT"` (author identity `nathanjohnpayne`; `move-item.sh` verifies it). All commands assume `REPO=nathanjohnpayne/fiveacross OWNER=nathanjohnpayne PROJECT=7`.
 
 ### 0. File a ticket (adds with no Status)
 
 `gh project item-add` does not set Status on its own. Always run the explicit move below—do not skip it based on whether the "Item added to project → set Status = Backlog" built-in (line 19 above) is enabled. As of this writing that built-in is disabled on Project #7, so a freshly added item lands with **no Status** and the move is required. If a future session enables it, the move becomes a no-op (Status is already Backlog) rather than a skippable step: the workflow's on/off state can drift without every agent's context reflecting it, so a single unconditional command is the only protocol that stays correct in both states.
 
 ```bash
-scripts/gh-as-author.sh -- gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/gaycruisebingo/issues/<num>
-PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+scripts/gh-as-author.sh -- gh project item-add "$PROJECT" --owner "$OWNER" --url https://github.com/nathanjohnpayne/fiveacross/issues/<num>
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Backlog"
 ```
 
@@ -44,11 +44,11 @@ Skipping this leaves the item in a No Status column whenever the built-in is off
 Pick a ticket whose Status is `Ready` and whose every `Depends on` is `Done`. Claim it **atomically**—self-assign **and** move it—then comment, so a racing agent sees it's taken:
 
 ```bash
-gh issue edit <num> --repo nathanjohnpayne/gaycruisebingo --add-assignee nathanjohnpayne
-PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+gh issue edit <num> --repo nathanjohnpayne/fiveacross --add-assignee nathanjohnpayne
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "In progress"
 GH_AS_REVIEWER_IDENTITY=nathanpayne-claude scripts/gh-as-reviewer.sh -- \
-  gh issue comment <num> --repo nathanjohnpayne/gaycruisebingo --body "Claiming — nathanpayne-claude."
+  gh issue comment <num> --repo nathanjohnpayne/fiveacross --body "Claiming — nathanpayne-claude."
 ```
 
 If the issue already has an assignee, back off and pick another `Ready` ticket. One in-progress ticket per agent; at most one open hot-file-owner ticket at a time (see the parallelization plan).
@@ -58,11 +58,11 @@ If the issue already has an assignee, back off and pick another `Ready` ticket. 
 Branch `feat/<slug>` off `main` (never push to `main`). Put `Closes #<num>` in the PR body so the merge closes the issue and the built-in workflow can drive Done. Then move the card:
 
 ```bash
-scripts/gh-as-author.sh -- gh pr create --repo nathanjohnpayne/gaycruisebingo \
+scripts/gh-as-author.sh -- gh pr create --repo nathanjohnpayne/fiveacross \
   --title "<type>: <summary>" --body "Closes #<num>
 
 <what changed / how verified>"
-PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "In review"
 ```
 
@@ -71,8 +71,8 @@ PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
 After review clears per [`REVIEW_POLICY.md`](../../REVIEW_POLICY.md) (reviewer-identity `--approve` under threshold; Phase 4 for `needs-phase-4` / ≥ 300-line / `src/auth/**` PRs), merge as `nathanjohnpayne`. The `Closes #<num>` link closes the issue; if the "issue closed / PR merged → Done" workflow is on, the card moves itself. Verify (or force) it:
 
 ```bash
-scripts/gh-as-author.sh -- gh pr merge <pr> --repo nathanjohnpayne/gaycruisebingo --squash --delete-branch
-PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+scripts/gh-as-author.sh -- gh pr merge <pr> --repo nathanjohnpayne/fiveacross --squash --delete-branch
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Done"   # only if the workflow didn't
 ```
 
@@ -81,7 +81,7 @@ PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
 When a ticket merges, whoever merged promotes the tickets that were waiting on it—every `Backlog` ticket whose `Depends on` set is now fully `Done`:
 
 ```bash
-PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/gaycruisebingo \
+PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <dependent-num> "Ready"
 ```
 

@@ -108,7 +108,7 @@ function recoveryInput(overrides = {}) {
     host: HOST,
     expectedCommitted: { revision: '7', digest: '5'.repeat(64) },
     lockId: 'lock-970',
-    incidentUrl: 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/970',
+    incidentUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/970',
     reason: 'Replace a quarantined publisher after exact provider readback.',
     sourceAttestor: {
       audience: SOURCE_ATTESTOR_AUDIENCE,

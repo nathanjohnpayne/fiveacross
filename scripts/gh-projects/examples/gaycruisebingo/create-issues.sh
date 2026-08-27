@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-export REPO="nathanjohnpayne/gaycruisebingo"
+export REPO="nathanjohnpayne/fiveacross"
 export OWNER="nathanjohnpayne"
 export PROJECT=7
 

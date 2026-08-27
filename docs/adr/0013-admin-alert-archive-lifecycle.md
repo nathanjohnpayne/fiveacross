@@ -4,7 +4,7 @@ Status: Accepted
 
 Date: 2026-08-19
 
-Issue: [#846](https://github.com/nathanjohnpayne/gaycruisebingo/issues/846)
+Issue: [#846](https://github.com/nathanjohnpayne/fiveacross/issues/846)
 
 ## Context
 

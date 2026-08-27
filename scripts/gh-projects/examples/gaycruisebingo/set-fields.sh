@@ -113,7 +113,7 @@ for line in open(mapfile):
     line = line.strip()
     if "=" in line:
         s, n = line.split("=", 1); num[s] = n
-REPO = "nathanjohnpayne/gaycruisebingo"
+REPO = "nathanjohnpayne/fiveacross"
 COL = ["Track", "Phase", "Wave", "Size", "ADR", "Status"]
 out = []
 for line in open(f"{work}/fields.tsv"):

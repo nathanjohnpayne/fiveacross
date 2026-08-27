@@ -134,7 +134,7 @@ The GitHub MCP server token is **read-only** in this environment—`issue create
 author_token="$(gh auth token --user nathanjohnpayne)" \
   || { echo "no gh author token for nathanjohnpayne — aborting" >&2; exit 1; }
 GH_TOKEN="$author_token" \
-  gh issue create --repo nathanjohnpayne/gaycruisebingo \
+  gh issue create --repo nathanjohnpayne/fiveacross \
   --title "<title>" --body-file <path-to-drafted-body.md> \
   --label bug --label "track:<area>" --label agent-action --label size:S \
   --assignee nathanjohnpayne
@@ -148,7 +148,7 @@ For **every** source report included in a created issue, write its immutable rec
 
 ```bash
 node scripts/bug-reports.mjs archive <report-id> \
-  https://github.com/nathanjohnpayne/gaycruisebingo/issues/<n>
+  https://github.com/nathanjohnpayne/fiveacross/issues/<n>
 ```
 
 Call it once per report. Each call also appends the import to the committed `.github/bug-reports/imported-ledger.jsonl` dedupe ledger (idempotent; it self-heals a pre-ledger import on re-archive) before moving the report to `imported/`—commit that file in step 7. If the ledger append fails, the report remains retryable in `inbox/` with its receipt instead of being moved into gitignored-only state. If the ledger already contains the report ID, `archive` only cleans up a stale local inbox when the requested issue URL matches the committed ledger receipt; a different issue URL fails before moving anything. Note that the login shell here is **zsh**, which does not word-split unquoted variables—a `for entry in "${MAP[@]}"; do set -- $entry; …` loop collapses `"<id> <n>"` into a single argument and the id fails validation (`Invalid report id`). Invoke `archive` explicitly per report, or split fields deliberately (`read -r id n <<< "$entry"`). For a report you cannot import, keep it retryable in the inbox: `npm run bugs:disposition -- <report-id> <failed|ambiguous> "<reason>"`.

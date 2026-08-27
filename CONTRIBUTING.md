@@ -28,7 +28,7 @@ npm install
 npm run dev                    # local dev at http://localhost:5173
 ```
 
-The `VITE_FIREBASE_*` values are **non-secret client identifiers** — they're baked into the client bundle by design, and access is enforced by the Firestore/Storage rules + Auth, not by hiding them. `.env.local` is gitignored; never commit it. A build with an empty `VITE_FIREBASE_API_KEY` ships a blank-page outage, so a real config must be present at build time (the build guards against an empty key — see [#140](https://github.com/nathanjohnpayne/gaycruisebingo/pull/140)).
+The `VITE_FIREBASE_*` values are **non-secret client identifiers** — they're baked into the client bundle by design, and access is enforced by the Firestore/Storage rules + Auth, not by hiding them. `.env.local` is gitignored; never commit it. A build with an empty `VITE_FIREBASE_API_KEY` ships a blank-page outage, so a real config must be present at build time (the build guards against an empty key — see [#140](https://github.com/nathanjohnpayne/fiveacross/pull/140)).
 
 ## Local checks before you push
 
@@ -71,7 +71,7 @@ Every change lands via pull request review before merge — this is enforced by 
 
 A few things about this app will bite you if you don't know them up front:
 
-- **The prompt pool lives in Firestore, not the JS bundle.** The app renders `events/{id}/items`, which only the seed script writes. Changing `ITEMS` in `src/data/seed.ts` / `scripts/seed.mjs` and deploying the app does **not** reach players — you must re-run the seed against the live project, then confirm with `npm run verify:seed` (production-pinned, read-only, exits non-zero on drift). Skipping the reseed is exactly how a pool update shipped late once ([#129](https://github.com/nathanjohnpayne/gaycruisebingo/issues/129)). Full detail: [app guide §4](docs/app/README.md).
+- **The prompt pool lives in Firestore, not the JS bundle.** The app renders `events/{id}/items`, which only the seed script writes. Changing `ITEMS` in `src/data/seed.ts` / `scripts/seed.mjs` and deploying the app does **not** reach players — you must re-run the seed against the live project, then confirm with `npm run verify:seed` (production-pinned, read-only, exits non-zero on drift). Skipping the reseed is exactly how a pool update shipped late once ([#129](https://github.com/nathanjohnpayne/fiveacross/issues/129)). Full detail: [app guide §4](docs/app/README.md).
 - **Stats are client-authoritative and never move server-side** — the honor-system trust model ([ADR 0001](docs/adr/0001-honor-system-trust-model.md)). Don't reintroduce a server-side stat recompute; it was deliberately removed.
 - **Boards freeze at deal time.** Prompts added later feed *future* deals only ([ADR 0003](docs/adr/0003-pool-is-pre-cruise.md)).
 - **Share images are generated on-device**, not server-rendered ([ADR 0005](docs/adr/0005-client-side-share-images.md)). The OG unfurl image is a static asset.
@@ -88,4 +88,4 @@ Deploys are manual and 1Password-backed — there is no CI deploy. They go throu
 
 ## Reporting security issues
 
-Do **not** open a public issue for a vulnerability. Use [GitHub's private vulnerability reporting](https://github.com/nathanjohnpayne/gaycruisebingo/security/advisories/new) or email the maintainer directly. See [`SECURITY.md`](SECURITY.md).
+Do **not** open a public issue for a vulnerability. Use [GitHub's private vulnerability reporting](https://github.com/nathanjohnpayne/fiveacross/security/advisories/new) or email the maintainer directly. See [`SECURITY.md`](SECURITY.md).

@@ -5,7 +5,11 @@ import contract from '../functions/src/bugReportContract.cjs';
 const { REPORT_KINDS, validateClientReportFields, validatePngBytes } = contract;
 
 const REPORT_ID = /^[A-Za-z0-9_-]{6,100}$/;
-const ISSUE_URL = /^https:\/\/github\.com\/nathanjohnpayne\/gaycruisebingo\/issues\/(\d+)$/;
+// The repository was renamed gaycruisebingo → fiveacross. GitHub redirects the
+// old slug, and every pre-rename line of the committed ledger below still
+// carries it, so both names must keep parsing — tightening this to the new name
+// alone would make normalizeReceipt throw on all of them.
+const ISSUE_URL = /^https:\/\/github\.com\/nathanjohnpayne\/(?:fiveacross|gaycruisebingo)\/issues\/(\d+)$/;
 
 // The durable dedupe ledger (issue #146's "export ledger" decision, made durable).
 // One JSON object per line — {reportId, issue, url, importedAt} — recording every
@@ -321,7 +325,7 @@ export async function exportReports({ reports, downloadScreenshot, root }) {
 export async function archiveReport({ reportId, issueUrl, root, now = new Date() }) {
   if (!REPORT_ID.test(reportId)) throw new Error('Invalid report id');
   const match = ISSUE_URL.exec(issueUrl);
-  if (!match) throw new Error('Issue URL must point to nathanjohnpayne/gaycruisebingo');
+  if (!match) throw new Error('Issue URL must point to nathanjohnpayne/fiveacross');
   const source = path.join(root, 'inbox', reportId);
   const destination = path.join(root, 'imported', reportId);
   const requested = {

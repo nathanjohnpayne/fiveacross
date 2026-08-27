@@ -715,10 +715,10 @@ phase_4b_automation:
   # 2.1.214 apiProvider=firstParty; no API-key env vars set).
   # Independent live Claude-adapter evidence: exact-head APPROVED review from
   # nathanpayne-claude on merged PR #702:
-  # https://github.com/nathanjohnpayne/gaycruisebingo/pull/702#pullrequestreview-4901655869
+  # https://github.com/nathanjohnpayne/fiveacross/pull/702#pullrequestreview-4901655869
   # Package CI evidence: main repo-lint job, including the successful
   # check_phase_4b_automation step:
-  # https://github.com/nathanjohnpayne/gaycruisebingo/actions/runs/32209450638/job/95939032735
+  # https://github.com/nathanjohnpayne/fiveacross/actions/runs/32209450638/job/95939032735
   enabled: true
 
   # Execution model. 'local' = the authoring agent's session shells out to

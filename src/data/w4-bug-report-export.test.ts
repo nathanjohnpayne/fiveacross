@@ -240,7 +240,7 @@ describe('local bug-report export', () => {
     await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
     const receipt = await archiveReport({
       reportId: 'report_123',
-      issueUrl: 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/200',
+      issueUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/200',
       root,
       now: new Date('2026-07-10T00:00:00Z'),
     });
@@ -249,7 +249,7 @@ describe('local bug-report export', () => {
     await expect(archiveReport({ reportId: 'report_123', issueUrl: receipt.url, root })).resolves.toEqual(receipt);
     await expect(archiveReport({
       reportId: 'report_123',
-      issueUrl: 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/201',
+      issueUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/201',
       root,
     })).rejects.toThrow('conflicting receipt');
   });
@@ -259,7 +259,7 @@ describe('local bug-report export', () => {
     await writeFile(path.join(root, 'inbox/report_123/github-issue.json'), 'existing');
     await expect(archiveReport({
       reportId: 'report_123',
-      issueUrl: 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/200',
+      issueUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/200',
       root,
     })).rejects.toThrow();
   });
@@ -290,7 +290,7 @@ describe('local bug-report export', () => {
   });
 
   const LEDGER = 'imported-ledger.jsonl';
-  const ISSUE_200 = 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/200';
+  const ISSUE_200 = 'https://github.com/nathanjohnpayne/fiveacross/issues/200';
 
   it('durable dedupe: skips a report recorded in the committed ledger even with no local inbox/imported tree', async () => {
     // Simulate a fresh clone or deleted worktree: only the committed ledger
@@ -364,7 +364,7 @@ describe('local bug-report export', () => {
 
     await expect(archiveReport({
       reportId: 'report_123',
-      issueUrl: 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/201',
+      issueUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/201',
       root,
     })).rejects.toThrow('Ledger has a conflicting receipt');
 

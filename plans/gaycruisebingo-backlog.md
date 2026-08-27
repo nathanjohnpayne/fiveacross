@@ -155,7 +155,7 @@ Each expands into a full templated issue body (`scripts/gh-projects/examples/gay
 
 ### Phase 2—Hardening (post-launch)
 
-Epic [#131](https://github.com/nathanjohnpayne/gaycruisebingo/issues/131). The post-launch server-side hardening pass, added 2026-07-09. Context that supersedes the Wave-4 rows above: the Phase-1 backend infra has largely merged—`w4-infra-blaze-budget` (#46), `w4-infra-domain` (#45), and the server-authoritative report-count auto-hide from `w4-phase1-functions` (#43 → PR #127, `functions/src/autohide.ts`) are all **Done**. Cloud Vision (`moderateProof`) was then deliberately **gated off** by a human decision ([#126](https://github.com/nathanjohnpayne/gaycruisebingo/issues/126) → PR #128—an off-by-default `ENABLE_VISION_MODERATION` flag, `functions/src/visionGate.ts`) so the #101 email notifiers could deploy without `moderateProof`'s us-central1/us-east1 region mismatch blocking the whole `functions/` deploy. This epic re-enables Vision and finishes hardening; `w4-app-check` moved here from `epic-backend`.
+Epic [#131](https://github.com/nathanjohnpayne/fiveacross/issues/131). The post-launch server-side hardening pass, added 2026-07-09. Context that supersedes the Wave-4 rows above: the Phase-1 backend infra has largely merged—`w4-infra-blaze-budget` (#46), `w4-infra-domain` (#45), and the server-authoritative report-count auto-hide from `w4-phase1-functions` (#43 → PR #127, `functions/src/autohide.ts`) are all **Done**. Cloud Vision (`moderateProof`) was then deliberately **gated off** by a human decision ([#126](https://github.com/nathanjohnpayne/fiveacross/issues/126) → PR #128—an off-by-default `ENABLE_VISION_MODERATION` flag, `functions/src/visionGate.ts`) so the #101 email notifiers could deploy without `moderateProof`'s us-central1/us-east1 region mismatch blocking the whole `functions/` deploy. This epic re-enables Vision and finishes hardening; `w4-app-check` moved here from `epic-backend`.
 
 **p2-vision-proof** *(needs-phase-4, phase-2, Blaze)*—The **producer** half of Cloud Vision: reverse the #126 deferral. Resolve the us-central1/us-east1 region mismatch so `moderateProof` validates, enable the Cloud Vision API, set `ENABLE_VISION_MODERATION=true` in `functions/.env.<projectId>`, deploy and verify SafeSearch on a real Proof upload—extreme/illegal-only, never raciness—plus the `sharp` thumbnail. `moderateProofHandler` logic is unchanged. Files: `functions/src/index.ts` (`:40` handler, `:81` gated export), `functions/.env.<projectId>`, `docs/app/phase-1-deploy.md`, `specs/cloud-vision-proof.md`.
 
@@ -228,7 +228,7 @@ Epic [#131](https://github.com/nathanjohnpayne/gaycruisebingo/issues/131). The p
 
 ## Slug → issue number map
 
-Created 2026-07-07 on [Project #7](https://github.com/users/nathanjohnpayne/projects/7) / [issues](https://github.com/nathanjohnpayne/gaycruisebingo/issues). Ready queue: **#8, #16, #17**.
+Created 2026-07-07 on [Project #7](https://github.com/users/nathanjohnpayne/projects/7) / [issues](https://github.com/nathanjohnpayne/fiveacross/issues). Ready queue: **#8, #16, #17**.
 
 | Epic | # | Children (slug → #) |
 |---|---|---|
