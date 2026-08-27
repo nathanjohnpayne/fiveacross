@@ -85,7 +85,7 @@ Phase 0 (pre-cruise MVP) is deliberately Cloud Functions-free: each player write
 
 ## Appendix
 
-- **Repo:** `nathanjohnpayne/fiveacross` — see `README.md`, `docs/architecture/`, and `DEPLOYMENT.md`. Phase 1 backend deploy steps live in the repo's Phase 1 guide.
+- **Repo:** `nathanjohnpayne/gaycruisebingo` — see `README.md`, `docs/architecture/`, and `DEPLOYMENT.md`. Phase 1 backend deploy steps live in the repo's Phase 1 guide.
 - **Fallback:** printed 12-card PDF (neon) and the single interactive HTML card.
 - **Seed pool (33):** Threesome · Foursome · Fivesome · Propositioned by septuagenarians · Suite orgy · Domestic violence · Dance-floor blowjob · Locked in a bathroom · Loses passport · Make OnlyFans content on a boat · Make LinkedIn content on a boat · Make out with Patti LuPone · Scabies · 3 loads in one day · Bang a Dutch person · Passaround party Norwegian · Complain about Circuit Music (free space) · Poppers spill · 30-year age gap · Dance-floor k-hole · Cafeteria k-hole · Make out with a woman · 3-way kiss · Cause an international incident · Wear a sissy skirt · Loudly announce you're going to bed early · Karaoke "Fergalicious" · Eat carbs · Become Dick Deck famous · Post butthole pic to Telegram · Use a condom · Mirror-hall selfie · Snort powder off a cock.
 - **Themes (8):** Get Sporty · Duty Free · Glamiators · Neon Playground (default) · Summer White · Dog Tag T-Dance · Revival Disco · Seriously Pink.

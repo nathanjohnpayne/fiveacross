@@ -60,12 +60,26 @@ function validateLedgerEntry(entry, lineNumber) {
   return normalizeReceipt(entry, prefix);
 }
 
+// The two slugs ISSUE_URL accepts are aliases for ONE repository, so a receipt
+// written under either names the same issue. Compare canonicalized URLs: a raw
+// byte comparison reads an old-slug ledger row and the documented new-slug URL
+// for the same issue as a conflict, aborting the idempotent stale-inbox cleanup
+// that retry path exists to perform. Canonicalizing preserves the property the
+// conflict checks are for — a DIFFERENT issue number still differs.
+const CANONICAL_REPO_SLUG = 'fiveacross';
+function canonicalIssueUrl(url) {
+  const match = ISSUE_URL.exec(String(url ?? ''));
+  return match ? `https://github.com/nathanjohnpayne/${CANONICAL_REPO_SLUG}/issues/${match[1]}` : String(url ?? '');
+}
+
 function sameReceipt(a, b) {
-  return a.reportId === b.reportId && a.issue === b.issue && a.url === b.url && a.importedAt === b.importedAt;
+  return a.reportId === b.reportId && a.issue === b.issue
+    && canonicalIssueUrl(a.url) === canonicalIssueUrl(b.url) && a.importedAt === b.importedAt;
 }
 
 function sameIssueTarget(a, b) {
-  return a.reportId === b.reportId && a.issue === b.issue && a.url === b.url;
+  return a.reportId === b.reportId && a.issue === b.issue
+    && canonicalIssueUrl(a.url) === canonicalIssueUrl(b.url);
 }
 
 /**

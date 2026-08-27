@@ -710,7 +710,8 @@ phase_4b_automation:
   # Reset to the manual-handoff default by the bootstrap mirror
   # (#628): a new repo opts in to local reviewer-CLI automation
   # explicitly, after validating plan-logins on its own machine.
-  # Enabled 2026-07-19 for gaycruisebingo: collect-enablement-evidence.sh
+  # Enabled 2026-07-19 for this repository (then named gaycruisebingo; renamed
+  # fiveacross 2026-08-27): collect-enablement-evidence.sh
   # reported READY (codex-cli 0.143.0 auth_mode=chatgpt; Claude Code
   # 2.1.214 apiProvider=firstParty; no API-key env vars set).
   # Independent live Claude-adapter evidence: exact-head APPROVED review from

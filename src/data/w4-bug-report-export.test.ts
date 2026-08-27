@@ -291,6 +291,7 @@ describe('local bug-report export', () => {
 
   const LEDGER = 'imported-ledger.jsonl';
   const ISSUE_200 = 'https://github.com/nathanjohnpayne/fiveacross/issues/200';
+  const ISSUE_200_OLD_SLUG = 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/200';
 
   it('durable dedupe: skips a report recorded in the committed ledger even with no local inbox/imported tree', async () => {
     // Simulate a fresh clone or deleted worktree: only the committed ledger
@@ -381,6 +382,51 @@ describe('local bug-report export', () => {
 
     expect(receipt).toEqual(ledgerReceipt);
     expect(JSON.parse(await readFile(path.join(root, 'imported/report_123/github-issue.json'), 'utf8'))).toEqual(ledgerReceipt);
+  });
+
+  // --- repository-rename compatibility (gaycruisebingo -> fiveacross) -------
+  // Every one of the 11 committed ledger rows predates the rename and carries the
+  // old slug, and ISSUE_URL accepts both. These pin the three behaviours that
+  // compatibility has to have, none of which the new-slug fixtures above exercise.
+
+  it('accepts an old-slug ledger receipt written before the repository rename', async () => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const oldSlugReceipt = { reportId: 'report_123', issue: 200, url: ISSUE_200_OLD_SLUG, importedAt: '2026-07-10T00:00:00.000Z' };
+    await writeFile(path.join(root, LEDGER), `${JSON.stringify(oldSlugReceipt)}\n`);
+
+    const receipt = await archiveReport({ reportId: 'report_123', issueUrl: ISSUE_200_OLD_SLUG, root });
+
+    expect(receipt).toEqual(oldSlugReceipt);
+  });
+
+  it('treats the old and new repository slugs as aliases for the same issue on retry', async () => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    // The durable ledger row is pre-rename; the retry uses the documented new-slug
+    // URL for the SAME issue. A byte-for-byte URL comparison read this as a
+    // conflicting receipt and aborted the idempotent stale-inbox cleanup.
+    const oldSlugReceipt = { reportId: 'report_123', issue: 200, url: ISSUE_200_OLD_SLUG, importedAt: '2026-07-10T00:00:00.000Z' };
+    await writeFile(path.join(root, LEDGER), `${JSON.stringify(oldSlugReceipt)}\n`);
+
+    const receipt = await archiveReport({ reportId: 'report_123', issueUrl: ISSUE_200, root });
+
+    expect(receipt).toEqual(oldSlugReceipt);
+    expect(JSON.parse(await readFile(path.join(root, 'imported/report_123/github-issue.json'), 'utf8'))).toEqual(oldSlugReceipt);
+  });
+
+  it('still rejects a different issue across the slug aliases, so alias-equality does not mask a real conflict', async () => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    await writeFile(
+      path.join(root, LEDGER),
+      `${JSON.stringify({ reportId: 'report_123', issue: 200, url: ISSUE_200_OLD_SLUG, importedAt: '2026-07-10T00:00:00.000Z' })}\n`,
+    );
+
+    await expect(archiveReport({
+      reportId: 'report_123',
+      issueUrl: 'https://github.com/nathanjohnpayne/fiveacross/issues/201',
+      root,
+    })).rejects.toThrow('Ledger has a conflicting receipt');
+
+    await expect(stat(path.join(root, 'inbox/report_123'))).resolves.toBeDefined();
   });
 
   it('ledger append is idempotent and self-heals a pre-ledger import on re-archive', async () => {
