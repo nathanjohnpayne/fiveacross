@@ -111,7 +111,7 @@ jobs:
           # Repos with many bot/gate workflows blow past that easily —
           # each re-dispatches on every PR event.
           #
-          # Concrete failure: nathanjohnpayne/fiveacross PR #524, head
+          # Concrete failure: nathanjohnpayne/gaycruisebingo PR #524, head
           # fa6ccdbb724ae2ba77d917371eb6ab243e0a68a0, accumulated 143
           # check-runs (128 when first diagnosed). The `lint` run this
           # function waits for had ALREADY succeeded, but sorted onto page
