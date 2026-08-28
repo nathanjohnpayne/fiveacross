@@ -3,7 +3,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/gaycruisebingo.md
-source_ref: b0e2fc9
+source_ref: 9a5ae82
 project: gaycruisebingo
 document_class: prd
 document_slug: gaycruisebingo
