@@ -168,28 +168,27 @@ const mount = () =>
   );
 const signInUser = () => act(async () => void (await emitAuth(FAKE_USER)));
 
-// This project's jsdom is configured with no `url`, so jsdom leaves
-// `localStorage` UNSET — sessionStorage exists, localStorage does not (the same
-// quirk `src/data/hostnames.test.ts` documents). The redirect acknowledgement
-// record lives in localStorage precisely because it must survive the
-// partitioning that drops sessionStorage (#346), so the suite supplies the
-// browser API the environment omits rather than asserting around its absence.
-if (typeof localStorage === 'undefined') {
-  const store = new Map<string, string>();
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, String(v)),
-      removeItem: (k: string) => void store.delete(k),
-      clear: () => store.clear(),
-      key: (index: number) => Array.from(store.keys())[index] ?? null,
-      get length() {
-        return store.size;
-      },
+// Install one controllable Storage seam in every runner. This project's
+// default jsdom setup leaves `localStorage` unset, while other runners may
+// expose a Web IDL Storage object whose methods cannot be shadowed on the
+// instance. The race tests must intercept `removeItem` in both environments,
+// so relying on whichever host object happens to exist would let the same test
+// either miss its intended interleaving or fail before exercising production
+// code.
+const store = new Map<string, string>();
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
     },
-  });
-}
+  },
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
