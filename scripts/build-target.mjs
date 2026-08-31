@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { parse } from 'dotenv';
+import { isRegisteredEdition } from '../src/edition-registry.mjs';
 
 export const REQUIRED_NONBLANK_PRODUCTION_VITE_KEYS = Object.freeze([
   'VITE_FIREBASE_API_KEY',
@@ -104,6 +105,12 @@ export function validateTargetOperationalMetadata(target, config) {
     (typeof config.staticFallbackEdition !== 'string' || !config.staticFallbackEdition.trim())
   ) {
     throw new Error(`Refusing target ${target}: staticFallbackEdition must be a nonblank Edition id.`);
+  }
+  if (
+    config.staticFallbackEdition !== undefined &&
+    !isRegisteredEdition(config.staticFallbackEdition)
+  ) {
+    throw new Error(`Refusing target ${target}: staticFallbackEdition must name a registered Edition id.`);
   }
   // Required rather than defaulted (#768). An omitted skipInvokerReconcile
   // reads as `false`, which is the DANGEROUS default for a new target: it

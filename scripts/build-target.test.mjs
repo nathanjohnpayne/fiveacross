@@ -127,19 +127,41 @@ describe('build target selection', () => {
     ).toThrow('Missing: VITE_EVENT_ID');
   });
 
-  it('rejects a Five Across target file that pins any Event', () => {
+  it('rejects any pinned Five Across Event independently of Edition mismatch', () => {
     expect(() =>
       buildEnvironment(
         'fiveacross',
         {
           ...FIVEACROSS_TARGET_ENV,
           VITE_EVENT_ID: 'bodega-bay-2026',
+          VITE_EDITION: 'vacay',
         },
         {},
         REQUIRED_VITE_KEYS,
       ),
-    ).toThrow('VITE_EVENT_ID=""');
+    ).toThrow('Set: VITE_EVENT_ID="".');
   });
+
+  it.each([
+    ['wrong', 'gcb'],
+    ['blank', ''],
+  ])(
+    'aggregates the expected Event and Edition when a Five Across target pins an Event with a %s Edition',
+    (_kind, edition) => {
+      expect(() =>
+        buildEnvironment(
+          'fiveacross',
+          {
+            ...FIVEACROSS_TARGET_ENV,
+            VITE_EVENT_ID: 'bodega-bay-2026',
+            VITE_EDITION: edition,
+          },
+          {},
+          REQUIRED_VITE_KEYS,
+        ),
+      ).toThrow('Set: VITE_EVENT_ID="", VITE_EDITION="vacay".');
+    },
+  );
 
   it('rejects a Five Across target file without the registered central auth origin', () => {
     expect(() =>
@@ -328,6 +350,17 @@ describe('build target selection', () => {
         staticFallbackEdition: '',
       }),
     ).toThrow('staticFallbackEdition');
+  });
+
+  it('rejects an unknown static fallback Edition', () => {
+    expect(() =>
+      validateTargetOperationalMetadata('future', {
+        syntheticUrl: 'https://future.example/',
+        skipCloudflarePurge: true,
+        skipInvokerReconcile: true,
+        staticFallbackEdition: 'vacayy',
+      }),
+    ).toThrow('staticFallbackEdition must name a registered Edition id');
   });
 
   it('requires every registered target to state its invoker-reconciliation choice (#768)', () => {

@@ -22,16 +22,22 @@
 // with an explicit Edition id.
 
 import type { EditionBrand, EditionLexicon } from './types';
+import {
+  assertEditionRegistryParity,
+  EDITION_IDS,
+  isRegisteredEdition,
+} from './edition-registry.mjs';
+import type { EditionId } from './edition-registry.mjs';
 export type { EditionBrand, EditionLexicon } from './types';
 
 // An Edition is a dialect as well as a name. Token skeletons and whole-string
 // overrides live in the table below; their shared shape lives in `src/types.ts`
 // with the rest of the app's cross-consumer contracts.
 
-export const DEFAULT_EDITION = 'gcb';
+export const DEFAULT_EDITION = EDITION_IDS.GAY_CRUISE_BINGO;
 
-const BRANDS: Record<string, EditionBrand> = {
-  gcb: {
+const BRANDS: Record<EditionId, EditionBrand> = {
+  [EDITION_IDS.GAY_CRUISE_BINGO]: {
     wordmark: 'GAY CRUISE BINGO',
     wordmarkBold: 'BINGO',
     // The platform endorsement line, carried here since #688. It is an
@@ -117,7 +123,7 @@ const BRANDS: Record<string, EditionBrand> = {
     updateToastTitle: 'A fresh build just docked',
     guidelinesScope: 'one sailing’s friend group',
   },
-  vacay: {
+  [EDITION_IDS.VACAY_BINGO]: {
     wordmark: 'VACAY BINGO',
     wordmarkBold: 'BINGO',
     // The platform endorsement line the wireframes draw under every in-app
@@ -197,7 +203,7 @@ const BRANDS: Record<string, EditionBrand> = {
   // cell, behind concrete and structural steel, drops signal more reliably than
   // a ship does — congestion and physical barriers, which the player experiences
   // identically as "no bars".
-  fiveacross: {
+  [EDITION_IDS.FIVE_ACROSS]: {
     wordmark: 'FIVE ACROSS',
     // "FIVE **ACROSS**" — the second word, matching how the other two Editions
     // bold their own last word (#602). The wordmark IS the mechanic here, so the
@@ -261,6 +267,11 @@ const BRANDS: Record<string, EditionBrand> = {
   },
 };
 
+// The declaration-backed Record catches TypeScript drift; this runtime parity
+// check also catches a new ID added to edition-registry.mjs without a matching
+// declaration/BRANDS change, before a lookup could silently fall back to GCB.
+assertEditionRegistryParity(Object.keys(BRANDS));
+
 /**
  * The resolved Edition for this session — the ONLY copy of it (#580).
  *
@@ -309,8 +320,8 @@ export function activeEdition(): string {
  * `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: this program
  * targets ES2021, where `Object.hasOwn` is not in `lib`.
  */
-function isKnownEdition(edition: string | null | undefined): boolean {
-  return typeof edition === 'string' && Object.prototype.hasOwnProperty.call(BRANDS, edition);
+function isKnownEdition(edition: string | null | undefined): edition is EditionId {
+  return isRegisteredEdition(edition) && Object.prototype.hasOwnProperty.call(BRANDS, edition);
 }
 
 /** Install the resolved Edition. A falsy or unknown value resets to the legacy
@@ -435,7 +446,7 @@ export const CANONICAL_NAMESPACE_APEX = 'fiveacross.app';
 // provisioner. Edition ids reach this table from imported and hand-edited
 // drafts, so "unrecognized" is not a hypothetical input class.
 const ALTERNATE_NAMESPACE_APEX: Partial<Record<string, string>> = Object.assign(Object.create(null), {
-  vacay: 'vacaybingo.com',
+  [EDITION_IDS.VACAY_BINGO]: 'vacaybingo.com',
 });
 
 /** `null` when `edition` owns no alternate Namespace — see
