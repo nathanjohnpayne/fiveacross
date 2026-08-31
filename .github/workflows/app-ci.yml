@@ -79,7 +79,7 @@ jobs:
       # CLI is a devDependency (firebase-tools), so the `npm ci` above already
       # put the `firebase` binary on npm's script PATH.
       - name: Set up Java (Firestore emulator runtime)
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
