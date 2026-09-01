@@ -19,9 +19,9 @@ import type { EventDoc, PlayerDoc } from '../types';
 // Card affordance issue #36 adds is covered separately in
 // src/components/w2-share-cards.test.tsx — useEventDoc is stubbed here only
 // so Leaderboard's render doesn't crash on the added hook call, and
-// ../analytics is stubbed only because Leaderboard now imports `track` (its
-// real module imports ../firebase, which initializes a real Firebase app —
-// unnecessary and unsafe for a suite that never asserts on tracking).
+// ../analytics and ../firebase are stubbed because Leaderboard imports both
+// directly for Event-scoped share tracking; a presentational suite must not
+// initialize the real Firebase app.
 
 const H = vi.hoisted(() => ({
   players: [] as PlayerDoc[],
@@ -30,6 +30,7 @@ const H = vi.hoisted(() => ({
 }));
 
 vi.mock('../analytics', () => ({ track: vi.fn() }));
+vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
 vi.mock('../hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs (no pinned honors).
   useDayMeta: () => ({ data: null, loading: false, hasServerData: true }),
