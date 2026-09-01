@@ -12,15 +12,18 @@
 spec_test_map:
   # auth-handoff-client's coverage is module-named (the mode/strategy table, the
   # transaction store, the boundary primitives, the two callable legs, the
-  # client/server parity pin, the central-origin page, the two new failure
-  # screens, the allowlist entry for the central auth origin, the production
-  # target composition, and its fail-closed deploy prerequisite), so none of
-  # them share the spec basename — map them all explicitly.
+  # client/server parity pin, the exact-session attestation bridge and provider
+  # adoption, the central-origin page, the two new failure screens, the allowlist
+  # entry for the central auth origin, the production target composition, and
+  # its fail-closed deploy prerequisite), so none of them share the spec basename
+  # — map them all explicitly.
   auth-handoff-client:
     - src/auth/authMode.test.ts
     - src/auth/handoffTransaction.test.ts
     - src/auth/handoffClient.test.ts
     - src/auth/handoffExchange.test.ts
+    - src/auth/handoffAttestation.test.ts
+    - src/auth/AuthContext.test.tsx
     - src/auth/handoff-parity.test.ts
     - src/auth/AuthHandoffOrigin.test.tsx
     - src/components/event-not-found-auth-reasons.test.tsx

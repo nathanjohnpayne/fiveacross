@@ -19,8 +19,8 @@ import {
   type Auth,
 } from 'firebase/auth';
 import { app, auth, firebaseEmulatorsEnabled, functions } from '../firebase';
-import { attestAdult } from '../data/api';
 import { recordHandoffFailure, type HandoffRequest } from './handoffClient';
+import { debugHandoff, rememberHandoffAttestation } from './handoffAttestation';
 import {
   createVerifier,
   forgetHandoffTransaction,
@@ -49,15 +49,6 @@ export const HANDOFF_EXCHANGE_TIMEOUT_MS = 15_000;
 function emulatorUrl({ protocol, host, port }: NonNullable<Auth['emulatorConfig']>): string {
   const authority = port === null ? host : `${host}:${port}`;
   return `${protocol}://${authority}`;
-}
-
-/** Fixed-text diagnostics only; logging must never become an auth dependency. */
-function debugHandoff(message: string): void {
-  try {
-    console.debug(`[auth-handoff] ${message}`);
-  } catch {
-    // Diagnostics never block authentication.
-  }
 }
 
 /**
@@ -120,11 +111,26 @@ function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+/** A monotonic clock keeps a wall-clock correction from extending the budget. */
+function deadlineNow(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
+function requireTimeRemaining(deadlineAt: number): void {
+  if (deadlineNow() >= deadlineAt) throw new Error('handoff-timeout');
+}
+
 /** Start `work` only while the shared pre-commit deadline still has time. */
 function beforeDeadline<T>(deadlineAt: number, work: () => Promise<T>): Promise<T> {
-  const remainingMs = deadlineAt - Date.now();
+  const remainingMs = deadlineAt - deadlineNow();
   if (remainingMs <= 0) return Promise.reject(new Error('handoff-timeout'));
-  return bounded(work(), remainingMs);
+  return bounded(work(), remainingMs).then((value) => {
+    // Promise fulfillment and a due timer can share one task turn. The work's
+    // reaction may win that scheduling race even though the budget is already
+    // exhausted, so enforce the deadline again before any shared mutation.
+    requireTimeRemaining(deadlineAt);
+    return value;
+  });
 }
 
 /**
@@ -184,7 +190,7 @@ export async function completeAuthHandoff(input: {
   timeoutMs?: number;
 }): Promise<boolean> {
   const timeoutMs = input.timeoutMs ?? HANDOFF_EXCHANGE_TIMEOUT_MS;
-  const preCommitDeadline = Date.now() + timeoutMs;
+  const preCommitDeadline = deadlineNow() + timeoutMs;
   const transaction = readHandoffTransaction(input.now ?? Date.now());
   if (transaction === null) {
     forgetHandoffTransaction();
@@ -250,6 +256,10 @@ export async function completeAuthHandoff(input: {
     );
     // This is the only shared-auth mutation. A credential that arrives after
     // the bound never reaches this line, even if another tab has since signed in.
+    // Recheck at the mutation boundary itself: awaiting `beforeDeadline` adds one
+    // final promise hop after its fulfillment check, and that hop can consume the
+    // last fraction of the budget.
+    requireTimeRemaining(preCommitDeadline);
     try {
       await updateCurrentUser(auth, credential.user);
     } catch (error) {
@@ -261,13 +271,19 @@ export async function completeAuthHandoff(input: {
       if (!isSameAuthSession(auth.currentUser, credential.user)) throw error;
       debugHandoff('primary persistence rejected after the session entered memory');
     }
+    // AuthProvider does not exist yet. Hand the exact promoted session its
+    // collected checkbox so the provider can run the existing optimistic /
+    // committed attestation state machine before its server bootstrap begins.
+    // Nothing network-bound is added back to this pre-mount return path.
     if (transaction.acknowledgedAdultContent) {
-      // Authentication already succeeded. Attestation is independent work: a
-      // failure or timeout leaves the profile unstamped so AuthProvider's
-      // existing re-prompt can collect it again, without delaying first render.
-      void bounded(attestAdult(credential.user), timeoutMs).catch(() =>
-        debugHandoff('adult attestation did not settle'),
-      );
+      let staged = false;
+      try {
+        staged = rememberHandoffAttestation(credential.user);
+      } catch {
+        // The shared session is already live. A bridge failure falls back to the
+        // ordinary settled-profile re-prompt rather than falsifying sign-in.
+      }
+      if (!staged) debugHandoff('adult attestation handoff could not be staged');
     }
     return true;
   } catch {

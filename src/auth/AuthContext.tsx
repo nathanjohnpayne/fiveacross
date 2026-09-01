@@ -22,6 +22,7 @@ import { adultContentRequired } from '../adultContent';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { firebaseAuthOriginRedirectUrl } from '../canonical-redirect';
 import { consumePostUpdateDealGrace } from '../postUpdateDeal';
+import { consumeHandoffAttestation, debugHandoff } from './handoffAttestation';
 import SignIn from '../components/SignIn';
 import ConfirmWinMoments from '../components/ConfirmWinMoments';
 import RetractWinMoments from '../components/RetractWinMoments';
@@ -738,7 +739,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // re-prompt — creating durable rows for an un-attested User. This flag holds the
   // deal until the authoritative read confirms the stamp. Re-armed false per auth
   // change; never set true offline (the cache lift is provisional).
-  const [attestedAuthoritative, setAttestedAuthoritative] = useState(false);
+  const [attestedAuthoritative, setAttestedAuthoritativeState] = useState(false);
   // Whether the online bootstrap SUCCEEDED, as distinct from having SETTLED
   // (Codex P2 on #615). `profileReady` is true after a bootstrap FAILURE too —
   // that is its contract, and every consumer that renders on it is right to.
@@ -756,14 +757,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // when the Event turns adult under an open tab, and only a subscription
   // makes that happen.
   const attestationRequired = useAdultContent();
-  // A ref mirror of `attestedAuthoritative` so async code (attest()'s catch) can
-  // read the LATEST value without a stale closure (Codex #117 round 9, finding B):
-  // the attest-failure rollback must NOT downgrade a User the bootstrap already
-  // SERVER-CONFIRMED as attested. Synced from state below.
+  // A synchronously maintained mirror of `attestedAuthoritative` so async code
+  // can read the latest authority in the SAME task that grants or revokes it.
+  // A passive state-mirroring effect is too late: an adopted attestation write
+  // can reject after bootstrap confirms the server stamp but before that effect,
+  // and must not roll the confirmed User back to the re-prompt.
   const attestedAuthoritativeRef = useRef(false);
-  useEffect(() => {
-    attestedAuthoritativeRef.current = attestedAuthoritative;
-  }, [attestedAuthoritative]);
+  const setAttestedAuthoritative = useCallback((next: boolean) => {
+    attestedAuthoritativeRef.current = next;
+    setAttestedAuthoritativeState(next);
+  }, []);
   // Monotonic id of the latest deal attempt; runDeal captures it and re-checks
   // before each setState so a superseded attempt's late result is dropped (P2).
   const dealAttemptRef = useRef(0);
@@ -1261,7 +1264,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfileReady(true);
     // Online gate resolved — release the "Loading…" hold and render (finding B).
     setLoading(false);
-  }, [failDeal, clearDealError]);
+  }, [failDeal, clearDealError, setAttestedAuthoritative]);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (u) => {
@@ -1279,6 +1282,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // shape of an unrelated cross-tab collision.
       const isFirstAuthSettle = firstAuthSettleRef.current;
       firstAuthSettleRef.current = false;
+      // A handoff acknowledgement belongs only to this mount's first Auth
+      // settle. Consume it even when that settle is null or a different session,
+      // so a cross-tab replacement cannot leave authority waiting in memory for
+      // some later account transition.
+      const adoptHandoffAttestation = isFirstAuthSettle && consumeHandoffAttestation(u);
       // Auth changed: retire the previous account's in-flight deal/bootstrap and
       // clear its stale state so a late result can't clobber the incoming User (P2).
       authUidRef.current = u?.uid ?? null;
@@ -1308,6 +1316,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Signed out → App renders SignIn, never "Loading…".
         setLoading(false);
         return undefined;
+      }
+      // The pre-mount handoff return can collect the same 18+ acknowledgement
+      // as SignIn, but AuthProvider does not exist yet when that return completes.
+      // Adopt only an exact uid + refresh-token match into THIS provider's normal
+      // optimistic/committed state machine before bootstrap starts. Calling the
+      // async function starts its synchronous optimistic prefix immediately, so
+      // a fast authoritative server-null cannot permanently win while the write
+      // is still pending; the existing success/failure arms then grant authority
+      // or restore the re-prompt without delaying mount.
+      if (adoptHandoffAttestation) {
+        void persistAttestation(u, { diagnoseHandoffFailure: true });
       }
       // Signal (b), #346: the durable pending record proves a redirect was
       // actually started, so a User publishing HERE — even with no
@@ -1364,22 +1383,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // an onAuthStateChanged callback's return value).
       return bootstrapUser(u, profileAttempt);
     });
-    // `completeRedirectReturn` (referenced above; `peekRedirectPending` is a
-    // module-level function, not a hook value, so it needs no entry here) is
-    // deliberately NOT in this array, and is safe to omit: it is declared
-    // further down this same function body (after `persistAttestation`), so
-    // putting it here would evaluate a `const` before its own declaration
-    // line runs. That is safe ONLY because the reference above lives inside
-    // this callback, which React does not invoke until after the whole
-    // component function — including that later declaration — has finished
-    // executing for this render; by then it is assigned. Listing it here
-    // would additionally re-subscribe onAuthStateChanged on every identity
-    // change of it, which is exactly the subscription churn
-    // `redirectReturnPendingRef` (above) exists to avoid for the same
-    // callback — and unnecessary besides, since neither closes over anything
-    // but refs, other stable callbacks, and React's own always-stable setState
-    // functions.
-  }, [bootstrapUser, clearDealError, handoffSignedOutWebApp]);
+    // `persistAttestation` and `completeRedirectReturn` are deliberately NOT in
+    // this array. Both are declared further down this same component body, so
+    // listing either here would evaluate a `const` before its declaration. The
+    // references above are safe because the effect callback cannot run until the
+    // complete render has assigned both stable callbacks. Re-subscribing on every
+    // callback identity change would also recreate the auth-listener churn that
+    // `redirectReturnPendingRef` exists to avoid.
+  }, [bootstrapUser, clearDealError, handoffSignedOutWebApp, setAttestedAuthoritative]);
 
   // Mirror connectivity into React state AND complete the DEFERRED offline
   // bootstrap when the network returns (#115). `online` flipping true re-runs the
@@ -1448,7 +1459,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('online', goOnline);
       window.removeEventListener('offline', goOffline);
     };
-  }, [bootstrapUser]);
+  }, [bootstrapUser, setAttestedAuthoritative]);
 
   // Deal a Board once the User is known; failures surface via `dealError` so
   // App renders a retry surface, not a blank Board. `dealError` is replaced only
@@ -1745,7 +1756,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       failDeal(err);
       setDealing(false);
     }
-  }, [failDeal, clearDealError]);
+  }, [failDeal, clearDealError, setAttestedAuthoritative]);
 
   // Retry the current User's path to a dealt Board, in place (no reload). The
   // manual retry must honor the SAME write-safety gate as the automatic deal
@@ -1782,44 +1793,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the
   // write acks, so a slow write never re-shows the prompt the User just satisfied;
-  // a failed write stays optimistically attested for the session and re-attempts
-  // on the next sign-in (honor-system self-statement, never a hard gate).
-  const persistAttestation = useCallback(async (u: User) => {
-    // OPTIMISTIC-UI tier (#23, Finding 3): record + flip attested true BEFORE the
-    // write so a later auth-state callback can never settle a re-prompt on a stale
-    // read, and the UI proceeds with no flicker. This does NOT grant deal authority.
-    attestedUidsRef.current.add(u.uid);
-    setAttested(true);
-    try {
-      // Pass the full User so a create-race win writes the COMPLETE profile, not
-      // just the stamp (Finding 2).
-      await attestAdult(u);
-      // DURABLE-AUTHORITY tier (round 7): the write COMMITTED — a durable
-      // users/{uid}.attestedAdultAt now exists — so this same-session attest is
-      // authoritative and may fire the deal. Grant it ONLY here, in the success
-      // path, and only if this is still the current User (a sign-out/switch during
-      // the await already re-armed the flag false). Never before the commit: an
-      // optimistic pre-commit lift is UI-only.
-      attestCommittedUidsRef.current.add(u.uid);
-      if (auth.currentUser?.uid === u.uid) setAttestedAuthoritative(true);
-    } catch {
-      // The write REJECTED. Roll the OPTIMISTIC-ONLY lift back so a stranded
-      // first-time User (re-prompt dismissed, no authority, no board, stuck on
-      // "Dealing…") gets the re-prompt back to retry in session (round 8 finding A).
-      // BUT never downgrade a User the bootstrap already SERVER-CONFIRMED as
-      // attested (Codex #117 round 9, finding B): a returning User with a valid
-      // server stamp whose redundant signIn-attest transaction merely dropped the
-      // network must NOT be re-prompted despite authoritative proof. So roll back
-      // ONLY when this uid is NOT authoritatively attested (no server stamp, no
-      // committed attest). A never-resolving offline attest never reaches here, so
-      // the #112 offline-optimistic behavior and the no-flicker SUCCESS path are
-      // untouched.
-      if (auth.currentUser?.uid !== u.uid) return;
-      if (attestedAuthoritativeRef.current || attestCommittedUidsRef.current.has(u.uid)) return;
-      attestedUidsRef.current.delete(u.uid);
-      setAttested(false);
-    }
-  }, []);
+  // a rejected write rolls that lift back unless server or committed authority
+  // already exists, restoring the in-session re-prompt without granting a deal.
+  const persistAttestation = useCallback(
+    async (u: User, { diagnoseHandoffFailure = false }: { diagnoseHandoffFailure?: boolean } = {}) => {
+      // OPTIMISTIC-UI tier (#23, Finding 3): record + flip attested true BEFORE the
+      // write so a later auth-state callback can never settle a re-prompt on a stale
+      // read, and the UI proceeds with no flicker. This does NOT grant deal authority.
+      attestedUidsRef.current.add(u.uid);
+      setAttested(true);
+      try {
+        // Pass the full User so a create-race win writes the COMPLETE profile, not
+        // just the stamp (Finding 2).
+        await attestAdult(u);
+        // DURABLE-AUTHORITY tier (round 7): the write COMMITTED — a durable
+        // users/{uid}.attestedAdultAt now exists — so this same-session attest is
+        // authoritative and may fire the deal. Grant it ONLY here, in the success
+        // path, and only if this is still the current User (a sign-out/switch during
+        // the await already re-armed the flag false). Never before the commit: an
+        // optimistic pre-commit lift is UI-only.
+        attestCommittedUidsRef.current.add(u.uid);
+        if (auth.currentUser?.uid === u.uid) setAttestedAuthoritative(true);
+      } catch {
+        if (diagnoseHandoffFailure) debugHandoff('adult attestation did not settle');
+        // The write REJECTED. Roll the OPTIMISTIC-ONLY lift back so a stranded
+        // first-time User (re-prompt dismissed, no authority, no board, stuck on
+        // "Dealing…") gets the re-prompt back to retry in session (round 8 finding A).
+        // BUT never downgrade a User the bootstrap already SERVER-CONFIRMED as
+        // attested (Codex #117 round 9, finding B): a returning User with a valid
+        // server stamp whose redundant signIn-attest transaction merely dropped the
+        // network must NOT be re-prompted despite authoritative proof. So roll back
+        // ONLY when this uid is NOT authoritatively attested (no server stamp, no
+        // committed attest). A never-resolving offline attest never reaches here, so
+        // the #112 offline-optimistic behavior and the no-flicker SUCCESS path are
+        // untouched.
+        if (auth.currentUser?.uid !== u.uid) return;
+        if (attestedAuthoritativeRef.current || attestCommittedUidsRef.current.has(u.uid)) return;
+        attestedUidsRef.current.delete(u.uid);
+        setAttested(false);
+      }
+    },
+    [setAttestedAuthoritative],
+  );
 
   const attest = useCallback(async () => {
     const u = auth.currentUser;

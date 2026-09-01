@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   httpsCallable: vi.fn(),
   signInWithCustomToken: vi.fn(),
   updateCurrentUser: vi.fn(),
-  attestAdult: vi.fn(),
+  rememberHandoffAttestation: vi.fn(),
   firebaseEmulatorsEnabled: vi.fn(),
   primaryApp: { options: { apiKey: 'test-api-key', projectId: 'test-project' } },
   primaryAuth: {
@@ -46,7 +46,10 @@ vi.mock('../firebase', () => ({
   functions: {},
   firebaseEmulatorsEnabled: mocks.firebaseEmulatorsEnabled,
 }));
-vi.mock('../data/api', () => ({ attestAdult: mocks.attestAdult }));
+vi.mock('./handoffAttestation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./handoffAttestation')>()),
+  rememberHandoffAttestation: mocks.rememberHandoffAttestation,
+}));
 
 import { HANDOFF_FRAGMENT_KEY, consumeHandoffFailure } from './handoffClient';
 import { HANDOFF_EXCHANGE_TIMEOUT_MS, completeAuthHandoff, mintAuthHandoff } from './handoffExchange';
@@ -124,7 +127,7 @@ beforeEach(() => {
     (targetAuth as { currentUser: unknown }).currentUser = user;
     if (targetAuth === mocks.primaryAuth) mocks.persistedSession.user = user;
   });
-  mocks.attestAdult.mockReset().mockResolvedValue(undefined);
+  mocks.rememberHandoffAttestation.mockReset().mockReturnValue(true);
   mocks.firebaseEmulatorsEnabled.mockReset().mockReturnValue(false);
   mocks.primaryAuth.authStateReady.mockReset().mockResolvedValue(undefined);
   mocks.primaryAuth.currentUser = null;
@@ -261,23 +264,36 @@ describe('completeAuthHandoff', () => {
     expect(mocks.connectAuthEmulator).not.toHaveBeenCalled();
   });
 
-  it('persists a collected acknowledgement for the exact user returned by this handoff', async () => {
-    const returnedUser = { uid: 'handoff-user' };
+  it('stages a collected acknowledgement for the exact session returned by this handoff', async () => {
+    const returnedUser = { uid: 'handoff-user', refreshToken: 'handoff-refresh-token' };
     armTransaction({ acknowledgedAdultContent: true });
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
     mocks.signInWithCustomToken.mockResolvedValue({ user: returnedUser });
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
-    expect(mocks.attestAdult).toHaveBeenCalledOnce();
-    expect(mocks.attestAdult).toHaveBeenCalledWith(returnedUser);
+    expect(mocks.rememberHandoffAttestation).toHaveBeenCalledOnce();
+    expect(mocks.rememberHandoffAttestation).toHaveBeenCalledWith(returnedUser);
   });
 
-  it('does not attest when this handoff collected no acknowledgement', async () => {
+  it('does not turn a live session into sign-in-failed when attestation staging throws', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    armTransaction({ acknowledgedAdultContent: true });
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.rememberHandoffAttestation.mockImplementation(() => {
+      throw new Error('staging failed');
+    });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
+    expect(consumeHandoffFailure()).toBeNull();
+    expect(debug).toHaveBeenCalledWith('[auth-handoff] adult attestation handoff could not be staged');
+  });
+
+  it('does not stage attestation when this handoff collected no acknowledgement', async () => {
     armTransaction({ acknowledgedAdultContent: false });
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
-    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.rememberHandoffAttestation).not.toHaveBeenCalled();
   });
 
   it('cannot use an expired handoff acknowledgement', async () => {
@@ -290,7 +306,7 @@ describe('completeAuthHandoff', () => {
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(false);
     expect(exchange).not.toHaveBeenCalled();
-    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.rememberHandoffAttestation).not.toHaveBeenCalled();
   });
 
   it('cannot carry an abandoned acknowledgement into its replacement transaction', async () => {
@@ -299,21 +315,7 @@ describe('completeAuthHandoff', () => {
     callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
 
     expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
-    expect(mocks.attestAdult).not.toHaveBeenCalled();
-  });
-
-  it('keeps the successful session when the attestation write rejects', async () => {
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
-    armTransaction({ acknowledgedAdultContent: true });
-    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
-    mocks.attestAdult.mockRejectedValue(new Error('offline'));
-
-    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN })).toBe(true);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
-    expect(consumeHandoffFailure()).toBeNull();
-    expect(debug).toHaveBeenCalledWith('[auth-handoff] adult attestation did not settle');
+    expect(mocks.rememberHandoffAttestation).not.toHaveBeenCalled();
   });
 
   // "Delete it the moment the exchange completes or fails" — success included.
@@ -499,6 +501,41 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
     expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
   });
 
+  it('rejects an isolated sign-in that settles at the deadline before its timer callback runs', async () => {
+    let elapsedMs = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsedMs);
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.signInWithCustomToken.mockImplementation(async (targetAuth: unknown) => {
+      elapsedMs = 10;
+      return firebaseSignInResult(targetAuth, { uid: 'u1' });
+    });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
+  it('rechecks the deadline at the shared-auth mutation after the fulfillment hop', async () => {
+    let isolatedSignInSettled = false;
+    let postSignInClockReads = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => {
+      if (!isolatedSignInSettled) return 0;
+      postSignInClockReads += 1;
+      return postSignInClockReads === 1 ? 9 : 10;
+    });
+    armTransaction();
+    callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
+    mocks.signInWithCustomToken.mockImplementation(async (targetAuth: unknown) => {
+      isolatedSignInSettled = true;
+      return firebaseSignInResult(targetAuth, { uid: 'u1' });
+    });
+
+    expect(await completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 10 })).toBe(false);
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+    expect(consumeHandoffFailure()).toEqual({ reason: 'sign-in-failed' });
+  });
+
   it('does not start the exchange after Auth readiness consumes the whole deadline', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
@@ -516,36 +553,6 @@ describe('completeAuthHandoff is bounded against a hung network', () => {
     expect(exchange).not.toHaveBeenCalled();
     expect(mocks.signInWithCustomToken).not.toHaveBeenCalled();
   });
-
-  it(
-    'does not strand the authenticated app when the attestation write never settles',
-    async () => {
-      let finishAttestation: () => void = () => {
-        throw new Error('attestation has not started');
-      };
-      armTransaction(true);
-      callables({ exchangeAuthHandoff: vi.fn().mockResolvedValue({ data: { customToken: 'ct-1' } }) });
-      mocks.attestAdult.mockImplementation(
-        () =>
-          new Promise<void>((resolve) => {
-            finishAttestation = resolve;
-          }),
-      );
-
-      const completion = completeAuthHandoff({ code: CODE, origin: ORIGIN, timeoutMs: 100 });
-      const result = await Promise.race([
-        completion.then((value) => ({ kind: 'result' as const, value })),
-        new Promise<{ kind: 'late' }>((resolve) => setTimeout(() => resolve({ kind: 'late' }), 30)),
-      ]);
-
-      expect(result).toEqual({ kind: 'result', value: true });
-      expect(mocks.persistedSession.user).toEqual({ uid: 'u1' });
-      expect(consumeHandoffFailure()).toBeNull();
-      finishAttestation();
-      await Promise.resolve();
-    },
-    150,
-  );
 
   it('does not let isolated-app cleanup hold the app mount forever', async () => {
     armTransaction();
@@ -678,7 +685,7 @@ describe('late sign-in isolation is cross-tab safe', () => {
     await Promise.resolve();
     expect(mocks.persistedSession.user).toBe(newerUser);
     expect(mocks.updateCurrentUser).toHaveBeenCalledTimes(1);
-    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.rememberHandoffAttestation).not.toHaveBeenCalled();
   });
 
   it('leaves shared auth signed out when no newer attempt intervened', async () => {

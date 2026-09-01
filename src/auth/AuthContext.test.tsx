@@ -1,5 +1,6 @@
 import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   AUTH_BOOTSTRAP_TIMEOUT_MS,
@@ -14,6 +15,7 @@ import {
 // The mocked module instance (vi.mock below) — the fallback-handler test writes
 // a config slot onto it to observe the #340 authDomain override.
 import { auth as mockedAuth } from '../firebase';
+import { forgetHandoffAttestation, rememberHandoffAttestation } from './handoffAttestation';
 
 // Mock the Firebase boundary so the real AuthProvider runs under jsdom: the tests
 // drive the auth callback by hand and stub the data-layer deal.
@@ -65,6 +67,7 @@ vi.mock('../data/api', () => ({
 vi.mock('../analytics', () => ({ track: mocks.track }));
 
 const FAKE_USER = { uid: 'sailor-1', displayName: 'Sailor', photoURL: null };
+const HANDOFF_USER = { ...FAKE_USER, refreshToken: 'handoff-refresh-token' };
 
 // The auth-state callback AuthProvider registers; emitting a User through it
 // simulates Firebase resolving the Google popup.
@@ -78,6 +81,17 @@ function Harness() {
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       <button onClick={() => retryDeal()}>retry</button>
       <button onClick={() => void signIn(false)}>signin</button>
+    </div>
+  );
+}
+
+function AttestationHarness() {
+  const { canRenderEventContent, dealing, needsAttestation } = useAuth();
+  return (
+    <div>
+      <span data-testid="handoff-needs-attestation">{needsAttestation ? 'yes' : 'no'}</span>
+      <span data-testid="handoff-can-render">{canRenderEventContent ? 'yes' : 'no'}</span>
+      <span data-testid="handoff-dealing">{dealing ? 'yes' : 'no'}</span>
     </div>
   );
 }
@@ -193,6 +207,7 @@ Object.defineProperty(globalThis, 'localStorage', {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  forgetHandoffAttestation();
   emitAuth = () => {};
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
     emitAuth = cb;
@@ -216,6 +231,187 @@ beforeEach(() => {
   mocks.signInWithPopup.mockResolvedValue({});
   mocks.signInWithRedirect.mockResolvedValue(undefined);
   mocks.signOut.mockResolvedValue(undefined);
+});
+
+describe('handoff acknowledgement adoption', () => {
+  it('keeps a collected acknowledgement sticky while the write loses to a server-null bootstrap', async () => {
+    const authMock = mockedAuth as { currentUser?: typeof HANDOFF_USER };
+    authMock.currentUser = HANDOFF_USER;
+    const write = deferred<void>();
+    mocks.attestAdult.mockReturnValue(write.promise);
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    rememberHandoffAttestation(HANDOFF_USER);
+
+    try {
+      render(
+        <AuthProvider>
+          <AttestationHarness />
+        </AuthProvider>,
+      );
+
+      await act(async () => void (await emitAuth(HANDOFF_USER)));
+
+      expect(mocks.attestAdult).toHaveBeenCalledOnce();
+      expect(mocks.attestAdult).toHaveBeenCalledWith(HANDOFF_USER);
+      expect(screen.getByTestId('handoff-needs-attestation')).toHaveTextContent('no');
+      expect(screen.getByTestId('handoff-can-render')).toHaveTextContent('yes');
+      expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+
+      await act(async () => {
+        write.settle();
+        await write.promise;
+      });
+
+      await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+      expect(screen.getByTestId('handoff-needs-attestation')).toHaveTextContent('no');
+    } finally {
+      delete authMock.currentUser;
+    }
+  });
+
+  it('does not adopt a collected acknowledgement for a different same-uid session', async () => {
+    const replacement = { ...HANDOFF_USER, refreshToken: 'newer-refresh-token' };
+    const authMock = mockedAuth as { currentUser?: typeof replacement };
+    authMock.currentUser = replacement;
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    rememberHandoffAttestation(HANDOFF_USER);
+
+    try {
+      render(
+        <AuthProvider>
+          <AttestationHarness />
+        </AuthProvider>,
+      );
+
+      await act(async () => void (await emitAuth(replacement)));
+
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('handoff-needs-attestation')).not.toBeInTheDocument();
+
+      // The mismatched first settle consumed the one-shot marker. Even if the
+      // original exact session later reappears, stale consent cannot follow it.
+      authMock.currentUser = HANDOFF_USER;
+      await act(async () => void (await emitAuth(HANDOFF_USER)));
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    } finally {
+      delete authMock.currentUser;
+    }
+  });
+
+  it('retires the acknowledgement when this mount first settles signed out', async () => {
+    const authMock = mockedAuth as { currentUser?: typeof HANDOFF_USER };
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    rememberHandoffAttestation(HANDOFF_USER);
+    render(
+      <AuthProvider>
+        <AttestationHarness />
+      </AuthProvider>,
+    );
+
+    await act(async () => void (await emitAuth(null)));
+    authMock.currentUser = HANDOFF_USER;
+    try {
+      await act(async () => void (await emitAuth(HANDOFF_USER)));
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    } finally {
+      delete authMock.currentUser;
+    }
+  });
+
+  it('restores the re-prompt and logs fixed text when the adopted write rejects', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const authMock = mockedAuth as { currentUser?: typeof HANDOFF_USER };
+    authMock.currentUser = HANDOFF_USER;
+    mocks.attestAdult.mockRejectedValue(new Error('secret Firestore detail'));
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    rememberHandoffAttestation(HANDOFF_USER);
+
+    try {
+      render(
+        <AuthProvider>
+          <AttestationHarness />
+        </AuthProvider>,
+      );
+
+      await act(async () => void (await emitAuth(HANDOFF_USER)));
+      await waitFor(() => expect(screen.queryByTestId('handoff-needs-attestation')).not.toBeInTheDocument());
+
+      expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+      expect(debug).toHaveBeenCalledWith('[auth-handoff] adult attestation did not settle');
+      expect(debug.mock.calls.flat().join(' ')).not.toContain('secret Firestore detail');
+    } finally {
+      delete authMock.currentUser;
+    }
+  });
+
+  it('does not let an adopted-write rejection revoke a server-confirmed stamp in the same turn', async () => {
+    const authMock = mockedAuth as { currentUser?: typeof HANDOFF_USER };
+    authMock.currentUser = HANDOFF_USER;
+    let rejectWrite!: (reason: Error) => void;
+    const write = new Promise<void>((_resolve, reject) => {
+      rejectWrite = reject;
+    });
+    mocks.attestAdult.mockReturnValue(write);
+    mocks.readAdultAttestation.mockResolvedValue(1);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    rememberHandoffAttestation(HANDOFF_USER);
+
+    try {
+      render(
+        <AuthProvider>
+          <AttestationHarness />
+        </AuthProvider>,
+      );
+
+      await act(async () => {
+        await emitAuth(HANDOFF_USER);
+        rejectWrite(new Error('offline'));
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+      expect(screen.getByTestId('handoff-needs-attestation')).toHaveTextContent('no');
+      expect(screen.getByTestId('handoff-can-render')).toHaveTextContent('yes');
+    } finally {
+      delete authMock.currentUser;
+    }
+  });
+
+  it('adopts the handoff acknowledgement exactly once through StrictMode effect replay', async () => {
+    const authMock = mockedAuth as { currentUser?: typeof HANDOFF_USER };
+    authMock.currentUser = HANDOFF_USER;
+    const write = deferred<void>();
+    mocks.attestAdult.mockReturnValue(write.promise);
+    mocks.readAdultAttestation.mockResolvedValue(null);
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
+      void cb(HANDOFF_USER);
+      return () => {};
+    });
+    rememberHandoffAttestation(HANDOFF_USER);
+
+    try {
+      render(
+        <StrictMode>
+          <AuthProvider>
+            <AttestationHarness />
+          </AuthProvider>
+        </StrictMode>,
+      );
+
+      await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledOnce());
+      expect(screen.getByTestId('handoff-needs-attestation')).toHaveTextContent('no');
+
+      await act(async () => {
+        write.settle();
+        await write.promise;
+      });
+      await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledOnce());
+    } finally {
+      delete authMock.currentUser;
+    }
+  });
 });
 
 describe('AuthContext deal-error hardening', () => {
